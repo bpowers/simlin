@@ -1,0 +1,91 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>100.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="TREND of input">
+                <eqn>TREND(input, average_time, initial_trend)</eqn>
+                <units>fraction/Month</units>
+            </aux>
+            <aux name="initial trend">
+                <eqn>0</eqn>
+                <units>fraction/Month</units>
+            </aux>
+            <aux name="average time">
+                <eqn>6</eqn>
+                <units>months</units>
+            </aux>
+            <aux name="input">
+                <eqn>1+0.5*SIN(2*3.14159*Time/20)</eqn>
+                <units>widgets/Month</units>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="TREND_of_input" x="375" y="246"/>
+                <aux name="initial_trend" x="210" y="256"/>
+                <aux name="average_time" x="210" y="306"/>
+                <aux name="input" x="210" y="201"/>
+                <connector uid="20" angle="-5.5267311215822019">
+                    <from>Time</from>
+                    <to>input</to>
+                </connector>
+                <connector uid="21" angle="-15.006080372018715">
+                    <from>input</from>
+                    <to>TREND_of_input</to>
+                </connector>
+                <connector uid="22" angle="5.101277304000007">
+                    <from>initial_trend</from>
+                    <to>TREND_of_input</to>
+                </connector>
+                <connector uid="23" angle="20.882260211231809">
+                    <from>average_time</from>
+                    <to>TREND_of_input</to>
+                </connector>
+                <connector uid="44" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

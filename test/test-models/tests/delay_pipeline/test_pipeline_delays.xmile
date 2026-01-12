@@ -1,0 +1,222 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>100.000000</stop>
+        <dt>0.500000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="Output Integer Pipeline Delay">
+                <doc>	Test delays with a delay time that is an integer multiple of the step size, so that the bins for the pipeline are clear.</doc>
+                <eqn>DELAY(Input, Integer_Delay_Time, Initial_Value)</eqn>
+            </aux>
+            <aux name="Integer Delay Time">
+                <doc>	Test that delay time can vary</doc>
+                <eqn>DT*Integer_Multiple</eqn>
+            </aux>
+            <aux name="Integer Multiple">
+                <eqn>5</eqn>
+            </aux>
+            <aux name="Output Fractional Pipeline Delay">
+                <doc>	When the delay time is not easily handled as an integer of the step size - what then?</doc>
+                <eqn>DELAY(Input, Fractional_Delay_Time, Initial_Value)</eqn>
+            </aux>
+            <aux name="Changing Delay Time">
+                <eqn>4+step(2, 15)</eqn>
+            </aux>
+            <aux name="Output Third order Delay with Modified Delay Time">
+                <eqn>DELAYN(Input,1.5,3,Initial_Value)</eqn>
+            </aux>
+            <aux name="Output Third order Delay">
+                <doc>	See if the order is rounded to 3 or 2</doc>
+                <eqn>DELAYN(Input,Fractional_Delay_Time,3,Initial_Value)</eqn>
+            </aux>
+            <aux name="Output Second Order Delay with Modified Delay Time">
+                <eqn>DELAYN(Input,1,2,Initial_Value)</eqn>
+            </aux>
+            <aux name="Initial Value">
+                <eqn>6</eqn>
+            </aux>
+            <aux name="Fractional Delay Time">
+                <doc>	See what happens when the delay time is not a simple multiple of the time step.</doc>
+                <eqn>Fractional_Multiple*DT</eqn>
+            </aux>
+            <aux name="Input">
+                <eqn>-1+step(5, 5)</eqn>
+            </aux>
+            <aux name="Output Second Order Delay">
+                <eqn>DELAYN(Input,Fractional_Delay_Time,2,Initial_Value)</eqn>
+            </aux>
+            <aux name="Output Changing Delay Time">
+                <doc>	Test that delay time can vary</doc>
+                <eqn>DELAY(Input, Changing_Delay_Time, Initial_Value)</eqn>
+            </aux>
+            <aux name="Fractional Multiple">
+                <doc>	This should be small so that the differences between rounding up to 3 and down to 2 are obvious. Should be on the boundary so that to test the rounding behavior too...</doc>
+                <eqn>2.5</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="Initial_Value" x="355" y="316"/>
+                <aux name="Input" x="440" y="315"/>
+                <aux name="Integer_Delay_Time" x="344" y="178"/>
+                <aux name="Output_Integer_Pipeline_Delay" x="305" y="213"/>
+                <connector uid="5" angle="-137.58066875672131">
+                    <from>Integer_Delay_Time</from>
+                    <to>Output_Integer_Pipeline_Delay</to>
+                </connector>
+                <connector uid="6" angle="-242.96817599828395">
+                    <from>Initial_Value</from>
+                    <to>Output_Integer_Pipeline_Delay</to>
+                </connector>
+                <connector uid="7" angle="142.73098861660051">
+                    <from>Input</from>
+                    <to>Output_Integer_Pipeline_Delay</to>
+                </connector>
+                <connector uid="8" angle="-242.96817599828395">
+                    <from>Initial_Value</from>
+                    <to>Output_Integer_Pipeline_Delay</to>
+                </connector>
+                <aux name="Integer_Multiple" x="310" y="123"/>
+                <connector uid="11" angle="206.46705109802252">
+                    <from>DT</from>
+                    <to>Integer_Delay_Time</to>
+                </connector>
+                <connector uid="12" angle="-61.436758668361819">
+                    <from>Integer_Multiple</from>
+                    <to>Integer_Delay_Time</to>
+                </connector>
+                <aux name="Output_Fractional_Pipeline_Delay" x="471" y="221"/>
+                <connector uid="14" angle="75.257589440691476">
+                    <from>Input</from>
+                    <to>Output_Fractional_Pipeline_Delay</to>
+                </connector>
+                <connector uid="15" angle="41.365432833241925">
+                    <from>Initial_Value</from>
+                    <to>Output_Fractional_Pipeline_Delay</to>
+                </connector>
+                <aux name="Fractional_Multiple" x="544" y="132"/>
+                <aux name="Fractional_Delay_Time" x="484" y="175"/>
+                <connector uid="18" angle="-39.287348879885485">
+                    <from>DT</from>
+                    <to>Fractional_Delay_Time</to>
+                </connector>
+                <connector uid="19" angle="213.23653461125093">
+                    <from>Fractional_Multiple</from>
+                    <to>Fractional_Delay_Time</to>
+                </connector>
+                <connector uid="20" angle="252.37163642449016">
+                    <from>Fractional_Delay_Time</from>
+                    <to>Output_Fractional_Pipeline_Delay</to>
+                </connector>
+                <aux name="Output_Changing_Delay_Time" x="198" y="211"/>
+                <aux name="Changing_Delay_Time" x="216" y="162"/>
+                <connector uid="23" angle="-213.62421362819828">
+                    <from>Initial_Value</from>
+                    <to>Output_Changing_Delay_Time</to>
+                </connector>
+                <connector uid="24" angle="156.73089275901702">
+                    <from>Input</from>
+                    <to>Output_Changing_Delay_Time</to>
+                </connector>
+                <connector uid="25" angle="-109.44804225606734">
+                    <from>Changing_Delay_Time</from>
+                    <to>Output_Changing_Delay_Time</to>
+                </connector>
+                <connector uid="26" angle="-213.62421362819828">
+                    <from>Initial_Value</from>
+                    <to>Output_Changing_Delay_Time</to>
+                </connector>
+                <connector uid="27" angle="41.365432833241925">
+                    <from>Initial_Value</from>
+                    <to>Output_Fractional_Pipeline_Delay</to>
+                </connector>
+                <aux name="Output_Third_order_Delay" x="597" y="225"/>
+                <connector uid="29" angle="31.134654069857362">
+                    <from>Input</from>
+                    <to>Output_Third_order_Delay</to>
+                </connector>
+                <connector uid="30" angle="22.090065155045977">
+                    <from>Initial_Value</from>
+                    <to>Output_Third_order_Delay</to>
+                </connector>
+                <connector uid="31" angle="-23.820570274844272">
+                    <from>Fractional_Delay_Time</from>
+                    <to>Output_Third_order_Delay</to>
+                </connector>
+                <aux name="Output_Second_Order_Delay" x="684" y="222"/>
+                <connector uid="33" angle="16.315498180069795">
+                    <from>Initial_Value</from>
+                    <to>Output_Second_Order_Delay</to>
+                </connector>
+                <connector uid="34" angle="21.166499233846949">
+                    <from>Input</from>
+                    <to>Output_Second_Order_Delay</to>
+                </connector>
+                <connector uid="35" angle="-11.962492004003977">
+                    <from>Fractional_Delay_Time</from>
+                    <to>Output_Second_Order_Delay</to>
+                </connector>
+                <aux name="Output_Third_order_Delay_with_Modified_Delay_Time" x="804" y="226"/>
+                <aux name="Output_Second_Order_Delay_with_Modified_Delay_Time" x="949" y="222"/>
+                <connector uid="38" angle="14.099535938366202">
+                    <from>Input</from>
+                    <to>Output_Third_order_Delay_with_Modified_Delay_Time</to>
+                </connector>
+                <connector uid="39" angle="11.88683234677714">
+                    <from>Initial_Value</from>
+                    <to>Output_Third_order_Delay_with_Modified_Delay_Time</to>
+                </connector>
+                <connector uid="42" angle="10.585607088063512">
+                    <from>Input</from>
+                    <to>Output_Second_Order_Delay_with_Modified_Delay_Time</to>
+                </connector>
+                <connector uid="43" angle="9.3729074069716063">
+                    <from>Initial_Value</from>
+                    <to>Output_Second_Order_Delay_with_Modified_Delay_Time</to>
+                </connector>
+                <connector uid="65" angle="177.91743472026911">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

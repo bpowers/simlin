@@ -1,0 +1,127 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>100.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions>
+        <dim name="One Dimensional Subscript">
+            <elem name="Entry 1"/>
+            <elem name="Entry 2"/>
+            <elem name="Entry 3"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <stock name="Stock A">
+                <inflow>Inflow_A</inflow>
+                <eqn>0</eqn>
+                <dimensions>
+                    <dim name="One Dimensional Subscript"/>
+                </dimensions>
+            </stock>
+            <aux name="Rate B">
+                <element subscript="Entry 1">
+                    <eqn>0.02</eqn>
+                </element>
+                <element subscript="Entry 2">
+                    <eqn>0.04</eqn>
+                </element>
+                <element subscript="Entry 3">
+                    <eqn>0.06</eqn>
+                </element>
+                <dimensions>
+                    <dim name="One Dimensional Subscript"/>
+                </dimensions>
+            </aux>
+            <flow name="Inflow A">
+                <element subscript="Entry 1">
+                    <eqn>Rate_A[Entry_1]</eqn>
+                </element>
+                <element subscript="Entry 3">
+                    <eqn>Rate_B[Entry_3]</eqn>
+                </element>
+                <element subscript="Entry 2">
+                    <eqn>Rate_A[Entry_2]</eqn>
+                </element>
+                <dimensions>
+                    <dim name="One Dimensional Subscript"/>
+                </dimensions>
+            </flow>
+            <aux name="Rate A">
+                <element subscript="Entry 1">
+                    <eqn>0.01</eqn>
+                </element>
+                <element subscript="Entry 2">
+                    <eqn>0.02</eqn>
+                </element>
+                <element subscript="Entry 3">
+                    <eqn>0.03</eqn>
+                </element>
+                <dimensions>
+                    <dim name="One Dimensional Subscript"/>
+                </dimensions>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <stock name="Stock_A" x="320" y="196"/>
+                <flow name="Inflow_A" x="223" y="197">
+                    <pts>
+                        <pt x="157" y="197"/>
+                        <pt x="320" y="196"/>
+                    </pts>
+                </flow>
+                <aux name="Rate_A" x="218" y="282"/>
+                <connector uid="8" angle="89.382165573972458">
+                    <from>Rate_A</from>
+                    <to>Inflow_A</to>
+                </connector>
+                <aux name="Rate_B" x="217" y="120"/>
+                <connector uid="10" angle="-89.204603244805554">
+                    <from>Rate_B</from>
+                    <to>Inflow_A</to>
+                </connector>
+                <connector uid="31" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

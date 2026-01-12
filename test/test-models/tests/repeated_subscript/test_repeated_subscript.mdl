@@ -1,0 +1,119 @@
+{UTF-8}
+a2a=
+	matrix[A,A]
+	~	
+	~		|
+
+dim1:
+	C,D
+	~	
+	~		|
+
+a2b=
+	matrix[A,B]
+	~	
+	~		|
+
+b2a=
+	matrix[B,A]
+	~	
+	~		|
+
+b2b=
+	matrix[B,B]
+	~	
+	~		|
+
+dim:
+	A,B
+	~	
+	~		|
+
+matrix[A, dim]=
+	1, 10 ~~|
+matrix[B, dim]=
+	5, 40
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 1
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,matrix,380,329,21,11,8,3,0,0,0,0,0,0
+10,2,a2b,645,254,14,11,8,3,0,0,0,0,0,0
+10,3,a2a,613,199,13,11,8,3,0,0,0,0,0,0
+10,4,b2a,648,320,14,11,8,3,0,0,0,0,0,0
+10,5,b2b,621,374,14,11,8,3,0,0,0,0,0,0
+1,6,1,3,0,0,0,0,0,128,0,-1--1--1,,1|(493,265)|
+1,7,1,2,0,0,0,0,0,128,0,-1--1--1,,1|(509,292)|
+1,8,1,4,0,0,0,0,0,128,0,-1--1--1,,1|(510,324)|
+1,9,1,5,0,0,0,0,0,128,0,-1--1--1,,1|(497,350)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:a2a
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:1
+26:1
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:Current
+48:
+6:A
+6:B
+6:C

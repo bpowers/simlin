@@ -1,0 +1,169 @@
+{UTF-8}
+data1:=
+	GET DIRECT DATA('inputs.xlsx', 'Global' , 'Time1' , 'value1' )
+	~	
+	~		|
+
+datav:=
+	GET DIRECT DATA('inputs.xlsx', 'Global' , 'Timev' , 'valuev' )
+	~	
+	~		|
+
+lookupv=
+	GET DIRECT LOOKUPS('inputs.xlsx', 'Global' , 'Timev' , 'valuev' )
+	~	
+	~		|
+
+finalv[dim]=
+	valuev[dim]+10*datav-100*lookupv(Time)
+	~	
+	~		|
+
+valuev[dim]=
+	GET DIRECT CONSTANTS('inputs.xlsx', 'Global' , 'valuev*' )
+	~	
+	~	Vertically defined variable
+	|
+
+data2:=
+	GET DIRECT DATA('inputs.xlsx', 'Local' , 'Time2' , 'value2' )
+	~	
+	~		|
+
+dim:
+	A, B, C, D, E, F
+	~	
+	~		|
+
+final1[dim]=
+	value1[dim]+10*data1-100*lookup1(Time)
+	~	
+	~		|
+
+final2[dim]=
+	value2[dim]+10*data2-100*lookup2(Time)
+	~	
+	~		|
+
+lookup1=
+	GET DIRECT LOOKUPS('inputs.xlsx', 'Global' , 'Time1' , 'value1' )
+	~	
+	~		|
+
+lookup2=
+	GET DIRECT LOOKUPS('inputs.xlsx', 'Local' , 'Time2' , 'value2' )
+	~	
+	~		|
+
+value1[dim]=
+	GET DIRECT CONSTANTS('inputs.xlsx', 'Global' , 'value1' )
+	~	
+	~	Globally defined variablr
+	|
+
+value2[dim]=
+	GET DIRECT CONSTANTS('inputs.xlsx', 'Local' , 'value2' )
+	~	
+	~	Locally defined variable
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 5
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,value1,342,100,22,11,8,3,0,0,0,0,0,0
+10,2,value2,350,215,22,11,8,3,0,0,0,0,0,0
+10,3,data1,461,155,19,11,8,3,0,0,0,0,0,0
+10,4,data2,473,243,19,11,8,3,0,0,0,0,0,0
+10,5,lookup1,602,188,27,11,8,3,0,0,0,0,0,0
+10,6,lookup2,606,261,27,11,8,3,0,0,0,0,0,0
+10,7,final2,772,239,18,11,8,3,0,0,0,0,0,0
+10,8,final1,766,187,18,11,8,3,0,0,0,0,0,0
+10,9,Time,949,247,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,10,9,8,0,0,0,0,0,128,0,-1--1--1,,1|(860,217)|
+1,11,9,7,0,0,0,0,0,128,0,-1--1--1,,1|(863,242)|
+1,12,6,7,0,0,0,0,0,128,0,-1--1--1,,1|(686,250)|
+1,13,4,7,0,0,0,0,0,128,0,-1--1--1,,1|(616,241)|
+1,14,2,7,0,0,0,0,0,128,0,-1--1--1,,1|(556,226)|
+1,15,5,8,0,0,0,0,0,128,0,-1--1--1,,1|(681,187)|
+1,16,3,8,0,0,0,0,0,128,0,-1--1--1,,1|(607,169)|
+1,17,1,8,0,0,0,0,0,128,0,-1--1--1,,1|(549,142)|
+10,18,valuev,356,316,21,11,8,3,0,0,0,0,0,0
+10,19,datav,466,349,19,11,8,3,0,0,0,0,0,0
+10,20,lookupv,592,369,27,11,8,3,0,0,0,0,0,0
+10,21,finalv,771,305,18,11,8,3,0,0,0,0,0,0
+1,22,18,21,0,0,0,0,0,128,0,-1--1--1,,1|(558,310)|
+1,23,19,21,0,0,0,0,0,128,0,-1--1--1,,1|(612,328)|
+1,24,20,21,0,0,0,0,0,128,0,-1--1--1,,1|(679,337)|
+1,25,9,21,0,0,0,0,0,128,0,-1--1--1,,1|(862,274)|
+///---\\\
+:L<%^E!@
+9:Current
+30:?inputs.xlsx=inputs.xlsx
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:data2
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:5
+26:5
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:Current
+48:
+6:A
+6:B
+6:C
+6:D
+6:E
+6:F

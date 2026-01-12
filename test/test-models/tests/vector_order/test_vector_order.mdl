@@ -1,0 +1,408 @@
+{UTF-8}
+revenue2A[company, A]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue_A') ~~|
+revenue2A[company, B]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue_B') ~~|
+revenue2A[company, C]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue_C')
+	~	$/year
+	~		|
+
+product:
+	X, Y
+	~	
+	~		|
+
+median revenue neg3[Region,product]=
+	sorted revenue REORDERed neg3[Region,product,sort3]
+	~	$/year
+	~		|
+
+revenue3[A, X, company]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue_A') ~~|
+revenue3[B, X, company]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue_B') ~~|
+revenue3[C, X, company]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue_C') ~~|
+revenue3[A, Y, company]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue_A') ~~|
+revenue3[B, Y, company]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue_B') ~~|
+revenue3[C, Y, company]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue_C')
+	~	$/year
+	~		|
+
+revenue2B[A, company]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue_A') ~~|
+revenue2B[B,company]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue_B') ~~|
+revenue2B[C,company]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue_C')
+	~	$/year
+	~		|
+
+median revenue neg2A[Region]=
+	sorted revenue REORDERed neg2A[sort3,Region]
+	~	$/year
+	~		|
+
+median revenue neg2B[Region]=
+	sorted revenue REORDERed neg2B[Region,sort3]
+	~	$/year
+	~		|
+
+median revenue2A[Region]=
+	sorted revenue REORDERed2A[sort3,Region]
+	~	$/year
+	~		|
+
+median revenue3[Region,product]=
+	sorted revenue REORDERed3[Region,product,sort3]
+	~	$/year
+	~		|
+
+median revenue2B[Region]=
+	sorted revenue REORDERed2B[Region,sort3]
+	~	$/year
+	~		|
+
+Region:
+	A, B, C
+	~	
+	~		|
+
+SORT ORDER3[Region,product,scompany]=
+	VECTOR SORT ORDER(revenue3[Region,product,company], 1)
+	~	dmnl
+	~	Order of elements in sorted revenue vector.
+	|
+
+SORT ORDER2B[Region,scompany]=
+	VECTOR SORT ORDER(revenue2B[Region,company], 1)
+	~	dmnl
+	~	Order of elements in sorted revenue vector.
+	|
+
+revenue RANK2A[company,Region]=
+	VECTOR RANK(revenue2A[company,Region], 1)
+	~	dmnl
+	~	Rank of companies by revenue.
+	|
+
+revenue RANK neg2A[company,Region]=
+	VECTOR RANK(revenue2A[company,Region], 0)
+	~	dmnl
+	~	Rank of companies by revenue.
+	|
+
+revenue RANK neg3[Region,product,scompany]=
+	VECTOR RANK(revenue3[Region,product,company], 0)
+	~	dmnl
+	~	Rank of companies by revenue.
+	|
+
+revenue RANK neg2B[Region,scompany]=
+	VECTOR RANK(revenue2B[Region,company], 0)
+	~	dmnl
+	~	Rank of companies by revenue.
+	|
+
+sorted revenue REORDERed neg2A[scompany,Region]=
+	VECTOR REORDER(revenue2A[company,Region],SORT ORDER neg2A[scompany,Region])
+	~	$/year
+	~	Revenue, sorted
+	|
+
+revenue RANK3[Region,product,scompany]=
+	VECTOR RANK(revenue3[Region,product,company], 1)
+	~	dmnl
+	~	Rank of companies by revenue.
+	|
+
+revenue RANK2B[Region,scompany]=
+	VECTOR RANK(revenue2B[Region,company], 1)
+	~	dmnl
+	~	Rank of companies by revenue.
+	|
+
+sorted revenue REORDERed2B[Region,scompany]=
+	VECTOR REORDER(revenue2B[Region,company],SORT ORDER2B[Region,scompany])
+	~	$/year
+	~	Revenue, sorted
+	|
+
+SORT ORDER2A[scompany,Region]=
+	VECTOR SORT ORDER(revenue2A[company,Region], 1)
+	~	dmnl
+	~	Order of elements in sorted revenue vector.
+	|
+
+SORT ORDER neg2A[scompany,Region]=
+	VECTOR SORT ORDER(revenue2A[company,Region], 0)
+	~	dmnl
+	~	Order of elements in sorted revenue vector.
+	|
+
+SORT ORDER neg3[Region,product,scompany]=
+	VECTOR SORT ORDER(revenue3[Region,product,company], 0)
+	~	dmnl
+	~	Order of elements in sorted revenue vector.
+	|
+
+SORT ORDER neg2B[Region,scompany]=
+	VECTOR SORT ORDER(revenue2B[Region,company], 0)
+	~	dmnl
+	~	Order of elements in sorted revenue vector.
+	|
+
+sorted revenue REORDERed2A[scompany,Region]=
+	VECTOR REORDER(revenue2A[company,Region],SORT ORDER2A[scompany,Region])
+	~	$/year
+	~	Revenue, sorted
+	|
+
+sorted revenue REORDERed3[Region,product,scompany]=
+	VECTOR REORDER(revenue3[Region,product,company],SORT ORDER3[Region,product,scompany]\
+		)
+	~	$/year
+	~	Revenue, sorted
+	|
+
+sorted revenue REORDERed neg3[Region,product,scompany]=
+	VECTOR REORDER(revenue3[Region,product,company],SORT ORDER neg3[Region,product,scompany\
+		])
+	~	$/year
+	~	Revenue, sorted
+	|
+
+sorted revenue REORDERed neg2B[Region,scompany]=
+	VECTOR REORDER(revenue2B[Region,company],SORT ORDER neg2B[Region,scompany])
+	~	$/year
+	~	Revenue, sorted
+	|
+
+revenue RANK neg[company]=
+	VECTOR RANK(revenue[company], 0)
+	~	dmnl
+	~	Rank of companies by revenue.
+	|
+
+median revenue neg=
+	sorted revenue REORDERed neg[sort3]
+	~	$/year
+	~		|
+
+SORT ORDER neg[scompany]=
+	VECTOR SORT ORDER(revenue[company], 0)
+	~	dmnl
+	~	Order of elements in sorted revenue vector.
+	|
+
+sorted revenue REORDERed neg[scompany]=
+	VECTOR REORDER(revenue[company],SORT ORDER neg[scompany])
+	~	$/year
+	~	Revenue, sorted
+	|
+
+median revenue=
+	sorted revenue REORDERed[sort3]
+	~	$/year
+	~		|
+
+company : (company1-company5)->scompany
+	~	
+	~		|
+
+revenue[company]:RAW::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1', 'time_index', 'revenue')
+	~	$/year
+	~		|
+
+scompany : (sort1-sort5)-> company
+	~	
+	~	Note that it is not really necessary to define scompany in this example. \
+		However, the order of values in sorted rev is no longer by company so it \
+		prevents possible confusion to use a different subscript range.
+	|
+
+SORT ORDER[scompany]=
+	VECTOR SORT ORDER(revenue[company], 1)
+	~	dmnl
+	~	Order of elements in sorted revenue vector.
+	|
+
+sorted revenue REORDERed[scompany] = VECTOR REORDER(revenue[company],SORT ORDER[scompany\
+		])
+	~	$/year
+	~	Revenue, sorted
+	|
+
+revenue RANK[company]=
+	VECTOR RANK(revenue[company], 1)
+	~	dmnl
+	~	Rank of companies by revenue.
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 14
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,110,0
+10,1,sorted revenue REORDERed,94,265,53,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+10,2,revenue,404,237,26,11,8,3,0,0,-1,0,0,0
+1,3,2,1,0,0,0,0,0,0,0,-1--1--1,,1|(269,248)|
+10,4,SORT ORDER,263,303,55,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,5,4,1,0,0,0,0,0,0,0,-1--1--1,,1|(187,285)|
+1,6,2,4,0,0,0,0,0,0,0,-1--1--1,,1|(339,267)|
+10,7,revenue RANK,160,191,55,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,8,2,7,0,0,0,0,0,0,0,-1--1--1,,1|(303,218)|
+10,9,median revenue,95,342,52,19,8,3,0,0,0,0,0,0
+1,10,1,9,0,0,0,0,0,64,0,-1--1--1,,1|(94,296)|
+12,11,0,220,93,125,28,8,135,0,18,-1,0,0,0,-1--1--1,0-0-0,|12|B|128-0-0
+VECTOR RANK, VECTOR SORT ORDER, VECTOR REORDER - Vector rank, sorting and reordering
+10,12,sorted revenue REORDERed neg,715,283,66,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+10,13,SORT ORDER neg,515,313,56,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,14,13,12,0,0,0,0,0,0,0,-1--1--1,,1|(603,299)|
+10,15,revenue RANK neg,707,209,56,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+10,16,median revenue neg,716,358,52,19,8,3,0,0,0,0,0,0
+1,17,12,16,0,0,0,0,0,64,0,-1--1--1,,1|(715,313)|
+1,18,2,15,0,0,0,0,0,64,0,-1--1--1,,1|(533,225)|
+1,19,2,12,0,0,0,0,0,64,0,-1--1--1,,1|(532,255)|
+1,20,2,13,0,0,0,0,0,64,0,-1--1--1,,1|(447,267)|
+10,21,Time,575,125,26,11,8,2,1,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,22,sorted revenue REORDERed2A,64,460,61,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+10,23,revenue2A,374,432,35,11,8,3,0,0,-1,0,0,0
+1,24,23,22,0,0,0,0,0,0,0,-1--1--1,,1|(238,443)|
+10,25,SORT ORDER2A,233,498,41,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,26,25,22,0,0,0,0,0,0,0,-1--1--1,,1|(165,482)|
+1,27,23,25,0,0,0,0,0,0,0,-1--1--1,,1|(318,458)|
+10,28,revenue RANK2A,130,386,35,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,29,23,28,0,0,0,0,0,0,0,-1--1--1,,1|(258,410)|
+10,30,median revenue2A,65,537,59,11,8,3,0,0,0,0,0,0
+1,31,22,30,0,0,0,0,0,64,0,-1--1--1,,1|(64,495)|
+10,32,sorted revenue REORDERed neg2A,685,478,75,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+10,33,SORT ORDER neg2A,485,508,56,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,34,33,32,0,0,0,0,0,0,0,-1--1--1,,1|(568,495)|
+10,35,revenue RANK neg2A,677,404,56,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+10,36,median revenue neg2A,686,553,50,19,8,3,0,0,0,0,0,0
+1,37,32,36,0,0,0,0,0,64,0,-1--1--1,,1|(685,508)|
+1,38,23,35,0,0,0,0,0,64,0,-1--1--1,,1|(508,419)|
+1,39,23,32,0,0,0,0,0,64,0,-1--1--1,,1|(502,450)|
+1,40,23,33,0,0,0,0,0,64,0,-1--1--1,,1|(417,462)|
+10,41,sorted revenue REORDERed2B,880,278,67,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+10,42,revenue2B,1190,250,40,11,8,3,0,0,-1,0,0,0
+1,43,42,41,0,0,0,0,0,0,0,-1--1--1,,1|(1055,261)|
+10,44,SORT ORDER2B,1049,316,47,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,45,44,41,0,0,0,0,0,0,0,-1--1--1,,1|(981,301)|
+1,46,42,44,0,0,0,0,0,0,0,-1--1--1,,1|(1134,276)|
+10,47,revenue RANK2B,946,204,41,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,48,42,47,0,0,0,0,0,0,0,-1--1--1,,1|(1075,228)|
+10,49,median revenue2B,881,355,41,19,8,3,0,0,0,0,0,0
+1,50,41,49,0,0,0,0,0,64,0,-1--1--1,,1|(880,309)|
+10,51,sorted revenue REORDERed neg2B,1501,296,81,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+10,52,SORT ORDER neg2B,1301,326,56,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,53,52,51,0,0,0,0,0,0,0,-1--1--1,,1|(1381,314)|
+10,54,revenue RANK neg2B,1493,222,56,19,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+10,55,median revenue neg2B,1502,371,50,19,8,3,0,0,0,0,0,0
+1,56,51,55,0,0,0,0,0,64,0,-1--1--1,,1|(1501,326)|
+1,57,42,54,0,0,0,0,0,64,0,-1--1--1,,1|(1326,237)|
+1,58,42,51,0,0,0,0,0,64,0,-1--1--1,,1|(1318,268)|
+1,59,42,52,0,0,0,0,0,64,0,-1--1--1,,1|(1233,280)|
+10,60,revenue3,1180,393,30,11,8,3,0,0,-1,0,0,0
+10,61,SORT ORDER3,1075,480,54,11,8,3,0,0,-1,0,0,0
+1,62,60,61,0,0,0,0,0,0,0,-1--1--1,,1|(1132,432)|
+10,63,sorted revenue REORDERed3,938,437,50,19,8,3,0,0,-1,0,0,0
+1,64,60,63,0,0,0,0,0,0,0,-1--1--1,,1|(1075,411)|
+1,65,61,63,0,0,0,0,0,0,0,-1--1--1,,1|(1020,462)|
+10,66,revenue RANK3,989,383,54,11,8,3,0,0,-1,0,0,0
+1,67,60,66,0,0,0,0,0,0,0,-1--1--1,,1|(1103,388)|
+10,68,median revenue3,931,521,53,11,8,3,0,0,-1,0,0,0
+1,69,63,68,0,0,0,0,0,0,0,-1--1--1,,1|(934,476)|
+10,70,median revenue neg3,1500,550,50,19,8,3,0,0,-1,0,0,0
+10,71,sorted revenue REORDERed neg3,1498,484,63,19,8,3,0,0,-1,0,0,0
+1,72,71,70,0,0,0,0,0,0,0,-1--1--1,,1|(1498,510)|
+1,73,60,71,0,0,0,0,0,0,0,-1--1--1,,1|(1315,431)|
+10,74,SORT ORDER neg3,1336,512,51,19,8,3,0,0,-1,0,0,0
+1,75,74,71,0,0,0,0,0,0,0,-1--1--1,,1|(1404,500)|
+1,76,60,74,0,0,0,0,0,0,0,-1--1--1,,1|(1246,444)|
+10,77,revenue RANK neg3,1492,430,51,19,8,3,0,0,-1,0,0,0
+1,78,60,77,0,0,0,0,0,0,0,-1--1--1,,1|(1318,408)|
+///---\\\
+:L<%^E!@
+1:current.vdf
+9:current
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+15:0,0,0,0,0,0
+19:110,0
+27:2,
+34:0,
+4:Time
+5:sorted revenue REORDERed neg2B[Region,scompany]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:14
+26:14
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:1
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:output
+48:
+6:A
+6:B
+6:C
+6:company1
+6:sort1
+6:X

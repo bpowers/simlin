@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+	<header>
+		<product version="1.0" lang="en">Vensim</product>
+		<vendor>Ventana Systems, Inc.</vendor>
+		<created>
+		</created>
+		<modified>
+		</modified>
+		<name>
+		</name>
+		<caption>
+		</caption>
+	</header>
+	<sim_specs method="RK4" time_units="Month">
+		<start>0</start>
+		<stop>10</stop>
+		<dt>1</dt>
+	</sim_specs>
+	<model>
+		<variables>
+			<stock name="stock0">
+				<units></units>
+				<doc></doc>
+					<eqn>
+					.34
+					</eqn>
+			</stock>
+			<stock name="stock1neg">
+				<units></units>
+				<doc></doc>
+					<eqn>
+					0
+					</eqn>
+					<outflow>
+					flow1n
+					</outflow>
+			</stock>
+			<stock name="stock1pos">
+				<units></units>
+				<doc></doc>
+					<eqn>
+					 .4
+					</eqn>
+					<inflow>
+					flow1p
+					</inflow>
+			</stock>
+			<stock name="stockmixed">
+				<units></units>
+				<doc></doc>
+					<eqn>
+					0
+					</eqn>
+					<outflow>
+					flow5
+					</outflow>
+					<inflow>
+					flow6
+					</inflow>
+					<outflow>
+					flow7
+					</outflow>
+					<outflow>
+					flow8
+					</outflow>
+			</stock>
+			<stock name="stocknegatives">
+				<units></units>
+				<doc></doc>
+					<eqn>
+					.25
+					</eqn>
+					<outflow>
+					flow2
+					</outflow>
+					<outflow>
+					flow4
+					</outflow>
+			</stock>
+			<stock name="stockpositives">
+				<units></units>
+				<doc></doc>
+					<eqn>
+					0
+					</eqn>
+					<inflow>
+					flow1
+					</inflow>
+					<inflow>
+					flow3
+					</inflow>
+			</stock>
+			<aux name="flow7">
+				<units></units>
+				<doc></doc>
+					<eqn>Time					</eqn>
+			</aux>
+			<aux name="flow1">
+				<units></units>
+				<doc></doc>
+					<eqn>.34					</eqn>
+			</aux>
+			<aux name="flow1n">
+				<units></units>
+				<doc></doc>
+					<eqn>.1					</eqn>
+			</aux>
+			<aux name="flow1p">
+				<units></units>
+				<doc></doc>
+					<eqn>.4					</eqn>
+			</aux>
+			<aux name="flow2">
+				<units></units>
+				<doc></doc>
+					<eqn>-.67					</eqn>
+			</aux>
+			<aux name="flow3">
+				<units></units>
+				<doc></doc>
+					<eqn>+.72					</eqn>
+			</aux>
+			<aux name="flow4">
+				<units></units>
+				<doc></doc>
+					<eqn>3e-05					</eqn>
+			</aux>
+			<aux name="flow5">
+				<units></units>
+				<doc></doc>
+					<eqn>.5					</eqn>
+			</aux>
+			<aux name="flow6">
+				<units></units>
+				<doc></doc>
+					<eqn>.1223					</eqn>
+			</aux>
+			<aux name="flow8">
+				<units></units>
+				<doc></doc>
+					<eqn>.3					</eqn>
+			</aux>
+		</variables>
+	</model>
+</xmile>

@@ -1,0 +1,106 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs isee:simulation_delay="0" method="Euler" time_units="Months">
+        <start>0</start>
+        <stop>10</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="TIME STEP">
+                <doc>	The time step for the simulation.</doc>
+                <eqn>1</eqn>
+                <units>Month</units>
+            </aux>
+            <aux name="INITIAL TIME">
+                <doc>	The initial time for the simulation.</doc>
+                <eqn>0</eqn>
+                <units>Month</units>
+            </aux>
+            <aux name="FINAL TIME">
+                <doc>	The final time for the simulation.</doc>
+                <eqn>10</eqn>
+                <units>Month</units>
+            </aux>
+            <stock name="Stock C">
+                <eqn>5</eqn>
+                <inflow>Flow_C</inflow>
+            </stock>
+            <stock name="Stock B">
+                <eqn>Stock_A+Stock_C+Stock_D</eqn>
+                <inflow>Flow_B</inflow>
+            </stock>
+            <flow name="Flow D">
+                <eqn>1</eqn>
+            </flow>
+            <stock name="Stock A">
+                <eqn>3</eqn>
+                <inflow>Flow_A</inflow>
+            </stock>
+            <flow name="Flow A">
+                <eqn>1</eqn>
+            </flow>
+            <stock name="Stock D">
+                <eqn>7</eqn>
+                <inflow>Flow_D</inflow>
+            </stock>
+            <flow name="Flow B">
+                <eqn>1</eqn>
+            </flow>
+            <aux name="SAVEPER">
+                <doc>	The frequency with which output is stored.</doc>
+                <eqn>TIME_STEP</eqn>
+                <units>Month</units>
+            </aux>
+            <flow name="Flow C">
+                <eqn>1</eqn>
+            </flow>
+        </variables>
+        <views>
+            <view>
+                <stock name="Stock_A" x="363" y="125"/>
+                <stock name="Stock_B" x="378" y="254"/>
+                <stock name="Stock_C" x="218" y="183"/>
+                <stock name="Stock_D" x="515" y="181"/>
+                <flow name="Flow_C" x="144" y="186">
+                    <pts>
+                        <pt x="100" y="186"/>
+                        <pt x="218" y="183"/>
+                    </pts>
+                </flow>
+                <flow name="Flow_A" x="294" y="121">
+                    <pts>
+                        <pt x="256" y="121"/>
+                        <pt x="363" y="125"/>
+                    </pts>
+                </flow>
+                <flow name="Flow_D" x="433" y="183">
+                    <pts>
+                        <pt x="402" y="183"/>
+                        <pt x="515" y="181"/>
+                    </pts>
+                </flow>
+                <flow name="Flow_B" x="304" y="254">
+                    <pts>
+                        <pt x="261" y="254"/>
+                        <pt x="378" y="254"/>
+                    </pts>
+                </flow>
+                <connector uid="48" angle="90">
+                    <from>TIME_STEP</from>
+                    <to>SAVEPER</to>
+                </connector>
+                <aux name="SAVEPER" x="114" y="100"/>
+                <aux name="FINAL_TIME" x="114" y="100"/>
+                <aux name="INITIAL_TIME" x="114" y="100"/>
+                <aux name="TIME_STEP" x="114" y="100"/>
+            </view>
+        </views>
+    </model>
+</xmile>

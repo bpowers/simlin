@@ -1,0 +1,134 @@
+{UTF-8}
+Delay Time=
+	4 + STEP(2, 15)
+	~	
+	~	Test that delay time can vary
+	|
+
+Initial Value=
+	6
+	~	
+	~		|
+
+Input=
+	-1 + STEP( 5 , 5 )
+	~	
+	~		|
+
+Order Variable=
+	2 + STEP(1, 10)
+	~	
+	~	Test the behavior when a change is requested to the order
+	|
+
+Output Delay1=
+	delay1(Input, Delay Time)
+	~	
+	~		|
+
+Output Delay1I=
+	DELAY1I(Input, Delay Time, Initial Value)
+	~	
+	~		|
+
+Output Delay3=
+	DELAY3(Input, Delay Time)
+	~	
+	~		|
+
+Output Delay3I=
+	DELAY3I(Input, Delay Time, Initial Value)
+	~	
+	~		|
+
+OutputDelayN=
+	DELAY N(Input, Delay Time, Initial Value, Order Variable)
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,Initial Value,267,235,32,8,8,3,0,0,0,0,0,0
+10,2,Input,268,144,15,8,8,3,0,0,0,0,0,0
+10,3,Delay Time,559,182,30,8,8,3,0,0,0,0,0,0
+10,4,Output Delay1,407,117,38,8,8,3,0,0,0,0,0,0
+10,5,Output Delay3,408,154,38,8,8,3,0,0,0,0,0,0
+10,6,Output Delay1I,414,229,40,8,8,3,0,0,0,0,0,0
+10,7,Output Delay3I,412,267,40,8,8,3,0,0,0,0,0,0
+10,8,OutputDelayN,409,191,38,8,8,3,0,0,0,0,0,0
+1,9,2,4,0,0,0,0,0,64,0,-1--1--1,,1|(319,134)|
+1,10,2,5,0,0,0,0,0,64,0,-1--1--1,,1|(319,147)|
+1,11,2,8,0,0,0,0,0,64,0,-1--1--1,,1|(327,163)|
+1,12,2,6,0,0,0,0,0,64,0,-1--1--1,,1|(334,182)|
+1,13,2,7,0,0,0,0,0,64,0,-1--1--1,,1|(334,200)|
+1,14,3,4,0,0,0,0,0,64,0,-1--1--1,,1|(489,152)|
+1,15,3,5,0,0,0,0,0,64,0,-1--1--1,,1|(494,170)|
+1,16,3,8,0,0,0,0,0,64,0,-1--1--1,,1|(494,185)|
+1,17,3,6,0,0,0,0,0,64,0,-1--1--1,,1|(493,203)|
+1,18,3,7,0,0,0,0,0,64,0,-1--1--1,,1|(491,221)|
+1,19,1,6,0,0,0,0,0,64,0,-1--1--1,,1|(329,232)|
+1,20,1,7,0,0,0,0,0,64,0,-1--1--1,,1|(330,248)|
+1,21,1,8,0,0,0,0,0,64,1,-1--1--1,,1|(330,215)|
+10,22,Order Variable,552,232,38,8,8,3,0,0,0,0,0,0
+1,23,22,8,0,0,0,0,0,64,1,-1--1--1,,1|(487,213)|
+1,24,22,8,0,0,0,0,0,64,0,-1--1--1,,1|(487,213)|
+1,25,1,8,0,0,0,0,0,64,0,-1--1--1,,1|(330,215)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+23:0
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Order Variable
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:100
+26:100

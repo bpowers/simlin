@@ -1,0 +1,148 @@
+{UTF-8}
+c:
+	E, F
+	~	
+	~		|
+
+d:
+	A,B
+	~	
+	~		|
+
+d1:
+	A,B
+	~	
+	~		|
+
+dim1:
+	h, m, l
+	~	
+	~		|
+
+dim2:
+	h, m, l
+	~	
+	~		|
+
+matrix 1[d,d1]=
+	4, 7;
+	2, 6;
+	~	
+	~		|
+
+matrix 2[E,d,d1]=
+	3, 3.5;
+	3.2, 3.6; ~~|
+matrix 2[F,d,d1]=
+	0.6, -0.7;
+	-0.2, 0.4;
+	~	
+	~		|
+
+matrix 2i[c,d,d1]=
+	INVERT MATRIX(matrix 2[c,d,d1], 2)
+	~	
+	~		|
+
+matrix 3[A,dim1,dim2]=
+	3, 0, 2;
+	2, 0, -2;
+	0, 1, 1; ~~|
+matrix 3[B,dim1,dim2]=
+	1, 0, 5;
+	2, 1, 5;
+	3, 4, 0;
+	~	
+	~		|
+
+matrix1i[d,d1]=
+	INVERT MATRIX(matrix 1[d,d1], 2)
+	~	
+	~		|
+
+matrix3i[d,dim1,dim2]=
+	INVERT MATRIX(matrix 3[d,dim1,dim2], 3)
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 1
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,matrix 1,300,198,27,11,8,3,0,0,0,0,0,0
+10,2,matrix1i,649,202,26,11,8,3,0,0,0,0,0,0
+10,3,matrix 2,295,327,27,11,8,3,0,0,0,0,0,0
+10,4,matrix 2i,609,318,28,11,8,3,0,0,0,0,0,0
+10,5,matrix 3,303,427,27,11,8,3,0,0,0,0,0,0
+10,6,matrix3i,610,416,26,11,8,3,0,0,0,0,0,0
+1,7,1,2,0,0,0,0,0,128,0,-1--1--1,,1|(468,199)|
+1,8,3,4,0,0,0,0,0,128,0,-1--1--1,,1|(444,322)|
+1,9,5,6,0,0,0,0,0,128,0,-1--1--1,,1|(450,421)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:matrix3i[d,dim1,dim1]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:1
+26:1
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:Current
+48:
+6:A
+6:E
+6:h

@@ -1,0 +1,81 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>10.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <stock name="StockA">
+                <inflow>InflowA</inflow>
+                <eqn>10</eqn>
+            </stock>
+            <aux name="StockA Initial Value">
+                <eqn>INIT(InflowA)</eqn>
+            </aux>
+            <flow name="InflowA">
+                <eqn>StockA</eqn>
+            </flow>
+        </variables>
+        <views>
+            <view>
+                <stock name="StockA" x="353" y="217"/>
+                <flow name="InflowA" x="256" y="213">
+                    <pts>
+                        <pt x="190" y="213"/>
+                        <pt x="353" y="217"/>
+                    </pts>
+                </flow>
+                <connector uid="7" angle="84.396245249707917">
+                    <from>StockA</from>
+                    <to>InflowA</to>
+                </connector>
+                <aux name="StockA_Initial_Value" x="308" y="269"/>
+                <connector uid="9" angle="-38.712068523048913">
+                    <from>InflowA</from>
+                    <to>StockA_Initial_Value</to>
+                </connector>
+                <connector uid="31" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

@@ -1,0 +1,218 @@
+{UTF-8}
+dim:
+	A, B
+	~	
+	~		|
+
+lookup4=
+	GET XLS LOOKUPS('input.xlsx', 'Hoja1', '10', 'A9')
+	~	
+	~		|
+
+lookup3=
+	GET XLS LOOKUPS('input.xlsx', 'Hoja1', '8', 'A9')
+	~	
+	~		|
+
+out lookup4=
+	lookup4(Time)
+	~	
+	~		|
+
+out lookup3=
+	lookup3(Time)
+	~	
+	~		|
+
+data interp4:INTERPOLATE::=
+	GET XLS DATA('input.xlsx', 'Hoja1', '10', 'A9')
+	~	
+	~		|
+
+data interp3:INTERPOLATE::=
+	GET XLS DATA('input.xlsx', 'Hoja1', '8', 'A9')
+	~	
+	~		|
+
+out data interp4=
+	data interp4
+	~	
+	~		|
+
+out data interp3=
+	data interp3
+	~	
+	~		|
+
+data interp2[dim]:=
+	GET XLS DATA('input.xlsx', 'Hoja1', '1', 'C5')
+	~	
+	~		|
+
+out data interp2[dim]=
+	data interp2[dim]
+	~	
+	~		|
+
+data interp1:=
+	GET XLS DATA('input.xlsx', 'Hoja1', '1', 'C5')
+	~	
+	~		|
+
+out data interp1=
+	data interp1
+	~	
+	~		|
+
+data lf4:LOOK FORWARD::=
+	GET XLS DATA('input.xlsx', 'Hoja1', '10', 'A9')
+	~	
+	~		|
+
+data lf3:LOOK FORWARD::=
+	GET XLS DATA('input.xlsx', 'Hoja1', '8', 'A9')
+	~	
+	~		|
+
+out data lf4=
+	data lf4
+	~	
+	~		|
+
+out data lf3=
+	data lf3
+	~	
+	~		|
+
+data lf2[dim]:LOOK FORWARD::=
+	GET XLS DATA('input.xlsx', 'Hoja1', '1', 'C5')
+	~	
+	~		|
+
+out data lf2[dim]=
+	data lf2[dim]
+	~	
+	~		|
+
+data lf1:LOOK FORWARD::=
+	GET XLS DATA('input.xlsx', 'Hoja1', '1', 'C5')
+	~	
+	~		|
+
+out data lf1=
+	data lf1
+	~	
+	~		|
+
+data hb4:HOLD BACKWARD::=
+	GET XLS DATA('input.xlsx', 'Hoja1', '10', 'A9')
+	~	
+	~		|
+
+data hb3:HOLD BACKWARD::=
+	GET XLS DATA('input.xlsx', 'Hoja1', '8', 'A9')
+	~	
+	~		|
+
+out data hb4=
+	data hb4
+	~	
+	~		|
+
+out data hb3=
+	data hb3
+	~	
+	~		|
+
+data hb2[dim]:HOLD BACKWARD::=
+	GET XLS DATA('input.xlsx', 'Hoja1', '1', 'C5')
+	~	
+	~		|
+
+out data hb2[dim]=
+	data hb2[dim]
+	~	
+	~		|
+
+data hb1:HOLD BACKWARD::=
+	GET XLS DATA('input.xlsx', 'Hoja1', '1', 'C5')
+	~	
+	~		|
+
+out data hb1=
+	data hb1
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+30:?input.xlsx=input.xlsx
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:data interp1
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:10
+26:10
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:Current
+48:
+6:A
+6:B

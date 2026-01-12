@@ -1,0 +1,75 @@
+{UTF-8}
+Dimension:
+	(t1-t4)   
+        ~
+        ~
+        |
+
+subdim:
+	t3, t1   
+        ~
+        ~
+        |
+
+var3[Dimension]=
+        ZIDZ(var1[Dimension], var2[Dimension])
+        ~
+        ~       ZIDZ will only work if the coordinates are in the same order.
+        |
+
+var5[Dimension]=
+        ZIDZ(var1[Dimension], var4[Dimension])
+        ~
+        ~       ZIDZ will only work if the coordinates are in the same order.
+        |
+
+
+var1[Dimension]=
+        GET_DIRECT_CONSTANTS('inputs.xlsx', 'Sheet1', 'var1all*')
+        ~
+        ~       Read at once, the order of coordinates will be the same as the definition.
+        |
+
+var2[t2]=
+        GET_DIRECT_CONSTANTS('inputs.xlsx', 'Sheet1', 'var2t2') ~~|
+var2[t3]=
+        GET_DIRECT_CONSTANTS('inputs.xlsx', 'Sheet1', 'var2t3') ~~|
+var2[t1]=
+        GET_DIRECT_CONSTANTS('inputs.xlsx', 'Sheet1', 'var2t1') ~~|
+var2[t4]=
+        GET_DIRECT_CONSTANTS('inputs.xlsx', 'Sheet1', 'var2t4')
+        ~
+        ~       Read by subscripts, the coordinates order may no be the correct one if not implemented.
+        |
+
+var4[t2]=
+        GET_DIRECT_CONSTANTS('inputs.xlsx', 'Sheet1', 'var2t2') ~~|
+var4[subdim]=
+        GET_DIRECT_CONSTANTS('inputs.xlsx', 'Sheet1', 'var4subdim*') ~~|
+var4[t4]=
+        GET_DIRECT_CONSTANTS('inputs.xlsx', 'Sheet1', 'var2t4')
+        ~
+        ~       Read by subscripts, the coordinates order may no be the correct one if not implemented.
+        |
+
+
+FINAL_TIME  = 1
+        ~       Year
+        ~       The final time for the simulation.
+        |
+
+INITIAL_TIME  = 0
+        ~       Year
+        ~       The initial time for the simulation.
+        |
+
+SAVEPER  = 1
+        ~       Year [0,?]
+        ~       The frequency with which output is stored.
+        |
+
+TIME_STEP  = 1
+        ~       Year [0,?]
+        ~       The time step for the simulation.
+        |
+

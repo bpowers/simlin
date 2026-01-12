@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE">
+	<header>
+		<smile version="1.0" namespace="std, isee"/>
+		<name>New Model</name>
+		<uuid>f2a71d66-9f40-4ebf-8fe9-235110e3905f</uuid>
+		<vendor>isee systems, inc.</vendor>
+		<product version="1.8.3" isee:build_number="1772" isee:saved_by_v1="true" lang="en">Stella Architect</product>
+	</header>
+	<sim_specs isee:simulation_delay="0.115385" isee:restore_on_start="false" method="Euler" time_units="Months" isee:instantaneous_flows="false">
+		<start>1</start>
+		<stop>13</stop>
+		<dt>1</dt>
+	</sim_specs>
+	<isee:prefs show_module_prefix="true" live_update_on_drag="true" show_restore_buttons="false" layer="model" interface_scale_ui="true" interface_max_page_width="10000" interface_max_page_height="10000" interface_min_page_width="0" interface_min_page_height="0" saved_runs="5" keep="false" rifp="true"/>
+	<isee:multiplayer_settings include_chat="true" allow_observers="false" advance_time_increment="1" observer_start_page="home_page" enabled="false"/>
+	<isee:time_formats default_format="Builtin">
+		<isee:time_format name="Builtin" type="adaptive"/>
+	</isee:time_formats>
+	<default_format/>
+	<model_units/>
+	<model>
+		<variables>
+			<stock name="Stock 1">
+				<eqn>100</eqn>
+				<inflow>Flow_2</inflow>
+				<non_negative/>
+			</stock>
+			<aux name="Converter 1">
+				<eqn>0.02</eqn>
+			</aux>
+			<flow name="Flow 2">
+				<eqn>Converter_1*Stock_1</eqn>
+				<non_negative/>
+			</flow>
+			<aux name="Converter 2">
+				<eqn>(((Stock_1/DELAY(Stock_1, 1))-1)*100)</eqn>
+			</aux>
+			<aux name="Delay Stock 1">
+				<eqn>DELAY(Stock_1, 1)</eqn>
+			</aux>
+			<aux name="Delay Stock 1 0">
+				<eqn>DELAY(Stock_1, 1, 0)</eqn>
+			</aux>
+			<aux name="Delay Flow 2">
+				<eqn>DELAY(Flow_2, 5)</eqn>
+			</aux>
+			<aux name="Delay Flow 2 20">
+				<eqn>DELAY(Flow_2, 5, -20)</eqn>
+			</aux>
+		</variables>
+	</model>
+</xmile>
+

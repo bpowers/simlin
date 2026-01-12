@@ -1,0 +1,82 @@
+{UTF-8}
+xls data down := GET XLS DATA('data down.xls','தாள்','A','B2')
+	~
+	~		|
+
+xls data across := GET XLS DATA('data across.xls','தாள்','1','B2')
+	~
+	~		|
+
+
+direct data down := GET DIRECT DATA('data down.csv',',','A','B2')
+	~
+	~		|
+
+direct data across := GET DIRECT DATA('data across.csv',',','1','B2')
+	~
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 3
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,xls data down,448,140,34,13,8,131,0,0,0,0,0,0
+10,2,direct data down,532,138,27,8,8,3,0,0,0,0,0,0
+10,3,xls data across,445,178,40,8,8,131,0,0,0,0,0,0
+10,4,direct data across,532,178,27,8,8,3,0,0,0,0,0,0
+///---\\\
+:L<%^E!@
+9:Current
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+23:0
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:xls data down
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:100
+26:100

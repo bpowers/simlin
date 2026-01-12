@@ -1,0 +1,34 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs isee:simulation_delay="0" method="Euler" time_units="Months">
+        <start>0</start>
+        <stop>1</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="test sin">
+                <eqn>SIN(PI())</eqn>
+            </aux>
+            <aux name="test cos">
+                <eqn>COS(PI())</eqn>
+            </aux>
+            <aux name="test pi">
+                <eqn>PI()</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="test_sin" x="324" y="205"/>
+                <aux name="test_cos" x="455" y="206"/>
+                <aux name="test_pi" x="100" y="116"/>
+            </view>
+        </views>
+    </model>
+</xmile>

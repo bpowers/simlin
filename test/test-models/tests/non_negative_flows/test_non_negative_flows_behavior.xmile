@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+    <header>
+        <vendor>sdCloud</vendor>
+        <name>Non_negative test model</name>
+        <product version="1.0">sdCloud solution</product>
+    </header>
+    <sim_specs>
+        <stop>50.0</stop>
+        <start>0.0</start>
+        <dt>1.00</dt>
+    </sim_specs>
+    <behavior>
+       <flow>
+           <non_negative/>
+       </flow>
+    </behavior>
+    <model name="default">
+        <variables>
+            <flow name="OutFlow0">
+                <eqn>Time-20</eqn>
+                <non_negative> false  </non_negative>
+            </flow>
+            <flow name="OutFlow1">
+                <eqn>Time-20</eqn>
+            </flow>
+            <stock name="TestStock0">
+                <outflow>OutFlow0</outflow>
+                <eqn>2</eqn>
+            </stock>
+            <stock name="TestStock1">
+                <outflow>OutFlow1</outflow>
+                <eqn>25</eqn>
+            </stock>
+            <flow name="if_else2">
+                <eqn>IF Time &gt; 10 THEN Time ELSE -Time</eqn>
+            </flow>
+            <flow name="if_else3">
+                <eqn>IF Time &gt; 10 THEN Time ELSE -Time</eqn>
+                <non_negative>FALSE  </non_negative>
+            <stock name="TestStock2">
+                <inflow>if_else2</inflow>
+                <eqn>10</eqn>
+            </stock>
+            <stock name="TestStock3">
+                <inflow>if_else3</inflow>
+                <eqn>10</eqn>
+            </stock>
+        </variables>
+    </model>
+</xmile>

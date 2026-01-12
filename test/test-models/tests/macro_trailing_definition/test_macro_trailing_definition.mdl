@@ -1,0 +1,79 @@
+{UTF-8}
+macro input=
+	5
+	~	
+	~		|
+
+macro output=
+	EXPRESSION MACRO(macro input,macro parameter)
+	~	
+	~		|
+
+macro parameter=
+	1.1
+	~	
+	~		|
+:MACRO: EXPRESSION MACRO(input, parameter)
+EXPRESSION MACRO = input * parameter
+	~	input
+	~	tests basic macro containing no stocks and having no output
+	|
+
+:END OF MACRO:
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 1
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,macro input,255,165,31,8,8,3,0,0,0,0,0,0
+10,2,macro output,383,163,34,8,8,3,0,0,0,0,0,0
+1,3,1,2,0,0,0,0,0,128,0,-1--1--1,,1|(310,164)|
+10,4,macro parameter,351,107,43,8,8,3,0,0,0,0,0,0
+1,5,4,2,0,0,0,0,0,128,0,-1--1--1,,1|(363,128)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:macro output
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:1
+26:1

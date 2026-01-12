@@ -1,0 +1,133 @@
+{UTF-8}
+init inventory[store,product]=
+	100
+	~	
+	~		|
+
+inventory[store,product] :EXCEPT: [s3,p5] = 
+	INTEG(receipts[store,product] - sales[store,product], init inventory[store,product])\
+		 ~~|
+inventory[s3,p5] = 
+	INTEG(receipts[s3,p5] - sales[s3,p5] - special giveaways, init inventory[s3,p5])
+	~	units
+	~	Inventory content.
+	|
+
+product: (p1-p5)
+	~	
+	~		|
+
+receipts[store,product]=
+	Time
+	~	
+	~		|
+
+sales[store,product]=
+	MAX(0, SIN(Time - 2))
+	~	
+	~		|
+
+special giveaways =
+     0.1*(1+SIN(Time))*inventory[s3, p5]
+	~	units
+	~	Special give aways.
+	|
+
+store: (s1-s4)
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,init inventory,313,139,40,11,8,3,0,0,-1,0,0,0
+10,2,inventory,327,256,30,11,8,3,0,0,-1,0,0,0
+1,3,1,2,0,0,0,0,0,0,1,-1--1--1,,1|(318,190)|
+10,4,receipts,209,292,26,11,8,3,0,0,-1,0,0,0
+1,5,4,2,0,0,0,0,0,0,0,-1--1--1,,1|(259,277)|
+10,6,sales,212,346,17,11,8,3,0,0,-1,0,0,0
+1,7,6,2,0,0,0,0,0,0,0,-1--1--1,,1|(263,305)|
+10,8,special giveaways,223,213,56,11,8,3,0,0,-1,0,0,0
+1,9,8,2,0,0,0,0,0,0,0,-1--1--1,,1|(268,231)|
+1,10,2,8,0,0,0,0,0,0,0,-1--1--1,,1|(281,237)|
+10,11,Time,81,210,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,12,11,8,0,0,0,0,0,0,0,-1--1--1,,1|(130,210)|
+10,13,Time,119,293,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,14,13,4,0,0,0,0,0,64,0,-1--1--1,,1|(156,292)|
+10,15,Time,127,346,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,16,15,6,0,0,0,0,0,64,0,-1--1--1,,1|(167,346)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:inventory[store,product]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:10
+26:10
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:Current
+48:
+6:p1
+6:p2
+6:p3
+6:p4
+6:p5
+6:s1
+6:s2
+6:s3
+6:s4

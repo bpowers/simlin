@@ -1,0 +1,5 @@
+Time	adimensional const	FINAL TIME	INITIAL TIME	SAVEPER	TIME STEP	var[a,female]	var[a,male]	var[b,female]	var[b,male]	var[c,female]	var[c,male]	var only women[a,female]	var only women[b,female]	var only women[c,female]	var2[a,female]	var2[b,female]	var2[c,female]
+1	5	4	0	1	1	0.1	0.2	0.9	0.3	0.4	0.4	1	2	3	0.5	9	6
+2				1											0.5	9	6
+3				1											0.5	9	6
+4				1											0.5	9	6

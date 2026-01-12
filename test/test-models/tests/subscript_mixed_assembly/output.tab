@@ -1,0 +1,5 @@
+Time	FINAL TIME	INITIAL TIME	mixed assembly[A,D]	mixed assembly[A,E]	mixed assembly[B,D]	mixed assembly[B,E]	mixed assembly[C,D]	mixed assembly[C,E]	SAVEPER	subset[A]	subset[B]	subset[C]	TIME STEP
+0	3	0	1.1	2.1	1.2	2.2	1.3	2.3	1	1.1	1.2	1.3	1
+1			1.1		1.2		1.3		1				
+2			1.1		1.2		1.3		1				
+3			1.1		1.2		1.3		1				

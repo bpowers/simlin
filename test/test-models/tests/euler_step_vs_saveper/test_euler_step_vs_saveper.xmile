@@ -1,0 +1,72 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0" isee:save_interval="1.0">
+        <start>0.000000</start>
+        <stop>100.000000</stop>
+        <dt>0.031250</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <stock name="Sine of t">
+                <doc>	Initialize at 10 so that integration noise is a small fractional component.
+		
+		If the model simulates properly, this will hover around 10. If it integrates on the 'saveper' then this will climb linearly...</doc>
+                <inflow>Cosine_of_t</inflow>
+                <eqn>10</eqn>
+            </stock>
+            <flow name="Cosine of t">
+                <eqn>COS(Time*2*3.14159)</eqn>
+            </flow>
+        </variables>
+        <views>
+            <view>
+                <stock name="Sine_of_t" x="450" y="174"/>
+                <flow name="Cosine_of_t" x="335" y="174">
+                    <pts>
+                        <pt x="265" y="174"/>
+                        <pt x="450" y="174"/>
+                    </pts>
+                </flow>
+                <connector uid="8" angle="269.64931613378138">
+                    <from>Time</from>
+                    <to>Cosine_of_t</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

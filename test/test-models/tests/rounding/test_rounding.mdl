@@ -1,0 +1,100 @@
+{UTF-8}
+StockA= 
+	-10 + Time/10
+	~	
+	~		|
+
+test integer=
+	INTEGER(StockA)
+	~	
+	~		|
+
+test modulo=
+	MODULO(StockA, 3 )
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 200
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,StockA,477,178,26,11,0,3,0,0,0,0,0,0
+10,7,test integer,533,252,39,11,8,3,0,0,0,0,0,0
+1,8,1,7,0,0,0,0,0,64,0,-1--1--1,,1|(500,209)|
+10,9,test modulo,409,252,40,11,8,3,0,0,0,0,0,0
+1,10,1,9,0,0,0,0,0,64,0,-1--1--1,,1|(447,209)|
+10,11,Time,477,111,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|0||128-128-128
+1,12,11,1,0,0,0,0,0,64,0,-1--1--1,,1|(477,137)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:StockA
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:200
+26:200
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output.tab
+47:Current
+48:

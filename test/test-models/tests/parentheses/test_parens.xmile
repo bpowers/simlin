@@ -1,0 +1,83 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>1.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="Var3">
+                <eqn>17</eqn>
+            </aux>
+            <aux name="Var2">
+                <eqn>7</eqn>
+            </aux>
+            <aux name="Var1">
+                <eqn>6</eqn>
+            </aux>
+            <aux name="Equation Parenthesis Test">
+                <eqn>Var1*(Var2+Var3)</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="Equation_Parenthesis_Test" x="261" y="189"/>
+                <aux name="Var1" x="193" y="120"/>
+                <aux name="Var2" x="261" y="120"/>
+                <aux name="Var3" x="329" y="120"/>
+                <connector uid="5" angle="-46.637085176628545">
+                    <from>Var1</from>
+                    <to>Equation_Parenthesis_Test</to>
+                </connector>
+                <connector uid="6" angle="270">
+                    <from>Var2</from>
+                    <to>Equation_Parenthesis_Test</to>
+                </connector>
+                <connector uid="7" angle="224.77446422732186">
+                    <from>Var3</from>
+                    <to>Equation_Parenthesis_Test</to>
+                </connector>
+                <connector uid="28" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

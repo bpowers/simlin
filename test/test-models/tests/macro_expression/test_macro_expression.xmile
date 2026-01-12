@@ -1,0 +1,78 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>1.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units/>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="macro parameter">
+                <eqn>1.1</eqn>
+            </aux>
+            <aux name="macro output">
+                <eqn>EXPRESSION_MACRO(macro_input, macro_parameter)</eqn>
+            </aux>
+            <aux name="macro input">
+                <eqn>5</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="macro_input" x="155" y="178"/>
+                <aux name="macro_output" x="283" y="176"/>
+                <connector uid="3" angle="1.1519757832292612">
+                    <from>macro_input</from>
+                    <to>macro_output</to>
+                </connector>
+                <aux name="macro_parameter" x="251" y="120"/>
+                <connector uid="5" angle="-60.255118703057846">
+                    <from>macro_parameter</from>
+                    <to>macro_output</to>
+                </connector>
+                <connector uid="26" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+    <macro name="EXPRESSION MACRO">
+        <eqn>EXPRESSION MACRO</eqn>
+        <parm>input</parm>
+        <parm>parameter</parm>
+        <variables>
+            <aux name="EXPRESSION MACRO">
+                <doc>	tests basic macro containing no stocks and having no output</doc>
+                <eqn>input*parameter</eqn>
+                <units>input</units>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="macro_input" x="155" y="178"/>
+                <aux name="macro_output" x="283" y="176"/>
+                <connector uid="3" angle="1.1519757832292612">
+                    <from>macro_input</from>
+                    <to>macro_output</to>
+                </connector>
+                <aux name="macro_parameter" x="251" y="120"/>
+                <connector uid="5" angle="-60.255118703057846">
+                    <from>macro_parameter</from>
+                    <to>macro_output</to>
+                </connector>
+                <connector uid="26" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </macro>
+</xmile>

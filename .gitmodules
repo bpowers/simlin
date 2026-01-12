@@ -1,3 +1,0 @@
-[submodule "test/test-models"]
-	path = test/test-models
-	url = https://github.com/bpowers/test-models.git

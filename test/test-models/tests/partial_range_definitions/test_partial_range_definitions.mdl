@@ -1,0 +1,167 @@
+{UTF-8}
+data[D]=
+	partial data[D] ~~|
+data[A]=
+	partial data[A]
+	~	
+	~		|
+
+my range:
+	A,B,C,D,E
+	~	
+	~		|
+
+partial call[A]=
+	partial lookup[A](Time) ~~|
+partial call[B]=
+	partial lookup[B](Time)
+	~	
+	~		|
+
+partial call2[C]=
+	partiall hardcoded lookup[C](Time) ~~|
+partial call2[D]=
+	partiall hardcoded lookup[D](Time)
+	~	
+	~		|
+
+partial constants[B]=
+	GET DIRECT CONSTANTS('inputs.xlsx', 'Sheet1', 'B2') ~~|
+partial constants[A]=
+	GET DIRECT CONSTANTS('inputs.xlsx', 'Sheet1', 'D3')
+	~	
+	~		|
+
+partial data[D]:INTERPOLATE::=
+	GET DIRECT DATA('inputs.xlsx', 'Sheet1', '1', 'A2') ~~|
+partial data[A]:INTERPOLATE::=
+	GET DIRECT DATA('inputs.xlsx', 'Sheet1', '1', 'A3')
+	~	
+	~		|
+
+partial lookup[A]=
+	GET DIRECT LOOKUPS('inputs.xlsx', 'Sheet1', '1', 'A2') ~~|
+partial lookup[B]=
+	GET DIRECT LOOKUPS('inputs.xlsx', 'Sheet1', '1', 'A3')
+	~	
+	~		|
+
+partiall hardcoded lookup[C](
+	[(0,0)-(10,10)],(0,0.719697),(2.84536,2.65152),(3.19588,5.15152),(5.07217,6.17424),(\
+		5.9732,3.42424),(7.15258,4.59091),(10,4.63258)) ~~|
+partiall hardcoded lookup[D](
+	[(0,0)-(10,10)],(0,5.07576),(1.27835,2.72727),(1.31959,6.51515),(2.61856,3.59848),(3.85567\
+		,5.22727),(4.28866,2.57576),(5.4433,6.40152),(7.87629,3.06818),(10,5.90909))
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$-1--1--1,0,|12||-1--1--1|-1--1--1|-1--1--1|-1--1--1|-1--1--1|96,96,100,0
+10,1,partial lookup,231,130,43,23,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,2,partial data,237,225,58,23,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,3,partial constants,241,314,44,23,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,4,partial call,507,124,58,23,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,5,partiall hardcoded lookup,511,229,44,25,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,6,1,4,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,7,Time,505,54,29,10,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|||128-128-128,0,0,0,0,0,0
+1,8,7,4,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+10,9,data,104,233,43,23,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,10,2,9,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,11,partial call2,651,221,62,23,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,12,5,11,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,13,Time,651,262,29,10,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|||128-128-128,0,0,0,0,0,0
+1,14,13,11,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+///---\\\
+:L<%^E!@
+1:output.vdfx
+1:current.vdfx
+4:Time
+5:partial constants[my range]
+6:A
+9:output
+19:100,0
+24:0
+25:10
+26:10
+57:1
+54:0
+55:0
+82:0
+86:0
+59:0
+56:0
+58:0
+71:0
+110:0
+111:0
+44:0
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:C:\Users\eneko\OneDrive - CREAF\CREAF\dev\models\output.tab
+47:
+48:
+23:0
+15:0,0,0,0,0,0
+27:0,
+34:0,
+42:1
+72:0
+73:0
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+95:0
+96:0
+97:0
+77:0
+78:0
+102:1
+93:0
+94:0
+92:0
+91:0
+90:0
+87:0
+75:
+43:C:\Users\eneko\OneDrive - CREAF\CREAF\dev\models\output.tab
+103:8,8,8,3,8
+105:0,0,0,0,0,0,0,0,0,0
+104:Courier|12||0-0-0|0-0-0|-1--1--1|0-0-255|192-192-192|-1--1--1

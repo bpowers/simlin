@@ -1,0 +1,85 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>100.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="test integer">
+                <eqn>INT(StockA)</eqn>
+            </aux>
+            <stock name="StockA">
+                <inflow>FlowA</inflow>
+                <eqn>-5</eqn>
+            </stock>
+            <flow name="FlowA">
+                <eqn>0.1</eqn>
+            </flow>
+            <aux name="test modulo">
+                <eqn>MODULO(StockA, 3)</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <stock name="StockA" x="297" y="121"/>
+                <flow name="FlowA" x="190" y="120">
+                    <pts>
+                        <pt x="113" y="120"/>
+                        <pt x="297" y="121"/>
+                    </pts>
+                </flow>
+                <aux name="test_integer" x="300" y="205"/>
+                <connector uid="9" angle="268.05449539045759">
+                    <from>StockA</from>
+                    <to>test_integer</to>
+                </connector>
+                <aux name="test_modulo" x="207" y="205"/>
+                <connector uid="11" angle="221.84418914090799">
+                    <from>StockA</from>
+                    <to>test_modulo</to>
+                </connector>
+                <connector uid="32" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

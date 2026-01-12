@@ -1,0 +1,109 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>10.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <flow name="Outflow 2">
+                <eqn>( IF Time = STOPTIME THEN 2 ELSE 0 )</eqn>
+            </flow>
+            <stock name="Stock">
+                <inflow>Inflow</inflow>
+                <outflow>Outflow_1</outflow>
+                <outflow>Outflow_2</outflow>
+                <eqn>0</eqn>
+            </stock>
+            <flow name="Inflow">
+                <eqn>( IF Time = STARTTIME THEN 10 ELSE 3 )</eqn>
+            </flow>
+            <flow name="Outflow 1">
+                <eqn>Stock/DT</eqn>
+            </flow>
+        </variables>
+        <views>
+            <view>
+                <stock name="Stock" x="261" y="238"/>
+                <flow name="Outflow_1" x="357" y="240">
+                    <pts>
+                        <pt x="261" y="238"/>
+                        <pt x="423" y="240"/>
+                    </pts>
+                </flow>
+                <connector uid="8" angle="-83.917446342820796">
+                    <from>Stock</from>
+                    <to>Outflow_1</to>
+                </connector>
+                <connector uid="10" angle="126.62855206605735">
+                    <from>DT</from>
+                    <to>Outflow_1</to>
+                </connector>
+                <flow name="Inflow" x="166" y="233">
+                    <pts>
+                        <pt x="101" y="233"/>
+                        <pt x="261" y="238"/>
+                    </pts>
+                </flow>
+                <connector uid="18" angle="40.526611661633069">
+                    <from>STARTTIME</from>
+                    <to>Inflow</to>
+                </connector>
+                <connector uid="20" angle="124.49206971555066">
+                    <from>Time</from>
+                    <to>Inflow</to>
+                </connector>
+                <flow name="Outflow_2" x="266" y="172">
+                    <pts>
+                        <pt x="261" y="238"/>
+                        <pt x="265" y="122"/>
+                    </pts>
+                </flow>
+                <connector uid="29" angle="176.27174288246442">
+                    <from>STOPTIME</from>
+                    <to>Outflow_2</to>
+                </connector>
+                <connector uid="54" angle="157.4777264405696">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

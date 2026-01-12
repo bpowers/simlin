@@ -1,0 +1,250 @@
+{UTF-8}
+sabs1[sub1]  = ABS(var1[sub1])
+	~	
+	~		|
+
+sarccos1[sub1]  = ARCCOS(var1[sub1])
+	~	
+	~		|
+
+sarcsin1[sub1] = ARCSIN(var1[sub1])
+	~	
+	~		|
+
+sarctan1[sub1]  = ARCTAN(var1[sub1])
+	~	
+	~		|
+
+scos1[sub1]  = COS(var1[sub1])
+	~	
+	~		|
+
+scosh1[sub1]  = COSH(var1[sub1])
+	~	
+	~		|
+
+sexp1[sub1]  = EXP(var1[sub1])
+	~	
+	~		|
+
+sln1[sub1]  = LN(ABS(var1[sub1]))
+	~	
+	~		|
+
+ssin1[sub1]  = SIN(var1[sub1])
+	~	
+	~		|
+
+ssinh1[sub1]  = SINH(var1[sub1])
+	~	
+	~		|
+
+stan1[sub1]  = TAN(var1[sub1])
+	~	
+	~		|
+
+stanh1[sub1]  = TANH(var1[sub1])
+	~	
+	~		|
+
+sabs2[sub1,sub2]  = ABS(var2[sub1,sub2])
+	~	
+	~		|
+
+sarccos2[sub1,sub2]  = ARCCOS(var2[sub1,sub2])
+	~	
+	~		|
+
+sarcsin2[sub1,sub2] = ARCSIN(var2[sub1,sub2])
+	~	
+	~		|
+
+sarctan2[sub1,sub2]  = ARCTAN(var2[sub1,sub2])
+	~	
+	~		|
+
+scos2[sub1,sub2]  = COS(var2[sub1,sub2])
+	~	
+	~		|
+
+scosh2[sub1,sub2]  = COSH(var2[sub1,sub2])
+	~	
+	~		|
+
+sexp2[sub1,sub2]  = EXP(var2[sub1,sub2])
+	~	
+	~		|
+
+sln2[sub1,sub2]  = LN(ABS(var2[sub1,sub2]))
+	~	
+	~		|
+
+ssin2[sub1,sub2]  = SIN(var2[sub1,sub2])
+	~	
+	~		|
+
+ssinh2[sub1,sub2]  = SINH(var2[sub1,sub2])
+	~	
+	~		|
+
+stan2[sub1,sub2]  = TAN(var2[sub1,sub2])
+	~	
+	~		|
+
+stanh2[sub1,sub2]  = TANH(var2[sub1,sub2])
+	~	
+	~		|
+
+sabs3[sub2]  = ABS(var3[sub2])
+	~	
+	~		|
+
+sarccos3[sub2]  = ARCCOS(var3[sub2])
+	~	
+	~		|
+
+sarcsin3[sub2] = ARCSIN(var3[sub2])
+	~	
+	~		|
+
+sarctan3[sub2]  = ARCTAN(var3[sub2])
+	~	
+	~		|
+
+scos3[sub2]  = COS(var3[sub2])
+	~	
+	~		|
+
+scosh3[sub2]  = COSH(var3[sub2])
+	~	
+	~		|
+
+sexp3[sub2]  = EXP(var3[sub2])
+	~	
+	~		|
+
+sln3[sub2]  = LN(ABS(var3[sub2]))
+	~	
+	~		|
+
+ssin3[sub2]  = SIN(var3[sub2])
+	~	
+	~		|
+
+ssinh3[sub2]  = SINH(var3[sub2])
+	~	
+	~		|
+
+stan3[sub2]  = TAN(var3[sub2])
+	~	
+	~		|
+
+stanh3[sub2]  = TANH(var3[sub2])
+	~	
+	~		|
+
+sub1:
+	A,B,C
+	~	
+	~		|
+
+sub2:
+	D,E
+	~	
+	~		|
+
+var1[sub1]=
+	0.1,0.3,0.8
+	~	
+	~		|
+
+var2[sub1,sub2]=
+	0.1,0.2;
+	0.4,0.5;
+	0.6,0.7;
+	~	
+	~		|
+
+var3[D]=
+	(Time+1)/15 ~~|
+var3[E]=
+	-0.2-Time/20
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,var1,257,179,16,11,8,3,0,0,0,0,0,0
+10,2,var2,249,272,16,11,8,3,0,0,0,0,0,0
+10,3,var3,251,372,16,11,8,3,0,0,0,0,0,0
+10,4,Time,251,402,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,5,4,3,0,0,0,0,0,64,0,-1--1--1,,1|(251,394)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:var3[sub2]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:10
+26:10
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:Current
+48:
+6:A
+6:D

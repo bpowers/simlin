@@ -1,0 +1,3 @@
+Time	FINAL TIME	INITIAL TIME	lower values[Layer2]	lower values[Layer3]	lower values[Layer4]	merged lower[Layer1]	merged lower[Layer2]	merged lower[Layer3]	merged lower[Layer4]	merged upper[Layer1]	merged upper[Layer2]	merged upper[Layer3]	merged upper[Layer4]	SAVEPER	TIME STEP	upper values[Layer1]	upper values[Layer2]	upper values[Layer3]	value per layer[Layer1]	value per layer[Layer2]	value per layer[Layer3]	value per layer[Layer4]
+0	1	0	2	3	4	10	2	3	4	1	2	3	40	1	1	1	2	3	1	2	3	4
+1			2	3	4		2	3	4	1	2	3		1		1	2	3				

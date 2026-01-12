@@ -1,0 +1,215 @@
+{UTF-8}
+add substract[sub1]=
+	cons3-time2+time3-cons2 ~~|
+add substract[sub2]=
+	-cons3-time2+time3-cons2 ~~|
+add substract[sub3]=
+	-(cons3-time2+time3-cons2) ~~|
+add substract[sub4]=
+	-(-cons3-time2+time3-cons2) ~~|
+add substract[sub5]=
+	-(cons3-time2)+(time3-cons2) ~~|
+add substract[sub6]=
+	-(cons3-time2)-(time3-cons2) ~~|
+add substract[sub7]=
+	-(cons3-time2)+(time3-cons2) ~~|
+add substract[sub8]=
+	(cons3-time2)-(time3-cons2) ~~|
+add substract[sub9]=
+	(cons3-time2)+(time3-cons2)
+	~	
+	~		|
+
+combined[sub1]=
+	(cons3/time2)+(time3/cons2) ~~|
+combined[sub2]=
+	-(cons3/time2+time3/cons2) ~~|
+combined[sub3]=
+	-cons3/(time2^(2+cons2)-time3/cons2) ~~|
+combined[sub4]=
+	1/(-cons3+3/time2*time3/(cons2-Time)) ~~|
+combined[sub5]=
+	-(cons3/time2)*(time3/cons2) ~~|
+combined[sub6]=
+	-(cons3/time2)+(cons3/time2)/(time3/cons2) ~~|
+combined[sub7]=
+	((cons3+cons2-Time)/time2)/(time3/cons2) ~~|
+combined[sub8]=
+	(cons3+cons2-Time/time2)/(time3/cons2) ~~|
+combined[sub9]=
+	(cons3/time2-cons3)*(time3/(cons2-cons3))
+	~	
+	~		|
+
+cons2=
+	2
+	~	
+	~		|
+
+cons3=
+	3
+	~	
+	~		|
+
+cons4=
+	4
+	~	
+	~		|
+
+expo[sub1]=
+	cons2^cons3 ~~|
+expo[sub2]=
+	cons4^cons3^cons2 ~~|
+expo[sub3]=
+	cons4^(cons3^cons2) ~~|
+expo[sub4]=
+	(cons4^cons3)^cons2 ~~|
+expo[sub5]=
+	-Time^cons2 ~~|
+expo[sub6]=
+	cons2^-cons2^-cons3 ~~|
+expo[sub7]=
+	(-Time)^cons2 ~~|
+expo[sub8]=
+	Time^(-cons2) ~~|
+expo[sub9]=
+	Time^-cons2
+	~	
+	~		|
+
+product[sub1]=
+	cons3/time2*time3/cons2 ~~|
+product[sub2]=
+	-cons3/time2*time3/cons2 ~~|
+product[sub3]=
+	-(cons3/time2*time3/cons2) ~~|
+product[sub4]=
+	1/(-cons3/time2*time3/cons2) ~~|
+product[sub5]=
+	-(cons3/time2)*(time3/cons2) ~~|
+product[sub6]=
+	-(cons3/time2)/(time3/cons2) ~~|
+product[sub7]=
+	-(cons3/time2)*(time3/cons2) ~~|
+product[sub8]=
+	(cons3/time2)/(time3/cons2) ~~|
+product[sub9]=
+	(cons3/time2)*(time3/cons2)
+	~	
+	~		|
+
+subs:
+	(sub1-sub9)
+	~	
+	~		|
+
+time1=
+	-Time
+	~	
+	~		|
+
+time2=
+	2*Time
+	~	
+	~		|
+
+time3=
+	3*Time
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 1
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,cons2,188,142,20,11,8,3,0,0,0,0,0,0
+10,2,cons3,184,230,20,11,8,3,0,0,0,0,0,0
+10,3,cons4,171,348,20,11,8,3,0,0,0,0,0,0
+10,4,time1,162,437,19,11,8,3,0,0,0,0,0,0
+10,5,time2,154,542,19,11,8,3,0,0,0,0,0,0
+10,6,time3,153,610,19,11,8,3,0,0,0,0,0,0
+10,7,Time,56,454,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,8,7,4,0,0,0,0,0,128,0,-1--1--1,,1|(105,446)|
+1,9,7,5,0,0,0,0,0,128,0,-1--1--1,,1|(99,493)|
+1,10,7,6,0,0,0,0,0,128,0,-1--1--1,,1|(100,526)|
+10,11,expo,420,151,17,11,8,3,0,0,0,0,0,0
+1,12,1,11,0,0,0,0,0,128,0,-1--1--1,,1|(298,145)|
+1,13,2,11,0,0,0,0,0,128,0,-1--1--1,,1|(296,192)|
+1,14,3,11,0,0,0,0,0,128,0,-1--1--1,,1|(289,253)|
+1,15,7,11,0,0,0,0,0,128,0,-1--1--1,,1|(232,306)|
+10,16,add substract,458,288,44,15,8,131,0,0,0,0,0,0
+1,17,1,16,0,0,0,0,0,128,0,-1--1--1,,1|(312,209)|
+1,18,2,16,0,0,0,0,0,128,0,-1--1--1,,1|(302,254)|
+1,19,5,16,0,0,0,0,0,128,0,-1--1--1,,1|(298,421)|
+1,20,6,16,0,0,0,0,0,128,0,-1--1--1,,1|(298,456)|
+10,21,product,456,419,49,11,8,131,0,0,0,0,0,0
+1,22,1,21,0,0,0,0,0,64,0,-1--1--1,,1|(316,275)|
+1,23,2,21,0,0,0,0,0,64,0,-1--1--1,,1|(313,320)|
+1,24,5,21,0,0,0,0,0,64,0,-1--1--1,,1|(294,485)|
+1,25,6,21,0,0,0,0,0,64,0,-1--1--1,,1|(298,518)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:Time
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:1
+25:10
+26:10
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:Current
+48:
+6:sub6

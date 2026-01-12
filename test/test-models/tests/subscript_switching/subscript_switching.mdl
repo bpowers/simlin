@@ -1,0 +1,140 @@
+{UTF-8}
+Categories[Cats]= INTEG (
+	Switching In[Cats]-Switching Out[Cats],
+		Initial Categories[Cats])
+	~	
+	~		|
+
+Switching In[dummy]=
+	Gain * SUM(Transition Matrix[Cats!,dummy]*Categories[Cats!])
+	~	
+	~		|
+
+Switching Out[Cats]=
+	Gain * SUM(Transition Matrix[Cats,dummy!]*Categories[Cats])
+	~	
+	~		|
+
+Gain=
+	0.1
+	~	
+	~		|
+
+Total=
+	SUM(Categories[Cats!])
+	~	
+	~		|
+
+Cats:
+	c1, c2, c3, c4, c5
+	~	
+	~		|
+
+dummy:
+	c1, c2, c3, c4, c5
+	~	
+	~		|
+
+Initial Categories[Cats]=
+	1,0,0,0,0
+	~	
+	~		|
+
+Transition Matrix[Cats,dummy]=
+	0, 0.3, 0.2, 0.4, 0.1;
+	0.1, 0, 0.3, 0.2, 0.4;
+	0.3, 0.4, 0, 0.1, 0.2;
+	0.2, 0.1, 0.4, 0, 0.3;
+	0.4, 0.2, 0.1, 0.3, 0;
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Helvetica|12|B|0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,Categories,422,264,40,20,3,3,0,0,0,0,0,0
+10,2,Initial Categories,423,364,51,7,8,3,0,0,0,0,0,0
+10,3,Transition Matrix,421,186,50,7,8,3,0,0,0,0,0,0
+12,4,48,565,260,10,8,0,3,0,0,-1,0,0,0
+1,5,7,4,4,0,0,22,0,0,0,-1--1--1,,1|(535,262)|
+1,6,7,1,100,0,0,22,0,0,0,-1--1--1,,1|(483,262)|
+11,7,48,510,262,6,8,34,3,0,0,1,0,0,0
+10,8,Switching Out,510,277,43,7,40,3,0,0,-1,0,0,0
+12,9,48,287,262,10,8,0,3,0,0,-1,0,0,0
+1,10,12,1,4,0,0,22,0,0,0,-1--1--1,,1|(361,263)|
+1,11,12,9,100,0,0,22,0,0,0,-1--1--1,,1|(313,263)|
+11,12,48,335,263,6,8,34,3,0,0,1,0,0,0
+10,13,Switching In,335,278,38,7,40,3,0,0,-1,0,0,0
+1,14,3,7,1,0,0,0,0,128,0,-1--1--1,,1|(471,212)|
+1,15,3,12,1,0,0,0,0,128,0,-1--1--1,,1|(367,217)|
+1,16,1,13,1,0,0,0,0,128,0,-1--1--1,,1|(381,296)|
+1,17,1,8,1,0,0,0,0,128,0,-1--1--1,,1|(464,295)|
+1,18,2,1,0,0,0,0,0,64,1,-1--1--1,,1|(422,327)|
+10,19,Gain,419,145,16,7,8,3,0,0,0,0,0,0
+1,20,19,12,1,0,0,0,0,128,0,-1--1--1,,1|(338,206)|
+1,21,19,7,1,0,0,0,0,128,0,-1--1--1,,1|(499,195)|
+10,22,Total,423,334,16,7,8,3,0,0,0,0,0,0
+1,23,1,22,0,0,0,0,0,128,0,-1--1--1,,1|(422,298)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+1:/Users/houghton/Google_Drive/MIT PhD/practice/Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Day,Days
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Switching In[Cats]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:100
+26:100
+6:c1
+6:c2
+6:c3
+6:c4
+6:c5

@@ -1,0 +1,341 @@
+{UTF-8}
+Complex Max[Second Dimension Subscript,Third Dimension Subscript]=
+	VMAX(IF THEN ELSE(Time>3, Input 3D[One Dimensional Subscript!,Second Dimension Subscript\
+		,Third Dimension Subscript], Stock A[One Dimensional Subscript!,Second Dimension Subscript\
+		]))
+	~	
+	~		|
+
+Complex Min[Second Dimension Subscript,Third Dimension Subscript]=
+	VMIN(Input 3D[One Dimensional Subscript!,Second Dimension Subscript,Third Dimension Subscript\
+		]+2*Stock A[One Dimensional Subscript!,Second Dimension Subscript]-5)
+	~	
+	~		|
+
+Complex Prod[Second Dimension Subscript]=
+	PROD(Input 3D[One Dimensional Subscript!,Second Dimension Subscript,Third Dimension Subscript\
+		!]-0.1*Stock A[One Dimensional Subscript!,Second Dimension Subscript])
+	~	
+	~		|
+
+Complex Sum[Second Dimension Subscript,Third Dimension Subscript]=
+	SUM(Input 3D[One Dimensional Subscript!,Second Dimension Subscript,Third Dimension Subscript\
+		]*Stock A[One Dimensional Subscript!,Second Dimension Subscript])
+	~	
+	~		|
+
+Complex Sum subrange[One Dimensional Subscript,Second Dimension Subscript]=
+	SUM(Input 3D[One Dimensional Subscript,Second Dimension Subscript,Third Dimension Subrange\
+		!]*Stock A[One Dimensional Subscript,Second Dimension Subscript])
+	~	
+	~		|
+
+Inflow A[One Dimensional Subscript,Second Dimension Subscript]=
+	Rate A[One Dimensional Subscript,Second Dimension Subscript]
+	~	
+	~		|
+
+Initial Values[One Dimensional Subscript,Second Dimension Subscript]=
+	1, 2; 3, 4; 5, 6;
+	~	
+	~		|
+
+Input 3D[One Dimensional Subscript,Column 1,Third Dimension Subscript]=
+	1, 2, 3; 4, 5, 6; 7, 8, 9; ~~|
+Input 3D[One Dimensional Subscript,Column 2,Third Dimension Subscript]=
+	10, 20, 30; 40, 50, 60; 70, 80, 100;
+	~	
+	~		|
+
+One Dimensional Subscript:
+	Entry 1, Entry 2, Entry 3
+	~	
+	~		|
+
+Rate A[One Dimensional Subscript,Second Dimension Subscript]=
+	0.01, 0.02; 0.03, 0.04; 0.05, 0.06;
+	~	
+	~		|
+
+Second Dimension Subscript:
+	Column 1, Column 2
+	~	
+	~		|
+
+Stock A[One Dimensional Subscript,Second Dimension Subscript]= INTEG (
+	Inflow A[One Dimensional Subscript,Second Dimension Subscript],
+		Initial Values[One Dimensional Subscript,Second Dimension Subscript])
+	~	
+	~		|
+
+Subcript Max 123=
+	VMAX(Input 3D[One Dimensional Subscript!,Second Dimension Subscript!,Third Dimension Subscript\
+		!])
+	~	
+	~		|
+
+Subcript Sum 2[One Dimensional Subscript,Third Dimension Subscript]=
+	SUM(Input 3D[One Dimensional Subscript,Second Dimension Subscript!,Third Dimension Subscript\
+		])
+	~	
+	~		|
+
+Subscript 1d Max[One Dimensional Subscript]=
+	VMAX(Stock A[One Dimensional Subscript,Second Dimension Subscript!])
+	~	
+	~		|
+
+Subscript 1d Min[Second Dimension Subscript]=
+	VMIN(Stock A[One Dimensional Subscript!,Second Dimension Subscript])
+	~	
+	~		|
+
+Subscript 1d Product[One Dimensional Subscript]=
+	PROD( Stock A[One Dimensional Subscript,Second Dimension Subscript!] )
+	~	
+	~		|
+
+Subscript 1d Sum[Second Dimension Subscript]=
+	SUM(Stock A[One Dimensional Subscript!,Second Dimension Subscript])
+	~	
+	~		|
+
+Subscript 2d Max=
+	VMAX(Stock A[One Dimensional Subscript!,Second Dimension Subscript!])
+	~	
+	~		|
+
+Subscript 2d Min=
+	VMIN(Stock A[One Dimensional Subscript!,Second Dimension Subscript!])
+	~	
+	~		|
+
+Subscript 2d Product=
+	PROD( Stock A[One Dimensional Subscript!,Second Dimension Subscript!] )
+	~	
+	~		|
+
+Subscript 2d Sum=
+	SUM(Stock A[One Dimensional Subscript!,Second Dimension Subscript!] )
+	~	
+	~		|
+
+Subscript Max 12[Third Dimension Subscript]=
+	VMAX(Input 3D[One Dimensional Subscript!,Second Dimension Subscript!,Third Dimension Subscript\
+		])
+	~	
+	~		|
+
+Subscript Min 13[Second Dimension Subscript]=
+	VMIN(Input 3D[One Dimensional Subscript!,Second Dimension Subscript,Third Dimension Subscript\
+		!])
+	~	
+	~		|
+
+Subscript Min 23[One Dimensional Subscript]=
+	VMIN(Input 3D[One Dimensional Subscript,Second Dimension Subscript!,Third Dimension Subscript\
+		!])
+	~	
+	~		|
+
+Subscript Prod 12[Third Dimension Subscript]=
+	PROD(Input 3D[One Dimensional Subscript!,Second Dimension Subscript!,Third Dimension Subscript\
+		])
+	~	
+	~		|
+
+Subscript Prod 23[One Dimensional Subscript]=
+	PROD(Input 3D[One Dimensional Subscript,Second Dimension Subscript!,Third Dimension Subscript\
+		!])
+	~	
+	~		|
+
+Subscript Secondary Max=
+	VMAX(Subscript 1d Max[One Dimensional Subscript!] )
+	~	
+	~		|
+
+Subscript Secondary Min=
+	VMIN(Subscript 1d Min[Second Dimension Subscript!])
+	~	
+	~		|
+
+Subscript Secondary Product=
+	PROD(Subscript 1d Product[One Dimensional Subscript!])
+	~	
+	~		|
+
+Subscript Secondary Sum=
+	SUM(Subscript 1d Sum[Second Dimension Subscript!])
+	~	
+	~		|
+
+Subscript Sum 13[Second Dimension Subscript]=
+	SUM(Input 3D[One Dimensional Subscript!,Second Dimension Subscript,Third Dimension Subscript\
+		!])
+	~	
+	~		|
+
+Third Dimension Subrange:
+	Depth 1, Depth 2
+	~	
+	~		|
+
+Third Dimension Subscript:
+	Depth 1, Depth 2, Depth 3
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 20
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,5,0
+10,1,Stock A,934,347,53,27,3,3,0,0,0,0,0,0
+12,2,48,717,348,10,8,0,3,0,0,-1,0,0,0
+1,3,5,1,4,0,0,22,0,0,0,-1--1--1,,1|(847,348)|
+1,4,5,2,100,0,0,22,0,0,0,-1--1--1,,1|(762,348)|
+11,5,48,805,348,8,11,34,3,0,0,1,0,0,0
+10,6,Inflow A,805,370,32,11,40,3,0,0,-1,0,0,0
+10,7,Rate A,802,260,25,11,8,3,0,0,0,0,0,0
+1,8,7,5,0,0,0,0,0,64,0,-1--1--1,,1|(802,298)|
+10,9,Initial Values,931,300,45,11,8,3,0,0,0,0,0,0
+1,10,9,1,0,0,0,0,0,64,1,-1--1--1,,1|(930,308)|
+10,11,Subscript 1d Sum,786,467,60,11,8,3,0,0,0,0,0,0
+1,12,1,11,0,0,0,0,0,64,0,-1--1--1,,1|(855,410)|
+10,13,Subscript 2d Sum,839,602,60,11,8,3,0,0,0,0,0,0
+1,14,1,13,0,0,0,0,0,64,0,-1--1--1,,1|(885,475)|
+10,15,Subscript Secondary Sum,653,583,55,19,8,3,0,0,0,0,0,0
+1,16,11,15,0,0,0,0,0,64,0,-1--1--1,,1|(729,516)|
+10,17,Subscript 1d Product,1017,479,71,11,8,3,0,0,0,0,0,0
+1,18,1,17,0,0,0,0,0,64,0,-1--1--1,,1|(976,415)|
+10,19,Subscript 2d Product,1243,540,71,11,8,3,0,0,0,0,0,0
+1,20,1,19,0,0,0,0,0,64,0,-1--1--1,,1|(1095,447)|
+10,21,Subscript Secondary Product,1067,614,64,19,8,3,0,0,0,0,0,0
+1,22,17,21,0,0,0,0,0,64,0,-1--1--1,,1|(1037,535)|
+10,23,Subscript 1d Max,1163,380,60,11,8,3,0,0,0,0,0,0
+10,24,Subscript Secondary Max,1382,420,55,19,8,3,0,0,0,0,0,0
+10,25,Subscript 1d Min,1173,244,59,11,8,3,0,0,0,0,0,0
+10,26,Subscript Secondary Min,1343,186,53,19,8,3,0,0,0,0,0,0
+10,27,Subscript 2d Max,1370,299,60,11,8,3,0,0,0,0,0,0
+10,28,Subscript 2d Min,1171,134,59,11,8,3,0,0,0,0,0,0
+1,29,1,23,0,0,0,0,0,64,0,-1--1--1,,1|(1038,361)|
+1,30,23,24,0,0,0,0,0,64,0,-1--1--1,,1|(1268,398)|
+1,31,1,27,0,0,0,0,0,64,0,-1--1--1,,1|(1141,324)|
+1,32,1,25,0,0,0,0,0,64,0,-1--1--1,,1|(1060,292)|
+1,33,25,26,0,0,0,0,0,64,0,-1--1--1,,1|(1240,220)|
+1,34,1,28,0,0,0,0,0,64,0,-1--1--1,,1|(1055,237)|
+10,35,Input 3D,497,247,29,11,8,3,0,0,0,0,0,0
+10,36,Subscript Min 13,498,155,55,11,8,3,0,0,0,0,0,0
+10,37,Subscript Min 23,636,175,56,11,8,131,0,0,0,0,0,0
+10,38,Subscript Max 12,659,240,57,11,8,3,0,0,0,0,0,0
+10,39,Subcript Max 123,653,295,58,11,8,3,0,0,0,0,0,0
+10,40,Subcript Sum 2,604,348,49,11,8,3,0,0,0,0,0,0
+10,41,Subscript Sum 13,561,393,56,11,8,3,0,0,0,0,0,0
+10,42,Subscript Prod 23,526,438,58,11,8,3,0,0,0,0,0,0
+10,43,Subscript Prod 12,478,492,58,11,8,3,0,0,0,0,0,0
+1,44,35,36,0,0,0,0,0,128,0,-1--1--1,,1|(497,208)|
+1,45,35,37,0,0,0,0,0,128,0,-1--1--1,,1|(559,214)|
+1,46,35,38,0,0,0,0,0,128,0,-1--1--1,,1|(557,244)|
+1,47,35,39,0,0,0,0,0,128,0,-1--1--1,,1|(564,267)|
+1,48,35,40,0,0,0,0,0,128,0,-1--1--1,,1|(544,292)|
+1,49,35,41,0,0,0,0,0,128,0,-1--1--1,,1|(525,313)|
+1,50,35,42,0,0,0,0,0,128,0,-1--1--1,,1|(509,335)|
+1,51,35,43,0,0,0,0,0,128,0,-1--1--1,,1|(488,362)|
+10,52,Complex Sum,653,117,45,11,8,3,0,0,0,0,0,0
+10,53,Complex Prod,912,115,47,11,8,3,0,0,0,0,0,0
+10,54,Complex Min,784,118,44,11,8,3,0,0,0,0,0,0
+10,55,Complex Max,1020,118,46,11,8,3,0,0,0,0,0,0
+1,56,35,54,1,0,0,0,0,128,0,-1--1--1,,1|(592,157)|
+1,57,1,54,1,0,0,0,0,128,0,-1--1--1,,1|(842,230)|
+1,58,35,52,1,0,0,0,0,128,0,-1--1--1,,1|(554,158)|
+1,59,1,52,1,0,0,0,0,128,0,-1--1--1,,1|(775,232)|
+1,60,35,53,1,0,0,0,0,128,0,-1--1--1,,1|(706,192)|
+1,61,1,53,1,0,0,0,0,128,0,-1--1--1,,1|(910,224)|
+1,62,35,55,1,0,0,0,0,128,0,-1--1--1,,1|(750,200)|
+1,63,1,55,1,0,0,0,0,128,0,-1--1--1,,1|(966,225)|
+10,64,Time,1047,176,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,65,64,55,0,0,0,0,0,64,0,-1--1--1,,1|(1036,153)|
+10,66,Complex Sum subrange,555,101,46,19,8,3,0,0,0,0,0,0
+1,67,35,66,0,0,0,0,0,128,0,-1--1--1,,1|(521,184)|
+1,68,1,66,0,0,0,0,0,128,0,-1--1--1,,1|(744,223)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+15:0,0,0,0,0,0
+19:5,0
+27:2,
+34:0,
+4:Time
+5:Complex Sum subrange[One Dimensional Subscript,Second Dimension Subscript]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:20
+26:20
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:Current
+48:
+6:Column 1
+6:Column 2
+6:Depth 1
+6:Depth 2
+6:Depth 3
+6:Entry 1
+6:Entry 2
+6:Entry 3

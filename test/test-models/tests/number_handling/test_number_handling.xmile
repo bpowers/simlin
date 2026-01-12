@@ -1,0 +1,91 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>1.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="quotient target">
+                <eqn>0.75</eqn>
+            </aux>
+            <aux name="quotient">
+                <eqn>numerator/denominator</eqn>
+            </aux>
+            <aux name="numerator">
+                <eqn>3</eqn>
+            </aux>
+            <aux name="equality">
+                <eqn>( IF quotient = quotient_target THEN 1 ELSE 0 )</eqn>
+            </aux>
+            <aux name="denominator">
+                <eqn>4</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="numerator" x="100" y="155"/>
+                <aux name="denominator" x="101" y="229"/>
+                <aux name="quotient" x="180" y="196"/>
+                <connector uid="4" angle="-27.339870989933942">
+                    <from>numerator</from>
+                    <to>quotient</to>
+                </connector>
+                <connector uid="5" angle="24.289438154718411">
+                    <from>denominator</from>
+                    <to>quotient</to>
+                </connector>
+                <aux name="quotient_target" x="182" y="288"/>
+                <aux name="equality" x="297" y="244"/>
+                <connector uid="9" angle="-22.437316449654958">
+                    <from>quotient</from>
+                    <to>equality</to>
+                </connector>
+                <connector uid="10" angle="22.472997289679085">
+                    <from>quotient_target</from>
+                    <to>equality</to>
+                </connector>
+                <connector uid="31" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

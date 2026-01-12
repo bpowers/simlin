@@ -1,0 +1,89 @@
+{UTF-8}
+Dim1:
+	A, B, C
+	~	
+	~		|
+
+Subscripted Constant[Dim1]=
+	5,5,5
+	~	
+	~		|
+
+Subscripted Variable[Dim1]=
+	Unsubscripted Constant
+	~	
+	~		|
+
+Unsubscripted Constant=
+	5
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 3
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Helvetica|12|B|0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,Unsubscripted Constant,316,208,45,12,8,3,0,0,0,0,0,0
+10,2,Subscripted Variable,495,210,37,12,8,3,0,0,0,0,0,0
+10,3,Subscripted Constant,493,315,37,12,8,3,0,0,0,0,0,0
+1,4,1,2,0,0,0,0,0,128,0,-1--1--1,,1|(402,208)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+1:/Users/houghton/Google_Drive/MIT PhD/Dissertation/source/Formalizing_Social_Movement_Theory/McCarthy_Zald_1977/Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Day,Days
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Subscripted Variable[Dim1]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:100
+26:100
+6:A
+6:B
+6:C

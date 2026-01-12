@@ -1,0 +1,6 @@
+Time	FINAL TIME	INITIAL TIME	SAVEPER	TIME STEP	var1[a,d]	var1[a,e]	var1[a,f]	var1[b,d]	var1[b,e]	var1[b,f]	var1[c,d]	var1[c,e]	var1[c,f]	var2[a,d]	var2[a,e]	var2[a,f]	var2[b,d]	var2[b,e]	var2[b,f]	var2[c,d]	var2[c,e]	var2[c,f]	var3[a,d,g]	var3[a,d,h]	var3[a,d,i]	var3[a,e,g]	var3[a,e,h]	var3[a,e,i]	var3[a,f,g]	var3[a,f,h]	var3[a,f,i]	var3[b,d,g]	var3[b,d,h]	var3[b,d,i]	var3[b,e,g]	var3[b,e,h]	var3[b,e,i]	var3[b,f,g]	var3[b,f,h]	var3[b,f,i]	var3[c,d,g]	var3[c,d,h]	var3[c,d,i]	var3[c,e,g]	var3[c,e,h]	var3[c,e,i]	var3[c,f,g]	var3[c,f,h]	var3[c,f,i]	var4[d]	var4[e]	var4[f]	var5[d]	var5[e]	var5[f]
+0	4	0	1	1	1	2	3	4	5	6	7	8	9	2	3	4	5	6	7	8	9	120	10	10	10	20	20	20	30	30	30	40	40	40	50	50	50	50	50	50	50	50	50	50	50	50	50	50	50	4	5	6	3	3.5	4
+1			1											2	3	4	5	6	7	8	9	120	10	10	10	20	20	20	30	30	30	40	40	40	50	50	50	50	50	50	50	50	50	50	50	50	50	50	50				3	3.5	4
+2			1											2	3	4	5	6	7	8	9	120	10	10	10	20	20	20	30	30	30	40	40	40	50	50	50	50	50	50	50	50	50	50	50	50	50	50	50				3	3.5	4
+3			1											2	3	4	5	6	7	8	9	120	10	10	10	20	20	20	30	30	30	40	40	40	50	50	50	50	50	50	50	50	50	50	50	50	50	50	50				3	3.5	4
+4			1											2	3	4	5	6	7	8	9	120	10	10	10	20	20	20	30	30	30	40	40	40	50	50	50	50	50	50	50	50	50	50	50	50	50	50	50				3	3.5	4

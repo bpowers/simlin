@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+	<header>
+		<product version="1.0" lang="en">Vensim</product>
+		<vendor>Ventana Systems, Inc.</vendor>
+		<created>
+		</created>
+		<modified>
+		</modified>
+		<name>
+		</name>
+		<caption>
+		</caption>
+	</header>
+	<sim_specs method="RK4" time_units="Month">
+		<start>1</start>
+		<stop>10</stop>
+		<dt>0.1</dt>
+	</sim_specs>
+	<dimensions>
+		<dim name="subs">
+			<elem name="sub1" />
+			<elem name="sub2" />
+			<elem name="sub3" />
+			<elem name="sub4" />
+			<elem name="sub5" />
+			<elem name="sub6" />
+			<elem name="sub7" />
+			<elem name="sub8" />
+			<elem name="sub9" />
+		</dim>
+	</dimensions>
+	<model>
+		<variables>
+			<aux name="add substract">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="subs" />
+				</dimensions>
+					<eqn>cons-time2+time3-cons					</eqn>
+					<eqn>-cons - time2 + time3 - cons					</eqn>
+					<eqn>-(cons-time2+time3-cons)					</eqn>
+					<eqn>-(-cons -time2+ time3-cons)					</eqn>
+					<eqn>-(0.01- time2)+(time3-cons)					</eqn>
+					<eqn>-(cons- time2)- (time3-cons)					</eqn>
+					<eqn>-(cons-    time2)+(time3-cons)					</eqn>
+					<eqn>(cons-time2)-    (time3-cons)					</eqn>
+					<eqn>(0.01-time2)   +(time3-cons)					</eqn>
+			</aux>
+			<aux name="combined">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="subs" />
+				</dimensions>
+					<eqn>(0.01/time2)+(time3 /cons)					</eqn>
+					<eqn>-(cons/ time2+time3/cons)					</eqn>
+					<eqn>-cons/(time2^(2+cons)-time3/cons)					</eqn>
+					<eqn>1/(-cons+3/time2*time3/(cons-Time))					</eqn>
+					<eqn>-(0.01/ time2)*(time3/cons)					</eqn>
+					<eqn>-(+0.012/time2)+(cons/  time2)/(time3/cons)					</eqn>
+					<eqn>((+0.012 +cons-Time) / time2)/(  time3/cons)					</eqn>
+					<eqn>(-0.012 +cons- Time / time2)/(time3/cons)					</eqn>
+					<eqn>(120/time2-120)*(time3/(cons-120))					</eqn>
+			</aux>
+			<aux name="expo">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="subs" />
+				</dimensions>
+					<eqn>30 ^cons					</eqn>
+					<eqn>30^ cons ^ cons					</eqn>
+					<eqn>cons^(   cons^  0.003)					</eqn>
+					<eqn>(cons    ^cons)   ^30					</eqn>
+					<eqn>- Time ^ 30					</eqn>
+					<eqn>30^ - 30^-cons					</eqn>
+					<eqn>(-Time)^ 30					</eqn>
+					<eqn>Time ^ (-30  )					</eqn>
+					<eqn>Time^-0.03					</eqn>
+			</aux>
+			<aux name="product">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="subs" />
+				</dimensions>
+					<eqn>cons/ time2*time3/0.03					</eqn>
+					<eqn>-cons/time2*time3 /0.03					</eqn>
+					<eqn>-(cons/time2 *time3/0.03)					</eqn>
+					<eqn>1/(-cons/time2*time3/0.03)					</eqn>
+					<eqn>-(cons/ time2)*(time3/0.03)					</eqn>
+					<eqn>-(cons/time2)/ (time3/0.13)					</eqn>
+					<eqn>-(cons/time2)*(time3/0.13)					</eqn>
+					<eqn>(cons/time2) /(time3/0.13)					</eqn>
+					<eqn>(cons /time2 )*(time3/0.13)					</eqn>
+			</aux>
+			<aux name="time1">
+				<units></units>
+				<doc></doc>
+					<eqn>-Time					</eqn>
+			</aux>
+			<aux name="time2">
+				<units></units>
+				<doc></doc>
+					<eqn>2*Time					</eqn>
+			</aux>
+			<aux name="time3">
+				<units></units>
+				<doc></doc>
+					<eqn>3*Time					</eqn>
+			</aux>
+			<aux name="cons">
+				<units></units>
+				<doc></doc>
+					<eqn>1.2					</eqn>
+			</aux>
+		</variables>
+	</model>
+</xmile>

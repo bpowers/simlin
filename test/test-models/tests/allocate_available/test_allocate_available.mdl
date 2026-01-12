@@ -1,0 +1,457 @@
+{UTF-8}
+allocation mixed[branch,product,size]=
+	ALLOCATE AVAILABLE(demand mixed[product,size],priorities mixed[branch,size,ptype],available\
+		)
+	~	
+	~		|
+
+allocation zeros[branch]=
+	ALLOCATE AVAILABLE(demand zeros[branch], priority zeros[branch,ptype], available)
+	~	
+	~		|
+
+allocation2 far[branch]=
+	ALLOCATE AVAILABLE(demand1[branch], priority2 far[branch,ptype], available)
+	~	
+	~		|
+
+allocation1 far[branch]=
+	ALLOCATE AVAILABLE(demand1[branch], priority1 far[branch,ptype], available)
+	~	
+	~		|
+
+priority zeros[branch,pprofile]=
+	1, 5, 2, 0;
+	1, 5, 50, 0;
+	1, 23, 4, 0;
+	~	
+	~		|
+
+allocation3 far[branch]=
+	ALLOCATE AVAILABLE(demand1[branch], priority3 far[branch,ptype], available)
+	~	
+	~		|
+
+demand zeros[branch]=
+	500, 0, 750
+	~	
+	~		|
+
+priority4 far[branch,pprofile]=
+	4,20,1,0;
+	4,7,2,0;
+	4,2,2,0;
+	~	
+	~		|
+
+demand mixed[product,size]=
+	500, 300, 750, 200;
+	550, 400, 650, 220;
+	200, 600, 850, 190;
+	300, 700, 350, 500;
+	~	
+	~		|
+
+priorities mixed[Boston,size,pprofile]=
+	1,3,3,0;
+	2,5,2,0;
+	3,2,1,0;
+	4,6,2,0; ~~|
+priorities mixed[Dayton,size,pprofile]=
+	1,4,1.5,0;
+	2,5,2,0;
+	3,4,1,0;
+	4,6,1,0; ~~|
+priorities mixed[Fresno,size,pprofile]=
+	1,3,3,0;
+	2,2,2,0;
+	3,2,2,0;
+	4,3,1,0;
+	~	
+	~		|
+
+priority3 far[branch,pprofile]=
+	3,20,1,0;
+	3,7,2,0;
+	3,2,2,0;
+	~	
+	~		|
+
+priority2 far[branch,pprofile]=
+	2,20,2,0;
+	2,7,4,0;
+	2,2,4,0;
+	~	
+	~		|
+
+allocation4 far[branch]=
+	ALLOCATE AVAILABLE(demand1[branch], priority4 far[branch,ptype], available)
+	~	
+	~		|
+
+priority1 far[branch,pprofile]=
+	1,20,2,0;
+	1,7,4,0;
+	1,2,4,0;
+	~	
+	~		|
+
+size:
+	small, medium, large, huge
+	~	
+	~		|
+
+allocation3 sep[product,branch]=
+	ALLOCATE AVAILABLE(demand1[branch], priority3 sep[branch,ptype], available sep[product\
+		])
+	~	
+	~		|
+
+allocation1 sep[product,branch]=
+	ALLOCATE AVAILABLE(demand1[branch], priority1 sep[branch,ptype], available sep[product\
+		])
+	~	
+	~		|
+
+allocation4 sep[product,branch]=
+	ALLOCATE AVAILABLE(demand1[branch], priority4 sep[branch,ptype], available sep[product\
+		])
+	~	
+	~		|
+
+allocation2 sep[product,branch]=
+	ALLOCATE AVAILABLE(demand1[branch], priority2 sep[branch,ptype], available sep[product\
+		])
+	~	
+	~		|
+
+available sep[product]=
+	100, 220, 300, 550
+	~	
+	~		|
+
+product:
+	A, B, C, D
+	~	
+	~		|
+
+priority3[branch,pprofile]=
+	3,5,1,0;
+	3,7,2,0;
+	3,3,2,0;
+	~	
+	~		|
+
+priority1 sep[branch,ptype]=
+	1 ~~|
+priority1 sep[branch,pwidth]=
+	4,2,2 ~~|
+priority1 sep[branch,pextra]=
+	0 ~~|
+priority1 sep[Boston,ppriority]=
+	5+0.1*Time ~~|
+priority1 sep[Dayton,ppriority]=
+	5 ~~|
+priority1 sep[Fresno,ppriority]=
+	5-0.1*Time
+	~	
+	~		|
+
+allocation3[branch]=
+	ALLOCATE AVAILABLE(demand1[branch], priority3[branch,ptype], available)
+	~	
+	~		|
+
+allocation4[branch]=
+	ALLOCATE AVAILABLE(demand1[branch], priority4[branch,ptype], available)
+	~	
+	~		|
+
+priority4[branch,pprofile]=
+	4,5,1,0;
+	4,7,2,0;
+	4,3,2,0;
+	~	
+	~		|
+
+priority3 sep[branch,ptype]=
+	3 ~~|
+priority3 sep[branch,pwidth]=
+	2,1,1 ~~|
+priority3 sep[branch,pextra]=
+	0 ~~|
+priority3 sep[Boston,ppriority]=
+	5+0.1*Time ~~|
+priority3 sep[Dayton,ppriority]=
+	5 ~~|
+priority3 sep[Fresno,ppriority]=
+	5-0.1*Time
+	~	
+	~		|
+
+priority4 sep[branch,ptype]=
+	4 ~~|
+priority4 sep[branch,pwidth]=
+	2,1,1 ~~|
+priority4 sep[branch,pextra]=
+	0 ~~|
+priority4 sep[Boston,ppriority]=
+	5+0.1*Time ~~|
+priority4 sep[Dayton,ppriority]=
+	5 ~~|
+priority4 sep[Fresno,ppriority]=
+	5-0.1*Time
+	~	
+	~		|
+
+priority2 sep[branch,ptype]=
+	2 ~~|
+priority2 sep[branch,pwidth]=
+	4,2,2 ~~|
+priority2 sep[branch,pextra]=
+	0 ~~|
+priority2 sep[Boston,ppriority]=
+	5+0.1*Time ~~|
+priority2 sep[Dayton,ppriority]=
+	5 ~~|
+priority2 sep[Fresno,ppriority]=
+	5-0.1*Time
+	~	
+	~		|
+
+allocation1[branch]=
+	ALLOCATE AVAILABLE(demand1[branch], priority1[branch,ptype], available)
+	~	
+	~		|
+
+allocation2[branch]=
+	ALLOCATE AVAILABLE(demand1[branch], priority2[branch,ptype], available)
+	~	
+	~		|
+
+available=
+	20*Time
+	~	
+	~		|
+
+branch:
+	Boston, Dayton, Fresno
+	~	
+	~		|
+
+demand1[branch]=
+	500, 300, 750
+	~	
+	~		|
+
+pprofile:
+	ptype, ppriority, pwidth, pextra
+	~	
+	~		|
+
+priority1[branch,pprofile]=
+	1,5,2,0;
+	1,7,4,0;
+	1,3,4,0;
+	~	
+	~		|
+
+priority2[branch,pprofile]=
+	2,5,2,0;
+	2,7,4,0;
+	2,3,4,0;
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 4
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$-1--1--1,0,|12||-1--1--1|-1--1--1|-1--1--1|-1--1--1|-1--1--1|96,96,100,0
+10,1,priority1,139,-379,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,2,demand1,159,-227,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,3,priority2,141,-310,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,4,available,587,-248,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,5,Time,722,-249,75,30,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|||128-128-128,0,0,0,0,0,0
+1,6,5,4,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+10,7,allocation1,365,-359,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,8,allocation2,374,-281,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,9,1,7,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,10,2,7,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,11,4,7,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,12,4,8,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,13,2,8,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,14,3,8,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,15,priority3,141,-158,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,16,allocation3,378,-200,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,17,15,16,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,18,4,16,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+1,19,2,16,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+10,20,priority4,158,-96,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,21,allocation4,383,-130,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,22,20,21,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,23,4,21,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+1,24,2,21,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+10,25,priority1 sep,878,-361,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,26,priority2 sep,880,-292,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,27,priority3 sep,880,-140,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,28,priority4 sep,897,-78,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,29,5,25,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,30,5,26,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,31,5,27,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,32,5,28,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,33,allocation1 sep,1088,-335,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,34,allocation2 sep,1097,-257,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,35,allocation3 sep,1101,-176,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,36,allocation4 sep,1106,-106,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,37,demand1,900,-220,75,30,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|||128-128-128,0,0,0,0,0,0
+1,38,37,33,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,39,37,34,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,40,37,35,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,41,37,36,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,42,available sep,1259,-205,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,43,42,33,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,44,42,34,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,45,42,35,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,46,42,36,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,47,28,36,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,48,27,35,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,49,26,34,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,50,25,33,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,51,priority1 far,163,6,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,52,priority2 far,165,75,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,53,allocation1 far,389,26,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,54,allocation2 far,398,104,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,55,51,53,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,56,52,54,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,57,priority3 far,165,227,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,58,allocation3 far,402,185,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,59,57,58,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,60,priority4 far,182,289,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,61,allocation4 far,407,255,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,62,60,61,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,63,demand1,184,156,75,30,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|||128-128-128,0,0,0,0,0,0
+10,64,available,573,152,75,30,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|||128-128-128,0,0,0,0,0,0
+1,65,63,53,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,66,63,54,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,67,63,58,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,68,63,61,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,69,64,61,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,70,64,58,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,71,64,54,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,72,64,53,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,73,demand mixed,826,169,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,74,priorities mixed,815,223,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,75,allocation mixed,1002,207,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,76,74,75,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+1,77,73,75,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,78,available,1170,202,75,30,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|||128-128-128,0,0,0,0,0,0
+1,79,78,75,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,80,allocation zeros,423,376,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,81,available,603,389,75,30,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|||128-128-128,0,0,0,0,0,0
+1,82,81,80,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,83,demand zeros,261,451,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,84,83,80,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,85,priority zeros,180,356,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,86,85,80,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+///---\\\
+:L<%^E!@
+1:output.vdfx
+4:Time
+5:allocation zeros[branch]
+6:A
+6:B
+6:Boston
+6:C
+6:D
+6:Dayton
+6:Fresno
+6:huge
+6:large
+6:medium
+6:ptype
+6:small
+9:output
+19:100,0
+24:0
+25:100
+26:100
+57:1
+54:0
+55:0
+82:0
+86:0
+59:0
+56:0
+58:0
+71:0
+110:0
+111:0
+44:0
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:Z:\CREAF\dev\pysd\tests\test-models\tests\allocate_available\output.tab
+47:
+48:
+23:0
+15:0,0,0,0,0,0
+27:0,
+34:0,
+42:1
+72:0
+73:0
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+95:0
+96:0
+97:0
+77:0
+78:0
+102:1
+93:0
+94:0
+92:0
+91:0
+90:0
+87:0
+75:
+43:Z:\CREAF\dev\pysd\tests\test-models\tests\allocate_available\output.tab
+103:8,8,8,3,8
+105:0,0,0,0,0,0,0,0,0,0
+104:Times New Roman|12||0-0-0|0-0-0|-1--1--1|0-0-255|192-192-192|-1--1--1

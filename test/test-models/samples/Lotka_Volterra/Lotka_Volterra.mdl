@@ -1,0 +1,193 @@
+{UTF-8}
+Fractional Predation Rate=
+	Reference Fractional Predation Rate * Predators / Reference Predators
+	~	Hares/(Year*Hare)
+	~	Increases Linearly with Number of Predators
+	|
+
+Initial Predator Population=
+	20
+	~	
+	~		|
+
+Initial Prey Population=
+	1000
+	~	
+	~		|
+
+Predator Births=
+	Predators * Predator Reproduction Ratio
+	~	Foxes/Year
+	~		|
+
+Predator Deaths=
+	Predators / Predator Lifespan
+	~	Foxes/Year
+	~		|
+
+Predator Lifespan=
+	10
+	~	Years [10,?]
+	~		|
+
+Predator Reproduction Ratio=
+	Reference Predator Reproduction Ratio * Prey / Reference Prey Population
+	~	Foxes/Fox/Year [0,?]
+	~	Increases linearly with prey availability
+	|
+
+Predators= INTEG (
+	Predator Births-Predator Deaths,
+		Initial Predator Population)
+	~	Foxes [0,?]
+	~		|
+
+Prey= INTEG (
+	Prey Births-Prey Deaths,
+		Initial Prey Population)
+	~	Hares [0,?]
+	~		|
+
+Prey Births=
+	Prey * Prey Reproduction Ratio
+	~	Hares/Year [0,?]
+	~		|
+
+Prey Deaths=
+	Prey * Fractional Predation Rate
+	~	Hares/Year [0,?]
+	~		|
+
+Prey Reproduction Ratio=
+	3
+	~	Hares/Hare/Year
+	~		|
+
+Reference Fractional Predation Rate=
+	0.2
+	~	Hares/(Year*Hare) [0,?]
+	~		|
+
+Reference Predator Reproduction Ratio=
+	1
+	~	
+	~		|
+
+Reference Predators=
+	20
+	~	
+	~		|
+
+Reference Prey Population=
+	1000
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 50
+	~	Year
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Year
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Year [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.0625
+	~	Year [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,Predators,464,171,40,20,3,3,0,0,0,0,0,0
+10,2,Prey,466,342,40,20,3,3,0,0,0,0,0,0
+12,3,48,293,169,10,8,0,3,0,0,-1,0,0,0
+1,5,7,1,4,0,0,22,0,0,0,-1--1--1,,1|(396,169)|
+1,6,7,3,100,0,0,22,0,0,0,-1--1--1,,1|(330,169)|
+11,7,0,363,169,6,8,34,3,0,0,1,0,0,0
+10,8,Predator Births,363,185,39,8,40,3,0,0,-1,0,0,0
+12,9,48,649,175,10,8,0,3,0,0,-1,0,0,0
+1,11,13,9,4,0,0,22,0,0,0,-1--1--1,,1|(608,175)|
+1,12,13,1,100,0,0,22,0,0,0,-1--1--1,,1|(534,175)|
+11,13,0,571,175,6,8,34,3,0,0,1,0,0,0
+10,14,Predator Deaths,571,191,41,8,40,3,0,0,-1,0,0,0
+12,15,48,279,341,10,8,0,3,0,0,-1,0,0,0
+1,17,19,2,4,0,0,22,0,0,0,-1--1--1,,1|(394,341)|
+1,18,19,15,100,0,0,22,0,0,0,-1--1--1,,1|(320,341)|
+11,19,0,357,341,6,8,34,3,0,0,1,0,0,0
+10,20,Prey Births,357,357,29,8,40,3,0,0,-1,0,0,0
+12,21,48,646,345,10,8,0,3,0,0,-1,0,0,0
+1,23,25,21,4,0,0,22,0,0,0,-1--1--1,,1|(606,345)|
+1,24,25,2,100,0,0,22,0,0,0,-1--1--1,,1|(535,345)|
+11,25,0,571,345,6,8,34,3,0,0,1,0,0,0
+10,26,Prey Deaths,571,361,31,8,40,3,0,0,-1,0,0,0
+1,27,1,8,1,0,0,0,0,128,0,-1--1--1,,1|(416,213)|
+1,28,1,13,1,0,0,0,0,128,0,-1--1--1,,1|(526,142)|
+1,29,2,25,1,0,0,0,0,128,0,-1--1--1,,1|(532,313)|
+1,30,2,20,1,0,0,0,0,128,0,-1--1--1,,1|(399,381)|
+10,31,Prey Reproduction Ratio,329,412,48,14,8,3,0,0,0,0,0,0
+10,32,Predator Lifespan,613,127,45,8,8,3,0,0,0,0,0,0
+10,33,Fractional Predation Rate,548,261,39,14,8,3,0,0,0,0,0,0
+10,34,Predator Reproduction Ratio,346,263,50,14,8,3,0,0,0,0,0,0
+1,35,34,8,1,0,0,0,0,128,0,-1--1--1,,1|(338,229)|
+1,36,31,20,1,0,0,0,0,128,0,-1--1--1,,1|(332,382)|
+1,37,2,34,1,0,0,0,0,128,0,-1--1--1,,1|(370,294)|
+1,38,1,33,1,0,0,0,0,128,0,-1--1--1,,1|(512,208)|
+1,39,33,25,1,0,0,0,0,128,0,-1--1--1,,1|(564,289)|
+1,40,32,13,0,0,0,0,0,128,0,-1--1--1,,1|(594,147)|
+10,41,Initial Predator Population,460,106,39,14,8,3,0,0,0,0,0,0
+10,42,Initial Prey Population,463,415,57,8,8,3,0,0,0,0,0,0
+1,43,41,1,0,0,0,0,0,64,1,-1--1--1,,1|(460,128)|
+1,44,42,2,0,0,0,0,0,64,1,-1--1--1,,1|(463,391)|
+10,45,Reference Predator Reproduction Ratio,220,224,51,14,8,3,0,0,0,0,0,0
+10,46,Reference Prey Population,224,284,40,14,8,3,0,0,0,0,0,0
+10,47,Reference Fractional Predation Rate,668,293,54,14,8,3,0,0,0,0,0,0
+10,48,Reference Predators,663,226,51,8,8,3,0,0,0,0,0,0
+1,49,48,33,0,0,0,0,0,128,0,-1--1--1,,1|(618,239)|
+1,50,47,33,0,0,0,0,0,128,0,-1--1--1,,1|(608,276)|
+1,51,45,34,0,0,0,0,0,128,0,-1--1--1,,1|(275,241)|
+1,52,46,34,0,0,0,0,0,128,0,-1--1--1,,1|(273,275)|
+///---\\\
+:L<%^E!@
+1:/Applications/Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Day,Days
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Initial Predator Population
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:0
+41:0
+42:0
+24:0
+25:50
+26:50

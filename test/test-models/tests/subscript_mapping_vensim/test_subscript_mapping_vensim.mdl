@@ -1,0 +1,126 @@
+{UTF-8}
+MFG SKILLS : MACHINERS, ASSEMBLERS -> PRODUCTS
+        ~       index
+        ~       Skill categories specific to manufacturing.
+        |
+
+PRODUCTS : PARTS, SYSTEMS
+        ~       index
+        ~       Different phases of manufacturing.
+        |
+
+WORK FLOW[PRODUCTS] = WORK FORCE[MFG SKILLS] *
+        PRODUCTIVITY[MFG SKILLS]
+        ~       Part/year
+        ~       Rate of progress in manufacture phases.
+        |
+
+WORK FORCE[MFG SKILLS] =
+        5, 10
+        ~       Part/year
+        ~       Rate of progress.
+        |
+
+PRODUCTIVITY[MFG SKILLS] =
+     0.6, 0.7
+        ~
+        ~       Productivity in manufacture phases.
+        |
+
+AGE : INFANT, CHILD, TEEN, MIDDLE, OLD
+        ~       index
+        ~       Age cohorts of a population
+        |
+
+ALL BUT YOUNGEST : CHILD, TEEN, MIDDLE, OLD
+        ~       index
+        ~       Age cohorts except infant
+        |
+
+
+PREVIOUS COHORT : INFANT, CHILD, TEEN, MIDDLE
+                -> ALL BUT YOUNGEST
+        ~       index
+        ~       Age cohorts preceding each member of
+                ALL BUT YOUNGEST
+        |
+
+POPULATION[INFANT]= INTEG ( births - aging[INFANT],
+                INITIAL POPULATION[INFANT]) ~~|
+POPULATION[ALL BUT YOUNGEST] = INTEG (
+               aging[PREVIOUS COHORT]
+               - aging[ALL BUT YOUNGEST] ,
+            INITIAL POPULATION[ALL BUT YOUNGEST] )
+        ~       People
+        ~       Age cohorts of a population
+        |
+
+births = 200
+        ~       People/year
+        ~          New briths
+        |
+
+aging[AGE] =
+     300, 280, 200, 150, 100
+        ~       People/year
+        ~          Number of people that increase to the next AGE
+        |
+
+INITIAL POPULATION[AGE] =
+        1000, 900, 900, 800, 200
+        ~       People
+        ~          Initial population
+        |
+
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
+:L<%^E!@
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+5:FINAL TIME
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:0
+26:0
+6:INFANT

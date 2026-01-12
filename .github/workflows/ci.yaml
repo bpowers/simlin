@@ -21,8 +21,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
-        with:
-          submodules: true
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -50,8 +48,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
-        with:
-          submodules: true
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -84,8 +80,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
-        with:
-          submodules: true
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3

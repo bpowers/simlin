@@ -1,0 +1,12 @@
+Time	FINAL TIME	INITIAL TIME	my var[A]	my var[C]	my var2[A,A]	my var2[A,B]	my var2[A,C]	my var2[B,A]	my var2[B,B]	my var2[B,C]	my var2[C,A]	my var2[C,B]	my var2[C,C]	SAVEPER	TIME STEP
+0	10	0	0	-0	1	2	3	4	3	40	0	0	0	1	1
+1			5	-1							1	1	1	1	
+2			10	-2							2	2	2	1	
+3			15	-3							3	3	3	1	
+4			20	-4							4	4	4	1	
+5			25	-5							5	5	5	1	
+6			30	-6							6	6	6	1	
+7			35	-7							7	7	7	1	
+8			40	-8							8	8	8	1	
+9			45	-9							9	9	9	1	
+10			50	-10							10	10	10	1	

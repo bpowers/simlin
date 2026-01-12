@@ -1,0 +1,157 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>100.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="OutputDelayN">
+                <eqn>DELAYN(Input,Delay_Time,Order_Variable,Initial_Value)</eqn>
+            </aux>
+            <aux name="Output Delay3I">
+                <eqn>DELAY3(Input, Delay_Time, Initial_Value)</eqn>
+            </aux>
+            <aux name="Output Delay1I">
+                <eqn>DELAY1(Input, Delay_Time, Initial_Value)</eqn>
+            </aux>
+            <aux name="Input">
+                <eqn>-1+step(5, 5)</eqn>
+            </aux>
+            <aux name="Initial Value">
+                <eqn>6</eqn>
+            </aux>
+            <aux name="Delay Time">
+                <doc>	Test that delay time can vary</doc>
+                <eqn>4+step(2, 15)</eqn>
+            </aux>
+            <aux name="Order Variable">
+                <doc>	Test the behavior when a change is requested to the order</doc>
+                <eqn>2+step(1, 10)</eqn>
+            </aux>
+            <aux name="Output Delay3">
+                <eqn>DELAY3(Input, Delay_Time)</eqn>
+            </aux>
+            <aux name="Output Delay1">
+                <eqn>DELAY1(Input, Delay_Time)</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="Initial_Value" x="167" y="238"/>
+                <aux name="Input" x="168" y="147"/>
+                <aux name="Delay_Time" x="459" y="185"/>
+                <aux name="Output_Delay1" x="307" y="120"/>
+                <aux name="Output_Delay3" x="308" y="157"/>
+                <aux name="Output_Delay1I" x="314" y="232"/>
+                <aux name="Output_Delay3I" x="312" y="270"/>
+                <aux name="OutputDelayN" x="309" y="194"/>
+                <connector uid="9" angle="11.152413806069887">
+                    <from>Input</from>
+                    <to>Output_Delay1</to>
+                </connector>
+                <connector uid="10" angle="-2.9549258287368048">
+                    <from>Input</from>
+                    <to>Output_Delay3</to>
+                </connector>
+                <connector uid="11" angle="-17.432108360719653">
+                    <from>Input</from>
+                    <to>OutputDelayN</to>
+                </connector>
+                <connector uid="12" angle="-29.704888567470952">
+                    <from>Input</from>
+                    <to>Output_Delay1I</to>
+                </connector>
+                <connector uid="13" angle="-40.155215337257665">
+                    <from>Input</from>
+                    <to>Output_Delay3I</to>
+                </connector>
+                <connector uid="14" angle="156.76253590556519">
+                    <from>Delay_Time</from>
+                    <to>Output_Delay1</to>
+                </connector>
+                <connector uid="15" angle="-190.42578923421834">
+                    <from>Delay_Time</from>
+                    <to>Output_Delay3</to>
+                </connector>
+                <connector uid="16" angle="182.03846503553822">
+                    <from>Delay_Time</from>
+                    <to>OutputDelayN</to>
+                </connector>
+                <connector uid="17" angle="197.3925051125795">
+                    <from>Delay_Time</from>
+                    <to>Output_Delay1I</to>
+                </connector>
+                <connector uid="18" angle="209.66206146010029">
+                    <from>Delay_Time</from>
+                    <to>Output_Delay3I</to>
+                </connector>
+                <connector uid="19" angle="3.0861567159681016">
+                    <from>Initial_Value</from>
+                    <to>Output_Delay1I</to>
+                </connector>
+                <connector uid="20" angle="-11.058758787306203">
+                    <from>Initial_Value</from>
+                    <to>Output_Delay3I</to>
+                </connector>
+                <connector uid="21" angle="17.930002736676428">
+                    <from>Initial_Value</from>
+                    <to>OutputDelayN</to>
+                </connector>
+                <aux name="Order_Variable" x="452" y="235"/>
+                <connector uid="23" angle="163.4588256307423">
+                    <from>Order_Variable</from>
+                    <to>OutputDelayN</to>
+                </connector>
+                <connector uid="24" angle="163.4588256307423">
+                    <from>Order_Variable</from>
+                    <to>OutputDelayN</to>
+                </connector>
+                <connector uid="25" angle="17.930002736676428">
+                    <from>Initial_Value</from>
+                    <to>OutputDelayN</to>
+                </connector>
+                <connector uid="46" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

@@ -1,0 +1,91 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>3.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+    </model_units>
+    <dimensions>
+        <dim name="Dim1">
+            <elem name="A"/>
+            <elem name="B"/>
+            <elem name="C"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="Unsubscripted Constant">
+                <eqn>5</eqn>
+            </aux>
+            <aux name="Subscripted Variable">
+                <eqn>Unsubscripted_Constant</eqn>
+                <dimensions>
+                    <dim name="Dim1"/>
+                </dimensions>
+            </aux>
+            <aux name="Subscripted Constant">
+                <element subscript="A">
+                    <eqn>5</eqn>
+                </element>
+                <element subscript="B">
+                    <eqn>5</eqn>
+                </element>
+                <element subscript="C">
+                    <eqn>5</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Dim1"/>
+                </dimensions>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="Unsubscripted_Constant" x="216" y="128"/>
+                <aux name="Subscripted_Variable" x="395" y="130"/>
+                <aux name="Subscripted_Constant" x="393" y="235"/>
+                <connector uid="4" angle="0.59182773311627557">
+                    <from>Unsubscripted_Constant</from>
+                    <to>Subscripted_Variable</to>
+                </connector>
+                <connector uid="25" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

@@ -1,0 +1,116 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Minute" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>45.000000</stop>
+        <dt>0.250000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <stock name="accumulation">
+                <inflow>rate</inflow>
+                <eqn>0</eqn>
+            </stock>
+            <aux name="first order smooth">
+                <doc>	Check that this doesn't get parsed as smoot</doc>
+                <eqn>SMTH1(100, 2)</eqn>
+            </aux>
+            <aux name="third order smooth">
+                <eqn>SMTH3(100, 2)</eqn>
+            </aux>
+            <flow name="rate">
+                <eqn>5</eqn>
+            </flow>
+            <aux name="Smoothing Time">
+                <doc>	The time (in meetings) required for the system to recognize that a new desired decision rate is needed.</doc>
+                <eqn>2</eqn>
+                <units>Meetings</units>
+            </aux>
+            <stock name="Input">
+                <doc>	This is the current stock of issues to be decided; this stock is the result of the initial stock
+		plus the accumulation of all inflows minus outflows since t = 0 (the first meeting).</doc>
+                <inflow>Input_net_flow</inflow>
+                <eqn>4</eqn>
+                <units>Issues</units>
+            </stock>
+            <aux name="Smoothed Input">
+                <doc>	The system's perception of how fast it needs to decide on issues. 
+		The Desired Decision Rate is equal to a first order exponential smooth of the indicated rate (SMOOTH1).</doc>
+                <eqn>SMTH1(Input, Smoothing_Time)</eqn>
+                <units>1</units>
+            </aux>
+            <flow name="Input net flow">
+                <eqn>0</eqn>
+            </flow>
+        </variables>
+        <views>
+            <view>
+                <stock name="accumulation" x="576" y="278"/>
+                <flow name="rate" x="480" y="279">
+                    <pts>
+                        <pt x="432" y="279"/>
+                        <pt x="576" y="278"/>
+                    </pts>
+                </flow>
+                <aux name="first_order_smooth" x="493" y="360"/>
+                <aux name="third_order_smooth" x="631" y="332"/>
+                <stock name="Input" x="583" y="120"/>
+                <aux name="Smoothing_Time" x="513" y="175"/>
+                <aux name="Smoothed_Input" x="610" y="215"/>
+                <connector uid="12" angle="-22.6017465963711">
+                    <from>Smoothing_Time</from>
+                    <to>Smoothed_Input</to>
+                </connector>
+                <connector uid="13" angle="-76.533943820114558">
+                    <from>Input</from>
+                    <to>Smoothed_Input</to>
+                </connector>
+                <connector uid="33" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+                <flow name="Input_net_flow" x="523" y="120">
+                    <pts>
+                        <pt x="498" y="120"/>
+                        <pt x="548" y="120"/>
+                    </pts>
+                </flow>
+            </view>
+        </views>
+    </model>
+</xmile>

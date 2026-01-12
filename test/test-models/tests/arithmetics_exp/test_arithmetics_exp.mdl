@@ -1,0 +1,199 @@
+{UTF-8}
+add substract[sub1]=
+	cons-time2+time3-cons ~~|
+add substract[sub2]=
+	-cons - time2 + time3 - cons ~~|
+add substract[sub3]=
+	-(cons-time2+time3-cons) ~~|
+add substract[sub4]=
+	-(-cons -time2+ time3-cons) ~~|
+add substract[sub5]=
+	-(0.01- time2)+(time3-cons) ~~|
+add substract[sub6]=
+	-(cons- time2)- (time3-cons) ~~|
+add substract[sub7]=
+	-(cons-    time2)+(time3-cons) ~~|
+add substract[sub8]=
+	(cons-time2)-    (time3-cons) ~~|
+add substract[sub9]=
+	(0.01-time2)   +(time3-cons)
+	~	
+	~		|
+
+combined[sub1]=
+	(0.01/time2)+(time3 /cons) ~~|
+combined[sub2]=
+	-(cons/ time2+time3/cons) ~~|
+combined[sub3]=
+	-cons/(time2^(2+cons)-time3/cons) ~~|
+combined[sub4]=
+	1/(-cons+3/time2*time3/(cons-Time)) ~~|
+combined[sub5]=
+	-(0.01/ time2)*(time3/cons) ~~|
+combined[sub6]=
+	-(+0.012/time2)+(cons/  time2)/(time3/cons) ~~|
+combined[sub7]=
+	((+0.012 +cons-Time) / time2)/(  time3/cons) ~~|
+combined[sub8]=
+	(-0.012 +cons- Time / time2)/(time3/cons) ~~|
+combined[sub9]=
+	(120/time2-120)*(time3/(cons-120))
+	~	
+	~		|
+
+cons=
+	1.2
+	~	
+	~		|
+
+expo[sub1]=
+	30 ^cons ~~|
+expo[sub2]=
+	30^ cons ^ cons ~~|
+expo[sub3]=
+	cons^(   cons^  0.003) ~~|
+expo[sub4]=
+	(cons    ^cons)   ^30 ~~|
+expo[sub5]=
+	- Time ^ 30 ~~|
+expo[sub6]=
+	30^ - 30^-cons ~~|
+expo[sub7]=
+	(-Time)^ 30 ~~|
+expo[sub8]=
+	Time ^ (-30  ) ~~|
+expo[sub9]=
+	Time^-0.03
+	~	
+	~		|
+
+product[sub1]=
+	cons/ time2*time3/0.03 ~~|
+product[sub2]=
+	-cons/time2*time3 /0.03 ~~|
+product[sub3]=
+	-(cons/time2 *time3/0.03) ~~|
+product[sub4]=
+	1/(-cons/time2*time3/0.03) ~~|
+product[sub5]=
+	-(cons/ time2)*(time3/0.03) ~~|
+product[sub6]=
+	-(cons/time2)/ (time3/0.13) ~~|
+product[sub7]=
+	-(cons/time2)*(time3/0.13) ~~|
+product[sub8]=
+	(cons/time2) /(time3/0.13) ~~|
+product[sub9]=
+	(cons /time2 )*(time3/0.13)
+	~	
+	~		|
+
+subs:
+	(sub1-sub9)
+	~	
+	~		|
+
+time1=
+	-Time
+	~	
+	~		|
+
+time2=
+	2*Time
+	~	
+	~		|
+
+time3=
+	3*Time
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 1
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,cons,171,348,20,11,8,3,0,0,0,0,0,0
+10,2,time1,162,437,19,11,8,3,0,0,0,0,0,0
+10,3,time2,154,542,19,11,8,3,0,0,0,0,0,0
+10,4,time3,153,610,19,11,8,3,0,0,0,0,0,0
+10,5,Time,56,454,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,6,5,2,0,0,0,0,0,128,0,-1--1--1,,1|(105,446)|
+1,7,5,3,0,0,0,0,0,128,0,-1--1--1,,1|(99,493)|
+1,8,5,4,0,0,0,0,0,128,0,-1--1--1,,1|(100,526)|
+10,9,expo,420,151,17,11,8,3,0,0,0,0,0,0
+1,10,1,9,0,0,0,0,0,128,0,-1--1--1,,1|(289,253)|
+1,11,5,9,0,0,0,0,0,128,0,-1--1--1,,1|(232,306)|
+10,12,add substract,458,288,44,15,8,131,0,0,0,0,0,0
+1,13,3,12,0,0,0,0,0,128,0,-1--1--1,,1|(298,421)|
+1,14,4,12,0,0,0,0,0,128,0,-1--1--1,,1|(298,456)|
+10,15,product,456,419,49,11,8,131,0,0,0,0,0,0
+1,16,3,15,0,0,0,0,0,64,0,-1--1--1,,1|(294,485)|
+1,17,4,15,0,0,0,0,0,64,0,-1--1--1,,1|(298,518)|
+1,18,1,12,0,0,0,0,0,64,0,-1--1--1,,1|(295,321)|
+1,19,1,15,0,0,0,0,0,64,0,-1--1--1,,1|(294,378)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:Time
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:1
+25:10
+26:10
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:Current
+48:
+6:sub1

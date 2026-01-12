@@ -1,0 +1,12 @@
+Time	const var 1[d1]	const var 1[d2]	const var 1[d3]	const var 1[d4]	const var 2[d1,a1]	const var 2[d1,a2]	const var 2[d2,a1]	const var 2[d2,a2]	const var 2[d3,a1]	const var 2[d3,a2]	const var 2[d4,a1]	const var 2[d4,a2]	const var 3[d1,a1]	const var 3[d1,a2]	const var 3[d2,a1]	const var 3[d2,a2]	const var 3[d3,a1]	const var 3[d3,a2]	const var 3[d4,a1]	const var 3[d4,a2]	FINAL TIME	INITIAL TIME	outdata 1[d1]	outdata 1[d2]	outdata 1[d3]	outdata 1[d4]	outdata 2[d1,a1]	outdata 2[d1,a2]	outdata 2[d2,a1]	outdata 2[d2,a2]	outdata 2[d3,a1]	outdata 2[d3,a2]	outdata 2[d4,a1]	outdata 2[d4,a2]	outdata3[d1,a1]	outdata3[d1,a2]	outdata3[d2,a1]	outdata3[d2,a2]	outdata3[d3,a1]	outdata3[d3,a2]	outdata3[d4,a1]	outdata3[d4,a2]	SAVEPER	TIME STEP	Variable 10[ext data,A]	Variable 10[ext data,B]	Variable 10[ext const,A]	Variable 10[ext const,B]	Variable 10[const,A]	Variable 10[const,B]
+0	10	5	20	3	10	30	2	40	3	50	4	60	10	5	2	6	3	20	4	8	10	0	11	5	21	3	11	31	2	41	3	51	4	61	11	5	2	6	3	21	4	8	1	1	200	490	100	110	20	40
+1																							11	5	21	3	11	31	2	41	3	51	4	61	11	5	2	6	3	21	4	8	1		203.333	416.667	100	110	20	40
+2																							12	5	22	3	12	32	2	42	3	52	4	62	12	5	2	6	3	22	4	8	1		206.667	343.333	100	110	20	40
+3																							13	5	23	3	13	33	2	43	3	53	4	63	13	5	2	6	3	23	4	8	1		210	270	100	110	20	40
+4																							14	5	24	3	14	34	2	44	3	54	4	64	14	5	2	6	3	24	4	8	1		215	140	100	110	20	40
+5																							15	5	25	3	15	35	2	45	3	55	4	65	15	5	2	6	3	25	4	8	1		220	10	100	110	20	40
+6																							15	5	25	3	15	35	2	45	3	55	4	65	15	5	2	6	3	25	4	8	1		225	365	100	110	20	40
+7																							15	5	25	3	15	35	2	45	3	55	4	65	15	5	2	6	3	25	4	8	1		230	720	100	110	20	40
+8																							15	5	25	3	15	35	2	45	3	55	4	65	15	5	2	6	3	25	4	8	1		233.333	516.667	100	110	20	40
+9																							15	5	25	3	15	35	2	45	3	55	4	65	15	5	2	6	3	25	4	8	1		236.667	313.333	100	110	20	40
+10																							15	5	25	3	15	35	2	45	3	55	4	65	15	5	2	6	3	25	4	8	1		240	110	100	110	20	40

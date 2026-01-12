@@ -1,0 +1,126 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>1.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions>
+        <dim name="Third Dimension Subscript">
+            <elem name="Depth 1"/>
+            <elem name="Depth 2"/>
+        </dim>
+        <dim name="Second Dimension Subscript">
+            <elem name="Column 1"/>
+            <elem name="Column 2"/>
+        </dim>
+        <dim name="One Dimensional Subscript">
+            <elem name="Entry 1"/>
+            <elem name="Entry 2"/>
+            <elem name="Entry 3"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="Three Dimensional Constant">
+                <element subscript="Entry 1, Column 1, Depth 1">
+                    <eqn>0.01</eqn>
+                </element>
+                <element subscript="Entry 1, Column 1, Depth 2">
+                    <eqn>0.02</eqn>
+                </element>
+                <element subscript="Entry 1, Column 2, Depth 1">
+                    <eqn>0.03</eqn>
+                </element>
+                <element subscript="Entry 1, Column 2, Depth 2">
+                    <eqn>0.04</eqn>
+                </element>
+                <element subscript="Entry 2, Column 1, Depth 1">
+                    <eqn>0.02</eqn>
+                </element>
+                <element subscript="Entry 2, Column 1, Depth 2">
+                    <eqn>0.05</eqn>
+                </element>
+                <element subscript="Entry 2, Column 2, Depth 1">
+                    <eqn>0.02</eqn>
+                </element>
+                <element subscript="Entry 2, Column 2, Depth 2">
+                    <eqn>0.04</eqn>
+                </element>
+                <element subscript="Entry 3, Column 1, Depth 1">
+                    <eqn>0.05</eqn>
+                </element>
+                <element subscript="Entry 3, Column 1, Depth 2">
+                    <eqn>0.06</eqn>
+                </element>
+                <element subscript="Entry 3, Column 2, Depth 1">
+                    <eqn>0.08</eqn>
+                </element>
+                <element subscript="Entry 3, Column 2, Depth 2">
+                    <eqn>0.09</eqn>
+                </element>
+                <dimensions>
+                    <dim name="One Dimensional Subscript"/>
+                    <dim name="Second Dimension Subscript"/>
+                    <dim name="Third Dimension Subscript"/>
+                </dimensions>
+            </aux>
+            <aux name="Three Dimensional Variable">
+                <eqn>Three_Dimensional_Constant[One_Dimensional_Subscript, Second_Dimension_Subscript, Third_Dimension_Subscript]</eqn>
+                <dimensions>
+                    <dim name="One Dimensional Subscript"/>
+                    <dim name="Second Dimension Subscript"/>
+                    <dim name="Third Dimension Subscript"/>
+                </dimensions>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="Three_Dimensional_Constant" x="346" y="120"/>
+                <aux name="Three_Dimensional_Variable" x="518" y="121"/>
+                <connector uid="3" angle="0.28294866447795641">
+                    <from>Three_Dimensional_Constant</from>
+                    <to>Three_Dimensional_Variable</to>
+                </connector>
+                <connector uid="24" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

@@ -1,0 +1,128 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>100.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <flow name="Flow*with a few^arithmetic + characters">
+                <eqn>4</eqn>
+            </flow>
+            <flow name="Flow with STEP(function call!)">
+                <eqn>"Aux_with_(entirely_superfuluous)_parenthetical_comment"</eqn>
+            </flow>
+            <flow name="Flow w/ division, lists, and INITIAL(construction functions)">
+                <eqn>"Aux_with_$peC!@|_characters"</eqn>
+            </flow>
+            <aux name="Aux with (entirely superfuluous) parenthetical comment">
+                <eqn>90</eqn>
+            </aux>
+            <aux name="import">
+                <doc>	This variable is a python keyword</doc>
+                <eqn>10</eqn>
+            </aux>
+            <stock name="Stock with \n Newline Character">
+                <inflow>Flow_w/_division,_lists,_and_INITIAL(construction_functions)</inflow>
+                <outflow>Flow_with_STEP(function_call!)</outflow>
+                <eqn>67</eqn>
+            </stock>
+            <aux name="Aux with $peC!@| characters">
+                <eqn>21</eqn>
+            </aux>
+            <stock name="Hyphenated-Stockname">
+                <inflow>normal_flow</inflow>
+                <outflow>Flow*with_a_few^arithmetic_+_characters</outflow>
+                <eqn>0</eqn>
+            </stock>
+            <flow name="normal flow">
+                <eqn>import</eqn>
+            </flow>
+        </variables>
+        <views>
+            <view>
+                <stock name="Hyphenated-Stockname" x="338" y="189"/>
+                <stock name="Stock_with_\n_Newline_Character" x="338" y="261"/>
+                <aux name="Aux_with_$peC!@|_characters" x="175" y="366"/>
+                <aux name="Aux_with_(entirely_superfuluous)_parenthetical_comment" x="494" y="372"/>
+                <flow name="normal_flow" x="175" y="185">
+                    <pts>
+                        <pt x="100" y="185"/>
+                        <pt x="338" y="189"/>
+                    </pts>
+                </flow>
+                <flow name="Flow*with_a_few^arithmetic_+_characters" x="494" y="189">
+                    <pts>
+                        <pt x="338" y="189"/>
+                        <pt x="590" y="189"/>
+                    </pts>
+                </flow>
+                <flow name="Flow_with_STEP(function_call!)" x="494" y="259">
+                    <pts>
+                        <pt x="338" y="261"/>
+                        <pt x="590" y="259"/>
+                    </pts>
+                </flow>
+                <flow name="Flow_w/_division,_lists,_and_INITIAL(construction_functions)" x="175" y="262">
+                    <pts>
+                        <pt x="100" y="262"/>
+                        <pt x="338" y="261"/>
+                    </pts>
+                </flow>
+                <connector uid="25" angle="90">
+                    <from>Aux_with_$peC!@|_characters</from>
+                    <to>Flow_w/_division,_lists,_and_INITIAL(construction_functions)</to>
+                </connector>
+                <connector uid="26" angle="90">
+                    <from>Aux_with_(entirely_superfuluous)_parenthetical_comment</from>
+                    <to>Flow_with_STEP(function_call!)</to>
+                </connector>
+                <aux name="import" x="175" y="120"/>
+                <connector uid="28" angle="270">
+                    <from>import</from>
+                    <to>normal_flow</to>
+                </connector>
+                <connector uid="49" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

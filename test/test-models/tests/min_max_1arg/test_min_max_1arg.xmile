@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+	<header>
+		<product version="1.0" lang="en">Vensim</product>
+		<vendor>Ventana Systems, Inc.</vendor>
+		<created>
+		</created>
+		<modified>
+		</modified>
+		<name>
+		</name>
+		<caption>
+		</caption>
+	</header>
+	<sim_specs method="RK4" time_units="Month">
+		<start> 0</start>
+		<stop> 1</stop>
+		<dt> 1</dt>
+	</sim_specs>
+	<dimensions>
+		<dim name="dim1">
+			<elem name="a" />
+			<elem name="b" />
+			<elem name="c" />
+		</dim>
+	</dimensions>
+	<model>
+		<variables>
+			<aux name="var_min">
+				<eqn>MIN(var1[dim1])</eqn>
+			</aux>
+			<aux name="var_max">
+				<eqn>MAX(var1[dim1])</eqn>
+			</aux>
+			<aux name="var1">
+				<dimensions>
+				<dim name="dim1" />
+				</dimensions>
+				<eqn>1, 2, 3</eqn>
+			</aux>
+		</variables>
+	</model>
+</xmile>

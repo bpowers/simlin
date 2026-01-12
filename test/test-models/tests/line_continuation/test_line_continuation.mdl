@@ -1,0 +1,101 @@
+{UTF-8}
+Absurdly long stock name with more words in it than is generally considered good modeling practice because of the lack of ready identifiability with a single concept yet surprisingly useful for testing line length issues\
+		= INTEG (
+	Flow descriptor that is somewhat awkward in implementation and definitely unhelpful in description\
+		,
+		0)
+	~	
+	~		|
+
+Flow descriptor that is somewhat awkward in implementation and definitely unhelpful in description\
+		=
+	Relatively long name for a single variable but not entirely unheard of * (Target for goal seeking loop and convenient object for testing user broken lines\
+		 - 
+	Absurdly long stock name with more words in it than is generally considered good modeling practice because of the lack of ready identifiability with a single concept yet surprisingly useful for testing line length issues\
+		)
+	~	
+	~		|
+
+Target for goal seeking loop and convenient object for testing user broken lines=
+	100
+	~	
+	~		|
+
+Relatively long name for a single variable but not entirely unheard of=
+	0.5
+	~	
+	~	This variable is a python keyword
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 1
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,Absurdly long stock name with more words in it than is generally considered good modeling practice because of the lack of ready identifiability with a single concept yet surprisingly useful for testing line length issues,465,227,101,52,3,131,0,0,0,0,0,0
+12,2,48,196,222,10,8,0,3,0,0,-1,0,0,0
+1,3,5,1,4,0,0,22,0,0,0,-1--1--1,,1|(320,223)|
+1,4,5,2,100,0,0,22,0,0,0,-1--1--1,,1|(235,223)|
+11,5,48,271,223,6,8,34,3,0,0,1,0,0,0
+10,6,Flow descriptor that is somewhat awkward in implementation and definitely unhelpful in description,271,252,86,21,40,3,0,0,-1,0,0,0
+10,7,Relatively long name for a single variable but not entirely unheard of,271,157,68,21,8,3,0,0,0,0,0,0
+1,8,7,5,0,0,0,0,0,64,0,-1--1--1,,1|(271,190)|
+1,9,1,6,1,0,0,0,0,64,0,-1--1--1,,1|(353,330)|
+10,10,Target for goal seeking loop and convenient object for testing user broken lines,224,374,71,21,8,3,0,0,0,0,0,0
+1,11,10,6,0,0,0,0,0,64,0,-1--1--1,,1|(244,319)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+23:0
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Target for goal seeking loop and convenient object for testing user broken lines
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:1
+26:1

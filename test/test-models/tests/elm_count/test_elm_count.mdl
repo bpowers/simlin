@@ -1,0 +1,143 @@
+{UTF-8}
+count1=
+	ELMCOUNT(dim1)
+	~	
+	~		|
+
+count2=
+	ELMCOUNT(dim2)
+	~	
+	~		|
+
+count3=
+	ELMCOUNT(dim30)
+	~	
+	~		|
+
+count4[c]=
+	ELMCOUNT(dimn) ~~|
+count4[b]=
+	ELMCOUNT(dim1)
+	~	
+	~		|
+
+dim1:
+	A,b,c,d
+	~	
+	~		|
+
+dim2:
+	c,b
+	~	
+	~		|
+
+dim30:
+	(aa1-aa30)
+	~	
+	~		|
+
+dimn:
+	(ab10-ab50), (ab60-ab70)
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL_TIME  = 5
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL_TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME_STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME_STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,count1,268,179,23,11,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,2,count2,242,300,23,11,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,3,count3,242,406,23,11,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,4,count4,289,502,23,11,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+///---\\\
+:L<%^E!@
+1:Current.vdfx
+4:Time
+5:count4[dim1]
+6:A
+6:aa1
+6:ab10
+9:Current
+19:100,0
+24:0
+25:5
+26:5
+57:1
+54:0
+55:0
+82:0
+86:0
+59:0
+56:0
+58:0
+71:0
+110:0
+111:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:0
+52:5
+53:1
+43:output
+47:Current
+48:
+15:0,0,0,0,0,0
+27:0,
+34:0,
+42:0
+72:0
+73:0
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+95:0
+96:0
+97:0
+77:0
+78:0
+102:1
+93:0
+94:0
+92:0
+91:0
+90:0
+87:0
+75:
+43:output
+103:8,8,8,3,8
+105:0,0,0,0,0,0,0,0,0,0
+104:Courier|12||0-0-0|0-0-0|-1--1--1|0-0-255|192-192-192|-1--1--1

@@ -1,0 +1,536 @@
+{UTF-8}
+Initial Population[Towns]=
+	15985, 21924, 10303, 8485, 28438, 494, 16283, 37819, 33201, 311, 42844, 6081, 3074, \
+		1737, 16593, 11584, 43593, 16188, 4356, 7427, 45193, 5398, 1779, 13320, 14649, 16332\
+		, 24729, 6411, 2866, 2129, 39502, 40243, 9026, 1233, 4897, 617660, 19754, 4996, 7965\
+		, 4355, 35744, 9820, 26563, 3609, 93810, 3390, 58732, 1902, 24498, 105162, 21561, 4852\
+		, 11509, 1266, 12981, 6125, 33802, 35177, 3235, 1337, 1222, 55298, 866, 1702, 13606\
+		, 7542, 1671, 17668, 1897, 872, 6756, 26493, 34032, 24729, 5125, 14207, 7086, 8471,\
+		 5589, 29457, 11390, 3179, 15059, 13794, 2183, 15720, 4956, 16053, 23112, 4067, 1225\
+		, 1800, 3504, 41667, 15873, 88857, 31531, 40318, 752, 16865, 68318, 31635, 8870, 20228\
+		, 8183, 1500, 28789, 1054, 75, 17765, 6240, 1566, 7104, 17456, 10646, 6459, 5250, 7518\
+		, 7764, 5139, 717, 13879, 10209, 2990, 6520, 12243, 3279, 60879, 337, 706, 22157, 2032\
+		, 10791, 17346, 2481, 13547, 39880, 5911, 14925, 4382, 19063, 10293, 2180, 13175, 12629\
+		, 10602, 8055, 3091, 76377, 5943, 10970, 5025, 40759, 1851, 31394, 711, 6362, 8924,\
+		 15784, 106519, 21103, 10086, 90329, 11596, 59450, 5136, 23184, 19808, 4907, 38499,\
+		 25132, 14006, 6045, 10106, 12024, 56173, 12752, 26983, 5839, 6338, 47255, 23116, 521\
+		, 8987, 27999, 13261, 7891, 3190, 27003, 121, 8560, 8437, 961, 838, 167, 3410, 10172\
+		, 33006, 28886, 228, 95072, 999, 1509, 990, 6666, 17416, 85146, 11227, 13708, 28352\
+		, 28712, 4680, 14892, 28549, 14155, 15707, 3032, 19031, 10506, 28602, 4527, 1902, 7839\
+		, 5890, 1612, 13709, 12140, 4806, 51251, 1321, 17837, 11497, 847, 1234, 1682, 44737\
+		, 648, 8264, 56468, 2820, 3413, 2942, 92271, 32112, 13383, 24747, 11608, 51755, 1475\
+		, 5232, 17489, 6952, 393, 5856, 1258, 1775, 7973, 41340, 8283, 915, 20675, 26628, 692\
+		, 18133, 13722, 17612, 3257, 1893, 4119, 7211, 35608, 1771, 18165, 75754, 17514, 5792\
+		, 9767, 16719, 9502, 11688, 153060, 7808, 1947, 21437, 26962, 6590, 9268, 17659, 3684\
+		, 8963, 13787, 15865, 55874, 8013, 28961, 3949, 485, 6085, 8926, 2003, 11292, 327, \
+		7542, 13457, 24932, 1838, 24070, 60632, 9872, 21822, 5135, 780, 538, 31915, 12994, \
+		16767, 27982, 2750, 848, 4875, 7669, 6916, 3701, 4235, 28391, 1306, 2740, 18272, 41094\
+		, 21951, 1607, 7277, 11261, 15532, 14618, 53743, 1496, 14489, 14219, 2482, 7754, 22325\
+		, 10300, 21374, 899, 17497, 38120, 181045, 1156, 10955, 23793
+	~	
+	~		|
+
+Deaths[Towns]= 
+	DELAY N(Births[Towns], Lifespan, Population[Towns]/Lifespan, 8)
+	~	
+	~		|
+
+Population[Towns]= INTEG (
+	Births[Towns]-Deaths[Towns],
+		Initial Population[Towns])
+	~	
+	~		|
+
+Birthrate[Towns]=
+	0.1
+	~	
+	~		|
+
+Births[Towns]=
+	Birthrate[Towns]*Population[Towns]
+	~	
+	~		|
+
+Lifespan=
+	70
+	~	
+	~		|
+
+Towns:
+	Abington, Acton, Acushnet, Adams, Agawam, Alford, Amesbury, Amherst, Andover, Aquinnah\
+		, Arlington, Ashburnham, Ashby, Ashfield, Ashland, Athol, Attleboro, Auburn, Avon, \
+		Ayer, Barnstable, Barre, Becket, Bedford, Belchertown, Bellingham, Belmont, Berkley\
+		, Berlin, Bernardston, Beverly, Billerica, Blackstone, Blandford, Bolton, Boston, Bourne\
+		, Boxborough, Boxford, Boylston, Braintree, Brewster, Bridgewater, Brimfield, Brockton\
+		, Brookfield, Brookline, Buckland, Burlington, Cambridge, Canton, Carlisle, Carver,\
+		 Charlemont, Charlton, Chatham, Chelmsford, Chelsea, Cheshire, Chester, Chesterfield\
+		, Chicopee, Chilmark, Clarksburg, Clinton, Cohasset, Colrain, Concord, Conway, Cummington\
+		, Dalton, Danvers, Dartmouth, Dedham, Deerfield, Dennis, Dighton, Douglas, Dover, Dracut\
+		, Dudley, Dunstable, Duxbury, East Bridgewater, East Brookfield, East Longmeadow, Eastham\
+		, Easthampton, Easton, Edgartown, Egremont, Erving, Essex, Everett, Fairhaven, Fall River\
+		, Falmouth, Fitchburg, Florida, Foxborough, Framingham, Franklin, Freetown, Gardner\
+		, Georgetown, Gill, Gloucester, Goshen, Gosnold, Grafton, Granby, Granville, Great Barrington\
+		, Greenfield, Groton, Groveland, Hadley, Halifax, Hamilton, Hampden, Hancock, Hanover\
+		, Hanson, Hardwick, Harvard, Harwich, Hatfield, Haverhill, Hawley, Heath, Hingham, \
+		Hinsdale, Holbrook, Holden, Holland, Holliston, Holyoke, Hopedale, Hopkinton, Hubbardston\
+		, Hudson, Hull, Huntington, Ipswich, Kingston, Lakeville, Lancaster, Lanesborough, \
+		Lawrence, Lee, Leicester, Lenox, Leominster, Leverett, Lexington, Leyden, Lincoln, \
+		Littleton, Longmeadow, Lowell, Ludlow, Lunenburg, Lynn, Lynnfield, Malden, Manchester by the Sea\
+		, Mansfield, Marblehead, Marion, Marlborough, Marshfield, Mashpee, Mattapoisett, Maynard\
+		, Medfield, Medford, Medway, Melrose, Mendon, Merrimac, Methuen, Middleborough, Middlefield\
+		, Middleton, Milford, Millbury, Millis, Millville, Milton, Monroe, Monson, Montague\
+		, Monterey, Montgomery, Mount Washington, Nahant, Nantucket, Natick, Needham, New Ashford\
+		, New Bedford, New Braintree, New Marlborough, New Salem, Newbury, Newburyport, Newton\
+		, Norfolk, North Adams, North Andover, North Attleborough, North Brookfield, North Reading\
+		, Northampton, Northborough, Northbridge, Northfield, Norton, Norwell, Norwood, Oak Bluffs\
+		, Oakham, Orange, Orleans, Otis, Oxford, Palmer, Paxton, Peabody, Pelham, Pembroke,\
+		 Pepperell, Peru, Petersham, Phillipston, Pittsfield, Plainfield, Plainville, Plymouth\
+		, Plympton, Princeton, Provincetown, Quincy, Randolph, Raynham, Reading, Rehoboth, \
+		Revere, Richmond, Rochester, Rockland, Rockport, Rowe, Rowley, Royalston, Russell, \
+		Rutland, Salem, Salisbury, Sandisfield, Sandwich, Saugus, Savoy, Scituate, Seekonk,\
+		 Sharon, Sheffield, Shelburne, Sherborn, Shirley, Shrewsbury, Shutesbury, Somerset,\
+		 Somerville, South Hadley, Southampton, Southborough, Southbridge, Southwick, Spencer\
+		, Springfield, Sterling, Stockbridge, Stoneham, Stoughton, Stow, Sturbridge, Sudbury\
+		, Sunderland, Sutton, Swampscott, Swansea, Taunton, Templeton, Tewksbury, Tisbury, \
+		Tolland, Topsfield, Townsend, Truro, Tyngsborough, Tyringham, Upton, Uxbridge, Wakefield\
+		, Wales, Walpole, Waltham, Ware, Wareham, Warren, Warwick, Washington, Watertown, Wayland\
+		, Webster, Wellesley, Wellfleet, Wendell, Wenham, West Boylston, West Bridgewater, \
+		West Brookfield, West Newbury, West Springfield, West Stockbridge, West Tisbury, Westborough\
+		, Westfield, Westford, Westhampton, Westminster, Weston, Westport, Westwood, Weymouth\
+		, Whately, Whitman, Wilbraham, Williamsburg, Williamstown, Wilmington, Winchendon, \
+		Winchester, Windsor, Winthrop, Woburn, Worcester, Worthington, Wrentham, Yarmouth
+	~	
+	~	These are towns
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 20
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,Population,488,276,40,20,3,3,0,0,0,0,0,0
+12,2,48,321,277,10,8,0,3,0,0,-1,0,0,0
+1,3,5,1,4,0,0,22,0,0,0,-1--1--1,,1|(421,277)|
+1,4,5,2,100,0,0,22,0,0,0,-1--1--1,,1|(357,277)|
+11,5,48,389,277,6,8,34,3,0,0,1,0,0,0
+10,6,Births,389,293,17,8,40,3,0,0,-1,0,0,0
+12,7,48,650,276,10,8,0,3,0,0,-1,0,0,0
+1,8,10,7,4,0,0,22,0,0,0,-1--1--1,,1|(615,276)|
+1,9,10,1,100,0,0,22,0,0,0,-1--1--1,,1|(553,276)|
+11,10,48,584,276,6,8,34,3,0,0,1,0,0,0
+10,11,Deaths,584,292,19,8,40,3,0,0,-1,0,0,0
+10,12,Birthrate,339,218,24,8,8,3,0,0,0,0,0,0
+1,13,12,5,0,0,0,0,0,64,0,-1--1--1,,1|(360,243)|
+1,14,1,5,1,0,0,0,0,64,0,-1--1--1,,1|(450,234)|
+10,15,Lifespan,629,221,23,8,8,3,0,0,0,0,0,0
+10,16,Initial Population,484,350,44,8,8,3,0,0,0,0,0,0
+1,17,16,1,0,0,0,0,0,64,1,-1--1--1,,1|(484,325)|
+1,18,5,11,1,0,0,0,0,128,0,-1--1--1,,1|(461,325)|
+1,19,15,10,0,0,0,0,0,128,0,-1--1--1,,1|(609,244)|
+1,20,1,11,0,0,0,0,0,64,1,-1--1--1,,1|(539,283)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Population[Towns]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:20
+26:20
+6:Abington
+6:Acton
+6:Acushnet
+6:Adams
+6:Agawam
+6:Alford
+6:Amesbury
+6:Amherst
+6:Andover
+6:Aquinnah
+6:Arlington
+6:Ashburnham
+6:Ashby
+6:Ashfield
+6:Ashland
+6:Athol
+6:Attleboro
+6:Auburn
+6:Avon
+6:Ayer
+6:Barnstable
+6:Barre
+6:Becket
+6:Bedford
+6:Belchertown
+6:Bellingham
+6:Belmont
+6:Berkley
+6:Berlin
+6:Bernardston
+6:Beverly
+6:Billerica
+6:Blackstone
+6:Blandford
+6:Bolton
+6:Boston
+6:Bourne
+6:Boxborough
+6:Boxford
+6:Boylston
+6:Braintree
+6:Brewster
+6:Bridgewater
+6:Brimfield
+6:Brockton
+6:Brookfield
+6:Brookline
+6:Buckland
+6:Burlington
+6:Cambridge
+6:Canton
+6:Carlisle
+6:Carver
+6:Charlemont
+6:Charlton
+6:Chatham
+6:Chelmsford
+6:Chelsea
+6:Cheshire
+6:Chester
+6:Chesterfield
+6:Chicopee
+6:Chilmark
+6:Clarksburg
+6:Clinton
+6:Cohasset
+6:Colrain
+6:Concord
+6:Conway
+6:Cummington
+6:Dalton
+6:Danvers
+6:Dartmouth
+6:Dedham
+6:Deerfield
+6:Dennis
+6:Dighton
+6:Douglas
+6:Dover
+6:Dracut
+6:Dudley
+6:Dunstable
+6:Duxbury
+6:East Bridgewater
+6:East Brookfield
+6:East Longmeadow
+6:Eastham
+6:Easthampton
+6:Easton
+6:Edgartown
+6:Egremont
+6:Erving
+6:Essex
+6:Everett
+6:Fairhaven
+6:Fall River
+6:Falmouth
+6:Fitchburg
+6:Florida
+6:Foxborough
+6:Framingham
+6:Franklin
+6:Freetown
+6:Gardner
+6:Georgetown
+6:Gill
+6:Gloucester
+6:Goshen
+6:Gosnold
+6:Grafton
+6:Granby
+6:Granville
+6:Great Barrington
+6:Greenfield
+6:Groton
+6:Groveland
+6:Hadley
+6:Halifax
+6:Hamilton
+6:Hampden
+6:Hancock
+6:Hanover
+6:Hanson
+6:Hardwick
+6:Harvard
+6:Harwich
+6:Hatfield
+6:Haverhill
+6:Hawley
+6:Heath
+6:Hingham
+6:Hinsdale
+6:Holbrook
+6:Holden
+6:Holland
+6:Holliston
+6:Holyoke
+6:Hopedale
+6:Hopkinton
+6:Hubbardston
+6:Hudson
+6:Hull
+6:Huntington
+6:Ipswich
+6:Kingston
+6:Lakeville
+6:Lancaster
+6:Lanesborough
+6:Lawrence
+6:Lee
+6:Leicester
+6:Lenox
+6:Leominster
+6:Leverett
+6:Lexington
+6:Leyden
+6:Lincoln
+6:Littleton
+6:Longmeadow
+6:Lowell
+6:Ludlow
+6:Lunenburg
+6:Lynn
+6:Lynnfield
+6:Malden
+6:Manchester by the Sea
+6:Mansfield
+6:Marblehead
+6:Marion
+6:Marlborough
+6:Marshfield
+6:Mashpee
+6:Mattapoisett
+6:Maynard
+6:Medfield
+6:Medford
+6:Medway
+6:Melrose
+6:Mendon
+6:Merrimac
+6:Methuen
+6:Middleborough
+6:Middlefield
+6:Middleton
+6:Milford
+6:Millbury
+6:Millis
+6:Millville
+6:Milton
+6:Monroe
+6:Monson
+6:Montague
+6:Monterey
+6:Montgomery
+6:Mount Washington
+6:Nahant
+6:Nantucket
+6:Natick
+6:Needham
+6:New Ashford
+6:New Bedford
+6:New Braintree
+6:New Marlborough
+6:New Salem
+6:Newbury
+6:Newburyport
+6:Newton
+6:Norfolk
+6:North Adams
+6:North Andover
+6:North Attleborough
+6:North Brookfield
+6:North Reading
+6:Northampton
+6:Northborough
+6:Northbridge
+6:Northfield
+6:Norton
+6:Norwell
+6:Norwood
+6:Oak Bluffs
+6:Oakham
+6:Orange
+6:Orleans
+6:Otis
+6:Oxford
+6:Palmer
+6:Paxton
+6:Peabody
+6:Pelham
+6:Pembroke
+6:Pepperell
+6:Peru
+6:Petersham
+6:Phillipston
+6:Pittsfield
+6:Plainfield
+6:Plainville
+6:Plymouth
+6:Plympton
+6:Princeton
+6:Provincetown
+6:Quincy
+6:Randolph
+6:Raynham
+6:Reading
+6:Rehoboth
+6:Revere
+6:Richmond
+6:Rochester
+6:Rockland
+6:Rockport
+6:Rowe
+6:Rowley
+6:Royalston
+6:Russell
+6:Rutland
+6:Salem
+6:Salisbury
+6:Sandisfield
+6:Sandwich
+6:Saugus
+6:Savoy
+6:Scituate
+6:Seekonk
+6:Sharon
+6:Sheffield
+6:Shelburne
+6:Sherborn
+6:Shirley
+6:Shrewsbury
+6:Shutesbury
+6:Somerset
+6:Somerville
+6:South Hadley
+6:Southampton
+6:Southborough
+6:Southbridge
+6:Southwick
+6:Spencer
+6:Springfield
+6:Sterling
+6:Stockbridge
+6:Stoneham
+6:Stoughton
+6:Stow
+6:Sturbridge
+6:Sudbury
+6:Sunderland
+6:Sutton
+6:Swampscott
+6:Swansea
+6:Taunton
+6:Templeton
+6:Tewksbury
+6:Tisbury
+6:Tolland
+6:Topsfield
+6:Townsend
+6:Truro
+6:Tyngsborough
+6:Tyringham
+6:Upton
+6:Uxbridge
+6:Wakefield
+6:Wales
+6:Walpole
+6:Waltham
+6:Ware
+6:Wareham
+6:Warren
+6:Warwick
+6:Washington
+6:Watertown
+6:Wayland
+6:Webster
+6:Wellesley
+6:Wellfleet
+6:Wendell
+6:Wenham
+6:West Boylston
+6:West Bridgewater
+6:West Brookfield
+6:West Newbury
+6:West Springfield
+6:West Stockbridge
+6:West Tisbury
+6:Westborough
+6:Westfield
+6:Westford
+6:Westhampton
+6:Westminster
+6:Weston
+6:Westport
+6:Westwood
+6:Weymouth
+6:Whately
+6:Whitman
+6:Wilbraham
+6:Williamsburg
+6:Williamstown
+6:Wilmington
+6:Winchendon
+6:Winchester
+6:Windsor
+6:Winthrop
+6:Woburn
+6:Worcester
+6:Worthington
+6:Wrentham
+6:Yarmouth

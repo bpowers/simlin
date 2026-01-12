@@ -1,0 +1,185 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>100.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions>
+        <dim name="Third Dimension Subscript">
+            <elem name="Depth 1"/>
+            <elem name="Depth 2"/>
+        </dim>
+        <dim name="Second Dimension Subscript">
+            <elem name="Column 1"/>
+            <elem name="Column 2"/>
+        </dim>
+        <dim name="One Dimensional Subscript">
+            <elem name="Entry 1"/>
+            <elem name="Entry 2"/>
+            <elem name="Entry 3"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <stock name="Stock A">
+                <inflow>Inflow_A</inflow>
+                <eqn>Initial_Values[One_Dimensional_Subscript, Second_Dimension_Subscript, Third_Dimension_Subscript]</eqn>
+                <dimensions>
+                    <dim name="One Dimensional Subscript"/>
+                    <dim name="Second Dimension Subscript"/>
+                    <dim name="Third Dimension Subscript"/>
+                </dimensions>
+            </stock>
+            <flow name="Inflow A">
+                <eqn>Rate_A[One_Dimensional_Subscript, Second_Dimension_Subscript, Third_Dimension_Subscript]</eqn>
+                <dimensions>
+                    <dim name="One Dimensional Subscript"/>
+                    <dim name="Second Dimension Subscript"/>
+                    <dim name="Third Dimension Subscript"/>
+                </dimensions>
+            </flow>
+            <aux name="Rate A">
+                <element subscript="Entry 1, Column 1, Depth 1">
+                    <eqn>0.01</eqn>
+                </element>
+                <element subscript="Entry 1, Column 2, Depth 1">
+                    <eqn>0.02</eqn>
+                </element>
+                <element subscript="Entry 2, Column 1, Depth 1">
+                    <eqn>0.03</eqn>
+                </element>
+                <element subscript="Entry 2, Column 2, Depth 1">
+                    <eqn>0.04</eqn>
+                </element>
+                <element subscript="Entry 3, Column 1, Depth 1">
+                    <eqn>0.05</eqn>
+                </element>
+                <element subscript="Entry 3, Column 2, Depth 1">
+                    <eqn>0.06</eqn>
+                </element>
+                <element subscript="Entry 1, Column 1, Depth 2">
+                    <eqn>0.02</eqn>
+                </element>
+                <element subscript="Entry 1, Column 2, Depth 2">
+                    <eqn>0.05</eqn>
+                </element>
+                <element subscript="Entry 2, Column 1, Depth 2">
+                    <eqn>0.02</eqn>
+                </element>
+                <element subscript="Entry 2, Column 2, Depth 2">
+                    <eqn>0.04</eqn>
+                </element>
+                <element subscript="Entry 3, Column 1, Depth 2">
+                    <eqn>0.05</eqn>
+                </element>
+                <element subscript="Entry 3, Column 2, Depth 2">
+                    <eqn>0.06</eqn>
+                </element>
+                <dimensions>
+                    <dim name="One Dimensional Subscript"/>
+                    <dim name="Second Dimension Subscript"/>
+                    <dim name="Third Dimension Subscript"/>
+                </dimensions>
+            </aux>
+            <aux name="Initial Values">
+                <element subscript="Entry 1, Column 1, Depth 1">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="Entry 1, Column 2, Depth 1">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="Entry 2, Column 1, Depth 1">
+                    <eqn>3</eqn>
+                </element>
+                <element subscript="Entry 2, Column 2, Depth 1">
+                    <eqn>4</eqn>
+                </element>
+                <element subscript="Entry 3, Column 1, Depth 1">
+                    <eqn>5</eqn>
+                </element>
+                <element subscript="Entry 3, Column 2, Depth 1">
+                    <eqn>6</eqn>
+                </element>
+                <element subscript="Entry 1, Column 1, Depth 2">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="Entry 1, Column 2, Depth 2">
+                    <eqn>4</eqn>
+                </element>
+                <element subscript="Entry 2, Column 1, Depth 2">
+                    <eqn>5</eqn>
+                </element>
+                <element subscript="Entry 2, Column 2, Depth 2">
+                    <eqn>3</eqn>
+                </element>
+                <element subscript="Entry 3, Column 1, Depth 2">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="Entry 3, Column 2, Depth 2">
+                    <eqn>4</eqn>
+                </element>
+                <dimensions>
+                    <dim name="One Dimensional Subscript"/>
+                    <dim name="Second Dimension Subscript"/>
+                    <dim name="Third Dimension Subscript"/>
+                </dimensions>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <stock name="Stock_A" x="320" y="162"/>
+                <flow name="Inflow_A" x="223" y="163">
+                    <pts>
+                        <pt x="157" y="163"/>
+                        <pt x="320" y="162"/>
+                    </pts>
+                </flow>
+                <aux name="Rate_A" x="218" y="248"/>
+                <connector uid="8" angle="89.382165573972458">
+                    <from>Rate_A</from>
+                    <to>Inflow_A</to>
+                </connector>
+                <aux name="Initial_Values" x="315" y="120"/>
+                <connector uid="31" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

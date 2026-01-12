@@ -1,0 +1,101 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>25.000000</stop>
+        <dt>0.062500</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <stock name="StockA">
+                <inflow>InputA</inflow>
+                <eqn>0</eqn>
+            </stock>
+            <flow name="InputA">
+                <eqn>Test_Pulse+Test_Pulse_Train+Test_Ramp+Test_Step</eqn>
+            </flow>
+            <aux name="Test Pulse Train">
+                <eqn>( IF TIME &gt;= (7) AND TIME &lt;= (12) AND (TIME - (7)) MOD (2) &lt; (1) THEN 1 ELSE 0 )</eqn>
+            </aux>
+            <aux name="Test Step">
+                <eqn>step(1, 1)</eqn>
+            </aux>
+            <aux name="Test Ramp">
+                <eqn>RAMP(1, 14, 17)</eqn>
+            </aux>
+            <aux name="Test Pulse">
+                <eqn>pulse(DT, 3, 2)</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <stock name="StockA" x="561" y="220"/>
+                <flow name="InputA" x="460" y="220">
+                    <pts>
+                        <pt x="389" y="220"/>
+                        <pt x="561" y="220"/>
+                    </pts>
+                </flow>
+                <aux name="Test_Step" x="318" y="121"/>
+                <aux name="Test_Pulse" x="422" y="122"/>
+                <connector uid="10" angle="-31.07342455474528">
+                    <from>Test_Step</from>
+                    <to>InputA</to>
+                </connector>
+                <connector uid="11" angle="-67.701416429485789">
+                    <from>Test_Pulse</from>
+                    <to>InputA</to>
+                </connector>
+                <aux name="Test_Pulse_Train" x="531" y="120"/>
+                <connector uid="13" angle="230.43284681315083">
+                    <from>Test_Pulse_Train</from>
+                    <to>InputA</to>
+                </connector>
+                <aux name="Test_Ramp" x="457" y="295"/>
+                <connector uid="15" angle="-268.14719613544173">
+                    <from>Test_Ramp</from>
+                    <to>InputA</to>
+                </connector>
+                <connector uid="36" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

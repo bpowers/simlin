@@ -1,0 +1,301 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>100.000000</stop>
+        <dt>0.125000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions>
+        <dim name="Citrus">
+            <elem name="Lemon"/>
+            <elem name="Lime"/>
+            <elem name="Orange"/>
+            <elem name="Clementine"/>
+            <elem name="Grapefruit"/>
+        </dim>
+        <dim name="Apples">
+            <elem name="Macoun"/>
+            <elem name="Red Spy"/>
+            <elem name="Grimes Golden"/>
+            <elem name="Roxbury Russet"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <flow name="Outflow Delay3">
+                <eqn>DELAY3(Inflow_Delay3[Apples, Citrus], delay[Apples])</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </flow>
+            <stock name="Stock Delay3">
+                <inflow>Inflow_Delay3</inflow>
+                <outflow>Outflow_Delay3</outflow>
+                <eqn>5</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </stock>
+            <stock name="Stock Delay1I">
+                <inflow>Inflow_Delay1I</inflow>
+                <outflow>Outflow_Delay1I</outflow>
+                <eqn>5</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </stock>
+            <flow name="Inflow Delay1">
+                <eqn>step(5, 10)</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </flow>
+            <flow name="Inflow DelayN">
+                <eqn>step(10, 5)</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </flow>
+            <flow name="Outflow Delay1">
+                <eqn>DELAY1(Inflow_Delay1[Apples, Citrus], delay[Apples])</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </flow>
+            <flow name="Outflow DelayN">
+                <eqn>DELAYN(Inflow_DelayN[Apples, Citrus],delay[Apples],6,10)</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </flow>
+            <aux name="delay">
+                <element subscript="Macoun">
+                    <eqn>10</eqn>
+                </element>
+                <element subscript="Red Spy">
+                    <eqn>3</eqn>
+                </element>
+                <element subscript="Grimes Golden">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="Roxbury Russet">
+                    <eqn>4</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Apples"/>
+                </dimensions>
+            </aux>
+            <flow name="Outflow Delay3I">
+                <eqn>DELAY3(Inflow_Delay3I[Apples, Citrus], delay[Apples], 3)</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </flow>
+            <stock name="Stock Delay3I">
+                <inflow>Inflow_Delay3I</inflow>
+                <outflow>Outflow_Delay3I</outflow>
+                <eqn>5</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </stock>
+            <flow name="Inflow Delay3">
+                <eqn>step(5, 10)</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </flow>
+            <flow name="Inflow Delay1I">
+                <eqn>step(5, 10)</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </flow>
+            <stock name="Stock Delay1">
+                <inflow>Inflow_Delay1</inflow>
+                <outflow>Outflow_Delay1</outflow>
+                <eqn>5</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </stock>
+            <flow name="Inflow Delay3I">
+                <eqn>step(5, 10)</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </flow>
+            <stock name="Stock DelayN">
+                <inflow>Inflow_DelayN</inflow>
+                <outflow>Outflow_DelayN</outflow>
+                <eqn>0</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </stock>
+            <flow name="Outflow Delay1I">
+                <eqn>DELAY1(Inflow_Delay1I[Apples, Citrus], delay[Apples], 2)</eqn>
+                <dimensions>
+                    <dim name="Apples"/>
+                    <dim name="Citrus"/>
+                </dimensions>
+            </flow>
+        </variables>
+        <views>
+            <view>
+                <stock name="Stock_Delay3" x="329" y="304"/>
+                <flow name="Inflow_Delay3" x="232" y="303">
+                    <pts>
+                        <pt x="166" y="303"/>
+                        <pt x="329" y="304"/>
+                    </pts>
+                </flow>
+                <flow name="Outflow_Delay3" x="429" y="306">
+                    <pts>
+                        <pt x="329" y="304"/>
+                        <pt x="499" y="306"/>
+                    </pts>
+                </flow>
+                <connector uid="12" angle="74.922135306592907">
+                    <from>Inflow_Delay3</from>
+                    <to>Outflow_Delay3</to>
+                </connector>
+                <aux name="delay" x="452" y="242"/>
+                <connector uid="14" angle="246.45840203766292">
+                    <from>delay</from>
+                    <to>Outflow_Delay3</to>
+                </connector>
+                <stock name="Stock_DelayN" x="334" y="415"/>
+                <flow name="Inflow_DelayN" x="234" y="414">
+                    <pts>
+                        <pt x="164" y="414"/>
+                        <pt x="334" y="415"/>
+                    </pts>
+                </flow>
+                <flow name="Outflow_DelayN" x="434" y="411">
+                    <pts>
+                        <pt x="334" y="415"/>
+                        <pt x="504" y="411"/>
+                    </pts>
+                </flow>
+                <alias x="455" y="361" uid="26">
+                    <of>delay</of>
+                </alias>
+                <connector uid="28" angle="65.208866057246297">
+                    <from>Inflow_DelayN</from>
+                    <to>Outflow_DelayN</to>
+                </connector>
+                <stock name="Stock_Delay1" x="324" y="180"/>
+                <flow name="Inflow_Delay1" x="227" y="179">
+                    <pts>
+                        <pt x="161" y="179"/>
+                        <pt x="324" y="180"/>
+                    </pts>
+                </flow>
+                <flow name="Outflow_Delay1" x="424" y="182">
+                    <pts>
+                        <pt x="324" y="180"/>
+                        <pt x="494" y="182"/>
+                    </pts>
+                </flow>
+                <connector uid="40" angle="74.922135306592935">
+                    <from>Inflow_Delay1</from>
+                    <to>Outflow_Delay1</to>
+                </connector>
+                <connector uid="41" angle="-236.81929872087701">
+                    <from>delay</from>
+                    <to>Outflow_Delay1</to>
+                </connector>
+                <stock name="Stock_Delay1I" x="769" y="189"/>
+                <stock name="Stock_Delay3I" x="764" y="306"/>
+                <flow name="Inflow_Delay1I" x="671" y="186">
+                    <pts>
+                        <pt x="603" y="186"/>
+                        <pt x="769" y="189"/>
+                    </pts>
+                </flow>
+                <flow name="Outflow_Delay1I" x="870" y="187">
+                    <pts>
+                        <pt x="769" y="189"/>
+                        <pt x="941" y="187"/>
+                    </pts>
+                </flow>
+                <flow name="Inflow_Delay3I" x="663" y="309">
+                    <pts>
+                        <pt x="592" y="309"/>
+                        <pt x="764" y="306"/>
+                    </pts>
+                </flow>
+                <flow name="Outflow_Delay3I" x="867" y="305">
+                    <pts>
+                        <pt x="764" y="306"/>
+                        <pt x="940" y="305"/>
+                    </pts>
+                </flow>
+                <connector uid="64" angle="65.627957713891931">
+                    <from>Inflow_Delay1I</from>
+                    <to>Outflow_Delay1I</to>
+                </connector>
+                <connector uid="65" angle="68.899942021168329">
+                    <from>Inflow_Delay3I</from>
+                    <to>Outflow_Delay3I</to>
+                </connector>
+                <alias x="903" y="252" uid="66">
+                    <of>delay</of>
+                </alias>
+                <connector uid="89" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

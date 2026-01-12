@@ -1,0 +1,109 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>3.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+    </model_units>
+    <dimensions>
+        <dim name="Dim2">
+            <elem name="D"/>
+            <elem name="E"/>
+        </dim>
+        <dim name="Dim1">
+            <elem name="A"/>
+            <elem name="B"/>
+            <elem name="C"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="subset">
+                <element subscript="A">
+                    <eqn>1.1</eqn>
+                </element>
+                <element subscript="B">
+                    <eqn>1.2</eqn>
+                </element>
+                <element subscript="C">
+                    <eqn>1.3</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Dim1"/>
+                </dimensions>
+            </aux>
+            <aux name="mixed assembly">
+                <element subscript="A, D">
+                    <eqn>subset[A]</eqn>
+                </element>
+                <element subscript="B, D">
+                    <eqn>subset[B]</eqn>
+                </element>
+                <element subscript="C, D">
+                    <eqn>subset[C]</eqn>
+                </element>
+                <element subscript="A, E">
+                    <eqn>2.1</eqn>
+                </element>
+                <element subscript="B, E">
+                    <eqn>2.2</eqn>
+                </element>
+                <element subscript="C, E">
+                    <eqn>2.3</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Dim1"/>
+                    <dim name="Dim2"/>
+                </dimensions>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="mixed_assembly" x="445" y="123"/>
+                <aux name="subset" x="240" y="120"/>
+                <connector uid="3" angle="0.55876605289435588">
+                    <from>subset</from>
+                    <to>mixed_assembly</to>
+                </connector>
+                <connector uid="24" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

@@ -1,0 +1,5 @@
+Time	FINAL_TIME	INITIAL_TIME	output[a]	output[b]	output[c]	output[d]	productivity[a]	productivity[b]	productivity[c]	productivity[d]	SAVEPER	TIME_STEP	workers[a]	workers[b]	workers[c]	workers[d]	working_hours[a]	working_hours[b]	working_hours[c]	working_hours[d]
+1	4	1	4	50	243	81	0.5	2	4.5	3	1	1	4	5	6	9	2	5	9	3
+2			4	50	243	81					1									
+3			4	50	243	81					1									
+4			4	50	243	81					1									

@@ -1,0 +1,501 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE">
+	<header>
+		<smile version="1.0" namespace="std, isee" uses_submodels=""/>
+		<name>model-modern</name>
+		<uuid>5c1276e0-9bab-4489-b31c-a1e5dfc3a410</uuid>
+		<vendor>isee systems, inc.</vendor>
+		<product version="1.4" isee:build_number="1125" isee:saved_by_v1="true" lang="en">Stella Architect</product>
+	</header>
+	<sim_specs isee:simulation_delay="0.0690335" method="Euler" time_units="time" isee:pause_after_rates="false" isee:instantaneous_flows="false">
+		<start>0</start>
+		<stop>12</stop>
+		<dt>0.5</dt>
+	</sim_specs>
+	<isee:prefs show_module_prefix="true" layer="model" saved_runs="5" keep="false" rifp="false"/>
+	<isee:multiplayer_settings include_chat="true" allow_observers="false" advance_time_increment="1" observer_start_page="home_page" enabled="false"/>
+	<model_units/>
+	<model>
+		<variables>
+			<module name="hares">
+				<connect to="hares.area" from=".area"/>
+				<connect to="hares.lynxes" from="lynxes.lynxes"/>
+			</module>
+			<module name="lynxes">
+				<connect to="lynxes.hare_density" from="hares.hare_density"/>
+				<connect to="lynxes.size_of_one_time_lynx_harvest" from=".size_of_one_time_lynx_harvest"/>
+			</module>
+			<aux name="area" access="output">
+				<eqn>1000</eqn>
+			</aux>
+			<aux name="size of one\ntime lynx harvest" access="output">
+				<eqn>100</eqn>
+			</aux>
+			<isee:dependencies>
+				<var name="hares">
+					<in>area</in>
+					<in>lynxes</in>
+				</var>
+				<var name="lynxes">
+					<in>hares</in>
+					<in>size_of_one_time_lynx_harvest</in>
+				</var>
+			</isee:dependencies>
+		</variables>
+		<views>
+			<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+				<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+				<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false">
+					<isee:series_styles>
+						<isee:series_style color="blue" thickness="1"/>
+						<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF7F00" thickness="1"/>
+						<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF007F" thickness="1"/>
+						<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#C8C8C8" thickness="1"/>
+					</isee:series_styles>
+				</graph>
+				<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" isee:report_month_names="false" interval="1" report_balances="beginning" report_flows="instantaneous"/>
+				<button color="black" background="#E0E0E0" font_size="9pt" transparent="false" corner_radius="0" isee:flat="false" icon_side="top"/>
+				<isee:annotation color="black" background="white" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" popup_background_color="#FFFECF"/>
+				<slider color="black" background="white" num_ticks="3" label_side="top" wrap_title="true" input_expands="true" input_width="100"/>
+				<isee:pie_input color="black" background="white" legend_position="bottom" isee:transparent="false"/>
+				<knob color="black" background="white" label_side="bottom" wrap_title="true"/>
+				<numeric_input color="black" background="white" label_side="left" wrap_title="true" input_expands="false" input_width="100"/>
+				<switch color="black" background="#E0E0E0" font_size="9pt" label_side="top" wrap_title="true" isee:appearance="switch"/>
+				<options color="black" background="white" appearance="radio-buttons" arrangement="vertical"/>
+				<graphical_input color="black" background="#E0E0E0" font_size="9pt"/>
+				<group_input color="black" background="#E0E0E0" font_size="9pt" header_font_size="9pt"/>
+				<lamp color="black" background="white" font_size="9pt"/>
+				<gauge color="black" background="white" needle_color="#F09F72" bar_color="#EEEEEE" bar_progress_color="black" appearance="radial" num_major_ticks="11" num_minor_ticks="11" show_numeric_value="true"/>
+				<isee:spatial_map color="black" background="white"/>
+				<isee:animation_object color="black" background="white"/>
+			</style>
+			<view isee:show_pages="false" page_width="756" page_height="584" zoom="200" isee:popup_graphs_are_comparative="true" type="stock_flow">
+				<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="9pt" padding="2" border_color="black" border_width="thin" border_style="none">
+					<stock color="blue" background="white" font_color="blue" label_side="top">
+						<shape type="rectangle" width="45" height="35"/>
+					</stock>
+					<flow color="blue" background="white" font_color="blue" label_side="bottom"/>
+					<module color="blue" background="white" font_color="blue" label_side="top">
+						<shape type="rectangle" width="55" height="45"/>
+					</module>
+					<aux color="blue" background="white" font_color="blue" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</aux>
+					<group color="red" background="white" font_color="red"/>
+					<connector color="#FF007F" background="white" font_color="#FF007F" isee:thickness="1"/>
+					<text_box color="black" background="white"/>
+					<numeric_display color="black" background="white" isee:transparent="false"/>
+					<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false">
+						<isee:series_styles>
+							<isee:series_style color="blue" thickness="1"/>
+							<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF7F00" thickness="1"/>
+							<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF007F" thickness="1"/>
+							<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#C8C8C8" thickness="1"/>
+						</isee:series_styles>
+					</graph>
+					<table color="black" background="white" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" isee:report_month_names="false" interval="1" report_balances="beginning" report_flows="instantaneous"/>
+				</style>
+				<connector uid="1" isee:thickness="2" angle="311.009">
+					<from>hares</from>
+					<to>lynxes</to>
+				</connector>
+				<connector uid="2" angle="102.529">
+					<from>area</from>
+					<to>hares</to>
+				</connector>
+				<connector uid="3" isee:thickness="2" angle="143.471">
+					<from>lynxes</from>
+					<to>hares</to>
+				</connector>
+				<connector uid="4" angle="83.6598">
+					<from>size_of_one_time_lynx_harvest</from>
+					<to>lynxes</to>
+				</connector>
+				<module x="88" y="85" name="hares"/>
+				<module x="273" y="85" name="lynxes"/>
+				<aux x="100" y="168" name="area"/>
+				<aux x="256" y="167" name="size of one\ntime lynx harvest"/>
+			</view>
+			<view isee:show_pages="false" background="white" page_width="788" page_height="528" home_view="true" type="interface">
+				<style/>
+			</view>
+			<isee:templates/>
+			<isee:stories/>
+		</views>
+	</model>
+	<model name="hares">
+		<variables>
+			<stock name="hares">
+				<eqn>50000</eqn>
+				<inflow>births</inflow>
+				<outflow>deaths</outflow>
+				<non_negative/>
+			</stock>
+			<flow name="births">
+				<eqn>hares * birth_fraction</eqn>
+				<non_negative/>
+			</flow>
+			<flow name="deaths">
+				<eqn>lynxes * hares_killed_per_lynx</eqn>
+				<non_negative/>
+			</flow>
+			<aux name="birth fraction">
+				<eqn>1.25</eqn>
+			</aux>
+			<aux name="area" access="input">
+				<eqn>{Enter equation for use when not hooked up to other models}</eqn>
+			</aux>
+			<aux name="hare density" access="output">
+				<eqn>hares / area</eqn>
+			</aux>
+			<stock name="lynxes" access="input">
+				<eqn>{Enter equation for use when not hooked up to other models}</eqn>
+				<non_negative/>
+			</stock>
+			<aux name="hares killed\nper lynx">
+				<eqn>hare_density</eqn>
+				<gf>
+					<yscale min="0" max="500"/>
+					<xpts>0,50,100,150,200,250,300,350,400,450,500</xpts>
+					<ypts>0,50,100,150,200,250,300,350,400,450,500</ypts>
+				</gf>
+			</aux>
+			<isee:dependencies>
+				<var name="births">
+					<in>birth_fraction</in>
+					<in>hares</in>
+				</var>
+				<var name="deaths">
+					<in>hares_killed_per_lynx</in>
+					<in>lynxes</in>
+				</var>
+				<var name="hare_density">
+					<in>hares</in>
+					<in>area</in>
+				</var>
+				<var name="hares_killed_per_lynx">
+					<in>hare_density</in>
+				</var>
+			</isee:dependencies>
+		</variables>
+		<views>
+			<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+				<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+				<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="right" isee:transparent="false" isee:hide_border="false">
+					<isee:series_styles>
+						<isee:series_style color="blue" thickness="1"/>
+						<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF7F00" thickness="1"/>
+						<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF007F" thickness="1"/>
+						<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#C8C8C8" thickness="1"/>
+					</isee:series_styles>
+				</graph>
+				<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" isee:report_month_names="false" interval="1" report_balances="beginning" report_flows="instantaneous"/>
+				<button color="black" background="#E0E0E0" font_size="9pt" transparent="false" corner_radius="0" isee:flat="false" icon_side="top"/>
+				<isee:annotation color="black" background="white" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" popup_background_color="#FFFECF"/>
+				<slider color="black" background="white" num_ticks="3" label_side="top" wrap_title="true" input_expands="true" input_width="100"/>
+				<isee:pie_input color="black" background="white" legend_position="bottom" isee:transparent="false"/>
+				<knob color="black" background="white" label_side="bottom" wrap_title="true"/>
+				<numeric_input color="black" background="white" label_side="left" wrap_title="true" input_expands="false" input_width="100"/>
+				<switch color="black" background="#E0E0E0" font_size="9pt" label_side="top" wrap_title="true" isee:appearance="switch"/>
+				<options color="black" background="white" appearance="radio-buttons" arrangement="vertical"/>
+				<graphical_input color="black" background="#E0E0E0" font_size="9pt"/>
+				<group_input color="black" background="#E0E0E0" font_size="9pt" header_font_size="9pt"/>
+				<lamp color="black" background="white" font_size="9pt"/>
+				<gauge color="black" background="white" needle_color="#F09F72" bar_color="#EEEEEE" bar_progress_color="black" appearance="radial" num_major_ticks="11" num_minor_ticks="11" show_numeric_value="true"/>
+				<isee:spatial_map color="black" background="white"/>
+				<isee:animation_object color="black" background="white"/>
+			</style>
+			<view isee:show_pages="false" page_width="768" page_height="576" zoom="200" isee:popup_graphs_are_comparative="true" type="stock_flow">
+				<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="9pt" padding="2" border_color="black" border_width="thin" border_style="none">
+					<stock color="blue" background="white" font_color="blue" label_side="top">
+						<shape type="rectangle" width="45" height="35"/>
+					</stock>
+					<flow color="blue" background="white" font_color="blue" label_side="bottom"/>
+					<module color="blue" background="white" font_color="blue" label_side="top">
+						<shape type="rectangle" width="55" height="45"/>
+					</module>
+					<aux color="blue" background="white" font_color="blue" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</aux>
+					<group color="red" background="white" font_color="red"/>
+					<connector color="#FF007F" background="white" font_color="#FF007F" isee:thickness="1"/>
+					<text_box color="black" background="white"/>
+					<numeric_display color="black" background="white" isee:transparent="false"/>
+					<graph color="black" background="white" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="right" isee:transparent="false" isee:hide_border="false">
+						<isee:series_styles>
+							<isee:series_style color="blue" thickness="1"/>
+							<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF7F00" thickness="1"/>
+							<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF007F" thickness="1"/>
+							<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#C8C8C8" thickness="1"/>
+						</isee:series_styles>
+					</graph>
+					<table color="black" background="white" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" isee:report_month_names="false" interval="1" report_balances="beginning" report_flows="instantaneous"/>
+				</style>
+				<connector uid="5" angle="54.4623">
+					<from>birth_fraction</from>
+					<to>births</to>
+				</connector>
+				<connector uid="6" angle="333.435">
+					<from>hare_density</from>
+					<to>hares_killed_per_lynx</to>
+				</connector>
+				<connector uid="7" angle="83.6598">
+					<from>hares_killed_per_lynx</from>
+					<to>deaths</to>
+				</connector>
+				<connector uid="8" angle="217.694">
+					<from>hares</from>
+					<to>hare_density</to>
+				</connector>
+				<connector uid="9" angle="127.405">
+					<from>lynxes</from>
+					<to>deaths</to>
+				</connector>
+				<connector uid="10" angle="139.635">
+					<from>hares</from>
+					<to>births</to>
+				</connector>
+				<connector uid="11" angle="40.6013">
+					<from>area</from>
+					<to>hare_density</to>
+				</connector>
+				<stock x="204" y="95" name="hares"/>
+				<flow x="121.25" y="94" name="births">
+					<pts>
+						<pt x="61" y="94"/>
+						<pt x="181.5" y="94"/>
+					</pts>
+				</flow>
+				<flow x="279.75" y="94" name="deaths">
+					<pts>
+						<pt x="226.5" y="94"/>
+						<pt x="357" y="94"/>
+					</pts>
+				</flow>
+				<aux x="68" y="167" name="birth fraction"/>
+				<aux color="blue" font_style="italic" font_weight="bold" x="148" y="218" name="area"/>
+				<aux x="202" y="167" name="hare density"/>
+				<stock color="blue" font_style="italic" font_weight="bold" x="342" y="176" name="lynxes"/>
+				<aux x="273" y="164" name="hares killed\nper lynx"/>
+			</view>
+			<view isee:simulation_delay="0.069033499999999998" page_height="528" page_width="788" type="interface" show_pages="false"/>
+		</views>
+	</model>
+	<model name="lynxes">
+		<variables>
+			<stock name="lynxes" access="output">
+				<eqn>1250</eqn>
+				<inflow>births</inflow>
+				<outflow>deaths</outflow>
+				<outflow>harvest</outflow>
+				<non_negative/>
+			</stock>
+			<flow name="births">
+				<eqn>lynxes * birth_fraction</eqn>
+				<non_negative/>
+			</flow>
+			<flow name="deaths">
+				<eqn>death_fraction * lynxes</eqn>
+				<non_negative/>
+			</flow>
+			<aux name="hare density" access="input">
+				<eqn>{Enter equation for use when not hooked up to other models}</eqn>
+			</aux>
+			<aux name="birth fraction">
+				<eqn>.25</eqn>
+			</aux>
+			<aux name="death fraction">
+				<eqn>hare_density</eqn>
+				<gf>
+					<yscale min="0" max="1"/>
+					<xpts>0,10,20,30,40,50,60,70,80,90,100</xpts>
+					<ypts>1,0.606530659712633,0.367879441171442,0.22313016014843,0.135335283236613,0.0820849986238988,0.0497870683678639,0.0301973834223185,0.0183156388887342,0.0111089965382423,0.00673794699908547</ypts>
+				</gf>
+			</aux>
+			<flow name="harvest">
+				<eqn>PULSE( size_of_one_time_lynx_harvest , 4 , 0 )</eqn>
+				<non_negative/>
+			</flow>
+			<aux name="size of one\ntime lynx harvest" access="input">
+				<eqn>{Enter equation for use when not hooked up to other models}</eqn>
+			</aux>
+			<isee:dependencies>
+				<var name="births">
+					<in>lynxes</in>
+					<in>birth_fraction</in>
+				</var>
+				<var name="deaths">
+					<in>lynxes</in>
+					<in>death_fraction</in>
+				</var>
+				<var name="death_fraction">
+					<in>hare_density</in>
+				</var>
+				<var name="harvest">
+					<in>size_of_one_time_lynx_harvest</in>
+				</var>
+			</isee:dependencies>
+		</variables>
+		<views>
+			<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+				<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+				<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="right" isee:transparent="false" isee:hide_border="false">
+					<isee:series_styles>
+						<isee:series_style color="blue" thickness="1"/>
+						<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF7F00" thickness="1"/>
+						<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF007F" thickness="1"/>
+						<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#C8C8C8" thickness="1"/>
+					</isee:series_styles>
+				</graph>
+				<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" isee:report_month_names="false" interval="1" report_balances="beginning" report_flows="instantaneous"/>
+				<button color="black" background="#E0E0E0" font_size="9pt" transparent="false" corner_radius="0" isee:flat="false" icon_side="top"/>
+				<isee:annotation color="black" background="white" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" popup_background_color="#FFFECF"/>
+				<slider color="black" background="white" num_ticks="3" label_side="top" wrap_title="true" input_expands="true" input_width="100"/>
+				<isee:pie_input color="black" background="white" legend_position="bottom" isee:transparent="false"/>
+				<knob color="black" background="white" label_side="bottom" wrap_title="true"/>
+				<numeric_input color="black" background="white" label_side="left" wrap_title="true" input_expands="false" input_width="100"/>
+				<switch color="black" background="#E0E0E0" font_size="9pt" label_side="top" wrap_title="true" isee:appearance="switch"/>
+				<options color="black" background="white" appearance="radio-buttons" arrangement="vertical"/>
+				<graphical_input color="black" background="#E0E0E0" font_size="9pt"/>
+				<group_input color="black" background="#E0E0E0" font_size="9pt" header_font_size="9pt"/>
+				<lamp color="black" background="white" font_size="9pt"/>
+				<gauge color="black" background="white" needle_color="#F09F72" bar_color="#EEEEEE" bar_progress_color="black" appearance="radial" num_major_ticks="11" num_minor_ticks="11" show_numeric_value="true"/>
+				<isee:spatial_map color="black" background="white"/>
+				<isee:animation_object color="black" background="white"/>
+			</style>
+			<view isee:show_pages="false" page_width="768" page_height="576" zoom="165.6" isee:popup_graphs_are_comparative="true" type="stock_flow">
+				<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="9pt" padding="2" border_color="black" border_width="thin" border_style="none">
+					<stock color="blue" background="white" font_color="blue" label_side="top">
+						<shape type="rectangle" width="45" height="35"/>
+					</stock>
+					<flow color="blue" background="white" font_color="blue" label_side="bottom"/>
+					<module color="blue" background="white" font_color="blue" label_side="top">
+						<shape type="rectangle" width="55" height="45"/>
+					</module>
+					<aux color="blue" background="white" font_color="blue" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</aux>
+					<group color="red" background="white" font_color="red"/>
+					<connector color="#FF007F" background="white" font_color="#FF007F" isee:thickness="1"/>
+					<text_box color="black" background="white"/>
+					<numeric_display color="black" background="white" isee:transparent="false"/>
+					<graph color="black" background="white" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="right" isee:transparent="false" isee:hide_border="false">
+						<isee:series_styles>
+							<isee:series_style color="blue" thickness="1"/>
+							<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF7F00" thickness="1"/>
+							<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF007F" thickness="1"/>
+							<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#C8C8C8" thickness="1"/>
+						</isee:series_styles>
+					</graph>
+					<table color="black" background="white" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" isee:report_month_names="false" interval="1" report_balances="beginning" report_flows="instantaneous"/>
+				</style>
+				<connector uid="12" angle="135">
+					<from>lynxes</from>
+					<to>births</to>
+				</connector>
+				<connector uid="13" angle="48.5763">
+					<from>lynxes</from>
+					<to>deaths</to>
+				</connector>
+				<connector uid="14" angle="90">
+					<from>birth_fraction</from>
+					<to>births</to>
+				</connector>
+				<connector uid="15" angle="198.435">
+					<from>hare_density</from>
+					<to>death_fraction</to>
+				</connector>
+				<connector uid="16" angle="139.399">
+					<from>size_of_one_time_lynx_harvest</from>
+					<to>harvest</to>
+				</connector>
+				<connector uid="17" angle="180">
+					<from>death_fraction</from>
+					<to>deaths</to>
+				</connector>
+				<stock x="202" y="100" name="lynxes"/>
+				<flow x="126.25" y="96" name="births">
+					<pts>
+						<pt x="73" y="96"/>
+						<pt x="179.5" y="96"/>
+					</pts>
+				</flow>
+				<flow x="294.25" y="96" name="deaths">
+					<pts>
+						<pt x="224.5" y="96"/>
+						<pt x="388" y="96"/>
+					</pts>
+				</flow>
+				<aux color="blue" font_style="italic" font_weight="bold" x="430" y="184" name="hare density"/>
+				<aux x="130" y="178" name="birth fraction"/>
+				<aux x="340" y="169" name="death fraction"/>
+				<flow color="blue" label_side="top" x="198" y="164.25" name="harvest">
+					<pts>
+						<pt x="198" y="117.5"/>
+						<pt x="198" y="232"/>
+					</pts>
+				</flow>
+				<aux color="blue" font_style="italic" font_weight="bold" x="304" y="223" name="size of one\ntime lynx harvest"/>
+			</view>
+			<view isee:simulation_delay="0.069033499999999998" page_height="528" page_width="788" type="interface" show_pages="false"/>
+		</views>
+	</model>
+</xmile>
+

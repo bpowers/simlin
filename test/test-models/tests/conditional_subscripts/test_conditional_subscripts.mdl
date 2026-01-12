@@ -1,0 +1,192 @@
+{UTF-8}
+dim:
+	(sec1-sec10)
+	~	
+	~		|
+
+dimA:
+	A, B, C
+	~	
+	~		|
+
+dimb:
+	(secb1-secb10)
+	~	
+	~		|
+
+dimc:
+	(secc1-secc8)
+	~	
+	~		|
+
+dimD:
+	D, E, F
+	~	
+	~		|
+
+dimG:
+	G,H
+	~	
+	~		|
+
+subA:
+	B,A
+	~	
+	~		|
+
+********************************************************
+	.Matrix
+********************************************************~
+		Matrix Parameters
+	|
+
+Matrix5[dim,subA]=
+	IF THEN ELSE(dim = subA, 1, 0)
+	~	
+	~		|
+
+Matrix1[dim, dimb]=
+	IF THEN ELSE(dim = dimb, 1, 0)
+	~	
+	~		|
+
+Matrix2[dim,dimc]=
+	IF THEN ELSE(dim = dimc, 1, 0)
+	~	
+	~		|
+
+Matrix3[dimA,dimD]=
+	IF THEN ELSE(dimA = dimD, 1, 0)
+	~	
+	~		|
+
+Matrix4[dimA, subA]=
+	IF THEN ELSE(dimA = subA, 1, 0)
+	~	
+	~		|
+
+Vector1[dimA]=
+	IF THEN ELSE(dimA = dimA, 1, 0)
+	~	
+	~		|
+
+Vector2[dimA]=
+	IF THEN ELSE(dimA = B, 1, 0)
+	~	
+	~		|
+
+Vector3[dimA]=
+	IF THEN ELSE(dimA = C, 1, 0)
+	~	
+	~		|
+
+********************************************************
+	.Vector
+********************************************************~
+		Vector Parameters
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 1
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,Matrix1,254,312,26,11,8,3,0,0,0,0,0,0
+10,2,Matrix2,253,373,26,11,8,3,0,0,0,0,0,0
+10,3,Matrix3,251,450,26,11,8,3,0,0,0,0,0,0
+10,4,Vector1,473,315,26,11,8,3,0,0,0,0,0,0
+10,5,Vector2,468,373,27,11,8,3,0,0,0,0,0,0
+10,6,Vector3,470,440,27,11,8,3,0,0,0,0,0,0
+10,7,Matrix4,248,522,26,11,8,3,0,0,0,0,0,0
+10,8,Matrix5,248,597,26,11,8,3,0,0,0,0,0,0
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:Matrix1[dim,dimb]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:1
+26:1
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:Current
+48:
+6:A
+6:B
+6:C
+6:D
+6:E
+6:F
+6:G
+6:H
+6:sec1
+6:sec10
+6:sec2
+6:sec3
+6:sec4
+6:sec5
+6:sec6
+6:sec7
+6:sec8
+6:sec9
+6:secb1
+6:secc1
+6:secc2
+6:secc3
+6:secc4
+6:secc5
+6:secc6
+6:secc7
+6:secc8

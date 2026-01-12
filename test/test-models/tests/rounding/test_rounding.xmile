@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+	<header>
+		<product version="1.0" lang="en">Vensim</product>
+		<vendor>Ventana Systems, Inc.</vendor>
+		<created>
+		</created>
+		<modified>
+		</modified>
+		<name>
+		</name>
+		<caption>
+		</caption>
+	</header>
+	<sim_specs method="RK4" time_units="Month">
+		<start>0</start>
+		<stop>200</stop>
+		<dt>1</dt>
+	</sim_specs>
+	<model>
+		<variables>
+			<aux name="StockA">
+				<units></units>
+				<doc></doc>
+					<eqn>-10 + Time/10					</eqn>
+			</aux>
+			<aux name="test integer">
+				<units></units>
+				<doc></doc>
+					<eqn>INT(StockA)					</eqn>
+			</aux>
+			<aux name="test modulo">
+				<units></units>
+				<doc></doc>
+					<eqn>StockA mod 3					</eqn>
+			</aux>
+		</variables>
+	</model>
+</xmile>

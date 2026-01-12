@@ -1,0 +1,112 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs isee:simulation_delay="0" method="Euler" time_units="Months">
+        <start>0</start>
+        <stop>20</stop>
+        <dt>0.125</dt>
+    </sim_specs>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="TIME STEP">
+                <doc>	The time step for the simulation.</doc>
+                <eqn>0.125</eqn>
+                <units>Month</units>
+            </aux>
+            <aux name="FINAL TIME">
+                <doc>	The final time for the simulation.</doc>
+                <eqn>20</eqn>
+                <units>Month</units>
+            </aux>
+            <aux name="test tan">
+                <eqn>TAN(StockA)</eqn>
+            </aux>
+            <aux name="INITIAL TIME">
+                <doc>	The initial time for the simulation.</doc>
+                <eqn>0</eqn>
+                <units>Month</units>
+            </aux>
+            <aux name="test arctan">
+                <eqn>ARCTAN(test_tan)</eqn>
+            </aux>
+            <aux name="test sin">
+                <eqn>SIN(StockA)</eqn>
+            </aux>
+            <aux name="test arcsin">
+                <eqn>ARCSIN(test_sin)</eqn>
+            </aux>
+            <aux name="test cos">
+                <eqn>COS(StockA)</eqn>
+            </aux>
+            <stock name="StockA">
+                <eqn>-10</eqn>
+                <inflow>InflowA</inflow>
+            </stock>
+            <flow name="InflowA">
+                <eqn>1</eqn>
+            </flow>
+            <aux name="test arccos">
+                <eqn>ARCCOS(test_cos)</eqn>
+            </aux>
+            <aux name="SAVEPER">
+                <doc>	The frequency with which output is stored.</doc>
+                <eqn>TIME_STEP</eqn>
+                <units>Month</units>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <stock name="StockA" x="322" y="103"/>
+                <flow name="InflowA" x="228" y="100">
+                    <pts>
+                        <pt x="164" y="100"/>
+                        <pt x="322" y="103"/>
+                    </pts>
+                </flow>
+                <aux name="test_tan" x="194" y="205"/>
+                <aux name="test_sin" x="324" y="205"/>
+                <aux name="test_cos" x="455" y="206"/>
+                <aux name="test_arctan" x="194" y="280"/>
+                <aux name="test_arcsin" x="324" y="280"/>
+                <aux name="test_arccos" x="455" y="280"/>
+                <connector uid="13" angle="218.55046529615777">
+                    <from>StockA</from>
+                    <to>test_tan</to>
+                </connector>
+                <connector uid="14" angle="-88.876697285924664">
+                    <from>StockA</from>
+                    <to>test_sin</to>
+                </connector>
+                <connector uid="15" angle="-37.755493147558859">
+                    <from>StockA</from>
+                    <to>test_cos</to>
+                </connector>
+                <connector uid="16" angle="270">
+                    <from>test_tan</from>
+                    <to>test_arctan</to>
+                </connector>
+                <connector uid="17" angle="270">
+                    <from>test_sin</from>
+                    <to>test_arcsin</to>
+                </connector>
+                <connector uid="18" angle="270">
+                    <from>test_cos</from>
+                    <to>test_arccos</to>
+                </connector>
+                <connector uid="39" angle="90">
+                    <from>TIME_STEP</from>
+                    <to>SAVEPER</to>
+                </connector>
+                <aux name="SAVEPER" x="100" y="116"/>
+                <aux name="INITIAL_TIME" x="100" y="116"/>
+                <aux name="FINAL_TIME" x="100" y="116"/>
+                <aux name="TIME_STEP" x="100" y="116"/>
+            </view>
+        </views>
+    </model>
+</xmile>

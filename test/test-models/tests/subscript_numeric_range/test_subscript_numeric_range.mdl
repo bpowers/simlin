@@ -1,0 +1,141 @@
+{UTF-8}
+Level_1[DimA,DimB,DimC]= INTEG (
+	input_level_1[DimA,DimB,DimC]-output_level_1[DimA,DimB,DimC],
+		10)
+	~	Dmnl
+	~		|
+
+Matrix_A[DimA,DimB,dc1]=
+	0.1,0.01,0.5;
+	0.3,0.2,0.12;
+	0.03,0.07,0.9;
+	0.8,0.22,0.15;
+	0.5,0.05,0.2; ~~|
+Matrix_A[DimA,DimB,dc2]=
+	0.5,0.2,0.8;
+	0.03,0.05,0.7;
+	0.3,0.07,0.5;
+	0.13,0.22,0.15;
+	0.5,0.08,0.2;
+	~	
+	~		|
+
+DimC:
+	dc1,dc2
+	~	
+	~		|
+
+input_level_1[DimA,DimB,DimC]=
+	Matrix_A[DimA,DimB,DimC]*Level_1[DimA,DimB,DimC]
+	~	Dmnl
+	~		|
+
+Matrix_B[DimA,DimB,dc1]=
+	0.2,0.2,0.01;
+	0.3,0.1,0.12;
+	0.4,0.07,0.9;
+	0.7,0.2,0.2;
+	0.11,0.15,0.17; ~~|
+Matrix_B[DimA,DimB,dc2]=
+	0.03,0.2,0.8;
+	0.09,0.5,0.07;
+	0.02,0.7,0.35;
+	0.02,0.22,0.11;
+	0.37,0.1,0.21;
+	~	
+	~		|
+
+output_level_1[DimA,DimB,DimC]=
+	Level_1[DimA,DimB,DimC]*Matrix_B[DimA,DimB,DimC]
+	~	
+	~		|
+
+DimA:
+	(da1-da4),da5
+	~	
+	~		|
+
+DimB:
+	(db1-db3)
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL_TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL_TIME  = 1
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME_STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME_STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,Level 1,552,341,52,31,3,131,0,0,0,0,0,0
+12,2,48,332,344,10,8,0,3,0,0,-1,0,0,0
+1,3,5,1,4,0,0,22,0,0,0,-1--1--1,,1|(467,344)|
+1,4,5,2,100,0,0,22,0,0,0,-1--1--1,,1|(382,344)|
+11,5,48,429,344,6,8,34,3,0,0,1,0,0,0
+10,6,input level 1,429,363,42,11,40,3,0,0,-1,0,0,0
+1,7,1,6,1,0,0,0,0,128,0,-1--1--1,,1|(536,398)|
+10,8,Matrix A,251,470,32,11,8,3,0,0,0,0,0,0
+1,9,8,6,0,0,0,0,0,128,0,-1--1--1,,1|(333,420)|
+12,10,48,824,341,10,8,0,3,0,0,-1,0,0,0
+1,11,13,10,4,0,0,22,0,0,0,-1--1--1,,1|(770,343)|
+1,12,13,1,100,0,0,22,0,0,0,-1--1--1,,1|(659,343)|
+11,13,0,721,343,6,8,34,3,0,0,1,0,0,0
+10,14,output level 1,721,362,47,11,40,3,0,0,-1,0,0,0
+1,15,1,14,1,0,0,0,0,128,0,-1--1--1,,1|(590,396)|
+10,16,Matrix B,850,477,31,11,8,3,0,0,0,0,0,0
+1,17,16,14,0,0,0,0,0,128,0,-1--1--1,,1|(790,424)|
+///---\\\
+:L<%^E!@
+1:test2.vdf
+9:test2
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:Level_1[DimA,DimB,DimC]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:1
+25:10
+26:10
+6:da1
+6:da2
+6:da3
+6:da4
+6:da5
+6:db1
+6:db2
+6:db3
+6:dc1
+6:dc2

@@ -1,0 +1,168 @@
+{UTF-8}
+dim: (A0-A100)
+	~	
+	~		|
+
+get time 0 dim 0[dim]  = GET TIME VALUE(0, dim-20, 0)
+	~	
+	~		|
+
+get time 1 dim 0[dim]  = GET TIME VALUE(1, dim-20, 0)
+	~	
+	~		|
+
+get time 0 dim 1[dim]  = GET TIME VALUE(0, dim-20, 1)
+	~	
+	~		|
+
+get time 1 dim 1[dim]  = GET TIME VALUE(1, dim-20, 1)
+	~	
+	~		|
+
+get time 0 dim 2[dim]  = GET TIME VALUE(0, dim-20, 2)
+	~	
+	~		|
+
+get time 1 dim 2[dim]  = GET TIME VALUE(1, dim-20, 2)
+	~	
+	~		|
+
+get time 0 dim 3[dim]  = GET TIME VALUE(0, dim-20, 3)
+	~	
+	~		|
+
+get time 1 dim 3[dim]  = GET TIME VALUE(1, dim-20, 3)
+	~	
+	~		|
+
+get time 0 dim 4[dim]  = GET TIME VALUE(0, dim-20, 4)
+	~	
+	~		|
+
+get time 1 dim 4[dim]  = GET TIME VALUE(1, dim-20, 4)
+	~	
+	~		|
+
+get time 0 dim 5[dim]  = GET TIME VALUE(0, dim-20, 5)
+	~	
+	~		|
+
+get time 1 dim 5[dim]  = GET TIME VALUE(1, dim-20, 5)
+	~	
+	~		|
+
+get time 0 dim 6[dim]  = GET TIME VALUE(0, dim-20, 6)
+	~	
+	~		|
+
+get time 1 dim 6[dim]  = GET TIME VALUE(1, dim-20, 6)
+	~	
+	~		|
+
+get time 0 dim 7[dim]  = GET TIME VALUE(0, dim-20, 7)
+	~	
+	~		|
+
+get time 1 dim 7[dim]  = GET TIME VALUE(1, dim-20, 7)
+	~	
+	~		|
+
+get time 0 dim 8[dim]  = GET TIME VALUE(0, dim-20, 8)
+	~	
+	~		|
+
+get time 1 dim 8[dim]  = GET TIME VALUE(1, dim-20, 8)
+	~	
+	~		|
+
+get time 0 dim 9[dim]  = GET TIME VALUE(0, dim-20, 9)
+	~	
+	~		|
+
+get time 1 dim 9[dim]  = GET TIME VALUE(1, dim-20, 9)
+	~	
+	~		|
+
+get time 0 dim 10[dim]  = GET TIME VALUE(0, dim-20, 10)
+	~	
+	~		|
+
+get time 1 dim 10[dim]  = GET TIME VALUE(1, dim-20, 10)
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 50
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,get time 0 dim 0,209,85,51,11,8,3,0,0,-1,0,0,0
+10,2,get time 0 dim 1,211,117,51,11,8,3,0,0,-1,0,0,0
+10,3,get time 0 dim 2,212,146,51,11,8,3,0,0,-1,0,0,0
+10,4,get time 0 dim 3,214,176,51,11,8,3,0,0,-1,0,0,0
+10,5,get time 0 dim 4,214,206,51,11,8,3,0,0,-1,0,0,0
+10,6,get time 0 dim 5,213,233,51,11,8,3,0,0,-1,0,0,0
+10,7,get time 0 dim 6,211,263,51,11,8,3,0,0,-1,0,0,0
+10,8,get time 0 dim 7,210,295,51,11,8,3,0,0,-1,0,0,0
+10,9,get time 0 dim 8,208,333,51,11,8,3,0,0,-1,0,0,0
+10,10,get time 0 dim 9,209,368,51,11,8,3,0,0,-1,0,0,0
+10,11,get time 0 dim 10,208,402,55,11,8,3,0,0,-1,0,0,0
+10,12,get time 1 dim 0,406,89,51,11,8,3,0,0,-1,0,0,0
+10,13,get time 1 dim 2,404,133,51,11,8,3,0,0,-1,0,0,0
+10,14,get time 1 dim 3,404,157,51,11,8,3,0,0,-1,0,0,0
+10,15,get time 1 dim 4,400,188,51,11,8,3,0,0,-1,0,0,0
+10,16,get time 1 dim 5,401,219,51,11,8,3,0,0,-1,0,0,0
+10,17,get time 1 dim 6,398,251,51,11,8,3,0,0,-1,0,0,0
+10,18,get time 1 dim 7,396,276,51,11,8,3,0,0,-1,0,0,0
+10,19,get time 1 dim 8,395,307,51,11,8,3,0,0,-1,0,0,0
+10,20,get time 1 dim 9,395,346,51,11,8,3,0,0,-1,0,0,0
+10,21,get time 1 dim 10,403,385,55,11,8,3,0,0,-1,0,0,0
+10,22,get time 1 dim 1,404,114,51,11,8,3,0,0,-1,0,0,0
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:FINAL TIME
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:50
+25:100
+26:100
+6:A19

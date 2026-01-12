@@ -1,0 +1,93 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs isee:simulation_delay="0" method="Euler" time_units="Months">
+        <start>0</start>
+        <stop>1</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="TIME STEP">
+                <doc>	The time step for the simulation.</doc>
+                <eqn>1</eqn>
+                <units>Minute</units>
+            </aux>
+            <aux name="INITIAL TIME">
+                <doc>	The initial time for the simulation.</doc>
+                <eqn>0</eqn>
+                <units>Minute</units>
+            </aux>
+            <aux name="FINAL TIME">
+                <doc>	The final time for the simulation.</doc>
+                <eqn>1</eqn>
+                <units>Minute</units>
+            </aux>
+            <aux name="NOT output">
+                <doc>	Test the :NOT: operator. Should yield 1.</doc>
+                <eqn>( IF NoT false_input THEN 1 ELSE 0 )</eqn>
+            </aux>
+            <aux name="false input">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="true input">
+                <eqn>1</eqn>
+            </aux>
+            <aux name="AND output">
+                <doc>	Test the :AND: Operator. Should Yield 0</doc>
+                <eqn>( IF true_input AnD false_input THEN 1 ELSE 0 )</eqn>
+            </aux>
+            <aux name="SAVEPER">
+                <doc>	The frequency with which output is stored.</doc>
+                <eqn>TIME_STEP</eqn>
+                <units>Minute</units>
+            </aux>
+            <aux name="OR output">
+                <doc>	Test the :OR: Operator, should yield 1</doc>
+                <eqn>( IF true_input oR false_input THEN 1 ELSE 0 )</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="OR_output" x="357" y="101"/>
+                <aux name="AND_output" x="357" y="158"/>
+                <aux name="true_input" x="213" y="100"/>
+                <aux name="false_input" x="211" y="156"/>
+                <connector uid="5" angle="-0.3978809618345937">
+                    <from>true_input</from>
+                    <to>OR_output</to>
+                </connector>
+                <connector uid="6" angle="20.642010315637219">
+                    <from>false_input</from>
+                    <to>OR_output</to>
+                </connector>
+                <connector uid="7" angle="-21.938480467706491">
+                    <from>true_input</from>
+                    <to>AND_output</to>
+                </connector>
+                <connector uid="8" angle="-0.78482460299188894">
+                    <from>false_input</from>
+                    <to>AND_output</to>
+                </connector>
+                <aux name="NOT_output" x="352" y="217"/>
+                <connector uid="10" angle="-23.394472757361548">
+                    <from>false_input</from>
+                    <to>NOT_output</to>
+                </connector>
+                <connector uid="31" angle="90">
+                    <from>TIME_STEP</from>
+                    <to>SAVEPER</to>
+                </connector>
+                <aux name="SAVEPER" x="100" y="133"/>
+                <aux name="FINAL_TIME" x="100" y="133"/>
+                <aux name="INITIAL_TIME" x="100" y="133"/>
+                <aux name="TIME_STEP" x="100" y="133"/>
+            </view>
+        </views>
+    </model>
+</xmile>

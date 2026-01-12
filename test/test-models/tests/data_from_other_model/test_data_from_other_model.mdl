@@ -1,0 +1,148 @@
+{UTF-8}
+conflict var[dim1,dim2]=
+        0
+	~	
+	~		|
+
+dim1:
+        A, B, C
+	~	
+	~		|
+
+dim2:
+        D, E
+	~	
+	~		|
+
+dim3:
+        A, B
+	~	
+	~		|
+
+out1[dim1]=
+	var 0dim*2+var 1dim[dim1]
+	~	
+	~		|
+
+out2[dim1,dim2]=
+	var 2dim[dim1,dim2]-1
+	~	
+	~		|
+
+out3[dim1,dim2,dim3]=
+	var 3dim[dim1,dim2,dim3]
+	~	
+	~		|
+
+stock[dim1,dim2,dim3]= INTEG (
+	out1[dim1]+out2[dim1,dim2],
+		0)
+	~	
+	~		|
+
+var 0dim:INTERPOLATE:
+	~	
+	~		|
+
+var 1dim[dim1]:HOLD BACKWARD:
+	~	
+	~		|
+
+var 2dim[dim1,dim2]:LOOK FORWARD:
+	~	
+	~		|
+
+var 3dim[dim1,dim2,dim3]:RAW:
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 50
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.5
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,var 0dim,342,171,29,11,8,3,0,0,0,0,0,0
+10,2,var 1dim,340,243,29,11,8,3,0,0,0,0,0,0
+10,3,var 2dim,339,316,29,11,8,3,0,0,0,0,0,0
+10,4,var 3dim,381,386,29,11,8,3,0,0,0,0,0,0
+10,5,out1,530,211,16,11,8,3,0,0,0,0,0,0
+1,6,1,5,0,0,0,0,0,128,0,-1--1--1,,1|(435,190)|
+1,7,2,5,0,0,0,0,0,128,0,-1--1--1,,1|(434,227)|
+10,8,conflict var,348,102,35,11,8,3,0,0,-1,0,0,0
+10,9,out2,511,324,16,11,8,3,0,0,0,0,0,0
+1,10,3,9,0,0,0,0,0,128,0,-1--1--1,,1|(424,319)|
+10,11,out3,539,380,16,11,8,3,0,0,0,0,0,0
+1,12,4,11,0,0,0,0,0,128,0,-1--1--1,,1|(459,382)|
+10,13,stock,686,294,19,11,8,3,0,0,0,0,0,0
+1,14,5,13,0,0,0,0,0,128,0,-1--1--1,,1|(600,247)|
+1,15,9,13,0,0,0,0,0,128,0,-1--1--1,,1|(590,310)|
+///---\\\
+:L<%^E!@
+1:output.vdf
+1:data.vdf
+9:output
+13:data.vdf
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:var 3dim[dim1,dim2,dim1]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:50
+26:50
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:output
+48:new.lst
+6:A
+6:B
+6:C
+6:D

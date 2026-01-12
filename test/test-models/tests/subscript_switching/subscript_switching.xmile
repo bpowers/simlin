@@ -1,0 +1,242 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0.000000</start>
+        <stop>100.000000</stop>
+        <dt>1.000000</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+    </model_units>
+    <dimensions>
+        <dim name="Cats">
+            <elem name="c1"/>
+            <elem name="c2"/>
+            <elem name="c3"/>
+            <elem name="c4"/>
+            <elem name="c5"/>
+        </dim>
+        <dim name="dummy">
+            <elem name="c1"/>
+            <elem name="c2"/>
+            <elem name="c3"/>
+            <elem name="c4"/>
+            <elem name="c5"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="Total">
+                <eqn>SUM(Categories[*])</eqn>
+            </aux>
+            <aux name="Transition Matrix">
+                <element subscript="c1, c1">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="c1, c2">
+                    <eqn>0.3</eqn>
+                </element>
+                <element subscript="c1, c3">
+                    <eqn>0.2</eqn>
+                </element>
+                <element subscript="c1, c4">
+                    <eqn>0.4</eqn>
+                </element>
+                <element subscript="c1, c5">
+                    <eqn>0.1</eqn>
+                </element>
+                <element subscript="c2, c1">
+                    <eqn>0.1</eqn>
+                </element>
+                <element subscript="c2, c2">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="c2, c3">
+                    <eqn>0.3</eqn>
+                </element>
+                <element subscript="c2, c4">
+                    <eqn>0.2</eqn>
+                </element>
+                <element subscript="c2, c5">
+                    <eqn>0.4</eqn>
+                </element>
+                <element subscript="c3, c1">
+                    <eqn>0.3</eqn>
+                </element>
+                <element subscript="c3, c2">
+                    <eqn>0.4</eqn>
+                </element>
+                <element subscript="c3, c3">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="c3, c4">
+                    <eqn>0.1</eqn>
+                </element>
+                <element subscript="c3, c5">
+                    <eqn>0.2</eqn>
+                </element>
+                <element subscript="c4, c1">
+                    <eqn>0.2</eqn>
+                </element>
+                <element subscript="c4, c2">
+                    <eqn>0.1</eqn>
+                </element>
+                <element subscript="c4, c3">
+                    <eqn>0.4</eqn>
+                </element>
+                <element subscript="c4, c4">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="c4, c5">
+                    <eqn>0.3</eqn>
+                </element>
+                <element subscript="c5, c1">
+                    <eqn>0.4</eqn>
+                </element>
+                <element subscript="c5, c2">
+                    <eqn>0.2</eqn>
+                </element>
+                <element subscript="c5, c3">
+                    <eqn>0.1</eqn>
+                </element>
+                <element subscript="c5, c4">
+                    <eqn>0.3</eqn>
+                </element>
+                <element subscript="c5, c5">
+                    <eqn>0</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Cats"/>
+                    <dim name="Cats"/>
+                </dimensions>
+            </aux>
+            <aux name="Initial Categories">
+                <element subscript="c1">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="c2">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="c3">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="c4">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="c5">
+                    <eqn>0</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Cats"/>
+                </dimensions>
+            </aux>
+            <flow name="Switching Out">
+                <eqn>Gain*SUM(Transition_Matrix[Cats, *:dummy]*Categories[Cats])</eqn>
+                <dimensions>
+                    <dim name="Cats"/>
+                </dimensions>
+            </flow>
+            <aux name="Gain">
+                <eqn>0.1</eqn>
+            </aux>
+            <flow name="Switching In">
+                <eqn>Gain*SUM(Transition_Matrix[*, dummy]*Categories[*])</eqn>
+                <dimensions>
+                    <dim name="dummy"/>
+                </dimensions>
+            </flow>
+            <stock name="Categories">
+                <inflow>Switching_In</inflow>
+                <outflow>Switching_Out</outflow>
+                <eqn>Initial_Categories[Cats]</eqn>
+                <dimensions>
+                    <dim name="Cats"/>
+                </dimensions>
+            </stock>
+        </variables>
+        <views>
+            <view>
+                <stock name="Categories" x="322" y="239"/>
+                <aux name="Initial_Categories" x="323" y="339"/>
+                <aux name="Transition_Matrix" x="321" y="161"/>
+                <flow name="Switching_Out" x="410" y="237">
+                    <pts>
+                        <pt x="322" y="239"/>
+                        <pt x="465" y="235"/>
+                    </pts>
+                </flow>
+                <flow name="Switching_In" x="235" y="238">
+                    <pts>
+                        <pt x="187" y="237"/>
+                        <pt x="322" y="239"/>
+                    </pts>
+                </flow>
+                <connector uid="14" angle="-14.074781734314072">
+                    <from>Transition_Matrix</from>
+                    <to>Switching_Out</to>
+                </connector>
+                <connector uid="15" angle="194.47066517457546">
+                    <from>Transition_Matrix</from>
+                    <to>Switching_In</to>
+                </connector>
+                <connector uid="16" angle="-111.51613374608152">
+                    <from>Categories</from>
+                    <to>Switching_In</to>
+                </connector>
+                <connector uid="17" angle="-66.20485148006648">
+                    <from>Categories</from>
+                    <to>Switching_Out</to>
+                </connector>
+                <aux name="Gain" x="319" y="120"/>
+                <connector uid="20" angle="187.09320664215593">
+                    <from>Gain</from>
+                    <to>Switching_In</to>
+                </connector>
+                <connector uid="21" angle="-5.0636457183768613">
+                    <from>Gain</from>
+                    <to>Switching_Out</to>
+                </connector>
+                <aux name="Total" x="323" y="309"/>
+                <connector uid="23" angle="269.22731519049421">
+                    <from>Categories</from>
+                    <to>Total</to>
+                </connector>
+                <connector uid="44" angle="90">
+                    <from>DT</from>
+                    <to>DT</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

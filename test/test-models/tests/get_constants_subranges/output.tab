@@ -1,0 +1,3 @@
+Time	constant[A]	constant[B]	constant[C]	constant[D]	constant[E]	FINAL TIME	INITIAL TIME	SAVEPER	TIME STEP
+0	0	0	1	15	50	1	0	1	1
+1								1	

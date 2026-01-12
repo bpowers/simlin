@@ -1,0 +1,3 @@
+Time	INITIAL TIME	FINAL TIME	TIME STEP	SAVEPER	var_min	var_max	var1[a]	var1[b]	var1[c]
+0	0	1	1	1	1.0	3.0	1.0	2.0	3.0
+1	0	1	1	1	1.0	3.0	1.0	2.0	3.0

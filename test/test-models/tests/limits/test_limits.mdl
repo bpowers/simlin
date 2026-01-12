@@ -1,0 +1,81 @@
+{UTF-8}
+Limited Flow=
+	1
+	~	Widgets/Month [-10,10,1]
+	~	The flow is limited to between negative 10 and positive 10, and has \
+		increments of 1
+	|
+
+Limited Stock= INTEG (
+	Limited Flow,
+		1)
+	~	Widgets [0,100]
+	~	The value of the stock is limited to between 0 and 100.
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 50
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Helvetica|12|B|0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,2,Limited Stock,626,250,40,20,3,3,0,0,0,0,0,0
+12,3,48,449,248,10,8,0,3,0,0,-1,0,0,0
+1,5,7,2,4,0,0,22,0,0,0,-1--1--1,,1|(557,248)|
+1,6,7,3,100,0,0,22,0,0,0,-1--1--1,,1|(487,248)|
+11,7,0,522,248,6,8,34,3,0,0,1,0,0,0
+10,8,Limited Flow,522,263,39,7,40,3,0,0,-1,0,0,0
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Day,Days
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Limited Stock
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:50
+26:50

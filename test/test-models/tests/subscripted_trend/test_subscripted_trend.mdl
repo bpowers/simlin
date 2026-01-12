@@ -1,0 +1,128 @@
+{UTF-8}
+Apples:
+        Macoun, Red Spy, Grimes Golden, Roxbury Russet
+        ~
+        ~               |
+
+Citrus:
+        Lemon, Lime, Orange, Clementine, Grapefruit
+        ~
+        ~               |
+
+input[Apples, Citrus]=
+	1+0.5*SIN(2*3.14159*Time/20)
+	~	widgets/Month
+	~		|
+
+average time=
+	6
+	~	months
+	~		|
+
+initial trend[Citrus]=
+	0
+	~	fraction/Month
+	~		|
+
+TREND of input[Apples, Citrus]=
+	TREND(input[Apples, Citrus], average time , initial trend[Citrus] )
+	~	fraction/Month
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+12,1,0,286,104,89,28,8,135,0,18,-1,0,0,0,-1--1--1,0-0-0,|12|B|128-0-0
+TREND - simple trend of input (fractional rate of change)
+10,14,TREND of input,350,230,57,11,8,3,0,16,0,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+10,15,initial trend,185,240,35,11,8,3,0,0,-1,0,0,0
+10,16,average time,185,290,40,11,8,3,0,0,-1,0,0,0
+10,17,input,185,185,17,11,8,3,0,0,-1,0,0,0
+10,19,Time,75,170,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,20,19,17,0,0,0,0,0,0,0,-1--1--1,,1|(127,176)|
+1,21,17,14,0,0,0,0,0,64,0,-1--1--1,,1|(248,202)|
+1,22,15,14,0,0,0,0,0,64,0,-1--1--1,,1|(249,235)|
+1,23,16,14,0,0,0,0,0,64,0,-1--1--1,,1|(260,262)|
+///---\\\
+:GRAPH TREND
+:TITLE TREND
+:SCALE
+:VAR input
+:SCALE
+:VAR input TREND
+:L<%^E!@
+1:TREND.vdf
+9:TREND
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+23:0
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:TREND of input[Apples,Citrus]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:100
+26:100
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:TREND
+48:
+6:Lemon
+6:Macoun

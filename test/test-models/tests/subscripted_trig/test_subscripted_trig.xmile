@@ -1,0 +1,363 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+	<header>
+		<product version="1.0" lang="en">Vensim</product>
+		<vendor>Ventana Systems, Inc.</vendor>
+		<created>
+		</created>
+		<modified>
+		</modified>
+		<name>
+		</name>
+		<caption>
+		</caption>
+	</header>
+	<sim_specs method="RK4" time_units="Month">
+		<start>0</start>
+		<stop>10</stop>
+		<dt>1</dt>
+	</sim_specs>
+	<dimensions>
+		<dim name="sub1">
+			<elem name="A" />
+			<elem name="B" />
+			<elem name="C" />
+		</dim>
+		<dim name="sub2">
+			<elem name="D" />
+			<elem name="E" />
+		</dim>
+	</dimensions>
+	<model>
+		<variables>
+			<aux name="sabs1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>ABS(var1[sub1])					</eqn>
+			</aux>
+			<aux name="sabs2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>ABS(var2[sub1,sub2])					</eqn>
+			</aux>
+			<aux name="sabs3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>ABS(var3[sub2])					</eqn>
+			</aux>
+			<aux name="sarccos1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>ARCCOS(var1[sub1])					</eqn>
+			</aux>
+			<aux name="sarccos2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>ARCCOS(var2[sub1,sub2])					</eqn>
+			</aux>
+			<aux name="sarccos3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>ARCCOS(var3[sub2])					</eqn>
+			</aux>
+			<aux name="sarcsin1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>ARCSIN(var1[sub1])					</eqn>
+			</aux>
+			<aux name="sarcsin2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>ARCSIN(var2[sub1,sub2])					</eqn>
+			</aux>
+			<aux name="sarcsin3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>ARCSIN(var3[sub2])					</eqn>
+			</aux>
+			<aux name="sarctan1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>ARCTAN(var1[sub1])					</eqn>
+			</aux>
+			<aux name="sarctan2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>ARCTAN(var2[sub1,sub2])					</eqn>
+			</aux>
+			<aux name="sarctan3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>ARCTAN(var3[sub2])					</eqn>
+			</aux>
+			<aux name="scos1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>COS(var1[sub1])					</eqn>
+			</aux>
+			<aux name="scos2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>COS(var2[sub1,sub2])					</eqn>
+			</aux>
+			<aux name="scos3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>COS(var3[sub2])					</eqn>
+			</aux>
+			<aux name="scosh1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>COSH(var1[sub1])					</eqn>
+			</aux>
+			<aux name="scosh2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>COSH(var2[sub1,sub2])					</eqn>
+			</aux>
+			<aux name="scosh3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>COSH(var3[sub2])					</eqn>
+			</aux>
+			<aux name="sexp1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>EXP(var1[sub1])					</eqn>
+			</aux>
+			<aux name="sexp2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>EXP(var2[sub1,sub2])					</eqn>
+			</aux>
+			<aux name="sexp3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>EXP(var3[sub2])					</eqn>
+			</aux>
+			<aux name="sln1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>LN(ABS(var1[sub1]))					</eqn>
+			</aux>
+			<aux name="sln2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>LN(ABS(var2[sub1,sub2]))					</eqn>
+			</aux>
+			<aux name="sln3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>LN(ABS(var3[sub2]))					</eqn>
+			</aux>
+			<aux name="ssin1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>SIN(var1[sub1])					</eqn>
+			</aux>
+			<aux name="ssin2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>SIN(var2[sub1,sub2])					</eqn>
+			</aux>
+			<aux name="ssin3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>SIN(var3[sub2])					</eqn>
+			</aux>
+			<aux name="ssinh1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>SINH(var1[sub1])					</eqn>
+			</aux>
+			<aux name="ssinh2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>SINH(var2[sub1,sub2])					</eqn>
+			</aux>
+			<aux name="ssinh3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>SINH(var3[sub2])					</eqn>
+			</aux>
+			<aux name="stan1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>TAN(var1[sub1])					</eqn>
+			</aux>
+			<aux name="stan2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>TAN(var2[sub1,sub2])					</eqn>
+			</aux>
+			<aux name="stan3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>TAN(var3[sub2])					</eqn>
+			</aux>
+			<aux name="stanh1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>TANH(var1[sub1])					</eqn>
+			</aux>
+			<aux name="stanh2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>TANH(var2[sub1,sub2])					</eqn>
+			</aux>
+			<aux name="stanh3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>TANH(var3[sub2])					</eqn>
+			</aux>
+			<aux name="var3">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>(Time+1)/15					</eqn>
+					<eqn>-0.2-Time/20					</eqn>
+			</aux>
+			<aux name="var1">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				</dimensions>
+					<eqn>0.1,0.3,0.8					</eqn>
+			</aux>
+			<aux name="var2">
+				<units></units>
+				<doc></doc>
+				<dimensions>
+				<dim name="sub1" />
+				<dim name="sub2" />
+				</dimensions>
+					<eqn>0.1,0.2;
+	0.4,0.5;
+	0.6,0.7;					</eqn>
+			</aux>
+		</variables>
+	</model>
+</xmile>

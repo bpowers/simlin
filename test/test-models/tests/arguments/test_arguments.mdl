@@ -1,0 +1,109 @@
+{UTF-8}
+constant=
+	29
+	~	
+	~		|
+
+Outer Multiple Inner Multiple=
+	DELAY1(Time , MODULO( constant , 4 ) )
+	~	
+	~		|
+
+Outer Multiple Inner Single=
+	DELAY1( Time , constant )
+	~	
+	~		|
+
+Outer Multiple Middle Multiple Inner Multiple=
+	SMOOTH N(DELAY3( Time , MODULO( constant , 3 ) ), constant , 1 , 2 )
+	~	
+	~		|
+
+Outer Multiple Middle Multiple Inner Single= 
+	SMOOTH N(DELAY3( Time , ABS( constant ) ), constant , 1 , 2 )
+	~	
+	~		|
+
+Outer Single Inner Multiple=
+	INITIAL( PULSE( constant , 2 ) )
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,Outer Multiple Inner Single,308,259,39,14,8,3,0,0,0,0,0,0
+10,2,Outer Multiple Inner Multiple,310,314,39,14,8,3,0,0,0,0,0,0
+10,3,Outer Multiple Middle Multiple Inner Single,306,368,58,14,8,3,0,0,0,0,0,0
+10,4,constant,79,225,22,8,8,3,0,0,0,0,0,0
+1,5,4,1,0,0,0,0,0,64,0,-1--1--1,,1|(178,239)|
+10,6,Time,444,306,21,8,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,7,6,1,0,0,0,0,0,64,0,-1--1--1,,1|(391,287)|
+1,8,4,2,0,0,0,0,0,128,0,-1--1--1,,1|(179,263)|
+1,9,6,2,0,0,0,0,0,128,0,-1--1--1,,1|(392,308)|
+1,10,4,3,0,0,0,0,0,128,0,-1--1--1,,1|(181,289)|
+1,11,6,3,0,0,0,0,0,128,0,-1--1--1,,1|(388,331)|
+10,12,Outer Multiple Middle Multiple Inner Multiple,307,441,61,14,8,3,0,0,0,0,0,0
+1,13,4,12,0,0,0,0,0,128,0,-1--1--1,,1|(184,325)|
+1,14,6,12,0,0,0,0,0,128,0,-1--1--1,,1|(383,365)|
+10,15,Outer Single Inner Multiple,305,191,48,14,8,3,0,0,0,0,0,0
+1,16,4,15,0,0,0,0,0,128,0,-1--1--1,,1|(172,211)|
+1,17,6,15,0,0,0,0,0,128,0,-1--1--1,,1|(383,255)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+1:/Applications/Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Day,Days
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Outer Multiple Middle Multiple Inner Multiple
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:100
+26:100

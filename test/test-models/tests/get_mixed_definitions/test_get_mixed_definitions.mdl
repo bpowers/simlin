@@ -1,0 +1,228 @@
+{UTF-8}
+DimAB:
+	A, B
+	~
+	~	|
+
+dim:
+        (d1-d4)
+	~	
+	~		|
+
+Type:
+	ext data, ext const, const
+	~	
+	~		|
+
+Variable[ext data,DimAB]:INTERPOLATE::=
+	GET DIRECT DATA('input.xlsx', 'Sheet1' , '4' , 'C5' ) ~~|
+Variable[ext const,DimAB]=
+	GET DIRECT CONSTANTS('input.xlsx', 'Sheet1' , 'C8*' ) ~~|
+Variable[const,DimAB]=
+	2, 4
+	~	
+	~		|
+
+Variable 10[Type,DimAB]=
+	Variable[Type,DimAB]*10
+	~	
+	~		|
+
+adim:
+        (a1-a2)
+	~	
+	~		|
+
+outdata 1[dim]=
+        data var 1[dim]
+	~	
+	~		|
+
+outdata 2[dim,adim]=
+        data var 2[dim,adim]
+	~	
+	~		|
+
+outdata3[dim,adim]=
+        data var 3[dim,adim]
+	~	
+	~		|
+
+const var 1[d1]=
+        GET DIRECT CONSTANTS('input.xlsx', 'Sheet2', 'var_d1*') ~~|
+const var 1[d2]=
+        5 ~~|
+const var 1[d3]=
+        GET DIRECT CONSTANTS('input.xlsx', 'Sheet2', 'var_d3') ~~|
+const var 1[d4]=
+        3
+	~	
+	~		|
+
+const var 2[d1, a1]  =
+        GET DIRECT CONSTANTS('input.xlsx', 'Sheet2', 'var_d1') ~~|
+const var 2[d2, a1]  =
+        2 ~~|
+const var 2[d3, a1]  =
+        3 ~~|
+const var 2[d4, a1]  =
+        4 ~~|
+const var 2[dim, a2]=
+        GET DIRECT CONSTANTS('input.xlsx', 'Sheet2', 'var_dim*')
+	~	
+	~		|
+
+const var 3[d1, a1]  =
+        GET DIRECT CONSTANTS('input.xlsx', 'Sheet2', 'var_d1') ~~|
+const var 3[d2, a1]  =
+        2 ~~|
+const var 3[d3, a1]  =
+        3 ~~|
+const var 3[d4, a1]  =
+        4 ~~|
+const var 3[d1, a2]  =
+        5 ~~|
+const var 3[d2, a2]  =
+        6 ~~|
+const var 3[d3, a2]  =
+        GET DIRECT CONSTANTS('input.xlsx', 'Sheet2', 'var_d3') ~~|
+const var 3[d4, a2]  =
+        8
+	~	
+	~		|
+
+data var 1[d1]:=
+        GET DIRECT DATA('input.xlsx', 'Sheet2', 'time', 'data_d1') ~~|
+data var 1[d2]=
+        5 ~~|
+data var 1[d3]:=
+        GET DIRECT DATA('input.xlsx', 'Sheet2', 'time', 'data_d3') ~~|
+data var 1[d4]=
+        3
+	~	
+	~		|
+
+data var 2[d1, a1]  :=
+        GET DIRECT DATA('input.xlsx', 'Sheet2', 'time', 'data_d1') ~~|
+data var 2[d2, a1]  =
+        2 ~~|
+data var 2[d3, a1]  =
+        3 ~~|
+data var 2[d4, a1]  =
+        4 ~~|
+data var 2[dim, a2]:=
+        GET DIRECT DATA('input.xlsx', 'Sheet2', 'time', 'data_dim')
+	~	
+	~		|
+
+data var 3[d1, a1]  :=
+        GET DIRECT DATA('input.xlsx', 'Sheet2', 'time', 'data_d1') ~~|
+data var 3[d2, a1]  =
+        2 ~~|
+data var 3[d3, a1]  =
+        3 ~~|
+data var 3[d4, a1]  =
+        4 ~~|
+data var 3[d1, a2]  =
+        5 ~~|
+data var 3[d2, a2]  =
+        6 ~~|
+data var 3[d3, a2]  :=
+        GET DIRECT DATA('input.xlsx', 'Sheet2', 'time', 'data_d3') ~~|
+data var 3[d4, a2]  =
+        8
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,Variable,451,161,28,11,8,3,0,0,0,0,0,0
+10,2,Variable 10,677,174,38,11,8,3,0,0,0,0,0,0
+1,3,1,2,0,0,0,0,0,128,0,-1--1--1,,1|(552,166)|
+10,4,const var 1,307,407,38,11,8,3,0,0,-1,0,0,0
+10,5,const var 2,285,489,38,11,8,3,0,0,-1,0,0,0
+10,6,const var 3,227,574,38,11,8,3,0,0,-1,0,0,0
+10,7,outdata 1,696,350,31,11,8,3,0,0,-1,0,0,0
+10,8,data var 1,696,388,33,11,8,3,0,0,-1,0,0,0
+1,9,8,7,0,0,0,0,0,0,0,-1--1--1,,1|(696,376)|
+10,10,outdata 2,681,440,31,11,8,3,0,0,-1,0,0,0
+10,11,data var 2,681,478,33,11,8,3,0,0,-1,0,0,0
+1,12,11,10,0,0,0,0,0,0,0,-1--1--1,,1|(681,466)|
+10,13,outdata3,647,558,29,11,8,3,0,0,-1,0,0,0
+10,14,data var 3,647,596,33,11,8,3,0,0,-1,0,0,0
+1,15,14,13,0,0,0,0,0,0,0,-1--1--1,,1|(647,584)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+30:?input.xlsx=input.xlsx
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:Variable[Type,DimAB]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:10
+26:10
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:Current
+48:
+6:A
+6:a1
+6:B
+6:const
+6:d1
+6:ext const
+6:ext data

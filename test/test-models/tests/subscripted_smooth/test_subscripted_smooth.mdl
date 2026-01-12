@@ -1,0 +1,175 @@
+{UTF-8}
+Apples:
+	Macoun, Red Spy, Grimes Golden, Roxbury Russet
+	~	
+	~		|
+
+Citrus:
+	Lemon, Lime, Orange, Clementine, Grapefruit
+	~	
+	~		|
+
+Initial value subscript[Citrus]=
+	4, 5, 6, 3, 7
+	~	
+	~		|
+
+Input SM[Apples,Citrus]=
+	-1 + STEP(3, 3)
+	~	
+	~		|
+
+SmoothI output[Apples,Citrus]=
+	SMOOTHI(Input SM[Apples,Citrus], Adjustment Time, Initial value subscript[Citrus] )
+	~	
+	~		|
+
+Variable Order=
+	2 + STEP(1, 1)
+	~	
+	~		|
+
+Smooth N output[Apples,Citrus]= 
+	SMOOTH N(Input SM[Apples,Citrus], Adjustment Time , Initial Value , Variable Order )
+	~	
+	~		|
+
+Smooth3I output[Apples,Citrus]=
+	SMOOTH3I(Input SM[Apples,Citrus], Adjustment Time, Initial Value )
+	~	
+	~		|
+
+Initial Value=
+	5
+	~	
+	~		|
+
+Smooth3 output[Apples,Citrus]=
+	SMOOTH3(Input SM[Apples,Citrus],Adjustment Time)
+	~	
+	~		|
+
+Smooth output[Apples,Citrus]=
+	SMOOTH(Input SM[Apples,Citrus], Adjustment Time )
+	~	
+	~		|
+
+Adjustment Time=
+	2 + STEP(2, 1)
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 20
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.25
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,Input SM,451,248,21,19,8,131,0,0,0,0,0,0
+10,2,Smooth3I output,404,340,57,11,8,3,0,0,0,0,0,0
+1,3,1,2,0,0,0,0,0,64,0,-1--1--1,,1|(428,291)|
+10,4,Adjustment Time,664,246,59,11,8,3,0,0,0,0,0,0
+1,5,4,2,1,0,0,0,0,64,0,-1--1--1,,1|(537,302)|
+10,6,SmoothI output,693,346,53,11,8,3,0,0,0,0,0,0
+1,7,1,6,0,0,0,0,0,64,0,-1--1--1,,1|(562,292)|
+1,8,4,6,0,0,0,0,0,64,0,-1--1--1,,1|(676,289)|
+10,9,Smooth output,381,154,51,11,8,3,0,0,0,0,0,0
+10,10,Smooth3 output,740,164,55,11,8,3,0,0,0,0,0,0
+1,11,1,9,0,0,0,0,0,64,0,-1--1--1,,1|(417,202)|
+1,12,4,9,0,0,0,0,0,64,0,-1--1--1,,1|(529,202)|
+1,13,1,10,0,0,0,0,0,64,0,-1--1--1,,1|(580,210)|
+1,14,4,10,0,0,0,0,0,64,0,-1--1--1,,1|(696,210)|
+10,15,Smooth N output,571,123,59,11,8,3,0,0,0,0,0,0
+1,16,1,15,0,0,0,0,0,64,0,-1--1--1,,1|(509,186)|
+1,17,4,15,0,0,0,0,0,64,0,-1--1--1,,1|(621,190)|
+10,18,Initial Value,439,403,43,11,8,3,0,0,0,0,0,0
+1,19,18,2,0,0,0,0,0,128,0,-1--1--1,,1|(424,377)|
+10,20,Initial Value,479,66,51,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,21,20,15,0,0,0,0,0,128,1,-1--1--1,,1|(518,90)|
+1,22,20,15,0,0,0,0,0,128,1,-1--1--1,,1|(518,90)|
+10,23,Variable Order,641,66,51,11,8,3,0,0,0,0,0,0
+1,24,23,15,0,0,0,0,0,128,1,-1--1--1,,1|(611,90)|
+1,25,23,15,0,0,0,0,0,128,1,-1--1--1,,1|(611,90)|
+1,26,20,15,0,0,0,0,0,128,1,-1--1--1,,1|(518,90)|
+10,27,Initial value subscript,603,409,36,19,8,3,0,0,0,0,0,0
+1,28,27,6,0,0,0,0,0,128,0,-1--1--1,,1|(647,377)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Adjustment Time
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:20
+26:20
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:1
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:Current
+47:output
+48:
+6:Clementine
+6:Grapefruit
+6:Grimes Golden
+6:Lemon
+6:Lime
+6:Macoun
+6:Orange
+6:Red Spy
+6:Roxbury Russet

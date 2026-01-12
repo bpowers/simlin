@@ -1,0 +1,3 @@
+Time	a2a	a2b	b2a	b2b	FINAL TIME	INITIAL TIME	matrix[A,A]	matrix[A,B]	matrix[B,A]	matrix[B,B]	SAVEPER	TIME STEP
+0	1	10	5	40	1	0	1	10	5	40	1	1
+1	1	10	5	40							1	

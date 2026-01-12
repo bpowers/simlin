@@ -1,0 +1,143 @@
+{UTF-8}
+comp1[dim1,dim2]=
+	IF THEN ELSE(dim1=dim2, 1, 0)
+	~	
+	~		|
+
+comp2[dim1,dim3]=
+	IF THEN ELSE(dim1=dim3, 1, 0)
+	~	
+	~		|
+
+comp3[dim1,dim3]=
+	IF THEN ELSE(dim3=dim1, 1, 0)
+	~	
+	~		|
+
+comp4[dim1,dim4]=
+	IF THEN ELSE(dim1=dim4, 1, 0)
+	~	
+	~		|
+
+comp5[dim1,dim2]=
+	IF THEN ELSE(dim1=dim2:AND:Time>5, 1, 0)
+	~	
+	~		|
+
+comp6[dim1,dim2]=
+	IF THEN ELSE(Time>5:OR:dim1=dim2, 1, 0)
+	~	
+	~		|
+
+comp7[dim1,dim2]=
+	IF THEN ELSE(:NOT:dim1=dim2, 1, 0)
+	~	
+	~		|
+
+comp8[dim1,dim2]=
+	IF THEN ELSE(dim1<>dim2, 1, 0)
+	~	
+	~		|
+
+dim1:
+	A, B, C
+	~	
+	~		|
+
+dim2:
+	A, B, C
+	~	
+	~		|
+
+dim3:
+	A, C, B
+	~	
+	~		|
+
+dim4:
+	A, B
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,comp1,488,136,23,11,8,3,0,0,0,0,0,0
+10,2,comp2,479,245,23,11,8,3,0,0,0,0,0,0
+10,3,comp3,480,354,23,11,8,3,0,0,0,0,0,0
+10,4,comp4,490,438,23,11,8,3,0,0,0,0,0,0
+10,5,comp5,490,516,23,11,8,3,0,0,0,0,0,0
+10,6,Time,401,520,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,7,6,5,0,0,0,0,0,64,0,-1--1--1,,1|(440,518)|
+10,8,comp6,477,573,23,11,8,3,0,0,0,0,0,0
+1,9,6,8,0,0,0,0,0,128,0,-1--1--1,,1|(432,542)|
+10,10,comp7,473,621,23,11,8,3,0,0,0,0,0,0
+10,11,comp8,483,668,23,11,8,3,0,0,0,0,0,0
+///---\\\
+:L<%^E!@
+1:Current.vdf
+1:Z:\CREAF\dev\pysd\tests\test-models\tests\invert_matrix\Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:comp8[dim1,dim1]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:10
+26:10
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:output
+47:Current
+48:
+6:A

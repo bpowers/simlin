@@ -2,8 +2,7 @@
 #
 # Cloud initialization script for Claude Code on the web and Codex Web.
 # This script sets up the development environment for Simlin, ensuring
-# that git submodules are initialized, git hooks are installed, and
-# basic dependencies are checked.
+# that git hooks are installed and basic dependencies are checked.
 #
 # This script is idempotent - it can be run multiple times safely.
 #
@@ -70,24 +69,7 @@ install_protoc() {
 echo "Setting up Simlin development environment..."
 echo ""
 
-# 1. Initialize git submodules
-echo -n "Initializing git submodules... "
-if git submodule update --init --recursive >/dev/null 2>&1; then
-    echo -e "${GREEN}done${NC}"
-else
-    echo -e "${RED}failed${NC}"
-    echo -e "${YELLOW}Warning: Could not initialize submodules. Some tests may not work.${NC}"
-fi
-
-# 2. Check if test-models submodule has content
-if [ -d "test/test-models" ] && [ -n "$(ls -A test/test-models 2>/dev/null)" ]; then
-    echo -e "  ${GREEN}✓${NC} test/test-models submodule initialized"
-else
-    echo -e "  ${YELLOW}!${NC} test/test-models submodule is empty"
-    echo -e "    Run: git submodule update --init --recursive"
-fi
-
-# 3. Install git hooks
+# 1. Install git hooks
 echo -n "Installing git hooks... "
 if [ -f ".git/hooks/pre-commit" ] && [ -L ".git/hooks/pre-commit" ]; then
     # Hook already exists and is a symlink
@@ -106,7 +88,7 @@ else
     echo -e "${GREEN}done${NC}"
 fi
 
-# 4. Check for required tools
+# 2. Check for required tools
 echo ""
 echo "Checking required tools..."
 
@@ -186,7 +168,7 @@ else
     echo -e "${YELLOW}not found (optional, needed for pysimlin)${NC}"
 fi
 
-# 5. Install yarn dependencies if node_modules doesn't exist
+# 3. Install yarn dependencies if node_modules doesn't exist
 echo ""
 if [ ! -d "node_modules" ]; then
     echo -n "Installing yarn dependencies... "
@@ -204,7 +186,7 @@ else
     echo -e "Yarn dependencies: ${GREEN}already installed${NC}"
 fi
 
-# 6. Install and configure AI tools for pre-commit hook
+# 4. Install and configure AI tools for pre-commit hook
 echo ""
 echo "Setting up AI tools for pre-commit hook..."
 

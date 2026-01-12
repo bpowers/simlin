@@ -1,0 +1,13 @@
+*.vdf
+*.vdfx
+*.3vm
+*.2mdl
+*.1mdl
+*.0mdl
+*.pyc
+*~
+*.isdb
+*.py
+.~*
+editor.aud
+samples/pendulum/Untitled.cin

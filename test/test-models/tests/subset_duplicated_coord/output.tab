@@ -1,0 +1,3 @@
+Time	FINAL TIME	INITIAL TIME	SAVEPER	sub[A]	sub[B]	sub[C]	sub1[A]	sub1[B]	sub1[C]	TIME STEP	variable[A,A]	variable[A,B]	variable[A,C]	variable[B,A]	variable[B,B]	variable[B,C]	variable[C,A]	variable[C,B]	variable[C,C]
+0	1	0	1	2	5	8	7	8	9	1	1	2	3	4	5	6	7	8	9
+1			1	2	5	8	7	8	9										

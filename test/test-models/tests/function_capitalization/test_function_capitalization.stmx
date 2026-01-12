@@ -1,0 +1,90 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs isee:simulation_delay="0" method="Euler" time_units="Months">
+        <start>0</start>
+        <stop>20</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="TIME STEP">
+                <doc>	The time step for the simulation.</doc>
+                <eqn>1</eqn>
+                <units>Month</units>
+            </aux>
+            <aux name="INITIAL TIME">
+                <doc>	The initial time for the simulation.</doc>
+                <eqn>0</eqn>
+                <units>Month</units>
+            </aux>
+            <aux name="FINAL TIME">
+                <doc>	The final time for the simulation.</doc>
+                <eqn>20</eqn>
+                <units>Month</units>
+            </aux>
+            <aux name="test all lower abs">
+                <doc>	Note that I modified this in a text editor to get around vensim forcing capitalization.</doc>
+                <eqn>ABS(StockA)</eqn>
+            </aux>
+            <flow name="FlowA">
+                <eqn>1</eqn>
+            </flow>
+            <stock name="StockA">
+                <eqn>-10</eqn>
+                <inflow>FlowA</inflow>
+            </stock>
+            <aux name="test mixed case Abs">
+                <doc>	Note that I modified this in a text editor to get around vensim forcing capitalization.</doc>
+                <eqn>ABS(StockA)</eqn>
+            </aux>
+            <aux name="SAVEPER">
+                <doc>	The frequency with which output is stored.</doc>
+                <eqn>TIME_STEP</eqn>
+                <units>Month</units>
+            </aux>
+            <aux name="test allcaps ABS">
+                <eqn>ABS(StockA)</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <stock name="StockA" x="335" y="104"/>
+                <flow name="FlowA" x="236" y="101">
+                    <pts>
+                        <pt x="168" y="101"/>
+                        <pt x="335" y="104"/>
+                    </pts>
+                </flow>
+                <aux name="test_all_lower_abs" x="333" y="197"/>
+                <connector uid="8" angle="268.76802259736036">
+                    <from>StockA</from>
+                    <to>test_all_lower_abs</to>
+                </connector>
+                <aux name="test_allcaps_ABS" x="458" y="167"/>
+                <aux name="test_mixed_case_Abs" x="485" y="100"/>
+                <connector uid="11" angle="-27.121303404158692">
+                    <from>StockA</from>
+                    <to>test_allcaps_ABS</to>
+                </connector>
+                <connector uid="12" angle="1.5275254422129285">
+                    <from>StockA</from>
+                    <to>test_mixed_case_Abs</to>
+                </connector>
+                <connector uid="33" angle="90">
+                    <from>TIME_STEP</from>
+                    <to>SAVEPER</to>
+                </connector>
+                <aux name="SAVEPER" x="100" y="151"/>
+                <aux name="FINAL_TIME" x="100" y="151"/>
+                <aux name="INITIAL_TIME" x="100" y="151"/>
+                <aux name="TIME_STEP" x="100" y="151"/>
+            </view>
+        </views>
+    </model>
+</xmile>

@@ -1,0 +1,157 @@
+{UTF-8}
+elastic acceleration=
+	-elastic constant/mass*position
+	~	m/s/s
+	~	Acceleration due to the elastic force.
+	|
+
+elastic constant=
+	0.5
+	~	kg/s/s
+	~	Elastic constant of the spring.
+	|
+
+initial position=
+	50
+	~	m
+	~	Initial position with the particule.
+	|
+
+mass=
+	10
+	~	kg
+	~	Mass of the object
+	|
+
+position= INTEG (
+	speed,
+		initial position)
+	~	m
+	~	Position of the particule.
+	|
+
+speed= INTEG (
+	elastic acceleration,
+		0)
+	~	m/s
+	~	Speed of the particule.
+	|
+
+********************************************************
+	.1/s
+********************************************************~
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 50
+	~	Second
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Second
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 0.1
+	~	Second [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.01
+	~	Second [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$-1--1--1,0,|12||-1--1--1|-1--1--1|-1--1--1|-1--1--1|-1--1--1|96,96,100,0
+10,1,position,352,118,40,20,3,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,2,speed,346,243,40,20,3,3,0,0,-1,0,0,0,0,0,0,0,0,0
+12,3,48,194,117,30,30,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+11,4,0,268,117,6,8,2,3,0,0,1,0,0,0,0,0,0,0,0,0
+1,5,4,3,100,0,0,22,0,192,0,-1--1--1,,1|(243,117)|
+1,6,4,1,4,0,0,22,0,192,0,-1--1--1,,1|(293,117)|
+1,7,2,4,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,8,initial position,487,119,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,9,8,1,0,0,0,0,0,64,1,-1--1--1,,1|(0,0)|
+12,10,48,180,235,30,30,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,11,13,10,100,0,0,22,0,192,0,-1--1--1,,1|(231,235)|
+1,12,13,2,4,0,0,22,0,192,0,-1--1--1,,1|(285,235)|
+11,13,0,258,235,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,14,elastic acceleration,258,273,75,30,40,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,15,1,14,0,0,0,0,0,192,0,-1--1--1,,1|(0,0)|
+10,16,elastic constant,226,354,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,17,16,14,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+10,18,mass,333,352,75,30,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,19,18,14,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+///---\\\
+:L<%^E!@
+1:output.vdfx
+1:current.vdfx
+4:Time
+5:position
+9:output
+19:100,0
+24:0
+25:50
+26:50
+57:1
+54:0
+55:0
+82:0
+86:0
+59:0
+56:0
+58:0
+71:0
+110:0
+111:0
+44:0
+46:0
+45:1
+49:1
+50:0
+51:
+52:
+53:
+43:Z:\dev\pysd\tests\test-models\samples\simple_harmonic_oscillator\output.tab
+47:
+48:
+22:s,Second
+15:0,0,0,0,0,0
+27:0,
+34:0,
+42:1
+72:0
+73:0
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+95:0
+96:0
+97:0
+77:0
+78:0
+102:1
+93:0
+94:0
+92:0
+91:0
+90:0
+87:0
+75:
+43:Z:\dev\pysd\tests\test-models\samples\simple_harmonic_oscillator\output.tab
+103:8,8,8,3,8
+105:0,0,0,0,0,0,0,0,0,0
+104:Courier|12||0-0-0|0-0-0|-1--1--1|0-0-255|192-192-192|-1--1--1

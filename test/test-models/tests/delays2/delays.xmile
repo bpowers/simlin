@@ -1,0 +1,413 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE">
+	<header>
+		<smile version="1.0" namespace="std, isee"/>
+		<name>delays</name>
+		<uuid>5d773e8c-1d7c-4d1d-955e-fadbb441a915</uuid>
+		<vendor>isee systems, inc.</vendor>
+		<product version="1.9.4" isee:build_number="1987" isee:saved_by_v1="true" lang="en">Stella Professional</product>
+	</header>
+	<sim_specs isee:sim_duration="1.2" isee:simulation_delay="0.1" isee:restore_on_start="false" method="Euler" time_units="months" isee:instantaneous_flows="false">
+		<start>1</start>
+		<stop>13</stop>
+		<dt reciprocal="true">4</dt>
+	</sim_specs>
+	<isee:prefs show_module_prefix="true" live_update_on_drag="true" show_restore_buttons="false" layer="model" interface_scale_ui="true" interface_max_page_width="10000" interface_max_page_height="10000" interface_min_page_width="0" interface_min_page_height="0" saved_runs="5" keep="false" rifp="true"/>
+	<isee:multiplayer_settings include_chat="true" allow_observers="false" advance_time_increment="1" observer_start_page="home_page" enabled="false"/>
+	<isee:time_formats default_format="Builtin">
+		<isee:time_format name="Builtin" type="adaptive"/>
+	</isee:time_formats>
+	<default_format/>
+	<model_units/>
+	<model>
+		<isee:extra_collection_variables>
+			<isee:extra_collection_variable name="Trend_in_Input"/>
+			<isee:extra_collection_variable name="smth_3"/>
+			<isee:extra_collection_variable name="smth3_output"/>
+			<isee:extra_collection_variable name="trend_output"/>
+			<isee:extra_collection_variable name="delay3_outflow"/>
+			<isee:extra_collection_variable name="delay3_output"/>
+		</isee:extra_collection_variables>
+		<variables>
+			<aux name="Input">
+				<eqn>IF (TIME &gt; 3) THEN 10 ELSE 5</eqn>
+			</aux>
+			<aux name="delay3 output">
+				<eqn>DELAY3(Input, Delay_Time)</eqn>
+			</aux>
+			<aux name="Delay Time">
+				<eqn>5</eqn>
+			</aux>
+			<stock name="delay 1">
+				<eqn>Input*(Delay_Time/3)</eqn>
+				<inflow>delay3_inflow</inflow>
+				<outflow>delay3_flow_1</outflow>
+			</stock>
+			<flow name="delay3 inflow">
+				<eqn>Input</eqn>
+			</flow>
+			<flow name="delay3 outflow">
+				<eqn>delay_3/(Delay_Time/3)</eqn>
+			</flow>
+			<flow name="delay3 flow 1">
+				<eqn>delay_1/(Delay_Time/3)</eqn>
+			</flow>
+			<stock name="delay 2">
+				<eqn>Input*(Delay_Time/3)</eqn>
+				<inflow>delay3_flow_1</inflow>
+				<outflow>delay3_flow_2</outflow>
+			</stock>
+			<flow name="delay3 flow 2">
+				<eqn>delay_2/(Delay_Time/3)</eqn>
+			</flow>
+			<stock name="delay 3">
+				<eqn>Input*(Delay_Time/3)</eqn>
+				<inflow>delay3_flow_2</inflow>
+				<outflow>delay3_outflow</outflow>
+			</stock>
+			<aux name="smth3 output">
+				<eqn>SMTH3(Input, Delay_Time)</eqn>
+			</aux>
+			<flow name="smth3 change 1">
+				<eqn>(Input - smth_1)/(Delay_Time/3)</eqn>
+			</flow>
+			<stock name="smth 1">
+				<eqn>Input</eqn>
+				<inflow>smth3_change_1</inflow>
+			</stock>
+			<stock name="smth 2">
+				<eqn>Input</eqn>
+				<inflow>smth3_change_2</inflow>
+			</stock>
+			<flow name="smth3 change 2">
+				<eqn>(smth_1 - smth_2)/(Delay_Time/3)</eqn>
+			</flow>
+			<stock name="smth 3">
+				<eqn>Input</eqn>
+				<inflow>smth3_change_3</inflow>
+			</stock>
+			<flow name="smth3 change 3">
+				<eqn>(smth_2 - smth_3)/(Delay_Time/3)</eqn>
+			</flow>
+			<stock name="Average Input">
+				<eqn>Input</eqn>
+				<inflow>Change_in_Average</inflow>
+			</stock>
+			<flow name="Change in Average">
+				<eqn>(Input-Average_Input)/Delay_Time</eqn>
+			</flow>
+			<aux name="Trend in Input">
+				<eqn>(Input-Average_Input)/(Average_Input*Delay_Time)</eqn>
+			</aux>
+			<aux name="trend output">
+				<eqn>TREND(Input, Delay_Time)</eqn>
+			</aux>
+		</variables>
+		<views>
+			<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+				<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<isee:loop_indicator color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+				<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="black" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="black" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="black" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="black" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+					<isee:series_styles>
+						<isee:series_style color="blue" thickness="1"/>
+						<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF7F00" thickness="1"/>
+						<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF007F" thickness="1"/>
+						<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#C8C8C8" thickness="1"/>
+					</isee:series_styles>
+				</graph>
+				<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+				<button color="black" background="#E0E0E0" font_size="12pt" border_width="thin" border_style="solid" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" isee:highlight_on_hover="false" isee:highlight_color="#959595"/>
+				<isee:annotation color="black" background="#E0E0E0" font_size="12pt" border_width="thin" border_style="solid" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" isee:highlight_on_hover="false" isee:highlight_color="#959595" popup_corner_radius="0" popup_background_color="#FFFECF"/>
+				<slider color="black" background="#E0E0E0" font_size="12pt" num_ticks="3" label_side="top" wrap_title="true" vertical="false" isee:fancy_appearance="false" isee:show_hover_tip="when_deciding" input_expands="true" input_width="100"/>
+				<isee:sim_speed_slider color="black" background="white"/>
+				<isee:time_slider color="black" background="white"/>
+				<isee:pie_input color="black" background="white" font_size="12pt" legend_position="bottom" isee:transparent="false"/>
+				<knob color="#66CC66" background="#E0E0E0" font_size="12pt" label_side="bottom" wrap_title="true"/>
+				<numeric_input color="black" background="#E0E0E0" font_size="12pt" label_side="left" wrap_title="true" input_expands="false" input_width="100"/>
+				<switch color="black" background="#E0E0E0" font_size="12pt" label_side="top" wrap_title="true" isee:appearance="switch" isee:on_color="green"/>
+				<options color="black" background="white" appearance="radio-buttons" arrangement="vertical"/>
+				<graphical_input color="black" background="#E0E0E0" font_size="12pt" isee:show_hover_tip="true"/>
+				<group_input color="black" background="#E0E0E0" font_size="12pt"/>
+				<lamp color="black" background="white" font_size="9pt"/>
+				<gauge color="black" background="white" font_size="9pt" needle_color="#F09F72" bar_color="#EEEEEE" bar_progress_color="black" appearance="radial" num_major_ticks="11" num_minor_ticks="11" show_numeric_value="true"/>
+				<isee:spatial_map color="black" background="white" font_size="12pt"/>
+				<isee:animation_object color="black" background="white" font_size="12pt"/>
+				<isee:navigation_widget color="black" background="white" border_color="#999999" border_width="thin" border_style="solid" item_spacing="6" appearance="tabs" corner_radius="4" selected_item_color="black" selected_item_background="white" item_background="#DDDDDD"/>
+				<isee:shape color="black" background="white" opacity="1" transparent_background="true"/>
+				<isee:selector color="black" background="white"/>
+				<isee:iframe color="black" background="white"/>
+				<isee:financial_table color="black" background="white" auto_fit="true" first_column_width="250" other_column_width="100" header_font_style="normal" header_font_weight="bold" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="14pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+			</style>
+			<view isee:show_pages="false" background="white" page_width="213" page_height="305" isee:page_cols="7" isee:page_rows="3" zoom="80" isee:popup_graphs_are_comparative="true" type="stock_flow">
+				<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+					<stock color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="45" height="35"/>
+					</stock>
+					<flow color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom"/>
+					<isee:placeholder color="#228B22" background="white" font_color="#228B22" label_side="bottom"/>
+					<module color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="55" height="45"/>
+					</module>
+					<aux color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</aux>
+					<group color="red" background="white" font_color="red" font_size="9pt"/>
+					<connector color="#FF007F" background="white" font_color="#FF007F" font_size="9pt" isee:thickness="1"/>
+					<text_box color="blue" background="white" text_align="left" vertical_text_align="top" font_size="9pt"/>
+					<isee:loop_indicator color="blue" background="white" font_color="blue" font_size="9pt"/>
+					<numeric_display color="blue" background="white" text_align="left" vertical_text_align="top" font_size="9pt" isee:transparent="false"/>
+					<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#666666" isee:graph_area_color="white" legend_position="right" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="black" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="black" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="black" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="black" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+						<isee:series_styles>
+							<isee:series_style color="blue" thickness="1"/>
+							<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF7F00" thickness="1"/>
+							<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF007F" thickness="1"/>
+							<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#C8C8C8" thickness="1"/>
+						</isee:series_styles>
+					</graph>
+					<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+				</style>
+				<connector uid="1" angle="6.34019">
+					<from>Input</from>
+					<to>delay3_output</to>
+				</connector>
+				<connector uid="2" angle="167.471">
+					<from>Delay_Time</from>
+					<to>delay3_output</to>
+				</connector>
+				<stacked_container uid="3" x="703.833" y="62.3333" width="350" height="250">
+					<graph width="350" height="250" type="time_series" isee:points_only="false" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" title="Delay3" isee:fill_intensity="0.1" left_axis_multi_scale="false" left_axis_auto_scale="true" right_axis_multi_scale="true" right_axis_auto_scale="true">
+						<plot color="red" isee:keep_zero_visible="false" pen_width="1" index="0" show_y_axis="true">
+							<entity name="delay3_output"/>
+						</plot>
+						<plot color="fuchsia" isee:keep_zero_visible="false" pen_width="1" index="1" show_y_axis="true">
+							<entity name="delay3_outflow"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<connector uid="4" angle="102.529">
+					<from>Input</from>
+					<to>delay3_inflow</to>
+				</connector>
+				<connector uid="5" angle="0">
+					<from>Delay_Time</from>
+					<to>delay3_outflow</to>
+				</connector>
+				<connector uid="6" angle="296.565">
+					<from>delay_1</from>
+					<to>delay3_flow_1</to>
+				</connector>
+				<connector uid="7" angle="139.399">
+					<from>Delay_Time</from>
+					<to>delay3_flow_1</to>
+				</connector>
+				<connector uid="8" angle="32.0054">
+					<from>Delay_Time</from>
+					<to>delay3_flow_2</to>
+				</connector>
+				<connector uid="9" angle="313.363">
+					<from>delay_2</from>
+					<to>delay3_flow_2</to>
+				</connector>
+				<connector uid="10" angle="313.363">
+					<from>delay_3</from>
+					<to>delay3_outflow</to>
+				</connector>
+				<connector uid="11" angle="282.529">
+					<from>Input</from>
+					<to>smth3_output</to>
+				</connector>
+				<connector uid="12" angle="243.435">
+					<from>Delay_Time</from>
+					<to>smth3_output</to>
+				</connector>
+				<connector uid="13" angle="263.66">
+					<from>Delay_Time</from>
+					<to>smth3_change_1</to>
+				</connector>
+				<connector uid="14" angle="263.66">
+					<from>Input</from>
+					<to>smth3_change_1</to>
+				</connector>
+				<connector uid="15" angle="238.57">
+					<from>smth_1</from>
+					<to>smth3_change_1</to>
+				</connector>
+				<connector uid="16" angle="273.18">
+					<from>smth_1</from>
+					<to>smth3_change_2</to>
+				</connector>
+				<connector uid="17" angle="276.34">
+					<from>Delay_Time</from>
+					<to>smth3_change_2</to>
+				</connector>
+				<connector uid="18" angle="246.038">
+					<from>smth_2</from>
+					<to>smth3_change_2</to>
+				</connector>
+				<connector uid="19" angle="214.287">
+					<from>smth_3</from>
+					<to>smth3_change_3</to>
+				</connector>
+				<connector uid="20" angle="310.601">
+					<from>Delay_Time</from>
+					<to>smth3_change_3</to>
+				</connector>
+				<connector uid="21" angle="270">
+					<from>smth_2</from>
+					<to>smth3_change_3</to>
+				</connector>
+				<stacked_container uid="22" x="706.833" y="360.333" width="350" height="250">
+					<graph width="350" height="250" type="time_series" isee:points_only="false" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" isee:fill_intensity="0.1" left_axis_multi_scale="false" left_axis_auto_scale="true" right_axis_multi_scale="true" right_axis_auto_scale="true">
+						<plot color="red" isee:keep_zero_visible="false" pen_width="1" index="0" show_y_axis="true">
+							<entity name="smth3_output"/>
+						</plot>
+						<plot color="fuchsia" isee:keep_zero_visible="false" pen_width="1" index="1" show_y_axis="true">
+							<entity name="smth_3"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<connector uid="23" angle="341.565">
+					<from>Delay_Time</from>
+					<to>Change_in_Average</to>
+				</connector>
+				<connector uid="24" angle="234.462">
+					<from>Input</from>
+					<to>Change_in_Average</to>
+				</connector>
+				<connector uid="25" angle="225">
+					<from>Average_Input</from>
+					<to>Change_in_Average</to>
+				</connector>
+				<connector uid="26" angle="302.905">
+					<from>Average_Input</from>
+					<to>Trend_in_Input</to>
+				</connector>
+				<connector uid="27" angle="234.462">
+					<from>Input</from>
+					<to>Trend_in_Input</to>
+				</connector>
+				<connector uid="28" angle="0">
+					<from>Delay_Time</from>
+					<to>Trend_in_Input</to>
+				</connector>
+				<stacked_container uid="29" x="706.833" y="662.333" width="350" height="250">
+					<graph width="350" height="250" type="time_series" isee:points_only="false" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" isee:fill_intensity="0.1" left_axis_multi_scale="false" left_axis_auto_scale="true" right_axis_multi_scale="true" right_axis_auto_scale="true">
+						<plot color="red" isee:keep_zero_visible="false" pen_width="1" index="0" show_y_axis="true">
+							<entity name="Trend_in_Input"/>
+						</plot>
+						<plot color="fuchsia" isee:keep_zero_visible="false" pen_width="1" index="1" show_y_axis="true">
+							<entity name="trend_output"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<connector uid="30" angle="49.3987">
+					<from>Input</from>
+					<to>trend_output</to>
+				</connector>
+				<connector uid="31" angle="139.399">
+					<from>Delay_Time</from>
+					<to>trend_output</to>
+				</connector>
+				<aux x="100.333" y="199.333" name="Input"/>
+				<aux x="203.333" y="199.333" name="delay3 output"/>
+				<aux x="342.083" y="199.333" name="Delay Time"/>
+				<stock x="220.833" y="87.3333" name="delay 1"/>
+				<flow x="149.833" y="87.3333" name="delay3 inflow">
+					<pts>
+						<pt x="89.3333" y="87.3333"/>
+						<pt x="198.333" y="87.3333"/>
+					</pts>
+				</flow>
+				<flow x="544.833" y="87.3333" name="delay3 outflow">
+					<pts>
+						<pt x="498.333" y="87.3333"/>
+						<pt x="603.333" y="87.3333"/>
+					</pts>
+				</flow>
+				<flow x="285.583" y="87.3333" name="delay3 flow 1">
+					<pts>
+						<pt x="243.333" y="87.3333"/>
+						<pt x="327.833" y="87.3333"/>
+					</pts>
+				</flow>
+				<stock x="350.333" y="87.3333" name="delay 2"/>
+				<flow label_angle="260.722" x="413.083" y="87.3333" name="delay3 flow 2">
+					<pts>
+						<pt x="372.833" y="87.3333"/>
+						<pt x="453.333" y="87.3333"/>
+					</pts>
+				</flow>
+				<stock x="475.833" y="87.3333" name="delay 3"/>
+				<aux x="203.333" y="271.333" name="smth3 output"/>
+				<flow x="206.708" y="386.333" name="smth3 change 1">
+					<pts>
+						<pt x="142.833" y="386.333"/>
+						<pt x="258.583" y="386.333"/>
+					</pts>
+				</flow>
+				<stock x="281.083" y="386.333" name="smth 1"/>
+				<stock x="345.833" y="469.333" name="smth 2"/>
+				<flow x="281.083" y="469.333" name="smth3 change 2">
+					<pts>
+						<pt x="226.833" y="469.333"/>
+						<pt x="323.333" y="469.333"/>
+					</pts>
+				</flow>
+				<stock x="430.833" y="538.333" name="smth 3"/>
+				<flow x="345.833" y="541.333" name="smth3 change 3">
+					<pts>
+						<pt x="271.333" y="541.333"/>
+						<pt x="408.333" y="541.333"/>
+					</pts>
+				</flow>
+				<stock x="477.833" y="648.833" width="45" height="35" name="Average Input"/>
+				<flow x="428.083" y="666.333" name="Change in Average">
+					<pts>
+						<pt x="366.333" y="666.333"/>
+						<pt x="477.833" y="666.333"/>
+					</pts>
+				</flow>
+				<aux x="527.333" y="722.333" name="Trend in Input"/>
+				<aux x="203.333" y="145.333" name="trend output"/>
+				<stacked_container uid="32" x="1131.25" y="91.583" width="350" height="250">
+					<table width="350" height="250">
+						<item type="time"/>
+						<item>
+							<format precision="full"/>
+							<entity name="delay3_outflow"/>
+						</item>
+						<item>
+							<format precision="full"/>
+							<entity name="delay3_output"/>
+						</item>
+					</table>
+				</stacked_container>
+			</view>
+			<view isee:show_pages="false" background="white" page_width="800" page_height="600" home_view="true" type="interface">
+				<style/>
+			</view>
+			<isee:templates/>
+			<isee:stories/>
+		</views>
+	</model>
+</xmile>
+

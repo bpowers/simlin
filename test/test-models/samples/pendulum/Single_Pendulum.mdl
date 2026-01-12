@@ -1,0 +1,158 @@
+{UTF-8}
+Damping Coefficient=
+	0
+	~	 [-100,100,1]
+	~		|
+
+Change in Angular Velocity=
+	Torque/Pendulum Moment of Inertia
+	~	
+	~		|
+
+Torque=
+	Angular component of Gravity * Length of Pendulum - Angular Velocity * Damping Coefficient
+	~	
+	~		|
+
+Acceleration due to Gravity=
+	-9.8
+	~	Meters/Second/Second
+	~		|
+
+Angular component of Gravity=
+	Force of Gravity * SIN(Angular Position)
+	~	Kilograms*Meters/Second/Second
+	~		|
+
+Angular Position= INTEG (
+	Change in Angular Position,
+		1)
+	~	radians
+	~	Angle between the pendulum and vertical
+	|
+
+Angular Velocity= INTEG (
+	Change in Angular Velocity,
+		0)
+	~	
+	~		|
+
+Change in Angular Position=
+	Angular Velocity
+	~	
+	~		|
+
+Force of Gravity=
+	Acceleration due to Gravity*Mass of Pendulum
+	~	Meters*Kilograms/(Second*Second)
+	~		|
+
+Length of Pendulum=
+	10
+	~	Meter
+	~		|
+
+Mass of Pendulum=
+	10
+	~	Kilogram
+	~		|
+
+Pendulum Moment of Inertia=
+	Mass of Pendulum * Length of Pendulum^2
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Second
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Second
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 0.1
+	~	Second [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.0078125
+	~	Second [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Helvetica|12|B|0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,Angular Position,463,105,40,20,3,3,0,0,0,0,0,0
+10,2,Angular Velocity,308,312,40,20,3,3,0,0,0,0,0,0
+12,3,48,294,106,10,8,0,3,0,0,-1,0,0,0
+1,4,6,1,4,0,0,22,0,0,0,-1--1--1,,1|(396,106)|
+1,5,6,3,100,0,0,22,0,0,0,-1--1--1,,1|(330,106)|
+11,6,48,363,106,6,8,34,3,0,0,1,0,0,0
+10,7,Change in Angular Position,363,126,51,12,40,3,0,0,-1,0,0,0
+12,8,48,459,312,10,8,0,3,0,0,-1,0,0,0
+1,9,11,2,4,0,0,22,0,0,0,-1--1--1,,1|(378,313)|
+1,10,11,8,100,0,0,22,0,0,0,-1--1--1,,1|(434,313)|
+11,11,48,414,313,6,8,34,3,0,0,1,0,0,0
+10,12,Change in Angular Velocity,414,333,50,12,40,3,0,0,-1,0,0,0
+10,13,Angular component of Gravity,536,189,42,18,8,3,0,0,0,0,0,0
+10,14,Acceleration due to Gravity,576,93,43,12,8,3,0,0,0,0,0,0
+1,15,1,13,1,0,0,0,0,128,0,-1--1--1,,1|(504,133)|
+1,16,14,26,0,0,0,0,0,128,0,-1--1--1,,1|(601,115)|
+10,17,Pendulum Moment of Inertia,508,384,33,18,8,3,0,0,0,0,0,0
+10,18,Length of Pendulum,610,270,31,12,8,3,0,0,0,0,0,0
+10,19,Mass of Pendulum,676,91,35,15,8,131,0,0,0,0,0,0
+1,20,18,23,0,0,0,0,0,128,0,-1--1--1,,1|(559,270)|
+1,21,19,26,0,0,0,0,0,128,0,-1--1--1,,1|(655,115)|
+1,22,2,7,1,0,0,0,0,128,0,-1--1--1,,1|(273,203)|
+10,23,Torque,503,271,22,7,8,3,0,0,0,0,0,0
+1,24,17,12,0,0,0,0,0,128,0,-1--1--1,,1|(461,359)|
+1,25,23,11,1,0,0,0,0,128,0,-1--1--1,,1|(462,296)|
+10,26,Force of Gravity,633,143,48,7,8,3,0,0,0,0,0,0
+1,27,26,13,0,0,0,0,0,128,0,-1--1--1,,1|(602,157)|
+1,28,13,23,1,0,0,0,0,128,0,-1--1--1,,1|(524,240)|
+10,29,Mass of Pendulum,610,342,35,12,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,30,Length of Pendulum,611,421,35,12,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,31,29,17,0,0,0,0,0,128,0,-1--1--1,,1|(567,359)|
+1,32,30,17,0,0,0,0,0,128,0,-1--1--1,,1|(566,404)|
+10,33,Damping Coefficient,422,214,33,12,8,3,0,0,0,0,0,0
+1,34,2,23,1,0,0,0,0,128,0,-1--1--1,,1|(359,268)|
+1,35,33,23,1,0,0,0,0,128,0,-1--1--1,,1|(479,232)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Day,Days
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Angular Position
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:7
+41:0
+42:0
+24:0
+25:99.9375
+26:99.9375
