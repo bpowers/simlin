@@ -202,7 +202,10 @@ export const VariableDetails = styled(
       }
     };
 
-    formatValue = (value: number | string | Array<number | string>): string => {
+    formatValue = (value: number | string | Array<number | string> | undefined): string => {
+      if (value === undefined) {
+        return '';
+      }
       return typeof value === 'number' ? value.toFixed(3) : value.toString();
     };
 
