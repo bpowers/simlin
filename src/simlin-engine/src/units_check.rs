@@ -210,7 +210,26 @@ impl UnitEvaluator<'_> {
                     BuiltinFn::Rank(a, _rest) => self.check(a),
                 }
             }
-            Expr2::Subscript(_, _, _, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr2::Subscript(base_name, _, _, loc) => {
+                // A subscripted expression has the same units as the base array variable
+                if let Some(units) = self
+                    .model
+                    .variables
+                    .get(base_name)
+                    .and_then(|var| var.units())
+                    .or_else(|| self.inferred_units.get(base_name))
+                {
+                    Ok(Units::Explicit(units.clone()))
+                } else {
+                    Err(UnitError::ConsistencyError(
+                        ErrorCode::DoesNotExist,
+                        *loc,
+                        Some(format!(
+                            "can't find or no units for subscripted variable '{base_name}'",
+                        )),
+                    ))
+                }
+            }
             Expr2::Op1(_, l, _, _) => self.check(l),
             Expr2::Op2(op, l, r, _, _) => {
                 let lunits = self.check(l)?;

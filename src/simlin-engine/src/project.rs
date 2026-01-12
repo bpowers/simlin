@@ -64,6 +64,11 @@ impl Project {
 impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
         Self::base_from(project_datamodel, |models, units_ctx, model| {
+            // Run unit inference to compute units for variables without explicit declarations.
+            // Inference errors are not surfaced to the model to maintain backwards compatibility
+            // with models that have incomplete or incorrect unit annotations. The check_units
+            // call below will still catch mismatches between explicitly declared units.
+            // TODO: Consider surfacing UnitMismatch errors once more test models have correct units.
             let inferred_units = crate::units_infer::infer(models, units_ctx, model)
                 .unwrap_or_else(|_err| {
                     // XXX: for now, ignore inference errors.  They aren't
