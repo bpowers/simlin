@@ -36,6 +36,8 @@ pub mod ai_info;
 mod array_tests;
 mod bytecode;
 pub mod interpreter;
+#[cfg(test)]
+mod json_proptest;
 pub mod ltm;
 pub mod ltm_augment;
 mod project;

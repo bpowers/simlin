@@ -1,0 +1,952 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Project",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "sim_specs": {
+      "$ref": "#/$defs/SimSpecs"
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Model"
+      }
+    },
+    "dimensions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Dimension"
+      }
+    },
+    "units": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Unit"
+      }
+    }
+  },
+  "required": [
+    "name",
+    "sim_specs",
+    "models"
+  ],
+  "$defs": {
+    "SimSpecs": {
+      "type": "object",
+      "properties": {
+        "start_time": {
+          "type": "number",
+          "format": "double"
+        },
+        "end_time": {
+          "type": "number",
+          "format": "double"
+        },
+        "dt": {
+          "type": "string"
+        },
+        "save_step": {
+          "type": "number",
+          "format": "double"
+        },
+        "method": {
+          "type": "string"
+        },
+        "time_units": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_time",
+        "end_time"
+      ]
+    },
+    "Model": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "stocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Stock"
+          }
+        },
+        "flows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Flow"
+          }
+        },
+        "auxiliaries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Auxiliary"
+          }
+        },
+        "modules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Module"
+          }
+        },
+        "sim_specs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SimSpecs"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "views": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/View"
+          }
+        },
+        "loop_metadata": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LoopMetadata"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "stocks",
+        "flows",
+        "auxiliaries"
+      ]
+    },
+    "Stock": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "name": {
+          "type": "string"
+        },
+        "initial_equation": {
+          "type": "string"
+        },
+        "units": {
+          "type": "string"
+        },
+        "inflows": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "outflows": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "non_negative": {
+          "type": "boolean"
+        },
+        "documentation": {
+          "type": "string"
+        },
+        "can_be_module_input": {
+          "type": "boolean"
+        },
+        "is_public": {
+          "type": "boolean"
+        },
+        "arrayed_equation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArrayedEquation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "inflows",
+        "outflows"
+      ]
+    },
+    "ArrayedEquation": {
+      "type": "object",
+      "properties": {
+        "dimensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "equation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "initial_equation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "elements": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ElementEquation"
+          }
+        }
+      },
+      "required": [
+        "dimensions"
+      ]
+    },
+    "ElementEquation": {
+      "type": "object",
+      "properties": {
+        "subscript": {
+          "type": "string"
+        },
+        "equation": {
+          "type": "string"
+        },
+        "initial_equation": {
+          "type": "string"
+        },
+        "graphical_function": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphicalFunction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "subscript",
+        "equation"
+      ]
+    },
+    "GraphicalFunction": {
+      "type": "object",
+      "properties": {
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "y_points": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "kind": {
+          "type": "string"
+        },
+        "x_scale": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphicalFunctionScale"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "y_scale": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphicalFunctionScale"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "GraphicalFunctionScale": {
+      "type": "object",
+      "properties": {
+        "min": {
+          "type": "number",
+          "format": "double"
+        },
+        "max": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "min",
+        "max"
+      ]
+    },
+    "Flow": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "name": {
+          "type": "string"
+        },
+        "equation": {
+          "type": "string"
+        },
+        "units": {
+          "type": "string"
+        },
+        "non_negative": {
+          "type": "boolean"
+        },
+        "graphical_function": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphicalFunction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "documentation": {
+          "type": "string"
+        },
+        "can_be_module_input": {
+          "type": "boolean"
+        },
+        "is_public": {
+          "type": "boolean"
+        },
+        "arrayed_equation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArrayedEquation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "Auxiliary": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "name": {
+          "type": "string"
+        },
+        "equation": {
+          "type": "string"
+        },
+        "initial_equation": {
+          "type": "string"
+        },
+        "units": {
+          "type": "string"
+        },
+        "graphical_function": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphicalFunction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "documentation": {
+          "type": "string"
+        },
+        "can_be_module_input": {
+          "type": "boolean"
+        },
+        "is_public": {
+          "type": "boolean"
+        },
+        "arrayed_equation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArrayedEquation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "Module": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "name": {
+          "type": "string"
+        },
+        "model_name": {
+          "type": "string"
+        },
+        "units": {
+          "type": "string"
+        },
+        "documentation": {
+          "type": "string"
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModuleReference"
+          }
+        },
+        "can_be_module_input": {
+          "type": "boolean"
+        },
+        "is_public": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "model_name"
+      ]
+    },
+    "ModuleReference": {
+      "type": "object",
+      "properties": {
+        "src": {
+          "type": "string"
+        },
+        "dst": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "src",
+        "dst"
+      ]
+    },
+    "View": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "elements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ViewElement"
+          }
+        },
+        "view_box": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rect"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "zoom": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "elements"
+      ]
+    },
+    "ViewElement": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "stock"
+            }
+          },
+          "$ref": "#/$defs/StockViewElement",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "flow"
+            }
+          },
+          "$ref": "#/$defs/FlowViewElement",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "aux"
+            }
+          },
+          "$ref": "#/$defs/AuxiliaryViewElement",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "cloud"
+            }
+          },
+          "$ref": "#/$defs/CloudViewElement",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "link"
+            }
+          },
+          "$ref": "#/$defs/LinkViewElement",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "module"
+            }
+          },
+          "$ref": "#/$defs/ModuleViewElement",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "alias"
+            }
+          },
+          "$ref": "#/$defs/AliasViewElement",
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "StockViewElement": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "name": {
+          "type": "string"
+        },
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        },
+        "label_side": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uid",
+        "name",
+        "x",
+        "y"
+      ]
+    },
+    "FlowPoint": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        },
+        "attached_to_uid": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ]
+    },
+    "FlowViewElement": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "name": {
+          "type": "string"
+        },
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        },
+        "label_side": {
+          "type": "string"
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FlowPoint"
+          }
+        }
+      },
+      "required": [
+        "uid",
+        "name",
+        "x",
+        "y",
+        "points"
+      ]
+    },
+    "AuxiliaryViewElement": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "name": {
+          "type": "string"
+        },
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        },
+        "label_side": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uid",
+        "name",
+        "x",
+        "y"
+      ]
+    },
+    "CloudViewElement": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "flow_uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "uid",
+        "flow_uid",
+        "x",
+        "y"
+      ]
+    },
+    "LinkPoint": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ]
+    },
+    "LinkViewElement": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "from_uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "to_uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "arc": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "multi_points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LinkPoint"
+          }
+        }
+      },
+      "required": [
+        "uid",
+        "from_uid",
+        "to_uid"
+      ]
+    },
+    "ModuleViewElement": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "name": {
+          "type": "string"
+        },
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        },
+        "label_side": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uid",
+        "name",
+        "x",
+        "y"
+      ]
+    },
+    "AliasViewElement": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "alias_of_uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        },
+        "label_side": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uid",
+        "alias_of_uid",
+        "x",
+        "y"
+      ]
+    },
+    "Rect": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        },
+        "width": {
+          "type": "number",
+          "format": "double"
+        },
+        "height": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ]
+    },
+    "LoopMetadata": {
+      "type": "object",
+      "properties": {
+        "uids": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "deleted": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uids",
+        "name"
+      ]
+    },
+    "Dimension": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "elements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "size": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "maps_to": {
+          "description": "Optional dimension mapping target (e.g., DimA: A1, A2, A3 -> DimB).\nThis establishes a positional correspondence between this dimension's\nelements and the target dimension's elements.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "Unit": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "equation": {
+          "type": "string"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  }
+}
