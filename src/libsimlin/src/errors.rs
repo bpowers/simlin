@@ -353,4 +353,62 @@ mod tests {
             .contains("units error in model 'main' variable 'bad_units': unit_mismatch"));
         assert!(lines.next().is_none());
     }
+
+    #[test]
+    fn inference_error_formats_correctly() {
+        use simlin_engine::builtins::Loc;
+        use simlin_engine::common::UnitError;
+
+        // Test InferenceError formatting with single source
+        let error = UnitError::InferenceError {
+            code: ErrorCode::UnitMismatch,
+            sources: vec![("my_var".to_string(), Some(Loc::new(5, 10)))],
+            details: Some("test details".to_string()),
+        };
+
+        let formatted = format_unit_error("test_model", "my_var", None, &error);
+        assert_eq!(formatted.code, ErrorCode::UnitMismatch);
+        assert_eq!(formatted.kind, FormattedErrorKind::Units);
+        assert_eq!(formatted.start_offset, 5);
+        assert_eq!(formatted.end_offset, 10);
+        assert_eq!(formatted.model_name, Some("test_model".to_string()));
+        assert_eq!(formatted.variable_name, Some("my_var".to_string()));
+        let msg = formatted.message.expect("should have message");
+        assert!(
+            msg.contains("units inference error"),
+            "should mention inference: {msg}"
+        );
+        assert!(
+            msg.contains("test details"),
+            "should include details: {msg}"
+        );
+
+        // Test InferenceError with multiple sources
+        let error = UnitError::InferenceError {
+            code: ErrorCode::UnitMismatch,
+            sources: vec![
+                ("var_a".to_string(), Some(Loc::new(0, 5))),
+                ("var_b".to_string(), None),
+            ],
+            details: None,
+        };
+
+        let formatted = format_unit_error("test_model", "var_a", None, &error);
+        let msg = formatted.message.expect("should have message");
+        assert!(
+            msg.contains("involving var_a, var_b"),
+            "should list involved variables: {msg}"
+        );
+
+        // Test InferenceError with no location (falls back to 0, 0)
+        let error = UnitError::InferenceError {
+            code: ErrorCode::UnitMismatch,
+            sources: vec![("no_loc_var".to_string(), None)],
+            details: None,
+        };
+
+        let formatted = format_unit_error("test_model", "no_loc_var", None, &error);
+        assert_eq!(formatted.start_offset, 0);
+        assert_eq!(formatted.end_offset, 0);
+    }
 }

@@ -747,6 +747,76 @@ fn test_fmt_display_implementations() {
     assert_eq!(format!("{canonical_str}"), "model·var");
 }
 
+#[test]
+fn test_unit_error_inference_display() {
+    use crate::ast::Loc;
+
+    // Test InferenceError with no sources (edge case)
+    let err = UnitError::InferenceError {
+        code: ErrorCode::UnitMismatch,
+        sources: vec![],
+        details: None,
+    };
+    let display = format!("{err}");
+    assert!(
+        display.contains("unknown"),
+        "Empty sources should show 'unknown'"
+    );
+    assert!(display.contains("unit_mismatch"));
+
+    // Test InferenceError with single source, no location
+    let err = UnitError::InferenceError {
+        code: ErrorCode::UnitMismatch,
+        sources: vec![("my_var".to_string(), None)],
+        details: None,
+    };
+    let display = format!("{err}");
+    assert!(display.contains("'my_var'"), "Should contain variable name");
+    assert!(!display.contains("@"), "Should not have @ when no location");
+
+    // Test InferenceError with single source, with location
+    let err = UnitError::InferenceError {
+        code: ErrorCode::UnitMismatch,
+        sources: vec![("my_var".to_string(), Some(Loc::new(5, 10)))],
+        details: None,
+    };
+    let display = format!("{err}");
+    assert!(
+        display.contains("'my_var'@"),
+        "Should contain variable with @ for location"
+    );
+    assert!(
+        display.contains("5:10"),
+        "Should contain location 5:10, got: {}",
+        display
+    );
+
+    // Test InferenceError with multiple sources
+    let err = UnitError::InferenceError {
+        code: ErrorCode::UnitMismatch,
+        sources: vec![
+            ("var_a".to_string(), Some(Loc::new(0, 5))),
+            ("var_b".to_string(), None),
+        ],
+        details: Some("conflicting units".to_string()),
+    };
+    let display = format!("{err}");
+    assert!(display.contains("'var_a'@"));
+    assert!(display.contains("'var_b'"));
+    assert!(
+        display.contains(", "),
+        "Should have comma-separated sources"
+    );
+    assert!(
+        display.contains("conflicting units"),
+        "Should contain details"
+    );
+    assert!(
+        display.contains("--"),
+        "Should have -- separator for details"
+    );
+}
+
 // Implementations for identifier types
 
 impl RawIdent {

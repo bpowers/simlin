@@ -1158,3 +1158,198 @@ fn test_find_constraint_mismatch_direct() {
         "Should not detect mismatch for purely under-constrained case"
     );
 }
+
+#[test]
+fn test_located_constraint_merge_sources() {
+    use crate::builtins::Loc;
+
+    // Test merge_sources deduplication
+    let mut constraint1 = LocatedConstraint::new(UnitMap::new(), "var_a", Some(Loc::new(0, 10)));
+    let constraint2 = LocatedConstraint::new(UnitMap::new(), "var_b", Some(Loc::new(5, 15)));
+
+    // Merge sources from constraint2 into constraint1
+    constraint1.merge_sources(&constraint2);
+
+    assert_eq!(constraint1.sources.len(), 2, "Should have both sources");
+    assert_eq!(constraint1.sources[0].var, "var_a");
+    assert_eq!(constraint1.sources[1].var, "var_b");
+
+    // Merging again should not add duplicate
+    constraint1.merge_sources(&constraint2);
+    assert_eq!(
+        constraint1.sources.len(),
+        2,
+        "Should not add duplicate source"
+    );
+
+    // But a different location for the same variable should be added
+    let constraint3 = LocatedConstraint::new(UnitMap::new(), "var_b", Some(Loc::new(20, 30)));
+    constraint1.merge_sources(&constraint3);
+    assert_eq!(
+        constraint1.sources.len(),
+        3,
+        "Should add source with different location"
+    );
+
+    // Test merging with None location
+    let constraint4 = LocatedConstraint::new(UnitMap::new(), "var_c", None);
+    constraint1.merge_sources(&constraint4);
+    assert_eq!(constraint1.sources.len(), 4);
+
+    // Merging same var with None location again should not duplicate
+    constraint1.merge_sources(&constraint4);
+    assert_eq!(
+        constraint1.sources.len(),
+        4,
+        "Should not add duplicate None location"
+    );
+}
+
+#[test]
+fn test_located_constraint_primary_accessors() {
+    use crate::builtins::Loc;
+
+    // Test primary_var and primary_loc with sources
+    let constraint = LocatedConstraint::new(UnitMap::new(), "primary_var", Some(Loc::new(5, 15)));
+
+    assert_eq!(
+        constraint.primary_var(),
+        Some("primary_var"),
+        "primary_var should return first source's variable"
+    );
+    assert_eq!(
+        constraint.primary_loc(),
+        Some(Loc::new(5, 15)),
+        "primary_loc should return first source's location"
+    );
+
+    // Test with None location
+    let constraint_no_loc = LocatedConstraint::new(UnitMap::new(), "another_var", None);
+    assert_eq!(constraint_no_loc.primary_var(), Some("another_var"));
+    assert_eq!(
+        constraint_no_loc.primary_loc(),
+        None,
+        "primary_loc should be None when source has no location"
+    );
+
+    // Test with_source chaining
+    let constraint_multi = LocatedConstraint::new(UnitMap::new(), "first", Some(Loc::new(1, 2)))
+        .with_source("second", Some(Loc::new(3, 4)));
+    assert_eq!(constraint_multi.sources.len(), 2);
+    assert_eq!(
+        constraint_multi.primary_var(),
+        Some("first"),
+        "primary_var should still be first source"
+    );
+}
+
+#[test]
+fn test_located_constraint_is_empty() {
+    // Test is_empty on LocatedConstraint
+    let empty_constraint = LocatedConstraint::new(UnitMap::new(), "test", None);
+    assert!(
+        empty_constraint.is_empty(),
+        "Empty UnitMap should make constraint empty"
+    );
+
+    let non_empty: UnitMap = [("meter".to_owned(), 1)].iter().cloned().collect();
+    let non_empty_constraint = LocatedConstraint::new(non_empty, "test", None);
+    assert!(
+        !non_empty_constraint.is_empty(),
+        "Non-empty UnitMap should not be empty"
+    );
+}
+
+#[test]
+fn test_rank_builtin_unit_inference() {
+    // Test that RANK builtin is handled correctly in unit inference
+    // RANK returns the same units as its first argument (the array being ranked)
+    let sim_specs = sim_specs_with_units("year");
+
+    let vars = [
+        (x_aux("values", "10", Some("dollar")), "dollar"),
+        (x_aux("ranking", "RANK(values, 1)", None), "dollar"),
+    ];
+
+    let expected: HashMap<&str, &str> = vars
+        .iter()
+        .map(|(var, units)| (var.get_ident(), *units))
+        .collect();
+    let model_vars: Vec<_> = vars.iter().map(|(var, _)| var.clone()).collect();
+    let model = x_model("main", model_vars);
+    let project_datamodel = x_project(sim_specs.clone(), &[model]);
+
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+    let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+    let _project = crate::project::Project::base_from(
+        project_datamodel.clone(),
+        |models, units_ctx, model| {
+            results = infer(models, units_ctx, model);
+        },
+    );
+
+    let results = results.expect("RANK inference should succeed");
+    for (ident, expected_units) in expected.iter() {
+        let expected_units: UnitMap = crate::units::parse_units(&units_ctx, Some(expected_units))
+            .unwrap()
+            .unwrap();
+        if let Some(computed_units) = results.get(&canonicalize(ident)) {
+            assert_eq!(
+                expected_units, *computed_units,
+                "Units for {} should match",
+                ident
+            );
+        }
+    }
+}
+
+#[test]
+fn test_unify_conflict_detection() {
+    // Test that unify() detects when the same variable is resolved to different units
+    // This exercises the code path at lines 656-680 in unify()
+    let sim_specs = sim_specs_with_units("year");
+
+    // Create a model where the same undeclared variable gets constrained to two different units
+    // x = a (no units on x or a)
+    // y = a * 1 {meter} (forces a to be meters through y's declared units)
+    // z = a * 1 {second} (forces a to be seconds through z's declared units)
+    // This creates a conflict: a can't be both meters and seconds
+    let vars = vec![
+        x_aux("a", "10", None),          // undeclared
+        x_aux("x", "a", None),           // uses a
+        x_aux("y", "a", Some("meter")),  // declares y as meters, constrains a
+        x_aux("z", "a", Some("second")), // declares z as seconds, constrains a
+    ];
+
+    let model_vars: Vec<_> = vars.into_iter().collect();
+    let model = x_model("main", model_vars);
+    let project_datamodel = x_project(sim_specs.clone(), &[model]);
+
+    let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+    let _project = crate::project::Project::base_from(
+        project_datamodel.clone(),
+        |models, units_ctx, model| {
+            results = infer(models, units_ctx, model);
+        },
+    );
+
+    // This should fail because 'a' can't be both meters and seconds
+    assert!(
+        results.is_err(),
+        "Should detect conflict when same variable has different unit constraints"
+    );
+
+    // Verify we get an InferenceError with the right code
+    match results {
+        Err(UnitError::InferenceError { code, sources, .. }) => {
+            assert_eq!(code, ErrorCode::UnitMismatch);
+            // Should have sources indicating which variables are involved
+            assert!(
+                !sources.is_empty(),
+                "Should have source information for conflict"
+            );
+        }
+        Err(e) => panic!("Expected InferenceError, got {:?}", e),
+        Ok(_) => panic!("Expected error, got success"),
+    }
+}
