@@ -131,7 +131,7 @@ function getAnyElementOfObject(obj: any): any | undefined {
 
 export const LookupEditor = styled(
   class InnerLookupEditor extends React.PureComponent<LookupEditorProps & { className?: string }, LookupEditorState> {
-    readonly lookupRef: React.RefObject<InstanceType<typeof LineChart>>;
+    readonly lookupRef: React.RefObject<InstanceType<typeof LineChart> | null>;
 
     constructor(props: LookupEditorProps) {
       super(props);

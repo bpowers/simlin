@@ -218,7 +218,7 @@ export const Login = styled(
       const { className } = this.props;
       const disabledClass = this.props.disabled ? 'simlin-login-disabled' : 'simlin-login-inner-inner';
 
-      let loginUI: JSX.Element | undefined = undefined;
+      let loginUI: React.JSX.Element | undefined = undefined;
       if (!this.props.disabled) {
         switch (this.state.emailLoginFlow) {
           case 'showEmail':

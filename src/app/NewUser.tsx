@@ -95,7 +95,7 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
     }
   };
 
-  render(): JSX.Element {
+  render(): React.JSX.Element {
     const warningText = this.state.errorMsg || '';
 
     const termsLabel = (
