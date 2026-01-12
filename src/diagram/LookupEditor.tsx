@@ -77,6 +77,21 @@ interface LookupEditorState {
   datapointCount: number;
 }
 
+type ChartEventDetails = {
+  chartX?: number;
+  chartY?: number;
+  activeTooltipIndex?: number;
+  activePayload?: Array<{ payload?: { x?: number } }>;
+};
+
+type InvertibleScale = {
+  invert: (value: number) => number;
+};
+
+function isInvertibleScale(scale: unknown): scale is InvertibleScale {
+  return !!scale && typeof (scale as InvertibleScale).invert === 'function';
+}
+
 function lookup(table: GFTable, index: number): number {
   const size = table.size;
   if (size <= 0) {
@@ -116,14 +131,9 @@ function lookup(table: GFTable, index: number): number {
   }
 }
 
-interface ChartInstance {
-  container?: HTMLElement;
-}
-
 export const LookupEditor = styled(
   class InnerLookupEditor extends React.PureComponent<LookupEditorProps & { className?: string }, LookupEditorState> {
-    // Recharts' LineChart ref exposes the component instance which has a `container` property
-    readonly lookupRef: React.RefObject<any>;
+    readonly lookupRef: React.RefObject<InstanceType<typeof LineChart>>;
 
     constructor(props: LookupEditorProps) {
       super(props);
@@ -192,14 +202,14 @@ export const LookupEditor = styled(
     };
 
     handleContainerTouchStart = (e: React.PointerEvent<HTMLDivElement>) => {
-      const chart = this.lookupRef.current;
-      if (!chart) {
-        return;
-      }
       // ensure we get 'mouse up' events (and friends) even if we leave the
       // confines of the chart
+      const target = e.target as HTMLElement | null;
+      if (!target || typeof target.setPointerCapture !== 'function') {
+        return;
+      }
 
-      (e.target as any).setPointerCapture(e.pointerId);
+      target.setPointerCapture(e.pointerId);
     };
 
     handleContainerTouchEnd = (_e: React.PointerEvent<HTMLDivElement>) => {};
@@ -225,13 +235,13 @@ export const LookupEditor = styled(
       // this.props.onLookupChange(defined(this.props.variable.ident), gf);
     }
 
-    updatePoint(details: any) {
-      if (!details || !details.hasOwnProperty('chartX') || !details.hasOwnProperty('chartY')) {
+    updatePoint(details: ChartEventDetails) {
+      if (!details || typeof details.chartX !== 'number' || typeof details.chartY !== 'number') {
         return;
       }
 
-      const chart: ChartInstance | null = this.lookupRef.current;
-      if (chart === null || !chart.container) {
+      const chart = this.lookupRef.current;
+      if (!chart || typeof chart.getYScaleByAxisId !== 'function') {
         return;
       }
 
@@ -243,64 +253,57 @@ export const LookupEditor = styled(
       const yMin = defined(gf.yScale).min;
       const yMax = defined(gf.yScale).max;
 
-      const x = details.activePayload[0].payload.x;
-
-      // Get the actual plot area dimensions from the chart's offset property
-      // which recharts populates based on actual axis sizes and margins
-      const offset = details.offset;
-      if (!offset) {
+      const yScale = chart.getYScaleByAxisId('1');
+      if (!isInvertibleScale(yScale)) {
         return;
       }
 
-      const containerHeight = chart.container.clientHeight;
-      if (containerHeight <= 0) {
-        return;
-      }
-
-      // Calculate actual plot area bounds
-      const plotAreaTop = offset.top;
-      const plotAreaHeight = containerHeight - offset.top - offset.bottom;
-      if (plotAreaHeight <= 0) {
-        return;
-      }
-
-      // chartY is relative to the SVG container, so adjust for the plot area offset
-      // Then normalize to [0, 1] where 0 = top (yMax) and 1 = bottom (yMin)
-      const plotAreaY = details.chartY - plotAreaTop;
-      const normalizedY = Math.max(0, Math.min(1, plotAreaY / plotAreaHeight));
-      let y = yMax - normalizedY * (yMax - yMin);
+      let y = yScale.invert(details.chartY);
       if (y > yMax) {
         y = yMax;
       } else if (y < yMin) {
         y = yMin;
       }
 
-      let off = -1;
-      for (let i = 0; i < newTable.size; i++) {
-        if (isEqual(newTable.x[i], x)) {
-          off = i;
-          break;
+      let tableIndex: number | undefined;
+      const activeIndex = details.activeTooltipIndex;
+      if (Number.isInteger(activeIndex)) {
+        tableIndex = activeIndex;
+      }
+
+      if (tableIndex === undefined || tableIndex < 0 || tableIndex >= newTable.size) {
+        tableIndex = undefined;
+      }
+
+      if (tableIndex === undefined && Array.isArray(details.activePayload) && details.activePayload.length > 0) {
+        const x = details.activePayload[0]?.payload?.x;
+        if (typeof x === 'number') {
+          for (let i = 0; i < newTable.size; i++) {
+            if (isEqual(newTable.x[i], x)) {
+              tableIndex = i;
+              break;
+            }
+          }
         }
       }
 
-      if (off < 0) {
-        // this is very unexpected
+      if (tableIndex === undefined) {
         return;
       }
 
-      newTable.y[off] = y;
+      newTable.y[tableIndex] = y;
       this.setState({
         hasChange: true,
         table: newTable,
       });
     }
 
-    handleMouseDown = (details: any) => {
+    handleMouseDown = (details: ChartEventDetails) => {
       this.setState({ inDrag: true });
       this.updatePoint(details);
     };
 
-    handleMouseMove = (details: any, event: React.SyntheticEvent) => {
+    handleMouseMove = (details: ChartEventDetails, event: React.SyntheticEvent) => {
       if (!this.state.inDrag) {
         return;
       }
