@@ -486,7 +486,7 @@ fn create_aux_variable(name: &str, equation: &str) -> crate::datamodel::Variable
         ident: canonicalize(name).to_string(),
         equation: datamodel::Equation::Scalar(equation.to_string(), None),
         documentation: "LTM".to_string(),
-        units: Some("dmnl".to_string()), // LTM scores are dimensionless
+        units: None, // LTM scores are dimensionless by design, no need to declare
         gf: None,
         can_be_module_input: false,
         visibility: datamodel::Visibility::Public,
@@ -1196,10 +1196,14 @@ mod tests {
 
     #[test]
     fn test_generate_stock_to_flow_equation_basic_inflow() {
-        // Create a test project with stock and flow
+        // Create a test project with stock and flow.
+        // Use a rate variable with units 1/Month to make the model dimensionally correct:
+        // production (widgets/Month) = inventory (widgets) * rate (1/Month)
         let project = TestProject::new("test_basic_inflow")
-            .stock("inventory", "100", &["production"], &[], None)
-            .flow("production", "inventory * 0.1", None)
+            .unit("widgets", None)
+            .aux_with_units("rate", "0.1", Some("1/Month"))
+            .stock_with_units("inventory", "100", &["production"], &[], Some("widgets"))
+            .flow_with_units("production", "inventory * rate", Some("widgets/Month"))
             .compile()
             .expect("Project should compile");
 
@@ -1219,6 +1223,7 @@ mod tests {
         // Verify the EXACT equation structure using SAFEDIV
         // Sign term uses first-order stock change per LTM paper formula
         // Returns NaN at initial timestep when PREVIOUS values don't exist
+        // Non-stock dependencies (like rate) get wrapped in PREVIOUS()
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
             then 0/0 \
@@ -1226,8 +1231,8 @@ mod tests {
                 ((production - PREVIOUS(production)) = 0) OR \
                 ((inventory - PREVIOUS(inventory)) = 0) \
                 then 0 \
-                else ABS(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), (production - PREVIOUS(production)), 0)) * \
-                SIGN(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), \
+                else ABS(SAFEDIV(((inventory * PREVIOUS(rate)) - PREVIOUS(production)), (production - PREVIOUS(production)), 0)) * \
+                SIGN(SAFEDIV(((inventory * PREVIOUS(rate)) - PREVIOUS(production)), \
                     (inventory - PREVIOUS(inventory)), 0))";
 
         assert_eq!(
@@ -1238,10 +1243,14 @@ mod tests {
 
     #[test]
     fn test_generate_stock_to_flow_equation_outflow() {
-        // Create a test project with stock and outflow
+        // Create a test project with stock and outflow.
+        // Use a time constant with units Month to make the model dimensionally correct:
+        // drainage (gallons/Month) = water_tank (gallons) / drain_time (Month)
         let project = TestProject::new("test_outflow")
-            .stock("water_tank", "100", &[], &["drainage"], None)
-            .flow("drainage", "water_tank / 10", None)
+            .unit("gallons", None)
+            .aux_with_units("drain_time", "10", Some("Month"))
+            .stock_with_units("water_tank", "100", &[], &["drainage"], Some("gallons"))
+            .flow_with_units("drainage", "water_tank / drain_time", Some("gallons/Month"))
             .compile()
             .expect("Project should compile");
 
@@ -1260,6 +1269,7 @@ mod tests {
         // Verify the EXACT equation structure using SAFEDIV
         // Sign term uses first-order stock change per LTM paper formula
         // Returns NaN at initial timestep when PREVIOUS values don't exist
+        // Non-stock dependencies (like drain_time) get wrapped in PREVIOUS()
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
             then 0/0 \
@@ -1267,8 +1277,8 @@ mod tests {
                 ((drainage - PREVIOUS(drainage)) = 0) OR \
                 ((water_tank - PREVIOUS(water_tank)) = 0) \
                 then 0 \
-                else ABS(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), (drainage - PREVIOUS(drainage)), 0)) * \
-                SIGN(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), \
+                else ABS(SAFEDIV(((water_tank / PREVIOUS(drain_time)) - PREVIOUS(drainage)), (drainage - PREVIOUS(drainage)), 0)) * \
+                SIGN(SAFEDIV(((water_tank / PREVIOUS(drain_time)) - PREVIOUS(drainage)), \
                     (water_tank - PREVIOUS(water_tank)), 0))";
 
         assert_eq!(

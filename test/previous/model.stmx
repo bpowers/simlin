@@ -33,23 +33,18 @@
 		<variables>
 			<aux name="prev test 1">
 				<eqn>PREVIOUS(based_on_time,  66.6)</eqn>
-				<units>years</units>
 			</aux>
 			<aux name="based on time">
 				<eqn>TIME</eqn>
-				<units>years</units>
 			</aux>
 			<aux name="prev test 2">
 				<eqn>PREVIOUS(increasing,  increasing)</eqn>
-				<units>widget</units>
 			</aux>
 			<aux name="prev test 3">
 				<eqn>IF TIME &gt; 1950 THEN PREVIOUS(SELF,  0) ELSE increasing</eqn>
-				<units>widget</units>
 			</aux>
 			<aux name="increasing">
 				<eqn>RAMP(PI,  1920)</eqn>
-				<units>widget</units>
 			</aux>
 		</variables>
 		<views>

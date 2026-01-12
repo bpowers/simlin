@@ -56,7 +56,6 @@
             </aux>
             <aux name="input">
                 <eqn>1+0.5*SIN(2*3.14159*Time/20)</eqn>
-                <units>widgets/Month</units>
             </aux>
         </variables>
         <views>
