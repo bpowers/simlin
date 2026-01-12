@@ -200,8 +200,23 @@ impl UnitEvaluator<'_> {
 
                         if let Some(c) = c {
                             let c_units = self.check(c)?;
-                            if c_units != units {
-                                // TODO: return an error here
+                            if !c_units.equals(&units) {
+                                let expected = match &units {
+                                    Units::Explicit(u) => u.clone(),
+                                    Units::Constant => UnitMap::new(),
+                                };
+                                let actual = match &c_units {
+                                    Units::Explicit(u) => u.clone(),
+                                    Units::Constant => UnitMap::new(),
+                                };
+                                return Err(ConsistencyError(
+                                    ErrorCode::UnitMismatch,
+                                    c.get_loc(),
+                                    Some(format!(
+                                        "SAFEDIV fallback has units '{}' but expected '{}'",
+                                        actual, expected
+                                    )),
+                                ));
                             }
                         }
 
@@ -284,12 +299,27 @@ impl UnitEvaluator<'_> {
                     }
                 }
             }
-            Expr2::If(_, l, r, _, _) => {
+            Expr2::If(_, l, r, _, loc) => {
                 let lunits = self.check(l)?;
                 let runits = self.check(r)?;
 
                 if !lunits.equals(&runits) {
-                    eprintln!("TODO: if error, left and right units don't match");
+                    let expected = match &lunits {
+                        Units::Explicit(units) => units.clone(),
+                        Units::Constant => UnitMap::new(),
+                    };
+                    let actual = match &runits {
+                        Units::Explicit(units) => units.clone(),
+                        Units::Constant => UnitMap::new(),
+                    };
+                    return Err(ConsistencyError(
+                        ErrorCode::UnitMismatch,
+                        *loc,
+                        Some(format!(
+                            "IF branches have different units: then '{}', else '{}'",
+                            expected, actual
+                        )),
+                    ));
                 }
 
                 Ok(lunits)
@@ -310,7 +340,9 @@ pub fn check(
     use UnitError::{ConsistencyError, DefinitionError};
     let mut errors: Vec<(Ident<Canonical>, UnitError)> = vec![];
 
-    // TODO: modules
+    // Module stock/flow relationships are validated when each submodel is processed.
+    // Cross-module connections (module inputs/outputs) are handled in unit inference,
+    // which creates constraints ensuring input variables match across model boundaries.
 
     // get the main model
     // iterate over the variables
@@ -416,8 +448,61 @@ pub fn check(
                             errors.push((ident.clone(), err));
                         }
                     },
-                    Ast::ApplyToAll(_, _) => {}
-                    Ast::Arrayed(_, _) => {}
+                    Ast::ApplyToAll(_, expr) => match units.check(expr) {
+                        Ok(Units::Explicit(actual)) => {
+                            if actual != *expected {
+                                let details = format!(
+                                    "computed units '{}' don't match specified units",
+                                    &actual,
+                                );
+                                let loc = expr.get_loc();
+                                errors.push((
+                                    ident.clone(),
+                                    ConsistencyError(
+                                        ErrorCode::UnitMismatch,
+                                        Loc::new(loc.start.into(), loc.end.into()),
+                                        Some(details),
+                                    ),
+                                ))
+                            }
+                        }
+                        Ok(Units::Constant) => {
+                            // definitionally we're fine
+                        }
+                        Err(err) => {
+                            errors.push((ident.clone(), err));
+                        }
+                    },
+                    Ast::Arrayed(_, asts) => {
+                        // Check each element expression in the arrayed variable
+                        for (_element, expr) in asts.iter() {
+                            match units.check(expr) {
+                                Ok(Units::Explicit(actual)) => {
+                                    if actual != *expected {
+                                        let details = format!(
+                                            "computed units '{}' don't match specified units",
+                                            &actual,
+                                        );
+                                        let loc = expr.get_loc();
+                                        errors.push((
+                                            ident.clone(),
+                                            ConsistencyError(
+                                                ErrorCode::UnitMismatch,
+                                                Loc::new(loc.start.into(), loc.end.into()),
+                                                Some(details),
+                                            ),
+                                        ))
+                                    }
+                                }
+                                Ok(Units::Constant) => {
+                                    // definitionally we're fine
+                                }
+                                Err(err) => {
+                                    errors.push((ident.clone(), err));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

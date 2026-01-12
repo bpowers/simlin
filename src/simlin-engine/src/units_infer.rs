@@ -95,8 +95,14 @@ struct UnitInferer<'a> {
 
 fn single_fv(units: &UnitMap) -> Option<&str> {
     let mut result = None;
-    for (unit, _) in units.map.iter() {
+    for (unit, exp) in units.map.iter() {
         if unit.starts_with('@') {
+            // Only consider metavariables with exponent ±1.
+            // If |exponent| > 1, we can't solve for this variable because it would
+            // require fractional exponents (e.g., @x^2 = meters => @x = meters^(1/2)).
+            if exp.abs() != 1 {
+                return None;
+            }
             if result.is_none() {
                 result = Some(unit.as_str())
             } else {
@@ -108,18 +114,20 @@ fn single_fv(units: &UnitMap) -> Option<&str> {
 }
 
 fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
-    // we have:
+    // We have:
     //   `1 == $lhs`
-    // where $lhs contains $var.  We want:
+    // where $lhs contains $var with exponent ±1 (ensured by single_fv check).
+    // We want:
     //   `$var = $lhs'`
-    // so if $var is in the numerator (has a value > 0) we want the
-    // inverse of $lhs; otherwise (value < 0) just delete $var from $lhs
+    // So if $var is in the numerator (exponent > 0) we want the
+    // inverse of $lhs; otherwise (exponent < 0) just delete $var from $lhs.
 
     let inverse = if let Some(exponent) = lhs.map.remove(var) {
-        // TODO: we seem to be expecting this to be 1 -- what if it is > 1?
-        if exponent.abs() != 1 {
-            println!("oh no!  solve_for removed {var} with exp {exponent}");
-        }
+        // single_fv ensures we only get here with exponent ±1
+        debug_assert!(
+            exponent.abs() == 1,
+            "solve_for called with |exponent| != 1; single_fv should prevent this"
+        );
         exponent > 0
     } else {
         false
@@ -138,16 +146,17 @@ fn substitute(
         .into_iter()
         .map(|mut c| {
             if let Some(exponent) = c.unit_map.map.remove(var) {
-                if exponent.abs() != 1 {
-                    println!("oh no!  subst removed {var} with exp {exponent}");
-                }
+                // Scale the units by the exponent magnitude.
+                // For example, if @x = seconds and we're substituting into @x^2,
+                // we need seconds^2, not just seconds.
+                let scaled_units = units.clone().exp(exponent.abs());
 
                 let op = if exponent > 0 {
                     UnitOp::Mul
                 } else {
                     UnitOp::Div
                 };
-                c.unit_map = combine(op, c.unit_map, units.clone());
+                c.unit_map = combine(op, c.unit_map, scaled_units);
 
                 // Merge sources from the substitution
                 for source in subst_sources {
@@ -581,9 +590,27 @@ impl UnitInferer<'_> {
                     Some(Ast::ApplyToAll(_, ast)) => {
                         self.gen_constraints(ast, prefix, &current_var, constraints)
                     }
-                    Some(Ast::Arrayed(_, _asts)) => {
-                        // todo!();
-                        Ok(Units::Constant)
+                    Some(Ast::Arrayed(_, asts)) => {
+                        // For arrayed variables, each element may have a different expression,
+                        // but all elements must have the same units. Process each expression
+                        // and collect the resulting units. If any element returns explicit units,
+                        // use those as the result.
+                        let mut result_units: UnitResult<Units> = Ok(Units::Constant);
+                        for (_element, expr) in asts.iter() {
+                            match self.gen_constraints(expr, prefix, &current_var, constraints) {
+                                Ok(expr_units) => {
+                                    // If any element has explicit units, use those
+                                    if matches!(expr_units, Units::Explicit(_)) {
+                                        result_units = Ok(expr_units);
+                                    }
+                                }
+                                Err(e) => {
+                                    result_units = Err(e);
+                                    break;
+                                }
+                            }
+                        }
+                        result_units
                     }
                     None => {
                         // TODO: maybe we should bail early?  If there is no equation we will fail
@@ -599,7 +626,10 @@ impl UnitInferer<'_> {
                     let loc = var.ast().map(|ast| match ast {
                         Ast::Scalar(expr) => expr.get_loc(),
                         Ast::ApplyToAll(_, expr) => expr.get_loc(),
-                        Ast::Arrayed(_, _) => Loc::default(),
+                        Ast::Arrayed(_, asts) => {
+                            // Use the first element's location if available
+                            asts.values().next().map_or(Loc::default(), |e| e.get_loc())
+                        }
                     });
                     constraints.push(LocatedConstraint::new(
                         combine(UnitOp::Div, mv, units),
@@ -1352,4 +1382,122 @@ fn test_unify_conflict_detection() {
         Err(e) => panic!("Expected InferenceError, got {:?}", e),
         Ok(_) => panic!("Expected error, got success"),
     }
+}
+
+#[test]
+fn test_substitute_handles_higher_exponents() {
+    // Test that substitute correctly handles exponents > 1
+    // If @x = seconds and we substitute into @x^2 * meters, we should get seconds^2 * meters
+
+    let var = "@x";
+    let units: UnitMap = [("seconds".to_owned(), 1)].iter().cloned().collect();
+    let sources = vec![];
+
+    // Constraint: 1 == @x^2 * meters  (i.e., @x^2 = 1/meters)
+    let constraint: UnitMap = [("@x".to_owned(), 2), ("meters".to_owned(), 1)]
+        .iter()
+        .cloned()
+        .collect();
+
+    let constraints = vec![test_constraint(constraint)];
+    let result = substitute(var, &units, &sources, constraints);
+
+    // After substitution: 1 == seconds^2 * meters
+    assert_eq!(result.len(), 1);
+    let result_map = &result[0].unit_map;
+
+    // Should have seconds^2 (exponent 2) and meters^1
+    assert_eq!(
+        result_map.map.get("seconds"),
+        Some(&2),
+        "seconds should have exponent 2 after substitution"
+    );
+    assert_eq!(
+        result_map.map.get("meters"),
+        Some(&1),
+        "meters should have exponent 1"
+    );
+    assert!(
+        !result_map.map.contains_key("@x"),
+        "@x should be removed after substitution"
+    );
+}
+
+#[test]
+fn test_substitute_handles_negative_higher_exponents() {
+    // Test that substitute correctly handles exponents < -1
+    // If @x = seconds and we substitute into @x^-2 * meters, we should get seconds^-2 * meters
+
+    let var = "@x";
+    let units: UnitMap = [("seconds".to_owned(), 1)].iter().cloned().collect();
+    let sources = vec![];
+
+    // Constraint: 1 == @x^-2 * meters  (i.e., meters/@x^2 = 1)
+    let constraint: UnitMap = [("@x".to_owned(), -2), ("meters".to_owned(), 1)]
+        .iter()
+        .cloned()
+        .collect();
+
+    let constraints = vec![test_constraint(constraint)];
+    let result = substitute(var, &units, &sources, constraints);
+
+    assert_eq!(result.len(), 1);
+    let result_map = &result[0].unit_map;
+
+    // Should have seconds^-2 and meters^1
+    assert_eq!(
+        result_map.map.get("seconds"),
+        Some(&-2),
+        "seconds should have exponent -2 after substitution"
+    );
+    assert_eq!(
+        result_map.map.get("meters"),
+        Some(&1),
+        "meters should have exponent 1"
+    );
+}
+
+#[test]
+fn test_solve_for_skips_higher_exponents() {
+    // Test that solve_for returns None for constraints with |exponent| > 1
+    // because we can't represent fractional exponents (e.g., sqrt(meters))
+
+    // Constraint: 1 == @x^2 * meters  =>  @x = meters^(-1/2), which we can't represent
+    let constraint: UnitMap = [("@x".to_owned(), 2), ("meters".to_owned(), 1)]
+        .iter()
+        .cloned()
+        .collect();
+
+    // single_fv should return None because @x has exponent 2, not ±1
+    let fv = single_fv(&constraint);
+    assert!(
+        fv.is_none(),
+        "single_fv should return None for metavariables with |exponent| > 1"
+    );
+}
+
+#[test]
+fn test_single_fv_with_exponent_1() {
+    // Test that single_fv works correctly for exponent ±1
+
+    // @x^1 * meters => should return Some("@x")
+    let constraint1: UnitMap = [("@x".to_owned(), 1), ("meters".to_owned(), 1)]
+        .iter()
+        .cloned()
+        .collect();
+    assert_eq!(single_fv(&constraint1), Some("@x"));
+
+    // @x^-1 * meters => should return Some("@x")
+    let constraint2: UnitMap = [("@x".to_owned(), -1), ("meters".to_owned(), 1)]
+        .iter()
+        .cloned()
+        .collect();
+    assert_eq!(single_fv(&constraint2), Some("@x"));
+
+    // @x^1 * @y^1 => should return None (multiple metavariables)
+    let constraint3: UnitMap = [("@x".to_owned(), 1), ("@y".to_owned(), 1)]
+        .iter()
+        .cloned()
+        .collect();
+    assert_eq!(single_fv(&constraint3), None);
 }
