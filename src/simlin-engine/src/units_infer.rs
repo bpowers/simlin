@@ -79,6 +79,77 @@ fn substitute(var: &str, units: &UnitMap, constraints: Vec<UnitMap>) -> Vec<Unit
         .collect()
 }
 
+/// Splits a UnitMap into its metavariable part (signature) and concrete part (residual).
+/// This enables O(n) mismatch detection by grouping constraints with the same signature.
+fn split_constraint(u: &UnitMap) -> (UnitMap, UnitMap) {
+    let mut signature = UnitMap::new();
+    let mut residual = UnitMap::new();
+
+    for (name, exp) in u.map.iter() {
+        if name.starts_with('@') {
+            signature.map.insert(name.clone(), *exp);
+        } else {
+            residual.map.insert(name.clone(), *exp);
+        }
+    }
+
+    (signature, residual)
+}
+
+/// Finds mismatches in the remaining constraints after unification.
+///
+/// There are two types of mismatches:
+///
+/// 1. A constraint with only concrete units (no metavariables) that isn't dimensionless.
+///    This means we have an equation like `meters = seconds` which is impossible.
+///
+/// 2. Two constraints with the same metavariable "signature" but different concrete "residuals".
+///    For example, `@a/@b * meters = 1` and `@a/@b * seconds = 1` both have signature `@a/@b`
+///    but residuals `meters` vs `seconds`. This implies `meters = seconds`, a contradiction.
+///
+/// This is O(n) by grouping constraints by their metavariable signature using a HashMap,
+/// rather than O(n²) pairwise comparison.
+fn find_constraint_mismatch(constraints: &[UnitMap]) -> Option<String> {
+    use std::collections::HashMap;
+    use std::fmt::Write;
+
+    // Group constraints by their metavariable signature.
+    // Key: sorted string representation of metavar signature (for HashMap key)
+    // Value: (first constraint with this signature, its residual)
+    let mut signature_groups: HashMap<String, (&UnitMap, UnitMap)> = HashMap::new();
+
+    for constraint in constraints {
+        let (signature, residual) = split_constraint(constraint);
+
+        // Case 1: No metavariables means this is a direct concrete mismatch
+        if signature.map.is_empty() && !residual.map.is_empty() {
+            let mut s = "unit checking failed; conflicting constraint:\n".to_owned();
+            write!(s, "    1 == {constraint}").unwrap();
+            return Some(s);
+        }
+
+        // Create a canonical string key for the signature (sorted for consistency)
+        let sig_key = format!("{signature}");
+
+        if let Some((first_constraint, first_residual)) = signature_groups.get(&sig_key) {
+            // Case 2: Same signature but different residual means contradiction
+            if residual != *first_residual {
+                let mut s = "unit checking failed; inconsistent constraints:\n".to_owned();
+                writeln!(s, "    1 == {}", first_constraint).unwrap();
+                writeln!(s, "    1 == {}", constraint).unwrap();
+                // The ratio of residuals shows the implied contradiction
+                let implied = first_residual.clone() / residual;
+                write!(s, "  These imply: 1 == {implied}").unwrap();
+                return Some(s);
+            }
+        } else {
+            signature_groups.insert(sig_key, (constraint, residual));
+        }
+    }
+
+    None
+}
+
 impl UnitInferer<'_> {
     /// gen_constraints generates a set of equality constraints for a given expression,
     /// storing those constraints in the mutable `constraints` argument. This is
@@ -466,21 +537,10 @@ impl UnitInferer<'_> {
 
         if let Some(constraints) = constraints {
             // Check if any unresolved constraint represents an actual mismatch
-            // (i.e., contains only concrete units, no metavariables)
-            let has_mismatch = constraints.iter().any(|c| {
-                // A constraint with only concrete units (no @ prefix) is a mismatch
-                !c.map.is_empty() && c.map.keys().all(|name| !name.starts_with('@'))
-            });
+            let mismatch = find_constraint_mismatch(&constraints);
 
-            if has_mismatch {
-                use std::fmt::Write;
-                let prefix = "unit checking failed; couldn't resolve: \n";
-                let mut s = prefix.to_owned();
-                for c in constraints.iter() {
-                    let delim = if s.len() == prefix.len() { "" } else { "; " };
-                    write!(s, "{delim}\n    1 == {c}").unwrap();
-                }
-                model_err!(UnitMismatch, s)
+            if let Some(mismatch_info) = mismatch {
+                model_err!(UnitMismatch, mismatch_info)
             } else {
                 // Unresolved constraints with metavariables just mean the model
                 // is under-constrained (e.g., no units declared). Return partial results.
@@ -505,6 +565,15 @@ fn test_inference() {
             // testing the 2-input version of smth1
             (x_aux("seen", "SMTH1(input, delay)", None), "widget"),
             (x_aux("seen_dep", "seen + 1", None), "widget"),
+        ],
+        // Test that a constant without declared units is properly constrained through
+        // module/builtin usage. Here delay_const has no declared units but should be
+        // inferred as "parsec" (time units) because it's used as the delay parameter in SMTH1.
+        &[
+            (x_aux("input", "6", Some("widget")), "widget"),
+            // delay_const is a constant (no units declared), but should be inferred as time units
+            (x_aux("delay_const", "3", None), "parsec"),
+            (x_aux("seen", "SMTH1(input, delay_const)", None), "widget"),
         ],
         &[
             (
@@ -693,4 +762,140 @@ fn test_constraint_generation_consistency() {
 
     // They should match!
     assert_eq!(constraint_var, ast_constraint);
+}
+
+#[test]
+fn test_multi_metavar_constraint_mismatch() {
+    // Test that we detect mismatches in constraints that contain multiple metavariables.
+    // This is the P2 badge case: two derived variables with declared units m and s
+    // both defined as a/b when neither a nor b has explicit units.
+    //
+    // This creates constraints:
+    //   @x = @a/@b  (from x = a/b)
+    //   @x = m      (from declared units of x)
+    //   @y = @a/@b  (from y = a/b)
+    //   @y = s      (from declared units of y)
+    //
+    // After unification, we get:
+    //   m = @a/@b
+    //   s = @a/@b
+    //
+    // These are contradictory: if @a/@b = m and @a/@b = s, then m = s.
+    // But m != s, so we should detect this as a mismatch.
+
+    let sim_specs = sim_specs_with_units("parsec");
+
+    let test_case: &[(crate::datamodel::Variable, &'static str)] = &[
+        (x_aux("a", "10", None), ""),                    // no units declared
+        (x_aux("b", "2", None), ""),                     // no units declared
+        (x_aux("x", "a / b", Some("meter")), "meter"),   // declared as meters
+        (x_aux("y", "a / b", Some("second")), "second"), // declared as seconds
+    ];
+
+    let vars = test_case
+        .iter()
+        .map(|(var, _unit)| var)
+        .cloned()
+        .collect::<Vec<_>>();
+    let model = x_model("main", vars);
+    let project_datamodel = x_project(sim_specs.clone(), &[model]);
+
+    let mut results: Result<HashMap<Ident<Canonical>, UnitMap>> =
+        model_err!(UnitMismatch, "".to_owned());
+    let _project = crate::project::Project::base_from(
+        project_datamodel.clone(),
+        |models, units_ctx, model| {
+            results = infer(models, units_ctx, model);
+        },
+    );
+
+    // The inference should fail because x and y have inconsistent unit declarations
+    assert!(
+        results.is_err(),
+        "Should detect multi-metavar constraint mismatch"
+    );
+}
+
+#[test]
+fn test_find_constraint_mismatch_direct() {
+    // Test the find_constraint_mismatch function directly
+    use crate::datamodel::UnitMap;
+
+    // Case 1: Direct concrete-only mismatch
+    let constraints = vec![
+        [("meter".to_owned(), 1), ("second".to_owned(), -1)]
+            .iter()
+            .cloned()
+            .collect::<UnitMap>(),
+    ];
+    let result = find_constraint_mismatch(&constraints);
+    assert!(result.is_some(), "Should detect direct concrete mismatch");
+
+    // Case 2: Pairwise mismatch with shared metavariables
+    let constraints = vec![
+        [
+            ("@a".to_owned(), 1),
+            ("@b".to_owned(), -1),
+            ("meter".to_owned(), 1),
+        ]
+        .iter()
+        .cloned()
+        .collect::<UnitMap>(),
+        [
+            ("@a".to_owned(), 1),
+            ("@b".to_owned(), -1),
+            ("second".to_owned(), 1),
+        ]
+        .iter()
+        .cloned()
+        .collect::<UnitMap>(),
+    ];
+    let result = find_constraint_mismatch(&constraints);
+    assert!(
+        result.is_some(),
+        "Should detect pairwise constraint mismatch"
+    );
+
+    // Case 3: No mismatch - same concrete units
+    let constraints = vec![
+        [
+            ("@a".to_owned(), 1),
+            ("@b".to_owned(), -1),
+            ("meter".to_owned(), 1),
+        ]
+        .iter()
+        .cloned()
+        .collect::<UnitMap>(),
+        [
+            ("@c".to_owned(), 1),
+            ("@d".to_owned(), -1),
+            ("meter".to_owned(), 1),
+        ]
+        .iter()
+        .cloned()
+        .collect::<UnitMap>(),
+    ];
+    let result = find_constraint_mismatch(&constraints);
+    // The ratio of these two would be @a/@b * @d/@c which still has metavariables
+    assert!(
+        result.is_none(),
+        "Should not detect mismatch for different metavar structures"
+    );
+
+    // Case 4: No mismatch - under-constrained but not contradictory
+    let constraints = vec![
+        [("@a".to_owned(), 1), ("@b".to_owned(), -1)]
+            .iter()
+            .cloned()
+            .collect::<UnitMap>(),
+        [("@c".to_owned(), 1), ("@d".to_owned(), -1)]
+            .iter()
+            .cloned()
+            .collect::<UnitMap>(),
+    ];
+    let result = find_constraint_mismatch(&constraints);
+    assert!(
+        result.is_none(),
+        "Should not detect mismatch for purely under-constrained case"
+    );
 }

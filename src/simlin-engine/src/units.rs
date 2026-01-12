@@ -294,10 +294,13 @@ fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> 
         }
         Expr0::Var(id, _) => {
             let id_str = id.as_str();
-            // Canonicalize the unit name for consistent comparison
+            // Canonicalize the unit name (lowercase) for consistent lookup.
+            // This is safe because Context::new() stores all alias keys and values
+            // in canonical form, so alias resolution also returns canonical names.
             let id_canonical = crate::common::canonicalize(id_str);
             let id_str = id_canonical.as_str();
-            // Check aliases with canonicalized name
+            // Resolve any alias (e.g., "m" -> "meter"). The result is already canonical
+            // because aliases are stored with canonical values in Context::new().
             let id_str = ctx
                 .aliases
                 .get(id_str)
@@ -675,4 +678,62 @@ fn test_const_int_eval() {
             const_int_eval(&expr).unwrap_err().code
         );
     }
+}
+
+#[test]
+fn test_unit_canonicalization() {
+    // Verify that unit names and aliases are properly canonicalized
+    let context = Context::new(
+        &[
+            Unit {
+                name: "Meter".to_owned(), // non-canonical case
+                equation: None,
+                disabled: false,
+                aliases: vec!["M".to_owned(), "METERS".to_owned()],
+            },
+            Unit {
+                name: "Second".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec!["S".to_owned(), "SECONDS".to_owned()],
+            },
+        ],
+        &Default::default(),
+    )
+    .unwrap();
+
+    // All of these should resolve to the same canonical unit
+    let test_cases = &["meter", "Meter", "METER", "m", "M", "meters", "METERS"];
+    for input in test_cases {
+        let expr = Expr0::new(input, LexerType::Units).unwrap().unwrap();
+        let result = build_unit_components(&context, &expr).unwrap();
+        assert_eq!(
+            result,
+            [("meter".to_owned(), 1)]
+                .iter()
+                .cloned()
+                .collect::<UnitMap>(),
+            "Expected '{input}' to canonicalize to 'meter'"
+        );
+    }
+
+    // Verify compound units with mixed case also work
+    let expr = Expr0::new("METER/SECOND", LexerType::Units)
+        .unwrap()
+        .unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    let expected: UnitMap = [("meter".to_owned(), 1), ("second".to_owned(), -1)]
+        .iter()
+        .cloned()
+        .collect();
+    assert_eq!(result, expected, "Compound units should be canonicalized");
+
+    // Verify that aliases resolve through case-insensitive matching
+    let expr = Expr0::new("M*S", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    let expected: UnitMap = [("meter".to_owned(), 1), ("second".to_owned(), 1)]
+        .iter()
+        .cloned()
+        .collect();
+    assert_eq!(result, expected, "Aliases should be resolved correctly");
 }
