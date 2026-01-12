@@ -116,22 +116,9 @@ function lookup(table: GFTable, index: number): number {
   }
 }
 
-function getAnyElementOfObject(obj: any): any | undefined {
-  if (!obj) {
-    return undefined;
-  }
-
-  const keys = Object.keys(obj);
-  if (keys && keys.length) {
-    return obj[keys[0]];
-  }
-
-  return undefined;
-}
-
 export const LookupEditor = styled(
   class InnerLookupEditor extends React.PureComponent<LookupEditorProps & { className?: string }, LookupEditorState> {
-    readonly lookupRef: React.RefObject<InstanceType<typeof LineChart>>;
+    readonly lookupRef: React.RefObject<SVGSVGElement | null>;
 
     constructor(props: LookupEditorProps) {
       super(props);
@@ -177,7 +164,10 @@ export const LookupEditor = styled(
       return gf;
     }
 
-    formatValue = (value: number | string | Array<number | string>): string => {
+    formatValue = (value: number | string | Array<number | string> | undefined): string => {
+      if (value === undefined) {
+        return '';
+      }
       return typeof value === 'number' ? value.toFixed(3) : value.toString();
     };
 
@@ -235,15 +225,8 @@ export const LookupEditor = styled(
         return;
       }
 
-      const chart = this.lookupRef.current;
-      if (chart === null || !(chart.state as unknown as any).yAxisMap) {
-        return;
-      }
-
-      const yAxisMap = getAnyElementOfObject((chart.state as unknown as any).yAxisMap);
-
-      const yScale = yAxisMap.scale;
-      if (!yScale || !yScale.invert) {
+      const svg = this.lookupRef.current;
+      if (svg === null) {
         return;
       }
 
@@ -257,7 +240,33 @@ export const LookupEditor = styled(
 
       const x = details.activePayload[0].payload.x;
 
-      let y = yScale.invert(details.chartY);
+      // Get the actual plot area dimensions from the chart's offset property
+      // which recharts populates based on actual axis sizes and margins
+      const offset = details.offset;
+      if (!offset) {
+        return;
+      }
+
+      // Get container height from the SVG element. In evergreen browsers with a
+      // visible, laid-out SVG element (required for us to receive events), this
+      // will always be a positive number.
+      const containerHeight = svg.clientHeight;
+      if (containerHeight <= 0) {
+        return;
+      }
+
+      // Calculate actual plot area bounds
+      const plotAreaTop = offset.top;
+      const plotAreaHeight = containerHeight - offset.top - offset.bottom;
+      if (plotAreaHeight <= 0) {
+        return;
+      }
+
+      // chartY is relative to the SVG container, so adjust for the plot area offset
+      // Then normalize to [0, 1] where 0 = top (yMax) and 1 = bottom (yMin)
+      const plotAreaY = details.chartY - plotAreaTop;
+      const normalizedY = Math.max(0, Math.min(1, plotAreaY / plotAreaHeight));
+      let y = yMax - normalizedY * (yMax - yMin);
       if (y > yMax) {
         y = yMax;
       } else if (y < yMin) {
@@ -289,15 +298,18 @@ export const LookupEditor = styled(
       this.updatePoint(details);
     };
 
-    handleMouseMove = (details: any, event: React.MouseEvent<typeof LineChart>) => {
+    handleMouseMove = (details: any, event: React.SyntheticEvent) => {
       if (!this.state.inDrag) {
         return;
       }
 
-      // if we were dragging in the chart, left the chart, stopped pressing the mouse,
-      // then moused back in we might mistakenly think we were still inDrag
-      if (event.hasOwnProperty('buttons') && event.buttons === 0) {
+      // If we were dragging in the chart, left the chart, stopped pressing the mouse/touch,
+      // then moved back in we might mistakenly think we were still inDrag.
+      // Check for buttons property which exists on MouseEvent and PointerEvent (but not TouchEvent).
+      const nativeEvent = event.nativeEvent;
+      if ('buttons' in nativeEvent && (nativeEvent as PointerEvent).buttons === 0) {
         this.endEditing();
+        return;
       }
 
       this.updatePoint(details);

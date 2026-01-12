@@ -312,7 +312,7 @@ const InnerApp = styled(
 `);
 
 export class App extends React.PureComponent {
-  render(): JSX.Element {
+  render(): React.JSX.Element {
     return (
       <React.StrictMode>
         <ThemeProvider theme={theme}>
