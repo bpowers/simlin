@@ -201,20 +201,13 @@ impl UnitEvaluator<'_> {
                         if let Some(c) = c {
                             let c_units = self.check(c)?;
                             if !c_units.equals(&units) {
-                                let expected = match &units {
-                                    Units::Explicit(u) => u.clone(),
-                                    Units::Constant => UnitMap::new(),
-                                };
-                                let actual = match &c_units {
-                                    Units::Explicit(u) => u.clone(),
-                                    Units::Constant => UnitMap::new(),
-                                };
                                 return Err(ConsistencyError(
                                     ErrorCode::UnitMismatch,
                                     c.get_loc(),
                                     Some(format!(
                                         "SAFEDIV fallback has units '{}' but expected '{}'",
-                                        actual, expected
+                                        c_units.to_unit_map(),
+                                        units.to_unit_map()
                                     )),
                                 ));
                             }
@@ -304,20 +297,13 @@ impl UnitEvaluator<'_> {
                 let runits = self.check(r)?;
 
                 if !lunits.equals(&runits) {
-                    let expected = match &lunits {
-                        Units::Explicit(units) => units.clone(),
-                        Units::Constant => UnitMap::new(),
-                    };
-                    let actual = match &runits {
-                        Units::Explicit(units) => units.clone(),
-                        Units::Constant => UnitMap::new(),
-                    };
                     return Err(ConsistencyError(
                         ErrorCode::UnitMismatch,
                         *loc,
                         Some(format!(
                             "IF branches have different units: then '{}', else '{}'",
-                            expected, actual
+                            lunits.to_unit_map(),
+                            runits.to_unit_map()
                         )),
                     ));
                 }
@@ -384,6 +370,48 @@ pub fn check(
             // specified on the variable (like a constant would be)
             continue;
         }
+
+        // Check that all elements of arrayed expressions have consistent units,
+        // even when the array variable has no declared units
+        if let Some(Ast::Arrayed(_, asts)) = var.ast() {
+            let mut first_units: Option<UnitMap> = None;
+            for (element, expr) in asts.iter() {
+                match units.check(expr) {
+                    Ok(Units::Explicit(element_units)) => {
+                        if let Some(ref existing) = first_units {
+                            if *existing != element_units {
+                                let loc = expr.get_loc();
+                                errors.push((
+                                    ident.clone(),
+                                    ConsistencyError(
+                                        ErrorCode::UnitMismatch,
+                                        Loc::new(loc.start.into(), loc.end.into()),
+                                        Some(format!(
+                                            "array element '{}' has units '{}' but previous element(s) have units '{}'",
+                                            element, element_units, existing
+                                        )),
+                                    ),
+                                ));
+                            }
+                        } else {
+                            first_units = Some(element_units);
+                        }
+                    }
+                    Ok(Units::Constant) => {
+                        // Constants are compatible with any units
+                    }
+                    Err(ConsistencyError(ErrorCode::DoesNotExist, _, _)) => {
+                        // If we can't determine units for an element (e.g., it uses a module
+                        // that doesn't have inferred units yet), skip the consistency check.
+                        // Other error types are propagated as actual errors.
+                    }
+                    Err(err) => {
+                        errors.push((ident.clone(), err));
+                    }
+                }
+            }
+        }
+
         if let Some(expected) = var.units() {
             if let Variable::Stock {
                 ident,

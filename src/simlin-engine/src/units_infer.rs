@@ -123,8 +123,10 @@ fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
     // inverse of $lhs; otherwise (exponent < 0) just delete $var from $lhs.
 
     let inverse = if let Some(exponent) = lhs.map.remove(var) {
-        // single_fv ensures we only get here with exponent ±1
-        debug_assert!(
+        // single_fv ensures we only get here with exponent ±1.
+        // Use a regular assert since violating this invariant would produce
+        // incorrect results (not just a performance issue).
+        assert!(
             exponent.abs() == 1,
             "solve_for called with |exponent| != 1; single_fv should prevent this"
         );
@@ -593,24 +595,35 @@ impl UnitInferer<'_> {
                     Some(Ast::Arrayed(_, asts)) => {
                         // For arrayed variables, each element may have a different expression,
                         // but all elements must have the same units. Process each expression
-                        // and collect the resulting units. If any element returns explicit units,
-                        // use those as the result.
-                        let mut result_units: UnitResult<Units> = Ok(Units::Constant);
+                        // and add a constraint tying each element's units to the array variable.
+                        // If elements have conflicting units, this will be detected as a mismatch
+                        // in the unify phase.
+                        let array_var: UnitMap =
+                            [(format!("@{prefix}{id}"), 1)].iter().cloned().collect();
+
+                        let mut result: UnitResult<Units> = Ok(Units::Constant);
                         for (_element, expr) in asts.iter() {
                             match self.gen_constraints(expr, prefix, &current_var, constraints) {
                                 Ok(expr_units) => {
-                                    // If any element has explicit units, use those
-                                    if matches!(expr_units, Units::Explicit(_)) {
-                                        result_units = Ok(expr_units);
+                                    // Add a constraint tying this element's units to the array variable
+                                    if let Units::Explicit(units) = expr_units {
+                                        let element_var = format!("{current_var}[element]");
+                                        constraints.push(LocatedConstraint::new(
+                                            combine(UnitOp::Div, array_var.clone(), units),
+                                            &element_var,
+                                            Some(expr.get_loc()),
+                                        ));
                                     }
                                 }
                                 Err(e) => {
-                                    result_units = Err(e);
+                                    result = Err(e);
                                     break;
                                 }
                             }
                         }
-                        result_units
+                        // Return Constant since we've added constraints directly above
+                        // (the constraint from var_units below would be redundant)
+                        result
                     }
                     None => {
                         // TODO: maybe we should bail early?  If there is no equation we will fail

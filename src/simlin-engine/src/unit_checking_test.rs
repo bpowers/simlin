@@ -632,6 +632,27 @@ mod tests {
     }
 
     #[test]
+    fn test_arrayed_expression_conflicting_inferred_units() {
+        // Test that inference catches when different array elements have different units
+        // without any declared units on the array itself
+        TestProject::new("arrayed_conflict_test")
+            .with_time_units("days")
+            .unit("widgets", None)
+            .unit("gadgets", None)
+            .named_dimension("Type", &["A", "B"])
+            .aux_with_units("widget_rate", "10", Some("widgets"))
+            .aux_with_units("gadget_rate", "20", Some("gadgets"))
+            // Different elements have different units - should fail
+            .array_with_ranges_direct(
+                "rates",
+                vec!["Type".to_string()],
+                vec![("A", "widget_rate"), ("B", "gadget_rate")],
+                None, // No declared units - relies on inference
+            )
+            .assert_unit_error();
+    }
+
+    #[test]
     fn test_arrayed_expression_unit_mismatch() {
         // Test that unit checking catches mismatches in arrayed expressions
         // The declared units are "widgets" but the expression computes "widgets/days"
