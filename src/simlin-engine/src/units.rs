@@ -73,25 +73,56 @@ impl Context {
         units: &[Unit],
         sim_specs: &SimSpecs,
     ) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
+        // Built-in unit equivalences for common singular/plural variations.
+        // These ensure that "person" and "people" (etc.) are treated as the same unit.
+        // We only add a built-in if the model doesn't already define a unit with that name.
         let builtin_units: &[(&str, &[&str])] = &[
-            // ("dollars", &["$", "usd"]),
-            // ("year", &["years"]),
-            // ("month", &["months"]),
-            // ("person", &["people", "persons", "peoples"]),
+            ("person", &["people", "persons"]),
+            ("minute", &["minutes"]),
+            ("month", &["months"]),
+            ("year", &["years"]),
+            ("day", &["days"]),
+            ("week", &["weeks"]),
+            ("hour", &["hours"]),
+            ("second", &["seconds"]),
         ];
-        let mut builtin_units = builtin_units
+
+        // Collect ALL model-defined unit identifiers (primary names AND aliases) into one set.
+        // This allows O(1) lookups when filtering built-ins.
+        let model_unit_identifiers: std::collections::HashSet<String> = units
             .iter()
+            .flat_map(|u| {
+                std::iter::once(canonicalize(&u.name).as_str().to_string()).chain(
+                    u.aliases
+                        .iter()
+                        .map(|a| canonicalize(a).as_str().to_string()),
+                )
+            })
+            .collect();
+
+        // Only include built-ins that don't conflict with model-defined units.
+        // A built-in conflicts if its primary name OR any of its aliases matches
+        // any model-defined identifier (name or alias).
+        let mut combined_units: Vec<Unit> = builtin_units
+            .iter()
+            .filter(|(name, aliases)| {
+                let primary = canonicalize(name).as_str().to_string();
+                !model_unit_identifiers.contains(&primary)
+                    && !aliases
+                        .iter()
+                        .any(|a| model_unit_identifiers.contains(canonicalize(a).as_str()))
+            })
             .map(|(name, aliases)| Unit {
                 name: name.to_string(),
                 equation: None,
                 disabled: false,
                 aliases: aliases.iter().map(|s| s.to_string()).collect(),
             })
-            .collect::<Vec<_>>();
+            .collect();
 
-        builtin_units.append(&mut units.to_vec());
+        combined_units.append(&mut units.to_vec());
 
-        Self::new(&builtin_units, sim_specs)
+        Self::new(&combined_units, sim_specs)
     }
     pub fn new(
         units: &[Unit],

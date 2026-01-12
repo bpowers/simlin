@@ -47,7 +47,7 @@
             </aux>
             <aux name="duration">
                 <eqn>5</eqn>
-                <units>days</units>
+                <units>time</units>
             </aux>
             <aux name="contact_infectivity">
                 <eqn>0.3</eqn>

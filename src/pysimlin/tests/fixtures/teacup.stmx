@@ -7,7 +7,7 @@
 		<vendor>isee systems, inc.</vendor>
 		<product version="1.4" isee:build_number="1125" isee:saved_by_v1="true" lang="en">Stella Architect</product>
 	</header>
-	<sim_specs isee:simulation_delay="0.1" method="Euler" time_units="Time" isee:pause_after_rates="false" isee:instantaneous_flows="false">
+	<sim_specs isee:simulation_delay="0.1" method="Euler" time_units="Minutes" isee:pause_after_rates="false" isee:instantaneous_flows="false">
 		<start>0</start>
 		<stop>30</stop>
 		<dt>0.125</dt>
@@ -37,7 +37,7 @@
 			<flow name="heat loss to room">
 				<eqn>(teacup_temperature-room_temperature)/characteristic_time</eqn>
 				<non_negative/>
-				<units>deg/time</units>
+				<units>deg/minutes</units>
 			</flow>
 			<aux name="characteristic time">
 				<eqn>10</eqn>

@@ -44,7 +44,7 @@
         <variables>
             <aux name="this is a spanish variable with ñ ç">
                 <eqn>2*this_is_a_german_variable_with_ö_ä_ü</eqn>
-                <units>D</units>
+                <units>dmnl</units>
             </aux>
             <aux name="this is a french variable with é à è">
                 <doc>	This variable also has funny german characters ö ä ü in its comment box</doc>

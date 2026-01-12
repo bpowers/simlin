@@ -43,12 +43,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires inference errors to be surfaced; currently disabled for backwards compat
     fn test_smth1_unit_mismatch_initial() {
-        // Test that SMTH1 fails when initial value has wrong units
-        // delay_time must have the same units as simulation time
-        // Note: This test requires inference errors to be surfaced to detect the mismatch
-        // between input (widgets) and initial (gadgets) through the SMTH1 module constraints.
+        // Test that SMTH1 fails when initial value has wrong units.
+        // The mismatch between input (widgets) and initial (gadgets) is detected
+        // through unit inference propagating constraints through the SMTH1 module.
         TestProject::new("smth1_mismatch_test")
             .with_time_units("seconds")
             .unit("widgets", None)

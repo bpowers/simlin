@@ -57,9 +57,9 @@
                 <eqn>5</eqn>
             </flow>
             <aux name="Smoothing Time">
-                <doc>	The time (in meetings) required for the system to recognize that a new desired decision rate is needed.</doc>
+                <doc>	The time required for the system to recognize that a new desired decision rate is needed.</doc>
                 <eqn>2</eqn>
-                <units>Meetings</units>
+                <units>Minutes</units>
             </aux>
             <stock name="Input">
                 <doc>	This is the current stock of issues to be decided; this stock is the result of the initial stock
@@ -69,10 +69,10 @@
                 <units>Issues</units>
             </stock>
             <aux name="Smoothed Input">
-                <doc>	The system's perception of how fast it needs to decide on issues. 
+                <doc>	The system's perception of how fast it needs to decide on issues.
 		The Desired Decision Rate is equal to a first order exponential smooth of the indicated rate (SMOOTH1).</doc>
                 <eqn>SMTH1(Input, Smoothing_Time)</eqn>
-                <units>1</units>
+                <units>Issues</units>
             </aux>
             <flow name="Input net flow">
                 <eqn>0</eqn>

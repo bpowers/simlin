@@ -65,16 +65,27 @@ impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
         Self::base_from(project_datamodel, |models, units_ctx, model| {
             // Run unit inference to compute units for variables without explicit declarations.
-            // Inference errors are not surfaced to the model to maintain backwards compatibility
-            // with models that have incomplete or incorrect unit annotations. The check_units
-            // call below will still catch mismatches between explicitly declared units.
-            // TODO: Consider surfacing UnitMismatch errors once more test models have correct units.
+            // The check_units call below validates inferred units against declared units.
+            // Check if the model has any variables with declared units.
+            // If not, we skip surfacing unit inference errors since the model
+            // wasn't designed with dimensional analysis in mind.
+            let has_declared_units = model.variables.values().any(|var| var.units().is_some());
+
             let inferred_units = crate::units_infer::infer(models, units_ctx, model)
-                .unwrap_or_else(|_err| {
-                    // Inference errors now include location information (variable names
-                    // and positions in equations). We're still not surfacing them to
-                    // maintain backwards compatibility, but they're ready to be used.
-                    // To enable: convert _err (UnitError::InferenceError) to model errors.
+                .unwrap_or_else(|err| {
+                    // Only surface unit mismatches for models that have declared units
+                    if has_declared_units
+                        && let crate::common::UnitError::InferenceError { code, .. } = &err
+                        && *code == crate::common::ErrorCode::UnitMismatch
+                    {
+                        let mut errors = model.errors.take().unwrap_or_default();
+                        errors.push(crate::common::Error {
+                            kind: crate::common::ErrorKind::Model,
+                            code: *code,
+                            details: Some(format!("{}", err)),
+                        });
+                        model.errors = Some(errors);
+                    }
                     Default::default()
                 });
             model.check_units(units_ctx, &inferred_units)
