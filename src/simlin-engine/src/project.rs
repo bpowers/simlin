@@ -69,8 +69,17 @@ impl From<datamodel::Project> for Project {
             // with models that have incomplete or incorrect unit annotations. The check_units
             // call below will still catch mismatches between explicitly declared units.
             // TODO: Consider surfacing UnitMismatch errors once more test models have correct units.
-            let inferred_units =
-                crate::units_infer::infer(models, units_ctx, model).unwrap_or_default();
+            let inferred_units = crate::units_infer::infer(models, units_ctx, model)
+                .unwrap_or_else(|_err| {
+                    // XXX: for now, ignore inference errors.  They aren't
+                    // understandable for anyone but me - we need to thread
+                    // location information through at a minimum.
+
+                    // let mut errors = model.errors.take().unwrap_or_default();
+                    // errors.push(err);
+                    // model.errors = Some(errors);
+                    Default::default()
+                });
             model.check_units(units_ctx, &inferred_units)
         })
     }
