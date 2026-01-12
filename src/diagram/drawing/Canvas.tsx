@@ -165,7 +165,7 @@ export const Canvas = styled(
   class InnerCanvas extends React.PureComponent<CanvasProps & { className?: string }, CanvasState> {
     state: CanvasState;
 
-    readonly svgRef: React.RefObject<HTMLDivElement | null>;
+    readonly svgRef: React.RefObject<HTMLDivElement>;
 
     // XXX: these should all be private, but that doesn't work with styled
     svgObserver: ResizeObserver | undefined;
