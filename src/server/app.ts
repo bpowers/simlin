@@ -247,7 +247,7 @@ class App {
           return;
         }
 
-        const projectName: string = req.params.projectName;
+        const projectName = req.params.projectName as string;
         const projectId = `${req.params.username}/${projectName}`;
         const projectModel = await this.app.db.project.findOne(projectId);
         if (!projectModel || !projectModel.getFileId()) {

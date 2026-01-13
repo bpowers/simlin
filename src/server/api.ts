@@ -127,7 +127,7 @@ export const apiRouter = (app: Application): Router => {
     if (requestUser && requestUser.getId() === req.params.username) {
       authorUser = requestUser;
     } else {
-      authorUser = await app.db.user.findOne(req.params.username);
+      authorUser = await app.db.user.findOne(req.params.username as string);
     }
     if (!authorUser) {
       res.status(404).json({});
@@ -167,7 +167,7 @@ export const apiRouter = (app: Application): Router => {
   api.get('/preview/:username/:projectName', async (req: Request, res: Response): Promise<void> => {
     let authorUser: UserPb | undefined = getUser(req, res);
     if (authorUser.getId() !== req.params.username) {
-      authorUser = await app.db.user.findOne(req.params.username);
+      authorUser = await app.db.user.findOne(req.params.username as string);
     }
     if (!authorUser) {
       res.status(404).json({});
