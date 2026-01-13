@@ -1866,6 +1866,7 @@ dependencies = [
  "float-cmp",
  "quick-xml",
  "serde",
+ "serde_json",
  "simlin-engine",
  "ssh-key",
  "test-generator",
