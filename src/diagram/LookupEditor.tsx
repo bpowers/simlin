@@ -6,7 +6,19 @@ import * as React from 'react';
 
 import { List } from 'immutable';
 import { styled } from '@mui/material/styles';
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+  useOffset,
+  useChartHeight,
+} from 'recharts';
+import type { CategoricalChartFunc } from 'recharts/types/chart/types';
+import type { ChartOffset } from 'recharts/types';
 import { Button, CardActions, CardContent, TextField } from '@mui/material';
 
 import { defined } from '@system-dynamics/core/common';
@@ -47,8 +59,8 @@ function tableFrom(gf: GraphicalFunction): GFTable | undefined {
     // either the x points have been explicitly specified, or
     // it is a linear mapping of points between xmin and xmax,
     // inclusive
-    const x = xpts ? defined(xpts.get(i)) : (i / (size - 1)) * (xmax - xmin) + xmin;
-    xList[i] = x;
+    const xVal = xpts ? defined(xpts.get(i)) : (i / (size - 1)) * (xmax - xmin) + xmin;
+    xList[i] = xVal;
     yList[i] = defined(ypts.get(i));
   }
 
@@ -65,8 +77,6 @@ interface LookupEditorProps {
   onLookupChange: (ident: string, newTable: GraphicalFunction | null) => void;
 }
 
-// export type LookupEditorProps = Pick<LookupEditorPropsFull, 'variable' | 'viewElement' | 'data'>;
-
 interface LookupEditorState {
   inDrag: boolean;
   hasChange: boolean;
@@ -77,19 +87,55 @@ interface LookupEditorState {
   datapointCount: number;
 }
 
-type ChartEventDetails = {
-  chartX?: number;
-  chartY?: number;
-  activeTooltipIndex?: number;
-  activePayload?: Array<{ payload?: { x?: number } }>;
-};
+// Chart height from ResponsiveContainer
+const CHART_HEIGHT = 300;
 
-type InvertibleScale = {
-  invert: (value: number) => number;
-};
+// Chart layout info extracted from recharts hooks
+interface ChartLayoutInfo {
+  chartHeight: number;
+  offset: ChartOffset;
+}
 
-function isInvertibleScale(scale: unknown): scale is InvertibleScale {
-  return !!scale && typeof (scale as InvertibleScale).invert === 'function';
+// Functional component that extracts chart layout info from recharts context
+// and passes it to the parent via a callback. This must be rendered inside
+// the LineChart to have access to the chart context.
+function ChartLayoutExtractor({
+  onLayoutChange,
+}: {
+  onLayoutChange: (layoutInfo: ChartLayoutInfo | undefined) => void;
+}) {
+  const offset = useOffset();
+  const chartHeight = useChartHeight();
+
+  React.useEffect(() => {
+    if (offset && chartHeight) {
+      onLayoutChange({ chartHeight, offset });
+    } else {
+      onLayoutChange(undefined);
+    }
+  }, [offset, chartHeight, onLayoutChange]);
+
+  return null;
+}
+
+// Convert pixel Y coordinate to data Y value using chart layout info and Y domain
+function pixelToDataY(pixelY: number, layoutInfo: ChartLayoutInfo, yDomain: { min: number; max: number }): number {
+  const { chartHeight, offset } = layoutInfo;
+  const plotTop = offset.top;
+  const plotBottom = chartHeight - offset.bottom;
+  const plotHeight = plotBottom - plotTop;
+
+  if (plotHeight <= 0) {
+    return yDomain.min;
+  }
+
+  // Calculate relative position within the plot area (0 = top, 1 = bottom)
+  const relativeY = (pixelY - plotTop) / plotHeight;
+
+  // Convert to data value (inverted because SVG Y increases downward)
+  // At relativeY = 0 (top), we want yDomain.max
+  // At relativeY = 1 (bottom), we want yDomain.min
+  return yDomain.max - relativeY * (yDomain.max - yDomain.min);
 }
 
 function lookup(table: GFTable, index: number): number {
@@ -133,7 +179,13 @@ function lookup(table: GFTable, index: number): number {
 
 export const LookupEditor = styled(
   class InnerLookupEditor extends React.PureComponent<LookupEditorProps & { className?: string }, LookupEditorState> {
-    readonly lookupRef: React.RefObject<InstanceType<typeof LineChart>>;
+    readonly containerRef: React.RefObject<HTMLDivElement | null>;
+
+    // Stored as an instance variable rather than state because:
+    // 1. We don't need re-renders when layoutInfo changes (it's only read during drag events)
+    // 2. Drag events always occur after the initial render when layoutInfo is populated
+    // 3. Making it state would cause unnecessary re-renders on every layout change
+    layoutInfo: ChartLayoutInfo | undefined;
 
     constructor(props: LookupEditorProps) {
       super(props);
@@ -141,7 +193,8 @@ export const LookupEditor = styled(
       const gf = this.getVariableGF();
       const table = defined(tableFrom(gf));
 
-      this.lookupRef = React.createRef();
+      this.containerRef = React.createRef();
+      this.layoutInfo = undefined;
       this.state = {
         inDrag: false,
         hasChange: false,
@@ -222,26 +275,22 @@ export const LookupEditor = styled(
 
     endEditing() {
       this.setState({ inDrag: false });
-
-      // const { series, yMin, yMax } = this.state;
-      // const xPoints: List<number> = List(series.map((p: Point): number => p.x));
-      // const yPoints: List<number> = List(series.map((p: Point): number => p.y));
-      //
-      // const { variable } = this.props;
-      // const xVar = defined(variable.xmile);
-      // const yScale = new Scale({ min: yMin, max: yMax });
-      // const gf = defined(xVar.gf).set('xPoints', xPoints).set('yPoints', yPoints).set('yScale', yScale);
-
-      // this.props.onLookupChange(defined(this.props.variable.ident), gf);
     }
 
-    updatePoint(details: ChartEventDetails) {
-      if (!details || typeof details.chartX !== 'number' || typeof details.chartY !== 'number') {
-        return;
-      }
+    // Class arrow function properties have stable identity across renders (assigned once
+    // at instance creation), so this won't cause unnecessary useEffect re-runs in
+    // ChartLayoutExtractor despite being in its dependency array.
+    handleLayoutChange = (layoutInfo: ChartLayoutInfo | undefined) => {
+      this.layoutInfo = layoutInfo;
+    };
 
-      const chart = this.lookupRef.current;
-      if (!chart || typeof chart.getYScaleByAxisId !== 'function') {
+    updatePoint(
+      activeTooltipIndex: number | string | null | undefined,
+      activeLabel: string | number | undefined,
+      event: React.SyntheticEvent,
+    ) {
+      const container = this.containerRef.current;
+      if (!container || !this.layoutInfo) {
         return;
       }
 
@@ -253,12 +302,32 @@ export const LookupEditor = styled(
       const yMin = defined(gf.yScale).min;
       const yMax = defined(gf.yScale).max;
 
-      const yScale = chart.getYScaleByAxisId('1');
-      if (!isInvertibleScale(yScale)) {
+      // Get mouse/touch Y position relative to container.
+      // Handle both MouseEvent (has clientY directly) and TouchEvent (has clientY on Touch objects).
+      const nativeEvent = event.nativeEvent;
+      let clientY: number | undefined;
+      if ('clientY' in nativeEvent && typeof nativeEvent.clientY === 'number') {
+        // MouseEvent or PointerEvent
+        clientY = nativeEvent.clientY;
+      } else if ('touches' in nativeEvent) {
+        // TouchEvent - get from first touch point
+        const touchEvent = nativeEvent as TouchEvent;
+        const touch = touchEvent.touches[0] ?? touchEvent.changedTouches[0];
+        if (touch) {
+          clientY = touch.clientY;
+        }
+      }
+      if (clientY === undefined) {
         return;
       }
 
-      let y = yScale.invert(details.chartY);
+      const rect = container.getBoundingClientRect();
+      const relativeY = clientY - rect.top;
+
+      // Use the layout info from recharts to convert pixel to data coordinates
+      let y = pixelToDataY(relativeY, this.layoutInfo, { min: yMin, max: yMax });
+
+      // Clamp to domain
       if (y > yMax) {
         y = yMax;
       } else if (y < yMin) {
@@ -266,23 +335,23 @@ export const LookupEditor = styled(
       }
 
       let tableIndex: number | undefined;
-      const activeIndex = details.activeTooltipIndex;
-      if (Number.isInteger(activeIndex)) {
-        tableIndex = activeIndex;
+      if (typeof activeTooltipIndex === 'number' && Number.isInteger(activeTooltipIndex)) {
+        tableIndex = activeTooltipIndex;
       }
 
       if (tableIndex === undefined || tableIndex < 0 || tableIndex >= newTable.size) {
         tableIndex = undefined;
       }
 
-      if (tableIndex === undefined && Array.isArray(details.activePayload) && details.activePayload.length > 0) {
-        const x = details.activePayload[0]?.payload?.x;
-        if (typeof x === 'number') {
-          for (let i = 0; i < newTable.size; i++) {
-            if (isEqual(newTable.x[i], x)) {
-              tableIndex = i;
-              break;
-            }
+      // Fallback: if activeTooltipIndex didn't give us a valid index, try to find
+      // the point by matching the X value from activeLabel. This handles edge
+      // cases where recharts doesn't provide a valid index (e.g., when points are
+      // very close together).
+      if (tableIndex === undefined && typeof activeLabel === 'number') {
+        for (let i = 0; i < newTable.size; i++) {
+          if (isEqual(newTable.x[i], activeLabel)) {
+            tableIndex = i;
+            break;
           }
         }
       }
@@ -298,12 +367,16 @@ export const LookupEditor = styled(
       });
     }
 
-    handleMouseDown = (details: ChartEventDetails) => {
+    handleMouseDown: CategoricalChartFunc = (nextState, event) => {
       this.setState({ inDrag: true });
-      this.updatePoint(details);
+      // nextState can be null when clicking outside the plot area (e.g., on axis labels)
+      if (!nextState) {
+        return;
+      }
+      this.updatePoint(nextState.activeTooltipIndex, nextState.activeLabel, event);
     };
 
-    handleMouseMove = (details: ChartEventDetails, event: React.SyntheticEvent) => {
+    handleMouseMove: CategoricalChartFunc = (nextState, event) => {
       if (!this.state.inDrag) {
         return;
       }
@@ -317,7 +390,11 @@ export const LookupEditor = styled(
         return;
       }
 
-      this.updatePoint(details);
+      // nextState can be null when the pointer is outside the plot area
+      if (!nextState) {
+        return;
+      }
+      this.updatePoint(nextState.activeTooltipIndex, nextState.activeLabel, event);
     };
 
     handleYMinChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -440,9 +517,9 @@ export const LookupEditor = styled(
       }
 
       for (let i = 0; i < size; i++) {
-        const x = (i / (size - 1)) * (xMax - xMin) + xMin;
-        newTable.x[i] = x;
-        newTable.y[i] = lookup(oldTable, x);
+        const xVal = (i / (size - 1)) * (xMax - xMin) + xMin;
+        newTable.x[i] = xVal;
+        newTable.y[i] = lookup(oldTable, xVal);
       }
       newTable.size = datapointCount;
 
@@ -498,9 +575,9 @@ export const LookupEditor = styled(
 
       const series: { x: number; y: number }[] = [];
       for (let i = 0; i < table.size; i++) {
-        const x = table.x[i];
-        const y = table.y[i];
-        series.push({ x, y });
+        const xVal = table.x[i];
+        const yVal = table.y[i];
+        series.push({ x: xVal, y: yVal });
       }
 
       const xScaleError = xMin >= xMax;
@@ -522,6 +599,7 @@ export const LookupEditor = styled(
               margin="normal"
             />
             <div
+              ref={this.containerRef}
               onMouseDown={this.handleContainerMouseDown}
               onMouseUp={this.handleContainerMouseUp}
               onMouseMove={this.handleContainerMouseMove}
@@ -529,15 +607,15 @@ export const LookupEditor = styled(
               onPointerUp={this.handleContainerTouchEnd}
               onPointerMove={this.handleContainerTouchMove}
             >
-              <ResponsiveContainer width="100%" height={300}>
+              <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
                 <LineChart
                   data={series}
                   onMouseDown={this.handleMouseDown}
                   onMouseMove={this.handleMouseMove}
                   onMouseUp={this.handleMouseUp}
-                  ref={this.lookupRef}
                   layout={'horizontal'}
                 >
+                  <ChartLayoutExtractor onLayoutChange={this.handleLayoutChange} />
                   <CartesianGrid horizontal={true} vertical={false} />
                   <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
                   <YAxis
