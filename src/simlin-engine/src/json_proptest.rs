@@ -665,18 +665,19 @@ fn model_strategy() -> BoxedStrategy<Model> {
         prop::collection::vec(flow_strategy(), 0..2),
         prop::collection::vec(auxiliary_strategy(), 0..2),
         prop::collection::vec(module_strategy(), 0..2),
-        prop::option::of(sim_specs_strategy()),
+        // Note: model-level sim_specs is intentionally None because the protobuf schema
+        // only supports project-level sim_specs, not model-level.
         prop::collection::vec(view_strategy(), 0..1),
         prop::collection::vec(loop_metadata_strategy(), 0..2),
     )
         .prop_map(
-            |(name, stocks, flows, auxiliaries, modules, sim_specs, views, loop_metadata)| Model {
+            |(name, stocks, flows, auxiliaries, modules, views, loop_metadata)| Model {
                 name,
                 stocks,
                 flows,
                 auxiliaries,
                 modules,
-                sim_specs,
+                sim_specs: None,
                 views,
                 loop_metadata,
             },
@@ -871,6 +872,602 @@ proptest! {
             validator.is_valid(&json_value),
             "Generated JSON failed schema validation"
         );
+    }
+}
+
+/// Performs a full protobuf -> JSON roundtrip:
+/// 1. Converts json::Project to datamodel::Project
+/// 2. Converts datamodel to project_io::Project (protobuf)
+/// 3. Encodes to protobuf bytes
+/// 4. Decodes protobuf bytes back
+/// 5. Converts through datamodel back to json::Project
+/// 6. Serializes to JSON string
+///
+/// Returns (protobuf_bytes, json_string)
+fn roundtrip_pb_json(json_project: &Project) -> (Vec<u8>, String) {
+    use crate::project_io;
+    use crate::prost::Message;
+    use crate::serde as project_serde;
+
+    // json -> datamodel -> protobuf
+    let dm_project: datamodel::Project = json_project.clone().into();
+    let pb_project: project_io::Project = project_serde::serialize(&dm_project);
+
+    // Encode to protobuf bytes
+    let mut pb_bytes = Vec::new();
+    pb_project.encode(&mut pb_bytes).unwrap();
+
+    // Decode protobuf bytes
+    let pb_decoded = project_io::Project::decode(&pb_bytes[..]).unwrap();
+
+    // protobuf -> datamodel -> json -> string
+    let dm_decoded: datamodel::Project = project_serde::deserialize(pb_decoded);
+    let json_decoded: Project = dm_decoded.into();
+    let json_str = serde_json::to_string(&json_decoded).unwrap();
+
+    (pb_bytes, json_str)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    // Protobuf -> JSON roundtrip tests
+    // These verify that pb -> json -> pb -> json produces identical results
+
+    #[test]
+    fn protobuf_json_roundtrip_idempotent(project in project_strategy()) {
+        // First roundtrip: json -> pb -> json
+        let (pb_bytes1, json_str1) = roundtrip_pb_json(&project);
+
+        // Parse the JSON string back to a Project
+        let json_parsed1: Project = serde_json::from_str(&json_str1).unwrap();
+
+        // Second roundtrip: json -> pb -> json
+        let (pb_bytes2, json_str2) = roundtrip_pb_json(&json_parsed1);
+
+        // The protobuf bytes should be identical after the first roundtrip
+        prop_assert_eq!(
+            pb_bytes1, pb_bytes2,
+            "Protobuf bytes should be identical after roundtrip"
+        );
+
+        // The JSON strings should be identical after the first roundtrip
+        prop_assert_eq!(
+            json_str1, json_str2,
+            "JSON strings should be identical after roundtrip"
+        );
+    }
+
+    /// Test that protobuf roundtrips are idempotent after the first conversion.
+    ///
+    /// Note: JSON has separate arrays for stocks, flows, auxiliaries, while datamodel
+    /// has a single `variables` Vec. The order can change during the first roundtrip,
+    /// but subsequent roundtrips should be stable. This is what matters for the
+    /// migration use case.
+    #[test]
+    fn protobuf_roundtrip_is_idempotent(project in project_strategy()) {
+        use crate::prost::Message;
+        use crate::project_io;
+        use crate::serde as project_serde;
+
+        // First roundtrip: json -> datamodel -> protobuf -> bytes
+        let dm1: datamodel::Project = project.clone().into();
+        let pb1: project_io::Project = project_serde::serialize(&dm1);
+        let mut pb_bytes1 = Vec::new();
+        pb1.encode(&mut pb_bytes1).unwrap();
+
+        // Decode and do second roundtrip
+        let pb1_decoded = project_io::Project::decode(&pb_bytes1[..]).unwrap();
+        let dm2: datamodel::Project = project_serde::deserialize(pb1_decoded);
+        let pb2: project_io::Project = project_serde::serialize(&dm2);
+        let mut pb_bytes2 = Vec::new();
+        pb2.encode(&mut pb_bytes2).unwrap();
+
+        // Third roundtrip
+        let pb2_decoded = project_io::Project::decode(&pb_bytes2[..]).unwrap();
+        let dm3: datamodel::Project = project_serde::deserialize(pb2_decoded);
+        let pb3: project_io::Project = project_serde::serialize(&dm3);
+        let mut pb_bytes3 = Vec::new();
+        pb3.encode(&mut pb_bytes3).unwrap();
+
+        // After first roundtrip, datamodel and protobuf bytes should be stable
+        prop_assert_eq!(&dm2, &dm3);
+        prop_assert_eq!(pb_bytes2, pb_bytes3);
+    }
+}
+
+#[cfg(test)]
+mod protobuf_roundtrip_tests {
+    use super::*;
+    use crate::project_io;
+    use crate::prost::Message;
+    use crate::serde as project_serde;
+    use std::fs;
+    use std::path::Path;
+
+    /// Tests roundtrip with a real protobin file from the test suite.
+    ///
+    /// Note: Due to floating point precision differences when serializing through JSON
+    /// (JSON uses decimal representation), we verify idempotence after the first roundtrip
+    /// rather than exact equality with the original. This is the key property for the
+    /// migration use case: once converted to JSON, subsequent roundtrips should be stable.
+    fn test_protobin_roundtrip(filename: &str) {
+        let proto_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test")
+            .join(filename);
+
+        let proto_bytes = fs::read(&proto_path)
+            .unwrap_or_else(|_| panic!("Failed to read {}", proto_path.display()));
+
+        // Decode the original protobuf
+        let pb_original = project_io::Project::decode(&proto_bytes[..])
+            .unwrap_or_else(|_| panic!("Failed to decode {}", filename));
+
+        // Convert to datamodel
+        let dm_original: datamodel::Project = project_serde::deserialize(pb_original.clone());
+
+        // First roundtrip: pb -> json string
+        let json_project1: Project = dm_original.into();
+        let json_str1 = serde_json::to_string_pretty(&json_project1).unwrap();
+
+        // Parse JSON and do second roundtrip
+        let json_parsed1: Project = serde_json::from_str(&json_str1).unwrap();
+        let (pb_bytes2, json_str2) = roundtrip_pb_json(&json_parsed1);
+
+        // Parse JSON again and do third roundtrip
+        let json_parsed2: Project = serde_json::from_str(&json_str2).unwrap();
+        let (pb_bytes3, json_str3) = roundtrip_pb_json(&json_parsed2);
+
+        // After the first roundtrip, JSON should be completely stable
+        assert_eq!(
+            json_str2, json_str3,
+            "JSON should be identical after second roundtrip for {}",
+            filename
+        );
+
+        // Protobuf bytes should also be stable after first roundtrip
+        assert_eq!(
+            pb_bytes2, pb_bytes3,
+            "Protobuf bytes should be identical after second roundtrip for {}",
+            filename
+        );
+    }
+
+    #[test]
+    fn test_fishbanks_roundtrip() {
+        test_protobin_roundtrip("fishbanks.protobin");
+    }
+
+    #[test]
+    fn test_logistic_growth_roundtrip() {
+        test_protobin_roundtrip("logistic-growth.protobin");
+    }
+
+    /// Test that we can parse JSON, convert to protobuf, and back, getting the same JSON
+    #[test]
+    fn test_json_to_protobuf_to_json_idempotent() {
+        // Create a sample JSON project
+        let json_project = Project {
+            name: "test_project".to_string(),
+            sim_specs: SimSpecs {
+                start_time: 0.0,
+                end_time: 100.0,
+                dt: "0.25".to_string(),
+                save_step: 1.0,
+                method: "rk4".to_string(),
+                time_units: "years".to_string(),
+            },
+            models: vec![Model {
+                name: "main".to_string(),
+                stocks: vec![Stock {
+                    uid: 1,
+                    name: "population".to_string(),
+                    initial_equation: "100".to_string(),
+                    units: "people".to_string(),
+                    inflows: vec!["births".to_string()],
+                    outflows: vec!["deaths".to_string()],
+                    non_negative: true,
+                    documentation: "Total population".to_string(),
+                    can_be_module_input: false,
+                    is_public: true,
+                    arrayed_equation: None,
+                }],
+                flows: vec![
+                    Flow {
+                        uid: 2,
+                        name: "births".to_string(),
+                        equation: "population * birth_rate".to_string(),
+                        units: "people/year".to_string(),
+                        non_negative: true,
+                        graphical_function: None,
+                        documentation: String::new(),
+                        can_be_module_input: false,
+                        is_public: false,
+                        arrayed_equation: None,
+                    },
+                    Flow {
+                        uid: 3,
+                        name: "deaths".to_string(),
+                        equation: "population * death_rate".to_string(),
+                        units: "people/year".to_string(),
+                        non_negative: true,
+                        graphical_function: None,
+                        documentation: String::new(),
+                        can_be_module_input: false,
+                        is_public: false,
+                        arrayed_equation: None,
+                    },
+                ],
+                auxiliaries: vec![
+                    Auxiliary {
+                        uid: 4,
+                        name: "birth_rate".to_string(),
+                        equation: "0.03".to_string(),
+                        initial_equation: String::new(),
+                        units: "1/year".to_string(),
+                        graphical_function: None,
+                        documentation: String::new(),
+                        can_be_module_input: true,
+                        is_public: false,
+                        arrayed_equation: None,
+                    },
+                    Auxiliary {
+                        uid: 5,
+                        name: "death_rate".to_string(),
+                        equation: "0.01".to_string(),
+                        initial_equation: String::new(),
+                        units: "1/year".to_string(),
+                        graphical_function: None,
+                        documentation: String::new(),
+                        can_be_module_input: true,
+                        is_public: false,
+                        arrayed_equation: None,
+                    },
+                ],
+                modules: vec![],
+                sim_specs: None,
+                views: vec![View {
+                    kind: "stock_flow".to_string(),
+                    elements: vec![
+                        ViewElement::Stock(StockViewElement {
+                            uid: 1,
+                            name: "population".to_string(),
+                            x: 200.0,
+                            y: 200.0,
+                            label_side: "top".to_string(),
+                        }),
+                        ViewElement::Flow(FlowViewElement {
+                            uid: 2,
+                            name: "births".to_string(),
+                            x: 100.0,
+                            y: 200.0,
+                            label_side: "bottom".to_string(),
+                            points: vec![
+                                FlowPoint {
+                                    x: 50.0,
+                                    y: 200.0,
+                                    attached_to_uid: 0,
+                                },
+                                FlowPoint {
+                                    x: 150.0,
+                                    y: 200.0,
+                                    attached_to_uid: 1,
+                                },
+                            ],
+                        }),
+                    ],
+                    view_box: Some(Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 800.0,
+                        height: 600.0,
+                    }),
+                    zoom: 1.0,
+                }],
+                loop_metadata: vec![LoopMetadata {
+                    uids: vec![1, 2, 4, 1],
+                    deleted: false,
+                    name: "Growth Loop".to_string(),
+                    description: "Population growth feedback loop".to_string(),
+                }],
+            }],
+            dimensions: vec![Dimension {
+                name: "regions".to_string(),
+                elements: vec!["north".to_string(), "south".to_string()],
+                size: 0,
+                maps_to: None,
+            }],
+            units: vec![Unit {
+                name: "people".to_string(),
+                equation: String::new(),
+                disabled: false,
+                aliases: vec!["persons".to_string()],
+            }],
+        };
+
+        // First roundtrip
+        let (pb_bytes1, json_str1) = roundtrip_pb_json(&json_project);
+
+        // Parse and second roundtrip
+        let json_parsed: Project = serde_json::from_str(&json_str1).unwrap();
+        let (pb_bytes2, json_str2) = roundtrip_pb_json(&json_parsed);
+
+        // Verify idempotence
+        assert_eq!(pb_bytes1, pb_bytes2, "Protobuf bytes should be identical");
+        assert_eq!(json_str1, json_str2, "JSON strings should be identical");
+    }
+
+    /// Test arrayed variables roundtrip correctly through protobuf and JSON
+    #[test]
+    fn test_arrayed_variables_roundtrip() {
+        let json_project = Project {
+            name: "arrayed_test".to_string(),
+            sim_specs: SimSpecs {
+                start_time: 0.0,
+                end_time: 10.0,
+                dt: "1".to_string(),
+                save_step: 0.0,
+                method: String::new(),
+                time_units: String::new(),
+            },
+            models: vec![Model {
+                name: "main".to_string(),
+                stocks: vec![Stock {
+                    uid: 1,
+                    name: "inventory".to_string(),
+                    initial_equation: String::new(),
+                    units: String::new(),
+                    inflows: vec![],
+                    outflows: vec![],
+                    non_negative: false,
+                    documentation: String::new(),
+                    can_be_module_input: false,
+                    is_public: false,
+                    arrayed_equation: Some(ArrayedEquation {
+                        dimensions: vec!["warehouses".to_string()],
+                        equation: Some("100".to_string()),
+                        initial_equation: None,
+                        elements: None,
+                    }),
+                }],
+                flows: vec![],
+                auxiliaries: vec![Auxiliary {
+                    uid: 2,
+                    name: "demand".to_string(),
+                    equation: String::new(),
+                    initial_equation: String::new(),
+                    units: String::new(),
+                    graphical_function: None,
+                    documentation: String::new(),
+                    can_be_module_input: false,
+                    is_public: false,
+                    arrayed_equation: Some(ArrayedEquation {
+                        dimensions: vec!["regions".to_string()],
+                        equation: None,
+                        initial_equation: None,
+                        elements: Some(vec![
+                            ElementEquation {
+                                subscript: "north".to_string(),
+                                equation: "50".to_string(),
+                                initial_equation: "10".to_string(),
+                                graphical_function: None,
+                            },
+                            ElementEquation {
+                                subscript: "south".to_string(),
+                                equation: "75".to_string(),
+                                initial_equation: String::new(),
+                                graphical_function: None,
+                            },
+                        ]),
+                    }),
+                }],
+                modules: vec![],
+                sim_specs: None,
+                views: vec![],
+                loop_metadata: vec![],
+            }],
+            dimensions: vec![
+                Dimension {
+                    name: "warehouses".to_string(),
+                    elements: vec![
+                        "east".to_string(),
+                        "west".to_string(),
+                        "central".to_string(),
+                    ],
+                    size: 0,
+                    maps_to: None,
+                },
+                Dimension {
+                    name: "regions".to_string(),
+                    elements: vec!["north".to_string(), "south".to_string()],
+                    size: 0,
+                    maps_to: None,
+                },
+            ],
+            units: vec![],
+        };
+
+        let (pb_bytes1, json_str1) = roundtrip_pb_json(&json_project);
+        let json_parsed: Project = serde_json::from_str(&json_str1).unwrap();
+        let (pb_bytes2, json_str2) = roundtrip_pb_json(&json_parsed);
+
+        assert_eq!(pb_bytes1, pb_bytes2, "Protobuf bytes should be identical");
+        assert_eq!(json_str1, json_str2, "JSON strings should be identical");
+
+        // Verify the arrayed equations are preserved
+        let parsed: Project = serde_json::from_str(&json_str1).unwrap();
+        assert!(parsed.models[0].stocks[0].arrayed_equation.is_some());
+        assert!(parsed.models[0].auxiliaries[0].arrayed_equation.is_some());
+
+        let arr_eq = parsed.models[0].auxiliaries[0]
+            .arrayed_equation
+            .as_ref()
+            .unwrap();
+        assert!(arr_eq.elements.is_some());
+        assert_eq!(arr_eq.elements.as_ref().unwrap().len(), 2);
+    }
+
+    /// Test graphical functions roundtrip correctly
+    #[test]
+    fn test_graphical_function_roundtrip() {
+        let json_project = Project {
+            name: "gf_test".to_string(),
+            sim_specs: SimSpecs {
+                start_time: 0.0,
+                end_time: 10.0,
+                dt: "1".to_string(),
+                save_step: 0.0,
+                method: String::new(),
+                time_units: String::new(),
+            },
+            models: vec![Model {
+                name: "main".to_string(),
+                stocks: vec![],
+                flows: vec![],
+                auxiliaries: vec![Auxiliary {
+                    uid: 1,
+                    name: "lookup".to_string(),
+                    equation: "lookup(input)".to_string(),
+                    initial_equation: String::new(),
+                    units: String::new(),
+                    graphical_function: Some(GraphicalFunction {
+                        points: vec![[0.0, 0.0], [0.5, 0.25], [1.0, 1.0]],
+                        y_points: vec![],
+                        kind: "continuous".to_string(),
+                        x_scale: Some(GraphicalFunctionScale { min: 0.0, max: 1.0 }),
+                        y_scale: Some(GraphicalFunctionScale { min: 0.0, max: 1.0 }),
+                    }),
+                    documentation: String::new(),
+                    can_be_module_input: false,
+                    is_public: false,
+                    arrayed_equation: None,
+                }],
+                modules: vec![],
+                sim_specs: None,
+                views: vec![],
+                loop_metadata: vec![],
+            }],
+            dimensions: vec![],
+            units: vec![],
+        };
+
+        let (pb_bytes1, json_str1) = roundtrip_pb_json(&json_project);
+        let json_parsed: Project = serde_json::from_str(&json_str1).unwrap();
+        let (pb_bytes2, json_str2) = roundtrip_pb_json(&json_parsed);
+
+        assert_eq!(pb_bytes1, pb_bytes2, "Protobuf bytes should be identical");
+        assert_eq!(json_str1, json_str2, "JSON strings should be identical");
+
+        // Verify the graphical function is preserved
+        let parsed: Project = serde_json::from_str(&json_str1).unwrap();
+        let gf = parsed.models[0].auxiliaries[0]
+            .graphical_function
+            .as_ref()
+            .unwrap();
+        assert_eq!(gf.points.len(), 3);
+        assert_eq!(gf.kind, "continuous");
+    }
+
+    /// Test dimension with maps_to roundtrips correctly
+    #[test]
+    fn test_dimension_maps_to_roundtrip() {
+        let json_project = Project {
+            name: "maps_to_test".to_string(),
+            sim_specs: SimSpecs {
+                start_time: 0.0,
+                end_time: 10.0,
+                dt: "1".to_string(),
+                save_step: 0.0,
+                method: String::new(),
+                time_units: String::new(),
+            },
+            models: vec![Model {
+                name: "main".to_string(),
+                stocks: vec![],
+                flows: vec![],
+                auxiliaries: vec![],
+                modules: vec![],
+                sim_specs: None,
+                views: vec![],
+                loop_metadata: vec![],
+            }],
+            dimensions: vec![
+                Dimension {
+                    name: "DimB".to_string(),
+                    elements: vec!["B1".to_string(), "B2".to_string(), "B3".to_string()],
+                    size: 0,
+                    maps_to: None,
+                },
+                Dimension {
+                    name: "DimA".to_string(),
+                    elements: vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
+                    size: 0,
+                    maps_to: Some("DimB".to_string()),
+                },
+            ],
+            units: vec![],
+        };
+
+        let (pb_bytes1, json_str1) = roundtrip_pb_json(&json_project);
+        let json_parsed: Project = serde_json::from_str(&json_str1).unwrap();
+        let (pb_bytes2, json_str2) = roundtrip_pb_json(&json_parsed);
+
+        assert_eq!(pb_bytes1, pb_bytes2, "Protobuf bytes should be identical");
+        assert_eq!(json_str1, json_str2, "JSON strings should be identical");
+
+        // Verify maps_to is preserved
+        let parsed: Project = serde_json::from_str(&json_str1).unwrap();
+        let dim_a = parsed.dimensions.iter().find(|d| d.name == "DimA").unwrap();
+        assert_eq!(dim_a.maps_to, Some("DimB".to_string()));
+    }
+
+    /// Test indexed dimension (size instead of elements) roundtrips correctly
+    #[test]
+    fn test_indexed_dimension_roundtrip() {
+        let json_project = Project {
+            name: "indexed_dim_test".to_string(),
+            sim_specs: SimSpecs {
+                start_time: 0.0,
+                end_time: 10.0,
+                dt: "1".to_string(),
+                save_step: 0.0,
+                method: String::new(),
+                time_units: String::new(),
+            },
+            models: vec![Model {
+                name: "main".to_string(),
+                stocks: vec![],
+                flows: vec![],
+                auxiliaries: vec![],
+                modules: vec![],
+                sim_specs: None,
+                views: vec![],
+                loop_metadata: vec![],
+            }],
+            dimensions: vec![Dimension {
+                name: "items".to_string(),
+                elements: vec![],
+                size: 10,
+                maps_to: None,
+            }],
+            units: vec![],
+        };
+
+        let (pb_bytes1, json_str1) = roundtrip_pb_json(&json_project);
+        let json_parsed: Project = serde_json::from_str(&json_str1).unwrap();
+        let (pb_bytes2, json_str2) = roundtrip_pb_json(&json_parsed);
+
+        assert_eq!(pb_bytes1, pb_bytes2, "Protobuf bytes should be identical");
+        assert_eq!(json_str1, json_str2, "JSON strings should be identical");
+
+        // Verify the indexed dimension is preserved
+        let parsed: Project = serde_json::from_str(&json_str1).unwrap();
+        assert_eq!(parsed.dimensions[0].size, 10);
+        assert!(parsed.dimensions[0].elements.is_empty());
     }
 }
 
