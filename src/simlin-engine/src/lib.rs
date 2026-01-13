@@ -38,6 +38,8 @@ mod bytecode;
 pub mod interpreter;
 #[cfg(test)]
 mod json_proptest;
+#[cfg(test)]
+mod json_sdai_proptest;
 pub mod ltm;
 pub mod ltm_augment;
 mod project;

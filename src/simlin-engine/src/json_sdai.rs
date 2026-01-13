@@ -17,6 +17,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::datamodel;
@@ -25,18 +26,18 @@ fn is_none<T>(val: &Option<T>) -> bool {
     val.is_none()
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct GraphicalFunction {
     pub points: Vec<Point>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct StockFields {
     pub name: String,
     #[serde(skip_serializing_if = "is_none")]
@@ -50,10 +51,11 @@ pub struct StockFields {
     #[serde(skip_serializing_if = "is_none")]
     pub outflows: Option<Vec<String>>,
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
+    #[schemars(rename = "graphicalFunction")]
     pub graphical_function: Option<GraphicalFunction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FlowFields {
     pub name: String,
     #[serde(skip_serializing_if = "is_none")]
@@ -63,10 +65,11 @@ pub struct FlowFields {
     #[serde(skip_serializing_if = "is_none")]
     pub units: Option<String>,
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
+    #[schemars(rename = "graphicalFunction")]
     pub graphical_function: Option<GraphicalFunction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AuxiliaryFields {
     pub name: String,
     #[serde(skip_serializing_if = "is_none")]
@@ -76,18 +79,20 @@ pub struct AuxiliaryFields {
     #[serde(skip_serializing_if = "is_none")]
     pub units: Option<String>,
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
+    #[schemars(rename = "graphicalFunction")]
     pub graphical_function: Option<GraphicalFunction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[schemars(tag = "type", rename_all = "lowercase")]
 pub enum Variable {
     Stock(StockFields),
     Flow(FlowFields),
     Variable(AuxiliaryFields),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Relationship {
     #[serde(skip_serializing_if = "is_none")]
     pub reasoning: Option<String>,
@@ -95,26 +100,31 @@ pub struct Relationship {
     pub to: String,
     pub polarity: String,
     #[serde(rename = "polarityReasoning", skip_serializing_if = "is_none")]
+    #[schemars(rename = "polarityReasoning")]
     pub polarity_reasoning: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SimSpecs {
     #[serde(rename = "startTime")]
+    #[schemars(rename = "startTime")]
     pub start_time: f64,
     #[serde(rename = "stopTime")]
+    #[schemars(rename = "stopTime")]
     pub stop_time: f64,
     #[serde(skip_serializing_if = "is_none")]
     pub dt: Option<f64>,
     #[serde(rename = "timeUnits", skip_serializing_if = "is_none")]
+    #[schemars(rename = "timeUnits")]
     pub time_units: Option<String>,
     #[serde(rename = "saveStep", skip_serializing_if = "is_none")]
+    #[schemars(rename = "saveStep")]
     pub save_step: Option<f64>,
     #[serde(skip_serializing_if = "is_none")]
     pub method: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SdaiModel {
     pub variables: Vec<Variable>,
     #[serde(skip_serializing_if = "is_none")]
@@ -123,6 +133,17 @@ pub struct SdaiModel {
     pub specs: Option<SimSpecs>,
     #[serde(skip_serializing_if = "is_none")]
     pub views: Option<Vec<crate::json::View>>,
+}
+
+/// Generate the JSON Schema for the SdaiModel type
+pub fn generate_schema() -> schemars::Schema {
+    schemars::schema_for!(SdaiModel)
+}
+
+/// Generate the JSON Schema as a formatted JSON string
+pub fn generate_schema_json() -> String {
+    let schema = generate_schema();
+    serde_json::to_string_pretty(&schema).expect("schema serialization should never fail")
 }
 
 // Conversions FROM SDAI types TO datamodel types
