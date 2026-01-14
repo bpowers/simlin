@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Any, Self, Union
 from types import TracebackType
 
@@ -10,6 +11,25 @@ from .errors import SimlinRuntimeError, ErrorCode
 from .analysis import Link, LinkPolarity, Loop
 from .types import Stock, Flow, Aux, TimeSpec, GraphicalFunction, GraphicalFunctionScale, ModelIssue
 from . import pb
+from .json_types import (
+    Stock as JsonStock,
+    Flow as JsonFlow,
+    Auxiliary as JsonAuxiliary,
+    Module as JsonModule,
+    View as JsonView,
+    JsonModelPatch,
+    JsonProjectPatch,
+    JsonModelOperation,
+    UpsertStock,
+    UpsertFlow,
+    UpsertAux,
+    UpsertModule,
+    DeleteVariable,
+    RenameVariable,
+    UpsertView,
+    DeleteView,
+)
+from .json_converter import converter
 
 if TYPE_CHECKING:
     from .sim import Sim
@@ -17,82 +37,55 @@ if TYPE_CHECKING:
     from .run import Run
 
 
-def _variable_ident(variable: pb.Variable) -> str:
-    kind = variable.WhichOneof("v")
-    if kind is None:
-        raise ValueError("Variable message has no assigned variant")
-    ident = getattr(getattr(variable, kind), "ident", None)
-    if not ident:
-        raise ValueError("Variable missing identifier")
-    return ident
-
-
-def _copy_variable(variable: pb.Variable) -> pb.Variable:
-    clone = pb.Variable()
-    clone.CopyFrom(variable)
-    return clone
+# Type for variable in the edit context current dict
+JsonVariable = Union[JsonStock, JsonFlow, JsonAuxiliary, JsonModule]
 
 
 class ModelPatchBuilder:
-    """Accumulates model operations before applying them to the engine."""
+    """Accumulates model operations before applying them as JSON."""
 
     def __init__(self, model_name: str) -> None:
-        self._patch = pb.ModelPatch()
-        self._patch.name = model_name
+        self._model_name = model_name
+        self._ops: list[JsonModelOperation] = []
 
     @property
     def model_name(self) -> str:
-        return self._patch.name
+        return self._model_name
 
     def has_operations(self) -> bool:
-        return bool(self._patch.ops)
+        return bool(self._ops)
 
-    def build(self) -> pb.ModelPatch:
-        patch = pb.ModelPatch()
-        patch.CopyFrom(self._patch)
-        return patch
+    def build(self) -> JsonModelPatch:
+        return JsonModelPatch(name=self._model_name, ops=list(self._ops))
 
-    def _add_op(self) -> pb.ModelOperation:
-        return self._patch.ops.add()
+    def upsert_stock(self, stock: JsonStock) -> JsonStock:
+        self._ops.append(UpsertStock(stock=stock))
+        return stock
 
-    def upsert_stock(self, stock: pb.Variable.Stock) -> pb.Variable.Stock:
-        op = self._add_op()
-        op.upsert_stock.stock.CopyFrom(stock)
-        return op.upsert_stock.stock
+    def upsert_flow(self, flow: JsonFlow) -> JsonFlow:
+        self._ops.append(UpsertFlow(flow=flow))
+        return flow
 
-    def upsert_flow(self, flow: pb.Variable.Flow) -> pb.Variable.Flow:
-        op = self._add_op()
-        op.upsert_flow.flow.CopyFrom(flow)
-        return op.upsert_flow.flow
+    def upsert_aux(self, aux: JsonAuxiliary) -> JsonAuxiliary:
+        self._ops.append(UpsertAux(aux=aux))
+        return aux
 
-    def upsert_aux(self, aux: pb.Variable.Aux) -> pb.Variable.Aux:
-        op = self._add_op()
-        op.upsert_aux.aux.CopyFrom(aux)
-        return op.upsert_aux.aux
-
-    def upsert_module(self, module: pb.Variable.Module) -> pb.Variable.Module:
-        op = self._add_op()
-        op.upsert_module.module.CopyFrom(module)
-        return op.upsert_module.module
+    def upsert_module(self, module: JsonModule) -> JsonModule:
+        self._ops.append(UpsertModule(module=module))
+        return module
 
     def delete_variable(self, ident: str) -> None:
-        op = self._add_op()
-        op.delete_variable.ident = ident
+        self._ops.append(DeleteVariable(ident=ident))
 
     def rename_variable(self, current_ident: str, new_ident: str) -> None:
-        op = self._add_op()
-        setattr(op.rename_variable, "from", current_ident)
-        op.rename_variable.to = new_ident
+        self._ops.append(RenameVariable(from_=current_ident, to=new_ident))
 
-    def upsert_view(self, index: int, view: pb.View) -> pb.View:
-        op = self._add_op()
-        op.upsert_view.index = index
-        op.upsert_view.view.CopyFrom(view)
-        return op.upsert_view.view
+    def upsert_view(self, index: int, view: JsonView) -> JsonView:
+        self._ops.append(UpsertView(index=index, view=view))
+        return view
 
     def delete_view(self, index: int) -> None:
-        op = self._add_op()
-        op.delete_view.index = index
+        self._ops.append(DeleteView(index=index))
 
 
 class _ModelEditContext:
@@ -100,31 +93,47 @@ class _ModelEditContext:
         self._model = model
         self._dry_run = dry_run
         self._allow_errors = allow_errors
-        self._current: Dict[str, pb.Variable] = {}
+        self._current: Dict[str, JsonVariable] = {}
         self._patch = ModelPatchBuilder(model._name or "")
 
-    def __enter__(self) -> Tuple[Dict[str, pb.Variable], ModelPatchBuilder]:
+    def __enter__(self) -> Tuple[Dict[str, JsonVariable], ModelPatchBuilder]:
         project = self._model._project
         if project is None:
             raise SimlinRuntimeError("Model is not attached to a Project")
 
-        project_proto = pb.Project()
-        project_proto.ParseFromString(project.serialize())
+        # Get project state as JSON
+        json_bytes = project.serialize_json()
+        project_dict = json.loads(json_bytes.decode("utf-8"))
 
-        model_proto = None
-        for candidate in project_proto.models:
-            if candidate.name == self._model._name or not self._model._name:
-                model_proto = candidate
+        model_dict = None
+        for candidate in project_dict.get("models", []):
+            if candidate["name"] == self._model._name or not self._model._name:
+                model_dict = candidate
                 break
 
-        if model_proto is None:
+        if model_dict is None:
             raise SimlinRuntimeError(
                 f"Model '{self._model._name or 'default'}' not found in project serialization"
             )
 
-        self._model._name = model_proto.name
-        self._patch = ModelPatchBuilder(model_proto.name)
-        self._current = {_variable_ident(var): _copy_variable(var) for var in model_proto.variables}
+        self._model._name = model_dict["name"]
+        self._patch = ModelPatchBuilder(model_dict["name"])
+
+        # Build current variable dict from JSON using converter.structure()
+        self._current = {}
+        for stock_dict in model_dict.get("stocks", []):
+            stock = converter.structure(stock_dict, JsonStock)
+            self._current[stock.name] = stock
+        for flow_dict in model_dict.get("flows", []):
+            flow = converter.structure(flow_dict, JsonFlow)
+            self._current[flow.name] = flow
+        for aux_dict in model_dict.get("auxiliaries", []):
+            aux = converter.structure(aux_dict, JsonAuxiliary)
+            self._current[aux.name] = aux
+        for module_dict in model_dict.get("modules", []):
+            module = converter.structure(module_dict, JsonModule)
+            self._current[module.name] = module
+
         return self._current, self._patch
 
     def __exit__(
@@ -143,12 +152,13 @@ class _ModelEditContext:
         if project is None:
             raise SimlinRuntimeError("Model is not attached to a Project")
 
-        project_patch = pb.ProjectPatch()
-        model_patch = project_patch.models.add()
-        model_patch.CopyFrom(self._patch.build())
+        # Build JSON patch
+        project_patch = JsonProjectPatch(models=[self._patch.build()])
+        patch_dict = converter.unstructure(project_patch)
+        patch_json = json.dumps(patch_dict).encode("utf-8")
 
-        project._apply_patch(
-            project_patch,
+        project._apply_patch_json(
+            patch_json,
             dry_run=self._dry_run,
             allow_errors=self._allow_errors,
         )

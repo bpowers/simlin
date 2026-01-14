@@ -15,6 +15,8 @@ from ._ffi import (
     check_out_error,
     extract_error_details,
     _register_finalizer,
+    apply_patch_json as _ffi_apply_patch_json,
+    serialize_json as _ffi_serialize_json,
 )
 from .errors import SimlinImportError, SimlinRuntimeError, ErrorCode, ErrorDetail
 from .analysis import Loop, LoopPolarity
@@ -370,6 +372,54 @@ class Project:
             raise exc
 
         return errors
+
+    def _apply_patch_json(
+        self,
+        patch_json: bytes,
+        *,
+        dry_run: bool = False,
+        allow_errors: bool = False,
+    ) -> List[ErrorDetail]:
+        """Apply a JSON patch, surfacing validation details as Python exceptions.
+
+        Args:
+            patch_json: JSON-encoded patch data (UTF-8 bytes)
+            dry_run: If True, validate without applying changes
+            allow_errors: If True, collect errors instead of failing on first error
+
+        Returns:
+            List of ErrorDetail objects for collected validation errors
+
+        Raises:
+            SimlinRuntimeError or SimlinCompilationError: If operation fails
+        """
+        errors = _ffi_apply_patch_json(self._ptr, patch_json, dry_run, allow_errors)
+
+        if errors and not allow_errors:
+            first_code = errors[0].code if errors else None
+            message = (
+                "Patch dry run reported validation errors"
+                if dry_run
+                else "Patch produced validation errors"
+            )
+            exc = SimlinRuntimeError(message, first_code)
+            setattr(exc, "errors", errors)
+            setattr(exc, "dry_run", dry_run)
+            setattr(exc, "allow_errors", allow_errors)
+            raise exc
+
+        return errors
+
+    def serialize_json(self) -> bytes:
+        """Serialize the project to JSON format.
+
+        Returns:
+            JSON-encoded project data (UTF-8 bytes)
+
+        Raises:
+            SimlinRuntimeError: If serialization fails
+        """
+        return _ffi_serialize_json(self._ptr)
 
     def set_sim_specs(self, **kwargs: Any) -> None:
         """Update the project's simulation specifications using protobuf-compatible kwargs."""

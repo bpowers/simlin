@@ -63,11 +63,10 @@ def main() -> None:
         baseline_final = run_simulation(model)
 
         with model.edit() as (current, patch):
-            flow_var = current["net_birth_rate"]
-            flow_var.flow.equation.scalar.equation = (
-                "fractional_growth_rate * population * 1.5"
-            )
-            patch.upsert_flow(flow_var.flow)
+            flow = current["net_birth_rate"]
+            # Update the equation on the flow and upsert it
+            flow.equation = "fractional_growth_rate * population * 1.5"
+            patch.upsert_flow(flow)
 
         accelerated_final = run_simulation(model)
 

@@ -1,10 +1,12 @@
 """Tests for the Model class."""
 
+import json
 import pytest
 from pathlib import Path
 import simlin
 from simlin import Project, Model, SimlinRuntimeError, SimlinCompilationError
 from simlin import pb
+from simlin.json_types import Auxiliary as JsonAuxiliary
 
 
 @pytest.fixture
@@ -184,64 +186,147 @@ class TestModelEditing:
 
         with model.edit(allow_errors=True) as (current, patch):
             heat_loss = current["Heat Loss to Room"]
-            heat_loss.flow.equation.scalar.equation = "0"
-            patch.upsert_flow(heat_loss.flow)
+            heat_loss.equation = "0"
+            patch.upsert_flow(heat_loss)
 
-        project_proto = pb.Project()
-        project_proto.ParseFromString(model.project.serialize())
-        model_proto = project_proto.models[0]
-        flow_proto = next(
-            var.flow
-            for var in model_proto.variables
-            if var.flow.ident in {"Heat Loss to Room", "heat_loss_to_room"}
+        # Verify via JSON serialization
+        project_json = json.loads(model.project.serialize_json().decode("utf-8"))
+        flow_dict = next(
+            f for f in project_json["models"][0]["flows"]
+            if f["name"] in {"Heat Loss to Room", "heat_loss_to_room"}
         )
-
-        assert flow_proto.equation.scalar.equation == "0"
+        assert flow_dict.get("equation", "") == "0"
 
     def test_edit_context_dry_run_does_not_commit(self, mdl_model_path) -> None:
         """dry_run=True should validate without mutating the project."""
         model = simlin.load(mdl_model_path)
 
-        original = pb.Project()
-        original.ParseFromString(model.project.serialize())
+        # Get original equation via JSON
+        original_json = json.loads(model.project.serialize_json().decode("utf-8"))
         original_flow = next(
-            var.flow
-            for var in original.models[0].variables
-            if var.flow.ident in {"Heat Loss to Room", "heat_loss_to_room"}
+            f for f in original_json["models"][0]["flows"]
+            if f["name"] in {"Heat Loss to Room", "heat_loss_to_room"}
         )
+        original_equation = original_flow.get("equation", "")
 
         with model.edit(dry_run=True, allow_errors=True) as (current, patch):
             flow = current["Heat Loss to Room"]
-            flow.flow.equation.scalar.equation = "0"
-            patch.upsert_flow(flow.flow)
+            flow.equation = "0"
+            patch.upsert_flow(flow)
 
-        project_proto = pb.Project()
-        project_proto.ParseFromString(model.project.serialize())
-        flow_proto = next(
-            var.flow
-            for var in project_proto.models[0].variables
-            if var.flow.ident in {"Heat Loss to Room", "heat_loss_to_room"}
+        # Verify equation unchanged via JSON
+        after_json = json.loads(model.project.serialize_json().decode("utf-8"))
+        after_flow = next(
+            f for f in after_json["models"][0]["flows"]
+            if f["name"] in {"Heat Loss to Room", "heat_loss_to_room"}
         )
-
-        assert flow_proto.equation.scalar.equation == original_flow.equation.scalar.equation
+        assert after_flow.get("equation", "") == original_equation
 
     def test_edit_context_invalid_patch_raises(self, xmile_model_path) -> None:
         """Invalid edits should raise and leave the project unchanged."""
         model = simlin.load(xmile_model_path)
 
-        before = pb.Project()
-        before.ParseFromString(model.project.serialize())
+        before_json = model.project.serialize_json()
 
         with pytest.raises((SimlinRuntimeError, SimlinCompilationError)):
             with model.edit() as (_, patch):
-                bad_aux = pb.Variable.Aux()
-                bad_aux.ident = "bad_variable"
-                bad_aux.equation.scalar.equation = "?? invalid expression"
+                bad_aux = JsonAuxiliary(
+                    name="bad_variable",
+                    equation="?? invalid expression",
+                )
                 patch.upsert_aux(bad_aux)
 
-        after = pb.Project()
-        after.ParseFromString(model.project.serialize())
-        assert after == before
+        after_json = model.project.serialize_json()
+        assert after_json == before_json
+
+    def test_edit_context_allow_errors_collects_errors(self, xmile_model_path) -> None:
+        """allow_errors=True should collect errors without raising."""
+        model = simlin.load(xmile_model_path)
+
+        # This should not raise - errors are collected
+        with model.edit(allow_errors=True) as (_, patch):
+            bad_aux = JsonAuxiliary(
+                name="bad_variable",
+                equation="?? invalid expression",
+            )
+            patch.upsert_aux(bad_aux)
+
+        # The variable should be added despite the error
+        project_json = json.loads(model.project.serialize_json().decode("utf-8"))
+        aux_names = [a["name"] for a in project_json["models"][0].get("auxiliaries", [])]
+        assert "bad_variable" in aux_names
+
+    def test_edit_context_dry_run_with_invalid_raises(self, xmile_model_path) -> None:
+        """dry_run=True should still raise on invalid patches when allow_errors=False."""
+        model = simlin.load(xmile_model_path)
+
+        before_json = model.project.serialize_json()
+
+        with pytest.raises((SimlinRuntimeError, SimlinCompilationError)):
+            with model.edit(dry_run=True) as (_, patch):
+                bad_aux = JsonAuxiliary(
+                    name="bad_variable",
+                    equation="?? invalid expression",
+                )
+                patch.upsert_aux(bad_aux)
+
+        # Verify project unchanged
+        after_json = model.project.serialize_json()
+        assert after_json == before_json
+
+    def test_edit_context_dry_run_allow_errors_validates_only(self, xmile_model_path) -> None:
+        """dry_run=True with allow_errors=True should validate without mutating."""
+        model = simlin.load(xmile_model_path)
+
+        before_json = model.project.serialize_json()
+
+        # Should not raise, should not mutate
+        with model.edit(dry_run=True, allow_errors=True) as (_, patch):
+            bad_aux = JsonAuxiliary(
+                name="bad_variable",
+                equation="?? invalid expression",
+            )
+            patch.upsert_aux(bad_aux)
+
+        # Project should be unchanged
+        after_json = model.project.serialize_json()
+        assert after_json == before_json
+
+    def test_apply_patch_json_invalid_json_raises(self, xmile_model_path) -> None:
+        """Malformed JSON should raise an error."""
+        model = simlin.load(xmile_model_path)
+
+        with pytest.raises((SimlinRuntimeError, SimlinCompilationError)):
+            model.project._apply_patch_json(b"{ not valid json }")
+
+    def test_apply_patch_json_returns_errors_when_allowed(self, xmile_model_path) -> None:
+        """apply_patch_json with allow_errors=True should return error details."""
+        import json as json_module
+        from simlin.json_types import JsonProjectPatch, JsonModelPatch, UpsertAux, Auxiliary
+        from simlin.json_converter import converter
+        from simlin.errors import ErrorDetail, ErrorCode
+
+        model = simlin.load(xmile_model_path)
+
+        # Create a patch with an invalid equation (??? is not valid syntax)
+        bad_aux = Auxiliary(name="broken_var", equation="??? totally invalid")
+        patch = JsonProjectPatch(
+            models=[JsonModelPatch(name=model._name or "main", ops=[UpsertAux(aux=bad_aux)])]
+        )
+        patch_json = json_module.dumps(converter.unstructure(patch)).encode("utf-8")
+
+        errors = model.project._apply_patch_json(patch_json, allow_errors=True)
+
+        # Verify errors are collected and contain meaningful diagnostic info
+        assert isinstance(errors, list)
+        assert len(errors) > 0, "Expected errors to be collected for invalid equation"
+
+        # Verify at least one error has meaningful information about the failure
+        error = errors[0]
+        assert isinstance(error, ErrorDetail)
+        assert error.code != ErrorCode.NO_ERROR, "Error should have a non-zero error code"
+        # The error should reference the variable with the bad equation
+        assert error.variable_name == "broken_var", f"Expected variable_name='broken_var', got '{error.variable_name}'"
 
 
 class TestModelRepr:

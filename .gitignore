@@ -85,4 +85,8 @@ src/pysimlin/simlin/_clib*.so
 __pycache__/
 **/__pycache__/
 *.pyc
+
+# Hypothesis test database
+.hypothesis/
+
 .ai-tool-config

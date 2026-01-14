@@ -1,7 +1,7 @@
 """Create a new Simlin project and build a simple population model using pysimlin's edit API."""
 
 import simlin
-import simlin.pb as pb
+from simlin.json_types import Stock, Flow, Auxiliary
 
 
 def build_population_project() -> simlin.Project:
@@ -24,26 +24,30 @@ def build_population_project() -> simlin.Project:
 
     model = project.get_model()
     with model.edit() as (_, patch):
-        population = pb.Variable.Stock()
-        population.ident = "population"
-        population.equation.scalar.equation = "50"
-        population.inflows.extend(["births"])
-        population.outflows.extend(["deaths"])
+        population = Stock(
+            name="population",
+            initial_equation="50",
+            inflows=["births"],
+            outflows=["deaths"],
+        )
         patch.upsert_stock(population)
 
-        births = pb.Variable.Flow()
-        births.ident = "births"
-        births.equation.scalar.equation = "population * birth_rate"
+        births = Flow(
+            name="births",
+            equation="population * birth_rate",
+        )
         patch.upsert_flow(births)
 
-        deaths = pb.Variable.Flow()
-        deaths.ident = "deaths"
-        deaths.equation.scalar.equation = "population * birth_rate * (population / 1000)"
+        deaths = Flow(
+            name="deaths",
+            equation="population * birth_rate * (population / 1000)",
+        )
         patch.upsert_flow(deaths)
 
-        birth_rate = pb.Variable.Aux()
-        birth_rate.ident = "birth_rate"
-        birth_rate.equation.scalar.equation = "0.08"
+        birth_rate = Auxiliary(
+            name="birth_rate",
+            equation="0.08",
+        )
         patch.upsert_aux(birth_rate)
 
     return project

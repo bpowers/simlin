@@ -36,6 +36,7 @@ dependencies = [
     "pandas>=1.5.0",
     "numpy>=1.22.0",
     "protobuf>=6.32.0",
+    "cattrs>=24.1.0",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +48,8 @@ dev = [
     "ruff>=0.1.0",
     "pandas-stubs>=2.0.0",
     "types-setuptools",
+    "hypothesis>=6.100.0",
+    "jsonschema>=4.20.0",
 ]
 
 [project.urls]

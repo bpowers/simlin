@@ -143,6 +143,85 @@ def check_error(result: int, operation: str = "operation") -> None:
         raise SimlinRuntimeError(f"{operation} failed: {error_str}", code)
 
 
+def apply_patch_json(
+    project_ptr: Any,
+    patch_json: bytes,
+    dry_run: bool,
+    allow_errors: bool,
+) -> List[Any]:
+    """Apply a JSON patch to a project.
+
+    Args:
+        project_ptr: Pointer to a SimlinProject
+        patch_json: JSON-encoded patch data (UTF-8 bytes)
+        dry_run: If True, validate without applying changes
+        allow_errors: If True, collect errors instead of failing on first error
+
+    Returns:
+        List of ErrorDetail objects for collected validation errors
+
+    Raises:
+        SimlinRuntimeError or SimlinCompilationError: If operation fails
+    """
+    from .errors import ErrorDetail
+
+    c_patch = ffi.new("uint8_t[]", patch_json)
+    out_collected_errors_ptr = ffi.new("SimlinError **")
+    err_ptr = ffi.new("SimlinError **")
+
+    # SimlinJsonFormat::Native = 0
+    lib.simlin_project_apply_patch_json(
+        project_ptr,
+        c_patch,
+        len(patch_json),
+        0,  # SIMLIN_JSON_FORMAT_NATIVE
+        dry_run,
+        allow_errors,
+        out_collected_errors_ptr,
+        err_ptr,
+    )
+    check_out_error(err_ptr, "Apply JSON patch")
+
+    errors: List[ErrorDetail] = []
+    if out_collected_errors_ptr[0] != ffi.NULL:
+        errors = extract_error_details(out_collected_errors_ptr[0])
+        lib.simlin_error_free(out_collected_errors_ptr[0])
+
+    return errors
+
+
+def serialize_json(project_ptr: Any) -> bytes:
+    """Serialize a project to JSON format.
+
+    Args:
+        project_ptr: Pointer to a SimlinProject
+
+    Returns:
+        JSON-encoded project data (UTF-8 bytes)
+
+    Raises:
+        SimlinRuntimeError: If serialization fails
+    """
+    output_ptr = ffi.new("uint8_t **")
+    output_len_ptr = ffi.new("uintptr_t *")
+    err_ptr = ffi.new("SimlinError **")
+
+    # SimlinJsonFormat::Native = 0
+    lib.simlin_project_serialize_json(
+        project_ptr,
+        0,  # SIMLIN_JSON_FORMAT_NATIVE
+        output_ptr,
+        output_len_ptr,
+        err_ptr,
+    )
+    check_out_error(err_ptr, "Project JSON serialization")
+
+    try:
+        return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))
+    finally:
+        lib.simlin_free(output_ptr[0])
+
+
 __all__ = [
     "ffi",
     "lib",
@@ -153,6 +232,8 @@ __all__ = [
     "extract_error_details",
     "check_out_error",
     "check_error",
+    "apply_patch_json",
+    "serialize_json",
     "_register_finalizer",
     "_finalizer_refs",
 ]
