@@ -52,6 +52,15 @@ typedef enum {
   SIMLIN_ERROR_CODE_GENERIC = 32,
 } SimlinErrorCode;
 
+// Error kind categorizing where in the project the error originates.
+typedef enum {
+  SIMLIN_ERROR_KIND_PROJECT = 0,
+  SIMLIN_ERROR_KIND_MODEL = 1,
+  SIMLIN_ERROR_KIND_VARIABLE = 2,
+  SIMLIN_ERROR_KIND_UNITS = 3,
+  SIMLIN_ERROR_KIND_SIMULATION = 4,
+} SimlinErrorKind;
+
 // JSON format specifier for C API
 typedef enum {
   SIMLIN_JSON_FORMAT_NATIVE = 0,
@@ -71,6 +80,18 @@ typedef enum {
   SIMLIN_LOOP_POLARITY_BALANCING = 1,
 } SimlinLoopPolarity;
 
+// Unit error kind for distinguishing types of unit-related errors.
+typedef enum {
+  // Not a unit error
+  SIMLIN_UNIT_ERROR_KIND_NOT_APPLICABLE = 0,
+  // Syntax error in unit string definition
+  SIMLIN_UNIT_ERROR_KIND_DEFINITION = 1,
+  // Dimensional analysis mismatch
+  SIMLIN_UNIT_ERROR_KIND_CONSISTENCY = 2,
+  // Inference error spanning multiple variables
+  SIMLIN_UNIT_ERROR_KIND_INFERENCE = 3,
+} SimlinUnitErrorKind;
+
 // Opaque error structure returned by the API
 typedef struct {
   uint8_t _private[0];
@@ -84,6 +105,8 @@ typedef struct {
   const char *variable_name;
   uint16_t start_offset;
   uint16_t end_offset;
+  SimlinErrorKind kind;
+  SimlinUnitErrorKind unit_error_kind;
 } SimlinErrorDetail;
 
 // Opaque project structure
@@ -138,16 +161,38 @@ extern "C" {
 // The returned string must not be freed or modified.
 const char *simlin_error_str(SimlinErrorCode err);
 
+// # Safety
+//
+// The pointer must have been created by a simlin function that returns a `*mut SimlinError`,
+// must not be null, and must not have been freed already.
 void simlin_error_free(SimlinError *err);
 
+// # Safety
+//
+// The pointer must be either null or a valid `SimlinError` pointer that has not been freed.
 SimlinErrorCode simlin_error_get_code(const SimlinError *err);
 
+// # Safety
+//
+// The pointer must be either null or a valid `SimlinError` pointer that has not been freed.
+// The returned string pointer is valid only as long as the error object is not freed.
 const char *simlin_error_get_message(const SimlinError *err);
 
+// # Safety
+//
+// The pointer must be either null or a valid `SimlinError` pointer that has not been freed.
 uintptr_t simlin_error_get_detail_count(const SimlinError *err);
 
+// # Safety
+//
+// The pointer must be either null or a valid `SimlinError` pointer that has not been freed.
+// The returned array pointer is valid only as long as the error object is not freed.
 const SimlinErrorDetail *simlin_error_get_details(const SimlinError *err);
 
+// # Safety
+//
+// The pointer must be either null or a valid `SimlinError` pointer that has not been freed.
+// The returned detail pointer is valid only as long as the error object is not freed.
 const SimlinErrorDetail *simlin_error_get_detail(const SimlinError *err, uintptr_t index);
 
 // simlin_project_open opens a project from protobuf data.
@@ -156,7 +201,7 @@ const SimlinErrorDetail *simlin_error_get_detail(const SimlinError *err, uintptr
 // # Safety
 // - `data` must be a valid pointer to at least `len` bytes
 // - `out_error` may be null
-SimlinProject *simlin_project_open(const uint8_t *data, uintptr_t len, SimlinError ** out_error);
+SimlinProject *simlin_project_open(const uint8_t *data, uintptr_t len, SimlinError **out_error);
 
 // simlin_project_json_open opens a project from JSON data.
 //
@@ -166,7 +211,7 @@ SimlinProject *simlin_project_open(const uint8_t *data, uintptr_t len, SimlinErr
 SimlinProject *simlin_project_json_open(const uint8_t *data,
                                         uintptr_t len,
                                         SimlinJsonFormat format,
-                                        SimlinError ** out_error);
+                                        SimlinError **out_error);
 
 // Increments the reference count of a project
 //
@@ -186,7 +231,7 @@ void simlin_project_unref(SimlinProject *project);
 // - `project` must be a valid pointer to a SimlinProject
 void simlin_project_get_model_count(SimlinProject *project,
                                     uintptr_t *out_count,
-                                    SimlinError ** out_error);
+                                    SimlinError **out_error);
 
 // Gets the list of model names in the project
 //
@@ -198,7 +243,7 @@ void simlin_project_get_model_names(SimlinProject *project,
                                     char **result,
                                     uintptr_t max,
                                     uintptr_t *out_written,
-                                    SimlinError ** out_error);
+                                    SimlinError **out_error);
 
 // Adds a new model to a project
 //
@@ -213,7 +258,9 @@ void simlin_project_get_model_names(SimlinProject *project,
 // - 0 on success
 // - SimlinErrorCode::Generic if project or model_name is null or empty
 // - SimlinErrorCode::DuplicateVariable if a model with that name already exists
-void simlin_project_add_model(SimlinProject *project, const char *model_name, SimlinError ** out_error);
+void simlin_project_add_model(SimlinProject *project,
+                              const char *model_name,
+                              SimlinError **out_error);
 
 // Gets a model from a project by name
 //
@@ -223,7 +270,7 @@ void simlin_project_add_model(SimlinProject *project, const char *model_name, Si
 // - The returned model must be freed with simlin_model_unref
 SimlinModel *simlin_project_get_model(SimlinProject *project,
                                       const char *model_name,
-                                      SimlinError ** out_error);
+                                      SimlinError **out_error);
 
 // Increments the reference count of a model
 //
@@ -241,7 +288,7 @@ void simlin_model_unref(SimlinModel *model);
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
-void simlin_model_get_var_count(SimlinModel *model, uintptr_t *out_count, SimlinError ** out_error);
+void simlin_model_get_var_count(SimlinModel *model, uintptr_t *out_count, SimlinError **out_error);
 
 // Gets the variable names from the model
 //
@@ -253,7 +300,7 @@ void simlin_model_get_var_names(SimlinModel *model,
                                 char **result,
                                 uintptr_t max,
                                 uintptr_t *out_written,
-                                SimlinError ** out_error);
+                                SimlinError **out_error);
 
 // Gets the incoming links (dependencies) for a variable
 //
@@ -272,7 +319,7 @@ void simlin_model_get_incoming_links(SimlinModel *model,
                                      char **result,
                                      uintptr_t max,
                                      uintptr_t *out_written,
-                                     SimlinError ** out_error);
+                                     SimlinError **out_error);
 
 // Gets all causal links in a model
 //
@@ -282,13 +329,13 @@ void simlin_model_get_incoming_links(SimlinModel *model,
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
 // - The returned SimlinLinks must be freed with simlin_free_links
-SimlinLinks *simlin_model_get_links(SimlinModel *model, SimlinError ** out_error);
+SimlinLinks *simlin_model_get_links(SimlinModel *model, SimlinError **out_error);
 
 // Creates a new simulation context
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
-SimlinSim *simlin_sim_new(SimlinModel *model, bool enable_ltm, SimlinError ** out_error);
+SimlinSim *simlin_sim_new(SimlinModel *model, bool enable_ltm, SimlinError **out_error);
 
 // Increments the reference count of a simulation
 //
@@ -306,25 +353,25 @@ void simlin_sim_unref(SimlinSim *sim);
 //
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
-void simlin_sim_run_to(SimlinSim *sim, double time, SimlinError ** out_error);
+void simlin_sim_run_to(SimlinSim *sim, double time, SimlinError **out_error);
 
 // Runs the simulation to completion
 //
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
-void simlin_sim_run_to_end(SimlinSim *sim, SimlinError ** out_error);
+void simlin_sim_run_to_end(SimlinSim *sim, SimlinError **out_error);
 
 // Gets the number of time steps in the results
 //
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
-void simlin_sim_get_stepcount(SimlinSim *sim, uintptr_t *out_count, SimlinError ** out_error);
+void simlin_sim_get_stepcount(SimlinSim *sim, uintptr_t *out_count, SimlinError **out_error);
 
 // Resets the simulation to its initial state
 //
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
-void simlin_sim_reset(SimlinSim *sim, SimlinError ** out_error);
+void simlin_sim_reset(SimlinSim *sim, SimlinError **out_error);
 
 // Gets a single value from the simulation
 //
@@ -332,7 +379,10 @@ void simlin_sim_reset(SimlinSim *sim, SimlinError ** out_error);
 // - `sim` must be a valid pointer to a SimlinSim
 // - `name` must be a valid C string
 // - `result` must be a valid pointer to a double
-void simlin_sim_get_value(SimlinSim *sim, const char *name, double *out_value, SimlinError ** out_error);
+void simlin_sim_get_value(SimlinSim *sim,
+                          const char *name,
+                          double *out_value,
+                          SimlinError **out_error);
 
 // Sets a value in the simulation
 //
@@ -344,7 +394,7 @@ void simlin_sim_get_value(SimlinSim *sim, const char *name, double *out_value, S
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
 // - `name` must be a valid C string
-void simlin_sim_set_value(SimlinSim *sim, const char *name, double val, SimlinError ** out_error);
+void simlin_sim_set_value(SimlinSim *sim, const char *name, double val, SimlinError **out_error);
 
 // Sets the value for a variable at the last saved timestep by offset
 //
@@ -353,7 +403,7 @@ void simlin_sim_set_value(SimlinSim *sim, const char *name, double val, SimlinEr
 void simlin_sim_set_value_by_offset(SimlinSim *sim,
                                     uintptr_t offset,
                                     double val,
-                                    SimlinError ** out_error);
+                                    SimlinError **out_error);
 
 // Gets the column offset for a variable by name
 //
@@ -367,7 +417,7 @@ void simlin_sim_set_value_by_offset(SimlinSim *sim,
 void simlin_sim_get_offset(SimlinSim *sim,
                            const char *name,
                            uintptr_t *out_offset,
-                           SimlinError ** out_error);
+                           SimlinError **out_error);
 
 // Gets a time series for a variable
 //
@@ -380,7 +430,7 @@ void simlin_sim_get_series(SimlinSim *sim,
                            double *results_ptr,
                            uintptr_t len,
                            uintptr_t *out_written,
-                           SimlinError ** out_error);
+                           SimlinError **out_error);
 
 // Frees a string returned by the API
 //
@@ -393,7 +443,7 @@ void simlin_free_string(char *s);
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
 // - The returned SimlinLoops must be freed with simlin_free_loops
-SimlinLoops *simlin_analyze_get_loops(SimlinProject *project, SimlinError ** out_error);
+SimlinLoops *simlin_analyze_get_loops(SimlinProject *project, SimlinError **out_error);
 
 // Frees a SimlinLoops structure
 //
@@ -410,7 +460,7 @@ void simlin_free_loops(SimlinLoops *loops);
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
 // - The returned SimlinLinks must be freed with simlin_free_links
-SimlinLinks *simlin_analyze_get_links(SimlinSim *sim, SimlinError ** out_error);
+SimlinLinks *simlin_analyze_get_links(SimlinSim *sim, SimlinError **out_error);
 
 // Frees a SimlinLinks structure
 //
@@ -431,14 +481,21 @@ void simlin_analyze_get_relative_loop_score(SimlinSim *sim,
                                             double *results_ptr,
                                             uintptr_t len,
                                             uintptr_t *out_written,
-                                            SimlinError ** out_error);
+                                            SimlinError **out_error);
 
+// # Safety
+//
+// - `sim` must be a valid pointer to a SimlinSim object
+// - `loop_id` must be a valid null-terminated C string
+// - `results_ptr` must point to a valid array of at least `len` doubles
+// - `out_written` must be a valid pointer to a usize
+// - `out_error` may be null or a valid pointer to a SimlinError pointer
 void simlin_analyze_get_rel_loop_score(SimlinSim *sim,
                                        const char *loop_id,
                                        double *results_ptr,
                                        uintptr_t len,
                                        uintptr_t *out_written,
-                                       SimlinError ** out_error);
+                                       SimlinError **out_error);
 
 uint8_t *simlin_malloc(uintptr_t size);
 
@@ -454,14 +511,14 @@ void simlin_free(uint8_t *ptr);
 // # Safety
 // - `data` must be a valid pointer to at least `len` bytes
 // - `out_error` may be null
-SimlinProject *simlin_import_xmile(const uint8_t *data, uintptr_t len, SimlinError ** out_error);
+SimlinProject *simlin_import_xmile(const uint8_t *data, uintptr_t len, SimlinError **out_error);
 
 // simlin_import_mdl opens a project from Vensim MDL format data.
 //
 // # Safety
 // - `data` must be a valid pointer to at least `len` bytes
 // - `out_error` may be null
-SimlinProject *simlin_import_mdl(const uint8_t *data, uintptr_t len, SimlinError ** out_error);
+SimlinProject *simlin_import_mdl(const uint8_t *data, uintptr_t len, SimlinError **out_error);
 
 // simlin_export_xmile exports a project to XMILE format.
 // Returns 0 on success, error code on failure.
@@ -473,7 +530,7 @@ SimlinProject *simlin_import_mdl(const uint8_t *data, uintptr_t len, SimlinError
 void simlin_export_xmile(SimlinProject *project,
                          uint8_t **out_buffer,
                          uintptr_t *out_len,
-                         SimlinError ** out_error);
+                         SimlinError **out_error);
 
 // Serializes a project to binary protobuf format
 //
@@ -490,30 +547,8 @@ void simlin_export_xmile(SimlinProject *project,
 void simlin_project_serialize(SimlinProject *project,
                               uint8_t **out_buffer,
                               uintptr_t *out_len,
-                              SimlinError ** out_error);
+                              SimlinError **out_error);
 
-// Serializes a project to JSON format.
-//
-// The resulting buffer contains UTF-8 JSON matching the native Simlin JSON
-// schema. Only the native format is supported.
-//
-// The caller takes ownership of `out_buffer` and must free it with
-// `simlin_free`.
-void simlin_project_serialize_json(SimlinProject *project,
-                                   SimlinJsonFormat format,
-                                   uint8_t **out_buffer,
-                                   uintptr_t *out_len,
-                                   SimlinError **out_error);
-
-// Applies a patch to the project datamodel.
-//
-// The patch is encoded as a `project_io.Patch` protobuf message. The caller can
-// request a dry run (which performs validation without committing) and control
-// whether errors are permitted. When `allow_errors` is false, any static or
-// simulation error will cause the patch to be rejected.
-//
-// On success returns `SimlinErrorCode::NoError`. On failure returns an error
-// code describing why the patch could not be applied. When `out_errors` is not
 // Applies a patch to the project datamodel.
 //
 // On success returns without populating `out_error`. When `out_collected_errors` is
@@ -530,12 +565,64 @@ void simlin_project_apply_patch(SimlinProject *project,
                                 bool dry_run,
                                 bool allow_errors,
                                 SimlinError **out_collected_errors,
-                                SimlinError ** out_error);
+                                SimlinError **out_error);
 
-// Applies a patch described by the native JSON format to the project.
+// Serializes a project to JSON format.
 //
-// Only the native JSON format is accepted. The payload must be UTF-8 encoded.
-// Semantics match `simlin_project_apply_patch`.
+// # Safety
+// - `project` must point to a valid `SimlinProject`.
+// - `out_buffer` and `out_len` must be valid pointers where the serialized
+//   bytes and length will be written.
+// - `out_error` must be a valid pointer for receiving error details and may
+//   be set to null on success.
+//
+// # Thread Safety
+// - This function is thread-safe for concurrent calls with the same `project` pointer.
+// - The underlying `engine::Project` uses `Arc<ModelStage1>` and is protected by a `Mutex`.
+// - Multiple threads may safely access the same project concurrently.
+// - Different projects may also be serialized concurrently from different threads safely.
+//
+// # Ownership
+// - Serialization creates a deep copy of the project datamodel via `clone()`.
+// - The original `project` remains fully usable after serialization.
+// - The returned buffer is exclusively owned by the caller and MUST be freed with `simlin_free`.
+// - The caller is responsible for freeing the buffer even if subsequent operations fail.
+//
+// # Buffer Lifetime
+// - The serialized JSON buffer remains valid until `simlin_free` is called on it.
+// - Multiple serializations can be performed concurrently (separate buffers are independent).
+// - It is safe to serialize the same project multiple times.
+void simlin_project_serialize_json(SimlinProject *project,
+                                   SimlinJsonFormat format,
+                                   uint8_t **out_buffer,
+                                   uintptr_t *out_len,
+                                   SimlinError **out_error);
+
+// Applies a JSON patch to the project datamodel.
+//
+// # Safety
+// - `project` must point to a valid `SimlinProject`.
+// - `patch_data` must either be null with `patch_len == 0` or reference at
+//   least `patch_len` bytes containing UTF-8 JSON.
+// - `out_collected_errors` and `out_error` must be valid pointers for writing
+//   error details and may be set to null on success.
+//
+// # Thread Safety
+// - This function is thread-safe for concurrent calls with the same `project` pointer.
+// - The underlying `engine::Project` uses `Arc<ModelStage1>` and is protected by a `Mutex`.
+// - Multiple threads may safely modify the same project concurrently.
+// - Different projects may also be patched concurrently from different threads safely.
+//
+// # Ownership and Mutation
+// - When `dry_run` is false, this function modifies the project in-place.
+// - When `dry_run` is true, the project remains unchanged and no modifications are committed.
+// - The `project` pointer remains valid and usable after this function returns.
+// - The project is not consumed or moved by this operation.
+//
+// # Format Support
+// - Only `SimlinJsonFormat::Native` is supported for patches.
+// - SDAI format is only supported for full project import via `simlin_project_json_open`.
+// - Attempting to use SDAI format will return an error.
 void simlin_project_apply_patch_json(SimlinProject *project,
                                      const uint8_t *patch_data,
                                      uintptr_t patch_len,
@@ -544,6 +631,19 @@ void simlin_project_apply_patch_json(SimlinProject *project,
                                      bool allow_errors,
                                      SimlinError **out_collected_errors,
                                      SimlinError **out_error);
+
+// Check if a project's model can be simulated
+//
+// Returns true if the model can be simulated (i.e., can be compiled to a VM
+// without errors), false otherwise. This is a quick check for the UI to determine
+// if the "Run Simulation" button should be enabled.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `model_name` may be null (defaults to "main") or must be a valid UTF-8 C string
+bool simlin_project_is_simulatable(SimlinProject *project,
+                                   const char *model_name,
+                                   SimlinError **out_error);
 
 // Get all errors in a project including static analysis and compilation errors
 //
@@ -577,7 +677,7 @@ void simlin_project_apply_patch_json(SimlinProject *project,
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
 // - The returned pointer must be freed with `simlin_free_error_details`
-SimlinError *simlin_project_get_errors(SimlinProject *project, SimlinError ** out_error);
+SimlinError *simlin_project_get_errors(SimlinProject *project, SimlinError **out_error);
 
 #ifdef __cplusplus
 }  // extern "C"

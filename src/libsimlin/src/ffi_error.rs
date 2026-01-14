@@ -1,4 +1,4 @@
-use crate::SimlinErrorCode;
+use crate::{SimlinErrorCode, SimlinErrorKind, SimlinUnitErrorKind};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr;
@@ -24,6 +24,8 @@ pub struct ErrorDetail {
     pub variable_name: Option<String>,
     pub start_offset: u16,
     pub end_offset: u16,
+    pub kind: SimlinErrorKind,
+    pub unit_error_kind: SimlinUnitErrorKind,
 }
 
 impl ErrorDetail {
@@ -35,6 +37,8 @@ impl ErrorDetail {
             variable_name: None,
             start_offset: 0,
             end_offset: 0,
+            kind: SimlinErrorKind::default(),
+            unit_error_kind: SimlinUnitErrorKind::default(),
         }
     }
 }
@@ -47,6 +51,8 @@ struct OwnedDetail {
     variable_name: Option<CString>,
     start_offset: u16,
     end_offset: u16,
+    kind: SimlinErrorKind,
+    unit_error_kind: SimlinUnitErrorKind,
 }
 
 impl OwnedDetail {
@@ -58,6 +64,8 @@ impl OwnedDetail {
             variable_name: detail.variable_name.map(sanitize_for_c),
             start_offset: detail.start_offset,
             end_offset: detail.end_offset,
+            kind: detail.kind,
+            unit_error_kind: detail.unit_error_kind,
         }
     }
 
@@ -78,6 +86,8 @@ impl OwnedDetail {
                 .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
             start_offset: self.start_offset,
             end_offset: self.end_offset,
+            kind: self.kind,
+            unit_error_kind: self.unit_error_kind,
         }
     }
 }

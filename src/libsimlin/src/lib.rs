@@ -1,7 +1,7 @@
 // Copyright 2025 The Simlin Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
-use anyhow::{Error as AnyError, Result};
+use anyhow::{anyhow, Error as AnyError, Result};
 use prost::Message;
 use serde::Deserialize;
 use simlin_engine::common::ErrorCode;
@@ -64,6 +64,33 @@ pub enum SimlinErrorCode {
     Generic = 32,
 }
 
+/// Error kind categorizing where in the project the error originates.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimlinErrorKind {
+    Project = 0,
+    Model = 1,
+    #[default]
+    Variable = 2,
+    Units = 3,
+    Simulation = 4,
+}
+
+/// Unit error kind for distinguishing types of unit-related errors.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimlinUnitErrorKind {
+    /// Not a unit error
+    #[default]
+    NotApplicable = 0,
+    /// Syntax error in unit string definition
+    Definition = 1,
+    /// Dimensional analysis mismatch
+    Consistency = 2,
+    /// Inference error spanning multiple variables
+    Inference = 3,
+}
+
 /// Error detail structure containing contextual information for failures.
 #[repr(C)]
 pub struct SimlinErrorDetail {
@@ -73,6 +100,8 @@ pub struct SimlinErrorDetail {
     pub variable_name: *const c_char,
     pub start_offset: u16,
     pub end_offset: u16,
+    pub kind: SimlinErrorKind,
+    pub unit_error_kind: SimlinUnitErrorKind,
 }
 
 impl From<engine::ErrorCode> for SimlinErrorCode {
@@ -2906,6 +2935,8 @@ struct ErrorDetailBuilder {
     variable_name: Option<String>,
     start_offset: u16,
     end_offset: u16,
+    kind: SimlinErrorKind,
+    unit_error_kind: SimlinUnitErrorKind,
 }
 
 impl ErrorDetailBuilder {
@@ -2917,6 +2948,8 @@ impl ErrorDetailBuilder {
             variable_name: None,
             start_offset: 0,
             end_offset: 0,
+            kind: SimlinErrorKind::default(),
+            unit_error_kind: SimlinUnitErrorKind::default(),
         }
     }
 
@@ -2941,6 +2974,16 @@ impl ErrorDetailBuilder {
         self
     }
 
+    fn kind(mut self, kind: SimlinErrorKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    fn unit_error_kind(mut self, unit_error_kind: SimlinUnitErrorKind) -> Self {
+        self.unit_error_kind = unit_error_kind;
+        self
+    }
+
     fn build(self) -> ErrorDetailData {
         ErrorDetailData {
             code: self.code,
@@ -2949,11 +2992,28 @@ impl ErrorDetailBuilder {
             variable_name: self.variable_name,
             start_offset: self.start_offset,
             end_offset: self.end_offset,
+            kind: self.kind,
+            unit_error_kind: self.unit_error_kind,
         }
     }
 
     fn from_formatted(error: errors::FormattedError) -> ErrorDetailData {
-        let mut builder = ErrorDetailBuilder::new(error.code);
+        let kind = match error.kind {
+            errors::FormattedErrorKind::Project => SimlinErrorKind::Project,
+            errors::FormattedErrorKind::Model => SimlinErrorKind::Model,
+            errors::FormattedErrorKind::Variable => SimlinErrorKind::Variable,
+            errors::FormattedErrorKind::Units => SimlinErrorKind::Units,
+            errors::FormattedErrorKind::Simulation => SimlinErrorKind::Simulation,
+        };
+        let unit_error_kind = match error.unit_error_kind {
+            Some(errors::UnitErrorKind::Definition) => SimlinUnitErrorKind::Definition,
+            Some(errors::UnitErrorKind::Consistency) => SimlinUnitErrorKind::Consistency,
+            Some(errors::UnitErrorKind::Inference) => SimlinUnitErrorKind::Inference,
+            None => SimlinUnitErrorKind::NotApplicable,
+        };
+        let mut builder = ErrorDetailBuilder::new(error.code)
+            .kind(kind)
+            .unit_error_kind(unit_error_kind);
         if let Some(message) = error.message {
             builder = builder.message(Some(message));
         }
@@ -3024,6 +3084,46 @@ fn first_error_code(
     }
 
     sim_error.map(|error| SimlinErrorCode::from(error.code))
+}
+
+/// Check if a project's model can be simulated
+///
+/// Returns true if the model can be simulated (i.e., can be compiled to a VM
+/// without errors), false otherwise. This is a quick check for the UI to determine
+/// if the "Run Simulation" button should be enabled.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `model_name` may be null (defaults to "main") or must be a valid UTF-8 C string
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_is_simulatable(
+    project: *mut SimlinProject,
+    model_name: *const c_char,
+    out_error: *mut *mut SimlinError,
+) -> bool {
+    clear_out_error(out_error);
+    let proj = match require_project(project) {
+        Ok(p) => p,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return false;
+        }
+    };
+
+    let model_name = if model_name.is_null() {
+        "main"
+    } else {
+        match CStr::from_ptr(model_name).to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                store_anyhow_error(out_error, anyhow!("invalid UTF-8 in model_name"));
+                return false;
+            }
+        }
+    };
+
+    let project_locked = proj.project.lock().unwrap();
+    create_vm(&project_locked, model_name).is_ok()
 }
 
 /// Get all errors in a project including static analysis and compilation errors
@@ -8479,6 +8579,285 @@ mod tests {
             assert_eq!((*proj).ref_count.load(Ordering::SeqCst), 1);
 
             // Clean up
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_error_kind_equation_error() {
+        let datamodel = TestProject::new("kind_test")
+            .aux("bad", "1 + unknown", None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null());
+            assert!(!all_errors.is_null());
+            let count = simlin_error_get_detail_count(all_errors);
+            assert!(count > 0);
+
+            let errors = simlin_error_get_details(all_errors);
+            let error_slice = std::slice::from_raw_parts(errors, count);
+            let equation_error = error_slice
+                .iter()
+                .find(|e| e.code == SimlinErrorCode::UnknownDependency)
+                .expect("should have unknown dependency error");
+
+            assert_eq!(
+                equation_error.kind,
+                SimlinErrorKind::Variable,
+                "equation errors should have Variable kind"
+            );
+            assert_eq!(
+                equation_error.unit_error_kind,
+                SimlinUnitErrorKind::NotApplicable,
+                "non-unit errors should have NotApplicable unit_error_kind"
+            );
+
+            simlin_error_free(all_errors);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_error_kind_unit_consistency_error() {
+        let datamodel = TestProject::new("unit_kind_test")
+            .unit("Person", None)
+            .unit("Dollar", None)
+            .aux("x", "1", Some("Person"))
+            .aux("y", "x", Some("Dollar"))
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null());
+            assert!(!all_errors.is_null());
+            let count = simlin_error_get_detail_count(all_errors);
+            assert!(count > 0);
+
+            let errors = simlin_error_get_details(all_errors);
+            let error_slice = std::slice::from_raw_parts(errors, count);
+            let unit_error = error_slice
+                .iter()
+                .find(|e| e.kind == SimlinErrorKind::Units)
+                .expect("should have unit error");
+
+            assert_eq!(
+                unit_error.kind,
+                SimlinErrorKind::Units,
+                "unit errors should have Units kind"
+            );
+            assert_eq!(
+                unit_error.unit_error_kind,
+                SimlinUnitErrorKind::Consistency,
+                "unit mismatch should be Consistency variant"
+            );
+
+            simlin_error_free(all_errors);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_error_kind_all_error_kinds_mapped() {
+        let datamodel = TestProject::new("all_kinds_test")
+            .unit("A", None)
+            .unit("B", None)
+            .aux("eq_error", "1 + bogus", None)
+            .aux("src", "1", Some("A"))
+            .aux("unit_error", "src", Some("B"))
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null());
+            assert!(!all_errors.is_null());
+            let count = simlin_error_get_detail_count(all_errors);
+            assert!(count >= 2, "should have at least 2 errors");
+
+            let errors = simlin_error_get_details(all_errors);
+            let error_slice = std::slice::from_raw_parts(errors, count);
+
+            let has_variable_kind = error_slice
+                .iter()
+                .any(|e| e.kind == SimlinErrorKind::Variable);
+            let has_units_kind = error_slice.iter().any(|e| e.kind == SimlinErrorKind::Units);
+
+            assert!(has_variable_kind, "should have Variable kind error");
+            assert!(has_units_kind, "should have Units kind error");
+
+            simlin_error_free(all_errors);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_is_simulatable_valid_project() {
+        let datamodel = TestProject::new("valid_sim")
+            .aux("x", "time", None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let is_sim =
+                simlin_project_is_simulatable(proj, ptr::null(), &mut err as *mut *mut SimlinError);
+            assert!(err.is_null(), "should not have error");
+            assert!(is_sim, "valid project should be simulatable");
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_is_simulatable_invalid_project() {
+        let datamodel = TestProject::new("invalid_sim")
+            .aux("x", "unknown_var", None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let is_sim =
+                simlin_project_is_simulatable(proj, ptr::null(), &mut err as *mut *mut SimlinError);
+            assert!(err.is_null(), "should not have error in out_error");
+            assert!(!is_sim, "invalid project should not be simulatable");
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_is_simulatable_null_project() {
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let is_sim = simlin_project_is_simulatable(
+                ptr::null_mut(),
+                ptr::null(),
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(!is_sim, "null project should not be simulatable");
+        }
+    }
+
+    #[test]
+    fn test_is_simulatable_with_model_name() {
+        let datamodel = TestProject::new("named_model")
+            .aux("x", "1", None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let model_name = CString::new("main").unwrap();
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let is_sim = simlin_project_is_simulatable(
+                proj,
+                model_name.as_ptr(),
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(err.is_null(), "should not have error");
+            assert!(
+                is_sim,
+                "valid project with named model should be simulatable"
+            );
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_error_kind_unit_definition_error() {
+        // Create a project with an invalid unit syntax to trigger a Definition error
+        let datamodel = TestProject::new("def_error_test")
+            .unit("BadUnit", Some("1///invalid"))
+            .aux("x", "1", Some("BadUnit"))
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null());
+            assert!(!all_errors.is_null());
+            let count = simlin_error_get_detail_count(all_errors);
+            assert!(count > 0, "should have at least one error");
+
+            let errors = simlin_error_get_details(all_errors);
+            let error_slice = std::slice::from_raw_parts(errors, count);
+            let unit_def_error = error_slice
+                .iter()
+                .find(|e| e.unit_error_kind == SimlinUnitErrorKind::Definition);
+
+            assert!(
+                unit_def_error.is_some(),
+                "should have a Definition unit error kind, got: {:?}",
+                error_slice
+                    .iter()
+                    .map(|e| (e.code, e.kind, e.unit_error_kind))
+                    .collect::<Vec<_>>()
+            );
+
+            let def_error = unit_def_error.unwrap();
+            assert_eq!(
+                def_error.kind,
+                SimlinErrorKind::Units,
+                "definition errors should have Units kind"
+            );
+
+            simlin_error_free(all_errors);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_error_kind_unit_inference_error() {
+        // Create a project with conflicting inferred units to trigger an Inference error
+        // Adding Widget + Month (time units) causes inference to fail
+        let datamodel = TestProject::new("infer_error_test")
+            .with_time_units("Month")
+            .unit("Widget", None)
+            .aux("input", "1", Some("Widget"))
+            .aux("bad", "input + TIME", None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null());
+            assert!(!all_errors.is_null());
+            let count = simlin_error_get_detail_count(all_errors);
+            assert!(count > 0, "should have at least one error");
+
+            let errors = simlin_error_get_details(all_errors);
+            let error_slice = std::slice::from_raw_parts(errors, count);
+            let unit_infer_error = error_slice
+                .iter()
+                .find(|e| e.unit_error_kind == SimlinUnitErrorKind::Inference);
+
+            assert!(
+                unit_infer_error.is_some(),
+                "should have an Inference unit error kind, got: {:?}",
+                error_slice
+                    .iter()
+                    .map(|e| (e.code, e.kind, e.unit_error_kind))
+                    .collect::<Vec<_>>()
+            );
+
+            let infer_error = unit_infer_error.unwrap();
+            assert_eq!(
+                infer_error.kind,
+                SimlinErrorKind::Units,
+                "inference errors should have Units kind"
+            );
+
+            simlin_error_free(all_errors);
             simlin_project_unref(proj);
         }
     }
