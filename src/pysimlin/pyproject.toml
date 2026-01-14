@@ -40,16 +40,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
+test = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "hypothesis>=6.100.0",
+    "jsonschema>=4.20.0",
+]
+dev = [
+    "pysimlin[test]",
     "mypy>=1.5.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
     "pandas-stubs>=2.0.0",
     "types-setuptools",
-    "hypothesis>=6.100.0",
-    "jsonschema>=4.20.0",
+    "build>=1.0.0",
 ]
 
 [project.urls]

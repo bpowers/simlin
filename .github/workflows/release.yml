@@ -140,12 +140,8 @@ jobs:
             exit 1
           fi
 
-          echo "Installing wheel: $WHEEL"
-          uv pip install --system "$WHEEL"
-
-          # Install test dependencies from pyproject.toml dev extras
-          # We extract just the test-related deps to avoid reinstalling the package
-          uv pip install --system pytest pytest-cov numpy pandas hypothesis jsonschema
+          echo "Installing wheel with test dependencies: $WHEEL"
+          uv pip install --system "$WHEEL[test]"
 
           # Debug: Check if the module was installed correctly
           echo "Checking installed package..."

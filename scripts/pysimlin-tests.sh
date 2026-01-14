@@ -26,5 +26,4 @@ uv run --directory src/pysimlin python examples/edit_existing_model.py
 uv run --directory src/pysimlin python examples/population_model.py
 
 echo "Building wheel..."
-uv pip install --directory src/pysimlin build
 uv run --directory src/pysimlin python -m build -w .
