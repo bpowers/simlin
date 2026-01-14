@@ -527,4 +527,4 @@ def _create_converter() -> cattrs.Converter:
 
 
 # Global converter instance
-converter = _create_converter()
+converter: cattrs.Converter = _create_converter()
