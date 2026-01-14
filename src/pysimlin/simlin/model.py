@@ -454,7 +454,11 @@ class Model:
             dt_str = sim_specs.get("dt", "1")
             if "/" in dt_str:
                 parts = dt_str.split("/")
-                dt_value = float(parts[0]) / float(parts[1])
+                numerator = float(parts[0])
+                denominator = float(parts[1])
+                if denominator == 0:
+                    raise SimlinRuntimeError("Invalid dt: division by zero in reciprocal notation")
+                dt_value = numerator / denominator
             else:
                 dt_value = float(dt_str) if dt_str else 1.0
 

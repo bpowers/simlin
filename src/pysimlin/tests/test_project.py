@@ -247,6 +247,46 @@ class TestProjectEditing:
         assert len(project_json["models"]) == 1
         assert project_json["models"][0]["name"] == "main"
 
+    def test_set_sim_specs_validates_dt_positive(self, xmile_model_path) -> None:
+        """set_sim_specs should reject non-positive dt values."""
+        model = simlin.load(xmile_model_path)
+        project = model.project
+
+        with pytest.raises(ValueError, match="must be positive"):
+            project.set_sim_specs(dt=0)
+
+        with pytest.raises(ValueError, match="must be positive"):
+            project.set_sim_specs(dt=-1.0)
+
+    def test_set_sim_specs_validates_dt_format(self, xmile_model_path) -> None:
+        """set_sim_specs should reject invalid dt string formats."""
+        model = simlin.load(xmile_model_path)
+        project = model.project
+
+        with pytest.raises(ValueError, match="Invalid dt format"):
+            project.set_sim_specs(dt="not-a-number")
+
+        with pytest.raises(ValueError, match="cannot be an empty string"):
+            project.set_sim_specs(dt="")
+
+    def test_set_sim_specs_validates_dt_division_by_zero(self, xmile_model_path) -> None:
+        """set_sim_specs should reject division by zero in reciprocal dt."""
+        model = simlin.load(xmile_model_path)
+        project = model.project
+
+        with pytest.raises(ValueError, match="denominator cannot be zero"):
+            project.set_sim_specs(dt="1/0")
+
+    def test_set_sim_specs_accepts_reciprocal_dt(self, xmile_model_path) -> None:
+        """set_sim_specs should accept valid reciprocal dt notation."""
+        model = simlin.load(xmile_model_path)
+        project = model.project
+
+        project.set_sim_specs(dt="1/4")
+
+        project_json = json.loads(project.serialize_json().decode("utf-8"))
+        assert project_json["sim_specs"]["dt"] == "1/4"
+
 
 class TestProjectRepr:
     """Test string representation of projects."""

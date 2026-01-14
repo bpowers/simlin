@@ -155,7 +155,7 @@ if __name__ == "__main__":
 from __future__ import annotations
 
 import simlin
-import simlin.pb as pb
+from simlin.json_types import Stock, Flow, Auxiliary
 
 
 def build_population_project() -> simlin.Project:
@@ -169,35 +169,32 @@ def build_population_project() -> simlin.Project:
         time_units="years",
     )
 
-    project.set_sim_specs(
-        start=0.0,
-        stop=80.0,
-        dt={"value": 0.25},
-        time_units="years",
-    )
-
     model = project.get_model()
     with model.edit() as (_, patch):
-        population = pb.Variable.Stock()
-        population.ident = "population"
-        population.equation.scalar.equation = "50"
-        population.inflows.extend(["births"])
-        population.outflows.extend(["deaths"])
+        population = Stock(
+            name="population",
+            initial_equation="50",
+            inflows=["births"],
+            outflows=["deaths"],
+        )
         patch.upsert_stock(population)
 
-        births = pb.Variable.Flow()
-        births.ident = "births"
-        births.equation.scalar.equation = "population * birth_rate"
+        births = Flow(
+            name="births",
+            equation="population * birth_rate",
+        )
         patch.upsert_flow(births)
 
-        deaths = pb.Variable.Flow()
-        deaths.ident = "deaths"
-        deaths.equation.scalar.equation = "population * birth_rate * (population / 1000)"
+        deaths = Flow(
+            name="deaths",
+            equation="population * birth_rate * (population / 1000)",
+        )
         patch.upsert_flow(deaths)
 
-        birth_rate = pb.Variable.Aux()
-        birth_rate.ident = "birth_rate"
-        birth_rate.equation.scalar.equation = "0.08"
+        birth_rate = Auxiliary(
+            name="birth_rate",
+            equation="0.08",
+        )
         patch.upsert_aux(birth_rate)
 
     return project
@@ -321,31 +318,34 @@ print(explanation)
 ### Model Editing
 
 ```python
-import simlin.pb as pb
+from dataclasses import replace
+from simlin.json_types import Stock, Flow, Auxiliary
 
 # Edit existing model variables using context manager
 with model.edit() as (current, patch):
-    # Access current variables by name
+    # Access current variables by name (returns Stock, Flow, Auxiliary, or Module)
     stock_var = current["population"]
 
-    # Modify the variable's properties
-    stock_var.stock.equation.scalar.equation = "100"  # Change initial value
+    # Modify the variable using dataclasses.replace()
+    updated_stock = replace(stock_var, initial_equation="100")
 
     # Apply the change
-    patch.upsert_stock(stock_var.stock)
+    patch.upsert_stock(updated_stock)
 
 # Create new variables programmatically
 with model.edit() as (current, patch):
     # Create a new auxiliary variable
-    new_aux = pb.Variable.Aux()
-    new_aux.ident = "growth_rate"
-    new_aux.equation.scalar.equation = "0.05"
+    new_aux = Auxiliary(
+        name="growth_rate",
+        equation="0.05",
+    )
     patch.upsert_aux(new_aux)
 
     # Create a new flow variable
-    new_flow = pb.Variable.Flow()
-    new_flow.ident = "births"
-    new_flow.equation.scalar.equation = "population * growth_rate"
+    new_flow = Flow(
+        name="births",
+        equation="population * growth_rate",
+    )
     patch.upsert_flow(new_flow)
 ```
 
@@ -463,12 +463,13 @@ if loops:
 
 ```python
 # Export to different formats
-xmile_bytes = project.to_xmile()    # Export as XMILE
-pb_bytes = project.serialize()      # Export as protobuf
+xmile_bytes = project.to_xmile()           # Export as XMILE XML
+json_bytes = project.serialize_json()      # Export as JSON
+pb_bytes = project.serialize_protobuf()    # Export as protobuf (legacy)
 
 # Save to file
 Path("exported.stmx").write_bytes(xmile_bytes)
-Path("model.pb").write_bytes(pb_bytes)
+Path("model.json").write_bytes(json_bytes)
 ```
 
 ### Error Handling

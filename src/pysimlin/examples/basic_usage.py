@@ -201,13 +201,17 @@ def model_conversion():
     xmile_data = project.to_xmile()
     print(f"Exported to XMILE: {len(xmile_data)} bytes")
 
-    # Serialize to protobuf
-    pb_data = project.serialize()
+    # Serialize to JSON (preferred format)
+    json_data = project.serialize_json()
+    print(f"Serialized to JSON: {len(json_data)} bytes")
+
+    # Serialize to protobuf (legacy format)
+    pb_data = project.serialize_protobuf()
     print(f"Serialized to protobuf: {len(pb_data)} bytes")
 
     print("Format conversion complete")
 
-    return xmile_data, pb_data
+    return xmile_data, json_data, pb_data
 
 
 def main():
