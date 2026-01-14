@@ -422,3 +422,46 @@ class TestPatchJsonFormat:
 
         assert op_dict["type"] == "delete_variable"
         assert op_dict["payload"]["ident"] == "unused_var"
+
+
+class TestOptionalFieldSerialization:
+    """Tests for correct handling of optional fields with falsy values."""
+
+    def test_optional_numeric_zero_is_preserved(self) -> None:
+        """arc=0.0 should be serialized, not omitted like arc=None."""
+        from simlin.json_types import LinkViewElement
+
+        # arc=None (default) should be omitted
+        link_default = LinkViewElement(uid=1, from_uid=2, to_uid=3, arc=None)
+        result_default = converter.unstructure(link_default)
+        assert "arc" not in result_default, "arc=None should be omitted (equals default)"
+
+        # arc=0.0 should be INCLUDED (different from default None)
+        link_zero = LinkViewElement(uid=1, from_uid=2, to_uid=3, arc=0.0)
+        result_zero = converter.unstructure(link_zero)
+        assert "arc" in result_zero, "arc=0.0 must be included (different from default None)"
+        assert result_zero["arc"] == 0.0
+
+    def test_optional_string_empty_vs_none(self) -> None:
+        """Empty string should only be omitted if it equals the default."""
+        # For Flow, equation defaults to "" so empty string should be omitted
+        flow_empty = Flow(name="test", equation="")
+        result_empty = converter.unstructure(flow_empty)
+        assert "equation" not in result_empty, "equation='' should be omitted (equals default)"
+
+        # Non-empty equation should be included
+        flow_value = Flow(name="test", equation="x + 1")
+        result_value = converter.unstructure(flow_value)
+        assert result_value.get("equation") == "x + 1"
+
+    def test_optional_bool_false_vs_default(self) -> None:
+        """False should only be omitted if it equals the default."""
+        # For Flow, non_negative defaults to False
+        flow_default = Flow(name="test", non_negative=False)
+        result_default = converter.unstructure(flow_default)
+        assert "non_negative" not in result_default, "non_negative=False should be omitted (equals default)"
+
+        # True should be included
+        flow_true = Flow(name="test", non_negative=True)
+        result_true = converter.unstructure(flow_true)
+        assert result_true.get("non_negative") is True

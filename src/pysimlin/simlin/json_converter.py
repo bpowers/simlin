@@ -55,17 +55,22 @@ def _make_omit_default_hook(
     conv: cattrs.Converter,
     required_fields: set[str] | None = None,
 ) -> Callable[[Any], dict[str, Any]]:
-    """Create an unstructure hook that omits default values.
+    """Create an unstructure hook that omits fields equal to their defaults.
 
     Pre-computes field information at registration time for performance.
+    Only omits a value if it equals the field's declared default. This preserves
+    meaningful values like 0.0 for optional numeric fields when the default is None.
 
     Args:
         cls: The dataclass type
         conv: The cattrs converter
-        required_fields: Set of field names that must always be included (even if empty)
+        required_fields: Set of field names that must always be included (even if default)
     """
     if required_fields is None:
         required_fields = set()
+
+    # Sentinel for fields with no default (must always be included)
+    _NO_DEFAULT = object()
 
     # Pre-compute field metadata at registration time
     field_info: list[tuple[str, Any, bool]] = []
@@ -76,7 +81,7 @@ def _make_omit_default_hook(
         elif fld.default_factory is not MISSING:
             default = fld.default_factory()
         else:
-            default = None
+            default = _NO_DEFAULT
 
         is_required = fld.name in required_fields
         field_info.append((fld.name, default, is_required))
@@ -91,26 +96,16 @@ def _make_omit_default_hook(
                 result[name] = conv.unstructure(val)
                 continue
 
-            # Skip if value equals default
-            if default is not None and val == default:
-                continue
-            # Skip empty strings
-            if val == "":
-                continue
-            # Skip zero numbers
-            if val == 0 or val == 0.0:
-                continue
-            # Skip False booleans
-            if val is False:
-                continue
-            # Skip empty lists
-            if isinstance(val, list) and len(val) == 0:
-                continue
-            # Skip None
-            if val is None:
+            # Always include fields without defaults
+            if default is _NO_DEFAULT:
+                result[name] = conv.unstructure(val)
                 continue
 
-            # Unstructure nested values
+            # Skip if value equals the field's default (handles None, 0, "", [], False correctly)
+            if val == default:
+                continue
+
+            # Include all other values
             result[name] = conv.unstructure(val)
 
         return result
@@ -220,6 +215,18 @@ def _create_converter() -> cattrs.Converter:
 
     conv.register_unstructure_hook(DeleteView, unstructure_delete_view)
 
+    # Valid model operation type names for error messages
+    _valid_model_op_types = (
+        "upsert_stock",
+        "upsert_flow",
+        "upsert_aux",
+        "upsert_module",
+        "delete_variable",
+        "rename_variable",
+        "upsert_view",
+        "delete_view",
+    )
+
     # Structure hook for parsing tagged JSON back to concrete types
     def structure_model_op(d: dict[str, Any], _: type) -> JsonModelOperation:
         type_name = d["type"]
@@ -244,7 +251,11 @@ def _create_converter() -> cattrs.Converter:
         elif type_name == "delete_view":
             return DeleteView(index=payload["index"])
         else:
-            raise ValueError(f"Unknown operation type: {type_name}")
+            valid = ", ".join(_valid_model_op_types)
+            raise ValueError(
+                f"Unknown model operation type: {type_name!r}. "
+                f"Expected one of: {valid}"
+            )
 
     # Register structure hook for Union type (used when parsing JSON)
     conv.register_structure_hook(
@@ -263,27 +274,37 @@ def _create_converter() -> cattrs.Converter:
 
     # Handle JsonProjectOperation tagged union
     # Rust expects: {"type": "set_sim_specs", "payload": {"sim_specs": {...}}}
+    _valid_project_op_types = ("set_sim_specs",)
+
     def unstructure_project_op(op: JsonProjectOperation) -> dict[str, Any]:
         if isinstance(op, SetSimSpecs):
             return {
                 "type": "set_sim_specs",
                 "payload": {"sim_specs": conv.unstructure(op.sim_specs)},
             }
-        raise ValueError(f"Unknown project operation type: {type(op)}")
+        valid = ", ".join(_valid_project_op_types)
+        raise ValueError(
+            f"Unknown project operation type: {type(op).__name__}. "
+            f"Expected one of: {valid}"
+        )
 
     def structure_project_op(d: dict[str, Any], _: type) -> JsonProjectOperation:
         type_name = d["type"]
         payload = d["payload"]
         if type_name == "set_sim_specs":
             return SetSimSpecs(sim_specs=conv.structure(payload["sim_specs"], SimSpecs))
-        raise ValueError(f"Unknown project operation type: {type_name}")
+        valid = ", ".join(_valid_project_op_types)
+        raise ValueError(
+            f"Unknown project operation type: {type_name!r}. "
+            f"Expected one of: {valid}"
+        )
 
     conv.register_unstructure_hook(Union[SetSimSpecs], unstructure_project_op)
     conv.register_structure_hook(Union[SetSimSpecs], structure_project_op)
 
     # Handle ViewElement tagged union
     # Rust expects: {"type": "stock", "uid": 1, "name": "foo", ...} (internally tagged)
-    _view_element_map: dict[type, str] = {
+    _view_element_cls_to_name: dict[type, str] = {
         StockViewElement: "stock",
         FlowViewElement: "flow",
         AuxiliaryViewElement: "aux",
@@ -292,32 +313,33 @@ def _create_converter() -> cattrs.Converter:
         ModuleViewElement: "module",
         AliasViewElement: "alias",
     }
+    _view_element_name_to_cls: dict[str, type] = {
+        v: k for k, v in _view_element_cls_to_name.items()
+    }
 
     def unstructure_view_element(elem: ViewElement) -> dict[str, Any]:
-        for elem_cls, type_name in _view_element_map.items():
-            if isinstance(elem, elem_cls):
-                result = conv.unstructure(elem)
-                result["type"] = type_name
-                return result
-        raise ValueError(f"Unknown view element type: {type(elem)}")
+        elem_type = type(elem)
+        if elem_type in _view_element_cls_to_name:
+            result = conv.unstructure(elem)
+            result["type"] = _view_element_cls_to_name[elem_type]
+            return result
+        valid_types = ", ".join(t.__name__ for t in _view_element_cls_to_name)
+        raise ValueError(
+            f"Unknown view element type: {elem_type.__name__}. "
+            f"Expected one of: {valid_types}"
+        )
 
     def structure_view_element(d: dict[str, Any], _: type) -> ViewElement:
         type_name = d.get("type")
         data = {k: v for k, v in d.items() if k != "type"}
 
-        type_to_cls: dict[str, type] = {
-            "stock": StockViewElement,
-            "flow": FlowViewElement,
-            "aux": AuxiliaryViewElement,
-            "cloud": CloudViewElement,
-            "link": LinkViewElement,
-            "module": ModuleViewElement,
-            "alias": AliasViewElement,
-        }
-
-        if type_name in type_to_cls:
-            return conv.structure(data, type_to_cls[type_name])
-        raise ValueError(f"Unknown view element type: {type_name}")
+        if type_name in _view_element_name_to_cls:
+            return conv.structure(data, _view_element_name_to_cls[type_name])
+        valid_names = ", ".join(_view_element_name_to_cls.keys())
+        raise ValueError(
+            f"Unknown view element type: {type_name!r}. "
+            f"Expected one of: {valid_names}"
+        )
 
     conv.register_unstructure_hook(
         Union[
