@@ -42,7 +42,6 @@ from .run import (
 from .project import Project, JSON_FORMAT_SIMLIN, JSON_FORMAT_SDAI
 from .model import Model
 from .sim import Sim
-from . import pb
 
 
 def load(path: Union[str, Path]) -> Model:
@@ -141,5 +140,4 @@ __all__ = [
     # JSON format constants
     "JSON_FORMAT_SIMLIN",
     "JSON_FORMAT_SDAI",
-    "pb",
 ]

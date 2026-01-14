@@ -32,7 +32,6 @@ from .json_types import (
     JsonProjectPatch,
 )
 from .json_converter import converter
-from . import pb
 
 # JSON format constants
 JSON_FORMAT_SIMLIN = "simlin"

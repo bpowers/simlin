@@ -5,7 +5,6 @@ import pytest
 from pathlib import Path
 import simlin
 from simlin import Project, SimlinImportError, ErrorCode
-from simlin import pb
 
 
 
@@ -128,18 +127,6 @@ class TestProjectSerialization:
         assert isinstance(xmile_data, bytes)
         assert len(xmile_data) > 0
         assert b"<xmile" in xmile_data or b"<?xml" in xmile_data
-
-    def test_round_trip_protobuf(self, xmile_model_path) -> None:
-        """Test protobuf serialization produces valid data."""
-        model = simlin.load(xmile_model_path)
-        project = model.project
-        pb_data = project.serialize_protobuf()
-
-        # Verify it's valid protobuf by parsing it
-        project_proto = pb.Project()
-        project_proto.ParseFromString(pb_data)
-        assert len(project_proto.models) > 0
-
 
 class TestProjectContextManager:
     """Test context manager functionality for projects."""
