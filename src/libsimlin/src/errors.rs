@@ -18,6 +18,17 @@ pub enum FormattedErrorKind {
     Simulation,
 }
 
+/// Unit error kind for distinguishing types of unit-related errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnitErrorKind {
+    /// Syntax error in unit string definition
+    Definition,
+    /// Dimensional analysis mismatch
+    Consistency,
+    /// Inference error spanning multiple variables
+    Inference,
+}
+
 /// A formatted error containing a human readable message and associated metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FormattedError {
@@ -28,6 +39,9 @@ pub struct FormattedError {
     pub start_offset: u16,
     pub end_offset: u16,
     pub kind: FormattedErrorKind,
+    /// For unit errors, indicates the specific type of unit error.
+    /// None for non-unit errors.
+    pub unit_error_kind: Option<UnitErrorKind>,
 }
 
 /// Collection of formatted errors plus bookkeeping flags that mirror previous CLI output
@@ -109,11 +123,18 @@ pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedErro
         start_offset: 0,
         end_offset: 0,
         kind: FormattedErrorKind::Simulation,
+        unit_error_kind: None,
     }
 }
 
 fn format_project_error(error: &Error) -> FormattedError {
     let message = format!("project error: {error}");
+    // Project-level unit definition errors should be marked as such
+    let (kind, unit_error_kind) = if error.code == ErrorCode::UnitDefinitionErrors {
+        (FormattedErrorKind::Units, Some(UnitErrorKind::Definition))
+    } else {
+        (FormattedErrorKind::Project, None)
+    };
     FormattedError {
         code: error.code,
         message: Some(message),
@@ -121,12 +142,19 @@ fn format_project_error(error: &Error) -> FormattedError {
         variable_name: None,
         start_offset: 0,
         end_offset: 0,
-        kind: FormattedErrorKind::Project,
+        kind,
+        unit_error_kind,
     }
 }
 
 fn format_model_error(model_name: &str, error: &Error) -> FormattedError {
     let message = format!("error in model '{model_name}': {error}");
+    // Model-level unit mismatch errors come from unit inference failures
+    let (kind, unit_error_kind) = if error.code == ErrorCode::UnitMismatch {
+        (FormattedErrorKind::Units, Some(UnitErrorKind::Inference))
+    } else {
+        (FormattedErrorKind::Model, None)
+    };
     FormattedError {
         code: error.code,
         message: Some(message),
@@ -134,7 +162,8 @@ fn format_model_error(model_name: &str, error: &Error) -> FormattedError {
         variable_name: None,
         start_offset: 0,
         end_offset: 0,
-        kind: FormattedErrorKind::Model,
+        kind,
+        unit_error_kind,
     }
 }
 
@@ -160,6 +189,7 @@ fn format_equation_error(
         start_offset: error.start,
         end_offset: error.end,
         kind: FormattedErrorKind::Variable,
+        unit_error_kind: None,
     }
 }
 
@@ -192,6 +222,7 @@ fn format_unit_error(
                 start_offset: eq_error.start,
                 end_offset: eq_error.end,
                 kind: FormattedErrorKind::Units,
+                unit_error_kind: Some(UnitErrorKind::Definition),
             }
         }
         UnitError::ConsistencyError(code, loc, details) => {
@@ -214,6 +245,7 @@ fn format_unit_error(
                 start_offset: loc.start,
                 end_offset: loc.end,
                 kind: FormattedErrorKind::Units,
+                unit_error_kind: Some(UnitErrorKind::Consistency),
             }
         }
         UnitError::InferenceError {
@@ -256,6 +288,7 @@ fn format_unit_error(
                 start_offset: start,
                 end_offset: end,
                 kind: FormattedErrorKind::Units,
+                unit_error_kind: Some(UnitErrorKind::Inference),
             }
         }
     }
