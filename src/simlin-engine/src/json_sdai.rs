@@ -372,6 +372,12 @@ fn extract_equation_string(eq: &datamodel::Equation) -> String {
     }
 }
 
+/// Convert a datamodel Stock to SDAI StockFields.
+///
+/// Note: Empty vectors for inflows/outflows are normalized to None,
+/// as are empty strings for equation, documentation, and units.
+/// This means `Some([])` and `None` are semantically equivalent
+/// and will both roundtrip to `None`.
 impl From<datamodel::Stock> for StockFields {
     fn from(stock: datamodel::Stock) -> Self {
         let equation = extract_equation_string(&stock.equation);

@@ -373,7 +373,11 @@ mod schema_tests {
     use std::fs;
     use std::path::Path;
 
+    /// This test writes to the file system to regenerate the schema file.
+    /// It is marked #[ignore] to avoid file system writes during normal test runs.
+    /// Run with `cargo test -- --ignored generate_and_write_sdai_schema` when needed.
     #[test]
+    #[ignore]
     fn generate_and_write_sdai_schema() {
         let schema_json = generate_schema_json();
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -489,6 +493,207 @@ mod schema_tests {
             !json.contains("start_time"),
             "Should not use snake_case: {}",
             json
+        );
+    }
+
+    // Negative test cases: Invalid JSON that should fail schema validation
+
+    #[test]
+    fn invalid_json_missing_required_field() {
+        let schema = generate_schema();
+        let schema_value = serde_json::to_value(&schema).unwrap();
+        let validator = jsonschema::validator_for(&schema_value).unwrap();
+
+        // Missing required "variables" field
+        let invalid_json: serde_json::Value = serde_json::json!({
+            "specs": { "startTime": 0.0, "stopTime": 100.0 }
+        });
+        assert!(
+            !validator.is_valid(&invalid_json),
+            "JSON missing 'variables' should fail validation"
+        );
+    }
+
+    #[test]
+    fn invalid_json_wrong_type_for_field() {
+        let schema = generate_schema();
+        let schema_value = serde_json::to_value(&schema).unwrap();
+        let validator = jsonschema::validator_for(&schema_value).unwrap();
+
+        // "variables" should be an array, not a string
+        let invalid_json: serde_json::Value = serde_json::json!({
+            "variables": "not an array"
+        });
+        assert!(
+            !validator.is_valid(&invalid_json),
+            "JSON with wrong type for 'variables' should fail validation"
+        );
+    }
+
+    #[test]
+    fn invalid_json_variable_missing_type_discriminator() {
+        let schema = generate_schema();
+        let schema_value = serde_json::to_value(&schema).unwrap();
+        let validator = jsonschema::validator_for(&schema_value).unwrap();
+
+        // Variable without "type" field
+        let invalid_json: serde_json::Value = serde_json::json!({
+            "variables": [
+                { "name": "inventory", "equation": "100" }
+            ]
+        });
+        assert!(
+            !validator.is_valid(&invalid_json),
+            "Variable missing 'type' discriminator should fail validation"
+        );
+    }
+
+    #[test]
+    fn invalid_json_variable_wrong_type_discriminator() {
+        let schema = generate_schema();
+        let schema_value = serde_json::to_value(&schema).unwrap();
+        let validator = jsonschema::validator_for(&schema_value).unwrap();
+
+        // Variable with invalid "type" value
+        let invalid_json: serde_json::Value = serde_json::json!({
+            "variables": [
+                { "type": "invalid_type", "name": "inventory" }
+            ]
+        });
+        assert!(
+            !validator.is_valid(&invalid_json),
+            "Variable with invalid 'type' should fail validation"
+        );
+    }
+
+    #[test]
+    fn invalid_json_relationship_missing_required_fields() {
+        let schema = generate_schema();
+        let schema_value = serde_json::to_value(&schema).unwrap();
+        let validator = jsonschema::validator_for(&schema_value).unwrap();
+
+        // Relationship missing "from", "to", "polarity"
+        let invalid_json: serde_json::Value = serde_json::json!({
+            "variables": [],
+            "relationships": [
+                { "reasoning": "some reason" }
+            ]
+        });
+        assert!(
+            !validator.is_valid(&invalid_json),
+            "Relationship missing required fields should fail validation"
+        );
+    }
+
+    #[test]
+    fn invalid_json_sim_specs_missing_required_fields() {
+        let schema = generate_schema();
+        let schema_value = serde_json::to_value(&schema).unwrap();
+        let validator = jsonschema::validator_for(&schema_value).unwrap();
+
+        // SimSpecs missing required startTime/stopTime
+        let invalid_json: serde_json::Value = serde_json::json!({
+            "variables": [],
+            "specs": { "dt": 0.5 }
+        });
+        assert!(
+            !validator.is_valid(&invalid_json),
+            "SimSpecs missing required fields should fail validation"
+        );
+    }
+
+    // Edge case tests
+
+    #[test]
+    fn test_empty_points_graphical_function() {
+        // Empty points array is valid JSON but may produce invalid scales
+        let gf = GraphicalFunction { points: vec![] };
+        let json = serde_json::to_string(&gf).unwrap();
+        let parsed: GraphicalFunction = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.points.len(), 0);
+
+        // Verify it validates against schema
+        let schema = generate_schema();
+        let schema_value = serde_json::to_value(&schema).unwrap();
+        let validator = jsonschema::validator_for(&schema_value).unwrap();
+
+        let model_with_empty_gf: serde_json::Value = serde_json::json!({
+            "variables": [{
+                "type": "flow",
+                "name": "rate",
+                "graphicalFunction": { "points": [] }
+            }]
+        });
+        // Empty points is valid per schema (but may produce NaN scales on roundtrip)
+        assert!(
+            validator.is_valid(&model_with_empty_gf),
+            "Empty points array should be valid JSON"
+        );
+    }
+
+    #[test]
+    fn test_single_point_graphical_function() {
+        // Single point is technically valid but unusual
+        let gf = GraphicalFunction {
+            points: vec![Point { x: 0.0, y: 1.0 }],
+        };
+        let json = serde_json::to_string(&gf).unwrap();
+        let parsed: GraphicalFunction = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.points.len(), 1);
+    }
+
+    #[test]
+    fn test_polarity_values_in_relationship() {
+        // Valid polarity values
+        for polarity in ["+", "-", "?"] {
+            let rel = Relationship {
+                reasoning: None,
+                from: "a".to_string(),
+                to: "b".to_string(),
+                polarity: polarity.to_string(),
+                polarity_reasoning: None,
+            };
+            let json = serde_json::to_string(&rel).unwrap();
+            let parsed: Relationship = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.polarity, polarity);
+        }
+
+        // Note: The schema doesn't currently restrict polarity to specific values.
+        // Any string is valid per the schema, but semantically only "+", "-", "?" are meaningful.
+        let rel_with_unusual_polarity = Relationship {
+            reasoning: None,
+            from: "a".to_string(),
+            to: "b".to_string(),
+            polarity: "unknown".to_string(), // Not a standard polarity but schema allows it
+            polarity_reasoning: None,
+        };
+        let json = serde_json::to_string(&rel_with_unusual_polarity).unwrap();
+        let parsed: Relationship = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.polarity, "unknown");
+    }
+
+    #[test]
+    fn test_empty_model() {
+        let empty_model = SdaiModel {
+            variables: vec![],
+            relationships: None,
+            specs: None,
+            views: None,
+        };
+
+        let json = serde_json::to_string(&empty_model).unwrap();
+        let parsed: SdaiModel = serde_json::from_str(&json).unwrap();
+        assert!(parsed.variables.is_empty());
+        assert!(parsed.relationships.is_none());
+
+        // Verify against schema
+        let schema = generate_schema();
+        let schema_value = serde_json::to_value(&schema).unwrap();
+        let validator = jsonschema::validator_for(&schema_value).unwrap();
+        let json_value = serde_json::to_value(&empty_model).unwrap();
+        assert!(
+            validator.is_valid(&json_value),
+            "Empty model should be valid"
         );
     }
 }
