@@ -8,6 +8,10 @@ Directives (HTML comments immediately before code blocks):
 - <!-- pysimlin-test: skip --> - Don't execute this block
 - <!-- pysimlin-test: expect-error --> - Block should raise an exception
 - <!-- pysimlin-test: reset --> - Clear namespace before this block
+
+SECURITY NOTE: This module uses exec() to run code extracted from README.md.
+This is acceptable because README.md is version-controlled and changes require
+PR review. Do not copy this pattern for use with untrusted input sources.
 """
 
 from __future__ import annotations
@@ -125,6 +129,8 @@ class TestReadmeExamples:
             code_preview = code[:300] + "..." if len(code) > 300 else code
 
             try:
+                # SECURITY: exec() is safe here because README.md is version-controlled
+                # and undergoes PR review. DO NOT use this pattern with untrusted input.
                 exec(code, namespace)
 
                 if expect_error:
