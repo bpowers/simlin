@@ -617,7 +617,7 @@ mod schema_tests {
 
     #[test]
     fn test_empty_points_graphical_function() {
-        // Empty points array is valid JSON but may produce invalid scales
+        // Empty points array is valid JSON
         let gf = GraphicalFunction { points: vec![] };
         let json = serde_json::to_string(&gf).unwrap();
         let parsed: GraphicalFunction = serde_json::from_str(&json).unwrap();
@@ -635,11 +635,45 @@ mod schema_tests {
                 "graphicalFunction": { "points": [] }
             }]
         });
-        // Empty points is valid per schema (but may produce NaN scales on roundtrip)
         assert!(
             validator.is_valid(&model_with_empty_gf),
             "Empty points array should be valid JSON"
         );
+    }
+
+    #[test]
+    fn test_empty_graphical_function_produces_valid_scales() {
+        // Empty points should produce valid 0-1 default scales, not INFINITY
+        let gf = GraphicalFunction { points: vec![] };
+        let dm_gf: datamodel::GraphicalFunction = gf.into();
+
+        // Verify scales are valid (0-1 default), not INFINITY
+        assert!(
+            dm_gf.x_scale.min.is_finite(),
+            "x_scale.min should be finite, got {}",
+            dm_gf.x_scale.min
+        );
+        assert!(
+            dm_gf.x_scale.max.is_finite(),
+            "x_scale.max should be finite, got {}",
+            dm_gf.x_scale.max
+        );
+        assert!(
+            dm_gf.y_scale.min.is_finite(),
+            "y_scale.min should be finite, got {}",
+            dm_gf.y_scale.min
+        );
+        assert!(
+            dm_gf.y_scale.max.is_finite(),
+            "y_scale.max should be finite, got {}",
+            dm_gf.y_scale.max
+        );
+
+        // Verify default scale is 0-1
+        assert_eq!(dm_gf.x_scale.min, 0.0);
+        assert_eq!(dm_gf.x_scale.max, 1.0);
+        assert_eq!(dm_gf.y_scale.min, 0.0);
+        assert_eq!(dm_gf.y_scale.max, 1.0);
     }
 
     #[test]

@@ -179,10 +179,22 @@ impl From<GraphicalFunction> for datamodel::GraphicalFunction {
         let x_points: Vec<f64> = gf.points.iter().map(|p| p.x).collect();
         let y_points: Vec<f64> = gf.points.iter().map(|p| p.y).collect();
 
-        let x_min = x_points.iter().copied().fold(f64::INFINITY, f64::min);
-        let x_max = x_points.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let y_min = y_points.iter().copied().fold(f64::INFINITY, f64::min);
-        let y_max = y_points.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        // Use default 0-1 scale for empty point arrays to avoid INFINITY values
+        let (x_min, x_max) = if x_points.is_empty() {
+            (0.0, 1.0)
+        } else {
+            let min = x_points.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = x_points.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            (min, max)
+        };
+
+        let (y_min, y_max) = if y_points.is_empty() {
+            (0.0, 1.0)
+        } else {
+            let min = y_points.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = y_points.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            (min, max)
+        };
 
         datamodel::GraphicalFunction {
             kind: datamodel::GraphicalFunctionKind::Continuous,
