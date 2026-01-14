@@ -10,13 +10,15 @@ from ._ffi import ffi, lib, string_to_c, c_to_string, free_c_string, _register_f
 from .errors import SimlinRuntimeError, ErrorCode
 from .analysis import Link, LinkPolarity, Loop
 from .types import Stock, Flow, Aux, TimeSpec, GraphicalFunction, GraphicalFunctionScale, ModelIssue
-from . import pb
 from .json_types import (
     Stock as JsonStock,
     Flow as JsonFlow,
     Auxiliary as JsonAuxiliary,
     Module as JsonModule,
+    Model as JsonModel,
     View as JsonView,
+    GraphicalFunction as JsonGraphicalFunction,
+    SimSpecs as JsonSimSpecs,
     JsonModelPatch,
     JsonProjectPatch,
     JsonModelOperation,
@@ -184,7 +186,6 @@ class Model:
         self._name = name or ""
         _register_finalizer(self, lib.simlin_model_unref, ptr)
 
-        self._cached_project_proto: Optional[pb.Project] = None
         self._cached_stocks: Optional[tuple[Stock, ...]] = None
         self._cached_flows: Optional[tuple[Flow, ...]] = None
         self._cached_auxs: Optional[tuple[Aux, ...]] = None
@@ -297,71 +298,43 @@ class Model:
         finally:
             lib.simlin_free_links(links_ptr)
 
-    def _get_project_proto(self) -> pb.Project:
-        """Get cached protobuf project representation."""
-        if self._cached_project_proto is None:
-            if self._project is None:
-                raise SimlinRuntimeError("Model is not attached to a Project")
-            project_proto = pb.Project()
-            project_proto.ParseFromString(self._project.serialize())
-            self._cached_project_proto = project_proto
-        return self._cached_project_proto
+    def _get_model_json(self) -> JsonModel:
+        """Get this model's JSON representation as a dataclass."""
+        if self._project is None:
+            raise SimlinRuntimeError("Model is not attached to a Project")
 
-    def _get_model_proto(self) -> pb.Model:
-        """Get this model's protobuf representation."""
-        project_proto = self._get_project_proto()
-        for model_proto in project_proto.models:
-            if model_proto.name == self._name or not self._name:
-                return model_proto
+        project_json = json.loads(self._project.serialize_json().decode("utf-8"))
+        for model_dict in project_json.get("models", []):
+            if model_dict["name"] == self._name or not self._name:
+                return converter.structure(model_dict, JsonModel)
         raise SimlinRuntimeError(f"Model '{self._name}' not found in project")
 
-    def _parse_graphical_function(self, gf_proto: pb.GraphicalFunction) -> GraphicalFunction:
-        """Parse a protobuf GraphicalFunction into a dataclass."""
-        x_points = tuple(gf_proto.x_points) if gf_proto.x_points else None
-        y_points = tuple(gf_proto.y_points)
+    def _parse_json_graphical_function(self, gf: JsonGraphicalFunction) -> GraphicalFunction:
+        """Parse a JSON GraphicalFunction into a types dataclass."""
+        # Handle points format (list of [x, y] pairs)
+        if gf.points:
+            x_points: Optional[tuple[float, ...]] = tuple(p[0] for p in gf.points)
+            y_points: tuple[float, ...] = tuple(p[1] for p in gf.points)
+        else:
+            x_points = None
+            y_points = tuple(gf.y_points) if gf.y_points else ()
 
         x_scale = GraphicalFunctionScale(
-            min=gf_proto.x_scale.min,
-            max=gf_proto.x_scale.max,
+            min=gf.x_scale.min if gf.x_scale else 0.0,
+            max=gf.x_scale.max if gf.x_scale else float(len(y_points) - 1) if y_points else 0.0,
         )
         y_scale = GraphicalFunctionScale(
-            min=gf_proto.y_scale.min,
-            max=gf_proto.y_scale.max,
+            min=gf.y_scale.min if gf.y_scale else 0.0,
+            max=gf.y_scale.max if gf.y_scale else 1.0,
         )
-
-        kind_map = {
-            pb.GraphicalFunction.CONTINUOUS: "continuous",
-            pb.GraphicalFunction.DISCRETE: "discrete",
-            pb.GraphicalFunction.EXTRAPOLATE: "extrapolate",
-        }
-        kind = kind_map.get(gf_proto.kind, "continuous")
 
         return GraphicalFunction(
             x_points=x_points,
             y_points=y_points,
             x_scale=x_scale,
             y_scale=y_scale,
-            kind=kind,
+            kind=gf.kind or "continuous",
         )
-
-    def _extract_equation_string(self, eqn_proto: pb.Variable.Equation) -> Tuple[str, Optional[str]]:
-        """
-        Extract equation and initial_equation from protobuf Equation.
-
-        Returns:
-            Tuple of (equation, initial_equation)
-        """
-        which = eqn_proto.WhichOneof("equation")
-        if which == "scalar":
-            scalar = eqn_proto.scalar
-            return scalar.equation, getattr(scalar, "initial_equation", None) or None
-        elif which == "apply_to_all":
-            ata = eqn_proto.apply_to_all
-            return ata.equation, getattr(ata, "initial_equation", None) or None
-        elif which == "arrayed":
-            return "[arrayed]", None
-        else:
-            return "", None
 
     @property
     def stocks(self) -> tuple[Stock, ...]:
@@ -372,30 +345,20 @@ class Model:
             Tuple of Stock objects representing all stocks in the model
         """
         if self._cached_stocks is None:
-            model_proto = self._get_model_proto()
-            stocks_list = []
-
-            for var_proto in model_proto.variables:
-                which = var_proto.WhichOneof("v")
-                if which == "stock":
-                    stock_proto = var_proto.stock
-                    eqn, initial_eqn = self._extract_equation_string(stock_proto.equation)
-
-                    dimensions = tuple(stock_proto.equation.apply_to_all.dimension_names) if stock_proto.equation.HasField("apply_to_all") else ()
-
-                    stock = Stock(
-                        name=stock_proto.ident,
-                        initial_equation=initial_eqn or eqn,
-                        inflows=tuple(stock_proto.inflows),
-                        outflows=tuple(stock_proto.outflows),
-                        units=stock_proto.units or None,
-                        documentation=stock_proto.documentation or None,
-                        dimensions=dimensions,
-                        non_negative=stock_proto.non_negative,
-                    )
-                    stocks_list.append(stock)
-
-            self._cached_stocks = tuple(stocks_list)
+            model = self._get_model_json()
+            self._cached_stocks = tuple(
+                Stock(
+                    name=s.name,
+                    initial_equation=s.initial_equation,
+                    inflows=tuple(s.inflows),
+                    outflows=tuple(s.outflows),
+                    units=s.units or None,
+                    documentation=s.documentation or None,
+                    dimensions=tuple(s.arrayed_equation.dimensions) if s.arrayed_equation else (),
+                    non_negative=s.non_negative,
+                )
+                for s in model.stocks
+            )
         return self._cached_stocks
 
     @property
@@ -407,31 +370,24 @@ class Model:
             Tuple of Flow objects representing all flows in the model
         """
         if self._cached_flows is None:
-            model_proto = self._get_model_proto()
+            model = self._get_model_json()
             flows_list = []
 
-            for var_proto in model_proto.variables:
-                which = var_proto.WhichOneof("v")
-                if which == "flow":
-                    flow_proto = var_proto.flow
-                    eqn, _ = self._extract_equation_string(flow_proto.equation)
+            for f in model.flows:
+                gf = None
+                if f.graphical_function:
+                    gf = self._parse_json_graphical_function(f.graphical_function)
 
-                    dimensions = tuple(flow_proto.equation.apply_to_all.dimension_names) if flow_proto.equation.HasField("apply_to_all") else ()
-
-                    gf = None
-                    if flow_proto.HasField("gf"):
-                        gf = self._parse_graphical_function(flow_proto.gf)
-
-                    flow = Flow(
-                        name=flow_proto.ident,
-                        equation=eqn,
-                        units=flow_proto.units or None,
-                        documentation=flow_proto.documentation or None,
-                        dimensions=dimensions,
-                        non_negative=flow_proto.non_negative,
-                        graphical_function=gf,
-                    )
-                    flows_list.append(flow)
+                flow = Flow(
+                    name=f.name,
+                    equation=f.equation,
+                    units=f.units or None,
+                    documentation=f.documentation or None,
+                    dimensions=tuple(f.arrayed_equation.dimensions) if f.arrayed_equation else (),
+                    non_negative=f.non_negative,
+                    graphical_function=gf,
+                )
+                flows_list.append(flow)
 
             self._cached_flows = tuple(flows_list)
         return self._cached_flows
@@ -445,31 +401,24 @@ class Model:
             Tuple of Aux objects representing all auxiliary variables in the model
         """
         if self._cached_auxs is None:
-            model_proto = self._get_model_proto()
+            model = self._get_model_json()
             auxs_list = []
 
-            for var_proto in model_proto.variables:
-                which = var_proto.WhichOneof("v")
-                if which == "aux":
-                    aux_proto = var_proto.aux
-                    eqn, initial_eqn = self._extract_equation_string(aux_proto.equation)
+            for a in model.auxiliaries:
+                gf = None
+                if a.graphical_function:
+                    gf = self._parse_json_graphical_function(a.graphical_function)
 
-                    dimensions = tuple(aux_proto.equation.apply_to_all.dimension_names) if aux_proto.equation.HasField("apply_to_all") else ()
-
-                    gf = None
-                    if aux_proto.HasField("gf"):
-                        gf = self._parse_graphical_function(aux_proto.gf)
-
-                    aux = Aux(
-                        name=aux_proto.ident,
-                        equation=eqn,
-                        initial_equation=initial_eqn,
-                        units=aux_proto.units or None,
-                        documentation=aux_proto.documentation or None,
-                        dimensions=dimensions,
-                        graphical_function=gf,
-                    )
-                    auxs_list.append(aux)
+                aux = Aux(
+                    name=a.name,
+                    equation=a.equation,
+                    initial_equation=a.initial_equation or None,
+                    units=a.units or None,
+                    documentation=a.documentation or None,
+                    dimensions=tuple(a.arrayed_equation.dimensions) if a.arrayed_equation else (),
+                    graphical_function=gf,
+                )
+                auxs_list.append(aux)
 
             self._cached_auxs = tuple(auxs_list)
         return self._cached_auxs
@@ -495,21 +444,25 @@ class Model:
             TimeSpec with simulation time configuration
         """
         if self._cached_time_spec is None:
-            model_proto = self._get_model_proto()
-            project_proto = self._get_project_proto()
+            if self._project is None:
+                raise SimlinRuntimeError("Model is not attached to a Project")
 
-            sim_specs = project_proto.sim_specs
+            project_json = json.loads(self._project.serialize_json().decode("utf-8"))
+            sim_specs = project_json["sim_specs"]
 
-            start = sim_specs.start
-            stop = sim_specs.stop
-            dt_value = sim_specs.dt.value if sim_specs.HasField("dt") else 1.0
-            time_units = sim_specs.time_units if sim_specs.HasField("time_units") else None
+            # Parse dt string (could be "1", "0.25", "1/4", etc.)
+            dt_str = sim_specs.get("dt", "1")
+            if "/" in dt_str:
+                parts = dt_str.split("/")
+                dt_value = float(parts[0]) / float(parts[1])
+            else:
+                dt_value = float(dt_str) if dt_str else 1.0
 
             self._cached_time_spec = TimeSpec(
-                start=start,
-                stop=stop,
+                start=sim_specs.get("start_time", 0.0),
+                stop=sim_specs.get("end_time", 10.0),
                 dt=dt_value,
-                units=time_units,
+                units=sim_specs.get("time_units") or None,
             )
         return self._cached_time_spec
 
