@@ -42,9 +42,18 @@ Error codes from C are mapped to Python ErrorCode enum.
 ### Prerequisites
 
 1. Rust toolchain (for building libsimlin)
-2. Python 3.9+ with pip
-3. CFFI development headers
-4. Platform-specific C compiler
+2. Python 3.11+
+3. [uv](https://docs.astral.sh/uv/) - Fast Python package manager
+4. CFFI development headers
+5. Platform-specific C compiler
+
+Install uv:
+```bash
+# macOS/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# or
+brew install uv
+```
 
 ### Local Development
 
@@ -53,26 +62,26 @@ Error codes from C are mapped to Python ErrorCode enum.
 cd src/libsimlin
 cargo build --release
 
-# Install Python package in dev mode
+# Install Python package in dev mode with uv
 cd src/pysimlin
-pip install -e ".[dev]"
+uv sync --extra dev
 
 # Run tests
-pytest tests/
+uv run pytest tests/
 
 # Type checking
-mypy simlin
+uv run mypy simlin
 
 # Linting
-ruff check simlin tests
-black --check simlin tests
+uv run ruff check simlin tests
+uv run black --check simlin tests
 ```
 
 ### Building Wheels
 
 ```bash
 cd src/pysimlin
-python scripts/build_wheels.py
+uv run python scripts/build_wheels.py
 ```
 
 This will:
@@ -96,19 +105,19 @@ This will:
 
 ```bash
 # All tests
-pytest
+uv run pytest
 
 # Specific test file
-pytest tests/test_project.py
+uv run pytest tests/test_project.py
 
 # With coverage
-pytest --cov=simlin --cov-report=term-missing
+uv run pytest --cov=simlin --cov-report=term-missing
 
 # Verbose output
-pytest -v
+uv run pytest -v
 
 # Memory tests only
-pytest tests/test_memory.py -v
+uv run pytest tests/test_memory.py -v
 ```
 
 ### Memory Leak Testing
@@ -150,15 +159,15 @@ The memory tests (`tests/test_memory.py`) cover:
 
 ```bash
 # Run all memory tests
-pytest tests/test_memory.py -v
+uv run pytest tests/test_memory.py -v
 
 # Run specific memory test categories
-pytest tests/test_memory.py::TestObjectCreationDestruction -v
-pytest tests/test_memory.py::TestReferenceCountingEdgeCases -v
-pytest tests/test_memory.py::TestFinalizerBehavior -v
+uv run pytest tests/test_memory.py::TestObjectCreationDestruction -v
+uv run pytest tests/test_memory.py::TestReferenceCountingEdgeCases -v
+uv run pytest tests/test_memory.py::TestFinalizerBehavior -v
 
 # Run with garbage collection debugging
-PYTHONMALLOC=debug pytest tests/test_memory.py -v
+PYTHONMALLOC=debug uv run pytest tests/test_memory.py -v
 ```
 
 #### Automated Memory Testing (CI)
@@ -257,7 +266,7 @@ Update version in:
 
 3. **Test Wheels**:
    ```bash
-   pip install dist/simlin-*.whl
+   uv pip install dist/simlin-*.whl
    python -c "import simlin; print(simlin.__version__)"
    ```
 
@@ -304,7 +313,7 @@ Or use GitHub Actions workflow triggered by tags.
 
 1. **Variable Discovery**: Currently requires passing variable list to `get_results()` - C API enhancement needed for automatic discovery
 2. **Platform Support**: Limited to macOS ARM64 and Linux (x86_64, ARM64)
-3. **Python Version**: Requires Python 3.9+ for type hint features
+3. **Python Version**: Requires Python 3.11+
 
 ## Future Enhancements
 
@@ -323,7 +332,7 @@ Or use GitHub Actions workflow triggered by tags.
    - Check library path in `_ffi_build.py`
 
 2. **CFFI Build Errors**:
-   - Install CFFI: `pip install cffi`
+   - Install CFFI: `uv pip install cffi`
    - Check compiler is available
 
 3. **Import Errors**:

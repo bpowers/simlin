@@ -6,7 +6,7 @@ build-lib:
 
 # Build the Python package
 build: build-lib
-	python scripts/build_wheels.py
+	uv run python scripts/build_wheels.py
 
 # Regenerate protobuf bindings
 protos:
@@ -16,29 +16,29 @@ protos:
 
 # Install for development
 dev: build-lib
-	pip install -e ".[dev]"
+	uv sync --extra dev
 
 # Run tests
 test:
-	pytest tests/ -v
+	uv run pytest tests/ -v
 
 # Run linting
 lint:
-	ruff check simlin tests
-	black --check simlin tests
+	uv run ruff check simlin tests
+	uv run black --check simlin tests
 
 # Run type checking
 type-check:
-	mypy simlin
+	uv run mypy simlin
 
 # Format code
 format:
-	black simlin tests
-	ruff check --fix simlin tests
+	uv run black simlin tests
+	uv run ruff check --fix simlin tests
 
 # Clean build artifacts
 clean:
-	rm -rf build dist *.egg-info
+	rm -rf build dist *.egg-info .venv
 	rm -rf simlin/_ffi.*.so simlin/_ffi.*.pyd
 	rm -rf .pytest_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
@@ -46,7 +46,7 @@ clean:
 
 # Install the package
 install: build
-	pip install dist/*.whl
+	uv pip install dist/*.whl
 
 # Run all checks
 check: lint type-check test
