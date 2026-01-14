@@ -63,3 +63,11 @@ def teacup_xmile_path(fixtures_dir: Path) -> Path:
 def logistic_growth_json_path() -> Path:
     """Return path to logistic growth JSON model."""
     return Path(__file__).parent / "logistic-growth.sd.json"
+
+
+@pytest.fixture
+def subscripted_model_path() -> Path:
+    """Return path to a model with subscripted (arrayed) variables."""
+    # This model has flows with apply-to-all equations
+    # Path from tests/conftest.py to simlin repo root is 4 levels up
+    return Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "tests" / "subscript_multiples" / "test_multiple_subscripts.stmx"

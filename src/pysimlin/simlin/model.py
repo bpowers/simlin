@@ -327,6 +327,39 @@ class Model:
         self._cached_time_spec = None
         self._cached_base_case = None
 
+    def _extract_equation(
+        self,
+        top_level: str,
+        arrayed: Optional[Any],
+        field: str = "equation",
+    ) -> str:
+        """Extract equation from JSON, handling apply-to-all arrayed equations.
+
+        For arrayed variables with apply-to-all equations, the top-level equation
+        field is empty and the actual equation is in arrayed_equation.equation.
+
+        Note: For stocks, the initial equation is stored in arrayed_equation.equation
+        (not arrayed_equation.initial_equation) because in XMILE, the <eqn> tag
+        for stocks represents the initial value, and the serializer maps this to
+        the "equation" field in ArrayedEquation for consistency.
+
+        Args:
+            top_level: The top-level equation string (may be empty)
+            arrayed: The arrayed_equation object (may be None)
+            field: Which field to read from arrayed - use "equation" for flows/auxs
+                   and also for stock initial equations (see note above)
+
+        Returns:
+            The equation string, preferring top-level if non-empty
+        """
+        if top_level:
+            return top_level
+        if arrayed is not None:
+            arrayed_eq = getattr(arrayed, field, None)
+            if arrayed_eq:
+                return arrayed_eq
+        return ""
+
     def _parse_json_graphical_function(self, gf: JsonGraphicalFunction) -> GraphicalFunction:
         """Parse a JSON GraphicalFunction into a types dataclass."""
         # Handle points format (list of [x, y] pairs)
@@ -367,7 +400,9 @@ class Model:
             self._cached_stocks = tuple(
                 Stock(
                     name=s.name,
-                    initial_equation=s.initial_equation,
+                    initial_equation=self._extract_equation(
+                        s.initial_equation, s.arrayed_equation, "equation"
+                    ),
                     inflows=tuple(s.inflows),
                     outflows=tuple(s.outflows),
                     units=s.units or None,
@@ -398,7 +433,7 @@ class Model:
 
                 flow = Flow(
                     name=f.name,
-                    equation=f.equation,
+                    equation=self._extract_equation(f.equation, f.arrayed_equation),
                     units=f.units or None,
                     documentation=f.documentation or None,
                     dimensions=tuple(f.arrayed_equation.dimensions) if f.arrayed_equation else (),
@@ -427,10 +462,16 @@ class Model:
                 if a.graphical_function:
                     gf = self._parse_json_graphical_function(a.graphical_function)
 
+                # Extract equations, handling apply-to-all arrayed equations
+                equation = self._extract_equation(a.equation, a.arrayed_equation)
+                initial_eq = self._extract_equation(
+                    a.initial_equation, a.arrayed_equation, "initial_equation"
+                )
+
                 aux = Aux(
                     name=a.name,
-                    equation=a.equation,
-                    initial_equation=a.initial_equation or None,
+                    equation=equation,
+                    initial_equation=initial_eq or None,
                     units=a.units or None,
                     documentation=a.documentation or None,
                     dimensions=tuple(a.arrayed_equation.dimensions) if a.arrayed_equation else (),
