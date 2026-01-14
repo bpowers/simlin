@@ -92,13 +92,39 @@ pub enum Variable {
     Variable(AuxiliaryFields),
 }
 
+/// Polarity of a causal relationship in a system dynamics model.
+/// Indicates whether an increase in the source variable causes an
+/// increase (+), decrease (-), or unknown effect (?) on the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum Polarity {
+    /// Positive polarity: increase in source causes increase in target
+    #[serde(rename = "+")]
+    Positive,
+    /// Negative polarity: increase in source causes decrease in target
+    #[serde(rename = "-")]
+    Negative,
+    /// Unknown polarity: relationship exists but direction of effect is unclear
+    #[serde(rename = "?")]
+    Unknown,
+}
+
+impl std::fmt::Display for Polarity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Polarity::Positive => write!(f, "+"),
+            Polarity::Negative => write!(f, "-"),
+            Polarity::Unknown => write!(f, "?"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Relationship {
     #[serde(skip_serializing_if = "is_none")]
     pub reasoning: Option<String>,
     pub from: String,
     pub to: String,
-    pub polarity: String,
+    pub polarity: Polarity,
     #[serde(rename = "polarityReasoning", skip_serializing_if = "is_none")]
     #[schemars(rename = "polarityReasoning")]
     pub polarity_reasoning: Option<String>,

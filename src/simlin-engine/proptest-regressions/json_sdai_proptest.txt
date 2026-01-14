@@ -4,4 +4,3 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc 1937a2a410c027fce4f642fe3478aeb029f068e88e48ae3a4fc9424e80e3af9d # shrinks to stock = StockFields { name: "a", equation: None, documentation: None, units: None, inflows: None, outflows: Some([]), graphical_function: None }

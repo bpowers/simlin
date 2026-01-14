@@ -61,11 +61,11 @@ fn units_strategy() -> impl Strategy<Value = String> {
     ]
 }
 
-fn polarity_strategy() -> impl Strategy<Value = String> {
+fn polarity_strategy() -> impl Strategy<Value = Polarity> {
     prop_oneof![
-        Just("+".to_string()),
-        Just("-".to_string()),
-        Just("?".to_string()),
+        Just(Polarity::Positive),
+        Just(Polarity::Negative),
+        Just(Polarity::Unknown),
     ]
 }
 
@@ -79,14 +79,30 @@ fn graphical_function_strategy() -> impl Strategy<Value = GraphicalFunction> {
     prop::collection::vec(point_strategy(), 2..6).prop_map(|points| GraphicalFunction { points })
 }
 
+/// Generate Option<Vec<T>> that is either None or Some(non-empty vec).
+/// This avoids generating Some([]) which normalizes to None during roundtrip,
+/// ensuring generated values are in canonical form.
+fn option_non_empty_vec<S: Strategy>(
+    element_strategy: S,
+    max_len: usize,
+) -> impl Strategy<Value = Option<Vec<S::Value>>>
+where
+    S::Value: std::fmt::Debug + Clone,
+{
+    prop_oneof![
+        Just(None),
+        prop::collection::vec(element_strategy, 1..=max_len).prop_map(Some),
+    ]
+}
+
 fn stock_fields_strategy() -> impl Strategy<Value = StockFields> {
     (
         ident_strategy(),
         prop::option::of(equation_strategy()),
         prop::option::of(documentation_strategy()),
         prop::option::of(units_strategy()),
-        prop::option::of(prop::collection::vec(ident_strategy(), 0..3)),
-        prop::option::of(prop::collection::vec(ident_strategy(), 0..3)),
+        option_non_empty_vec(ident_strategy(), 3),
+        option_non_empty_vec(ident_strategy(), 3),
         prop::option::of(graphical_function_strategy()),
     )
         .prop_map(
@@ -303,16 +319,11 @@ proptest! {
     fn datamodel_roundtrip_stock_fields(stock in stock_fields_strategy()) {
         let dm: datamodel::Stock = stock.clone().into();
         let sdai_back: StockFields = dm.into();
-        // Core fields should match
+        // Core fields should match exactly since strategy only generates canonical forms
         prop_assert_eq!(stock.name, sdai_back.name);
         prop_assert_eq!(stock.equation, sdai_back.equation);
-        // Inflows/outflows: Some([]) normalizes to None during roundtrip
-        let inflows_orig = stock.inflows.unwrap_or_default();
-        let inflows_back = sdai_back.inflows.unwrap_or_default();
-        prop_assert_eq!(inflows_orig, inflows_back);
-        let outflows_orig = stock.outflows.unwrap_or_default();
-        let outflows_back = sdai_back.outflows.unwrap_or_default();
-        prop_assert_eq!(outflows_orig, outflows_back);
+        prop_assert_eq!(stock.inflows, sdai_back.inflows);
+        prop_assert_eq!(stock.outflows, sdai_back.outflows);
     }
 
     #[test]
@@ -644,32 +655,59 @@ mod schema_tests {
 
     #[test]
     fn test_polarity_values_in_relationship() {
-        // Valid polarity values
-        for polarity in ["+", "-", "?"] {
+        // Valid polarity values with their JSON representations
+        let test_cases = [
+            (Polarity::Positive, "+"),
+            (Polarity::Negative, "-"),
+            (Polarity::Unknown, "?"),
+        ];
+
+        for (polarity, expected_str) in test_cases {
             let rel = Relationship {
                 reasoning: None,
                 from: "a".to_string(),
                 to: "b".to_string(),
-                polarity: polarity.to_string(),
+                polarity,
                 polarity_reasoning: None,
             };
             let json = serde_json::to_string(&rel).unwrap();
+            assert!(
+                json.contains(&format!("\"polarity\":\"{}\"", expected_str)),
+                "Polarity {:?} should serialize to '{}': {}",
+                polarity,
+                expected_str,
+                json
+            );
             let parsed: Relationship = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.polarity, polarity);
         }
+    }
 
-        // Note: The schema doesn't currently restrict polarity to specific values.
-        // Any string is valid per the schema, but semantically only "+", "-", "?" are meaningful.
-        let rel_with_unusual_polarity = Relationship {
-            reasoning: None,
-            from: "a".to_string(),
-            to: "b".to_string(),
-            polarity: "unknown".to_string(), // Not a standard polarity but schema allows it
-            polarity_reasoning: None,
-        };
-        let json = serde_json::to_string(&rel_with_unusual_polarity).unwrap();
-        let parsed: Relationship = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.polarity, "unknown");
+    #[test]
+    fn invalid_json_polarity_value() {
+        // Invalid polarity values should fail to parse
+        let invalid_json = r#"{"from": "a", "to": "b", "polarity": "invalid"}"#;
+        let result: Result<Relationship, _> = serde_json::from_str(invalid_json);
+        assert!(
+            result.is_err(),
+            "Invalid polarity value should fail to parse"
+        );
+
+        // Also test schema validation
+        let schema = generate_schema();
+        let schema_value = serde_json::to_value(&schema).unwrap();
+        let validator = jsonschema::validator_for(&schema_value).unwrap();
+
+        let invalid_model: serde_json::Value = serde_json::json!({
+            "variables": [],
+            "relationships": [
+                { "from": "a", "to": "b", "polarity": "invalid" }
+            ]
+        });
+        assert!(
+            !validator.is_valid(&invalid_model),
+            "Invalid polarity value should fail schema validation"
+        );
     }
 
     #[test]
@@ -798,7 +836,7 @@ mod protobuf_roundtrip_tests {
                 reasoning: Some("Higher production leads to more inventory".to_string()),
                 from: "production".to_string(),
                 to: "inventory".to_string(),
-                polarity: "+".to_string(),
+                polarity: Polarity::Positive,
                 polarity_reasoning: None,
             }]),
             specs: Some(SimSpecs {

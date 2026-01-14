@@ -267,7 +267,7 @@
           "type": "string"
         },
         "polarity": {
-          "type": "string"
+          "$ref": "#/$defs/Polarity"
         },
         "polarityReasoning": {
           "type": [
@@ -280,6 +280,26 @@
         "from",
         "to",
         "polarity"
+      ]
+    },
+    "Polarity": {
+      "description": "Polarity of a causal relationship in a system dynamics model.\nIndicates whether an increase in the source variable causes an\nincrease (+), decrease (-), or unknown effect (?) on the target.",
+      "oneOf": [
+        {
+          "description": "Positive polarity: increase in source causes increase in target",
+          "type": "string",
+          "const": "+"
+        },
+        {
+          "description": "Negative polarity: increase in source causes decrease in target",
+          "type": "string",
+          "const": "-"
+        },
+        {
+          "description": "Unknown polarity: relationship exists but direction of effect is unclear",
+          "type": "string",
+          "const": "?"
+        }
       ]
     },
     "SimSpecs": {
