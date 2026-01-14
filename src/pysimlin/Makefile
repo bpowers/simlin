@@ -8,12 +8,6 @@ build-lib:
 build: build-lib
 	uv run python scripts/build_wheels.py
 
-# Regenerate protobuf bindings
-protos:
-	protoc -I../simlin-engine/src --python_out=simlin ../simlin-engine/src/project_io.proto
-	mv simlin/project_io_pb2.py simlin/pb.py
-	sed -i '' "s/'project_io_pb2'/'pb'/g" simlin/pb.py
-
 # Install for development
 dev: build-lib
 	uv sync --extra dev

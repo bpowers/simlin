@@ -5,7 +5,6 @@ import pytest
 from pathlib import Path
 import simlin
 from simlin import Project, Model, SimlinRuntimeError, SimlinCompilationError
-from simlin import pb
 from simlin.json_types import Auxiliary as JsonAuxiliary
 
 
