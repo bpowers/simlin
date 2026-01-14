@@ -6,6 +6,7 @@ import json
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Any, Self, Union
 from types import TracebackType
 
+from ._dt import parse_dt
 from ._ffi import ffi, lib, string_to_c, c_to_string, free_c_string, _register_finalizer, check_out_error
 from .errors import SimlinRuntimeError, ErrorCode
 from .analysis import Link, LinkPolarity, Loop
@@ -165,6 +166,9 @@ class _ModelEditContext:
             allow_errors=self._allow_errors,
         )
 
+        # Invalidate caches since model state has changed
+        self._model._invalidate_caches()
+
         return False
 
 
@@ -186,6 +190,7 @@ class Model:
         self._name = name or ""
         _register_finalizer(self, lib.simlin_model_unref, ptr)
 
+        self._cached_model_json: Optional[JsonModel] = None
         self._cached_stocks: Optional[tuple[Stock, ...]] = None
         self._cached_flows: Optional[tuple[Flow, ...]] = None
         self._cached_auxs: Optional[tuple[Aux, ...]] = None
@@ -299,15 +304,28 @@ class Model:
             lib.simlin_free_links(links_ptr)
 
     def _get_model_json(self) -> JsonModel:
-        """Get this model's JSON representation as a dataclass."""
+        """Get this model's JSON representation as a dataclass (cached)."""
+        if self._cached_model_json is not None:
+            return self._cached_model_json
+
         if self._project is None:
             raise SimlinRuntimeError("Model is not attached to a Project")
 
         project_json = json.loads(self._project.serialize_json().decode("utf-8"))
         for model_dict in project_json.get("models", []):
             if model_dict["name"] == self._name or not self._name:
-                return converter.structure(model_dict, JsonModel)
+                self._cached_model_json = converter.structure(model_dict, JsonModel)
+                return self._cached_model_json
         raise SimlinRuntimeError(f"Model '{self._name}' not found in project")
+
+    def _invalidate_caches(self) -> None:
+        """Invalidate all cached data. Called after model edits."""
+        self._cached_model_json = None
+        self._cached_stocks = None
+        self._cached_flows = None
+        self._cached_auxs = None
+        self._cached_time_spec = None
+        self._cached_base_case = None
 
     def _parse_json_graphical_function(self, gf: JsonGraphicalFunction) -> GraphicalFunction:
         """Parse a JSON GraphicalFunction into a types dataclass."""
@@ -450,22 +468,10 @@ class Model:
             project_json = json.loads(self._project.serialize_json().decode("utf-8"))
             sim_specs = project_json["sim_specs"]
 
-            # Parse dt string (could be "1", "0.25", "1/4", etc.)
-            dt_str = sim_specs.get("dt", "1")
-            if "/" in dt_str:
-                parts = dt_str.split("/")
-                numerator = float(parts[0])
-                denominator = float(parts[1])
-                if denominator == 0:
-                    raise SimlinRuntimeError("Invalid dt: division by zero in reciprocal notation")
-                dt_value = numerator / denominator
-            else:
-                dt_value = float(dt_str) if dt_str else 1.0
-
             self._cached_time_spec = TimeSpec(
                 start=sim_specs.get("start_time", 0.0),
                 stop=sim_specs.get("end_time", 10.0),
-                dt=dt_value,
+                dt=parse_dt(sim_specs.get("dt", "1")),
                 units=sim_specs.get("time_units") or None,
             )
         return self._cached_time_spec

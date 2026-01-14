@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import List, Optional, TYPE_CHECKING, Any, Self
 from types import TracebackType
-from pathlib import Path
 
 import dataclasses
 import json
 
+from ._dt import validate_dt
 from ._ffi import (
     ffi,
     lib,
@@ -37,60 +37,6 @@ from . import pb
 # JSON format constants
 JSON_FORMAT_SIMLIN = "simlin"
 JSON_FORMAT_SDAI = "sd-ai"
-
-# Valid dt formats: numeric (int, float) or reciprocal string like "1/4"
-import re
-_DT_RECIPROCAL_PATTERN = re.compile(r"^(\d+(?:\.\d+)?)/(\d+(?:\.\d+)?)$")
-
-
-def _validate_and_normalize_dt(value: Any) -> str:
-    """Validate dt value and return normalized string representation.
-
-    Args:
-        value: The dt value - can be int, float, or string in "n" or "1/n" format
-
-    Returns:
-        Normalized string representation of dt
-
-    Raises:
-        ValueError: If the value is not a valid dt format
-    """
-    if isinstance(value, (int, float)):
-        if value <= 0:
-            raise ValueError(f"dt must be positive, got {value}")
-        return str(value)
-
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            raise ValueError("dt cannot be an empty string")
-
-        # Check for reciprocal format like "1/4"
-        match = _DT_RECIPROCAL_PATTERN.match(value)
-        if match:
-            numerator = float(match.group(1))
-            denominator = float(match.group(2))
-            if denominator == 0:
-                raise ValueError("dt denominator cannot be zero")
-            if numerator <= 0 or denominator <= 0:
-                raise ValueError(f"dt values must be positive, got {value}")
-            return value
-
-        # Try to parse as a plain number
-        try:
-            num_value = float(value)
-            if num_value <= 0:
-                raise ValueError(f"dt must be positive, got {value}")
-            return value
-        except ValueError:
-            raise ValueError(
-                f"Invalid dt format: {value!r}. Expected a positive number or "
-                f"reciprocal notation like '1/4'"
-            )
-
-    raise ValueError(
-        f"dt must be a number or string, got {type(value).__name__}"
-    )
 
 
 def _collect_error_details(err_ptr: Any) -> List[ErrorDetail]:
@@ -424,7 +370,7 @@ class Project:
         for key, value in kwargs.items():
             json_key = field_mapping.get(key, key)
             if json_key == "dt":
-                updates["dt"] = _validate_and_normalize_dt(value)
+                updates["dt"] = validate_dt(value)
             elif json_key == "save_step":
                 updates["save_step"] = float(value) if value is not None else 0.0
             elif json_key == "method":
