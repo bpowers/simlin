@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, TYPE_CHECKING, Any, Self, Mapping
+from typing import List, Optional, TYPE_CHECKING, Any, Self
 from types import TracebackType
-from pathlib import Path
 
+import dataclasses
+import json
+
+from ._dt import validate_dt
 from ._ffi import (
     ffi,
     lib,
@@ -17,9 +20,18 @@ from ._ffi import (
     _register_finalizer,
     apply_patch_json as _ffi_apply_patch_json,
     serialize_json as _ffi_serialize_json,
+    open_json as _ffi_open_json,
 )
 from .errors import SimlinImportError, SimlinRuntimeError, ErrorCode, ErrorDetail
 from .analysis import Loop, LoopPolarity
+from .json_types import (
+    Project as JsonProject,
+    Model as JsonModel,
+    SimSpecs as JsonSimSpecs,
+    SetSimSpecs,
+    JsonProjectPatch,
+)
+from .json_converter import converter
 from . import pb
 
 # JSON format constants
@@ -35,31 +47,6 @@ def _collect_error_details(err_ptr: Any) -> List[ErrorDetail]:
     """
     return extract_error_details(err_ptr)
 
-
-def _coerce_dt(value: Any) -> pb.Dt:
-    """Coerce input into a Dt protobuf message."""
-    if isinstance(value, pb.Dt):
-        dt = pb.Dt()
-        dt.CopyFrom(value)
-        return dt
-
-    if isinstance(value, Mapping):
-        dt = pb.Dt()
-        for key, field_value in value.items():
-            if key == "value":
-                dt.value = float(field_value)
-            elif key == "is_reciprocal":
-                dt.is_reciprocal = bool(field_value)
-            else:
-                raise ValueError(f"Unknown Dt field: {key}")
-        return dt
-
-    if isinstance(value, (int, float)):
-        dt = pb.Dt()
-        dt.value = float(value)
-        return dt
-
-    raise TypeError("dt values must be a Dt message, mapping, or number")
 
 if TYPE_CHECKING:
     from .model import Model
@@ -96,7 +83,6 @@ class Project:
 
         Args:
             name: Project name recorded in the metadata.
-            model_name: Name of the initial (empty) model.
             sim_start: Simulation start time.
             sim_stop: Simulation stop time.
             dt: Simulation time step (Euler method by default).
@@ -105,32 +91,20 @@ class Project:
         Returns:
             A new Project instance ready for editing.
         """
-
-        project_proto = pb.Project()
-        project_proto.name = name
-
-        sim_specs = project_proto.sim_specs
-        sim_specs.start = float(sim_start)
-        sim_specs.stop = float(sim_stop)
-        sim_specs.dt.value = float(dt)
-        sim_specs.sim_method = pb.EULER
-        if time_units:
-            sim_specs.time_units = str(time_units)
-
-        model_proto = project_proto.models.add()
-        model_proto.name = "main"
-
-        # Serialize protobuf and create project from binary data
-        data = project_proto.SerializeToString()
-        if not data:
-            raise SimlinImportError("Failed to serialize new project")
-
-        c_data = ffi.new("uint8_t[]", data)
-        err_ptr = ffi.new("SimlinError **")
-
-        project_ptr = lib.simlin_project_open(c_data, len(data), err_ptr)
-        check_out_error(err_ptr, "Create new project")
-
+        sim_specs = JsonSimSpecs(
+            start_time=float(sim_start),
+            end_time=float(sim_stop),
+            dt=str(dt),
+            method="euler",
+            time_units=time_units if time_units else "",
+        )
+        project = JsonProject(
+            name=name,
+            sim_specs=sim_specs,
+            models=[JsonModel(name="main")],
+        )
+        json_data = json.dumps(converter.unstructure(project)).encode("utf-8")
+        project_ptr = _ffi_open_json(json_data)
         return cls(project_ptr)
 
     def __get_model_count(self) -> int:
@@ -322,57 +296,6 @@ class Project:
         finally:
             lib.simlin_free(output_ptr[0])
 
-    def _apply_patch(
-        self,
-        patch: pb.ProjectPatch,
-        *,
-        dry_run: bool = False,
-        allow_errors: bool = False,
-    ) -> List[ErrorDetail]:
-        """Apply a patch, surfacing validation details as Python exceptions."""
-
-        if not patch.project_ops and not patch.models:
-            return []
-
-        patch_bytes = patch.SerializeToString()
-        c_patch = ffi.new("uint8_t[]", patch_bytes)
-        out_collected_errors_ptr = ffi.new("SimlinError **")
-        err_ptr = ffi.new("SimlinError **")
-
-        lib.simlin_project_apply_patch(
-            self._ptr,
-            c_patch,
-            len(patch_bytes),
-            dry_run,
-            allow_errors,
-            out_collected_errors_ptr,
-            err_ptr,
-        )
-        check_out_error(err_ptr, "Apply patch")
-
-        errors: List[ErrorDetail] = []
-        if out_collected_errors_ptr[0] != ffi.NULL:
-            errors = _collect_error_details(out_collected_errors_ptr[0])
-            lib.simlin_error_free(out_collected_errors_ptr[0])
-
-        if not errors:
-            return []
-
-        if errors and not allow_errors:
-            first_code = errors[0].code if errors else None
-            message = (
-                "Patch dry run reported validation errors"
-                if dry_run
-                else "Patch produced validation errors"
-            )
-            exc = SimlinRuntimeError(message, first_code)
-            setattr(exc, "errors", errors)
-            setattr(exc, "dry_run", dry_run)
-            setattr(exc, "allow_errors", allow_errors)
-            raise exc
-
-        return errors
-
     def _apply_patch_json(
         self,
         patch_json: bytes,
@@ -422,44 +345,55 @@ class Project:
         return _ffi_serialize_json(self._ptr)
 
     def set_sim_specs(self, **kwargs: Any) -> None:
-        """Update the project's simulation specifications using protobuf-compatible kwargs."""
+        """Update the project's simulation specifications.
 
+        Args:
+            start: Simulation start time (float)
+            stop: Simulation stop time (float)
+            dt: Time step (float or string)
+            save_step: Save step interval (float)
+            sim_method: Simulation method (0 for "euler", 1 for "rk4", or string)
+            time_units: Time units string
+        """
         if not kwargs:
             raise ValueError("set_sim_specs requires at least one field")
 
-        specs = pb.SimSpecs()
-        fields = dict(kwargs)
+        # Read current specs via JSON
+        project_json = json.loads(self.serialize_json().decode("utf-8"))
+        current = converter.structure(project_json["sim_specs"], JsonSimSpecs)
 
-        sim_specs_msg = fields.pop("sim_specs", None)
-        if sim_specs_msg is not None:
-            if not isinstance(sim_specs_msg, pb.SimSpecs):
-                raise TypeError("sim_specs must be a pb.SimSpecs message")
-            specs.CopyFrom(sim_specs_msg)
-            if fields:
-                raise ValueError("Pass either a sim_specs message or individual fields, not both")
-        else:
-            for field_name, value in fields.items():
-                if field_name in {"start", "stop"}:
-                    setattr(specs, field_name, float(value))
-                elif field_name == "time_units":
-                    specs.time_units = str(value)
-                elif field_name == "sim_method":
-                    specs.sim_method = int(value)
-                elif field_name in {"dt", "save_step"}:
-                    if value is None:
-                        specs.ClearField(field_name)
-                    else:
-                        getattr(specs, field_name).CopyFrom(_coerce_dt(value))
+        # Map from legacy protobuf-style field names to JSON field names
+        field_mapping = {"start": "start_time", "stop": "end_time", "sim_method": "method"}
+
+        # Build updates dict
+        updates: dict[str, Any] = {}
+        for key, value in kwargs.items():
+            json_key = field_mapping.get(key, key)
+            if json_key == "dt":
+                updates["dt"] = validate_dt(value)
+            elif json_key == "save_step":
+                updates["save_step"] = float(value) if value is not None else 0.0
+            elif json_key == "method":
+                method_map = {0: "euler", 1: "rk4"}
+                if isinstance(value, int):
+                    updates["method"] = method_map.get(value, "euler")
                 else:
-                    raise ValueError(f"Unknown SimSpecs field: {field_name}")
+                    updates["method"] = str(value).lower()
+            elif json_key in {"start_time", "end_time"}:
+                updates[json_key] = float(value)
+            elif json_key == "time_units":
+                updates["time_units"] = str(value) if value else ""
+            else:
+                raise ValueError(f"Unknown SimSpecs field: {key}")
 
-        patch = pb.ProjectPatch()
-        op = patch.project_ops.add()
-        op.set_sim_specs.sim_specs.CopyFrom(specs)
+        new_specs = dataclasses.replace(current, **updates)
 
-        self._apply_patch(patch)
+        # Apply patch using JSON
+        patch = JsonProjectPatch(project_ops=[SetSimSpecs(sim_specs=new_specs)])
+        patch_json = json.dumps(converter.unstructure(patch)).encode("utf-8")
+        self._apply_patch_json(patch_json)
     
-    def serialize(self) -> bytes:
+    def serialize_protobuf(self) -> bytes:
         """
         Serialize the project to binary protobuf format.
 

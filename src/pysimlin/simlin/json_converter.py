@@ -19,6 +19,7 @@ from .json_types import (
     CloudViewElement,
     DeleteVariable,
     DeleteView,
+    Dimension,
     ElementEquation,
     Flow,
     FlowPoint,
@@ -31,15 +32,19 @@ from .json_types import (
     JsonProjectPatch,
     LinkPoint,
     LinkViewElement,
+    LoopMetadata,
+    Model,
     Module,
     ModuleReference,
     ModuleViewElement,
+    Project,
     Rect,
     RenameVariable,
     SetSimSpecs,
     SimSpecs,
     Stock,
     StockViewElement,
+    Unit,
     UpsertAux,
     UpsertFlow,
     UpsertModule,
@@ -361,7 +366,7 @@ def _create_converter() -> cattrs.Converter:
         Flow: {"name"},
         Auxiliary: {"name"},
         Module: {"name", "model_name"},
-        SimSpecs: {"start_time", "end_time"},
+        SimSpecs: {"start_time", "end_time", "dt", "method"},
         ArrayedEquation: {"dimensions"},
         ElementEquation: {"subscript", "equation"},
         ModuleReference: {"src", "dst"},
@@ -504,6 +509,125 @@ def _create_converter() -> cattrs.Converter:
         )
 
     conv.register_structure_hook(Module, structure_module)
+
+    # Dimension: simple structure
+    def structure_dimension(d: dict[str, Any], _: type) -> Dimension:
+        return Dimension(
+            name=d["name"],
+            elements=d.get("elements", []),
+            size=d.get("size", 0),
+            maps_to=d.get("maps_to"),
+        )
+
+    conv.register_structure_hook(Dimension, structure_dimension)
+
+    # Unit: simple structure
+    def structure_unit(d: dict[str, Any], _: type) -> Unit:
+        return Unit(
+            name=d["name"],
+            equation=d.get("equation", ""),
+            disabled=d.get("disabled", False),
+            aliases=d.get("aliases", []),
+        )
+
+    conv.register_structure_hook(Unit, structure_unit)
+
+    # LoopMetadata: simple structure
+    def structure_loop_metadata(d: dict[str, Any], _: type) -> LoopMetadata:
+        return LoopMetadata(
+            uids=d.get("uids", []),
+            deleted=d.get("deleted", False),
+            name=d.get("name", ""),
+            description=d.get("description", ""),
+        )
+
+    conv.register_structure_hook(LoopMetadata, structure_loop_metadata)
+
+    # SimSpecs: handle all fields
+    def structure_sim_specs(d: dict[str, Any], _: type) -> SimSpecs:
+        return SimSpecs(
+            start_time=d["start_time"],
+            end_time=d["end_time"],
+            dt=d.get("dt", ""),
+            save_step=d.get("save_step", 0.0),
+            method=d.get("method", ""),
+            time_units=d.get("time_units", ""),
+        )
+
+    conv.register_structure_hook(SimSpecs, structure_sim_specs)
+
+    # View: handle elements list
+    def structure_view(d: dict[str, Any], _: type) -> View:
+        elements = [
+            structure_view_element(e, ViewElement)
+            for e in d.get("elements", [])
+        ]
+        view_box = None
+        if "view_box" in d and d["view_box"]:
+            vb = d["view_box"]
+            view_box = Rect(x=vb["x"], y=vb["y"], width=vb["width"], height=vb["height"])
+        return View(
+            elements=elements,
+            kind=d.get("kind", ""),
+            view_box=view_box,
+            zoom=d.get("zoom", 0.0),
+        )
+
+    conv.register_structure_hook(View, structure_view)
+
+    # Model: handle all nested types
+    def structure_model(d: dict[str, Any], _: type) -> Model:
+        stocks = [conv.structure(s, Stock) for s in d.get("stocks", [])]
+        flows = [conv.structure(f, Flow) for f in d.get("flows", [])]
+        auxiliaries = [conv.structure(a, Auxiliary) for a in d.get("auxiliaries", [])]
+        modules = [conv.structure(m, Module) for m in d.get("modules", [])]
+        sim_specs = None
+        if "sim_specs" in d and d["sim_specs"]:
+            sim_specs = conv.structure(d["sim_specs"], SimSpecs)
+        views = [conv.structure(v, View) for v in d.get("views", [])]
+        loop_metadata = [
+            conv.structure(lm, LoopMetadata) for lm in d.get("loop_metadata", [])
+        ]
+        return Model(
+            name=d["name"],
+            stocks=stocks,
+            flows=flows,
+            auxiliaries=auxiliaries,
+            modules=modules,
+            sim_specs=sim_specs,
+            views=views,
+            loop_metadata=loop_metadata,
+        )
+
+    conv.register_structure_hook(Model, structure_model)
+
+    # Project: handle all nested types
+    def structure_project(d: dict[str, Any], _: type) -> Project:
+        sim_specs = conv.structure(d["sim_specs"], SimSpecs)
+        models = [conv.structure(m, Model) for m in d.get("models", [])]
+        dimensions = [conv.structure(dim, Dimension) for dim in d.get("dimensions", [])]
+        units = [conv.structure(u, Unit) for u in d.get("units", [])]
+        return Project(
+            name=d["name"],
+            sim_specs=sim_specs,
+            models=models,
+            dimensions=dimensions,
+            units=units,
+        )
+
+    conv.register_structure_hook(Project, structure_project)
+
+    # Register omit-default hooks for new types
+    additional_type_required_fields: dict[type, set[str]] = {
+        Dimension: {"name"},
+        Unit: {"name"},
+        LoopMetadata: {"uids", "name"},
+        Model: {"name", "stocks", "flows", "auxiliaries"},
+        Project: {"name", "sim_specs"},
+    }
+
+    for cls, required in additional_type_required_fields.items():
+        conv.register_unstructure_hook(cls, _make_omit_default_hook(cls, conv, required))
 
     return conv
 

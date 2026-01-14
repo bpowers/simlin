@@ -583,3 +583,42 @@ class TestModelUtilities:
         flow_name = flows[0].name
         explanation = test_model.explain(flow_name)
         assert "computed as" in explanation
+
+
+class TestArrayedEquations:
+    """Test extraction of arrayed (subscripted) variable equations."""
+
+    def test_flow_with_apply_to_all_equation(self, subscripted_model_path: Path) -> None:
+        """Arrayed flows using apply-to-all equations should expose the actual equation.
+
+        For arrayed variables, XMILE stores equations in different places depending
+        on how they're defined. For "apply-to-all" equations (same formula for all
+        subscript elements), the equation is stored in arrayed_equation.equation
+        rather than the top-level equation field.
+        """
+        model = simlin.load(subscripted_model_path)
+
+        # Find the arrayed flows
+        flows_by_name = {f.name: f for f in model.flows}
+
+        # These flows have apply-to-all equations in the test model
+        assert "Inflow A" in flows_by_name or "inflow_a" in flows_by_name
+        inflow_a = flows_by_name.get("Inflow A") or flows_by_name.get("inflow_a")
+        assert inflow_a is not None
+
+        # The equation should be non-empty (extracted from arrayed_equation)
+        assert inflow_a.equation, "Arrayed flow equation should not be empty"
+        assert "Rate_A" in inflow_a.equation or "rate_a" in inflow_a.equation.lower()
+
+    def test_stock_with_apply_to_all_initial(self, subscripted_model_path: Path) -> None:
+        """Arrayed stocks should expose their initial equation."""
+        model = simlin.load(subscripted_model_path)
+
+        stocks_by_name = {s.name: s for s in model.stocks}
+
+        assert "Stock A" in stocks_by_name or "stock_a" in stocks_by_name
+        stock_a = stocks_by_name.get("Stock A") or stocks_by_name.get("stock_a")
+        assert stock_a is not None
+
+        # The initial equation should be extracted (it's "0" in this model)
+        assert stock_a.initial_equation == "0"

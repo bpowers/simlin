@@ -270,6 +270,64 @@ class SimSpecs:
     time_units: str = ""
 
 
+# Project structure types
+
+
+@dataclass
+class Dimension:
+    """A dimension for subscripted variables."""
+
+    name: str
+    elements: list[str] = field(default_factory=list)
+    size: int = 0
+    maps_to: Optional[str] = None
+
+
+@dataclass
+class Unit:
+    """A unit definition."""
+
+    name: str
+    equation: str = ""
+    disabled: bool = False
+    aliases: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LoopMetadata:
+    """Metadata for a feedback loop."""
+
+    uids: list[int] = field(default_factory=list)
+    deleted: bool = False
+    name: str = ""
+    description: str = ""
+
+
+@dataclass
+class Model:
+    """A model in the project."""
+
+    name: str
+    stocks: list[Stock] = field(default_factory=list)
+    flows: list[Flow] = field(default_factory=list)
+    auxiliaries: list[Auxiliary] = field(default_factory=list)
+    modules: list[Module] = field(default_factory=list)
+    sim_specs: Optional[SimSpecs] = None
+    views: list[View] = field(default_factory=list)
+    loop_metadata: list[LoopMetadata] = field(default_factory=list)
+
+
+@dataclass
+class Project:
+    """A complete system dynamics project."""
+
+    name: str
+    sim_specs: SimSpecs
+    models: list[Model] = field(default_factory=list)
+    dimensions: list[Dimension] = field(default_factory=list)
+    units: list[Unit] = field(default_factory=list)
+
+
 # Patch operation types
 
 

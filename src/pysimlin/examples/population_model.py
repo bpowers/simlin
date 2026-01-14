@@ -15,13 +15,6 @@ def build_population_project() -> simlin.Project:
         time_units="years",
     )
 
-    project.set_sim_specs(
-        start=0.0,
-        stop=80.0,
-        dt={"value": 0.25},
-        time_units="years",
-    )
-
     model = project.get_model()
     with model.edit() as (_, patch):
         population = Stock(

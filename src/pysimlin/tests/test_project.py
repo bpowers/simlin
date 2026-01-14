@@ -1,5 +1,6 @@
 """Tests for the Project class."""
 
+import json
 import pytest
 from pathlib import Path
 import simlin
@@ -95,19 +96,30 @@ class TestProjectAnalysis:
 
 class TestProjectSerialization:
     """Test project serialization and export."""
-    
+
     def test_serialize_to_protobuf(self, xmile_model_path) -> None:
         """Test serializing a project to protobuf."""
         model = simlin.load(xmile_model_path)
         project = model.project
-        pb_data = project.serialize()
+        pb_data = project.serialize_protobuf()
         assert isinstance(pb_data, bytes)
         assert len(pb_data) > 0
-        
-        # Protobuf round-trip tested in test_round_trip_protobuf
-        # Just verify we can serialize
-        assert len(pb_data) > 0
-    
+
+    def test_serialize_to_json(self, xmile_model_path) -> None:
+        """Test serializing a project to JSON."""
+        model = simlin.load(xmile_model_path)
+        project = model.project
+        json_data = project.serialize_json()
+        assert isinstance(json_data, bytes)
+        assert len(json_data) > 0
+
+        # Verify it's valid JSON
+        project_dict = json.loads(json_data.decode("utf-8"))
+        assert "name" in project_dict
+        assert "sim_specs" in project_dict
+        assert "models" in project_dict
+        assert len(project_dict["models"]) > 0
+
     def test_export_to_xmile(self, xmile_model_path) -> None:
         """Test exporting a project to XMILE."""
         model = simlin.load(xmile_model_path)
@@ -116,12 +128,12 @@ class TestProjectSerialization:
         assert isinstance(xmile_data, bytes)
         assert len(xmile_data) > 0
         assert b"<xmile" in xmile_data or b"<?xml" in xmile_data
-    
+
     def test_round_trip_protobuf(self, xmile_model_path) -> None:
         """Test protobuf serialization produces valid data."""
         model = simlin.load(xmile_model_path)
         project = model.project
-        pb_data = project.serialize()
+        pb_data = project.serialize_protobuf()
 
         # Verify it's valid protobuf by parsing it
         project_proto = pb.Project()
@@ -205,30 +217,75 @@ class TestProjectEditing:
         project.set_sim_specs(
             start=0.0,
             stop=42.0,
-            dt={"value": 0.25, "is_reciprocal": False},
-            save_step=pb.Dt(value=0.5, is_reciprocal=False),
-            sim_method=pb.SimMethod.EULER,
+            dt=0.25,
+            save_step=0.5,
+            sim_method=1,  # RK4 (non-default, so it will be serialized)
             time_units="Minutes",
         )
 
-        project_proto = pb.Project()
-        project_proto.ParseFromString(project.serialize())
+        # Verify via JSON
+        project_json = json.loads(project.serialize_json().decode("utf-8"))
+        sim_specs = project_json["sim_specs"]
 
-        assert project_proto.sim_specs.start == pytest.approx(0.0)
-        assert project_proto.sim_specs.stop == pytest.approx(42.0)
-        assert project_proto.sim_specs.dt.value == pytest.approx(0.25)
-        assert project_proto.sim_specs.dt.is_reciprocal is False
-        assert project_proto.sim_specs.save_step.value == pytest.approx(0.5)
-        assert project_proto.sim_specs.sim_method == pb.SimMethod.EULER
-        assert project_proto.sim_specs.time_units == "Minutes"
+        assert sim_specs["start_time"] == pytest.approx(0.0)
+        assert sim_specs["end_time"] == pytest.approx(42.0)
+        assert sim_specs["dt"] == "0.25"
+        assert sim_specs["save_step"] == pytest.approx(0.5)
+        assert sim_specs["method"] == "rk4"
+        assert sim_specs["time_units"] == "Minutes"
 
-    def test_set_sim_specs_rejects_invalid_dt(self, xmile_model_path) -> None:
-        """Invalid dt types should raise a TypeError before reaching the engine."""
+    def test_new_project_creates_valid_json(self) -> None:
+        """Project.new() should create a project with valid JSON representation."""
+        project = Project.new(name="test", sim_start=5.0, sim_stop=20.0, dt=0.5)
+
+        project_json = json.loads(project.serialize_json().decode("utf-8"))
+
+        assert project_json["name"] == "test"
+        assert project_json["sim_specs"]["start_time"] == 5.0
+        assert project_json["sim_specs"]["end_time"] == 20.0
+        assert project_json["sim_specs"]["dt"] == "0.5"
+        assert len(project_json["models"]) == 1
+        assert project_json["models"][0]["name"] == "main"
+
+    def test_set_sim_specs_validates_dt_positive(self, xmile_model_path) -> None:
+        """set_sim_specs should reject non-positive dt values."""
         model = simlin.load(xmile_model_path)
         project = model.project
 
-        with pytest.raises(TypeError):
-            project.set_sim_specs(dt="not-a-dt")
+        with pytest.raises(ValueError, match="must be positive"):
+            project.set_sim_specs(dt=0)
+
+        with pytest.raises(ValueError, match="must be positive"):
+            project.set_sim_specs(dt=-1.0)
+
+    def test_set_sim_specs_validates_dt_format(self, xmile_model_path) -> None:
+        """set_sim_specs should reject invalid dt string formats."""
+        model = simlin.load(xmile_model_path)
+        project = model.project
+
+        with pytest.raises(ValueError, match="Invalid dt format"):
+            project.set_sim_specs(dt="not-a-number")
+
+        with pytest.raises(ValueError, match="cannot be an empty string"):
+            project.set_sim_specs(dt="")
+
+    def test_set_sim_specs_validates_dt_division_by_zero(self, xmile_model_path) -> None:
+        """set_sim_specs should reject division by zero in reciprocal dt."""
+        model = simlin.load(xmile_model_path)
+        project = model.project
+
+        with pytest.raises(ValueError, match="denominator cannot be zero"):
+            project.set_sim_specs(dt="1/0")
+
+    def test_set_sim_specs_accepts_reciprocal_dt(self, xmile_model_path) -> None:
+        """set_sim_specs should accept valid reciprocal dt notation."""
+        model = simlin.load(xmile_model_path)
+        project = model.project
+
+        project.set_sim_specs(dt="1/4")
+
+        project_json = json.loads(project.serialize_json().decode("utf-8"))
+        assert project_json["sim_specs"]["dt"] == "1/4"
 
 
 class TestProjectRepr:

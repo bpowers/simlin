@@ -222,6 +222,28 @@ def serialize_json(project_ptr: Any) -> bytes:
         lib.simlin_free(output_ptr[0])
 
 
+def open_json(json_data: bytes) -> Any:
+    """Open a project from JSON data.
+
+    Args:
+        json_data: JSON-encoded project data (UTF-8 bytes)
+
+    Returns:
+        Pointer to SimlinProject
+
+    Raises:
+        SimlinRuntimeError: If parsing or opening fails
+    """
+    c_data = ffi.new("uint8_t[]", json_data)
+    err_ptr = ffi.new("SimlinError **")
+
+    # SIMLIN_JSON_FORMAT_NATIVE = 0
+    project_ptr = lib.simlin_project_json_open(c_data, len(json_data), 0, err_ptr)
+    check_out_error(err_ptr, "Open JSON project")
+
+    return project_ptr
+
+
 __all__ = [
     "ffi",
     "lib",
@@ -234,6 +256,7 @@ __all__ = [
     "check_error",
     "apply_patch_json",
     "serialize_json",
+    "open_json",
     "_register_finalizer",
     "_finalizer_refs",
 ]
