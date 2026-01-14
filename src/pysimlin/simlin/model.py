@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Any, Self, Union
 from types import TracebackType
 
@@ -10,6 +11,30 @@ from .errors import SimlinRuntimeError, ErrorCode
 from .analysis import Link, LinkPolarity, Loop
 from .types import Stock, Flow, Aux, TimeSpec, GraphicalFunction, GraphicalFunctionScale, ModelIssue
 from . import pb
+from .json_types import (
+    Stock as JsonStock,
+    Flow as JsonFlow,
+    Auxiliary as JsonAuxiliary,
+    Module as JsonModule,
+    View as JsonView,
+    JsonModelPatch,
+    JsonProjectPatch,
+    JsonModelOperation,
+    UpsertStock,
+    UpsertFlow,
+    UpsertAux,
+    UpsertModule,
+    DeleteVariable,
+    RenameVariable,
+    UpsertView,
+    DeleteView,
+    GraphicalFunction as JsonGraphicalFunction,
+    GraphicalFunctionScale as JsonGraphicalFunctionScale,
+    ArrayedEquation as JsonArrayedEquation,
+    ElementEquation as JsonElementEquation,
+    ModuleReference as JsonModuleReference,
+)
+from .json_converter import converter
 
 if TYPE_CHECKING:
     from .sim import Sim
@@ -17,82 +42,195 @@ if TYPE_CHECKING:
     from .run import Run
 
 
-def _variable_ident(variable: pb.Variable) -> str:
-    kind = variable.WhichOneof("v")
-    if kind is None:
-        raise ValueError("Variable message has no assigned variant")
-    ident = getattr(getattr(variable, kind), "ident", None)
-    if not ident:
-        raise ValueError("Variable missing identifier")
-    return ident
-
-
-def _copy_variable(variable: pb.Variable) -> pb.Variable:
-    clone = pb.Variable()
-    clone.CopyFrom(variable)
-    return clone
+# Type for variable in the edit context current dict
+JsonVariable = Union[JsonStock, JsonFlow, JsonAuxiliary, JsonModule]
 
 
 class ModelPatchBuilder:
-    """Accumulates model operations before applying them to the engine."""
+    """Accumulates model operations before applying them as JSON."""
 
     def __init__(self, model_name: str) -> None:
-        self._patch = pb.ModelPatch()
-        self._patch.name = model_name
+        self._model_name = model_name
+        self._ops: list[JsonModelOperation] = []
 
     @property
     def model_name(self) -> str:
-        return self._patch.name
+        return self._model_name
 
     def has_operations(self) -> bool:
-        return bool(self._patch.ops)
+        return bool(self._ops)
 
-    def build(self) -> pb.ModelPatch:
-        patch = pb.ModelPatch()
-        patch.CopyFrom(self._patch)
-        return patch
+    def build(self) -> JsonModelPatch:
+        return JsonModelPatch(name=self._model_name, ops=list(self._ops))
 
-    def _add_op(self) -> pb.ModelOperation:
-        return self._patch.ops.add()
+    def upsert_stock(self, stock: JsonStock) -> JsonStock:
+        self._ops.append(UpsertStock(stock=stock))
+        return stock
 
-    def upsert_stock(self, stock: pb.Variable.Stock) -> pb.Variable.Stock:
-        op = self._add_op()
-        op.upsert_stock.stock.CopyFrom(stock)
-        return op.upsert_stock.stock
+    def upsert_flow(self, flow: JsonFlow) -> JsonFlow:
+        self._ops.append(UpsertFlow(flow=flow))
+        return flow
 
-    def upsert_flow(self, flow: pb.Variable.Flow) -> pb.Variable.Flow:
-        op = self._add_op()
-        op.upsert_flow.flow.CopyFrom(flow)
-        return op.upsert_flow.flow
+    def upsert_aux(self, aux: JsonAuxiliary) -> JsonAuxiliary:
+        self._ops.append(UpsertAux(aux=aux))
+        return aux
 
-    def upsert_aux(self, aux: pb.Variable.Aux) -> pb.Variable.Aux:
-        op = self._add_op()
-        op.upsert_aux.aux.CopyFrom(aux)
-        return op.upsert_aux.aux
-
-    def upsert_module(self, module: pb.Variable.Module) -> pb.Variable.Module:
-        op = self._add_op()
-        op.upsert_module.module.CopyFrom(module)
-        return op.upsert_module.module
+    def upsert_module(self, module: JsonModule) -> JsonModule:
+        self._ops.append(UpsertModule(module=module))
+        return module
 
     def delete_variable(self, ident: str) -> None:
-        op = self._add_op()
-        op.delete_variable.ident = ident
+        self._ops.append(DeleteVariable(ident=ident))
 
     def rename_variable(self, current_ident: str, new_ident: str) -> None:
-        op = self._add_op()
-        setattr(op.rename_variable, "from", current_ident)
-        op.rename_variable.to = new_ident
+        self._ops.append(RenameVariable(from_=current_ident, to=new_ident))
 
-    def upsert_view(self, index: int, view: pb.View) -> pb.View:
-        op = self._add_op()
-        op.upsert_view.index = index
-        op.upsert_view.view.CopyFrom(view)
-        return op.upsert_view.view
+    def upsert_view(self, index: int, view: JsonView) -> JsonView:
+        self._ops.append(UpsertView(index=index, view=view))
+        return view
 
     def delete_view(self, index: int) -> None:
-        op = self._add_op()
-        op.delete_view.index = index
+        self._ops.append(DeleteView(index=index))
+
+
+def _parse_graphical_function_from_json(gf_dict: dict[str, Any]) -> JsonGraphicalFunction:
+    """Parse a graphical function from JSON dict."""
+    points: list[tuple[float, float]] = []
+    if "points" in gf_dict:
+        points = [(p[0], p[1]) for p in gf_dict["points"]]
+
+    x_scale = None
+    if "x_scale" in gf_dict:
+        x_scale = JsonGraphicalFunctionScale(
+            min=gf_dict["x_scale"]["min"],
+            max=gf_dict["x_scale"]["max"],
+        )
+
+    y_scale = None
+    if "y_scale" in gf_dict:
+        y_scale = JsonGraphicalFunctionScale(
+            min=gf_dict["y_scale"]["min"],
+            max=gf_dict["y_scale"]["max"],
+        )
+
+    return JsonGraphicalFunction(
+        points=points,
+        y_points=gf_dict.get("y_points", []),
+        kind=gf_dict.get("kind", ""),
+        x_scale=x_scale,
+        y_scale=y_scale,
+    )
+
+
+def _parse_arrayed_equation_from_json(ae_dict: dict[str, Any]) -> JsonArrayedEquation:
+    """Parse an arrayed equation from JSON dict."""
+    elements = None
+    if "elements" in ae_dict and ae_dict["elements"]:
+        elements = []
+        for elem in ae_dict["elements"]:
+            gf = None
+            if "graphical_function" in elem and elem["graphical_function"]:
+                gf = _parse_graphical_function_from_json(elem["graphical_function"])
+            elements.append(JsonElementEquation(
+                subscript=elem["subscript"],
+                equation=elem.get("equation", ""),
+                initial_equation=elem.get("initial_equation", ""),
+                graphical_function=gf,
+            ))
+
+    return JsonArrayedEquation(
+        dimensions=ae_dict.get("dimensions", []),
+        equation=ae_dict.get("equation"),
+        initial_equation=ae_dict.get("initial_equation"),
+        elements=elements,
+    )
+
+
+def _stock_from_json(d: dict[str, Any]) -> JsonStock:
+    """Convert a stock JSON dict to a JsonStock dataclass."""
+    arrayed_equation = None
+    if "arrayed_equation" in d and d["arrayed_equation"]:
+        arrayed_equation = _parse_arrayed_equation_from_json(d["arrayed_equation"])
+
+    return JsonStock(
+        name=d["name"],
+        inflows=d.get("inflows", []),
+        outflows=d.get("outflows", []),
+        uid=d.get("uid", 0),
+        initial_equation=d.get("initial_equation", ""),
+        units=d.get("units", ""),
+        non_negative=d.get("non_negative", False),
+        documentation=d.get("documentation", ""),
+        can_be_module_input=d.get("can_be_module_input", False),
+        is_public=d.get("is_public", False),
+        arrayed_equation=arrayed_equation,
+    )
+
+
+def _flow_from_json(d: dict[str, Any]) -> JsonFlow:
+    """Convert a flow JSON dict to a JsonFlow dataclass."""
+    gf = None
+    if "graphical_function" in d and d["graphical_function"]:
+        gf = _parse_graphical_function_from_json(d["graphical_function"])
+
+    arrayed_equation = None
+    if "arrayed_equation" in d and d["arrayed_equation"]:
+        arrayed_equation = _parse_arrayed_equation_from_json(d["arrayed_equation"])
+
+    return JsonFlow(
+        name=d["name"],
+        uid=d.get("uid", 0),
+        equation=d.get("equation", ""),
+        units=d.get("units", ""),
+        non_negative=d.get("non_negative", False),
+        graphical_function=gf,
+        documentation=d.get("documentation", ""),
+        can_be_module_input=d.get("can_be_module_input", False),
+        is_public=d.get("is_public", False),
+        arrayed_equation=arrayed_equation,
+    )
+
+
+def _auxiliary_from_json(d: dict[str, Any]) -> JsonAuxiliary:
+    """Convert an auxiliary JSON dict to a JsonAuxiliary dataclass."""
+    gf = None
+    if "graphical_function" in d and d["graphical_function"]:
+        gf = _parse_graphical_function_from_json(d["graphical_function"])
+
+    arrayed_equation = None
+    if "arrayed_equation" in d and d["arrayed_equation"]:
+        arrayed_equation = _parse_arrayed_equation_from_json(d["arrayed_equation"])
+
+    return JsonAuxiliary(
+        name=d["name"],
+        uid=d.get("uid", 0),
+        equation=d.get("equation", ""),
+        initial_equation=d.get("initial_equation", ""),
+        units=d.get("units", ""),
+        graphical_function=gf,
+        documentation=d.get("documentation", ""),
+        can_be_module_input=d.get("can_be_module_input", False),
+        is_public=d.get("is_public", False),
+        arrayed_equation=arrayed_equation,
+    )
+
+
+def _module_from_json(d: dict[str, Any]) -> JsonModule:
+    """Convert a module JSON dict to a JsonModule dataclass."""
+    references = []
+    for ref in d.get("references", []):
+        references.append(JsonModuleReference(src=ref["src"], dst=ref["dst"]))
+
+    return JsonModule(
+        name=d["name"],
+        model_name=d["model_name"],
+        uid=d.get("uid", 0),
+        units=d.get("units", ""),
+        documentation=d.get("documentation", ""),
+        references=references,
+        can_be_module_input=d.get("can_be_module_input", False),
+        is_public=d.get("is_public", False),
+    )
 
 
 class _ModelEditContext:
@@ -100,31 +238,47 @@ class _ModelEditContext:
         self._model = model
         self._dry_run = dry_run
         self._allow_errors = allow_errors
-        self._current: Dict[str, pb.Variable] = {}
+        self._current: Dict[str, JsonVariable] = {}
         self._patch = ModelPatchBuilder(model._name or "")
 
-    def __enter__(self) -> Tuple[Dict[str, pb.Variable], ModelPatchBuilder]:
+    def __enter__(self) -> Tuple[Dict[str, JsonVariable], ModelPatchBuilder]:
         project = self._model._project
         if project is None:
             raise SimlinRuntimeError("Model is not attached to a Project")
 
-        project_proto = pb.Project()
-        project_proto.ParseFromString(project.serialize())
+        # Get project state as JSON
+        json_bytes = project.serialize_json()
+        project_dict = json.loads(json_bytes.decode("utf-8"))
 
-        model_proto = None
-        for candidate in project_proto.models:
-            if candidate.name == self._model._name or not self._model._name:
-                model_proto = candidate
+        model_dict = None
+        for candidate in project_dict.get("models", []):
+            if candidate["name"] == self._model._name or not self._model._name:
+                model_dict = candidate
                 break
 
-        if model_proto is None:
+        if model_dict is None:
             raise SimlinRuntimeError(
                 f"Model '{self._model._name or 'default'}' not found in project serialization"
             )
 
-        self._model._name = model_proto.name
-        self._patch = ModelPatchBuilder(model_proto.name)
-        self._current = {_variable_ident(var): _copy_variable(var) for var in model_proto.variables}
+        self._model._name = model_dict["name"]
+        self._patch = ModelPatchBuilder(model_dict["name"])
+
+        # Build current variable dict from JSON
+        self._current = {}
+        for stock_dict in model_dict.get("stocks", []):
+            stock = _stock_from_json(stock_dict)
+            self._current[stock.name] = stock
+        for flow_dict in model_dict.get("flows", []):
+            flow = _flow_from_json(flow_dict)
+            self._current[flow.name] = flow
+        for aux_dict in model_dict.get("auxiliaries", []):
+            aux = _auxiliary_from_json(aux_dict)
+            self._current[aux.name] = aux
+        for module_dict in model_dict.get("modules", []):
+            module = _module_from_json(module_dict)
+            self._current[module.name] = module
+
         return self._current, self._patch
 
     def __exit__(
@@ -143,12 +297,13 @@ class _ModelEditContext:
         if project is None:
             raise SimlinRuntimeError("Model is not attached to a Project")
 
-        project_patch = pb.ProjectPatch()
-        model_patch = project_patch.models.add()
-        model_patch.CopyFrom(self._patch.build())
+        # Build JSON patch
+        project_patch = JsonProjectPatch(models=[self._patch.build()])
+        patch_dict = converter.unstructure(project_patch)
+        patch_json = json.dumps(patch_dict).encode("utf-8")
 
-        project._apply_patch(
-            project_patch,
+        project._apply_patch_json(
+            patch_json,
             dry_run=self._dry_run,
             allow_errors=self._allow_errors,
         )

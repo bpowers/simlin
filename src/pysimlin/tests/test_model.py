@@ -1,10 +1,12 @@
 """Tests for the Model class."""
 
+import json
 import pytest
 from pathlib import Path
 import simlin
 from simlin import Project, Model, SimlinRuntimeError, SimlinCompilationError
 from simlin import pb
+from simlin.json_types import Auxiliary as JsonAuxiliary
 
 
 @pytest.fixture
@@ -184,64 +186,58 @@ class TestModelEditing:
 
         with model.edit(allow_errors=True) as (current, patch):
             heat_loss = current["Heat Loss to Room"]
-            heat_loss.flow.equation.scalar.equation = "0"
-            patch.upsert_flow(heat_loss.flow)
+            heat_loss.equation = "0"
+            patch.upsert_flow(heat_loss)
 
-        project_proto = pb.Project()
-        project_proto.ParseFromString(model.project.serialize())
-        model_proto = project_proto.models[0]
-        flow_proto = next(
-            var.flow
-            for var in model_proto.variables
-            if var.flow.ident in {"Heat Loss to Room", "heat_loss_to_room"}
+        # Verify via JSON serialization
+        project_json = json.loads(model.project.serialize_json().decode("utf-8"))
+        flow_dict = next(
+            f for f in project_json["models"][0]["flows"]
+            if f["name"] in {"Heat Loss to Room", "heat_loss_to_room"}
         )
-
-        assert flow_proto.equation.scalar.equation == "0"
+        assert flow_dict.get("equation", "") == "0"
 
     def test_edit_context_dry_run_does_not_commit(self, mdl_model_path) -> None:
         """dry_run=True should validate without mutating the project."""
         model = simlin.load(mdl_model_path)
 
-        original = pb.Project()
-        original.ParseFromString(model.project.serialize())
+        # Get original equation via JSON
+        original_json = json.loads(model.project.serialize_json().decode("utf-8"))
         original_flow = next(
-            var.flow
-            for var in original.models[0].variables
-            if var.flow.ident in {"Heat Loss to Room", "heat_loss_to_room"}
+            f for f in original_json["models"][0]["flows"]
+            if f["name"] in {"Heat Loss to Room", "heat_loss_to_room"}
         )
+        original_equation = original_flow.get("equation", "")
 
         with model.edit(dry_run=True, allow_errors=True) as (current, patch):
             flow = current["Heat Loss to Room"]
-            flow.flow.equation.scalar.equation = "0"
-            patch.upsert_flow(flow.flow)
+            flow.equation = "0"
+            patch.upsert_flow(flow)
 
-        project_proto = pb.Project()
-        project_proto.ParseFromString(model.project.serialize())
-        flow_proto = next(
-            var.flow
-            for var in project_proto.models[0].variables
-            if var.flow.ident in {"Heat Loss to Room", "heat_loss_to_room"}
+        # Verify equation unchanged via JSON
+        after_json = json.loads(model.project.serialize_json().decode("utf-8"))
+        after_flow = next(
+            f for f in after_json["models"][0]["flows"]
+            if f["name"] in {"Heat Loss to Room", "heat_loss_to_room"}
         )
-
-        assert flow_proto.equation.scalar.equation == original_flow.equation.scalar.equation
+        assert after_flow.get("equation", "") == original_equation
 
     def test_edit_context_invalid_patch_raises(self, xmile_model_path) -> None:
         """Invalid edits should raise and leave the project unchanged."""
         model = simlin.load(xmile_model_path)
 
-        before = pb.Project()
-        before.ParseFromString(model.project.serialize())
+        before_json = model.project.serialize_json()
 
         with pytest.raises((SimlinRuntimeError, SimlinCompilationError)):
             with model.edit() as (_, patch):
-                bad_aux = pb.Variable.Aux()
-                bad_aux.ident = "bad_variable"
-                bad_aux.equation.scalar.equation = "?? invalid expression"
+                bad_aux = JsonAuxiliary(
+                    name="bad_variable",
+                    equation="?? invalid expression",
+                )
                 patch.upsert_aux(bad_aux)
 
-        after = pb.Project()
-        after.ParseFromString(model.project.serialize())
-        assert after == before
+        after_json = model.project.serialize_json()
+        assert after_json == before_json
 
 
 class TestModelRepr:
