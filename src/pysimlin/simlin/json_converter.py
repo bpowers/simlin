@@ -168,36 +168,59 @@ def _create_converter() -> cattrs.Converter:
 
     # Handle JsonModelOperation tagged union
     # Rust expects: {"type": "upsert_stock", "payload": {"stock": {...}}}
-    _op_type_map: dict[type, tuple[str, str | None]] = {
-        UpsertStock: ("upsert_stock", "stock"),
-        UpsertFlow: ("upsert_flow", "flow"),
-        UpsertAux: ("upsert_aux", "aux"),
-        UpsertModule: ("upsert_module", "module"),
-        DeleteVariable: ("delete_variable", "ident"),
-        RenameVariable: ("rename_variable", None),
-        UpsertView: ("upsert_view", None),
-        DeleteView: ("delete_view", "index"),
-    }
+    # Register hooks on EACH CONCRETE TYPE to ensure correct serialization
+    # regardless of how the op is accessed (directly or via Union type)
 
-    def unstructure_model_op(op: JsonModelOperation) -> dict[str, Any]:
-        for op_cls, (type_name, _) in _op_type_map.items():
-            if isinstance(op, op_cls):
-                if op_cls == RenameVariable:
-                    payload = conv.unstructure(op)
-                elif op_cls == UpsertView:
-                    payload = {"index": op.index, "view": conv.unstructure(op.view)}
-                elif op_cls == DeleteVariable:
-                    payload = {"ident": op.ident}
-                elif op_cls == DeleteView:
-                    payload = {"index": op.index}
-                else:
-                    # UpsertStock, UpsertFlow, UpsertAux, UpsertModule
-                    field_name = _op_type_map[op_cls][1]
-                    inner_val = getattr(op, field_name)
-                    payload = {field_name: conv.unstructure(inner_val)}
-                return {"type": type_name, "payload": payload}
-        raise ValueError(f"Unknown operation type: {type(op)}")
+    def _make_upsert_unstructure_hook(
+        type_name: str, field_name: str
+    ) -> Callable[[Any], dict[str, Any]]:
+        """Create an unstructure hook for upsert operations."""
 
+        def hook(op: Any) -> dict[str, Any]:
+            inner_val = getattr(op, field_name)
+            payload = {field_name: conv.unstructure(inner_val)}
+            return {"type": type_name, "payload": payload}
+
+        return hook
+
+    # Register hooks for each concrete operation type
+    conv.register_unstructure_hook(
+        UpsertStock, _make_upsert_unstructure_hook("upsert_stock", "stock")
+    )
+    conv.register_unstructure_hook(
+        UpsertFlow, _make_upsert_unstructure_hook("upsert_flow", "flow")
+    )
+    conv.register_unstructure_hook(
+        UpsertAux, _make_upsert_unstructure_hook("upsert_aux", "aux")
+    )
+    conv.register_unstructure_hook(
+        UpsertModule, _make_upsert_unstructure_hook("upsert_module", "module")
+    )
+
+    def unstructure_delete_variable(op: DeleteVariable) -> dict[str, Any]:
+        return {"type": "delete_variable", "payload": {"ident": op.ident}}
+
+    conv.register_unstructure_hook(DeleteVariable, unstructure_delete_variable)
+
+    def unstructure_rename_variable(op: RenameVariable) -> dict[str, Any]:
+        return {"type": "rename_variable", "payload": {"from": op.from_, "to": op.to}}
+
+    conv.register_unstructure_hook(RenameVariable, unstructure_rename_variable)
+
+    def unstructure_upsert_view(op: UpsertView) -> dict[str, Any]:
+        return {
+            "type": "upsert_view",
+            "payload": {"index": op.index, "view": conv.unstructure(op.view)},
+        }
+
+    conv.register_unstructure_hook(UpsertView, unstructure_upsert_view)
+
+    def unstructure_delete_view(op: DeleteView) -> dict[str, Any]:
+        return {"type": "delete_view", "payload": {"index": op.index}}
+
+    conv.register_unstructure_hook(DeleteView, unstructure_delete_view)
+
+    # Structure hook for parsing tagged JSON back to concrete types
     def structure_model_op(d: dict[str, Any], _: type) -> JsonModelOperation:
         type_name = d["type"]
         payload = d["payload"]
@@ -215,26 +238,15 @@ def _create_converter() -> cattrs.Converter:
         elif type_name == "rename_variable":
             return RenameVariable(from_=payload["from"], to=payload["to"])
         elif type_name == "upsert_view":
-            return UpsertView(index=payload["index"], view=conv.structure(payload["view"], View))
+            return UpsertView(
+                index=payload["index"], view=conv.structure(payload["view"], View)
+            )
         elif type_name == "delete_view":
             return DeleteView(index=payload["index"])
         else:
             raise ValueError(f"Unknown operation type: {type_name}")
 
-    # Register for the Union type
-    conv.register_unstructure_hook(
-        Union[
-            UpsertStock,
-            UpsertFlow,
-            UpsertAux,
-            UpsertModule,
-            DeleteVariable,
-            RenameVariable,
-            UpsertView,
-            DeleteView,
-        ],
-        unstructure_model_op,
-    )
+    # Register structure hook for Union type (used when parsing JSON)
     conv.register_structure_hook(
         Union[
             UpsertStock,
