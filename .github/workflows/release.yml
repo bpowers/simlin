@@ -35,20 +35,22 @@ jobs:
           CIBW_SKIP: pp* *-musllinux*
           CIBW_ARCHS_MACOS: arm64
           CIBW_ARCHS_LINUX: x86_64 aarch64
+          CIBW_BEFORE_ALL: |
+            # Install uv for fast dependency management
+            curl -LsSf https://astral.sh/uv/install.sh | sh
           CIBW_BEFORE_BUILD: |
             set -ex  # Exit on error and print commands
-            python -m pip install --upgrade pip
-            pip install cffi setuptools wheel
+            export PATH="$HOME/.local/bin:$PATH"
+            uv pip install --system cffi setuptools wheel
             # Install protoc
             if [ "$(uname)" = "Linux" ]; then
               echo "Installing protoc for Linux..."
-              # Try downloading binary directly (yum often doesn't have protobuf-compiler)
               ARCH="$(uname -m)"
-              if [ "$ARCH" = "x86_64" ]; then 
+              if [ "$ARCH" = "x86_64" ]; then
                 PROTOC_ZIP="protoc-25.1-linux-x86_64.zip"
-              elif [ "$ARCH" = "aarch64" ]; then 
+              elif [ "$ARCH" = "aarch64" ]; then
                 PROTOC_ZIP="protoc-25.1-linux-aarch_64.zip"
-              else 
+              else
                 echo "Unsupported arch: $ARCH" && exit 1
               fi
               curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v25.1/$PROTOC_ZIP"
@@ -105,6 +107,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Download wheels
         uses: actions/download-artifact@v4
         with:
@@ -112,9 +117,8 @@ jobs:
           path: wheelhouse
           merge-multiple: true
 
-      - name: Install wheel
+      - name: Install wheel and test dependencies
         run: |
-          python -m pip install --upgrade pip
           # Find the right wheel for this platform
           PYVER=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
           if [ "$RUNNER_OS" = "Linux" ]; then
@@ -129,20 +133,19 @@ jobs:
             # macOS ARM64
             WHEEL=$(ls wheelhouse/pysimlin-*-${PYVER}-*-macosx*_arm64.whl 2>/dev/null | head -1)
           fi
-          
+
           if [ -z "$WHEEL" ]; then
             echo "No compatible wheel found for Python ${PYVER} on ${RUNNER_OS}"
             ls -la wheelhouse/
             exit 1
           fi
-          
-          echo "Installing wheel: $WHEEL"
-          pip install "$WHEEL"
-          pip install pytest pytest-cov numpy pandas
-          
+
+          echo "Installing wheel with test dependencies: $WHEEL"
+          uv pip install --system "$WHEEL[test]"
+
           # Debug: Check if the module was installed correctly
           echo "Checking installed package..."
-          pip show pysimlin
+          uv pip show --system pysimlin
           python -c "import simlin; print('simlin imported successfully')" || {
             echo "Failed to import simlin. Checking what's installed:"
             python -c "import sys; print(sys.path)"
