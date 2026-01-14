@@ -17,6 +17,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::datamodel;
@@ -25,18 +26,18 @@ fn is_none<T>(val: &Option<T>) -> bool {
     val.is_none()
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct GraphicalFunction {
     pub points: Vec<Point>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct StockFields {
     pub name: String,
     #[serde(skip_serializing_if = "is_none")]
@@ -50,10 +51,11 @@ pub struct StockFields {
     #[serde(skip_serializing_if = "is_none")]
     pub outflows: Option<Vec<String>>,
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
+    #[schemars(rename = "graphicalFunction")]
     pub graphical_function: Option<GraphicalFunction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FlowFields {
     pub name: String,
     #[serde(skip_serializing_if = "is_none")]
@@ -63,10 +65,11 @@ pub struct FlowFields {
     #[serde(skip_serializing_if = "is_none")]
     pub units: Option<String>,
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
+    #[schemars(rename = "graphicalFunction")]
     pub graphical_function: Option<GraphicalFunction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AuxiliaryFields {
     pub name: String,
     #[serde(skip_serializing_if = "is_none")]
@@ -76,45 +79,78 @@ pub struct AuxiliaryFields {
     #[serde(skip_serializing_if = "is_none")]
     pub units: Option<String>,
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
+    #[schemars(rename = "graphicalFunction")]
     pub graphical_function: Option<GraphicalFunction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[schemars(tag = "type", rename_all = "lowercase")]
 pub enum Variable {
     Stock(StockFields),
     Flow(FlowFields),
     Variable(AuxiliaryFields),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Polarity of a causal relationship in a system dynamics model.
+/// Indicates whether an increase in the source variable causes an
+/// increase (+), decrease (-), or unknown effect (?) on the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum Polarity {
+    /// Positive polarity: increase in source causes increase in target
+    #[serde(rename = "+")]
+    Positive,
+    /// Negative polarity: increase in source causes decrease in target
+    #[serde(rename = "-")]
+    Negative,
+    /// Unknown polarity: relationship exists but direction of effect is unclear
+    #[serde(rename = "?")]
+    Unknown,
+}
+
+impl std::fmt::Display for Polarity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Polarity::Positive => write!(f, "+"),
+            Polarity::Negative => write!(f, "-"),
+            Polarity::Unknown => write!(f, "?"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Relationship {
     #[serde(skip_serializing_if = "is_none")]
     pub reasoning: Option<String>,
     pub from: String,
     pub to: String,
-    pub polarity: String,
+    pub polarity: Polarity,
     #[serde(rename = "polarityReasoning", skip_serializing_if = "is_none")]
+    #[schemars(rename = "polarityReasoning")]
     pub polarity_reasoning: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SimSpecs {
     #[serde(rename = "startTime")]
+    #[schemars(rename = "startTime")]
     pub start_time: f64,
     #[serde(rename = "stopTime")]
+    #[schemars(rename = "stopTime")]
     pub stop_time: f64,
     #[serde(skip_serializing_if = "is_none")]
     pub dt: Option<f64>,
     #[serde(rename = "timeUnits", skip_serializing_if = "is_none")]
+    #[schemars(rename = "timeUnits")]
     pub time_units: Option<String>,
     #[serde(rename = "saveStep", skip_serializing_if = "is_none")]
+    #[schemars(rename = "saveStep")]
     pub save_step: Option<f64>,
     #[serde(skip_serializing_if = "is_none")]
     pub method: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SdaiModel {
     pub variables: Vec<Variable>,
     #[serde(skip_serializing_if = "is_none")]
@@ -125,6 +161,17 @@ pub struct SdaiModel {
     pub views: Option<Vec<crate::json::View>>,
 }
 
+/// Generate the JSON Schema for the SdaiModel type
+pub fn generate_schema() -> schemars::Schema {
+    schemars::schema_for!(SdaiModel)
+}
+
+/// Generate the JSON Schema as a formatted JSON string
+pub fn generate_schema_json() -> String {
+    let schema = generate_schema();
+    serde_json::to_string_pretty(&schema).expect("schema serialization should never fail")
+}
+
 // Conversions FROM SDAI types TO datamodel types
 
 impl From<GraphicalFunction> for datamodel::GraphicalFunction {
@@ -132,10 +179,22 @@ impl From<GraphicalFunction> for datamodel::GraphicalFunction {
         let x_points: Vec<f64> = gf.points.iter().map(|p| p.x).collect();
         let y_points: Vec<f64> = gf.points.iter().map(|p| p.y).collect();
 
-        let x_min = x_points.iter().copied().fold(f64::INFINITY, f64::min);
-        let x_max = x_points.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let y_min = y_points.iter().copied().fold(f64::INFINITY, f64::min);
-        let y_max = y_points.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        // Use default 0-1 scale for empty point arrays to avoid INFINITY values
+        let (x_min, x_max) = if x_points.is_empty() {
+            (0.0, 1.0)
+        } else {
+            let min = x_points.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = x_points.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            (min, max)
+        };
+
+        let (y_min, y_max) = if y_points.is_empty() {
+            (0.0, 1.0)
+        } else {
+            let min = y_points.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = y_points.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            (min, max)
+        };
 
         datamodel::GraphicalFunction {
             kind: datamodel::GraphicalFunctionKind::Continuous,
@@ -351,6 +410,12 @@ fn extract_equation_string(eq: &datamodel::Equation) -> String {
     }
 }
 
+/// Convert a datamodel Stock to SDAI StockFields.
+///
+/// Note: Empty vectors for inflows/outflows are normalized to None,
+/// as are empty strings for equation, documentation, and units.
+/// This means `Some([])` and `None` are semantically equivalent
+/// and will both roundtrip to `None`.
 impl From<datamodel::Stock> for StockFields {
     fn from(stock: datamodel::Stock) -> Self {
         let equation = extract_equation_string(&stock.equation);
