@@ -28,11 +28,6 @@ from .json_types import (
     RenameVariable,
     UpsertView,
     DeleteView,
-    GraphicalFunction as JsonGraphicalFunction,
-    GraphicalFunctionScale as JsonGraphicalFunctionScale,
-    ArrayedEquation as JsonArrayedEquation,
-    ElementEquation as JsonElementEquation,
-    ModuleReference as JsonModuleReference,
 )
 from .json_converter import converter
 
@@ -93,146 +88,6 @@ class ModelPatchBuilder:
         self._ops.append(DeleteView(index=index))
 
 
-def _parse_graphical_function_from_json(gf_dict: dict[str, Any]) -> JsonGraphicalFunction:
-    """Parse a graphical function from JSON dict."""
-    points: list[tuple[float, float]] = []
-    if "points" in gf_dict:
-        points = [(p[0], p[1]) for p in gf_dict["points"]]
-
-    x_scale = None
-    if "x_scale" in gf_dict:
-        x_scale = JsonGraphicalFunctionScale(
-            min=gf_dict["x_scale"]["min"],
-            max=gf_dict["x_scale"]["max"],
-        )
-
-    y_scale = None
-    if "y_scale" in gf_dict:
-        y_scale = JsonGraphicalFunctionScale(
-            min=gf_dict["y_scale"]["min"],
-            max=gf_dict["y_scale"]["max"],
-        )
-
-    return JsonGraphicalFunction(
-        points=points,
-        y_points=gf_dict.get("y_points", []),
-        kind=gf_dict.get("kind", ""),
-        x_scale=x_scale,
-        y_scale=y_scale,
-    )
-
-
-def _parse_arrayed_equation_from_json(ae_dict: dict[str, Any]) -> JsonArrayedEquation:
-    """Parse an arrayed equation from JSON dict."""
-    elements = None
-    if "elements" in ae_dict and ae_dict["elements"]:
-        elements = []
-        for elem in ae_dict["elements"]:
-            gf = None
-            if "graphical_function" in elem and elem["graphical_function"]:
-                gf = _parse_graphical_function_from_json(elem["graphical_function"])
-            elements.append(JsonElementEquation(
-                subscript=elem["subscript"],
-                equation=elem.get("equation", ""),
-                initial_equation=elem.get("initial_equation", ""),
-                graphical_function=gf,
-            ))
-
-    return JsonArrayedEquation(
-        dimensions=ae_dict.get("dimensions", []),
-        equation=ae_dict.get("equation"),
-        initial_equation=ae_dict.get("initial_equation"),
-        elements=elements,
-    )
-
-
-def _stock_from_json(d: dict[str, Any]) -> JsonStock:
-    """Convert a stock JSON dict to a JsonStock dataclass."""
-    arrayed_equation = None
-    if "arrayed_equation" in d and d["arrayed_equation"]:
-        arrayed_equation = _parse_arrayed_equation_from_json(d["arrayed_equation"])
-
-    return JsonStock(
-        name=d["name"],
-        inflows=d.get("inflows", []),
-        outflows=d.get("outflows", []),
-        uid=d.get("uid", 0),
-        initial_equation=d.get("initial_equation", ""),
-        units=d.get("units", ""),
-        non_negative=d.get("non_negative", False),
-        documentation=d.get("documentation", ""),
-        can_be_module_input=d.get("can_be_module_input", False),
-        is_public=d.get("is_public", False),
-        arrayed_equation=arrayed_equation,
-    )
-
-
-def _flow_from_json(d: dict[str, Any]) -> JsonFlow:
-    """Convert a flow JSON dict to a JsonFlow dataclass."""
-    gf = None
-    if "graphical_function" in d and d["graphical_function"]:
-        gf = _parse_graphical_function_from_json(d["graphical_function"])
-
-    arrayed_equation = None
-    if "arrayed_equation" in d and d["arrayed_equation"]:
-        arrayed_equation = _parse_arrayed_equation_from_json(d["arrayed_equation"])
-
-    return JsonFlow(
-        name=d["name"],
-        uid=d.get("uid", 0),
-        equation=d.get("equation", ""),
-        units=d.get("units", ""),
-        non_negative=d.get("non_negative", False),
-        graphical_function=gf,
-        documentation=d.get("documentation", ""),
-        can_be_module_input=d.get("can_be_module_input", False),
-        is_public=d.get("is_public", False),
-        arrayed_equation=arrayed_equation,
-    )
-
-
-def _auxiliary_from_json(d: dict[str, Any]) -> JsonAuxiliary:
-    """Convert an auxiliary JSON dict to a JsonAuxiliary dataclass."""
-    gf = None
-    if "graphical_function" in d and d["graphical_function"]:
-        gf = _parse_graphical_function_from_json(d["graphical_function"])
-
-    arrayed_equation = None
-    if "arrayed_equation" in d and d["arrayed_equation"]:
-        arrayed_equation = _parse_arrayed_equation_from_json(d["arrayed_equation"])
-
-    return JsonAuxiliary(
-        name=d["name"],
-        uid=d.get("uid", 0),
-        equation=d.get("equation", ""),
-        initial_equation=d.get("initial_equation", ""),
-        units=d.get("units", ""),
-        graphical_function=gf,
-        documentation=d.get("documentation", ""),
-        can_be_module_input=d.get("can_be_module_input", False),
-        is_public=d.get("is_public", False),
-        arrayed_equation=arrayed_equation,
-    )
-
-
-def _module_from_json(d: dict[str, Any]) -> JsonModule:
-    """Convert a module JSON dict to a JsonModule dataclass."""
-    references = []
-    for ref in d.get("references", []):
-        references.append(JsonModuleReference(src=ref["src"], dst=ref["dst"]))
-
-    return JsonModule(
-        name=d["name"],
-        model_name=d["model_name"],
-        uid=d.get("uid", 0),
-        units=d.get("units", ""),
-        documentation=d.get("documentation", ""),
-        references=references,
-        can_be_module_input=d.get("can_be_module_input", False),
-        is_public=d.get("is_public", False),
-    )
-
-
 class _ModelEditContext:
     def __init__(self, model: "Model", dry_run: bool, allow_errors: bool) -> None:
         self._model = model
@@ -264,19 +119,19 @@ class _ModelEditContext:
         self._model._name = model_dict["name"]
         self._patch = ModelPatchBuilder(model_dict["name"])
 
-        # Build current variable dict from JSON
+        # Build current variable dict from JSON using converter.structure()
         self._current = {}
         for stock_dict in model_dict.get("stocks", []):
-            stock = _stock_from_json(stock_dict)
+            stock = converter.structure(stock_dict, JsonStock)
             self._current[stock.name] = stock
         for flow_dict in model_dict.get("flows", []):
-            flow = _flow_from_json(flow_dict)
+            flow = converter.structure(flow_dict, JsonFlow)
             self._current[flow.name] = flow
         for aux_dict in model_dict.get("auxiliaries", []):
-            aux = _auxiliary_from_json(aux_dict)
+            aux = converter.structure(aux_dict, JsonAuxiliary)
             self._current[aux.name] = aux
         for module_dict in model_dict.get("modules", []):
-            module = _module_from_json(module_dict)
+            module = converter.structure(module_dict, JsonModule)
             self._current[module.name] = module
 
         return self._current, self._patch

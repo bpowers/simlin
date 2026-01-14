@@ -6,10 +6,10 @@ the Rust serde expectations in libsimlin.
 
 from __future__ import annotations
 
-from typing import Any, Union, get_args, get_origin
+from dataclasses import MISSING, fields
+from typing import Any, Callable, Union
 
 import cattrs
-from cattrs.gen import make_dict_unstructure_fn, override
 
 from .json_types import (
     AliasViewElement,
@@ -50,17 +50,14 @@ from .json_types import (
 )
 
 
-def _is_default(val: Any, default: Any) -> bool:
-    """Check if a value equals its default."""
-    return val == default
-
-
 def _make_omit_default_hook(
     cls: type,
     conv: cattrs.Converter,
     required_fields: set[str] | None = None,
-) -> Any:
+) -> Callable[[Any], dict[str, Any]]:
     """Create an unstructure hook that omits default values.
+
+    Pre-computes field information at registration time for performance.
 
     Args:
         cls: The dataclass type
@@ -70,17 +67,28 @@ def _make_omit_default_hook(
     if required_fields is None:
         required_fields = set()
 
+    # Pre-compute field metadata at registration time
+    field_info: list[tuple[str, Any, bool]] = []
+    for fld in fields(cls):
+        # Compute default value
+        if fld.default is not MISSING:
+            default = fld.default
+        elif fld.default_factory is not MISSING:
+            default = fld.default_factory()
+        else:
+            default = None
+
+        is_required = fld.name in required_fields
+        field_info.append((fld.name, default, is_required))
+
     def unstructure(obj: Any) -> dict[str, Any]:
-        result = {}
-        for fld in cls.__dataclass_fields__.values():
-            val = getattr(obj, fld.name)
-            default = fld.default if fld.default is not fld.default_factory else None
-            if fld.default_factory is not fld.default_factory:
-                default = fld.default_factory()
+        result: dict[str, Any] = {}
+        for name, default, is_required in field_info:
+            val = getattr(obj, name)
 
             # Always include required fields
-            if fld.name in required_fields:
-                result[fld.name] = conv.unstructure(val)
+            if is_required:
+                result[name] = conv.unstructure(val)
                 continue
 
             # Skip if value equals default
@@ -103,7 +111,7 @@ def _make_omit_default_hook(
                 continue
 
             # Unstructure nested values
-            result[fld.name] = conv.unstructure(val)
+            result[name] = conv.unstructure(val)
 
         return result
 
@@ -160,14 +168,14 @@ def _create_converter() -> cattrs.Converter:
 
     # Handle JsonModelOperation tagged union
     # Rust expects: {"type": "upsert_stock", "payload": {"stock": {...}}}
-    _op_type_map: dict[type, tuple[str, str]] = {
+    _op_type_map: dict[type, tuple[str, str | None]] = {
         UpsertStock: ("upsert_stock", "stock"),
         UpsertFlow: ("upsert_flow", "flow"),
         UpsertAux: ("upsert_aux", "aux"),
         UpsertModule: ("upsert_module", "module"),
         DeleteVariable: ("delete_variable", "ident"),
-        RenameVariable: ("rename_variable", None),  # type: ignore[dict-item]
-        UpsertView: ("upsert_view", None),  # type: ignore[dict-item]
+        RenameVariable: ("rename_variable", None),
+        UpsertView: ("upsert_view", None),
         DeleteView: ("delete_view", "index"),
     }
 
@@ -352,10 +360,134 @@ def _create_converter() -> cattrs.Converter:
     for cls, required in type_required_fields.items():
         conv.register_unstructure_hook(cls, _make_omit_default_hook(cls, conv, required))
 
-    # Simple types that don't need special handling
+    # GraphicalFunctionScale: unstructure and structure
     conv.register_unstructure_hook(
         GraphicalFunctionScale, lambda x: {"min": x.min, "max": x.max}
     )
+    conv.register_structure_hook(
+        GraphicalFunctionScale,
+        lambda d, _: GraphicalFunctionScale(min=d["min"], max=d["max"]),
+    )
+
+    # ElementEquation: handle optional graphical_function
+    def structure_element_equation(d: dict[str, Any], _: type) -> ElementEquation:
+        gf = None
+        if "graphical_function" in d and d["graphical_function"]:
+            gf = conv.structure(d["graphical_function"], GraphicalFunction)
+        return ElementEquation(
+            subscript=d["subscript"],
+            equation=d.get("equation", ""),
+            initial_equation=d.get("initial_equation", ""),
+            graphical_function=gf,
+        )
+
+    conv.register_structure_hook(ElementEquation, structure_element_equation)
+
+    # ArrayedEquation: handle elements list with nested types
+    def structure_arrayed_equation(d: dict[str, Any], _: type) -> ArrayedEquation:
+        elements = None
+        if "elements" in d and d["elements"]:
+            elements = [conv.structure(e, ElementEquation) for e in d["elements"]]
+        return ArrayedEquation(
+            dimensions=d.get("dimensions", []),
+            equation=d.get("equation"),
+            initial_equation=d.get("initial_equation"),
+            elements=elements,
+        )
+
+    conv.register_structure_hook(ArrayedEquation, structure_arrayed_equation)
+
+    # ModuleReference: simple structure
+    conv.register_structure_hook(
+        ModuleReference,
+        lambda d, _: ModuleReference(src=d["src"], dst=d["dst"]),
+    )
+
+    # Stock: handle nested types
+    def structure_stock(d: dict[str, Any], _: type) -> Stock:
+        arrayed_equation = None
+        if "arrayed_equation" in d and d["arrayed_equation"]:
+            arrayed_equation = conv.structure(d["arrayed_equation"], ArrayedEquation)
+        return Stock(
+            name=d["name"],
+            inflows=d.get("inflows", []),
+            outflows=d.get("outflows", []),
+            uid=d.get("uid", 0),
+            initial_equation=d.get("initial_equation", ""),
+            units=d.get("units", ""),
+            non_negative=d.get("non_negative", False),
+            documentation=d.get("documentation", ""),
+            can_be_module_input=d.get("can_be_module_input", False),
+            is_public=d.get("is_public", False),
+            arrayed_equation=arrayed_equation,
+        )
+
+    conv.register_structure_hook(Stock, structure_stock)
+
+    # Flow: handle nested types
+    def structure_flow(d: dict[str, Any], _: type) -> Flow:
+        gf = None
+        if "graphical_function" in d and d["graphical_function"]:
+            gf = conv.structure(d["graphical_function"], GraphicalFunction)
+        arrayed_equation = None
+        if "arrayed_equation" in d and d["arrayed_equation"]:
+            arrayed_equation = conv.structure(d["arrayed_equation"], ArrayedEquation)
+        return Flow(
+            name=d["name"],
+            uid=d.get("uid", 0),
+            equation=d.get("equation", ""),
+            units=d.get("units", ""),
+            non_negative=d.get("non_negative", False),
+            graphical_function=gf,
+            documentation=d.get("documentation", ""),
+            can_be_module_input=d.get("can_be_module_input", False),
+            is_public=d.get("is_public", False),
+            arrayed_equation=arrayed_equation,
+        )
+
+    conv.register_structure_hook(Flow, structure_flow)
+
+    # Auxiliary: handle nested types
+    def structure_auxiliary(d: dict[str, Any], _: type) -> Auxiliary:
+        gf = None
+        if "graphical_function" in d and d["graphical_function"]:
+            gf = conv.structure(d["graphical_function"], GraphicalFunction)
+        arrayed_equation = None
+        if "arrayed_equation" in d and d["arrayed_equation"]:
+            arrayed_equation = conv.structure(d["arrayed_equation"], ArrayedEquation)
+        return Auxiliary(
+            name=d["name"],
+            uid=d.get("uid", 0),
+            equation=d.get("equation", ""),
+            initial_equation=d.get("initial_equation", ""),
+            units=d.get("units", ""),
+            graphical_function=gf,
+            documentation=d.get("documentation", ""),
+            can_be_module_input=d.get("can_be_module_input", False),
+            is_public=d.get("is_public", False),
+            arrayed_equation=arrayed_equation,
+        )
+
+    conv.register_structure_hook(Auxiliary, structure_auxiliary)
+
+    # Module: handle references list
+    def structure_module(d: dict[str, Any], _: type) -> Module:
+        references = [
+            conv.structure(ref, ModuleReference)
+            for ref in d.get("references", [])
+        ]
+        return Module(
+            name=d["name"],
+            model_name=d["model_name"],
+            uid=d.get("uid", 0),
+            units=d.get("units", ""),
+            documentation=d.get("documentation", ""),
+            references=references,
+            can_be_module_input=d.get("can_be_module_input", False),
+            is_public=d.get("is_public", False),
+        )
+
+    conv.register_structure_hook(Module, structure_module)
 
     return conv
 
