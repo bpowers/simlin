@@ -141,10 +141,10 @@ def _create_converter() -> cattrs.Converter:
             y_points=d.get("y_points", []),
             kind=d.get("kind", ""),
             x_scale=conv.structure(d["x_scale"], GraphicalFunctionScale)
-            if "x_scale" in d
+            if d.get("x_scale") is not None
             else None,
             y_scale=conv.structure(d["y_scale"], GraphicalFunctionScale)
-            if "y_scale" in d
+            if d.get("y_scale") is not None
             else None,
         )
 
@@ -182,12 +182,8 @@ def _create_converter() -> cattrs.Converter:
     conv.register_unstructure_hook(
         UpsertStock, _make_upsert_unstructure_hook("upsert_stock", "stock")
     )
-    conv.register_unstructure_hook(
-        UpsertFlow, _make_upsert_unstructure_hook("upsert_flow", "flow")
-    )
-    conv.register_unstructure_hook(
-        UpsertAux, _make_upsert_unstructure_hook("upsert_aux", "aux")
-    )
+    conv.register_unstructure_hook(UpsertFlow, _make_upsert_unstructure_hook("upsert_flow", "flow"))
+    conv.register_unstructure_hook(UpsertAux, _make_upsert_unstructure_hook("upsert_aux", "aux"))
     conv.register_unstructure_hook(
         UpsertModule, _make_upsert_unstructure_hook("upsert_module", "module")
     )
@@ -245,16 +241,13 @@ def _create_converter() -> cattrs.Converter:
         elif type_name == "rename_variable":
             return RenameVariable(from_=payload["from"], to=payload["to"])
         elif type_name == "upsert_view":
-            return UpsertView(
-                index=payload["index"], view=conv.structure(payload["view"], View)
-            )
+            return UpsertView(index=payload["index"], view=conv.structure(payload["view"], View))
         elif type_name == "delete_view":
             return DeleteView(index=payload["index"])
         else:
             valid = ", ".join(_valid_model_op_types)
             raise ValueError(
-                f"Unknown model operation type: {type_name!r}. "
-                f"Expected one of: {valid}"
+                f"Unknown model operation type: {type_name!r}. Expected one of: {valid}"
             )
 
     # Register structure hook for Union type (used when parsing JSON)
@@ -284,8 +277,7 @@ def _create_converter() -> cattrs.Converter:
             }
         valid = ", ".join(_valid_project_op_types)
         raise ValueError(
-            f"Unknown project operation type: {type(op).__name__}. "
-            f"Expected one of: {valid}"
+            f"Unknown project operation type: {type(op).__name__}. Expected one of: {valid}"
         )
 
     def structure_project_op(d: dict[str, Any], _: type) -> JsonProjectOperation:
@@ -294,10 +286,7 @@ def _create_converter() -> cattrs.Converter:
         if type_name == "set_sim_specs":
             return SetSimSpecs(sim_specs=conv.structure(payload["sim_specs"], SimSpecs))
         valid = ", ".join(_valid_project_op_types)
-        raise ValueError(
-            f"Unknown project operation type: {type_name!r}. "
-            f"Expected one of: {valid}"
-        )
+        raise ValueError(f"Unknown project operation type: {type_name!r}. Expected one of: {valid}")
 
     conv.register_unstructure_hook(Union[SetSimSpecs], unstructure_project_op)
     conv.register_structure_hook(Union[SetSimSpecs], structure_project_op)
@@ -325,8 +314,7 @@ def _create_converter() -> cattrs.Converter:
             return result
         valid_types = ", ".join(t.__name__ for t in _view_element_cls_to_name)
         raise ValueError(
-            f"Unknown view element type: {elem_type.__name__}. "
-            f"Expected one of: {valid_types}"
+            f"Unknown view element type: {elem_type.__name__}. Expected one of: {valid_types}"
         )
 
     def structure_view_element(d: dict[str, Any], _: type) -> ViewElement:
@@ -337,8 +325,7 @@ def _create_converter() -> cattrs.Converter:
             return conv.structure(data, _view_element_name_to_cls[type_name])
         valid_names = ", ".join(_view_element_name_to_cls.keys())
         raise ValueError(
-            f"Unknown view element type: {type_name!r}. "
-            f"Expected one of: {valid_names}"
+            f"Unknown view element type: {type_name!r}. Expected one of: {valid_names}"
         )
 
     conv.register_unstructure_hook(
@@ -395,9 +382,7 @@ def _create_converter() -> cattrs.Converter:
         conv.register_unstructure_hook(cls, _make_omit_default_hook(cls, conv, required))
 
     # GraphicalFunctionScale: unstructure and structure
-    conv.register_unstructure_hook(
-        GraphicalFunctionScale, lambda x: {"min": x.min, "max": x.max}
-    )
+    conv.register_unstructure_hook(GraphicalFunctionScale, lambda x: {"min": x.min, "max": x.max})
     conv.register_structure_hook(
         GraphicalFunctionScale,
         lambda d, _: GraphicalFunctionScale(min=d["min"], max=d["max"]),
@@ -506,10 +491,7 @@ def _create_converter() -> cattrs.Converter:
 
     # Module: handle references list
     def structure_module(d: dict[str, Any], _: type) -> Module:
-        references = [
-            conv.structure(ref, ModuleReference)
-            for ref in d.get("references", [])
-        ]
+        references = [conv.structure(ref, ModuleReference) for ref in d.get("references", [])]
         return Module(
             name=d["name"],
             model_name=d["model_name"],

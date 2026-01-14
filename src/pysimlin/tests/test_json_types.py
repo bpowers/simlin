@@ -14,6 +14,7 @@ from hypothesis import given, strategies as st, settings, assume
 
 try:
     import jsonschema
+
     HAS_JSONSCHEMA = True
 except ImportError:
     HAS_JSONSCHEMA = False
@@ -62,25 +63,33 @@ def ident_strategy(draw: Any) -> str:
 @st.composite
 def equation_strategy(draw: Any) -> str:
     """Generate simple valid equations."""
-    return draw(st.sampled_from([
-        "0",
-        "1",
-        "42",
-        "3.14159",
-        "x",
-        "x + y",
-        "a * b",
-        "TIME",
-        "INIT(x)",
-        "IF x > 0 THEN y ELSE z",
-    ]))
+    return draw(
+        st.sampled_from(
+            [
+                "0",
+                "1",
+                "42",
+                "3.14159",
+                "x",
+                "x + y",
+                "a * b",
+                "TIME",
+                "INIT(x)",
+                "IF x > 0 THEN y ELSE z",
+            ]
+        )
+    )
 
 
 @st.composite
 def graphical_function_scale_strategy(draw: Any) -> GraphicalFunctionScale:
     """Generate a graphical function scale."""
-    min_val = draw(st.floats(min_value=-1000, max_value=1000, allow_nan=False, allow_infinity=False))
-    max_val = draw(st.floats(min_value=min_val + 0.001, max_value=1001, allow_nan=False, allow_infinity=False))
+    min_val = draw(
+        st.floats(min_value=-1000, max_value=1000, allow_nan=False, allow_infinity=False)
+    )
+    max_val = draw(
+        st.floats(min_value=min_val + 0.001, max_value=1001, allow_nan=False, allow_infinity=False)
+    )
     return GraphicalFunctionScale(min=min_val, max=max_val)
 
 
@@ -93,7 +102,9 @@ def graphical_function_strategy(draw: Any) -> GraphicalFunction:
         points = []
         for i in range(num_points):
             x = float(i)
-            y = draw(st.floats(min_value=-100, max_value=100, allow_nan=False, allow_infinity=False))
+            y = draw(
+                st.floats(min_value=-100, max_value=100, allow_nan=False, allow_infinity=False)
+            )
             points.append((x, y))
         y_points: list[float] = []
     else:
@@ -377,7 +388,9 @@ class TestPatchJsonFormat:
 
     def test_upsert_stock_format(self) -> None:
         """UpsertStock should produce correctly tagged JSON."""
-        stock = Stock(name="population", inflows=["births"], outflows=["deaths"], initial_equation="100")
+        stock = Stock(
+            name="population", inflows=["births"], outflows=["deaths"], initial_equation="100"
+        )
         op = UpsertStock(stock=stock)
         patch = JsonModelPatch(name="main", ops=[op])
         project_patch = JsonProjectPatch(models=[patch])
@@ -459,9 +472,73 @@ class TestOptionalFieldSerialization:
         # For Flow, non_negative defaults to False
         flow_default = Flow(name="test", non_negative=False)
         result_default = converter.unstructure(flow_default)
-        assert "non_negative" not in result_default, "non_negative=False should be omitted (equals default)"
+        assert "non_negative" not in result_default, (
+            "non_negative=False should be omitted (equals default)"
+        )
 
         # True should be included
         flow_true = Flow(name="test", non_negative=True)
         result_true = converter.unstructure(flow_true)
         assert result_true.get("non_negative") is True
+
+
+class TestNullValueHandling:
+    """Tests for correct handling of explicit null values in JSON."""
+
+    def test_graphical_function_with_explicit_null_scales(self) -> None:
+        """GraphicalFunction should accept explicit null for x_scale/y_scale.
+
+        The JSON schema allows null for optional fields. When incoming JSON
+        explicitly sets x_scale or y_scale to null, we should treat it as None,
+        not raise an error.
+        """
+        # JSON with explicit null values for x_scale and y_scale
+        json_with_null_scales = {
+            "points": [[0.0, 1.0], [1.0, 2.0]],
+            "kind": "continuous",
+            "x_scale": None,
+            "y_scale": None,
+        }
+        gf = converter.structure(json_with_null_scales, GraphicalFunction)
+        assert gf.x_scale is None
+        assert gf.y_scale is None
+        assert gf.points == [(0.0, 1.0), (1.0, 2.0)]
+        assert gf.kind == "continuous"
+
+    def test_graphical_function_with_null_x_scale_only(self) -> None:
+        """GraphicalFunction should handle null x_scale with valid y_scale."""
+        json_with_mixed = {
+            "points": [[0.0, 1.0], [1.0, 2.0]],
+            "x_scale": None,
+            "y_scale": {"min": 0.0, "max": 10.0},
+        }
+        gf = converter.structure(json_with_mixed, GraphicalFunction)
+        assert gf.x_scale is None
+        assert gf.y_scale is not None
+        assert gf.y_scale.min == 0.0
+        assert gf.y_scale.max == 10.0
+
+    def test_graphical_function_with_null_y_scale_only(self) -> None:
+        """GraphicalFunction should handle valid x_scale with null y_scale."""
+        json_with_mixed = {
+            "points": [[0.0, 1.0], [1.0, 2.0]],
+            "x_scale": {"min": -5.0, "max": 5.0},
+            "y_scale": None,
+        }
+        gf = converter.structure(json_with_mixed, GraphicalFunction)
+        assert gf.x_scale is not None
+        assert gf.x_scale.min == -5.0
+        assert gf.x_scale.max == 5.0
+        assert gf.y_scale is None
+
+    def test_graphical_function_without_scale_keys(self) -> None:
+        """GraphicalFunction should handle missing x_scale/y_scale keys."""
+        # Keys are completely absent (different from explicit null)
+        json_without_scales = {
+            "points": [[0.0, 1.0], [1.0, 2.0]],
+            "kind": "discrete",
+        }
+        gf = converter.structure(json_without_scales, GraphicalFunction)
+        assert gf.x_scale is None
+        assert gf.y_scale is None
+        assert gf.kind == "discrete"
