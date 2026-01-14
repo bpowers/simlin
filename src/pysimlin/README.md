@@ -4,7 +4,7 @@ Python bindings for the Simlin system dynamics simulation engine.
 
 ## Features
 
-- Load models from XMILE, Vensim MDL, and binary protobuf formats
+- Load models from XMILE, Vensim MDL, and Simlin JSON and protobuf formats
 - Run system dynamics simulations with full control
 - Get simulation results as pandas DataFrames
 - Analyze model structure and feedback loops
@@ -31,28 +31,50 @@ pip install pysimlin
 
 ```python
 import simlin
+from simlin import Project
+from simlin.json_types import Stock, Flow, Auxiliary
 
-# Load a model (auto-detects format)
-model = simlin.load("model.stmx")
+# Create a simple population model programmatically
+project = Project.new(
+    name="population-demo",
+    sim_start=0.0,
+    sim_stop=100.0,
+    dt=0.25,
+    time_units="years"
+)
+
+model = project.get_model()
+with model.edit() as (_, patch):
+    # Stock: population level
+    patch.upsert_stock(Stock(
+        name="population",
+        initial_equation="1000",
+        inflows=["births"],
+        outflows=["deaths"]
+    ))
+
+    # Flows: births and deaths
+    patch.upsert_flow(Flow(name="births", equation="population * birth_rate"))
+    patch.upsert_flow(Flow(name="deaths", equation="population * death_rate"))
+
+    # Parameters
+    patch.upsert_aux(Auxiliary(name="birth_rate", equation="0.03"))
+    patch.upsert_aux(Auxiliary(name="death_rate", equation="0.02"))
 
 # Run simulation and get results
-run = model.run()
+run = model.run(analyze_loops=False)
 print(run.results.head())
 
 # Access individual variables
-population = run.results["population"]
-
-# Or use low-level simulation for gaming/interactive use
-with model.simulate() as sim:
-    sim.run_to_end()
-    run = sim.get_run()
-    print(run.results.head())
+population_series = run.results["population"]
+print(f"Population grows from {population_series.iloc[0]:.0f} to {population_series.iloc[-1]:.0f}")
 ```
 
 ## Examples
 
 ### Editing a flow in an existing model
 
+<!-- pysimlin-test: reset -->
 ```python
 """Example showing how to edit an existing model's flow equation with pysimlin."""
 
@@ -121,11 +143,9 @@ def main() -> None:
         baseline_final = run_simulation(model)
 
         with model.edit() as (current, patch):
-            flow_var = current["net_birth_rate"]
-            flow_var.flow.equation.scalar.equation = (
-                "fractional_growth_rate * population * 1.5"
-            )
-            patch.upsert_flow(flow_var.flow)
+            flow = current["net_birth_rate"]
+            flow.equation = "fractional_growth_rate * population * 1.5"
+            patch.upsert_flow(flow)
 
         accelerated_final = run_simulation(model)
 
@@ -149,6 +169,7 @@ if __name__ == "__main__":
 
 ### Building a logistic population model programmatically
 
+<!-- pysimlin-test: reset -->
 ```python
 """Create a new Simlin project and build a simple population model using pysimlin's edit API."""
 
@@ -264,17 +285,41 @@ Both examples live under `src/pysimlin/examples/` and are executed by `scripts/p
 
 ```python
 import simlin
-
-# Load a model (auto-detects format from extension)
-model = simlin.load("model.stmx")  # .stmx, .mdl, .json, etc.
-
-# Access the underlying project if needed
-project = model.project
-
-# Create a new blank project/model programmatically
 from simlin import Project
-project = Project.new(name="my-project", sim_start=0, sim_stop=100, dt=0.25)
+from simlin.json_types import Stock, Flow, Auxiliary
+
+# Create a model programmatically (used by all API examples below)
+project = Project.new(
+    name="api-demo",
+    sim_start=0.0,
+    sim_stop=100.0,
+    dt=0.25,
+    time_units="years"
+)
+
 model = project.get_model()
+with model.edit() as (_, patch):
+    patch.upsert_stock(Stock(
+        name="population",
+        initial_equation="1000",
+        inflows=["births"],
+        outflows=["deaths"]
+    ))
+    patch.upsert_flow(Flow(name="births", equation="population * birth_rate"))
+    patch.upsert_flow(Flow(name="deaths", equation="population * death_rate"))
+    patch.upsert_aux(Auxiliary(name="birth_rate", equation="0.03"))
+    patch.upsert_aux(Auxiliary(name="death_rate", equation="0.02"))
+
+print(f"Created model with {len(model.variables)} variables")
+```
+
+You can also load models from files:
+
+<!-- pysimlin-test: skip -->
+```python
+# Load from file (auto-detects format from extension)
+model = simlin.load("model.stmx")  # .stmx, .mdl, .json, etc.
+project = model.project
 ```
 
 ### Working with Models
@@ -357,11 +402,11 @@ run = model.run(analyze_loops=False)
 print(run.results.head())
 
 # Run with variable overrides
-run = model.run(overrides={"initial_population": 1000}, analyze_loops=False)
+run = model.run(overrides={"birth_rate": 0.05}, analyze_loops=False)
 
 # Use the cached base case
 base_case = model.base_case  # Automatically cached
-print(base_case.results["population"].plot())
+print(base_case.results["population"].tail())
 
 # Low-level API: create simulation for step-by-step control
 with model.simulate() as sim:
@@ -386,12 +431,11 @@ df = run.results  # Time series for all variables
 
 # Access specific variables
 population = df["population"]
-gdp = df["gdp"]
+births = df["births"]
 
 # Standard pandas operations
 print(df.describe())
 print(df.tail())
-df["population"].plot()
 
 # Get metadata
 time_spec = run.time_spec
@@ -401,19 +445,19 @@ overrides = run.overrides  # Dict of variable overrides used
 ### Model Interventions
 
 ```python
-# Run with different initial conditions
+# Run with different parameter values
 scenarios = {}
-for initial_pop in [100, 500, 1000]:
+for rate in [0.02, 0.03, 0.04]:
     run = model.run(
-        overrides={"initial_population": initial_pop},
+        overrides={"birth_rate": rate},
         analyze_loops=False
     )
-    scenarios[f"pop_{initial_pop}"] = run.results["population"]
+    scenarios[f"rate_{rate}"] = run.results["population"]
 
 # Compare scenarios
 import pandas as pd
 comparison = pd.DataFrame(scenarios)
-comparison.plot()
+print(comparison.tail())
 ```
 
 ### Feedback Loop Analysis
@@ -462,14 +506,18 @@ if loops:
 ### Model Export
 
 ```python
+from pathlib import Path
+
 # Export to different formats
 xmile_bytes = project.to_xmile()           # Export as XMILE XML
 json_bytes = project.serialize_json()      # Export as JSON
-pb_bytes = project.serialize_protobuf()    # Export as protobuf (legacy)
 
-# Save to file
-Path("exported.stmx").write_bytes(xmile_bytes)
-Path("model.json").write_bytes(json_bytes)
+print(f"XMILE export: {len(xmile_bytes)} bytes")
+print(f"JSON export: {len(json_bytes)} bytes")
+
+# Save to file (example - commented out to avoid creating files)
+# Path("exported.stmx").write_bytes(xmile_bytes)
+# Path("model.json").write_bytes(json_bytes)
 ```
 
 ### Error Handling
@@ -483,23 +531,33 @@ from simlin import (
     ErrorCode
 )
 
+# Check for compilation errors on the existing project
+errors = project.get_errors()
+if errors:
+    for error in errors:
+        print(f"{error.code.name} in {error.model_name}/{error.variable_name}")
+        print(f"  {error.message}")
+else:
+    print("No errors in project")
+```
+
+When loading models from files, you can catch import errors:
+
+<!-- pysimlin-test: skip -->
+```python
 try:
     model = simlin.load("model.stmx")
-    project = model.project
 except SimlinImportError as e:
     print(f"Import failed: {e}")
     if e.code == ErrorCode.XML_DESERIALIZATION:
         print("Invalid XML format")
-
-# Check for compilation errors
-errors = project.get_errors()
-for error in errors:
-    print(f"{error.code.name} in {error.model_name}/{error.variable_name}")
-    print(f"  {error.message}")
 ```
 
 ## Complete Example
 
+This example demonstrates loading a model from file and comparing scenarios with matplotlib:
+
+<!-- pysimlin-test: skip -->
 ```python
 import simlin
 import pandas as pd
