@@ -8,7 +8,7 @@ import * as path from 'path';
 import { init, reset, getMemory, isUrl, isNode, loadFileNode } from '../src/wasm';
 import { malloc, free } from '../src/memory';
 import { SimlinError } from '../src/error';
-import { SimlinErrorCode } from '../src/types';
+import { SimlinErrorCode, SimlinJsonFormat } from '../src/types';
 import {
   simlin_project_unref,
   simlin_project_get_model,
@@ -16,46 +16,9 @@ import {
   simlin_project_apply_patch,
   simlin_project_apply_patch_json,
 } from '../src/project';
-import { SimlinJsonFormat } from '../src/types';
 import { simlin_model_unref, simlin_model_get_latex_equation, simlin_model_get_var_names } from '../src/model';
 import { readErrorDetail } from '../src/error';
-import {
-  simlin_sim_new,
-  simlin_sim_unref,
-  simlin_sim_run_to_end,
-  simlin_sim_get_stepcount,
-  simlin_sim_get_series,
-} from '../src/sim';
-import { simlin_import_xmile, simlin_export_xmile } from '../src/import-export';
-
-// Helper to load the WASM module from the built file.
-// Initializes the WASM instance and stores it globally for test access.
-async function loadWasm(): Promise<void> {
-  const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
-  const wasmBuffer = fs.readFileSync(wasmPath);
-
-  try {
-    const module = await WebAssembly.compile(wasmBuffer);
-    const memory = new WebAssembly.Memory({ initial: 256, maximum: 16384 });
-    const instance = await WebAssembly.instantiate(module, {
-      env: { memory },
-    });
-
-    // The WASM module exports its own memory
-    const exports = instance.exports;
-    if (exports.memory instanceof WebAssembly.Memory) {
-      // Use exported memory
-    }
-
-    // Store instance globally for tests
-    (global as unknown as { __wasmInstance: WebAssembly.Instance }).__wasmInstance = instance;
-    (global as unknown as { __wasmMemory: WebAssembly.Memory }).__wasmMemory =
-      exports.memory instanceof WebAssembly.Memory ? exports.memory : memory;
-  } catch (e) {
-    console.error('Failed to load WASM:', e);
-    throw e;
-  }
-}
+import { simlin_import_xmile } from '../src/import-export';
 
 // Load the teacup test model in XMILE format from pysimlin fixtures.
 function loadTestXmile(): Uint8Array {
