@@ -356,7 +356,8 @@ export function simlin_project_is_simulatable(
 /**
  * Get all errors in a project.
  * @param project Project pointer
- * @returns Error pointer (null if no errors)
+ * @returns Error pointer (0 if no errors)
+ * @throws SimlinError if the call itself fails (e.g., invalid project pointer)
  */
 export function simlin_project_get_errors(project: SimlinProjectPtr): SimlinErrorPtr {
   const exports = getExports();
@@ -369,7 +370,10 @@ export function simlin_project_get_errors(project: SimlinProjectPtr): SimlinErro
     const errPtr = readOutPtr(outErrPtr);
 
     if (errPtr !== 0) {
+      const code = simlin_error_get_code(errPtr);
+      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
       simlin_error_free(errPtr);
+      throw new SimlinError(message, code);
     }
 
     return result;

@@ -8,9 +8,36 @@ let wasmInstance: WebAssembly.Instance | null = null;
 let wasmMemory: WebAssembly.Memory | null = null;
 
 /**
+ * Check if a string looks like a URL (http://, https://, or file://)
+ * @internal Exported for testing
+ */
+export function isUrl(path: string): boolean {
+  return path.startsWith('http://') || path.startsWith('https://') || path.startsWith('file://');
+}
+
+/**
+ * Check if we're running in Node.js
+ * @internal Exported for testing
+ */
+export function isNode(): boolean {
+  return typeof process !== 'undefined' && process.versions?.node !== undefined;
+}
+
+/**
+ * Load a file from the filesystem in Node.js
+ * @internal Exported for testing
+ */
+export async function loadFileNode(path: string): Promise<ArrayBuffer> {
+  const fs = await import('node:fs/promises');
+  const nodeBuffer = await fs.readFile(path);
+  return nodeBuffer.buffer.slice(nodeBuffer.byteOffset, nodeBuffer.byteOffset + nodeBuffer.byteLength);
+}
+
+/**
  * Initialize the WASM module.
  * Must be called before any other functions.
- * @param wasmPathOrBuffer - Either a path to the WASM file, or an ArrayBuffer/Uint8Array containing the WASM binary
+ * @param wasmPathOrBuffer - Either a path/URL to the WASM file, or an ArrayBuffer/Uint8Array containing the WASM binary.
+ *                           In browsers, paths are fetched as URLs. In Node.js, filesystem paths are read directly.
  */
 export async function init(wasmPathOrBuffer?: string | ArrayBuffer | Uint8Array): Promise<void> {
   if (wasmInstance !== null) {
@@ -28,8 +55,14 @@ export async function init(wasmPathOrBuffer?: string | ArrayBuffer | Uint8Array)
     buffer = copy.buffer;
   } else {
     const path = wasmPathOrBuffer ?? './core/libsimlin.wasm';
-    const response = await fetch(path);
-    buffer = await response.arrayBuffer();
+
+    // In Node.js, filesystem paths need to be read directly (fetch only works with URLs)
+    if (isNode() && !isUrl(path)) {
+      buffer = await loadFileNode(path);
+    } else {
+      const response = await fetch(path);
+      buffer = await response.arrayBuffer();
+    }
   }
 
   const module = await WebAssembly.compile(buffer);

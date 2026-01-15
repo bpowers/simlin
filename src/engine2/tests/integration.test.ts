@@ -6,7 +6,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { init, reset, getMemory } from '../src/wasm';
+import { init, reset, getMemory, isUrl, isNode, loadFileNode } from '../src/wasm';
 import { malloc, free, stringToWasm, wasmToString, copyToWasm, copyFromWasm } from '../src/memory';
 import { simlin_error_str, SimlinError } from '../src/error';
 import { SimlinErrorCode } from '../src/types';
@@ -16,6 +16,7 @@ import {
   simlin_project_get_model,
   simlin_project_serialize,
   simlin_project_is_simulatable,
+  simlin_project_get_errors,
 } from '../src/project';
 import { simlin_model_unref, simlin_model_get_latex_equation, simlin_model_get_var_names } from '../src/model';
 import { readErrorDetail } from '../src/error';
@@ -591,6 +592,109 @@ describe('WASM Integration Tests', () => {
 
       // Cleanup
       simlin_model_unref(model);
+      simlin_project_unref(project);
+    });
+  });
+
+  describe('Node.js File Loading Helpers', () => {
+    describe('isUrl', () => {
+      it('should return true for http:// URLs', () => {
+        expect(isUrl('http://example.com/file.wasm')).toBe(true);
+        expect(isUrl('http://localhost:8080/wasm')).toBe(true);
+      });
+
+      it('should return true for https:// URLs', () => {
+        expect(isUrl('https://example.com/file.wasm')).toBe(true);
+        expect(isUrl('https://cdn.example.org/lib.wasm')).toBe(true);
+      });
+
+      it('should return true for file:// URLs', () => {
+        expect(isUrl('file:///path/to/file.wasm')).toBe(true);
+        expect(isUrl('file://localhost/path')).toBe(true);
+      });
+
+      it('should return false for filesystem paths', () => {
+        expect(isUrl('./core/libsimlin.wasm')).toBe(false);
+        expect(isUrl('/absolute/path/to/file.wasm')).toBe(false);
+        expect(isUrl('../parent/file.wasm')).toBe(false);
+        expect(isUrl('relative/path.wasm')).toBe(false);
+      });
+    });
+
+    describe('isNode', () => {
+      it('should return true in Node.js environment', () => {
+        // We're running tests in Node.js, so this should be true
+        expect(isNode()).toBe(true);
+      });
+    });
+
+    describe('loadFileNode', () => {
+      it('should load a file from the filesystem', async () => {
+        const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
+        const buffer = await loadFileNode(wasmPath);
+
+        expect(buffer).toBeInstanceOf(ArrayBuffer);
+        expect(buffer.byteLength).toBeGreaterThan(0);
+
+        // Verify it's valid WASM (starts with magic bytes \0asm)
+        const view = new Uint8Array(buffer);
+        expect(view[0]).toBe(0x00);
+        expect(view[1]).toBe(0x61); // 'a'
+        expect(view[2]).toBe(0x73); // 's'
+        expect(view[3]).toBe(0x6d); // 'm'
+      });
+
+      it('should throw for non-existent file', async () => {
+        await expect(loadFileNode('/nonexistent/path/to/file.wasm')).rejects.toThrow();
+      });
+    });
+
+    describe('init with filesystem path', () => {
+      it('should initialize WASM from filesystem path in Node.js', async () => {
+        reset();
+        const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
+        await init(wasmPath);
+
+        // Verify WASM is loaded by checking we can get memory
+        const memory = getMemory();
+        expect(memory).toBeInstanceOf(WebAssembly.Memory);
+      });
+    });
+  });
+
+  describe('Project Error Handling', () => {
+    beforeAll(async () => {
+      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
+      const wasmBuffer = fs.readFileSync(wasmPath);
+
+      reset();
+      await init(wasmBuffer);
+    });
+
+    it('should throw SimlinError when simlin_project_get_errors is called with invalid project', () => {
+      // Pass an invalid project pointer (0 or any invalid value)
+      expect(() => simlin_project_get_errors(0)).toThrow(SimlinError);
+
+      try {
+        simlin_project_get_errors(0);
+      } catch (e) {
+        expect(e).toBeInstanceOf(SimlinError);
+        if (e instanceof SimlinError) {
+          expect(e.code).toBe(SimlinErrorCode.Generic);
+        }
+      }
+    });
+
+    it('should return 0 for a valid project with no errors', () => {
+      const xmileData = loadTestXmile();
+      const project = simlin_import_xmile(xmileData);
+      expect(project).toBeGreaterThan(0);
+
+      // The teacup model is valid, so it should have no errors
+      // simlin_project_get_errors returns 0 (null pointer) when there are no errors
+      const errPtr = simlin_project_get_errors(project);
+      expect(errPtr).toBe(0);
+
       simlin_project_unref(project);
     });
   });
