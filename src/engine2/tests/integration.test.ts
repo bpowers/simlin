@@ -5,20 +5,19 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { init, reset, getMemory, isUrl, isNode, loadFileNode } from '../src/wasm';
-import { malloc, free } from '../src/memory';
-import { SimlinError } from '../src/error';
-import { SimlinErrorCode, SimlinJsonFormat } from '../src/types';
+import { init, reset, getMemory, isUrl, isNode, loadFileNode } from '../src/internal/wasm';
+import { malloc, free } from '../src/internal/memory';
+import { SimlinError, readErrorDetail } from '../src/internal/error';
+import { SimlinErrorCode, SimlinJsonFormat } from '../src/internal/types';
 import {
   simlin_project_unref,
   simlin_project_get_model,
   simlin_project_get_errors,
   simlin_project_apply_patch,
   simlin_project_apply_patch_json,
-} from '../src/project';
-import { simlin_model_unref, simlin_model_get_latex_equation, simlin_model_get_var_names } from '../src/model';
-import { readErrorDetail } from '../src/error';
-import { simlin_import_xmile } from '../src/import-export';
+} from '../src/internal/project';
+import { simlin_model_unref, simlin_model_get_latex_equation, simlin_model_get_var_names } from '../src/internal/model';
+import { simlin_import_xmile } from '../src/internal/import-export';
 
 // Load the teacup test model in XMILE format from pysimlin fixtures.
 function loadTestXmile(): Uint8Array {
