@@ -133,3 +133,6 @@ jobs:
           rustup target add wasm32-unknown-unknown
           yarn install
           DISABLE_WASM_OPT=1 yarn build
+
+      - name: Run engine2 tests
+        run: yarn workspace @system-dynamics/engine2 test

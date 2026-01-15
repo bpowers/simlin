@@ -38,7 +38,9 @@
     "eslint-plugin-prettier": "^5.0.0",
     "prettier": "^3.0.0",
     "typescript": "^5.7.2",
-    "vitest": "^2.0.0"
+    "jest": "^30.0.0",
+    "@types/jest": "^30.0.0",
+    "ts-jest": "^29.4.0"
   },
   "scripts": {
     "needs-format": "prettier -l 'src/**/*.ts' 'tests/**/*.ts'",
@@ -46,7 +48,7 @@
     "lint": "eslint src",
     "clean": "rm -rf ./lib ./lib.browser ./core",
     "build": "./build.sh",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "jest",
+    "test:watch": "jest --watch"
   }
 }
