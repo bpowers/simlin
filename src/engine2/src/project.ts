@@ -449,8 +449,19 @@ export function simlin_project_apply_patch(
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+
+      // Also free any collected errors to prevent memory leak
+      const collectedPtr = readOutPtr(outCollectedPtr);
+      if (collectedPtr !== 0) {
+        // Read collected error details and merge with main error details
+        const collectedDetails = readAllErrorDetails(collectedPtr);
+        details.push(...collectedDetails);
+        simlin_error_free(collectedPtr);
+      }
+
+      throw new SimlinError(message, code, details);
     }
 
     return readOutPtr(outCollectedPtr);
@@ -500,8 +511,19 @@ export function simlin_project_apply_patch_json(
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+
+      // Also free any collected errors to prevent memory leak
+      const collectedPtr = readOutPtr(outCollectedPtr);
+      if (collectedPtr !== 0) {
+        // Read collected error details and merge with main error details
+        const collectedDetails = readAllErrorDetails(collectedPtr);
+        details.push(...collectedDetails);
+        simlin_error_free(collectedPtr);
+      }
+
+      throw new SimlinError(message, code, details);
     }
 
     return readOutPtr(outCollectedPtr);

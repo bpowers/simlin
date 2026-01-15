@@ -14,10 +14,12 @@ import {
   simlin_project_open,
   simlin_project_unref,
   simlin_project_get_model,
-  simlin_project_serialize,
   simlin_project_is_simulatable,
   simlin_project_get_errors,
+  simlin_project_apply_patch,
+  simlin_project_apply_patch_json,
 } from '../src/project';
+import { SimlinJsonFormat } from '../src/types';
 import { simlin_model_unref, simlin_model_get_latex_equation, simlin_model_get_var_names } from '../src/model';
 import { readErrorDetail } from '../src/error';
 import { simlin_sim_new, simlin_sim_unref, simlin_sim_run_to_end, simlin_sim_get_stepcount, simlin_sim_get_series } from '../src/sim';
@@ -694,6 +696,81 @@ describe('WASM Integration Tests', () => {
       // simlin_project_get_errors returns 0 (null pointer) when there are no errors
       const errPtr = simlin_project_get_errors(project);
       expect(errPtr).toBe(0);
+
+      simlin_project_unref(project);
+    });
+  });
+
+  describe('Patch Error Handling', () => {
+    beforeAll(async () => {
+      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
+      const wasmBuffer = fs.readFileSync(wasmPath);
+
+      reset();
+      await init(wasmBuffer);
+    });
+
+    it('should throw SimlinError when apply_patch fails with invalid project', () => {
+      // Create an invalid patch (empty data)
+      const invalidPatch = new Uint8Array([]);
+
+      expect(() => simlin_project_apply_patch(0, invalidPatch, false, false)).toThrow(SimlinError);
+
+      try {
+        simlin_project_apply_patch(0, invalidPatch, false, false);
+      } catch (e) {
+        expect(e).toBeInstanceOf(SimlinError);
+        if (e instanceof SimlinError) {
+          expect(e.code).toBe(SimlinErrorCode.Generic);
+          // Verify the error has details array (may be empty for this error type)
+          expect(Array.isArray(e.details)).toBe(true);
+          // Verify the error has a message
+          expect(typeof e.message).toBe('string');
+          expect(e.message.length).toBeGreaterThan(0);
+        }
+      }
+    });
+
+    it('should throw SimlinError when apply_patch_json fails with invalid project', () => {
+      // Create an invalid JSON patch
+      const invalidPatch = new TextEncoder().encode('{}');
+
+      expect(() => simlin_project_apply_patch_json(0, invalidPatch, SimlinJsonFormat.Native, false, false)).toThrow(SimlinError);
+
+      try {
+        simlin_project_apply_patch_json(0, invalidPatch, SimlinJsonFormat.Native, false, false);
+      } catch (e) {
+        expect(e).toBeInstanceOf(SimlinError);
+        if (e instanceof SimlinError) {
+          expect(e.code).toBe(SimlinErrorCode.Generic);
+          // Verify the error has details array (may be empty for this error type)
+          expect(Array.isArray(e.details)).toBe(true);
+          // Verify the error has a message
+          expect(typeof e.message).toBe('string');
+          expect(e.message.length).toBeGreaterThan(0);
+        }
+      }
+    });
+
+    it('should apply a valid JSON patch successfully', () => {
+      const xmileData = loadTestXmile();
+      const project = simlin_import_xmile(xmileData);
+      expect(project).toBeGreaterThan(0);
+
+      // An empty JSON patch is valid and does nothing
+      const emptyPatch = new TextEncoder().encode('{"project_ops":[],"models":[]}');
+
+      // Apply the patch - should not throw
+      const collectedErrors = simlin_project_apply_patch_json(
+        project,
+        emptyPatch,
+        SimlinJsonFormat.Native,
+        false,
+        false
+      );
+
+      // No errors should be collected for a valid empty patch
+      expect(collectedErrors).toBe(0);
 
       simlin_project_unref(project);
     });
