@@ -13,6 +13,7 @@
     "packages": [
       "src/xmutil-js",
       "src/engine",
+      "src/engine2",
       "src/importer",
       "src/core",
       "src/diagram",

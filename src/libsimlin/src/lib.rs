@@ -1154,6 +1154,84 @@ pub unsafe extern "C" fn simlin_model_get_links(
     Box::into_raw(links)
 }
 
+/// Gets the LaTeX representation of a variable's equation
+///
+/// Returns the equation rendered as a LaTeX string, or NULL if the variable
+/// doesn't exist or doesn't have an equation (e.g., modules).
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `ident` must be a valid C string
+/// - The returned string must be freed with simlin_free_string
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_latex_equation(
+    model: *mut SimlinModel,
+    ident: *const c_char,
+    out_error: *mut *mut SimlinError,
+) -> *mut c_char {
+    clear_out_error(out_error);
+
+    if ident.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("ident pointer must not be NULL"),
+        );
+        return ptr::null_mut();
+    }
+
+    let model_ref = match require_model(model) {
+        Ok(m) => m,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return ptr::null_mut();
+        }
+    };
+
+    let ident_str = match CStr::from_ptr(ident).to_str() {
+        Ok(s) => canonicalize(s),
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message("ident is not valid UTF-8"),
+            );
+            return ptr::null_mut();
+        }
+    };
+
+    let project_locked = (*model_ref.project).project.lock().unwrap();
+
+    let eng_model = match project_locked
+        .models
+        .get(&canonicalize(&model_ref.model_name))
+    {
+        Some(m) => m,
+        None => {
+            return ptr::null_mut();
+        }
+    };
+
+    let var = match eng_model.variables.get(&ident_str) {
+        Some(v) => v,
+        None => {
+            return ptr::null_mut();
+        }
+    };
+
+    let ast = match var.ast() {
+        Some(a) => a,
+        None => {
+            return ptr::null_mut();
+        }
+    };
+
+    let latex = ast.to_latex();
+    match CString::new(latex) {
+        Ok(s) => s.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
 /// Helper function to create a VM for a given project and model
 fn create_vm(project: &engine::Project, model_name: &str) -> Result<Vm, engine::Error> {
     let compiler = engine::Simulation::new(project, model_name)?;
@@ -2229,6 +2307,7 @@ pub unsafe extern "C" fn simlin_import_xmile(
 /// # Safety
 /// - `data` must be a valid pointer to at least `len` bytes
 /// - `out_error` may be null
+#[cfg(feature = "vensim")]
 #[no_mangle]
 pub unsafe extern "C" fn simlin_import_mdl(
     data: *const u8,
@@ -5256,6 +5335,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "vensim")]
     #[test]
     fn test_import_mdl() {
         // Load the SIR MDL model
@@ -5557,16 +5637,19 @@ mod tests {
             assert!(!err.is_null(), "Expected an error but got success");
             simlin_error_free(err);
 
-            // Test with invalid MDL
-            err = ptr::null_mut();
-            let proj = simlin_import_mdl(
-                bad_data.as_ptr(),
-                bad_data.len(),
-                &mut err as *mut *mut SimlinError,
-            );
-            assert!(proj.is_null());
-            assert!(!err.is_null(), "Expected an error but got success");
-            simlin_error_free(err);
+            // Test with invalid MDL (only when vensim feature is enabled)
+            #[cfg(feature = "vensim")]
+            {
+                err = ptr::null_mut();
+                let proj = simlin_import_mdl(
+                    bad_data.as_ptr(),
+                    bad_data.len(),
+                    &mut err as *mut *mut SimlinError,
+                );
+                assert!(proj.is_null());
+                assert!(!err.is_null(), "Expected an error but got success");
+                simlin_error_free(err);
+            }
         }
     }
 
@@ -8858,6 +8941,231 @@ mod tests {
             );
 
             simlin_error_free(all_errors);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_model_get_latex_equation() {
+        let datamodel = TestProject::new("latex_test")
+            .aux("test_var", "10 + 5 * 2", None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut get_model_error: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut get_model_error);
+            assert!(get_model_error.is_null());
+            assert!(!model.is_null());
+
+            // Get LaTeX for the variable
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            let ident = CString::new("test_var").unwrap();
+            let latex_ptr = simlin_model_get_latex_equation(model, ident.as_ptr(), &mut out_error);
+
+            assert!(out_error.is_null(), "expected no error getting latex");
+            assert!(!latex_ptr.is_null(), "expected non-null latex string");
+
+            let latex = CStr::from_ptr(latex_ptr).to_str().unwrap();
+            assert!(!latex.is_empty(), "latex should not be empty");
+            // The LaTeX should contain the equation components
+            assert!(latex.contains("10"), "latex should contain 10");
+
+            simlin_free_string(latex_ptr);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_model_get_latex_equation_nonexistent_var() {
+        let datamodel = TestProject::new("latex_nonexistent").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut get_model_error: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut get_model_error);
+            assert!(get_model_error.is_null());
+            assert!(!model.is_null());
+
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            let ident = CString::new("nonexistent").unwrap();
+            let latex_ptr = simlin_model_get_latex_equation(model, ident.as_ptr(), &mut out_error);
+
+            // Should return null for nonexistent variable
+            assert!(latex_ptr.is_null(), "expected null for nonexistent var");
+
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_model_get_latex_equation_null_ident() {
+        let datamodel = TestProject::new("latex_null_ident").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut get_model_error: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut get_model_error);
+            assert!(get_model_error.is_null());
+            assert!(!model.is_null());
+
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            let latex_ptr = simlin_model_get_latex_equation(model, ptr::null(), &mut out_error);
+
+            // Should return error for null ident
+            assert!(!out_error.is_null(), "expected error for null ident");
+            assert!(latex_ptr.is_null());
+
+            simlin_error_free(out_error);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_model_get_latex_equation_null_model() {
+        unsafe {
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            let ident = CString::new("test_var").unwrap();
+            let latex_ptr =
+                simlin_model_get_latex_equation(ptr::null_mut(), ident.as_ptr(), &mut out_error);
+
+            // Should return error for null model
+            assert!(!out_error.is_null(), "expected error for null model");
+            assert!(latex_ptr.is_null());
+
+            // Verify error details
+            let code = simlin_error_get_code(out_error);
+            assert_eq!(code, SimlinErrorCode::Generic);
+
+            simlin_error_free(out_error);
+        }
+    }
+
+    #[test]
+    fn test_model_get_latex_equation_invalid_utf8() {
+        let datamodel = TestProject::new("latex_invalid_utf8").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut get_model_error: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut get_model_error);
+            assert!(get_model_error.is_null());
+            assert!(!model.is_null());
+
+            // Create invalid UTF-8 sequence: 0xFF is never valid in UTF-8
+            let invalid_utf8: [u8; 4] = [0xFF, 0xFE, 0x00, 0x00];
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            let latex_ptr = simlin_model_get_latex_equation(
+                model,
+                invalid_utf8.as_ptr() as *const i8,
+                &mut out_error,
+            );
+
+            // Should return error for invalid UTF-8
+            assert!(!out_error.is_null(), "expected error for invalid UTF-8");
+            assert!(latex_ptr.is_null());
+
+            // Verify error message mentions UTF-8
+            let msg_ptr = simlin_error_get_message(out_error);
+            assert!(!msg_ptr.is_null());
+            let msg = CStr::from_ptr(msg_ptr).to_str().unwrap();
+            assert!(
+                msg.contains("UTF-8"),
+                "error message should mention UTF-8: {}",
+                msg
+            );
+
+            simlin_error_free(out_error);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_model_get_latex_equation_module_var_no_ast() {
+        // Module variables exist in the model but have no AST (they reference other models)
+        // This tests the path where var.ast() returns None
+        use engine::datamodel::{self, Dt, Equation, Project, SimMethod, SimSpecs, Visibility};
+
+        // Create a project with two models: a child model and main model with a module
+        let project = Project {
+            name: "module_test".to_string(),
+            sim_specs: SimSpecs {
+                start: 0.0,
+                stop: 1.0,
+                dt: Dt::Dt(1.0),
+                save_step: Some(Dt::Dt(1.0)),
+                sim_method: SimMethod::Euler,
+                time_units: Some("Month".to_string()),
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                // Child model that will be referenced as a module
+                datamodel::Model {
+                    name: "child_model".to_string(),
+                    sim_specs: None,
+                    variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "child_var".to_string(),
+                        equation: Equation::Scalar("42".to_string(), None),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                    })],
+                    views: vec![],
+                    loop_metadata: vec![],
+                },
+                // Main model with a module variable
+                datamodel::Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    variables: vec![datamodel::Variable::Module(datamodel::Module {
+                        ident: "my_module".to_string(),
+                        model_name: "child_model".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![],
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                    })],
+                    views: vec![],
+                    loop_metadata: vec![],
+                },
+            ],
+            source: Default::default(),
+            ai_information: None,
+        };
+
+        let proj = open_project_from_datamodel(&project);
+
+        unsafe {
+            let mut get_model_error: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut get_model_error);
+            assert!(get_model_error.is_null());
+            assert!(!model.is_null());
+
+            // "my_module" is a Module variable that exists but has no equation/AST
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            let ident = CString::new("my_module").unwrap();
+            let latex_ptr = simlin_model_get_latex_equation(model, ident.as_ptr(), &mut out_error);
+
+            // Should return null since modules have no AST
+            assert!(out_error.is_null(), "should not have an error");
+            assert!(
+                latex_ptr.is_null(),
+                "should return null for module with no AST"
+            );
+
+            simlin_model_unref(model);
             simlin_project_unref(proj);
         }
     }
