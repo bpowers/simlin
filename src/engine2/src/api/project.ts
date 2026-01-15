@@ -161,7 +161,7 @@ export class Project {
    * Get all models in this project.
    * @returns Array of Model instances
    */
-  get models(): Model[] {
+  get models(): readonly Model[] {
     this.checkDisposed();
     return this.getModelNames().map((name) => this.getModel(name));
   }

@@ -229,7 +229,7 @@ export class Model {
   /**
    * Stock variables in the model (immutable array).
    */
-  get stocks(): Stock[] {
+  get stocks(): readonly Stock[] {
     this.checkDisposed();
     if (this._cachedStocks !== null) {
       return this._cachedStocks;
@@ -254,7 +254,7 @@ export class Model {
   /**
    * Flow variables in the model (immutable array).
    */
-  get flows(): Flow[] {
+  get flows(): readonly Flow[] {
     this.checkDisposed();
     if (this._cachedFlows !== null) {
       return this._cachedFlows;
@@ -285,7 +285,7 @@ export class Model {
   /**
    * Auxiliary variables in the model (immutable array).
    */
-  get auxs(): Aux[] {
+  get auxs(): readonly Aux[] {
     this.checkDisposed();
     if (this._cachedAuxs !== null) {
       return this._cachedAuxs;
@@ -319,7 +319,7 @@ export class Model {
   /**
    * All variables in the model (stocks + flows + auxs).
    */
-  get variables(): Variable[] {
+  get variables(): readonly Variable[] {
     this.checkDisposed();
     if (this._cachedVariables !== null) {
       return this._cachedVariables;
@@ -362,7 +362,7 @@ export class Model {
   /**
    * Structural feedback loops (no behavior data).
    */
-  get loops(): Loop[] {
+  get loops(): readonly Loop[] {
     this.checkDisposed();
     if (this._project === null) {
       return [];

@@ -41,7 +41,7 @@ export class Run {
   /**
    * Variable names in this run.
    */
-  get varNames(): string[] {
+  get varNames(): readonly string[] {
     if (this._cachedVarNames === null) {
       this._cachedVarNames = this._sim.getVarNames();
     }
@@ -52,7 +52,7 @@ export class Run {
    * Get the time series for all variables.
    * @returns Map of variable name to Float64Array
    */
-  get results(): Map<string, Float64Array> {
+  get results(): ReadonlyMap<string, Float64Array> {
     if (this._cachedResults !== null) {
       return this._cachedResults;
     }
@@ -97,14 +97,14 @@ export class Run {
    * Returns the structural loops from the model. For loop scores,
    * use the links with LTM enabled.
    */
-  get loops(): Loop[] {
+  get loops(): readonly Loop[] {
     return this._sim.model.loops;
   }
 
   /**
    * Get causal links, potentially with LTM scores.
    */
-  get links(): Link[] {
+  get links(): readonly Link[] {
     return this._sim.getLinks();
   }
 
