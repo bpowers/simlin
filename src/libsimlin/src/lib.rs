@@ -9023,4 +9023,150 @@ mod tests {
             simlin_project_unref(proj);
         }
     }
+
+    #[test]
+    fn test_model_get_latex_equation_null_model() {
+        unsafe {
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            let ident = CString::new("test_var").unwrap();
+            let latex_ptr =
+                simlin_model_get_latex_equation(ptr::null_mut(), ident.as_ptr(), &mut out_error);
+
+            // Should return error for null model
+            assert!(!out_error.is_null(), "expected error for null model");
+            assert!(latex_ptr.is_null());
+
+            // Verify error details
+            let code = simlin_error_get_code(out_error);
+            assert_eq!(code, SimlinErrorCode::Generic);
+
+            simlin_error_free(out_error);
+        }
+    }
+
+    #[test]
+    fn test_model_get_latex_equation_invalid_utf8() {
+        let datamodel = TestProject::new("latex_invalid_utf8").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut get_model_error: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut get_model_error);
+            assert!(get_model_error.is_null());
+            assert!(!model.is_null());
+
+            // Create invalid UTF-8 sequence: 0xFF is never valid in UTF-8
+            let invalid_utf8: [u8; 4] = [0xFF, 0xFE, 0x00, 0x00];
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            let latex_ptr = simlin_model_get_latex_equation(
+                model,
+                invalid_utf8.as_ptr() as *const i8,
+                &mut out_error,
+            );
+
+            // Should return error for invalid UTF-8
+            assert!(!out_error.is_null(), "expected error for invalid UTF-8");
+            assert!(latex_ptr.is_null());
+
+            // Verify error message mentions UTF-8
+            let msg_ptr = simlin_error_get_message(out_error);
+            assert!(!msg_ptr.is_null());
+            let msg = CStr::from_ptr(msg_ptr).to_str().unwrap();
+            assert!(
+                msg.contains("UTF-8"),
+                "error message should mention UTF-8: {}",
+                msg
+            );
+
+            simlin_error_free(out_error);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_model_get_latex_equation_module_var_no_ast() {
+        // Module variables exist in the model but have no AST (they reference other models)
+        // This tests the path where var.ast() returns None
+        use engine::datamodel::{self, Dt, Equation, Project, SimMethod, SimSpecs, Visibility};
+
+        // Create a project with two models: a child model and main model with a module
+        let project = Project {
+            name: "module_test".to_string(),
+            sim_specs: SimSpecs {
+                start: 0.0,
+                stop: 1.0,
+                dt: Dt::Dt(1.0),
+                save_step: Some(Dt::Dt(1.0)),
+                sim_method: SimMethod::Euler,
+                time_units: Some("Month".to_string()),
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                // Child model that will be referenced as a module
+                datamodel::Model {
+                    name: "child_model".to_string(),
+                    sim_specs: None,
+                    variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "child_var".to_string(),
+                        equation: Equation::Scalar("42".to_string(), None),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                    })],
+                    views: vec![],
+                    loop_metadata: vec![],
+                },
+                // Main model with a module variable
+                datamodel::Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    variables: vec![datamodel::Variable::Module(datamodel::Module {
+                        ident: "my_module".to_string(),
+                        model_name: "child_model".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![],
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                    })],
+                    views: vec![],
+                    loop_metadata: vec![],
+                },
+            ],
+            source: Default::default(),
+            ai_information: None,
+        };
+
+        let proj = open_project_from_datamodel(&project);
+
+        unsafe {
+            let mut get_model_error: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut get_model_error);
+            assert!(get_model_error.is_null());
+            assert!(!model.is_null());
+
+            // "my_module" is a Module variable that exists but has no equation/AST
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            let ident = CString::new("my_module").unwrap();
+            let latex_ptr = simlin_model_get_latex_equation(model, ident.as_ptr(), &mut out_error);
+
+            // Should return null since modules have no AST
+            assert!(out_error.is_null(), "should not have an error");
+            assert!(
+                latex_ptr.is_null(),
+                "should return null for module with no AST"
+            );
+
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
 }
