@@ -23,8 +23,24 @@ import {
 } from '../sim';
 import { simlin_model_get_var_names } from '../model';
 import { simlin_analyze_get_links, simlin_free_links, readLinks } from '../analysis';
-import { SimlinSimPtr, Link as LowLevelLink } from '../types';
+import { SimlinSimPtr, SimlinLinkPolarity, Link as LowLevelLink } from '../types';
 import { Link, LinkPolarity } from './types';
+
+/**
+ * Convert low-level link polarity to high-level type with validation.
+ */
+function convertLinkPolarity(rawPolarity: SimlinLinkPolarity): LinkPolarity {
+  switch (rawPolarity) {
+    case SimlinLinkPolarity.Positive:
+      return LinkPolarity.Positive;
+    case SimlinLinkPolarity.Negative:
+      return LinkPolarity.Negative;
+    case SimlinLinkPolarity.Unknown:
+      return LinkPolarity.Unknown;
+    default:
+      throw new Error(`Invalid link polarity value: ${rawPolarity}`);
+  }
+}
 import { Model } from './model';
 import { Run } from './run';
 
@@ -198,7 +214,7 @@ export class Sim {
     return rawLinks.map((link: LowLevelLink) => ({
       from: link.from,
       to: link.to,
-      polarity: link.polarity as unknown as LinkPolarity,
+      polarity: convertLinkPolarity(link.polarity),
       score: link.score || undefined,
     }));
   }

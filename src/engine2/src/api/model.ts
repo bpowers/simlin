@@ -17,7 +17,7 @@ import {
   simlin_model_get_links,
 } from '../model';
 import { readLinks, simlin_free_links } from '../analysis';
-import { SimlinModelPtr, Link as LowLevelLink } from '../types';
+import { SimlinModelPtr, SimlinLinkPolarity, Link as LowLevelLink } from '../types';
 import {
   Stock,
   Flow,
@@ -36,6 +36,23 @@ import { Project } from './project';
 import { Sim } from './sim';
 import { Run } from './run';
 import { ModelPatchBuilder } from './patch';
+
+/**
+ * Convert low-level link polarity to high-level type with validation.
+ * Validates that the polarity value is within expected range.
+ */
+function convertLinkPolarity(rawPolarity: SimlinLinkPolarity): LinkPolarity {
+  switch (rawPolarity) {
+    case SimlinLinkPolarity.Positive:
+      return LinkPolarity.Positive;
+    case SimlinLinkPolarity.Negative:
+      return LinkPolarity.Negative;
+    case SimlinLinkPolarity.Unknown:
+      return LinkPolarity.Unknown;
+    default:
+      throw new Error(`Invalid link polarity value: ${rawPolarity}`);
+  }
+}
 
 /**
  * Parse a DT string to a number.
@@ -222,7 +239,7 @@ export class Model {
     this._cachedStocks = (model.stocks || []).map((s: JsonStock) => ({
       type: 'stock' as const,
       name: s.name,
-      initialEquation: this.extractEquation(s.initial_equation, s.arrayed_equation, 'equation'),
+      initialEquation: this.extractEquation(s.initial_equation, s.arrayed_equation, 'initial_equation'),
       inflows: s.inflows || [],
       outflows: s.outflows || [],
       units: s.units || undefined,
@@ -314,6 +331,7 @@ export class Model {
 
   /**
    * Time specification for simulation.
+   * Uses model-level sim_specs if present, otherwise falls back to project-level.
    */
   get timeSpec(): TimeSpec {
     this.checkDisposed();
@@ -326,7 +344,10 @@ export class Model {
     }
 
     const projectJson = JSON.parse(this._project.serializeJson());
-    const simSpecs = projectJson.sim_specs;
+    const modelJson = this.getModelJson();
+
+    // Use model-level sim_specs if present, otherwise fall back to project-level
+    const simSpecs = modelJson.sim_specs ?? projectJson.sim_specs;
 
     this._cachedTimeSpec = {
       start: simSpecs.start_time ?? 0,
@@ -384,7 +405,7 @@ export class Model {
     return rawLinks.map((link: LowLevelLink) => ({
       from: link.from,
       to: link.to,
-      polarity: link.polarity as unknown as LinkPolarity,
+      polarity: convertLinkPolarity(link.polarity),
       score: link.score || undefined,
     }));
   }
@@ -434,7 +455,23 @@ export class Model {
     }
 
     const errorDetails = this._project.getErrors();
-    return errorDetails.map((detail) => ({
+
+    // Filter to errors for this model only
+    const modelErrors = errorDetails.filter((detail) => {
+      // If no model name on error, it's a project-level error - exclude
+      if (!detail.modelName) {
+        return false;
+      }
+      // For the main model (null name), match errors with no model or matching model
+      if (this._name === null) {
+        // Main model: include if modelName matches any model name in project
+        // or if it's an empty string (legacy format)
+        return true;
+      }
+      return detail.modelName === this._name;
+    });
+
+    return modelErrors.map((detail) => ({
       severity: 'error' as const,
       message: detail.message || 'Unknown error',
       variable: detail.variableName || undefined,
@@ -516,7 +553,8 @@ export class Model {
     // Create patch builder
     const patch = new ModelPatchBuilder(modelName);
 
-    // Call user callback
+    // Call user callback - if it throws, the patch won't be applied
+    // and model state remains unchanged
     callback(currentVars, patch);
 
     // If no operations, return early

@@ -286,7 +286,10 @@ export class Project {
       return;
     }
 
-    // Clear model cache
+    // Dispose all cached models first (includes main model if accessed)
+    for (const model of this._models.values()) {
+      model.dispose();
+    }
     this._models.clear();
     this._mainModel = null;
 
