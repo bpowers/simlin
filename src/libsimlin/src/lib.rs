@@ -2307,6 +2307,7 @@ pub unsafe extern "C" fn simlin_import_xmile(
 /// # Safety
 /// - `data` must be a valid pointer to at least `len` bytes
 /// - `out_error` may be null
+#[cfg(feature = "vensim")]
 #[no_mangle]
 pub unsafe extern "C" fn simlin_import_mdl(
     data: *const u8,
@@ -5334,6 +5335,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "vensim")]
     #[test]
     fn test_import_mdl() {
         // Load the SIR MDL model
@@ -5635,16 +5637,19 @@ mod tests {
             assert!(!err.is_null(), "Expected an error but got success");
             simlin_error_free(err);
 
-            // Test with invalid MDL
-            err = ptr::null_mut();
-            let proj = simlin_import_mdl(
-                bad_data.as_ptr(),
-                bad_data.len(),
-                &mut err as *mut *mut SimlinError,
-            );
-            assert!(proj.is_null());
-            assert!(!err.is_null(), "Expected an error but got success");
-            simlin_error_free(err);
+            // Test with invalid MDL (only when vensim feature is enabled)
+            #[cfg(feature = "vensim")]
+            {
+                err = ptr::null_mut();
+                let proj = simlin_import_mdl(
+                    bad_data.as_ptr(),
+                    bad_data.len(),
+                    &mut err as *mut *mut SimlinError,
+                );
+                assert!(proj.is_null());
+                assert!(!err.is_null(), "Expected an error but got success");
+                simlin_error_free(err);
+            }
         }
     }
 

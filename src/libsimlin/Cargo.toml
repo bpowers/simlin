@@ -8,11 +8,15 @@ license = "Apache-2.0"
 edition = "2021"
 
 [lib]
-crate-type = ["staticlib", "rlib"]
+crate-type = ["staticlib", "rlib", "cdylib"]
+
+[features]
+default = ["vensim"]
+vensim = ["simlin-compat/vensim"]
 
 [dependencies]
 simlin-engine = { version = "0.1", path = "../simlin-engine" }
-simlin-compat = { version = "0.1", path = "../simlin-compat", features = ["vensim"] }
+simlin-compat = { version = "0.1", path = "../simlin-compat" }
 prost = "0.14"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
