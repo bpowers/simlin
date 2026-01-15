@@ -14,9 +14,9 @@ import * as path from 'path';
 
 import { init, reset } from '../src/wasm';
 import { Project, Model, Sim, Run } from '../src/api';
-import { Stock, Flow, Aux, TimeSpec, LinkPolarity, LoopPolarity } from '../src/api/types';
+import { LinkPolarity } from '../src/api/types';
 import { ModelPatchBuilder } from '../src/api/patch';
-import { JsonStock, JsonFlow, JsonAuxiliary, JsonProjectPatch } from '../src/api/json-types';
+import { JsonStock, JsonFlow, JsonAuxiliary } from '../src/api/json-types';
 
 // Helper to load the WASM module
 async function loadWasm(): Promise<void> {
@@ -925,33 +925,39 @@ describe('High-Level API', () => {
       const xmileData = fs.readFileSync(modulesPath);
       const project = Project.fromXmile(xmileData);
 
-      // Get all errors to check what the project reports
-      const allErrors = project.getErrors();
-
       // This project has multiple models (main, 'a', 'b')
-      // Get the model names
       const modelNames = project.getModelNames();
       expect(modelNames.length).toBeGreaterThan(1);
 
-      // For each model, check() should only return errors relevant to that model
+      // Get all project errors to understand what we're filtering
+      const allProjectErrors = project.getErrors();
+
+      // For each model, check() should only return errors for THAT model
       for (const modelName of modelNames) {
         const model = project.getModel(modelName);
-        const issues = model.check();
+        const modelIssues = model.check();
 
-        // Each issue should be associated with this model (or have no model specified)
-        for (const issue of issues) {
-          // The error should be for this model, not a different one
-          // We can't directly check the model name from the issue,
-          // but we verified in the code that we filter by model name
-        }
+        // Get the actual model name from JSON for comparison
+        // (since modelName could be null for main model)
+        const projectJson = JSON.parse(project.serializeJson());
+        const modelJson = projectJson.models.find(
+          (m: { name: string }) => m.name === modelName || (modelName === null && m.name),
+        );
+        const actualModelName = modelJson?.name;
+
+        // Filter project errors to find only those for this model
+        const expectedErrorsForModel = allProjectErrors.filter((e) => e.modelName === actualModelName);
+
+        // The model's check() should return exactly the errors for this model
+        expect(modelIssues.length).toBe(expectedErrorsForModel.length);
       }
 
       project.dispose();
     });
 
-    // Test the filter logic more directly by verifying behavior
+    // Test that main model errors don't leak to other models
     it('should not return errors from other models', () => {
-      // Create project with error in main model
+      // Create project with error in main model only
       const projectJson = {
         name: 'test_project',
         sim_specs: {
@@ -971,15 +977,59 @@ describe('High-Level API', () => {
 
       const project = Project.fromJson(JSON.stringify(projectJson));
 
+      // Get all project errors
+      const allErrors = project.getErrors();
+
       // main model should report the error
       const mainModel = project.mainModel;
-      const issues = mainModel.check();
+      const mainIssues = mainModel.check();
 
-      // There should be an error about unknown_reference
+      // If project reports errors for 'main', main model should report them
+      const mainErrors = allErrors.filter((e) => e.modelName === 'main');
+      expect(mainIssues.length).toBe(mainErrors.length);
+
+      // Verify the error is about the unknown reference
+      if (mainIssues.length > 0) {
+        expect(mainIssues[0].message).toContain('unknown_reference');
+      }
+
+      project.dispose();
+    });
+
+    // Test filtering with actual multi-model errors
+    it('should correctly attribute errors to their respective models', () => {
+      // Use the modules model and verify filtering logic
+      const modulesPath = path.join(
+        __dirname,
+        '..',
+        '..',
+        '..',
+        'test',
+        'modules_with_complex_idents',
+        'modules_with_complex_idents.stmx',
+      );
+      const xmileData = fs.readFileSync(modulesPath);
+      const project = Project.fromXmile(xmileData);
+
+      // Get errors per model
       const allErrors = project.getErrors();
-      // If project reports errors, main model should too
-      if (allErrors.length > 0) {
-        expect(issues.length).toBeGreaterThan(0);
+      const modelNames = project.getModelNames();
+
+      // Count errors per model name
+      const errorCountByModel = new Map<string, number>();
+      for (const error of allErrors) {
+        if (error.modelName) {
+          const count = errorCountByModel.get(error.modelName) || 0;
+          errorCountByModel.set(error.modelName, count + 1);
+        }
+      }
+
+      // Verify each model's check() returns correct count
+      for (const modelName of modelNames) {
+        const model = project.getModel(modelName);
+        const issues = model.check();
+        const expectedCount = errorCountByModel.get(modelName) || 0;
+        expect(issues.length).toBe(expectedCount);
       }
 
       project.dispose();

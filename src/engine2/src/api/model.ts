@@ -456,19 +456,19 @@ export class Model {
 
     const errorDetails = this._project.getErrors();
 
+    // Get the actual model name from JSON for comparison
+    // (handles case where _name is null for main model)
+    const modelJson = this.getModelJson();
+    const actualModelName = modelJson.name;
+
     // Filter to errors for this model only
     const modelErrors = errorDetails.filter((detail) => {
       // If no model name on error, it's a project-level error - exclude
       if (!detail.modelName) {
         return false;
       }
-      // For the main model (null name), match errors with no model or matching model
-      if (this._name === null) {
-        // Main model: include if modelName matches any model name in project
-        // or if it's an empty string (legacy format)
-        return true;
-      }
-      return detail.modelName === this._name;
+      // Compare against the actual model name from JSON
+      return detail.modelName === actualModelName;
     });
 
     return modelErrors.map((detail) => ({

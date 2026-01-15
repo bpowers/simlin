@@ -6,14 +6,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { init, reset, getMemory, isUrl, isNode, loadFileNode } from '../src/wasm';
-import { malloc, free, stringToWasm, wasmToString, copyToWasm, copyFromWasm } from '../src/memory';
-import { simlin_error_str, SimlinError } from '../src/error';
+import { malloc, free } from '../src/memory';
+import { SimlinError } from '../src/error';
 import { SimlinErrorCode } from '../src/types';
 import {
-  simlin_project_open,
   simlin_project_unref,
   simlin_project_get_model,
-  simlin_project_is_simulatable,
   simlin_project_get_errors,
   simlin_project_apply_patch,
   simlin_project_apply_patch_json,
