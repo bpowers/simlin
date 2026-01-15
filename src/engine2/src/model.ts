@@ -16,7 +16,13 @@ import {
   readOutUsize,
 } from './memory';
 import { SimlinModelPtr, SimlinLinksPtr } from './types';
-import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, readAllErrorDetails, SimlinError } from './error';
+import {
+  simlin_error_free,
+  simlin_error_get_code,
+  simlin_error_get_message,
+  readAllErrorDetails,
+  SimlinError,
+} from './error';
 
 /**
  * Increment the reference count of a model.
@@ -75,10 +81,7 @@ export function simlin_model_get_var_count(model: SimlinModelPtr): number {
  * @param ident Variable identifier
  * @returns LaTeX string, or null if not found
  */
-export function simlin_model_get_latex_equation(
-  model: SimlinModelPtr,
-  ident: string
-): string | null {
+export function simlin_model_get_latex_equation(model: SimlinModelPtr, ident: string): string | null {
   const exports = getExports();
   const fn = exports.simlin_model_get_latex_equation as (model: number, ident: number, outErr: number) => number;
 
@@ -149,7 +152,7 @@ export function simlin_model_get_var_names(model: SimlinModelPtr): string[] {
     result: number,
     max: number,
     outWritten: number,
-    outErr: number
+    outErr: number,
   ) => void;
 
   // First get the count
@@ -204,10 +207,7 @@ export function simlin_model_get_var_names(model: SimlinModelPtr): string[] {
  * @param varName Variable name
  * @returns Array of incoming variable names
  */
-export function simlin_model_get_incoming_links(
-  model: SimlinModelPtr,
-  varName: string
-): string[] {
+export function simlin_model_get_incoming_links(model: SimlinModelPtr, varName: string): string[] {
   const exports = getExports();
   const fn = exports.simlin_model_get_incoming_links as (
     model: number,
@@ -215,7 +215,7 @@ export function simlin_model_get_incoming_links(
     result: number,
     max: number,
     outWritten: number,
-    outErr: number
+    outErr: number,
   ) => void;
 
   const varNamePtr = stringToWasm(varName);

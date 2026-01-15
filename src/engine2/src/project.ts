@@ -17,13 +17,14 @@ import {
   allocOutUsize,
   readOutUsize,
 } from './memory';
+import { SimlinProjectPtr, SimlinModelPtr, SimlinErrorPtr, SimlinJsonFormat } from './types';
 import {
-  SimlinProjectPtr,
-  SimlinModelPtr,
-  SimlinErrorPtr,
-  SimlinJsonFormat,
-} from './types';
-import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, SimlinError, readAllErrorDetails } from './error';
+  simlin_error_free,
+  simlin_error_get_code,
+  simlin_error_get_message,
+  SimlinError,
+  readAllErrorDetails,
+} from './error';
 
 /**
  * Open a project from protobuf data.
@@ -152,7 +153,7 @@ export function simlin_project_get_model_names(project: SimlinProjectPtr): strin
     result: number,
     max: number,
     outWritten: number,
-    outErr: number
+    outErr: number,
   ) => void;
 
   // First get the count
@@ -206,10 +207,7 @@ export function simlin_project_get_model_names(project: SimlinProjectPtr): strin
  * @param modelName Model name (null for default/main model)
  * @returns Model pointer
  */
-export function simlin_project_get_model(
-  project: SimlinProjectPtr,
-  modelName: string | null
-): SimlinModelPtr {
+export function simlin_project_get_model(project: SimlinProjectPtr, modelName: string | null): SimlinModelPtr {
   const exports = getExports();
   const fn = exports.simlin_project_get_model as (proj: number, name: number, outErr: number) => number;
 
@@ -241,12 +239,7 @@ export function simlin_project_get_model(
  */
 export function simlin_project_serialize(project: SimlinProjectPtr): Uint8Array {
   const exports = getExports();
-  const fn = exports.simlin_project_serialize as (
-    proj: number,
-    outBuf: number,
-    outLen: number,
-    outErr: number
-  ) => void;
+  const fn = exports.simlin_project_serialize as (proj: number, outBuf: number, outLen: number, outErr: number) => void;
 
   const outBufPtr = allocOutPtr();
   const outLenPtr = allocOutUsize();
@@ -281,17 +274,14 @@ export function simlin_project_serialize(project: SimlinProjectPtr): Uint8Array 
  * @param format JSON format
  * @returns JSON-encoded project data
  */
-export function simlin_project_serialize_json(
-  project: SimlinProjectPtr,
-  format: SimlinJsonFormat
-): Uint8Array {
+export function simlin_project_serialize_json(project: SimlinProjectPtr, format: SimlinJsonFormat): Uint8Array {
   const exports = getExports();
   const fn = exports.simlin_project_serialize_json as (
     proj: number,
     fmt: number,
     outBuf: number,
     outLen: number,
-    outErr: number
+    outErr: number,
   ) => void;
 
   const outBufPtr = allocOutPtr();
@@ -327,10 +317,7 @@ export function simlin_project_serialize_json(
  * @param modelName Model name (null for default/main model)
  * @returns True if simulatable
  */
-export function simlin_project_is_simulatable(
-  project: SimlinProjectPtr,
-  modelName: string | null
-): boolean {
+export function simlin_project_is_simulatable(project: SimlinProjectPtr, modelName: string | null): boolean {
   const exports = getExports();
   const fn = exports.simlin_project_is_simulatable as (proj: number, name: number, outErr: number) => number;
 
@@ -387,10 +374,7 @@ export function simlin_project_get_errors(project: SimlinProjectPtr): SimlinErro
  * @param project Project pointer
  * @param modelName Model name
  */
-export function simlin_project_add_model(
-  project: SimlinProjectPtr,
-  modelName: string
-): void {
+export function simlin_project_add_model(project: SimlinProjectPtr, modelName: string): void {
   const exports = getExports();
   const fn = exports.simlin_project_add_model as (proj: number, name: number, outErr: number) => void;
 
@@ -425,7 +409,7 @@ export function simlin_project_apply_patch(
   project: SimlinProjectPtr,
   patchData: Uint8Array,
   dryRun: boolean,
-  allowErrors: boolean
+  allowErrors: boolean,
 ): SimlinErrorPtr {
   const exports = getExports();
   const fn = exports.simlin_project_apply_patch as (
@@ -435,7 +419,7 @@ export function simlin_project_apply_patch(
     dryRun: number,
     allowErrors: number,
     outCollected: number,
-    outErr: number
+    outErr: number,
   ) => void;
 
   const dataPtr = copyToWasm(patchData);
@@ -486,7 +470,7 @@ export function simlin_project_apply_patch_json(
   patchData: Uint8Array,
   format: SimlinJsonFormat,
   dryRun: boolean,
-  allowErrors: boolean
+  allowErrors: boolean,
 ): SimlinErrorPtr {
   const exports = getExports();
   const fn = exports.simlin_project_apply_patch_json as (
@@ -497,7 +481,7 @@ export function simlin_project_apply_patch_json(
     dryRun: number,
     allowErrors: number,
     outCollected: number,
-    outErr: number
+    outErr: number,
   ) => void;
 
   const dataPtr = copyToWasm(patchData);

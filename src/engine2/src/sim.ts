@@ -17,7 +17,13 @@ import {
   malloc,
 } from './memory';
 import { SimlinModelPtr, SimlinSimPtr } from './types';
-import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, readAllErrorDetails, SimlinError } from './error';
+import {
+  simlin_error_free,
+  simlin_error_get_code,
+  simlin_error_get_message,
+  readAllErrorDetails,
+  SimlinError,
+} from './error';
 
 /**
  * Create a new simulation context.
@@ -258,7 +264,7 @@ export function simlin_sim_get_series(sim: SimlinSimPtr, name: string, stepCount
     results: number,
     len: number,
     outWritten: number,
-    outErr: number
+    outErr: number,
   ) => void;
 
   const namePtr = stringToWasm(name);
@@ -297,7 +303,12 @@ export function simlin_sim_get_series(sim: SimlinSimPtr, name: string, stepCount
  */
 export function simlin_sim_set_value_by_offset(sim: SimlinSimPtr, offset: number, value: number): void {
   const exports = getExports();
-  const fn = exports.simlin_sim_set_value_by_offset as (sim: number, offset: number, val: number, outErr: number) => void;
+  const fn = exports.simlin_sim_set_value_by_offset as (
+    sim: number,
+    offset: number,
+    val: number,
+    outErr: number,
+  ) => void;
 
   const outErrPtr = allocOutPtr();
 
