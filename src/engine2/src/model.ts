@@ -29,7 +29,6 @@ import {
   LinkPolarity,
   ModelIssue,
   GraphicalFunction,
-  GraphicalFunctionScale,
 } from './types';
 import { JsonModel, JsonStock, JsonFlow, JsonAuxiliary, JsonGraphicalFunction, JsonProjectPatch } from './json-types';
 import { Project } from './project';
@@ -197,32 +196,24 @@ export class Model {
   }
 
   private parseJsonGraphicalFunction(gf: JsonGraphicalFunction): GraphicalFunction {
-    let xPoints: number[] | undefined;
-    let yPoints: number[];
+    // Convert to the schema format with points as [x, y] tuples
+    let points: [number, number][] | undefined;
+    let yPoints: number[] | undefined;
 
     if (gf.points && gf.points.length > 0) {
-      xPoints = gf.points.map((p) => p[0]);
-      yPoints = gf.points.map((p) => p[1]);
-    } else {
-      yPoints = gf.y_points || [];
+      // Already in [x, y] format
+      points = gf.points;
+    } else if (gf.y_points && gf.y_points.length > 0) {
+      // y_points only format
+      yPoints = gf.y_points;
     }
 
-    const xScale: GraphicalFunctionScale = {
-      min: gf.x_scale?.min ?? 0,
-      max: gf.x_scale?.max ?? (yPoints.length > 0 ? yPoints.length - 1 : 0),
-    };
-
-    const yScale: GraphicalFunctionScale = {
-      min: gf.y_scale?.min ?? 0,
-      max: gf.y_scale?.max ?? 1,
-    };
-
     return {
-      xPoints,
+      points,
       yPoints,
-      xScale,
-      yScale,
-      kind: gf.kind || 'continuous',
+      xScale: gf.x_scale ? { min: gf.x_scale.min, max: gf.x_scale.max } : undefined,
+      yScale: gf.y_scale ? { min: gf.y_scale.min, max: gf.y_scale.max } : undefined,
+      kind: gf.kind,
     };
   }
 
