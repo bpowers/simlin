@@ -2,7 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { describe, it, expect, beforeAll } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -22,7 +21,13 @@ import {
 import { SimlinJsonFormat } from '../src/types';
 import { simlin_model_unref, simlin_model_get_latex_equation, simlin_model_get_var_names } from '../src/model';
 import { readErrorDetail } from '../src/error';
-import { simlin_sim_new, simlin_sim_unref, simlin_sim_run_to_end, simlin_sim_get_stepcount, simlin_sim_get_series } from '../src/sim';
+import {
+  simlin_sim_new,
+  simlin_sim_unref,
+  simlin_sim_run_to_end,
+  simlin_sim_get_stepcount,
+  simlin_sim_get_series,
+} from '../src/sim';
 import { simlin_import_xmile, simlin_export_xmile } from '../src/import-export';
 
 // Helper to load the WASM module from the built file.
@@ -47,7 +52,7 @@ async function loadWasm(): Promise<void> {
     // Store instance globally for tests
     (global as unknown as { __wasmInstance: WebAssembly.Instance }).__wasmInstance = instance;
     (global as unknown as { __wasmMemory: WebAssembly.Memory }).__wasmMemory =
-      (exports.memory instanceof WebAssembly.Memory) ? exports.memory : memory;
+      exports.memory instanceof WebAssembly.Memory ? exports.memory : memory;
   } catch (e) {
     console.error('Failed to load WASM:', e);
     throw e;
@@ -233,14 +238,33 @@ describe('WASM Integration Tests', () => {
 
       const malloc_fn = instance.exports.simlin_malloc as (size: number) => number;
       const free_fn = instance.exports.simlin_free as (ptr: number) => void;
-      const import_xmile_fn = instance.exports.simlin_import_xmile as (ptr: number, len: number, outErr: number) => number;
+      const import_xmile_fn = instance.exports.simlin_import_xmile as (
+        ptr: number,
+        len: number,
+        outErr: number,
+      ) => number;
       const project_unref_fn = instance.exports.simlin_project_unref as (ptr: number) => void;
-      const project_get_model_fn = instance.exports.simlin_project_get_model as (proj: number, name: number, outErr: number) => number;
+      const project_get_model_fn = instance.exports.simlin_project_get_model as (
+        proj: number,
+        name: number,
+        outErr: number,
+      ) => number;
       const model_unref_fn = instance.exports.simlin_model_unref as (ptr: number) => void;
       const sim_new_fn = instance.exports.simlin_sim_new as (model: number, ltm: number, outErr: number) => number;
       const sim_run_to_end_fn = instance.exports.simlin_sim_run_to_end as (sim: number, outErr: number) => void;
-      const sim_get_stepcount_fn = instance.exports.simlin_sim_get_stepcount as (sim: number, outCount: number, outErr: number) => void;
-      const sim_get_series_fn = instance.exports.simlin_sim_get_series as (sim: number, name: number, results: number, len: number, outWritten: number, outErr: number) => void;
+      const sim_get_stepcount_fn = instance.exports.simlin_sim_get_stepcount as (
+        sim: number,
+        outCount: number,
+        outErr: number,
+      ) => void;
+      const sim_get_series_fn = instance.exports.simlin_sim_get_series as (
+        sim: number,
+        name: number,
+        results: number,
+        len: number,
+        outWritten: number,
+        outErr: number,
+      ) => void;
       const sim_unref_fn = instance.exports.simlin_sim_unref as (ptr: number) => void;
 
       // Helper to check for errors
@@ -330,8 +354,16 @@ describe('WASM Integration Tests', () => {
 
       const malloc_fn = instance.exports.simlin_malloc as (size: number) => number;
       const free_fn = instance.exports.simlin_free as (ptr: number) => void;
-      const import_xmile_fn = instance.exports.simlin_import_xmile as (ptr: number, len: number, outErr: number) => number;
-      const project_is_simulatable_fn = instance.exports.simlin_project_is_simulatable as (proj: number, name: number, outErr: number) => number;
+      const import_xmile_fn = instance.exports.simlin_import_xmile as (
+        ptr: number,
+        len: number,
+        outErr: number,
+      ) => number;
+      const project_is_simulatable_fn = instance.exports.simlin_project_is_simulatable as (
+        proj: number,
+        name: number,
+        outErr: number,
+      ) => number;
       const project_unref_fn = instance.exports.simlin_project_unref as (ptr: number) => void;
 
       // Helper to check for errors
@@ -373,9 +405,22 @@ describe('WASM Integration Tests', () => {
 
       const malloc_fn = instance.exports.simlin_malloc as (size: number) => number;
       const free_fn = instance.exports.simlin_free as (ptr: number) => void;
-      const import_xmile_fn = instance.exports.simlin_import_xmile as (ptr: number, len: number, outErr: number) => number;
-      const project_open_fn = instance.exports.simlin_project_open as (ptr: number, len: number, outErr: number) => number;
-      const project_serialize_fn = instance.exports.simlin_project_serialize as (proj: number, outBuf: number, outLen: number, outErr: number) => void;
+      const import_xmile_fn = instance.exports.simlin_import_xmile as (
+        ptr: number,
+        len: number,
+        outErr: number,
+      ) => number;
+      const project_open_fn = instance.exports.simlin_project_open as (
+        ptr: number,
+        len: number,
+        outErr: number,
+      ) => number;
+      const project_serialize_fn = instance.exports.simlin_project_serialize as (
+        proj: number,
+        outBuf: number,
+        outLen: number,
+        outErr: number,
+      ) => void;
       const project_unref_fn = instance.exports.simlin_project_unref as (ptr: number) => void;
 
       // Helper to check for errors
@@ -491,14 +536,14 @@ describe('WASM Integration Tests', () => {
       const view = new DataView(memory.buffer);
 
       // Write known values at expected offsets
-      view.setUint32(structPtr + 0, 42, true);   // code
-      view.setUint32(structPtr + 4, 0, true);    // message (null)
-      view.setUint32(structPtr + 8, 0, true);    // model_name (null)
-      view.setUint32(structPtr + 12, 0, true);   // variable_name (null)
+      view.setUint32(structPtr + 0, 42, true); // code
+      view.setUint32(structPtr + 4, 0, true); // message (null)
+      view.setUint32(structPtr + 8, 0, true); // model_name (null)
+      view.setUint32(structPtr + 12, 0, true); // variable_name (null)
       view.setUint16(structPtr + 16, 100, true); // start_offset
       view.setUint16(structPtr + 18, 200, true); // end_offset
-      view.setUint32(structPtr + 20, 2, true);   // kind (Variable)
-      view.setUint32(structPtr + 24, 1, true);   // unit_error_kind (Definition)
+      view.setUint32(structPtr + 20, 2, true); // kind (Variable)
+      view.setUint32(structPtr + 24, 1, true); // unit_error_kind (Definition)
 
       // Read it back using our function
       const detail = readErrorDetail(structPtr);
@@ -735,7 +780,9 @@ describe('WASM Integration Tests', () => {
       // Create an invalid JSON patch
       const invalidPatch = new TextEncoder().encode('{}');
 
-      expect(() => simlin_project_apply_patch_json(0, invalidPatch, SimlinJsonFormat.Native, false, false)).toThrow(SimlinError);
+      expect(() => simlin_project_apply_patch_json(0, invalidPatch, SimlinJsonFormat.Native, false, false)).toThrow(
+        SimlinError,
+      );
 
       try {
         simlin_project_apply_patch_json(0, invalidPatch, SimlinJsonFormat.Native, false, false);
@@ -766,7 +813,7 @@ describe('WASM Integration Tests', () => {
         emptyPatch,
         SimlinJsonFormat.Native,
         false,
-        false
+        false,
       );
 
       // No errors should be collected for a valid empty patch
