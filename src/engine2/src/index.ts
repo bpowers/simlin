@@ -13,3 +13,6 @@ export * from './model';
 export * from './sim';
 export * from './analysis';
 export * from './import-export';
+
+// High-level API
+export * as api from './api';

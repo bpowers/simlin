@@ -6,14 +6,7 @@
 
 import { getExports, getMemory } from './wasm';
 import { wasmToString } from './memory';
-import {
-  Ptr,
-  SimlinErrorPtr,
-  SimlinErrorCode,
-  SimlinErrorKind,
-  SimlinUnitErrorKind,
-  ErrorDetail,
-} from './types';
+import { Ptr, SimlinErrorPtr, SimlinErrorCode, SimlinErrorKind, SimlinUnitErrorKind, ErrorDetail } from './types';
 
 /**
  * Get the string representation of an error code.
@@ -160,10 +153,9 @@ export class SimlinError extends Error {
   constructor(
     message: string,
     public code: SimlinErrorCode,
-    public details: ErrorDetail[] = []
+    public details: ErrorDetail[] = [],
   ) {
     super(message);
     this.name = 'SimlinError';
   }
 }
-

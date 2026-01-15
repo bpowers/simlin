@@ -5,17 +5,15 @@
 // Import and export functions
 
 import { getExports } from './wasm';
-import {
-  free,
-  copyToWasm,
-  copyFromWasm,
-  allocOutPtr,
-  readOutPtr,
-  allocOutUsize,
-  readOutUsize,
-} from './memory';
+import { free, copyToWasm, copyFromWasm, allocOutPtr, readOutPtr, allocOutUsize, readOutUsize } from './memory';
 import { SimlinProjectPtr, SimlinErrorCode } from './types';
-import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, readAllErrorDetails, SimlinError } from './error';
+import {
+  simlin_error_free,
+  simlin_error_get_code,
+  simlin_error_get_message,
+  readAllErrorDetails,
+  SimlinError,
+} from './error';
 
 /**
  * Import a project from XMILE format.
@@ -74,8 +72,8 @@ export function simlin_import_mdl(data: Uint8Array): SimlinProjectPtr {
   if (typeof fn !== 'function') {
     throw new SimlinError(
       'simlin_import_mdl is not available: libsimlin was built without Vensim support. ' +
-      'Rebuild with the "vensim" feature enabled to import MDL files.',
-      SimlinErrorCode.Generic
+        'Rebuild with the "vensim" feature enabled to import MDL files.',
+      SimlinErrorCode.Generic,
     );
   }
 
@@ -109,12 +107,7 @@ export function simlin_import_mdl(data: Uint8Array): SimlinProjectPtr {
  */
 export function simlin_export_xmile(project: SimlinProjectPtr): Uint8Array {
   const exports = getExports();
-  const fn = exports.simlin_export_xmile as (
-    proj: number,
-    outBuf: number,
-    outLen: number,
-    outErr: number
-  ) => void;
+  const fn = exports.simlin_export_xmile as (proj: number, outBuf: number, outLen: number, outErr: number) => void;
 
   const outBufPtr = allocOutPtr();
   const outLenPtr = allocOutUsize();

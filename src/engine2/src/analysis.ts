@@ -26,7 +26,13 @@ import {
   Link,
   Loop,
 } from './types';
-import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, readAllErrorDetails, SimlinError } from './error';
+import {
+  simlin_error_free,
+  simlin_error_get_code,
+  simlin_error_get_message,
+  readAllErrorDetails,
+  SimlinError,
+} from './error';
 
 /**
  * Analyze a project and get feedback loops.
@@ -118,7 +124,7 @@ export function simlin_free_links(links: SimlinLinksPtr): void {
 export function simlin_analyze_get_relative_loop_score(
   sim: SimlinSimPtr,
   loopId: string,
-  stepCount: number
+  stepCount: number,
 ): Float64Array {
   const exports = getExports();
   const fn = exports.simlin_analyze_get_relative_loop_score as (
@@ -127,7 +133,7 @@ export function simlin_analyze_get_relative_loop_score(
     results: number,
     len: number,
     outWritten: number,
-    outErr: number
+    outErr: number,
   ) => void;
 
   const loopIdPtr = stringToWasm(loopId);
