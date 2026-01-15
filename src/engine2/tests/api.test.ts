@@ -13,7 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { init, reset } from '../src/wasm';
-import { Project, Model, Sim, Run, load, loadFromXmile, loadFromJson } from '../src/api';
+import { Project, Model, Sim, Run } from '../src/api';
 import { Stock, Flow, Aux, TimeSpec, LinkPolarity, LoopPolarity } from '../src/api/types';
 import { ModelPatchBuilder } from '../src/api/patch';
 import { JsonStock, JsonFlow, JsonAuxiliary, JsonProjectPatch } from '../src/api/json-types';
@@ -746,39 +746,29 @@ describe('High-Level API', () => {
     });
   });
 
-  describe('Top-level load() function', () => {
-    it('should load from file path (XMILE)', async () => {
-      const xmilePath = path.join(__dirname, '..', '..', 'pysimlin', 'tests', 'fixtures', 'teacup.stmx');
-      const model = await load(xmilePath);
-
-      expect(model).toBeInstanceOf(Model);
-      expect(model.variables.find((v) => v.name === 'teacup temperature')).toBeDefined();
-
-      model.project?.dispose();
-    });
-
-    it('should load from Uint8Array (XMILE)', () => {
-      const xmileData = loadTestXmile();
-      const model = loadFromXmile(xmileData);
-
-      expect(model).toBeInstanceOf(Model);
-      expect(model.variables.find((v) => v.name === 'teacup temperature')).toBeDefined();
-
-      model.project?.dispose();
-    });
-
-    it('should load from JSON string', () => {
-      // First create a project and serialize to JSON
+  describe('Project.from* factory methods', () => {
+    it('should load from XMILE data and access mainModel', () => {
       const xmileData = loadTestXmile();
       const project = Project.fromXmile(xmileData);
-      const json = project.serializeJson();
-      project.dispose();
+      const model = project.mainModel;
 
-      // Now load from JSON
-      const model = loadFromJson(json);
+      expect(model).toBeInstanceOf(Model);
+      expect(model.variables.find((v) => v.name === 'teacup temperature')).toBeDefined();
+
+      project.dispose();
+    });
+
+    it('should load from JSON string and access mainModel', () => {
+      const xmileData = loadTestXmile();
+      const project1 = Project.fromXmile(xmileData);
+      const json = project1.serializeJson();
+      project1.dispose();
+
+      const project2 = Project.fromJson(json);
+      const model = project2.mainModel;
       expect(model).toBeInstanceOf(Model);
 
-      model.project?.dispose();
+      project2.dispose();
     });
   });
 
