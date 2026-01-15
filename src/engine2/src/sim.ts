@@ -4,7 +4,7 @@
 
 // Simulation functions
 
-import { getExports, getMemory } from './wasm';
+import { getExports } from './wasm';
 import {
   free,
   stringToWasm,
@@ -13,10 +13,11 @@ import {
   allocOutUsize,
   readOutUsize,
   readDouble,
+  readFloat64Array,
   malloc,
 } from './memory';
 import { SimlinModelPtr, SimlinSimPtr } from './types';
-import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, SimlinError } from './error';
+import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, readAllErrorDetails, SimlinError } from './error';
 
 /**
  * Create a new simulation context.
@@ -37,8 +38,9 @@ export function simlin_sim_new(model: SimlinModelPtr, enableLtm: boolean): Simli
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     return result;
@@ -85,8 +87,9 @@ export function simlin_sim_run_to(sim: SimlinSimPtr, time: number): void {
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
   } finally {
     free(outErrPtr);
@@ -110,8 +113,9 @@ export function simlin_sim_run_to_end(sim: SimlinSimPtr): void {
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
   } finally {
     free(outErrPtr);
@@ -135,8 +139,9 @@ export function simlin_sim_reset(sim: SimlinSimPtr): void {
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
   } finally {
     free(outErrPtr);
@@ -162,8 +167,9 @@ export function simlin_sim_get_stepcount(sim: SimlinSimPtr): number {
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     return readOutUsize(outCountPtr);
@@ -194,8 +200,9 @@ export function simlin_sim_get_value(sim: SimlinSimPtr, name: string): number {
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     return readDouble(outValPtr);
@@ -226,8 +233,9 @@ export function simlin_sim_set_value(sim: SimlinSimPtr, name: string, value: num
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
   } finally {
     free(namePtr);
@@ -265,14 +273,14 @@ export function simlin_sim_get_series(sim: SimlinSimPtr, name: string, stepCount
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     const written = readOutUsize(outWrittenPtr);
-    const memory = getMemory();
-    const view = new Float64Array(memory.buffer, resultsPtr, written);
-    return new Float64Array(view); // Copy to avoid memory view issues
+    // Use readFloat64Array to avoid alignment issues with Float64Array
+    return readFloat64Array(resultsPtr, written);
   } finally {
     free(namePtr);
     free(resultsPtr);
@@ -300,8 +308,9 @@ export function simlin_sim_set_value_by_offset(sim: SimlinSimPtr, offset: number
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
   } finally {
     free(outErrPtr);
@@ -329,8 +338,9 @@ export function simlin_sim_get_offset(sim: SimlinSimPtr, name: string): number {
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     return readOutUsize(outOffsetPtr);

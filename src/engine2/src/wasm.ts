@@ -10,17 +10,28 @@ let wasmMemory: WebAssembly.Memory | null = null;
 /**
  * Initialize the WASM module.
  * Must be called before any other functions.
+ * @param wasmPathOrBuffer - Either a path to the WASM file, or an ArrayBuffer/Uint8Array containing the WASM binary
  */
-export async function init(wasmPath?: string): Promise<void> {
+export async function init(wasmPathOrBuffer?: string | ArrayBuffer | Uint8Array): Promise<void> {
   if (wasmInstance !== null) {
     return; // Already initialized
   }
 
-  const path = wasmPath ?? './core/libsimlin.wasm';
+  let buffer: ArrayBuffer;
 
-  // Load WASM module
-  const response = await fetch(path);
-  const buffer = await response.arrayBuffer();
+  if (wasmPathOrBuffer instanceof ArrayBuffer) {
+    buffer = wasmPathOrBuffer;
+  } else if (wasmPathOrBuffer instanceof Uint8Array) {
+    // Copy to a new ArrayBuffer to handle SharedArrayBuffer case
+    const copy = new Uint8Array(wasmPathOrBuffer.length);
+    copy.set(wasmPathOrBuffer);
+    buffer = copy.buffer;
+  } else {
+    const path = wasmPathOrBuffer ?? './core/libsimlin.wasm';
+    const response = await fetch(path);
+    buffer = await response.arrayBuffer();
+  }
+
   const module = await WebAssembly.compile(buffer);
 
   // Create memory - libsimlin manages its own memory

@@ -13,6 +13,7 @@ import {
   readOutPtr,
   allocOutUsize,
   readOutUsize,
+  readFloat64Array,
   malloc,
 } from './memory';
 import {
@@ -25,7 +26,7 @@ import {
   Link,
   Loop,
 } from './types';
-import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, SimlinError } from './error';
+import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, readAllErrorDetails, SimlinError } from './error';
 
 /**
  * Analyze a project and get feedback loops.
@@ -45,8 +46,9 @@ export function simlin_analyze_get_loops(project: SimlinProjectPtr): SimlinLoops
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     return result;
@@ -84,8 +86,9 @@ export function simlin_analyze_get_links(sim: SimlinSimPtr): SimlinLinksPtr {
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     return result;
@@ -139,14 +142,14 @@ export function simlin_analyze_get_relative_loop_score(
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     const written = readOutUsize(outWrittenPtr);
-    const memory = getMemory();
-    const view = new Float64Array(memory.buffer, resultsPtr, written);
-    return new Float64Array(view); // Copy to avoid memory view issues
+    // Use readFloat64Array to avoid alignment issues with Float64Array
+    return readFloat64Array(resultsPtr, written);
   } finally {
     free(loopIdPtr);
     free(resultsPtr);
@@ -155,11 +158,36 @@ export function simlin_analyze_get_relative_loop_score(
   }
 }
 
-// Size of SimlinLoop struct: id: ptr, variables: ptr, var_count: usize, polarity: u32
-const LOOP_SIZE = 16; // 4 + 4 + 4 + 4
+// Struct sizes for wasm32 target
+// SimlinLoop: id: ptr(4), variables: ptr(4), var_count: usize(4), polarity: u32(4) = 16 bytes
+const LOOP_SIZE = 16;
+// SimlinLink: from: ptr(4), to: ptr(4), polarity: u32(4), score: ptr(4), score_len: usize(4) = 20 bytes
+const LINK_SIZE = 20;
+// Pointer size for wasm32
+const PTR_SIZE = 4;
 
-// Size of SimlinLink struct: from: ptr, to: ptr, polarity: u32, score: ptr, score_len: usize
-const LINK_SIZE = 20; // 4 + 4 + 4 + 4 + 4
+/**
+ * Validate struct sizes match expected wasm32 layout.
+ * This helps catch ABI mismatches early.
+ * @throws Error if struct sizes don't match expected values
+ */
+export function validateStructSizes(): void {
+  // These assertions document the expected ABI and will fail if
+  // the Rust struct layout changes incompatibly
+  if (PTR_SIZE !== 4) {
+    throw new Error(`Expected wasm32 pointer size of 4, got ${PTR_SIZE}`);
+  }
+  // The LOOP_SIZE should be: ptr + ptr + usize + u32 = 4 + 4 + 4 + 4 = 16
+  const expectedLoopSize = PTR_SIZE + PTR_SIZE + PTR_SIZE + 4; // id, variables, var_count, polarity
+  if (LOOP_SIZE !== expectedLoopSize) {
+    throw new Error(`LOOP_SIZE ${LOOP_SIZE} does not match expected ${expectedLoopSize}`);
+  }
+  // The LINK_SIZE should be: ptr + ptr + u32 + ptr + usize = 4 + 4 + 4 + 4 + 4 = 20
+  const expectedLinkSize = PTR_SIZE + PTR_SIZE + 4 + PTR_SIZE + PTR_SIZE; // from, to, polarity, score, score_len
+  if (LINK_SIZE !== expectedLinkSize) {
+    throw new Error(`LINK_SIZE ${LINK_SIZE} does not match expected ${expectedLinkSize}`);
+  }
+}
 
 /**
  * Read loops from a SimlinLoops pointer.
@@ -230,8 +258,8 @@ export function readLinks(linksPtr: SimlinLinksPtr): Link[] {
 
     let score: Float64Array | null = null;
     if (scorePtr !== 0 && scoreLen > 0) {
-      const scoreView = new Float64Array(memory.buffer, scorePtr, scoreLen);
-      score = new Float64Array(scoreView); // Copy
+      // Use readFloat64Array to avoid alignment issues with Float64Array
+      score = readFloat64Array(scorePtr, scoreLen);
     }
 
     links.push({ from, to, polarity, score });

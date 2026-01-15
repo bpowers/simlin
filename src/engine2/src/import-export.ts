@@ -14,8 +14,8 @@ import {
   allocOutUsize,
   readOutUsize,
 } from './memory';
-import { SimlinProjectPtr } from './types';
-import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, SimlinError } from './error';
+import { SimlinProjectPtr, SimlinErrorCode } from './types';
+import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, readAllErrorDetails, SimlinError } from './error';
 
 /**
  * Import a project from XMILE format.
@@ -36,8 +36,9 @@ export function simlin_import_xmile(data: Uint8Array): SimlinProjectPtr {
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     return result;
@@ -48,26 +49,50 @@ export function simlin_import_xmile(data: Uint8Array): SimlinProjectPtr {
 }
 
 /**
+ * Check if the WASM module was built with Vensim MDL support.
+ * @returns True if simlin_import_mdl is available
+ */
+export function hasVensimSupport(): boolean {
+  const exports = getExports();
+  return typeof exports.simlin_import_mdl === 'function';
+}
+
+/**
  * Import a project from Vensim MDL format.
+ * Note: This function is only available when libsimlin is built with the 'vensim' feature.
+ * The default WASM build (--no-default-features) does not include this function.
+ * Use hasVensimSupport() to check availability before calling.
  * @param data MDL file data
  * @returns Project pointer
+ * @throws SimlinError with code Generic if vensim support is not available
  */
 export function simlin_import_mdl(data: Uint8Array): SimlinProjectPtr {
   const exports = getExports();
-  const fn = exports.simlin_import_mdl as (ptr: number, len: number, outErr: number) => number;
+  const fn = exports.simlin_import_mdl;
 
+  // Guard against missing export when vensim feature is disabled
+  if (typeof fn !== 'function') {
+    throw new SimlinError(
+      'simlin_import_mdl is not available: libsimlin was built without Vensim support. ' +
+      'Rebuild with the "vensim" feature enabled to import MDL files.',
+      SimlinErrorCode.Generic
+    );
+  }
+
+  const importFn = fn as (ptr: number, len: number, outErr: number) => number;
   const dataPtr = copyToWasm(data);
   const outErrPtr = allocOutPtr();
 
   try {
-    const result = fn(dataPtr, data.length, outErrPtr);
+    const result = importFn(dataPtr, data.length, outErrPtr);
     const errPtr = readOutPtr(outErrPtr);
 
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     return result;
@@ -102,8 +127,9 @@ export function simlin_export_xmile(project: SimlinProjectPtr): Uint8Array {
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     const bufPtr = readOutPtr(outBufPtr);

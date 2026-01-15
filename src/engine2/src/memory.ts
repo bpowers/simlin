@@ -59,21 +59,32 @@ export function stringToWasm(str: string): Ptr {
   return ptr;
 }
 
+// Maximum string length to prevent runaway reads (1MB)
+const MAX_STRING_LENGTH = 1024 * 1024;
+
 /**
  * Read a null-terminated C string from WASM memory.
  * Does NOT free the string.
  * @param ptr Pointer to the string
+ * @param maxLength Maximum length to read (defaults to 1MB)
  * @returns JavaScript string, or null if ptr is 0
  */
-export function wasmToString(ptr: Ptr): string | null {
+export function wasmToString(ptr: Ptr, maxLength: number = MAX_STRING_LENGTH): string | null {
   if (ptr === 0) return null;
   const memory = getMemory();
   const view = new Uint8Array(memory.buffer);
+  const bufferEnd = view.length;
 
-  // Find null terminator
+  // Find null terminator with bounds checking
   let end = ptr;
-  while (view[end] !== 0) {
+  const limit = Math.min(ptr + maxLength, bufferEnd);
+  while (end < limit && view[end] !== 0) {
     end++;
+  }
+
+  // If we hit the limit without finding null terminator, this is likely a bug
+  if (end >= limit && view[end] !== 0) {
+    throw new Error(`wasmToString: string exceeds maximum length ${maxLength} or is not null-terminated`);
   }
 
   const bytes = view.slice(ptr, end);
@@ -127,13 +138,14 @@ export function allocOutPtr(): Ptr {
 
 /**
  * Read a pointer value from an output pointer.
+ * Uses DataView to avoid alignment requirements.
  * @param outPtr Pointer to the output pointer
  * @returns The pointer value
  */
 export function readOutPtr(outPtr: Ptr): Ptr {
   const memory = getMemory();
-  const view = new Uint32Array(memory.buffer, outPtr, 1);
-  return view[0];
+  const view = new DataView(memory.buffer);
+  return view.getUint32(outPtr, true);
 }
 
 /**
@@ -146,24 +158,43 @@ export function allocOutUsize(): Ptr {
 
 /**
  * Read a usize value from an output pointer.
+ * Uses DataView to avoid alignment requirements.
  * @param outPtr Pointer to the output usize
  * @returns The usize value
  */
 export function readOutUsize(outPtr: Ptr): number {
   const memory = getMemory();
-  const view = new Uint32Array(memory.buffer, outPtr, 1);
-  return view[0];
+  const view = new DataView(memory.buffer);
+  return view.getUint32(outPtr, true);
 }
 
 /**
  * Read a double value from WASM memory.
+ * Uses DataView to avoid alignment requirements.
  * @param ptr Pointer to the double
  * @returns The double value
  */
 export function readDouble(ptr: Ptr): number {
   const memory = getMemory();
-  const view = new Float64Array(memory.buffer, ptr, 1);
-  return view[0];
+  const view = new DataView(memory.buffer);
+  return view.getFloat64(ptr, true);
+}
+
+/**
+ * Read an array of float64 values from WASM memory.
+ * Uses DataView to avoid alignment requirements and copies data.
+ * @param ptr Pointer to the array
+ * @param count Number of elements
+ * @returns New Float64Array with copied data
+ */
+export function readFloat64Array(ptr: Ptr, count: number): Float64Array {
+  const memory = getMemory();
+  const view = new DataView(memory.buffer);
+  const result = new Float64Array(count);
+  for (let i = 0; i < count; i++) {
+    result[i] = view.getFloat64(ptr + i * 8, true);
+  }
+  return result;
 }
 
 /**

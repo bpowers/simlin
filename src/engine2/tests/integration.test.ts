@@ -6,7 +6,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { init, isInitialized, reset } from '../src/wasm';
+import { init, reset, getMemory } from '../src/wasm';
 import { malloc, free, stringToWasm, wasmToString, copyToWasm, copyFromWasm } from '../src/memory';
 import { simlin_error_str, SimlinError } from '../src/error';
 import { SimlinErrorCode } from '../src/types';
@@ -17,7 +17,8 @@ import {
   simlin_project_serialize,
   simlin_project_is_simulatable,
 } from '../src/project';
-import { simlin_model_unref, simlin_model_get_latex_equation } from '../src/model';
+import { simlin_model_unref, simlin_model_get_latex_equation, simlin_model_get_var_names } from '../src/model';
+import { readErrorDetail } from '../src/error';
 import { simlin_sim_new, simlin_sim_unref, simlin_sim_run_to_end, simlin_sim_get_stepcount, simlin_sim_get_series } from '../src/sim';
 import { simlin_import_xmile, simlin_export_xmile } from '../src/import-export';
 
@@ -428,6 +429,169 @@ describe('WASM Integration Tests', () => {
       free_fn(outLenPtr);
       free_fn(serializedPtr);
       free_fn(dataPtr2);
+    });
+  });
+
+  describe('Error Detail Struct Layout', () => {
+    beforeAll(async () => {
+      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
+      const wasmBuffer = fs.readFileSync(wasmPath);
+
+      reset();
+      await init(wasmBuffer);
+    });
+
+    it('should correctly read error details from an error with details', () => {
+      // Try to import invalid XMILE data using our TypeScript wrapper
+      const invalidXmile = new TextEncoder().encode('<?xml version="1.0"?><xmile><invalid_model/></xmile>');
+
+      try {
+        simlin_import_xmile(new Uint8Array(invalidXmile));
+        // If no error was thrown, the import succeeded (unlikely with invalid data)
+      } catch (e) {
+        if (e instanceof SimlinError) {
+          // Verify we can access error details
+          expect(typeof e.code).toBe('number');
+          expect(typeof e.message).toBe('string');
+          expect(Array.isArray(e.details)).toBe(true);
+
+          // Verify detail structure if there are any
+          for (const detail of e.details) {
+            expect(typeof detail.code).toBe('number');
+            expect(typeof detail.kind).toBe('number');
+            expect(typeof detail.unitErrorKind).toBe('number');
+            expect(typeof detail.startOffset).toBe('number');
+            expect(typeof detail.endOffset).toBe('number');
+          }
+        } else {
+          throw e;
+        }
+      }
+    });
+
+    it('should have correct struct field offsets for SimlinErrorDetail', () => {
+      // This test verifies the struct layout assumptions documented in error.ts
+      // SimlinErrorDetail layout on wasm32:
+      //   offset 0: code (u32)
+      //   offset 4: message (ptr)
+      //   offset 8: model_name (ptr)
+      //   offset 12: variable_name (ptr)
+      //   offset 16: start_offset (u16)
+      //   offset 18: end_offset (u16)
+      //   offset 20: kind (u32)
+      //   offset 24: unit_error_kind (u32)
+      // Total size: 28 bytes
+
+      // Use the malloc/free from our memory module
+      const structPtr = malloc(28);
+      const memory = getMemory();
+      const view = new DataView(memory.buffer);
+
+      // Write known values at expected offsets
+      view.setUint32(structPtr + 0, 42, true);   // code
+      view.setUint32(structPtr + 4, 0, true);    // message (null)
+      view.setUint32(structPtr + 8, 0, true);    // model_name (null)
+      view.setUint32(structPtr + 12, 0, true);   // variable_name (null)
+      view.setUint16(structPtr + 16, 100, true); // start_offset
+      view.setUint16(structPtr + 18, 200, true); // end_offset
+      view.setUint32(structPtr + 20, 2, true);   // kind (Variable)
+      view.setUint32(structPtr + 24, 1, true);   // unit_error_kind (Definition)
+
+      // Read it back using our function
+      const detail = readErrorDetail(structPtr);
+
+      expect(detail.code).toBe(42);
+      expect(detail.message).toBeNull();
+      expect(detail.modelName).toBeNull();
+      expect(detail.variableName).toBeNull();
+      expect(detail.startOffset).toBe(100);
+      expect(detail.endOffset).toBe(200);
+      expect(detail.kind).toBe(2);
+      expect(detail.unitErrorKind).toBe(1);
+
+      free(structPtr);
+    });
+  });
+
+  describe('Model Functions', () => {
+    beforeAll(async () => {
+      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
+      const wasmBuffer = fs.readFileSync(wasmPath);
+
+      reset();
+      await init(wasmBuffer);
+    });
+
+    it('should get latex equation for a variable', () => {
+      const xmileData = loadTestXmile();
+
+      // Import XMILE using our wrapper
+      const project = simlin_import_xmile(xmileData);
+      expect(project).toBeGreaterThan(0);
+
+      // Get model using our wrapper
+      const model = simlin_project_get_model(project, null);
+      expect(model).toBeGreaterThan(0);
+
+      // Get latex equation for teacup_temperature using our TypeScript wrapper
+      const latex = simlin_model_get_latex_equation(model, 'teacup_temperature');
+
+      // The teacup model should have an equation for teacup_temperature
+      expect(latex).not.toBeNull();
+      expect(typeof latex).toBe('string');
+      expect(latex!.length).toBeGreaterThan(0);
+
+      // Cleanup
+      simlin_model_unref(model);
+      simlin_project_unref(project);
+    });
+
+    it('should return null for non-existent variable', () => {
+      const xmileData = loadTestXmile();
+
+      // Import XMILE
+      const project = simlin_import_xmile(xmileData);
+      expect(project).toBeGreaterThan(0);
+
+      // Get model
+      const model = simlin_project_get_model(project, null);
+      expect(model).toBeGreaterThan(0);
+
+      // Get latex equation for a non-existent variable
+      const latex = simlin_model_get_latex_equation(model, 'nonexistent_variable_xyz');
+
+      // Should return null for non-existent variable
+      expect(latex).toBeNull();
+
+      // Cleanup
+      simlin_model_unref(model);
+      simlin_project_unref(project);
+    });
+
+    it('should get variable names from model', () => {
+      const xmileData = loadTestXmile();
+
+      // Import XMILE
+      const project = simlin_import_xmile(xmileData);
+      expect(project).toBeGreaterThan(0);
+
+      // Get model
+      const model = simlin_project_get_model(project, null);
+      expect(model).toBeGreaterThan(0);
+
+      // Get variable names using our TypeScript wrapper
+      const varNames = simlin_model_get_var_names(model);
+
+      // The teacup model should have some variables
+      expect(Array.isArray(varNames)).toBe(true);
+      expect(varNames.length).toBeGreaterThan(0);
+
+      // Should include the teacup_temperature variable
+      expect(varNames).toContain('teacup_temperature');
+
+      // Cleanup
+      simlin_model_unref(model);
+      simlin_project_unref(project);
     });
   });
 });

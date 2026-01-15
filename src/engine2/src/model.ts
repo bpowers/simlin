@@ -16,7 +16,7 @@ import {
   readOutUsize,
 } from './memory';
 import { SimlinModelPtr, SimlinLinksPtr } from './types';
-import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, SimlinError } from './error';
+import { simlin_error_free, simlin_error_get_code, simlin_error_get_message, readAllErrorDetails, SimlinError } from './error';
 
 /**
  * Increment the reference count of a model.
@@ -57,8 +57,9 @@ export function simlin_model_get_var_count(model: SimlinModelPtr): number {
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     return readOutUsize(outCountPtr);
@@ -91,8 +92,9 @@ export function simlin_model_get_latex_equation(
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     if (result === 0) {
@@ -124,8 +126,9 @@ export function simlin_model_get_links(model: SimlinModelPtr): SimlinLinksPtr {
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     return result;
@@ -167,8 +170,9 @@ export function simlin_model_get_var_names(model: SimlinModelPtr): string[] {
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     const written = readOutUsize(outWrittenPtr);
@@ -227,8 +231,9 @@ export function simlin_model_get_incoming_links(
     if (errPtr !== 0) {
       const code = simlin_error_get_code(errPtr);
       const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
       simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+      throw new SimlinError(message, code, details);
     }
 
     const count = readOutUsize(outCountPtr);
