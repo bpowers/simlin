@@ -155,7 +155,6 @@ export const NewProject = styled(
 
         const engine2Project = await Engine2Project.open(contents);
         const projectPB = engine2Project.serializeProtobuf();
-        engine2Project.dispose();
         const activeProject = ProjectDM.deserializeBinary(projectPB);
         const views = activeProject.models.get('main')?.views;
         if (!views || views.isEmpty()) {

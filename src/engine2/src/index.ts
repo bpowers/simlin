@@ -10,10 +10,9 @@
  *
  * @example
  * // Load a model and run simulation
- * import { Project, init } from '@system-dynamics/engine2';
+ * import { Project } from '@system-dynamics/engine2';
  *
- * await init(wasmBuffer); // Initialize WASM
- * const project = Project.fromXmile(xmileData);
+ * const project = await Project.open(xmileData);
  * const model = project.mainModel;
  *
  * // Run simulation with default parameters
@@ -43,5 +42,6 @@ export { ModelPatchBuilder } from './patch';
 export * from './types';
 export * from './json-types';
 
-// WASM initialization functions
-export { init, reset, isInitialized, ensureInitialized } from './internal/wasm';
+// Optional WASM configuration for advanced use cases
+export { configureWasm, ensureInitialized as ready, isInitialized as isReady } from './internal/wasm';
+export type { WasmConfig, WasmSource, WasmSourceProvider } from './internal/wasm';

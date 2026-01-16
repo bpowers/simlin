@@ -3,7 +3,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 
 import { convertMdlToXmile } from '@system-dynamics/xmutil';
-import { Project as Engine2Project, init } from '@system-dynamics/engine2';
+import { Project as Engine2Project } from '@system-dynamics/engine2';
 import { Project } from '@system-dynamics/core/datamodel';
 import { renderSvgToString } from '@system-dynamics/diagram/render-common';
 
@@ -11,9 +11,6 @@ import { renderSvgToString } from '@system-dynamics/diagram/render-common';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const wasmPath = resolve(__dirname, '../src/engine2/core/libsimlin.wasm');
-
-// Initialize WASM explicitly for Node.js
-await init(wasmPath);
 
 const args = process.argv.slice(2);
 const inputFile = args[0];
@@ -23,9 +20,8 @@ if (inputFile.endsWith('.mdl')) {
   contents = await convertMdlToXmile(contents, false);
 }
 
-const engine2Project = await Engine2Project.open(contents);
+const engine2Project = await Engine2Project.open(contents, { wasm: wasmPath });
 const pb = engine2Project.serializeProtobuf();
-engine2Project.dispose();
 const project = Project.deserializeBinary(pb);
 
 

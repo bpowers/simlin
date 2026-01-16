@@ -12,15 +12,17 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { init, reset, Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder } from '../src';
+import { Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder, configureWasm, ready } from '../src';
 import { JsonStock, JsonFlow, JsonAuxiliary } from '../src/json-types';
+import { reset } from '../src/internal/wasm';
 
 // Helper to load the WASM module
 async function loadWasm(): Promise<void> {
   const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
   const wasmBuffer = fs.readFileSync(wasmPath);
   reset();
-  await init(wasmBuffer);
+  configureWasm({ source: wasmBuffer });
+  await ready();
 }
 
 // Load the teacup test model in XMILE format from pysimlin fixtures
@@ -32,22 +34,24 @@ function loadTestXmile(): Uint8Array {
   return fs.readFileSync(xmilePath);
 }
 
+async function openTestProject(): Promise<Project> {
+  return Project.open(loadTestXmile());
+}
+
 describe('High-Level API', () => {
   beforeAll(async () => {
     await loadWasm();
   });
 
   describe('Project class', () => {
-    it('should load from XMILE data', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should load from XMILE data', async () => {
+      const project = await openTestProject();
       expect(project).toBeInstanceOf(Project);
       project.dispose();
     });
 
-    it('should get model names', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should get model names', async () => {
+      const project = await openTestProject();
 
       const modelNames = project.getModelNames();
       expect(Array.isArray(modelNames)).toBe(true);
@@ -56,9 +60,8 @@ describe('High-Level API', () => {
       project.dispose();
     });
 
-    it('should get the main model', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should get the main model', async () => {
+      const project = await openTestProject();
 
       const model = project.mainModel;
       expect(model).toBeInstanceOf(Model);
@@ -66,9 +69,8 @@ describe('High-Level API', () => {
       project.dispose();
     });
 
-    it('should get a model by name', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should get a model by name', async () => {
+      const project = await openTestProject();
 
       const modelNames = project.getModelNames();
       const model = project.getModel(modelNames[0]);
@@ -77,9 +79,8 @@ describe('High-Level API', () => {
       project.dispose();
     });
 
-    it('should check if project is simulatable', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should check if project is simulatable', async () => {
+      const project = await openTestProject();
 
       const isSimulatable = project.isSimulatable();
       expect(isSimulatable).toBe(true);
@@ -87,24 +88,22 @@ describe('High-Level API', () => {
       project.dispose();
     });
 
-    it('should serialize to protobuf and back', () => {
-      const xmileData = loadTestXmile();
-      const project1 = Project.fromXmile(xmileData);
+    it('should serialize to protobuf and back', async () => {
+      const project1 = await openTestProject();
 
       const protobuf = project1.serializeProtobuf();
       expect(protobuf).toBeInstanceOf(Uint8Array);
       expect(protobuf.length).toBeGreaterThan(0);
 
-      const project2 = Project.fromProtobuf(protobuf);
+      const project2 = await Project.openProtobuf(protobuf);
       expect(project2.getModelNames()).toEqual(project1.getModelNames());
 
       project1.dispose();
       project2.dispose();
     });
 
-    it('should serialize to JSON', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should serialize to JSON', async () => {
+      const project = await openTestProject();
 
       const json = project.serializeJson();
       expect(typeof json).toBe('string');
@@ -116,9 +115,8 @@ describe('High-Level API', () => {
       project.dispose();
     });
 
-    it('should get loops', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should get loops', async () => {
+      const project = await openTestProject();
 
       const loops = project.getLoops();
       expect(Array.isArray(loops)).toBe(true);
@@ -127,9 +125,8 @@ describe('High-Level API', () => {
       project.dispose();
     });
 
-    it('should get errors', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should get errors', async () => {
+      const project = await openTestProject();
 
       // The teacup model should have no errors
       const errors = project.getErrors();
@@ -143,9 +140,8 @@ describe('High-Level API', () => {
   describe('Model class', () => {
     let project: Project;
 
-    beforeAll(() => {
-      const xmileData = loadTestXmile();
-      project = Project.fromXmile(xmileData);
+    beforeAll(async () => {
+      project = await openTestProject();
     });
 
     afterAll(() => {
@@ -280,9 +276,8 @@ describe('High-Level API', () => {
   describe('Sim class (step-by-step simulation)', () => {
     let project: Project;
 
-    beforeAll(() => {
-      const xmileData = loadTestXmile();
-      project = Project.fromXmile(xmileData);
+    beforeAll(async () => {
+      project = await openTestProject();
     });
 
     afterAll(() => {
@@ -456,9 +451,8 @@ describe('High-Level API', () => {
   describe('Run class (completed simulation results)', () => {
     let project: Project;
 
-    beforeAll(() => {
-      const xmileData = loadTestXmile();
-      project = Project.fromXmile(xmileData);
+    beforeAll(async () => {
+      project = await openTestProject();
     });
 
     afterAll(() => {
@@ -537,9 +531,8 @@ describe('High-Level API', () => {
   describe('Model.baseCase', () => {
     let project: Project;
 
-    beforeAll(() => {
-      const xmileData = loadTestXmile();
-      project = Project.fromXmile(xmileData);
+    beforeAll(async () => {
+      project = await openTestProject();
     });
 
     afterAll(() => {
@@ -649,9 +642,8 @@ describe('High-Level API', () => {
   describe('Model.edit() context', () => {
     let project: Project;
 
-    beforeEach(() => {
-      const xmileData = loadTestXmile();
-      project = Project.fromXmile(xmileData);
+    beforeEach(async () => {
+      project = await openTestProject();
     });
 
     afterEach(() => {
@@ -743,10 +735,9 @@ describe('High-Level API', () => {
     });
   });
 
-  describe('Project.from* factory methods', () => {
-    it('should load from XMILE data and access mainModel', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+  describe('Project.open* factory methods', () => {
+    it('should load from XMILE data and access mainModel', async () => {
+      const project = await openTestProject();
       const model = project.mainModel;
 
       expect(model).toBeInstanceOf(Model);
@@ -755,13 +746,12 @@ describe('High-Level API', () => {
       project.dispose();
     });
 
-    it('should load from JSON string and access mainModel', () => {
-      const xmileData = loadTestXmile();
-      const project1 = Project.fromXmile(xmileData);
+    it('should load from JSON string and access mainModel', async () => {
+      const project1 = await openTestProject();
       const json = project1.serializeJson();
       project1.dispose();
 
-      const project2 = Project.fromJson(json);
+      const project2 = await Project.openJson(json);
       const model = project2.mainModel;
       expect(model).toBeInstanceOf(Model);
 
@@ -770,9 +760,8 @@ describe('High-Level API', () => {
   });
 
   describe('Resource management', () => {
-    it('should properly dispose project', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should properly dispose project', async () => {
+      const project = await openTestProject();
 
       // Access model before dispose
       const model = project.mainModel;
@@ -785,9 +774,8 @@ describe('High-Level API', () => {
       expect(() => project.getModelNames()).toThrow();
     });
 
-    it('should properly dispose simulation', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should properly dispose simulation', async () => {
+      const project = await openTestProject();
       const model = project.mainModel;
       const sim = model.simulate();
 
@@ -802,11 +790,9 @@ describe('High-Level API', () => {
       project.dispose();
     });
 
-    it('should support using statement pattern (Symbol.dispose)', () => {
-      const xmileData = loadTestXmile();
-
+    it('should support using statement pattern (Symbol.dispose)', async () => {
       // Test that dispose method exists and can be called
-      const project = Project.fromXmile(xmileData);
+      const project = await openTestProject();
       expect(typeof project.dispose).toBe('function');
       project.dispose();
     });
@@ -814,7 +800,7 @@ describe('High-Level API', () => {
 
   describe('Issue fixes', () => {
     // Test for: Model.timeSpec should use model-level sim_specs when present
-    it('should use model-level sim_specs when present', () => {
+    it('should use model-level sim_specs when present', async () => {
       // Create a project with model-level sim_specs override via JSON
       const projectJson = {
         name: 'test_project',
@@ -846,7 +832,7 @@ describe('High-Level API', () => {
         ],
       };
 
-      const project = Project.fromJson(JSON.stringify(projectJson));
+      const project = await Project.openJson(JSON.stringify(projectJson));
 
       // Model with override should use model-level sim_specs
       const modelWithOverride = project.getModel('model_with_override');
@@ -864,7 +850,7 @@ describe('High-Level API', () => {
     });
 
     // Test for: Stock initial_equation should read from arrayed_equation.initial_equation
-    it('should read arrayed stock initial_equation correctly', () => {
+    it('should read arrayed stock initial_equation correctly', async () => {
       const projectJson = {
         name: 'test_project',
         sim_specs: {
@@ -893,7 +879,7 @@ describe('High-Level API', () => {
         ],
       };
 
-      const project = Project.fromJson(JSON.stringify(projectJson));
+      const project = await Project.openJson(JSON.stringify(projectJson));
       const model = project.mainModel;
 
       const stock = model.stocks.find((s) => s.name === 'population');
@@ -905,7 +891,7 @@ describe('High-Level API', () => {
     });
 
     // Test for: Model.check() should filter results to this model only
-    it('should filter check() results to this model only', () => {
+    it('should filter check() results to this model only', async () => {
       // Use the modules test model which has multiple models
       const modulesPath = path.join(
         __dirname,
@@ -920,7 +906,7 @@ describe('High-Level API', () => {
         throw new Error('Required test model not found: ' + modulesPath);
       }
       const xmileData = fs.readFileSync(modulesPath);
-      const project = Project.fromXmile(xmileData);
+      const project = await Project.open(xmileData);
 
       // This project has multiple models (main, 'a', 'b')
       const modelNames = project.getModelNames();
@@ -953,7 +939,7 @@ describe('High-Level API', () => {
     });
 
     // Test that main model errors don't leak to other models
-    it('should not return errors from other models', () => {
+    it('should not return errors from other models', async () => {
       // Create project with error in main model only
       const projectJson = {
         name: 'test_project',
@@ -972,7 +958,7 @@ describe('High-Level API', () => {
         ],
       };
 
-      const project = Project.fromJson(JSON.stringify(projectJson));
+      const project = await Project.openJson(JSON.stringify(projectJson));
 
       // Get all project errors
       const allErrors = project.getErrors();
@@ -994,7 +980,7 @@ describe('High-Level API', () => {
     });
 
     // Test filtering with actual multi-model errors
-    it('should correctly attribute errors to their respective models', () => {
+    it('should correctly attribute errors to their respective models', async () => {
       // Use the modules model and verify filtering logic
       const modulesPath = path.join(
         __dirname,
@@ -1006,7 +992,7 @@ describe('High-Level API', () => {
         'modules_with_complex_idents.stmx',
       );
       const xmileData = fs.readFileSync(modulesPath);
-      const project = Project.fromXmile(xmileData);
+      const project = await Project.open(xmileData);
 
       // Get errors per model
       const allErrors = project.getErrors();
@@ -1033,9 +1019,8 @@ describe('High-Level API', () => {
     });
 
     // Test for: Edit callback should not crash if callback throws
-    it('should handle errors in edit callback gracefully', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should handle errors in edit callback gracefully', async () => {
+      const project = await openTestProject();
       const model = project.mainModel;
 
       // Callback that throws an error
@@ -1053,9 +1038,8 @@ describe('High-Level API', () => {
     });
 
     // Test for: Project.dispose() should dispose cached models
-    it('should dispose cached models when project is disposed', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should dispose cached models when project is disposed', async () => {
+      const project = await openTestProject();
 
       // Access the main model to cache it
       const model = project.mainModel;
@@ -1070,9 +1054,8 @@ describe('High-Level API', () => {
     });
 
     // Test for: Link polarity should be validated at runtime
-    it('should have valid link polarity values', () => {
-      const xmileData = loadTestXmile();
-      const project = Project.fromXmile(xmileData);
+    it('should have valid link polarity values', async () => {
+      const project = await openTestProject();
       const model = project.mainModel;
 
       const links = model.getLinks();

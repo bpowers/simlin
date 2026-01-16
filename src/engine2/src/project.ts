@@ -26,10 +26,19 @@ import { simlin_import_xmile, simlin_export_xmile } from './internal/import-expo
 import { simlin_analyze_get_loops, readLoops, simlin_free_loops } from './internal/analysis';
 import { SimlinProjectPtr, SimlinJsonFormat, ErrorDetail } from './internal/types';
 import { readAllErrorDetails, simlin_error_free } from './internal/error';
-import { ensureInitialized } from './internal/wasm';
+import { registerFinalizer, unregisterFinalizer } from './internal/dispose';
+import { ensureInitialized, WasmSourceProvider } from './internal/wasm';
 import { Loop, LoopPolarity } from './types';
 import { Model } from './model';
 import { JsonProjectPatch } from './json-types';
+
+type ProjectOpenOptions = {
+  wasm?: WasmSourceProvider;
+};
+
+type ProjectOpenJsonOptions = ProjectOpenOptions & {
+  format?: SimlinJsonFormat;
+};
 
 /**
  * A system dynamics project containing models.
@@ -48,6 +57,7 @@ export class Project {
       throw new Error('Cannot create Project from null pointer');
     }
     this._ptr = ptr;
+    registerFinalizer(this, ptr, simlin_project_unref);
   }
 
   /**
@@ -56,7 +66,7 @@ export class Project {
    * @returns New Project instance
    * @throws SimlinError if the XMILE data is invalid
    */
-  static fromXmile(data: Uint8Array): Project {
+  private static fromXmile(data: Uint8Array): Project {
     const ptr = simlin_import_xmile(data);
     return new Project(ptr);
   }
@@ -67,7 +77,7 @@ export class Project {
    * @returns New Project instance
    * @throws SimlinError if the protobuf data is invalid
    */
-  static fromProtobuf(data: Uint8Array): Project {
+  private static fromProtobuf(data: Uint8Array): Project {
     const ptr = simlin_project_open(data);
     return new Project(ptr);
   }
@@ -79,7 +89,7 @@ export class Project {
    * @returns New Project instance
    * @throws SimlinError if the JSON data is invalid
    */
-  static fromJson(data: string | Uint8Array, format: SimlinJsonFormat = SimlinJsonFormat.Native): Project {
+  private static fromJson(data: string | Uint8Array, format: SimlinJsonFormat = SimlinJsonFormat.Native): Project {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
     const ptr = simlin_project_json_open(bytes, format);
     return new Project(ptr);
@@ -89,12 +99,12 @@ export class Project {
    * Create a project from XMILE data (string or bytes).
    * Automatically initializes WASM if needed.
    * @param xmile XMILE XML data as string or Uint8Array
-   * @param wasmPath Optional path to WASM file for initialization
+   * @param options Optional WASM configuration
    * @returns Promise resolving to new Project instance
    * @throws SimlinError if the XMILE data is invalid
    */
-  static async open(xmile: string | Uint8Array, wasmPath?: string): Promise<Project> {
-    await ensureInitialized(wasmPath);
+  static async open(xmile: string | Uint8Array, options: ProjectOpenOptions = {}): Promise<Project> {
+    await ensureInitialized(options.wasm);
     const data = typeof xmile === 'string' ? new TextEncoder().encode(xmile) : xmile;
     return Project.fromXmile(data);
   }
@@ -103,13 +113,27 @@ export class Project {
    * Create a project from protobuf data.
    * Automatically initializes WASM if needed.
    * @param data Protobuf-encoded project data
-   * @param wasmPath Optional path to WASM file for initialization
+   * @param options Optional WASM configuration
    * @returns Promise resolving to new Project instance
    * @throws SimlinError if the protobuf data is invalid
    */
-  static async openProtobuf(data: Uint8Array, wasmPath?: string): Promise<Project> {
-    await ensureInitialized(wasmPath);
+  static async openProtobuf(data: Uint8Array, options: ProjectOpenOptions = {}): Promise<Project> {
+    await ensureInitialized(options.wasm);
     return Project.fromProtobuf(data);
+  }
+
+  /**
+   * Create a project from JSON data (string or bytes).
+   * Automatically initializes WASM if needed.
+   * @param data JSON string or Uint8Array
+   * @param options Optional format and WASM configuration
+   * @returns Promise resolving to new Project instance
+   * @throws SimlinError if the JSON data is invalid
+   */
+  static async openJson(data: string | Uint8Array, options: ProjectOpenJsonOptions = {}): Promise<Project> {
+    await ensureInitialized(options.wasm);
+    const format = options.format ?? SimlinJsonFormat.Native;
+    return Project.fromJson(data, format);
   }
 
   /**
@@ -321,6 +345,8 @@ export class Project {
     if (this._disposed) {
       return;
     }
+
+    unregisterFinalizer(this);
 
     // Dispose all cached models first (includes main model if accessed)
     for (const model of this._models.values()) {

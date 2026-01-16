@@ -16,7 +16,6 @@ import { Project as Engine2Project } from '@system-dynamics/engine2';
 async function fileFromXmile(files: Table<File>, projectId: string, userId: string, xmile: string): Promise<File> {
   const project = await Engine2Project.open(xmile);
   const sdPB = project.serializeProtobuf();
-  project.dispose();
 
   const file = createFile(projectId, userId, undefined, sdPB);
   await files.create(file.getId(), file);

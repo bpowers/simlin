@@ -984,7 +984,6 @@ export const Editor = styled(
       Engine2Project.openProtobuf(projectPb)
         .then((project) => {
           const xmile = project.toXmileString();
-          project.dispose();
           const encoder = new TextEncoder();
           const xmileBytes = encoder.encode(xmile);
           const blob = new Blob([xmileBytes], {

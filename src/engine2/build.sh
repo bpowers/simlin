@@ -18,7 +18,10 @@ cp ../../target/wasm32-unknown-unknown/release/simlin.wasm core/libsimlin.wasm
 # Optimize WASM if wasm-opt is available
 if command -v wasm-opt &> /dev/null && [ "1" != "${DISABLE_WASM_OPT-0}" ]; then
   echo "Running wasm-opt..."
-  wasm-opt core/libsimlin.wasm -o core/libsimlin.wasm-opt -O3
+  wasm-opt core/libsimlin.wasm -o core/libsimlin.wasm-opt -O3 \
+    --enable-bulk-memory \
+    --enable-bulk-memory-opt \
+    --enable-nontrapping-float-to-int
   mv core/libsimlin.wasm-opt core/libsimlin.wasm
 else
   echo "Skipping wasm-opt (not installed or disabled)"

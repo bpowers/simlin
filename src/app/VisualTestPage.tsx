@@ -36,7 +36,6 @@ export const VisualTestPage: React.FC = () => {
         console.log('Loading XMILE model, length:', xmileContent.length);
         const engine2Project = await Engine2Project.open(xmileContent);
         const projectBinary = engine2Project.serializeProtobuf();
-        engine2Project.dispose();
         console.log('Got project binary, length:', projectBinary.length);
         const importedProject = Project.deserializeBinary(projectBinary);
         console.log('Deserialized project, models:', importedProject.models.size);
