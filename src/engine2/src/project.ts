@@ -26,6 +26,7 @@ import { simlin_import_xmile, simlin_export_xmile } from './internal/import-expo
 import { simlin_analyze_get_loops, readLoops, simlin_free_loops } from './internal/analysis';
 import { SimlinProjectPtr, SimlinJsonFormat, ErrorDetail } from './internal/types';
 import { readAllErrorDetails, simlin_error_free } from './internal/error';
+import { ensureInitialized } from './internal/wasm';
 import { Loop, LoopPolarity } from './types';
 import { Model } from './model';
 import { JsonProjectPatch } from './json-types';
@@ -82,6 +83,33 @@ export class Project {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
     const ptr = simlin_project_json_open(bytes, format);
     return new Project(ptr);
+  }
+
+  /**
+   * Create a project from XMILE data (string or bytes).
+   * Automatically initializes WASM if needed.
+   * @param xmile XMILE XML data as string or Uint8Array
+   * @param wasmPath Optional path to WASM file for initialization
+   * @returns Promise resolving to new Project instance
+   * @throws SimlinError if the XMILE data is invalid
+   */
+  static async open(xmile: string | Uint8Array, wasmPath?: string): Promise<Project> {
+    await ensureInitialized(wasmPath);
+    const data = typeof xmile === 'string' ? new TextEncoder().encode(xmile) : xmile;
+    return Project.fromXmile(data);
+  }
+
+  /**
+   * Create a project from protobuf data.
+   * Automatically initializes WASM if needed.
+   * @param data Protobuf-encoded project data
+   * @param wasmPath Optional path to WASM file for initialization
+   * @returns Promise resolving to new Project instance
+   * @throws SimlinError if the protobuf data is invalid
+   */
+  static async openProtobuf(data: Uint8Array, wasmPath?: string): Promise<Project> {
+    await ensureInitialized(wasmPath);
+    return Project.fromProtobuf(data);
   }
 
   /**
@@ -203,6 +231,14 @@ export class Project {
   toXmile(): Uint8Array {
     this.checkDisposed();
     return simlin_export_xmile(this._ptr);
+  }
+
+  /**
+   * Export this project to XMILE format as a string.
+   * @returns XMILE XML string
+   */
+  toXmileString(): string {
+    return new TextDecoder().decode(this.toXmile());
   }
 
   /**

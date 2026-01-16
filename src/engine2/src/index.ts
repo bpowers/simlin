@@ -44,4 +44,4 @@ export * from './types';
 export * from './json-types';
 
 // WASM initialization functions
-export { init, reset, isInitialized } from './internal/wasm';
+export { init, reset, isInitialized, ensureInitialized } from './internal/wasm';

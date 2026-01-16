@@ -25,7 +25,7 @@ import CardActions from '@mui/material/CardActions';
 import CardContent from '@mui/material/CardContent';
 import { canonicalize } from '@system-dynamics/core/canonicalize';
 
-import { toXmile } from '@system-dynamics/importer';
+import { Project as Engine2Project } from '@system-dynamics/engine2';
 import type {
   Engine as IEngine,
   Error as EngineError,
@@ -981,12 +981,10 @@ export const Editor = styled(
     handleDownloadXmile = () => {
       const engine = defined(this.engine());
       const projectPb = engine.serializeToProtobuf();
-      toXmile(projectPb)
-        .then((xmile) => {
-          if (!xmile) {
-            this.appendModelError('unable to download as XMILE at this time');
-            return;
-          }
+      Engine2Project.openProtobuf(projectPb)
+        .then((project) => {
+          const xmile = project.toXmileString();
+          project.dispose();
           const encoder = new TextEncoder();
           const xmileBytes = encoder.encode(xmile);
           const blob = new Blob([xmileBytes], {

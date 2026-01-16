@@ -4,8 +4,8 @@ set -euo pipefail
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$DIR"
 
-# Clean previous builds
-rm -rf lib lib.browser core
+# Clean previous builds (including tsbuildinfo for incremental compilation)
+rm -rf lib lib.browser core *.tsbuildinfo
 
 # Build libsimlin as WASM (without vensim feature due to C++ xmutil dependency)
 echo "Building libsimlin for wasm32-unknown-unknown..."

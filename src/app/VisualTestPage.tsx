@@ -12,7 +12,7 @@ import CssBaseline from '@mui/material/CssBaseline';
 
 import { Project, UID, ViewElement, Variable } from '@system-dynamics/core/datamodel';
 import { defined } from '@system-dynamics/core/common';
-import { fromXmile } from '@system-dynamics/importer';
+import { Project as Engine2Project } from '@system-dynamics/engine2';
 import { Canvas } from '@system-dynamics/diagram/drawing/Canvas';
 import { VariableDetails } from '@system-dynamics/diagram/VariableDetails';
 import { Point } from '@system-dynamics/diagram/drawing/common';
@@ -34,7 +34,9 @@ export const VisualTestPage: React.FC = () => {
     (window as any).loadXmileModel = async (xmileContent: string) => {
       try {
         console.log('Loading XMILE model, length:', xmileContent.length);
-        const projectBinary = await fromXmile(xmileContent);
+        const engine2Project = await Engine2Project.open(xmileContent);
+        const projectBinary = engine2Project.serializeProtobuf();
+        engine2Project.dispose();
         console.log('Got project binary, length:', projectBinary.length);
         const importedProject = Project.deserializeBinary(projectBinary);
         console.log('Deserialized project, models:', importedProject.models.size);

@@ -6,6 +6,7 @@
 
 let wasmInstance: WebAssembly.Instance | null = null;
 let wasmMemory: WebAssembly.Memory | null = null;
+let initPromise: Promise<void> | null = null;
 
 /**
  * Check if a string looks like a URL (http://, https://, or file://)
@@ -24,11 +25,19 @@ export function isNode(): boolean {
 }
 
 /**
- * Load a file from the filesystem in Node.js
+ * Load a file from the filesystem in Node.js.
+ * This function uses a dynamic import pattern that avoids bundler analysis.
+ * Note: This approach uses new Function() to hide the import from bundlers,
+ * which doesn't work in Jest's sandbox. Tests that call this function directly
+ * should read the file with fs.readFileSync and pass the buffer to init() instead.
  * @internal Exported for testing
  */
 export async function loadFileNode(path: string): Promise<ArrayBuffer> {
-  const fs = await import('node:fs/promises');
+  // Use a technique that prevents bundlers from analyzing this import.
+  // In Node.js, this will work. In browsers, this function should never be called.
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  const dynamicImport = new Function('specifier', 'return import(specifier)');
+  const fs = await dynamicImport('node:fs/promises');
   const nodeBuffer = await fs.readFile(path);
   return nodeBuffer.buffer.slice(nodeBuffer.byteOffset, nodeBuffer.byteOffset + nodeBuffer.byteLength);
 }
@@ -114,9 +123,37 @@ export function isInitialized(): boolean {
 }
 
 /**
+ * Ensure the WASM module is initialized.
+ * This is a convenience function that will initialize WASM with default settings
+ * if it hasn't been initialized yet. Safe to call multiple times.
+ *
+ * @param wasmPath - Optional path to the WASM file. Defaults to './core/libsimlin.wasm'
+ *                   which works for both Node.js (relative to engine2 package) and
+ *                   browsers (if the WASM is served at that path).
+ */
+export async function ensureInitialized(wasmPath?: string): Promise<void> {
+  if (wasmInstance !== null) {
+    return;
+  }
+
+  if (initPromise !== null) {
+    await initPromise;
+    return;
+  }
+
+  initPromise = init(wasmPath);
+  try {
+    await initPromise;
+  } finally {
+    initPromise = null;
+  }
+}
+
+/**
  * Reset the WASM state (for testing).
  */
 export function reset(): void {
   wasmInstance = null;
   wasmMemory = null;
+  initPromise = null;
 }

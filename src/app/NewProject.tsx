@@ -21,7 +21,7 @@ import { Project } from './Project';
 import { User } from './User';
 import { Project as ProjectDM } from '@system-dynamics/core/datamodel';
 import { convertMdlToXmile } from '@system-dynamics/xmutil';
-import { fromXmile } from '@system-dynamics/importer';
+import { Project as Engine2Project } from '@system-dynamics/engine2';
 
 interface NewProjectProps {
   user: User;
@@ -153,7 +153,9 @@ export const NewProject = styled(
           }
         }
 
-        const projectPB: Uint8Array = await fromXmile(contents);
+        const engine2Project = await Engine2Project.open(contents);
+        const projectPB = engine2Project.serializeProtobuf();
+        engine2Project.dispose();
         const activeProject = ProjectDM.deserializeBinary(projectPB);
         const views = activeProject.models.get('main')?.views;
         if (!views || views.isEmpty()) {
