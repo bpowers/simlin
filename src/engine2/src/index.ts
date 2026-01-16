@@ -38,9 +38,16 @@ export { Sim } from './sim';
 export { Run } from './run';
 export { ModelPatchBuilder } from './patch';
 
+// Error utilities
+export { errorCodeDescription, ErrorCode } from './errors';
+
 // High-level types
 export * from './types';
 export * from './json-types';
+
+// Internal types needed for error handling
+export type { ErrorDetail } from './internal/types';
+export { SimlinErrorKind, SimlinUnitErrorKind } from './internal/types';
 
 // Optional WASM configuration for advanced use cases
 export {

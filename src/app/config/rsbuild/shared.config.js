@@ -137,7 +137,6 @@ const sharedConfig = defineConfig({
           '@': resolveApp('.'),
           '@system-dynamics/core': resolveApp('../core'),
           '@system-dynamics/diagram': resolveApp('../diagram'),
-          '@system-dynamics/engine': resolveApp('../engine'),
           '@system-dynamics/engine2': resolveApp('../engine2'),
           '@system-dynamics/xmutil': resolveApp('../xmutil-js'),
         },

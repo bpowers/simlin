@@ -24,7 +24,6 @@
     "@emotion/styled": "^11.0.0",
     "@mui/material": "^5.0.0",
     "@system-dynamics/core": "^1.3.5",
-    "@system-dynamics/engine": "^1.3.1",
     "@system-dynamics/engine2": "^2.0.0",
     "chroma-js": "^3.1.2",
     "google-protobuf": "^4.0.0",

@@ -15,6 +15,7 @@ import {
   simlin_model_unref,
   simlin_model_get_incoming_links,
   simlin_model_get_links,
+  simlin_model_get_latex_equation,
 } from './internal/model';
 import { readLinks, simlin_free_links } from './internal/analysis';
 import { SimlinModelPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types';
@@ -424,6 +425,16 @@ export class Model {
     }
 
     throw new Error(`Variable '${variable}' not found in model`);
+  }
+
+  /**
+   * Get the LaTeX representation of a variable's equation.
+   * @param ident Variable identifier
+   * @returns LaTeX string, or null if not found
+   */
+  getLatexEquation(ident: string): string | null {
+    this.checkDisposed();
+    return simlin_model_get_latex_equation(this._ptr, ident);
   }
 
   /**
