@@ -36,13 +36,8 @@ export function isNode(): boolean {
   return typeof process !== 'undefined' && process.versions?.node !== undefined;
 }
 
-async function dynamicImport<T = unknown>(specifier: string): Promise<T> {
-  const importer = new Function('specifier', 'return import(specifier)');
-  return importer(specifier) as Promise<T>;
-}
-
 async function getDefaultNodeWasmPath(): Promise<string> {
-  const path = await dynamicImport<typeof import('node:path')>('node:path');
+  const path = await import('node:path');
   return path.join(__dirname, '..', 'core', 'libsimlin.wasm');
 }
 
@@ -79,14 +74,10 @@ async function resolveWasmSource(source?: WasmSourceProvider): Promise<WasmSourc
 
 /**
  * Load a file from the filesystem in Node.js.
- * This function uses a dynamic import pattern that avoids bundler analysis.
- * Note: This approach uses new Function() to hide the import from bundlers,
- * which doesn't work in Jest's sandbox. Tests that call this function directly
- * should read the file with fs.readFileSync and pass the buffer to init() instead.
  * @internal Exported for testing
  */
 export async function loadFileNode(pathOrUrl: string | URL): Promise<ArrayBuffer> {
-  const fs = await dynamicImport<typeof import('node:fs/promises')>('node:fs/promises');
+  const fs = await import('node:fs/promises');
   const nodeBuffer = await fs.readFile(pathOrUrl);
   return nodeBuffer.buffer.slice(nodeBuffer.byteOffset, nodeBuffer.byteOffset + nodeBuffer.byteLength);
 }
