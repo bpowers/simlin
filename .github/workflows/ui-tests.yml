@@ -53,7 +53,7 @@ jobs:
         run: npx playwright install chromium
 
       - name: Install Firestore emulator
-        run: sudo apt-get install -y google-cloud-cli-firestore-emulator
+        run: gcloud components install cloud-firestore-emulator --quiet
 
       - name: Run UI integration tests
         run: yarn test:ui
