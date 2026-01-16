@@ -2,362 +2,249 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// Simulation functions
+/**
+ * Sim class for step-by-step simulation control.
+ *
+ * Use Model.simulate() to create a Sim instance for gaming applications
+ * where you need to inspect state and modify variables during simulation.
+ * For batch analysis, use Model.run() instead.
+ */
 
-import { getExports } from './wasm';
 import {
-  free,
-  stringToWasm,
-  allocOutPtr,
-  readOutPtr,
-  allocOutUsize,
-  readOutUsize,
-  readDouble,
-  readFloat64Array,
-  malloc,
-} from './memory';
-import { SimlinModelPtr, SimlinSimPtr } from './types';
-import {
-  simlin_error_free,
-  simlin_error_get_code,
-  simlin_error_get_message,
-  readAllErrorDetails,
-  SimlinError,
-} from './error';
+  simlin_sim_new,
+  simlin_sim_unref,
+  simlin_sim_run_to,
+  simlin_sim_run_to_end,
+  simlin_sim_reset,
+  simlin_sim_get_stepcount,
+  simlin_sim_get_value,
+  simlin_sim_set_value,
+  simlin_sim_get_series,
+} from './internal/sim';
+import { simlin_model_get_var_names } from './internal/model';
+import { simlin_analyze_get_links, simlin_free_links, readLinks } from './internal/analysis';
+import { SimlinSimPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types';
+import { Link, LinkPolarity } from './types';
 
 /**
- * Create a new simulation context.
- * @param model Model pointer
- * @param enableLtm Enable Loop Tendency Method analysis
- * @returns Simulation pointer
+ * Convert low-level link polarity to high-level type with validation.
  */
-export function simlin_sim_new(model: SimlinModelPtr, enableLtm: boolean): SimlinSimPtr {
-  const exports = getExports();
-  const fn = exports.simlin_sim_new as (model: number, ltm: number, outErr: number) => number;
-
-  const outErrPtr = allocOutPtr();
-
-  try {
-    const result = fn(model, enableLtm ? 1 : 0, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-
-    return result;
-  } finally {
-    free(outErrPtr);
+function convertLinkPolarity(rawPolarity: SimlinLinkPolarity): LinkPolarity {
+  switch (rawPolarity) {
+    case SimlinLinkPolarity.Positive:
+      return LinkPolarity.Positive;
+    case SimlinLinkPolarity.Negative:
+      return LinkPolarity.Negative;
+    case SimlinLinkPolarity.Unknown:
+      return LinkPolarity.Unknown;
+    default:
+      throw new Error(`Invalid link polarity value: ${rawPolarity}`);
   }
 }
+import { Model } from './model';
+import { Run } from './run';
 
 /**
- * Increment the reference count of a simulation.
- * @param sim Simulation pointer
+ * A simulation context for step-by-step execution.
+ *
+ * Sim provides low-level control over simulation execution, allowing
+ * you to run to specific times, inspect and modify variable values,
+ * and get time series data.
  */
-export function simlin_sim_ref(sim: SimlinSimPtr): void {
-  const exports = getExports();
-  const fn = exports.simlin_sim_ref as (ptr: number) => void;
-  fn(sim);
-}
+export class Sim {
+  private _ptr: SimlinSimPtr;
+  private _model: Model;
+  private _overrides: Record<string, number>;
+  private _disposed: boolean = false;
+  private _enableLtm: boolean;
 
-/**
- * Decrement the reference count of a simulation. Frees if count reaches zero.
- * @param sim Simulation pointer
- */
-export function simlin_sim_unref(sim: SimlinSimPtr): void {
-  const exports = getExports();
-  const fn = exports.simlin_sim_unref as (ptr: number) => void;
-  fn(sim);
-}
+  /**
+   * Create a Sim from a Model.
+   * This is internal - use Model.simulate() instead.
+   */
+  constructor(model: Model, overrides: Record<string, number> = {}, enableLtm: boolean = false) {
+    const ptr = simlin_sim_new(model.ptr, enableLtm);
+    this._ptr = ptr;
+    this._model = model;
+    this._overrides = { ...overrides };
+    this._enableLtm = enableLtm;
 
-/**
- * Run simulation to a specific time.
- * @param sim Simulation pointer
- * @param time Target time
- */
-export function simlin_sim_run_to(sim: SimlinSimPtr, time: number): void {
-  const exports = getExports();
-  const fn = exports.simlin_sim_run_to as (sim: number, time: number, outErr: number) => void;
-
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(sim, time, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
+    // Apply any overrides
+    for (const [name, value] of Object.entries(overrides)) {
+      simlin_sim_set_value(ptr, name, value);
     }
-  } finally {
-    free(outErrPtr);
   }
-}
 
-/**
- * Run simulation to the end.
- * @param sim Simulation pointer
- */
-export function simlin_sim_run_to_end(sim: SimlinSimPtr): void {
-  const exports = getExports();
-  const fn = exports.simlin_sim_run_to_end as (sim: number, outErr: number) => void;
-
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(sim, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-  } finally {
-    free(outErrPtr);
+  /**
+   * Get the internal WASM pointer. For internal use only.
+   */
+  get ptr(): SimlinSimPtr {
+    this.checkDisposed();
+    return this._ptr;
   }
-}
 
-/**
- * Reset simulation to initial state.
- * @param sim Simulation pointer
- */
-export function simlin_sim_reset(sim: SimlinSimPtr): void {
-  const exports = getExports();
-  const fn = exports.simlin_sim_reset as (sim: number, outErr: number) => void;
-
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(sim, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-  } finally {
-    free(outErrPtr);
+  /**
+   * The Model this simulation is based on.
+   */
+  get model(): Model {
+    return this._model;
   }
-}
 
-/**
- * Get the step count from simulation.
- * @param sim Simulation pointer
- * @returns Number of steps
- */
-export function simlin_sim_get_stepcount(sim: SimlinSimPtr): number {
-  const exports = getExports();
-  const fn = exports.simlin_sim_get_stepcount as (sim: number, outCount: number, outErr: number) => void;
-
-  const outCountPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(sim, outCountPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-
-    return readOutUsize(outCountPtr);
-  } finally {
-    free(outCountPtr);
-    free(outErrPtr);
+  /**
+   * The overrides applied to this simulation.
+   */
+  get overrides(): Record<string, number> {
+    return { ...this._overrides };
   }
-}
 
-/**
- * Get the current value of a variable.
- * @param sim Simulation pointer
- * @param name Variable name
- * @returns Current value
- */
-export function simlin_sim_get_value(sim: SimlinSimPtr, name: string): number {
-  const exports = getExports();
-  const fn = exports.simlin_sim_get_value as (sim: number, name: number, outVal: number, outErr: number) => void;
-
-  const namePtr = stringToWasm(name);
-  const outValPtr = malloc(8); // f64
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(sim, namePtr, outValPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-
-    return readDouble(outValPtr);
-  } finally {
-    free(namePtr);
-    free(outValPtr);
-    free(outErrPtr);
+  /**
+   * Whether LTM (Loops That Matter) analysis is enabled.
+   */
+  get ltmEnabled(): boolean {
+    return this._enableLtm;
   }
-}
 
-/**
- * Set the value of a variable.
- * @param sim Simulation pointer
- * @param name Variable name
- * @param value New value
- */
-export function simlin_sim_set_value(sim: SimlinSimPtr, name: string, value: number): void {
-  const exports = getExports();
-  const fn = exports.simlin_sim_set_value as (sim: number, name: number, val: number, outErr: number) => void;
-
-  const namePtr = stringToWasm(name);
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(sim, namePtr, value, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
+  private checkDisposed(): void {
+    if (this._disposed) {
+      throw new Error('Sim has been disposed');
     }
-  } finally {
-    free(namePtr);
-    free(outErrPtr);
   }
-}
 
-/**
- * Get time series data for a variable.
- * @param sim Simulation pointer
- * @param name Variable name
- * @param stepCount Number of steps to read
- * @returns Float64Array with time series data
- */
-export function simlin_sim_get_series(sim: SimlinSimPtr, name: string, stepCount: number): Float64Array {
-  const exports = getExports();
-  const fn = exports.simlin_sim_get_series as (
-    sim: number,
-    name: number,
-    results: number,
-    len: number,
-    outWritten: number,
-    outErr: number,
-  ) => void;
-
-  const namePtr = stringToWasm(name);
-  const resultsPtr = malloc(stepCount * 8); // f64 array
-  const outWrittenPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(sim, namePtr, resultsPtr, stepCount, outWrittenPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-
-    const written = readOutUsize(outWrittenPtr);
-    // Use readFloat64Array to avoid alignment issues with Float64Array
-    return readFloat64Array(resultsPtr, written);
-  } finally {
-    free(namePtr);
-    free(resultsPtr);
-    free(outWrittenPtr);
-    free(outErrPtr);
+  /**
+   * Get the current simulation time.
+   */
+  get time(): number {
+    this.checkDisposed();
+    return simlin_sim_get_value(this._ptr, 'time');
   }
-}
 
-/**
- * Set a value by offset.
- * @param sim Simulation pointer
- * @param offset Variable offset
- * @param value New value
- */
-export function simlin_sim_set_value_by_offset(sim: SimlinSimPtr, offset: number, value: number): void {
-  const exports = getExports();
-  const fn = exports.simlin_sim_set_value_by_offset as (
-    sim: number,
-    offset: number,
-    val: number,
-    outErr: number,
-  ) => void;
-
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(sim, offset, value, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-  } finally {
-    free(outErrPtr);
+  /**
+   * Run the simulation to a specific time.
+   * @param time Target time
+   */
+  runTo(time: number): void {
+    this.checkDisposed();
+    simlin_sim_run_to(this._ptr, time);
   }
-}
 
-/**
- * Get the column offset for a variable.
- * @param sim Simulation pointer
- * @param name Variable name
- * @returns Column offset
- */
-export function simlin_sim_get_offset(sim: SimlinSimPtr, name: string): number {
-  const exports = getExports();
-  const fn = exports.simlin_sim_get_offset as (sim: number, name: number, outOffset: number, outErr: number) => void;
+  /**
+   * Run the simulation to the end.
+   */
+  runToEnd(): void {
+    this.checkDisposed();
+    simlin_sim_run_to_end(this._ptr);
+  }
 
-  const namePtr = stringToWasm(name);
-  const outOffsetPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
+  /**
+   * Reset the simulation to initial state.
+   */
+  reset(): void {
+    this.checkDisposed();
+    simlin_sim_reset(this._ptr);
 
-  try {
-    fn(sim, namePtr, outOffsetPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
+    // Re-apply overrides after reset
+    for (const [name, value] of Object.entries(this._overrides)) {
+      simlin_sim_set_value(this._ptr, name, value);
+    }
+  }
 
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
+  /**
+   * Get the number of simulation steps completed.
+   */
+  getStepCount(): number {
+    this.checkDisposed();
+    return simlin_sim_get_stepcount(this._ptr);
+  }
+
+  /**
+   * Get the current value of a variable.
+   * @param name Variable name
+   * @returns Current value
+   */
+  getValue(name: string): number {
+    this.checkDisposed();
+    return simlin_sim_get_value(this._ptr, name);
+  }
+
+  /**
+   * Set the value of a variable.
+   * @param name Variable name
+   * @param value New value
+   */
+  setValue(name: string, value: number): void {
+    this.checkDisposed();
+    simlin_sim_set_value(this._ptr, name, value);
+  }
+
+  /**
+   * Get time series data for a variable.
+   * @param name Variable name
+   * @returns Float64Array with time series data
+   */
+  getSeries(name: string): Float64Array {
+    this.checkDisposed();
+    const stepCount = this.getStepCount();
+    return simlin_sim_get_series(this._ptr, name, stepCount);
+  }
+
+  /**
+   * Get variable names available in this simulation.
+   * @returns Array of variable names
+   */
+  getVarNames(): string[] {
+    this.checkDisposed();
+    return simlin_model_get_var_names(this._model.ptr);
+  }
+
+  /**
+   * Get causal links with LTM scores (if enabled).
+   * @returns Array of Link objects
+   */
+  getLinks(): Link[] {
+    this.checkDisposed();
+
+    const linksPtr = simlin_analyze_get_links(this._ptr);
+    if (linksPtr === 0) {
+      return [];
     }
 
-    return readOutUsize(outOffsetPtr);
-  } finally {
-    free(namePtr);
-    free(outOffsetPtr);
-    free(outErrPtr);
+    const rawLinks = readLinks(linksPtr);
+    simlin_free_links(linksPtr);
+
+    return rawLinks.map((link: LowLevelLink) => ({
+      from: link.from,
+      to: link.to,
+      polarity: convertLinkPolarity(link.polarity),
+      score: link.score || undefined,
+    }));
+  }
+
+  /**
+   * Convert this simulation to a Run object.
+   * @returns Run object with results and analysis
+   */
+  getRun(): Run {
+    this.checkDisposed();
+    return new Run(this);
+  }
+
+  /**
+   * Dispose this simulation and free WASM resources.
+   */
+  dispose(): void {
+    if (this._disposed) {
+      return;
+    }
+
+    simlin_sim_unref(this._ptr);
+    this._ptr = 0;
+    this._disposed = true;
+  }
+
+  /**
+   * Symbol.dispose support for using statement.
+   */
+  [Symbol.dispose](): void {
+    this.dispose();
   }
 }

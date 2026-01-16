@@ -2,283 +2,587 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// Model functions
+/**
+ * Model class for working with system dynamics models.
+ *
+ * A Model contains variables, equations, and structure that define
+ * the system dynamics simulation. Models can be simulated by creating
+ * Sim instances.
+ */
 
-import { getExports, getMemory } from './wasm';
 import {
-  malloc,
-  free,
-  stringToWasm,
-  wasmToStringAndFree,
-  allocOutPtr,
-  readOutPtr,
-  allocOutUsize,
-  readOutUsize,
-} from './memory';
-import { SimlinModelPtr, SimlinLinksPtr } from './types';
+  simlin_model_ref,
+  simlin_model_unref,
+  simlin_model_get_incoming_links,
+  simlin_model_get_links,
+} from './internal/model';
+import { readLinks, simlin_free_links } from './internal/analysis';
+import { SimlinModelPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types';
 import {
-  simlin_error_free,
-  simlin_error_get_code,
-  simlin_error_get_message,
-  readAllErrorDetails,
-  SimlinError,
-} from './error';
+  Stock,
+  Flow,
+  Aux,
+  Variable,
+  TimeSpec,
+  Link,
+  Loop,
+  LinkPolarity,
+  ModelIssue,
+  GraphicalFunction,
+} from './types';
+import { JsonModel, JsonStock, JsonFlow, JsonAuxiliary, JsonGraphicalFunction, JsonProjectPatch } from './json-types';
+import { Project } from './project';
+import { Sim } from './sim';
+import { Run } from './run';
+import { ModelPatchBuilder } from './patch';
 
 /**
- * Increment the reference count of a model.
- * @param model Model pointer
+ * Convert low-level link polarity to high-level type with validation.
+ * Validates that the polarity value is within expected range.
  */
-export function simlin_model_ref(model: SimlinModelPtr): void {
-  const exports = getExports();
-  const fn = exports.simlin_model_ref as (ptr: number) => void;
-  fn(model);
-}
-
-/**
- * Decrement the reference count of a model. Frees if count reaches zero.
- * @param model Model pointer
- */
-export function simlin_model_unref(model: SimlinModelPtr): void {
-  const exports = getExports();
-  const fn = exports.simlin_model_unref as (ptr: number) => void;
-  fn(model);
-}
-
-/**
- * Get the number of variables in a model.
- * @param model Model pointer
- * @returns Number of variables
- */
-export function simlin_model_get_var_count(model: SimlinModelPtr): number {
-  const exports = getExports();
-  const fn = exports.simlin_model_get_var_count as (model: number, outCount: number, outErr: number) => void;
-
-  const outCountPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(model, outCountPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-
-    return readOutUsize(outCountPtr);
-  } finally {
-    free(outCountPtr);
-    free(outErrPtr);
+function convertLinkPolarity(rawPolarity: SimlinLinkPolarity): LinkPolarity {
+  switch (rawPolarity) {
+    case SimlinLinkPolarity.Positive:
+      return LinkPolarity.Positive;
+    case SimlinLinkPolarity.Negative:
+      return LinkPolarity.Negative;
+    case SimlinLinkPolarity.Unknown:
+      return LinkPolarity.Unknown;
+    default:
+      throw new Error(`Invalid link polarity value: ${rawPolarity}`);
   }
 }
 
 /**
- * Get the LaTeX representation of a variable's equation.
- * @param model Model pointer
- * @param ident Variable identifier
- * @returns LaTeX string, or null if not found
+ * Parse a DT string to a number.
+ * Handles fractional notation like "1/4" or plain numbers like "0.25".
  */
-export function simlin_model_get_latex_equation(model: SimlinModelPtr, ident: string): string | null {
-  const exports = getExports();
-  const fn = exports.simlin_model_get_latex_equation as (model: number, ident: number, outErr: number) => number;
-
-  const identPtr = stringToWasm(ident);
-  const outErrPtr = allocOutPtr();
-
-  try {
-    const result = fn(model, identPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-
-    if (result === 0) {
-      return null;
-    }
-
-    return wasmToStringAndFree(result);
-  } finally {
-    free(identPtr);
-    free(outErrPtr);
+function parseDt(dt: string): number {
+  if (!dt || dt.trim() === '') {
+    return 1;
   }
+
+  const trimmed = dt.trim();
+
+  // Check for fraction notation
+  if (trimmed.includes('/')) {
+    const parts = trimmed.split('/');
+    if (parts.length === 2) {
+      const numerator = parseFloat(parts[0]);
+      const denominator = parseFloat(parts[1]);
+      if (!isNaN(numerator) && !isNaN(denominator) && denominator !== 0) {
+        return numerator / denominator;
+      }
+    }
+  }
+
+  const value = parseFloat(trimmed);
+  return isNaN(value) ? 1 : value;
 }
 
 /**
- * Get links from a model.
- * @param model Model pointer
- * @returns Links pointer
+ * A system dynamics model.
+ *
+ * Models are obtained from Project.getModel() or Project.mainModel.
+ * They provide access to variables, structure, and simulation capabilities.
  */
-export function simlin_model_get_links(model: SimlinModelPtr): SimlinLinksPtr {
-  const exports = getExports();
-  const fn = exports.simlin_model_get_links as (model: number, outErr: number) => number;
+export class Model {
+  private _ptr: SimlinModelPtr;
+  private _project: Project | null;
+  private _name: string | null;
+  private _disposed: boolean = false;
 
-  const outErrPtr = allocOutPtr();
+  // Cached data
+  private _cachedModelJson: JsonModel | null = null;
+  private _cachedStocks: Stock[] | null = null;
+  private _cachedFlows: Flow[] | null = null;
+  private _cachedAuxs: Aux[] | null = null;
+  private _cachedTimeSpec: TimeSpec | null = null;
+  private _cachedBaseCase: Run | null = null;
+  private _cachedVariables: Variable[] | null = null;
 
-  try {
-    const result = fn(model, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
+  /**
+   * Create a Model from a WASM pointer.
+   * This is internal - use Project.getModel() or Project.mainModel instead.
+   */
+  constructor(ptr: SimlinModelPtr, project: Project | null, name: string | null) {
+    if (ptr === 0) {
+      throw new Error('Cannot create Model from null pointer');
     }
+    this._ptr = ptr;
+    this._project = project;
+    this._name = name;
 
-    return result;
-  } finally {
-    free(outErrPtr);
-  }
-}
-
-/**
- * Get variable names from a model.
- * @param model Model pointer
- * @returns Array of variable names
- */
-export function simlin_model_get_var_names(model: SimlinModelPtr): string[] {
-  const exports = getExports();
-  const fn = exports.simlin_model_get_var_names as (
-    model: number,
-    result: number,
-    max: number,
-    outWritten: number,
-    outErr: number,
-  ) => void;
-
-  // First get the count
-  const count = simlin_model_get_var_count(model);
-  if (count === 0) {
-    return [];
+    // Increment reference count since we're holding a reference
+    simlin_model_ref(ptr);
   }
 
-  // Allocate array of pointers (4 bytes each on wasm32)
-  const resultPtr = malloc(count * 4);
-  const outWrittenPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
+  /**
+   * Get the internal WASM pointer. For internal use only.
+   */
+  get ptr(): SimlinModelPtr {
+    this.checkDisposed();
+    return this._ptr;
+  }
 
-  try {
-    fn(model, resultPtr, count, outWrittenPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
+  /**
+   * The Project this model belongs to.
+   */
+  get project(): Project | null {
+    return this._project;
+  }
 
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
+  /**
+   * The model name.
+   */
+  get name(): string | null {
+    return this._name;
+  }
+
+  private checkDisposed(): void {
+    if (this._disposed) {
+      throw new Error('Model has been disposed');
+    }
+  }
+
+  /**
+   * Invalidate all cached data. Called after model edits.
+   */
+  invalidateCaches(): void {
+    this._cachedModelJson = null;
+    this._cachedStocks = null;
+    this._cachedFlows = null;
+    this._cachedAuxs = null;
+    this._cachedTimeSpec = null;
+    this._cachedBaseCase = null;
+    this._cachedVariables = null;
+  }
+
+  private getModelJson(): JsonModel {
+    if (this._cachedModelJson !== null) {
+      return this._cachedModelJson;
     }
 
-    const written = readOutUsize(outWrittenPtr);
-    const names: string[] = [];
-    const memory = getMemory();
-    const view = new DataView(memory.buffer);
+    if (this._project === null) {
+      throw new Error('Model is not attached to a Project');
+    }
 
-    for (let i = 0; i < written; i++) {
-      const strPtr = view.getUint32(resultPtr + i * 4, true);
-      if (strPtr !== 0) {
-        const name = wasmToStringAndFree(strPtr);
-        if (name !== null) {
-          names.push(name);
-        }
+    const projectJson = JSON.parse(this._project.serializeJson());
+    for (const modelDict of projectJson.models || []) {
+      if (modelDict.name === this._name || !this._name) {
+        this._cachedModelJson = modelDict as JsonModel;
+        return this._cachedModelJson;
       }
     }
 
-    return names;
-  } finally {
-    free(resultPtr);
-    free(outWrittenPtr);
-    free(outErrPtr);
+    throw new Error(`Model '${this._name}' not found in project`);
   }
-}
 
-/**
- * Get the incoming links (dependencies) for a variable.
- * @param model Model pointer
- * @param varName Variable name
- * @returns Array of incoming variable names
- */
-export function simlin_model_get_incoming_links(model: SimlinModelPtr, varName: string): string[] {
-  const exports = getExports();
-  const fn = exports.simlin_model_get_incoming_links as (
-    model: number,
-    varName: number,
-    result: number,
-    max: number,
-    outWritten: number,
-    outErr: number,
-  ) => void;
+  private extractEquation(
+    topLevel: string | undefined,
+    arrayed: { equation?: string; initial_equation?: string } | undefined,
+    field: 'equation' | 'initial_equation' = 'equation',
+  ): string {
+    if (topLevel) {
+      return topLevel;
+    }
+    if (arrayed) {
+      const value = arrayed[field];
+      if (value) {
+        return value;
+      }
+    }
+    return '';
+  }
 
-  const varNamePtr = stringToWasm(varName);
+  private parseJsonGraphicalFunction(gf: JsonGraphicalFunction): GraphicalFunction {
+    // Convert to the schema format with points as [x, y] tuples
+    let points: [number, number][] | undefined;
+    let yPoints: number[] | undefined;
 
-  // First call with max=0 to get the count
-  const outCountPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(model, varNamePtr, 0, 0, outCountPtr, outErrPtr);
-    let errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
+    if (gf.points && gf.points.length > 0) {
+      // Already in [x, y] format
+      points = gf.points;
+    } else if (gf.y_points && gf.y_points.length > 0) {
+      // y_points only format
+      yPoints = gf.y_points;
     }
 
-    const count = readOutUsize(outCountPtr);
-    if (count === 0) {
+    return {
+      points,
+      yPoints,
+      xScale: gf.x_scale ? { min: gf.x_scale.min, max: gf.x_scale.max } : undefined,
+      yScale: gf.y_scale ? { min: gf.y_scale.min, max: gf.y_scale.max } : undefined,
+      kind: gf.kind,
+    };
+  }
+
+  /**
+   * Stock variables in the model (immutable array).
+   */
+  get stocks(): readonly Stock[] {
+    this.checkDisposed();
+    if (this._cachedStocks !== null) {
+      return this._cachedStocks;
+    }
+
+    const model = this.getModelJson();
+    this._cachedStocks = (model.stocks || []).map((s: JsonStock) => ({
+      type: 'stock' as const,
+      name: s.name,
+      initialEquation: this.extractEquation(s.initial_equation, s.arrayed_equation, 'initial_equation'),
+      inflows: s.inflows || [],
+      outflows: s.outflows || [],
+      units: s.units || undefined,
+      documentation: s.documentation || undefined,
+      dimensions: s.arrayed_equation?.dimensions || [],
+      nonNegative: s.non_negative || false,
+    }));
+
+    return this._cachedStocks;
+  }
+
+  /**
+   * Flow variables in the model (immutable array).
+   */
+  get flows(): readonly Flow[] {
+    this.checkDisposed();
+    if (this._cachedFlows !== null) {
+      return this._cachedFlows;
+    }
+
+    const model = this.getModelJson();
+    this._cachedFlows = (model.flows || []).map((f: JsonFlow) => {
+      let gf: GraphicalFunction | undefined;
+      if (f.graphical_function) {
+        gf = this.parseJsonGraphicalFunction(f.graphical_function);
+      }
+
+      return {
+        type: 'flow' as const,
+        name: f.name,
+        equation: this.extractEquation(f.equation, f.arrayed_equation),
+        units: f.units || undefined,
+        documentation: f.documentation || undefined,
+        dimensions: f.arrayed_equation?.dimensions || [],
+        nonNegative: f.non_negative || false,
+        graphicalFunction: gf,
+      };
+    });
+
+    return this._cachedFlows;
+  }
+
+  /**
+   * Auxiliary variables in the model (immutable array).
+   */
+  get auxs(): readonly Aux[] {
+    this.checkDisposed();
+    if (this._cachedAuxs !== null) {
+      return this._cachedAuxs;
+    }
+
+    const model = this.getModelJson();
+    this._cachedAuxs = (model.auxiliaries || []).map((a: JsonAuxiliary) => {
+      let gf: GraphicalFunction | undefined;
+      if (a.graphical_function) {
+        gf = this.parseJsonGraphicalFunction(a.graphical_function);
+      }
+
+      const equation = this.extractEquation(a.equation, a.arrayed_equation);
+      const initialEquation = this.extractEquation(a.initial_equation, a.arrayed_equation, 'initial_equation');
+
+      return {
+        type: 'aux' as const,
+        name: a.name,
+        equation,
+        initialEquation: initialEquation || undefined,
+        units: a.units || undefined,
+        documentation: a.documentation || undefined,
+        dimensions: a.arrayed_equation?.dimensions || [],
+        graphicalFunction: gf,
+      };
+    });
+
+    return this._cachedAuxs;
+  }
+
+  /**
+   * All variables in the model (stocks + flows + auxs).
+   */
+  get variables(): readonly Variable[] {
+    this.checkDisposed();
+    if (this._cachedVariables !== null) {
+      return this._cachedVariables;
+    }
+
+    this._cachedVariables = [...this.stocks, ...this.flows, ...this.auxs];
+    return this._cachedVariables;
+  }
+
+  /**
+   * Time specification for simulation.
+   * Uses model-level sim_specs if present, otherwise falls back to project-level.
+   */
+  get timeSpec(): TimeSpec {
+    this.checkDisposed();
+    if (this._cachedTimeSpec !== null) {
+      return this._cachedTimeSpec;
+    }
+
+    if (this._project === null) {
+      throw new Error('Model is not attached to a Project');
+    }
+
+    const projectJson = JSON.parse(this._project.serializeJson());
+    const modelJson = this.getModelJson();
+
+    // Use model-level sim_specs if present, otherwise fall back to project-level
+    const simSpecs = modelJson.sim_specs ?? projectJson.sim_specs;
+
+    this._cachedTimeSpec = {
+      start: simSpecs.start_time ?? 0,
+      stop: simSpecs.end_time ?? 10,
+      dt: parseDt(simSpecs.dt ?? '1'),
+      units: simSpecs.time_units || undefined,
+    };
+
+    return this._cachedTimeSpec;
+  }
+
+  /**
+   * Structural feedback loops (no behavior data).
+   */
+  get loops(): readonly Loop[] {
+    this.checkDisposed();
+    if (this._project === null) {
+      return [];
+    }
+    return this._project.getLoops();
+  }
+
+  /**
+   * Get the dependencies (incoming links) for a given variable.
+   * @param varName The name of the variable to query
+   * @returns List of variable names that this variable depends on
+   */
+  getIncomingLinks(varName: string): string[] {
+    this.checkDisposed();
+
+    // Validate variable exists
+    const varNames = this.variables.map((v) => v.name);
+    if (!varNames.includes(varName)) {
+      throw new Error(`Variable not found: ${varName}`);
+    }
+
+    return simlin_model_get_incoming_links(this._ptr, varName);
+  }
+
+  /**
+   * Get all causal links in the model (static analysis).
+   * @returns List of Link objects representing causal relationships
+   */
+  getLinks(): Link[] {
+    this.checkDisposed();
+
+    const linksPtr = simlin_model_get_links(this._ptr);
+    if (linksPtr === 0) {
       return [];
     }
 
-    // Now allocate and get the actual links
-    const resultPtr = malloc(count * 4);
-    const outWrittenPtr = allocOutUsize();
+    const rawLinks = readLinks(linksPtr);
+    simlin_free_links(linksPtr);
 
-    try {
-      fn(model, varNamePtr, resultPtr, count, outWrittenPtr, outErrPtr);
-      errPtr = readOutPtr(outErrPtr);
+    return rawLinks.map((link: LowLevelLink) => ({
+      from: link.from,
+      to: link.to,
+      polarity: convertLinkPolarity(link.polarity),
+      score: link.score || undefined,
+    }));
+  }
 
-      if (errPtr !== 0) {
-        const code = simlin_error_get_code(errPtr);
-        const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-        simlin_error_free(errPtr);
-        throw new SimlinError(message, code);
+  /**
+   * Get human-readable explanation of a variable.
+   * @param variable Variable name
+   * @returns Textual description of what defines/drives this variable
+   */
+  explain(variable: string): string {
+    this.checkDisposed();
+
+    for (const stock of this.stocks) {
+      if (stock.name === variable) {
+        const inflowsStr = stock.inflows.length > 0 ? stock.inflows.join(', ') : 'no inflows';
+        const outflowsStr = stock.outflows.length > 0 ? stock.outflows.join(', ') : 'no outflows';
+        return `${stock.name} is a stock with initial value ${stock.initialEquation}, increased by ${inflowsStr}, decreased by ${outflowsStr}`;
       }
-
-      const written = readOutUsize(outWrittenPtr);
-      const names: string[] = [];
-      const memory = getMemory();
-      const view = new DataView(memory.buffer);
-
-      for (let i = 0; i < written; i++) {
-        const strPtr = view.getUint32(resultPtr + i * 4, true);
-        if (strPtr !== 0) {
-          const name = wasmToStringAndFree(strPtr);
-          if (name !== null) {
-            names.push(name);
-          }
-        }
-      }
-
-      return names;
-    } finally {
-      free(resultPtr);
-      free(outWrittenPtr);
     }
-  } finally {
-    free(varNamePtr);
-    free(outCountPtr);
-    free(outErrPtr);
+
+    for (const flow of this.flows) {
+      if (flow.name === variable) {
+        return `${flow.name} is a flow computed as ${flow.equation}`;
+      }
+    }
+
+    for (const aux of this.auxs) {
+      if (aux.name === variable) {
+        if (aux.initialEquation) {
+          return `${aux.name} is an auxiliary variable computed as ${aux.equation} with initial value ${aux.initialEquation}`;
+        }
+        return `${aux.name} is an auxiliary variable computed as ${aux.equation}`;
+      }
+    }
+
+    throw new Error(`Variable '${variable}' not found in model`);
+  }
+
+  /**
+   * Check model for common issues.
+   * @returns Array of ModelIssue objects, or empty array if no issues
+   */
+  check(): ModelIssue[] {
+    this.checkDisposed();
+    if (this._project === null) {
+      return [];
+    }
+
+    const errorDetails = this._project.getErrors();
+
+    // Get the actual model name from JSON for comparison
+    // (handles case where _name is null for main model)
+    const modelJson = this.getModelJson();
+    const actualModelName = modelJson.name;
+
+    // Filter to errors for this model only
+    const modelErrors = errorDetails.filter((detail) => {
+      // If no model name on error, it's a project-level error - exclude
+      if (!detail.modelName) {
+        return false;
+      }
+      // Compare against the actual model name from JSON
+      return detail.modelName === actualModelName;
+    });
+
+    return modelErrors.map((detail) => ({
+      severity: 'error' as const,
+      message: detail.message || 'Unknown error',
+      variable: detail.variableName || undefined,
+      suggestion: undefined,
+    }));
+  }
+
+  /**
+   * Create low-level simulation for step-by-step execution.
+   * @param overrides Variable value overrides
+   * @param options Simulation options
+   * @returns Sim instance for step-by-step execution
+   */
+  simulate(overrides: Record<string, number> = {}, options: { enableLtm?: boolean } = {}): Sim {
+    this.checkDisposed();
+    const { enableLtm = false } = options;
+    return new Sim(this, overrides, enableLtm);
+  }
+
+  /**
+   * Run simulation with optional variable overrides.
+   * @param overrides Override values for any model variables
+   * @param options Run options
+   * @returns Run object with results and analysis
+   */
+  run(overrides: Record<string, number> = {}, options: { analyzeLtm?: boolean } = {}): Run {
+    this.checkDisposed();
+    const { analyzeLtm = true } = options;
+
+    const sim = this.simulate(overrides, { enableLtm: analyzeLtm });
+    sim.runToEnd();
+
+    return sim.getRun();
+  }
+
+  /**
+   * Simulation results with default parameters (cached).
+   */
+  get baseCase(): Run {
+    this.checkDisposed();
+    if (this._cachedBaseCase === null) {
+      this._cachedBaseCase = this.run();
+    }
+    return this._cachedBaseCase;
+  }
+
+  /**
+   * Edit the model using a callback with patch builder.
+   * @param callback Function that receives current variables and a patch builder
+   * @param options Edit options (dryRun, allowErrors)
+   */
+  edit(
+    callback: (currentVars: Record<string, JsonStock | JsonFlow | JsonAuxiliary>, patch: ModelPatchBuilder) => void,
+    options: { dryRun?: boolean; allowErrors?: boolean } = {},
+  ): void {
+    this.checkDisposed();
+    if (this._project === null) {
+      throw new Error('Model is not attached to a Project');
+    }
+
+    const { dryRun = false, allowErrors = false } = options;
+
+    // Get current model state as JSON
+    const modelJson = this.getModelJson();
+    const modelName = modelJson.name;
+
+    // Build current variables map
+    const currentVars: Record<string, JsonStock | JsonFlow | JsonAuxiliary> = {};
+    for (const stock of modelJson.stocks || []) {
+      currentVars[stock.name] = stock;
+    }
+    for (const flow of modelJson.flows || []) {
+      currentVars[flow.name] = flow;
+    }
+    for (const aux of modelJson.auxiliaries || []) {
+      currentVars[aux.name] = aux;
+    }
+
+    // Create patch builder
+    const patch = new ModelPatchBuilder(modelName);
+
+    // Call user callback - if it throws, the patch won't be applied
+    // and model state remains unchanged
+    callback(currentVars, patch);
+
+    // If no operations, return early
+    if (!patch.hasOperations()) {
+      return;
+    }
+
+    // Build and apply the patch
+    const projectPatch: JsonProjectPatch = {
+      models: [patch.build()],
+    };
+
+    this._project.applyPatch(projectPatch, { dryRun, allowErrors });
+
+    // Invalidate caches if not dry run
+    if (!dryRun) {
+      this.invalidateCaches();
+    }
+  }
+
+  /**
+   * Dispose this model and free WASM resources.
+   */
+  dispose(): void {
+    if (this._disposed) {
+      return;
+    }
+
+    simlin_model_unref(this._ptr);
+    this._ptr = 0;
+    this._disposed = true;
+  }
+
+  /**
+   * Symbol.dispose support for using statement.
+   */
+  [Symbol.dispose](): void {
+    this.dispose();
   }
 }

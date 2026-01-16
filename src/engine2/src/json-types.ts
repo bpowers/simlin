@@ -65,8 +65,8 @@ export interface JsonModuleReference {
  */
 export interface JsonStock {
   name: string;
-  inflows?: string[];
-  outflows?: string[];
+  inflows: string[];
+  outflows: string[];
   uid?: number;
   initial_equation?: string;
   units?: string;
@@ -161,6 +161,7 @@ export interface JsonRect {
  * Visual element for a stock.
  */
 export interface JsonStockViewElement {
+  type: 'stock';
   uid: number;
   name: string;
   x: number;
@@ -172,11 +173,12 @@ export interface JsonStockViewElement {
  * Visual element for a flow.
  */
 export interface JsonFlowViewElement {
+  type: 'flow';
   uid: number;
   name: string;
   x: number;
   y: number;
-  points?: JsonFlowPoint[];
+  points: JsonFlowPoint[];
   label_side?: string;
 }
 
@@ -184,6 +186,7 @@ export interface JsonFlowViewElement {
  * Visual element for an auxiliary variable.
  */
 export interface JsonAuxiliaryViewElement {
+  type: 'aux';
   uid: number;
   name: string;
   x: number;
@@ -195,6 +198,7 @@ export interface JsonAuxiliaryViewElement {
  * Visual element for a cloud (source/sink).
  */
 export interface JsonCloudViewElement {
+  type: 'cloud';
   uid: number;
   flow_uid: number;
   x: number;
@@ -205,6 +209,7 @@ export interface JsonCloudViewElement {
  * Visual element for a causal link.
  */
 export interface JsonLinkViewElement {
+  type: 'link';
   uid: number;
   from_uid: number;
   to_uid: number;
@@ -216,6 +221,7 @@ export interface JsonLinkViewElement {
  * Visual element for a module.
  */
 export interface JsonModuleViewElement {
+  type: 'module';
   uid: number;
   name: string;
   x: number;
@@ -227,6 +233,7 @@ export interface JsonModuleViewElement {
  * Visual element for an alias (ghost).
  */
 export interface JsonAliasViewElement {
+  type: 'alias';
   uid: number;
   alias_of_uid: number;
   x: number;
@@ -250,7 +257,7 @@ export type JsonViewElement =
  * A view/diagram in the model.
  */
 export interface JsonView {
-  elements?: JsonViewElement[];
+  elements: JsonViewElement[];
   kind?: string;
   view_box?: JsonRect;
   zoom?: number;
@@ -296,9 +303,9 @@ export interface JsonUnit {
  * Metadata for a feedback loop.
  */
 export interface JsonLoopMetadata {
-  uids?: number[];
+  uids: number[];
+  name: string;
   deleted?: boolean;
-  name?: string;
   description?: string;
 }
 
@@ -307,9 +314,9 @@ export interface JsonLoopMetadata {
  */
 export interface JsonModel {
   name: string;
-  stocks?: JsonStock[];
-  flows?: JsonFlow[];
-  auxiliaries?: JsonAuxiliary[];
+  stocks: JsonStock[];
+  flows: JsonFlow[];
+  auxiliaries: JsonAuxiliary[];
   modules?: JsonModule[];
   sim_specs?: JsonSimSpecs;
   views?: JsonView[];
@@ -322,7 +329,7 @@ export interface JsonModel {
 export interface JsonProject {
   name: string;
   sim_specs: JsonSimSpecs;
-  models?: JsonModel[];
+  models: JsonModel[];
   dimensions?: JsonDimension[];
   units?: JsonUnit[];
 }

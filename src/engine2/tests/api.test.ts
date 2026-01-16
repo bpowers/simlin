@@ -12,11 +12,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { init, reset } from '../src/wasm';
-import { Project, Model, Sim, Run } from '../src/api';
-import { LinkPolarity } from '../src/api/types';
-import { ModelPatchBuilder } from '../src/api/patch';
-import { JsonStock, JsonFlow, JsonAuxiliary } from '../src/api/json-types';
+import { init, reset, Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder } from '../src';
+import { JsonStock, JsonFlow, JsonAuxiliary } from '../src/json-types';
 
 // Helper to load the WASM module
 async function loadWasm(): Promise<void> {

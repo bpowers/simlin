@@ -9,7 +9,7 @@ import {
   SimlinJsonFormat,
   SimlinLinkPolarity,
   SimlinLoopPolarity,
-} from '../src/types';
+} from '../src/internal/types';
 
 describe('Types', () => {
   describe('SimlinErrorCode', () => {

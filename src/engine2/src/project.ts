@@ -2,518 +2,307 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// Project management functions
+/**
+ * Project class for managing system dynamics projects.
+ *
+ * A Project contains one or more Models and handles serialization,
+ * error checking, and loop analysis at the project level.
+ */
 
-import { getExports, getMemory } from './wasm';
 import {
-  malloc,
-  free,
-  stringToWasm,
-  wasmToStringAndFree,
-  copyToWasm,
-  copyFromWasm,
-  allocOutPtr,
-  readOutPtr,
-  allocOutUsize,
-  readOutUsize,
-} from './memory';
-import { SimlinProjectPtr, SimlinModelPtr, SimlinErrorPtr, SimlinJsonFormat } from './types';
-import {
-  simlin_error_free,
-  simlin_error_get_code,
-  simlin_error_get_message,
-  SimlinError,
-  readAllErrorDetails,
-} from './error';
+  simlin_project_open,
+  simlin_project_json_open,
+  simlin_project_unref,
+  simlin_project_get_model_count,
+  simlin_project_get_model_names,
+  simlin_project_get_model,
+  simlin_project_serialize,
+  simlin_project_serialize_json,
+  simlin_project_is_simulatable,
+  simlin_project_get_errors,
+  simlin_project_apply_patch_json,
+} from './internal/project';
+import { simlin_import_xmile, simlin_export_xmile } from './internal/import-export';
+import { simlin_analyze_get_loops, readLoops, simlin_free_loops } from './internal/analysis';
+import { SimlinProjectPtr, SimlinJsonFormat, ErrorDetail } from './internal/types';
+import { readAllErrorDetails, simlin_error_free } from './internal/error';
+import { Loop, LoopPolarity } from './types';
+import { Model } from './model';
+import { JsonProjectPatch } from './json-types';
 
 /**
- * Open a project from protobuf data.
- * @param data Protobuf-encoded project data
- * @returns Project pointer
- * @throws SimlinError on failure
+ * A system dynamics project containing models.
+ *
+ * Projects manage the lifecycle of WASM resources and provide
+ * access to models, serialization, and project-level analysis.
  */
-export function simlin_project_open(data: Uint8Array): SimlinProjectPtr {
-  const exports = getExports();
-  const fn = exports.simlin_project_open as (ptr: number, len: number, outErr: number) => number;
+export class Project {
+  private _ptr: SimlinProjectPtr;
+  private _disposed: boolean = false;
+  private _models: Map<string, Model> = new Map();
+  private _mainModel: Model | null = null;
 
-  const dataPtr = copyToWasm(data);
-  const outErrPtr = allocOutPtr();
-
-  try {
-    const result = fn(dataPtr, data.length, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
+  private constructor(ptr: SimlinProjectPtr) {
+    if (ptr === 0) {
+      throw new Error('Cannot create Project from null pointer');
     }
-
-    return result;
-  } finally {
-    free(dataPtr);
-    free(outErrPtr);
-  }
-}
-
-/**
- * Open a project from JSON data.
- * @param data JSON-encoded project data
- * @param format JSON format (Native or SDAI)
- * @returns Project pointer
- * @throws SimlinError on failure
- */
-export function simlin_project_json_open(data: Uint8Array, format: SimlinJsonFormat): SimlinProjectPtr {
-  const exports = getExports();
-  const fn = exports.simlin_project_json_open as (ptr: number, len: number, fmt: number, outErr: number) => number;
-
-  const dataPtr = copyToWasm(data);
-  const outErrPtr = allocOutPtr();
-
-  try {
-    const result = fn(dataPtr, data.length, format, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-
-    return result;
-  } finally {
-    free(dataPtr);
-    free(outErrPtr);
-  }
-}
-
-/**
- * Increment the reference count of a project.
- * @param project Project pointer
- */
-export function simlin_project_ref(project: SimlinProjectPtr): void {
-  const exports = getExports();
-  const fn = exports.simlin_project_ref as (ptr: number) => void;
-  fn(project);
-}
-
-/**
- * Decrement the reference count of a project. Frees if count reaches zero.
- * @param project Project pointer
- */
-export function simlin_project_unref(project: SimlinProjectPtr): void {
-  const exports = getExports();
-  const fn = exports.simlin_project_unref as (ptr: number) => void;
-  fn(project);
-}
-
-/**
- * Get the number of models in a project.
- * @param project Project pointer
- * @returns Number of models
- */
-export function simlin_project_get_model_count(project: SimlinProjectPtr): number {
-  const exports = getExports();
-  const fn = exports.simlin_project_get_model_count as (proj: number, outCount: number, outErr: number) => void;
-
-  const outCountPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(project, outCountPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
-    }
-
-    return readOutUsize(outCountPtr);
-  } finally {
-    free(outCountPtr);
-    free(outErrPtr);
-  }
-}
-
-/**
- * Get model names from a project.
- * @param project Project pointer
- * @returns Array of model names
- */
-export function simlin_project_get_model_names(project: SimlinProjectPtr): string[] {
-  const exports = getExports();
-  const fn = exports.simlin_project_get_model_names as (
-    proj: number,
-    result: number,
-    max: number,
-    outWritten: number,
-    outErr: number,
-  ) => void;
-
-  // First get the count
-  const count = simlin_project_get_model_count(project);
-  if (count === 0) {
-    return [];
+    this._ptr = ptr;
   }
 
-  // Allocate array of pointers (4 bytes each on wasm32)
-  const resultPtr = malloc(count * 4);
-  const outWrittenPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
+  /**
+   * Create a project from XMILE data.
+   * @param data XMILE XML data as Uint8Array
+   * @returns New Project instance
+   * @throws SimlinError if the XMILE data is invalid
+   */
+  static fromXmile(data: Uint8Array): Project {
+    const ptr = simlin_import_xmile(data);
+    return new Project(ptr);
+  }
 
-  try {
-    fn(project, resultPtr, count, outWrittenPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
+  /**
+   * Create a project from protobuf data.
+   * @param data Protobuf-encoded project data
+   * @returns New Project instance
+   * @throws SimlinError if the protobuf data is invalid
+   */
+  static fromProtobuf(data: Uint8Array): Project {
+    const ptr = simlin_project_open(data);
+    return new Project(ptr);
+  }
 
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+  /**
+   * Create a project from JSON data.
+   * @param data JSON string or Uint8Array
+   * @param format JSON format (Native or SDAI)
+   * @returns New Project instance
+   * @throws SimlinError if the JSON data is invalid
+   */
+  static fromJson(data: string | Uint8Array, format: SimlinJsonFormat = SimlinJsonFormat.Native): Project {
+    const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+    const ptr = simlin_project_json_open(bytes, format);
+    return new Project(ptr);
+  }
+
+  /**
+   * Get the internal WASM pointer. For internal use only.
+   */
+  get ptr(): SimlinProjectPtr {
+    this.checkDisposed();
+    return this._ptr;
+  }
+
+  /**
+   * Check if the project has been disposed.
+   */
+  get isDisposed(): boolean {
+    return this._disposed;
+  }
+
+  private checkDisposed(): void {
+    if (this._disposed) {
+      throw new Error('Project has been disposed');
+    }
+  }
+
+  /**
+   * Get the number of models in this project.
+   */
+  get modelCount(): number {
+    this.checkDisposed();
+    return simlin_project_get_model_count(this._ptr);
+  }
+
+  /**
+   * Get names of all models in this project.
+   * @returns Array of model names
+   */
+  getModelNames(): string[] {
+    this.checkDisposed();
+    return simlin_project_get_model_names(this._ptr);
+  }
+
+  /**
+   * Get the main (default) model from this project.
+   * The main model is typically the first model or the one that is simulatable.
+   * @returns The main Model instance
+   */
+  get mainModel(): Model {
+    this.checkDisposed();
+    if (this._mainModel === null) {
+      this._mainModel = this.getModel(null);
+    }
+    return this._mainModel;
+  }
+
+  /**
+   * Get a model by name.
+   * @param name Model name, or null for the default/main model
+   * @returns The Model instance
+   * @throws SimlinError if model not found
+   */
+  getModel(name: string | null): Model {
+    this.checkDisposed();
+
+    // Check cache first
+    const cacheKey = name ?? '';
+    const cached = this._models.get(cacheKey);
+    if (cached) {
+      return cached;
     }
 
-    const written = readOutUsize(outWrittenPtr);
-    const names: string[] = [];
-    const memory = getMemory();
-    const view = new DataView(memory.buffer);
+    const modelPtr = simlin_project_get_model(this._ptr, name);
+    const model = new Model(modelPtr, this, name);
+    this._models.set(cacheKey, model);
+    return model;
+  }
 
-    for (let i = 0; i < written; i++) {
-      const strPtr = view.getUint32(resultPtr + i * 4, true);
-      if (strPtr !== 0) {
-        const name = wasmToStringAndFree(strPtr);
-        if (name !== null) {
-          names.push(name);
-        }
+  /**
+   * Get all models in this project.
+   * @returns Array of Model instances
+   */
+  get models(): readonly Model[] {
+    this.checkDisposed();
+    return this.getModelNames().map((name) => this.getModel(name));
+  }
+
+  /**
+   * Check if this project (or a specific model) is simulatable.
+   * @param modelName Optional model name to check, or null for main model
+   * @returns true if simulatable
+   */
+  isSimulatable(modelName: string | null = null): boolean {
+    this.checkDisposed();
+    return simlin_project_is_simulatable(this._ptr, modelName);
+  }
+
+  /**
+   * Serialize this project to protobuf format.
+   * @returns Protobuf-encoded data
+   */
+  serializeProtobuf(): Uint8Array {
+    this.checkDisposed();
+    return simlin_project_serialize(this._ptr);
+  }
+
+  /**
+   * Serialize this project to JSON format.
+   * @param format JSON format (Native or SDAI)
+   * @returns JSON string
+   */
+  serializeJson(format: SimlinJsonFormat = SimlinJsonFormat.Native): string {
+    this.checkDisposed();
+    const bytes = simlin_project_serialize_json(this._ptr, format);
+    return new TextDecoder().decode(bytes);
+  }
+
+  /**
+   * Export this project to XMILE format.
+   * @returns XMILE XML data
+   */
+  toXmile(): Uint8Array {
+    this.checkDisposed();
+    return simlin_export_xmile(this._ptr);
+  }
+
+  /**
+   * Get all feedback loops in this project.
+   * @returns Array of Loop objects
+   */
+  getLoops(): Loop[] {
+    this.checkDisposed();
+    const loopsPtr = simlin_analyze_get_loops(this._ptr);
+    if (loopsPtr === 0) {
+      return [];
+    }
+    const rawLoops = readLoops(loopsPtr);
+    simlin_free_loops(loopsPtr);
+    return rawLoops.map((loop) => ({
+      id: loop.id,
+      variables: loop.variables,
+      polarity: loop.polarity as unknown as LoopPolarity,
+    }));
+  }
+
+  /**
+   * Get all errors in this project.
+   * @returns Array of ErrorDetail objects
+   */
+  getErrors(): ErrorDetail[] {
+    this.checkDisposed();
+    const errPtr = simlin_project_get_errors(this._ptr);
+    if (errPtr === 0) {
+      return [];
+    }
+    const details = readAllErrorDetails(errPtr);
+    simlin_error_free(errPtr);
+    return details;
+  }
+
+  /**
+   * Apply a JSON patch to this project.
+   * @param patch The patch to apply
+   * @param options Patch options
+   * @returns Array of collected errors (if allowErrors is true)
+   * @throws SimlinError if patch fails and allowErrors is false
+   */
+  applyPatch(patch: JsonProjectPatch, options: { dryRun?: boolean; allowErrors?: boolean } = {}): ErrorDetail[] {
+    this.checkDisposed();
+    const { dryRun = false, allowErrors = false } = options;
+
+    const patchJson = JSON.stringify(patch);
+    const patchBytes = new TextEncoder().encode(patchJson);
+
+    const collectedPtr = simlin_project_apply_patch_json(
+      this._ptr,
+      patchBytes,
+      SimlinJsonFormat.Native,
+      dryRun,
+      allowErrors,
+    );
+
+    // Invalidate all model caches since the project state changed
+    if (!dryRun) {
+      for (const model of this._models.values()) {
+        model.invalidateCaches();
       }
     }
 
-    return names;
-  } finally {
-    free(resultPtr);
-    free(outWrittenPtr);
-    free(outErrPtr);
-  }
-}
-
-/**
- * Get a model from a project.
- * @param project Project pointer
- * @param modelName Model name (null for default/main model)
- * @returns Model pointer
- */
-export function simlin_project_get_model(project: SimlinProjectPtr, modelName: string | null): SimlinModelPtr {
-  const exports = getExports();
-  const fn = exports.simlin_project_get_model as (proj: number, name: number, outErr: number) => number;
-
-  const namePtr = modelName !== null ? stringToWasm(modelName) : 0;
-  const outErrPtr = allocOutPtr();
-
-  try {
-    const result = fn(project, namePtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+    if (collectedPtr === 0) {
+      return [];
     }
 
-    return result;
-  } finally {
-    if (namePtr !== 0) free(namePtr);
-    free(outErrPtr);
+    const details = readAllErrorDetails(collectedPtr);
+    simlin_error_free(collectedPtr);
+    return details;
   }
-}
 
-/**
- * Serialize a project to protobuf.
- * @param project Project pointer
- * @returns Protobuf-encoded project data
- */
-export function simlin_project_serialize(project: SimlinProjectPtr): Uint8Array {
-  const exports = getExports();
-  const fn = exports.simlin_project_serialize as (proj: number, outBuf: number, outLen: number, outErr: number) => void;
-
-  const outBufPtr = allocOutPtr();
-  const outLenPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(project, outBufPtr, outLenPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+  /**
+   * Dispose this project and free WASM resources.
+   * After disposal, the project cannot be used.
+   */
+  dispose(): void {
+    if (this._disposed) {
+      return;
     }
 
-    const bufPtr = readOutPtr(outBufPtr);
-    const len = readOutUsize(outLenPtr);
-    const data = copyFromWasm(bufPtr, len);
-    free(bufPtr);
-    return data;
-  } finally {
-    free(outBufPtr);
-    free(outLenPtr);
-    free(outErrPtr);
-  }
-}
-
-/**
- * Serialize a project to JSON.
- * @param project Project pointer
- * @param format JSON format
- * @returns JSON-encoded project data
- */
-export function simlin_project_serialize_json(project: SimlinProjectPtr, format: SimlinJsonFormat): Uint8Array {
-  const exports = getExports();
-  const fn = exports.simlin_project_serialize_json as (
-    proj: number,
-    fmt: number,
-    outBuf: number,
-    outLen: number,
-    outErr: number,
-  ) => void;
-
-  const outBufPtr = allocOutPtr();
-  const outLenPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(project, format, outBufPtr, outLenPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
+    // Dispose all cached models first (includes main model if accessed)
+    for (const model of this._models.values()) {
+      model.dispose();
     }
+    this._models.clear();
+    this._mainModel = null;
 
-    const bufPtr = readOutPtr(outBufPtr);
-    const len = readOutUsize(outLenPtr);
-    const data = copyFromWasm(bufPtr, len);
-    free(bufPtr);
-    return data;
-  } finally {
-    free(outBufPtr);
-    free(outLenPtr);
-    free(outErrPtr);
+    // Free the WASM pointer
+    simlin_project_unref(this._ptr);
+    this._ptr = 0;
+    this._disposed = true;
   }
-}
 
-/**
- * Check if a project is simulatable.
- * @param project Project pointer
- * @param modelName Model name (null for default/main model)
- * @returns True if simulatable
- */
-export function simlin_project_is_simulatable(project: SimlinProjectPtr, modelName: string | null): boolean {
-  const exports = getExports();
-  const fn = exports.simlin_project_is_simulatable as (proj: number, name: number, outErr: number) => number;
-
-  const namePtr = modelName !== null ? stringToWasm(modelName) : 0;
-  const outErrPtr = allocOutPtr();
-
-  try {
-    const result = fn(project, namePtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      simlin_error_free(errPtr);
-      return false;
-    }
-
-    return result !== 0;
-  } finally {
-    if (namePtr !== 0) free(namePtr);
-    free(outErrPtr);
-  }
-}
-
-/**
- * Get all errors in a project.
- * @param project Project pointer
- * @returns Error pointer (0 if no errors)
- * @throws SimlinError if the call itself fails (e.g., invalid project pointer)
- */
-export function simlin_project_get_errors(project: SimlinProjectPtr): SimlinErrorPtr {
-  const exports = getExports();
-  const fn = exports.simlin_project_get_errors as (proj: number, outErr: number) => number;
-
-  const outErrPtr = allocOutPtr();
-
-  try {
-    const result = fn(project, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
-    }
-
-    return result;
-  } finally {
-    free(outErrPtr);
-  }
-}
-
-/**
- * Add a new model to a project.
- * @param project Project pointer
- * @param modelName Model name
- */
-export function simlin_project_add_model(project: SimlinProjectPtr, modelName: string): void {
-  const exports = getExports();
-  const fn = exports.simlin_project_add_model as (proj: number, name: number, outErr: number) => void;
-
-  const namePtr = stringToWasm(modelName);
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(project, namePtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code);
-    }
-  } finally {
-    free(namePtr);
-    free(outErrPtr);
-  }
-}
-
-/**
- * Apply a patch to the project datamodel (protobuf format).
- * @param project Project pointer
- * @param patchData Protobuf-encoded patch data
- * @param dryRun If true, validate without applying
- * @param allowErrors If true, continue despite errors
- * @returns Collected errors if any (caller should free with simlin_error_free)
- */
-export function simlin_project_apply_patch(
-  project: SimlinProjectPtr,
-  patchData: Uint8Array,
-  dryRun: boolean,
-  allowErrors: boolean,
-): SimlinErrorPtr {
-  const exports = getExports();
-  const fn = exports.simlin_project_apply_patch as (
-    proj: number,
-    data: number,
-    len: number,
-    dryRun: number,
-    allowErrors: number,
-    outCollected: number,
-    outErr: number,
-  ) => void;
-
-  const dataPtr = copyToWasm(patchData);
-  const outCollectedPtr = allocOutPtr();
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(project, dataPtr, patchData.length, dryRun ? 1 : 0, allowErrors ? 1 : 0, outCollectedPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-
-      // Also free any collected errors to prevent memory leak
-      const collectedPtr = readOutPtr(outCollectedPtr);
-      if (collectedPtr !== 0) {
-        // Read collected error details and merge with main error details
-        const collectedDetails = readAllErrorDetails(collectedPtr);
-        details.push(...collectedDetails);
-        simlin_error_free(collectedPtr);
-      }
-
-      throw new SimlinError(message, code, details);
-    }
-
-    return readOutPtr(outCollectedPtr);
-  } finally {
-    free(dataPtr);
-    free(outCollectedPtr);
-    free(outErrPtr);
-  }
-}
-
-/**
- * Apply a JSON patch to the project datamodel.
- * @param project Project pointer
- * @param patchData JSON-encoded patch data
- * @param format JSON format (only Native supported for patches)
- * @param dryRun If true, validate without applying
- * @param allowErrors If true, continue despite errors
- * @returns Collected errors if any (caller should free with simlin_error_free)
- */
-export function simlin_project_apply_patch_json(
-  project: SimlinProjectPtr,
-  patchData: Uint8Array,
-  format: SimlinJsonFormat,
-  dryRun: boolean,
-  allowErrors: boolean,
-): SimlinErrorPtr {
-  const exports = getExports();
-  const fn = exports.simlin_project_apply_patch_json as (
-    proj: number,
-    data: number,
-    len: number,
-    fmt: number,
-    dryRun: number,
-    allowErrors: number,
-    outCollected: number,
-    outErr: number,
-  ) => void;
-
-  const dataPtr = copyToWasm(patchData);
-  const outCollectedPtr = allocOutPtr();
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(project, dataPtr, patchData.length, format, dryRun ? 1 : 0, allowErrors ? 1 : 0, outCollectedPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-
-      // Also free any collected errors to prevent memory leak
-      const collectedPtr = readOutPtr(outCollectedPtr);
-      if (collectedPtr !== 0) {
-        // Read collected error details and merge with main error details
-        const collectedDetails = readAllErrorDetails(collectedPtr);
-        details.push(...collectedDetails);
-        simlin_error_free(collectedPtr);
-      }
-
-      throw new SimlinError(message, code, details);
-    }
-
-    return readOutPtr(outCollectedPtr);
-  } finally {
-    free(dataPtr);
-    free(outCollectedPtr);
-    free(outErrPtr);
+  /**
+   * Symbol.dispose support for using statement.
+   */
+  [Symbol.dispose](): void {
+    this.dispose();
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "@system-dynamics/engine2",
-  "version": "0.1.0",
-  "description": "Low-level JavaScript bindings for libsimlin WASM",
+  "version": "2.0.0",
+  "description": "an engine for building, running and analyzing system dynamics models",
   "repository": "http://github.com/bpowers/simlin",
   "author": {
     "name": "Bobby Powers",
