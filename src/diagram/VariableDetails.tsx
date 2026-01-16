@@ -31,7 +31,7 @@ import { defined, Series } from '@system-dynamics/core/common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { CustomElement, FormattedText, CustomEditor } from './drawing/SlateEditor';
 import { LookupEditor } from './LookupEditor';
-import { errorCodeDescription } from '@system-dynamics/engine';
+import { errorCodeDescription } from '@system-dynamics/engine2';
 
 const SearchbarWidthSm = 359;
 const SearchbarWidthMd = 420;

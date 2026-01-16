@@ -10,7 +10,7 @@ import { Card, CardContent, Typography } from '@mui/material';
 import { styled } from '@mui/material/styles';
 
 import { SimError, ModelError, EquationError, ErrorCode, UnitError } from '@system-dynamics/core/datamodel';
-import { errorCodeDescription } from '@system-dynamics/engine';
+import { errorCodeDescription } from '@system-dynamics/engine2';
 
 const SearchbarWidthSm = 359;
 const SearchbarWidthMd = 420;

@@ -25,20 +25,21 @@ import CardActions from '@mui/material/CardActions';
 import CardContent from '@mui/material/CardContent';
 import { canonicalize } from '@system-dynamics/core/canonicalize';
 
-import { Project as Engine2Project } from '@system-dynamics/engine2';
-import type {
-  Engine as IEngine,
-  Error as EngineError,
-  EquationError as EngineEquationError,
-  UnitError as EngineUnitError,
-} from '@system-dynamics/engine';
-import { open, errorCodeDescription } from '@system-dynamics/engine';
+import { Project as Engine2Project, SimlinErrorKind, SimlinUnitErrorKind } from '@system-dynamics/engine2';
+import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs, JsonArrayedEquation } from '@system-dynamics/engine2';
+import type { ErrorDetail } from '@system-dynamics/engine2';
+import { stockFlowViewToJson } from './view-conversion';
 import {
   Project,
   Model,
   Variable,
   UID,
   Stock as StockVar,
+  Flow,
+  Aux,
+  ScalarEquation,
+  ApplyToAllEquation,
+  ArrayedEquation,
   ViewElement,
   NamedViewElement,
   StockFlowView,
@@ -84,54 +85,50 @@ function radToDeg(r: number): number {
   return (r * 180) / Math.PI;
 }
 
-function lowerErrors(varErrors: globalThis.Map<string, Array<EngineEquationError>>): Map<string, List<EquationError>> {
-  let result = Map<string, List<EquationError>>();
-  if (varErrors.size > 0) {
-    for (const ident of varErrors.keys()) {
-      const rawErrors = defined(varErrors.get(ident));
-      const errors = List(
-        rawErrors.map((err) => {
-          return new EquationError({
-            start: err.start,
-            end: err.end,
-            code: err.code,
-          });
-        }),
-      );
+function convertErrorDetails(
+  errors: ErrorDetail[],
+  modelName: string,
+): {
+  varErrors: Map<string, List<EquationError>>;
+  unitErrors: Map<string, List<UnitError>>;
+} {
+  let varErrors = Map<string, List<EquationError>>();
+  let unitErrors = Map<string, List<UnitError>>();
 
-      result = result.set(ident, errors);
+  for (const err of errors) {
+    if (err.modelName !== modelName) {
+      continue;
+    }
 
-      // these things point back into the wasm heap, so ensure we call free on them
-      rawErrors.forEach((err) => err.free());
+    const ident = err.variableName;
+    if (!ident) {
+      continue;
+    }
+
+    const isUnitError = err.kind === SimlinErrorKind.Units;
+
+    if (isUnitError) {
+      const unitError = new UnitError({
+        start: err.startOffset ?? 0,
+        end: err.endOffset ?? 0,
+        code: err.code as unknown as ErrorCode,
+        isConsistencyError: err.unitErrorKind === SimlinUnitErrorKind.Consistency,
+        details: err.message ?? undefined,
+      });
+      const existing = unitErrors.get(ident) ?? List<UnitError>();
+      unitErrors = unitErrors.set(ident, existing.push(unitError));
+    } else {
+      const eqError = new EquationError({
+        start: err.startOffset ?? 0,
+        end: err.endOffset ?? 0,
+        code: err.code as unknown as ErrorCode,
+      });
+      const existing = varErrors.get(ident) ?? List<EquationError>();
+      varErrors = varErrors.set(ident, existing.push(eqError));
     }
   }
-  return result;
-}
 
-function lowerUnitErrors(varErrors: globalThis.Map<string, Array<EngineUnitError>>): Map<string, List<UnitError>> {
-  let result = Map<string, List<UnitError>>();
-  if (varErrors.size > 0) {
-    for (const ident of varErrors.keys()) {
-      const rawErrors = defined(varErrors.get(ident));
-      const errors = List(
-        rawErrors.map((err) => {
-          return new UnitError({
-            start: err.start,
-            isConsistencyError: err.is_consistency_error,
-            end: err.end,
-            code: err.code,
-            details: err.get_details(),
-          });
-        }),
-      );
-
-      result = result.set(ident, errors);
-
-      // these things point back into the wasm heap, so ensure we call free on them
-      rawErrors.forEach((err) => err.free());
-    }
-  }
-  return result;
+  return { varErrors, unitErrors };
 }
 
 class EditorError implements Error {
@@ -173,7 +170,7 @@ interface EditorProps {
 
 export const Editor = styled(
   class InnerEditor extends React.PureComponent<EditorProps & { className?: string }, EditorState> {
-    activeEngine?: IEngine;
+    engine2Project?: Engine2Project;
     newEngineShouldPullView = false;
     newEngineQueuedView?: StockFlowView;
 
@@ -206,7 +203,7 @@ export const Editor = styled(
       };
 
       setTimeout(async () => {
-        await this.openEngine(props.initialProjectBinary, activeProject);
+        await this.openEngine2Project(props.initialProjectBinary, activeProject);
         this.scheduleSimRun();
       });
     }
@@ -224,36 +221,37 @@ export const Editor = styled(
       return this.state.activeProject;
     }
 
-    engine(): IEngine | undefined {
-      return this.activeEngine;
+    engine2(): Engine2Project | undefined {
+      return this.engine2Project;
     }
 
     scheduleSimRun(): void {
       setTimeout(() => {
-        const engine = this.engine();
-        if (!engine) {
+        const engine2 = this.engine2();
+        if (!engine2) {
           return;
         }
-        this.loadSim(engine);
+        this.loadSim(engine2);
       });
     }
 
-    loadSim(engine: IEngine) {
+    loadSim(engine2: Engine2Project) {
       this.recalculateStatus();
 
-      if (!engine.isSimulatable()) {
+      if (!engine2.isSimulatable()) {
         return;
       }
       try {
-        engine.simRunToEnd();
-        const idents = engine.simVarNames() as string[];
-        const time = engine.simSeries('time');
+        const model = engine2.mainModel;
+        const run = model.run();
+        const idents = run.varNames;
+        const time = run.getSeries('time') ?? new Float64Array(0);
         const data = Map<string, Series>(
-          idents.map((ident) => [ident, { name: ident, time, values: engine.simSeries(ident) }]),
+          idents.map((ident) => {
+            const values = run.getSeries(ident) ?? new Float64Array(0);
+            return [ident, { name: ident, time, values }];
+          }),
         );
-        setTimeout(() => {
-          engine.simClose();
-        });
         const project = defined(this.project());
         this.setState({
           activeProject: project.attachData(data, this.state.modelName),
@@ -368,16 +366,12 @@ export const Editor = styled(
         return;
       }
 
-      const engine = defined(this.engine());
-      let err = engine.rename(this.state.modelName, oldName, newName);
-      if (err) {
-        const details = err.getDetails();
-        const msg = `${errorCodeDescription(err.code)}` + (details ? `: ${details}` : '');
-        this.appendModelError(msg);
+      const engine2 = this.engine2();
+      if (!engine2) {
         return;
       }
-      const view = defined(this.getView());
 
+      const view = defined(this.getView());
       const oldIdent = canonicalize(oldName);
       newName = newName.replace('\n', '\\n');
 
@@ -393,12 +387,27 @@ export const Editor = styled(
         return namedElement.set('name', newName);
       });
 
-      const viewPb = view.set('elements', elements).toPb();
-      const serializedView = viewPb.serializeBinary();
-      err = engine.setView(this.state.modelName, 0, serializedView);
-      if (err) {
-        const details = err.getDetails();
-        const msg = `${errorCodeDescription(err.code)}` + (details ? `: ${details}` : '');
+      const updatedView = view.set('elements', elements);
+
+      const ops: JsonModelOperation[] = [
+        {
+          type: 'rename_variable',
+          payload: { from: oldIdent, to: canonicalize(newName) },
+        },
+        {
+          type: 'upsert_view',
+          payload: { index: 0, view: stockFlowViewToJson(updatedView) },
+        },
+      ];
+
+      const patch: JsonProjectPatch = {
+        models: [{ name: this.state.modelName, ops }],
+      };
+
+      try {
+        engine2.applyPatch(patch);
+      } catch (e: any) {
+        const msg = e?.message ?? 'Unknown error during rename';
         this.appendModelError(msg);
         return;
       }
@@ -406,7 +415,7 @@ export const Editor = styled(
       this.setState({
         flowStillBeingCreated: false,
       });
-      this.updateProject(engine.serializeToProtobuf());
+      this.updateProject(engine2.serializeProtobuf());
       this.scheduleSimRun();
     };
 
@@ -426,10 +435,11 @@ export const Editor = styled(
     };
 
     getLatexEquation = (ident: string): string | undefined => {
-      const engine = this.engine();
-      if (!engine) return undefined;
+      const engine2 = this.engine2();
+      if (!engine2) return undefined;
       try {
-        return (engine as any).getLatexEquation?.(this.state.modelName, ident);
+        const model = engine2.getModel(this.state.modelName);
+        return model.getLatexEquation(ident) ?? undefined;
       } catch {
         return undefined;
       }
@@ -479,11 +489,27 @@ export const Editor = styled(
       });
       elements = elements.concat(clouds);
 
-      const engine = defined(this.engine());
-      for (const ident of this.getSelectionIdents()) {
-        engine.deleteVariable(modelName, ident);
+      const engine2 = this.engine2();
+      if (!engine2) {
+        return;
       }
-      // this will ensure that deletions the engine does above are also serialized to the state
+
+      const deleteOps: JsonModelOperation[] = this.getSelectionIdents().map((ident) => ({
+        type: 'delete_variable' as const,
+        payload: { ident },
+      }));
+
+      if (deleteOps.length > 0) {
+        const patch: JsonProjectPatch = {
+          models: [{ name: modelName, ops: deleteOps }],
+        };
+        try {
+          engine2.applyPatch(patch);
+        } catch (e: any) {
+          this.appendModelError(e?.message ?? 'Unknown error during delete');
+        }
+      }
+
       this.updateView(view.merge({ elements, nextUid }));
       this.setState({
         selection: Set<number>(),
@@ -682,19 +708,87 @@ export const Editor = styled(
       }
       elements = elements.concat(newClouds);
 
-      const engine = defined(this.engine());
+      const engine2 = this.engine2();
+      if (!engine2) {
+        return;
+      }
+
+      const ops: JsonModelOperation[] = [];
+
       if (isCreatingNew) {
-        engine.addNewVariable(this.state.modelName, 'flow', (flow as NamedViewElement).name);
-        if (sourceStockIdent) {
-          engine.addStocksFlow(this.state.modelName, sourceStockIdent, flow.ident, 'out');
+        ops.push({
+          type: 'upsert_flow',
+          payload: {
+            flow: {
+              name: (flow as NamedViewElement).name,
+              equation: '',
+            },
+          },
+        });
+      }
+
+      if (sourceStockIdent) {
+        const model = defined(this.getModel());
+        const stockVar = model.variables.get(sourceStockIdent);
+        if (stockVar instanceof StockVar) {
+          ops.push({
+            type: 'upsert_stock',
+            payload: {
+              stock: {
+                name: stockVar.ident,
+                inflows: stockVar.inflows.toArray(),
+                outflows: stockVar.outflows.push(flow.ident).toArray(),
+              },
+            },
+          });
         }
       }
+
       if (stockAttachingIdent) {
-        engine.addStocksFlow(this.state.modelName, stockAttachingIdent, flow.ident, 'in');
+        const model = defined(this.getModel());
+        const stockVar = model.variables.get(stockAttachingIdent);
+        if (stockVar instanceof StockVar) {
+          ops.push({
+            type: 'upsert_stock',
+            payload: {
+              stock: {
+                name: stockVar.ident,
+                inflows: stockVar.inflows.push(flow.ident).toArray(),
+                outflows: stockVar.outflows.toArray(),
+              },
+            },
+          });
+        }
       }
+
       if (stockDetachingIdent) {
-        engine.removeStocksFlow(this.state.modelName, stockDetachingIdent, flow.ident, 'in');
+        const model = defined(this.getModel());
+        const stockVar = model.variables.get(stockDetachingIdent);
+        if (stockVar instanceof StockVar) {
+          ops.push({
+            type: 'upsert_stock',
+            payload: {
+              stock: {
+                name: stockVar.ident,
+                inflows: stockVar.inflows.filter((f) => f !== flow.ident).toArray(),
+                outflows: stockVar.outflows.toArray(),
+              },
+            },
+          });
+        }
       }
+
+      if (ops.length > 0) {
+        const patch: JsonProjectPatch = {
+          models: [{ name: this.state.modelName, ops }],
+        };
+        try {
+          engine2.applyPatch(patch);
+        } catch (e: any) {
+          this.appendModelError(e?.message ?? 'Unknown error during flow attach');
+        }
+      }
+
       this.updateView(view.merge({ nextUid, elements }));
       this.setState({
         selection,
@@ -773,28 +867,85 @@ export const Editor = styled(
     };
 
     updateView(view: StockFlowView) {
-      const viewPb = view.toPb();
-      const serializedView = viewPb.serializeBinary();
-      const engine = this.engine();
-      if (engine) {
-        const err = engine.setView(this.state.modelName, 0, serializedView);
-        if (err) {
-          const details = err.getDetails();
-          const msg = `${errorCodeDescription(err.code)}` + (details ? `: ${details}` : '');
+      const engine2 = this.engine2();
+      if (engine2) {
+        const ops: JsonModelOperation[] = [
+          {
+            type: 'upsert_view',
+            payload: { index: 0, view: stockFlowViewToJson(view) },
+          },
+        ];
+        const patch: JsonProjectPatch = {
+          models: [{ name: this.state.modelName, ops }],
+        };
+        try {
+          engine2.applyPatch(patch);
+        } catch (e: any) {
+          const msg = e?.message ?? 'Unknown error during view update';
           this.appendModelError(msg);
           return;
         }
-        this.updateProject(engine.serializeToProtobuf());
+        this.updateProject(engine2.serializeProtobuf());
       }
     }
 
     handleCreateVariable = (element: ViewElement) => {
       const view = defined(this.getView());
+      const engine2 = this.engine2();
+      if (!engine2) {
+        return;
+      }
 
       let nextUid = view.nextUid;
       const elements = view.elements.push(element.set('uid', nextUid++));
+      const elementType = viewElementType(element);
+      const name = (element as NamedViewElement).name;
 
-      this.engine()?.addNewVariable(this.state.modelName, viewElementType(element), (element as NamedViewElement).name);
+      let op: JsonModelOperation;
+      if (elementType === 'stock') {
+        op = {
+          type: 'upsert_stock',
+          payload: {
+            stock: {
+              name,
+              inflows: [],
+              outflows: [],
+              initial_equation: '',
+            },
+          },
+        };
+      } else if (elementType === 'flow') {
+        op = {
+          type: 'upsert_flow',
+          payload: {
+            flow: {
+              name,
+              equation: '',
+            },
+          },
+        };
+      } else {
+        op = {
+          type: 'upsert_aux',
+          payload: {
+            aux: {
+              name,
+              equation: '',
+            },
+          },
+        };
+      }
+
+      const patch: JsonProjectPatch = {
+        models: [{ name: this.state.modelName, ops: [op] }],
+      };
+
+      try {
+        engine2.applyPatch(patch);
+      } catch (e: any) {
+        this.appendModelError(e?.message ?? 'Unknown error during variable creation');
+      }
+
       this.updateView(view.merge({ nextUid, elements }));
       this.setState({
         selection: Set<number>(),
@@ -934,79 +1085,106 @@ export const Editor = styled(
       });
     };
 
-    handleStartTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const engine = this.engine();
-      if (!engine) {
+    applySimSpecChange(updates: Partial<JsonSimSpecs>) {
+      const engine2 = this.engine2();
+      if (!engine2) {
         return;
       }
-      const value = Number(event.target.value);
-      engine.setSimSpecStart(value);
-      this.updateProject(engine.serializeToProtobuf());
+
+      const project = this.project();
+      if (!project) {
+        return;
+      }
+
+      const simSpec = project.simSpecs;
+      const dt = simSpec.dt.isReciprocal ? `1/${simSpec.dt.value}` : `${simSpec.dt.value}`;
+
+      // Convert saveStep Dt to the actual numeric step size
+      let saveStep: number | undefined;
+      if (simSpec.saveStep) {
+        saveStep = simSpec.saveStep.isReciprocal
+          ? 1 / simSpec.saveStep.value
+          : simSpec.saveStep.value;
+      }
+
+      const simSpecs: JsonSimSpecs = {
+        start_time: updates.start_time ?? simSpec.start,
+        end_time: updates.end_time ?? simSpec.stop,
+        dt: updates.dt ?? dt,
+        time_units: updates.time_units ?? simSpec.timeUnits,
+        save_step: updates.save_step ?? saveStep,
+        method: updates.method ?? simSpec.simMethod,
+      };
+
+      const patch: JsonProjectPatch = {
+        project_ops: [
+          {
+            type: 'set_sim_specs',
+            payload: { sim_specs: simSpecs },
+          },
+        ],
+      };
+
+      try {
+        engine2.applyPatch(patch);
+      } catch (e: any) {
+        this.appendModelError(e?.message ?? 'Unknown error updating sim specs');
+        return;
+      }
+
+      this.updateProject(engine2.serializeProtobuf());
       this.scheduleSimRun();
+    }
+
+    handleStartTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+      const value = Number(event.target.value);
+      this.applySimSpecChange({ start_time: value });
     };
 
     handleStopTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const engine = this.engine();
-      if (!engine) {
-        return;
-      }
       const value = Number(event.target.value);
-      engine.setSimSpecStop(value);
-      this.updateProject(engine.serializeToProtobuf());
-      this.scheduleSimRun();
+      this.applySimSpecChange({ end_time: value });
     };
 
     handleDtChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const engine = this.engine();
-      if (!engine) {
-        return;
-      }
       const value = Number(event.target.value);
-      engine.setSimSpecDt(value, false);
-      this.updateProject(engine.serializeToProtobuf());
-      this.scheduleSimRun();
+      this.applySimSpecChange({ dt: `${value}` });
     };
 
     handleTimeUnitsChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const engine = this.engine();
-      if (!engine) {
-        return;
-      }
       const value = event.target.value;
-      engine.setSimSpecTimeUnits(value);
-      this.updateProject(engine.serializeToProtobuf());
-      this.scheduleSimRun();
+      this.applySimSpecChange({ time_units: value });
     };
 
     handleDownloadXmile = () => {
-      const engine = defined(this.engine());
-      const projectPb = engine.serializeToProtobuf();
-      Engine2Project.openProtobuf(projectPb)
-        .then((project) => {
-          const xmile = project.toXmileString();
-          const encoder = new TextEncoder();
-          const xmileBytes = encoder.encode(xmile);
-          const blob = new Blob([xmileBytes], {
-            type: 'application/octet-stream',
-          });
-          const url = window.URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          document.body.appendChild(a);
-          try {
-            (a as unknown as any).style = 'display: none';
-          } catch {
-            // oh well
-          }
-          a.href = url;
-          a.download = `${this.props.name}-${this.state.projectVersion | 0}.stmx`;
-          a.click();
-          window.URL.revokeObjectURL(url);
-        })
-        .catch((err) => {
-          if (err && err.hasOwnProperty('msg')) {
-            this.appendModelError(err.msg);
-          }
+      const engine2 = this.engine2();
+      if (!engine2) {
+        return;
+      }
+      try {
+        const xmile = engine2.toXmileString();
+        const encoder = new TextEncoder();
+        const xmileBytes = encoder.encode(xmile);
+        const blob = new Blob([xmileBytes], {
+          type: 'application/octet-stream',
         });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        document.body.appendChild(a);
+        try {
+          (a as unknown as any).style = 'display: none';
+        } catch {
+          // oh well
+        }
+        a.href = url;
+        a.download = `${this.props.name}-${this.state.projectVersion | 0}.stmx`;
+        a.click();
+        window.URL.revokeObjectURL(url);
+      } catch (err: any) {
+        if (err && err.message) {
+          this.appendModelError(err.message);
+        }
+      }
     };
 
     getDrawer() {
@@ -1071,18 +1249,26 @@ export const Editor = styled(
     }
 
     queueViewUpdate(view: StockFlowView): void {
-      const engine = this.engine();
-      if (engine) {
-        const viewPb = view.toPb();
-        const err = engine.setView(this.state.modelName, 0, viewPb.serializeBinary());
-        if (err) {
-          const details = err.getDetails();
-          const msg = `${errorCodeDescription(err.code)}` + (details ? `: ${details}` : '');
+      const engine2 = this.engine2();
+      if (engine2) {
+        const ops: JsonModelOperation[] = [
+          {
+            type: 'upsert_view',
+            payload: { index: 0, view: stockFlowViewToJson(view) },
+          },
+        ];
+        const patch: JsonProjectPatch = {
+          models: [{ name: this.state.modelName, ops }],
+        };
+        try {
+          engine2.applyPatch(patch);
+        } catch (e: any) {
+          const msg = e?.message ?? 'Unknown error during view update';
           this.appendModelError(msg);
           return;
         }
 
-        this.updateProject(engine.serializeToProtobuf(), false);
+        this.updateProject(engine2.serializeProtobuf(), false);
       } else {
         // there exists a race where we need to center/update the viewBox when
         // displaying a newly imported model, but the async wasm stuff doesn't
@@ -1350,38 +1536,210 @@ export const Editor = styled(
       this.handleSelection(Set());
     };
 
+    // Returns the equation fields for a JSON patch operation.
+    // For scalar equations, returns { equation: string }.
+    // For arrayed equations, returns { arrayed_equation: JsonArrayedEquation }.
+    getEquationFields(variable: Variable): { equation?: string; arrayed_equation?: JsonArrayedEquation } {
+      const eq = variable.equation;
+      if (eq instanceof ScalarEquation) {
+        return { equation: eq.equation };
+      } else if (eq instanceof ApplyToAllEquation) {
+        return {
+          arrayed_equation: {
+            dimensions: eq.dimensionNames.toArray(),
+            equation: eq.equation,
+          },
+        };
+      } else if (eq instanceof ArrayedEquation) {
+        return {
+          arrayed_equation: {
+            dimensions: eq.dimensionNames.toArray(),
+            elements: eq.elements.entrySeq().map(([subscript, eqStr]) => ({
+              subscript,
+              equation: eqStr,
+            })).toArray(),
+          },
+        };
+      }
+      return { equation: '' };
+    }
+
     handleEquationChange = (
       ident: string,
       newEquation: string | undefined,
       newUnits: string | undefined,
       newDocs: string | undefined,
     ) => {
-      const engine = this.engine();
-      if (!engine) {
+      const engine2 = this.engine2();
+      if (!engine2) {
         return;
       }
-      if (newEquation !== undefined) {
-        engine.setEquation(this.state.modelName, ident, newEquation);
+
+      const model = this.getModel();
+      if (!model) {
+        return;
       }
-      if (newUnits !== undefined) {
-        engine.setUnits(this.state.modelName, ident, newUnits);
+
+      const variable = model.variables.get(ident);
+      if (!variable) {
+        return;
       }
-      if (newDocs !== undefined) {
-        engine.setDocumentation(this.state.modelName, ident, newDocs);
+
+      // When newEquation is provided, use it as a scalar equation.
+      // Otherwise, preserve the existing equation structure (including arrayed equations).
+      const existingEqFields = this.getEquationFields(variable);
+
+      let op: JsonModelOperation;
+      if (variable instanceof StockVar) {
+        op = {
+          type: 'upsert_stock',
+          payload: {
+            stock: {
+              name: variable.ident,
+              inflows: variable.inflows.toArray(),
+              outflows: variable.outflows.toArray(),
+              // For stocks, the scalar equation field is initial_equation
+              initial_equation: newEquation ?? existingEqFields.equation,
+              arrayed_equation: newEquation !== undefined ? undefined : existingEqFields.arrayed_equation,
+              units: newUnits ?? variable.units ?? undefined,
+              documentation: newDocs ?? variable.documentation ?? undefined,
+            },
+          },
+        };
+      } else if (variable instanceof Flow) {
+        const gf = variable.gf
+          ? {
+              y_points: variable.gf.yPoints?.toArray(),
+              kind: variable.gf.kind,
+              x_scale: variable.gf.xScale ? { min: variable.gf.xScale.min, max: variable.gf.xScale.max } : undefined,
+              y_scale: variable.gf.yScale ? { min: variable.gf.yScale.min, max: variable.gf.yScale.max } : undefined,
+            }
+          : undefined;
+        op = {
+          type: 'upsert_flow',
+          payload: {
+            flow: {
+              name: variable.ident,
+              equation: newEquation ?? existingEqFields.equation,
+              arrayed_equation: newEquation !== undefined ? undefined : existingEqFields.arrayed_equation,
+              units: newUnits ?? variable.units ?? undefined,
+              documentation: newDocs ?? variable.documentation ?? undefined,
+              graphical_function: gf,
+            },
+          },
+        };
+      } else {
+        const auxVar = variable as Aux;
+        const gf = auxVar.gf
+          ? {
+              y_points: auxVar.gf.yPoints?.toArray(),
+              kind: auxVar.gf.kind,
+              x_scale: auxVar.gf.xScale ? { min: auxVar.gf.xScale.min, max: auxVar.gf.xScale.max } : undefined,
+              y_scale: auxVar.gf.yScale ? { min: auxVar.gf.yScale.min, max: auxVar.gf.yScale.max } : undefined,
+            }
+          : undefined;
+        op = {
+          type: 'upsert_aux',
+          payload: {
+            aux: {
+              name: auxVar.ident,
+              equation: newEquation ?? existingEqFields.equation,
+              arrayed_equation: newEquation !== undefined ? undefined : existingEqFields.arrayed_equation,
+              units: newUnits ?? auxVar.units ?? undefined,
+              documentation: newDocs ?? auxVar.documentation ?? undefined,
+              graphical_function: gf,
+            },
+          },
+        };
       }
-      this.updateProject(engine.serializeToProtobuf());
+
+      const patch: JsonProjectPatch = {
+        models: [{ name: this.state.modelName, ops: [op] }],
+      };
+
+      try {
+        engine2.applyPatch(patch);
+      } catch (e: any) {
+        this.appendModelError(e?.message ?? 'Unknown error during equation update');
+        return;
+      }
+
+      this.updateProject(engine2.serializeProtobuf());
       this.scheduleSimRun();
     };
 
     handleTableChange = (ident: string, newTable: GraphicalFunction | null) => {
-      const engine = defined(this.engine());
-      if (newTable) {
-        const gf = newTable.toPb();
-        engine.setGraphicalFunction(this.state.modelName, ident, gf.serializeBinary());
-      } else {
-        engine.removeGraphicalFunction(this.state.modelName, ident);
+      const engine2 = this.engine2();
+      if (!engine2) {
+        return;
       }
-      this.updateProject(engine.serializeToProtobuf());
+
+      const model = this.getModel();
+      if (!model) {
+        return;
+      }
+
+      const variable = model.variables.get(ident);
+      if (!variable) {
+        return;
+      }
+
+      const gf = newTable
+        ? {
+            y_points: newTable.yPoints?.toArray(),
+            kind: newTable.kind,
+            x_scale: newTable.xScale ? { min: newTable.xScale.min, max: newTable.xScale.max } : undefined,
+            y_scale: newTable.yScale ? { min: newTable.yScale.min, max: newTable.yScale.max } : undefined,
+          }
+        : undefined;
+
+      // Preserve the existing equation structure when updating the graphical function
+      const existingEqFields = this.getEquationFields(variable);
+
+      let op: JsonModelOperation;
+      if (variable instanceof Flow) {
+        op = {
+          type: 'upsert_flow',
+          payload: {
+            flow: {
+              name: variable.ident,
+              equation: existingEqFields.equation,
+              arrayed_equation: existingEqFields.arrayed_equation,
+              units: variable.units ?? undefined,
+              documentation: variable.documentation ?? undefined,
+              graphical_function: gf,
+            },
+          },
+        };
+      } else {
+        const auxVar = variable as Aux;
+        op = {
+          type: 'upsert_aux',
+          payload: {
+            aux: {
+              name: auxVar.ident,
+              equation: existingEqFields.equation,
+              arrayed_equation: existingEqFields.arrayed_equation,
+              units: auxVar.units ?? undefined,
+              documentation: auxVar.documentation ?? undefined,
+              graphical_function: gf,
+            },
+          },
+        };
+      }
+
+      const patch: JsonProjectPatch = {
+        models: [{ name: this.state.modelName, ops: [op] }],
+      };
+
+      try {
+        engine2.applyPatch(patch);
+      } catch (e: any) {
+        this.appendModelError(e?.message ?? 'Unknown error during table update');
+        return;
+      }
+
+      this.updateProject(engine2.serializeProtobuf());
       this.scheduleSimRun();
     };
 
@@ -1391,31 +1749,38 @@ export const Editor = styled(
       let varErrors = Map<string, List<EquationError>>();
       let unitErrors = Map<string, List<UnitError>>();
 
-      const engine = this.engine();
-      if (engine) {
-        const rawSimError = engine.getSimError();
-        if (rawSimError) {
-          simError = new SimError({
-            code: rawSimError.code,
-            details: rawSimError.getDetails(),
-          });
-          rawSimError.free();
-        }
-
+      const engine2 = this.engine2();
+      if (engine2) {
         const modelName = this.state.modelName;
-        const rawModelErrors = engine.getModelErrors(modelName) as EngineError[];
-        for (let i = 0; i < rawModelErrors.length; i++) {
-          const rawError = rawModelErrors[i];
-          const error = new ModelError({
-            code: rawError.code,
-            details: rawError.getDetails(),
-          });
-          rawError.free();
-          modelErrors = modelErrors.push(error);
+        const errors = engine2.getErrors();
+
+        for (const err of errors) {
+          // Skip errors from other models
+          if (err.modelName && err.modelName !== modelName) {
+            continue;
+          }
+
+          if (err.kind === SimlinErrorKind.Simulation) {
+            simError = new SimError({
+              code: err.code as unknown as ErrorCode,
+              details: err.message ?? undefined,
+            });
+          } else if (!err.variableName) {
+            // Errors without a variable name (including Model/Project/Variable/Units kinds)
+            // are shown as model-level errors. In the old engine API, variable errors were
+            // always keyed by variable name; this handles any edge cases in the new API.
+            modelErrors = modelErrors.push(
+              new ModelError({
+                code: err.code as unknown as ErrorCode,
+                details: err.message ?? undefined,
+              }),
+            );
+          }
         }
 
-        varErrors = this.getVariableErrors(engine, modelName);
-        unitErrors = this.getVariableUnitErrors(engine, modelName);
+        const converted = convertErrorDetails(errors, modelName);
+        varErrors = converted.varErrors;
+        unitErrors = converted.unitErrors;
       }
 
       return (
@@ -1528,24 +1893,16 @@ export const Editor = styled(
       });
     };
 
-    getVariableErrors(engine: IEngine, modelName: string): Map<string, List<EquationError>> {
-      const varErrors = engine.getModelVariableErrors(modelName) as globalThis.Map<string, Array<EngineEquationError>>;
-      return lowerErrors(varErrors);
-    }
-
-    getVariableUnitErrors(engine: IEngine, modelName: string): Map<string, List<UnitError>> {
-      const unitErrors = engine.getModelVariableUnitErrors(modelName) as globalThis.Map<string, Array<EngineUnitError>>;
-      return lowerUnitErrors(unitErrors);
-    }
-
     updateVariableErrors(project: Project): Project {
-      const engine = this.engine();
-      if (!engine) {
+      const engine2 = this.engine2();
+      if (!engine2) {
         return project;
       }
 
       const modelName = this.state.modelName;
-      const varErrors = this.getVariableErrors(engine, modelName);
+      const errors = engine2.getErrors();
+      const { varErrors, unitErrors } = convertErrorDetails(errors, modelName);
+
       if (varErrors.size > 0) {
         const model = defined(project.models.get(modelName));
 
@@ -1555,8 +1912,8 @@ export const Editor = styled(
         if (varErrors.size === model.variables.size && Set(varErrors.keys()).equals(Set(model.variables.keys()))) {
           let foundOtherError = false;
 
-          for (const [, errors] of varErrors) {
-            if (errors.size !== 1 || defined(errors.first()).code !== ErrorCode.EmptyEquation) {
+          for (const [, errs] of varErrors) {
+            if (errs.size !== 1 || defined(errs.first()).code !== ErrorCode.EmptyEquation) {
               foundOtherError = true;
               break;
             }
@@ -1566,20 +1923,19 @@ export const Editor = styled(
           }
         }
 
-        for (const [ident, errors] of varErrors) {
+        for (const [ident, errs] of varErrors) {
           project = project.updateIn(
             ['models', modelName, 'variables', ident],
-            ((v: Variable): Variable => v.set('errors', errors)) as (value: unknown) => unknown,
+            ((v: Variable): Variable => v.set('errors', errs)) as (value: unknown) => unknown,
           );
         }
       }
 
-      const unitErrors = this.getVariableUnitErrors(engine, modelName);
       if (unitErrors.size > 0) {
-        for (const [ident, errors] of unitErrors) {
+        for (const [ident, errs] of unitErrors) {
           project = project.updateIn(
             ['models', modelName, 'variables', ident],
-            ((v: Variable): Variable => v.set('unitErrors', errors)) as (value: unknown) => unknown,
+            ((v: Variable): Variable => v.set('unitErrors', errs)) as (value: unknown) => unknown,
           );
         }
       }
@@ -1587,16 +1943,21 @@ export const Editor = styled(
       return project;
     }
 
-    async openEngine(serializedProject: Readonly<Uint8Array>, project: Project): Promise<IEngine | undefined> {
-      this.activeEngine?.free();
-      this.activeEngine = undefined;
+    async openEngine2Project(
+      serializedProject: Readonly<Uint8Array>,
+      project: Project,
+    ): Promise<Engine2Project | undefined> {
+      this.engine2Project?.dispose();
+      this.engine2Project = undefined;
 
-      const engine: IEngine | undefined = await open(serializedProject as Uint8Array);
-      if (!engine) {
-        this.appendModelError(`opening the project in the engine failed`);
+      let engine2: Engine2Project;
+      try {
+        engine2 = await Engine2Project.openProtobuf(serializedProject as Uint8Array);
+      } catch (e: any) {
+        this.appendModelError(`opening the project in the engine failed: ${e?.message ?? 'Unknown error'}`);
         return;
       }
-      this.activeEngine = engine;
+      this.engine2Project = engine2;
 
       if (this.newEngineShouldPullView) {
         const queuedView = defined(this.newEngineQueuedView);
@@ -1610,17 +1971,17 @@ export const Editor = styled(
         activeProject: this.updateVariableErrors(project),
       });
 
-      return engine;
+      return engine2;
     }
 
     recalculateStatus() {
       const project = this.project();
-      const engine = this.engine();
+      const engine2 = this.engine2();
 
       let status: 'ok' | 'error' | 'disabled';
-      if (!engine || !project || project.hasNoEquations) {
+      if (!engine2 || !project || project.hasNoEquations) {
         status = 'disabled';
-      } else if (!engine.isSimulatable()) {
+      } else if (!engine2.isSimulatable()) {
         status = 'error';
       } else {
         status = 'ok';
@@ -1643,7 +2004,7 @@ export const Editor = styled(
       this.setState({ activeProject, projectOffset, projectVersion });
 
       setTimeout(async () => {
-        await this.openEngine(serializedProject, activeProject);
+        await this.openEngine2Project(serializedProject, activeProject);
         this.scheduleSimRun();
         this.scheduleSave(serializedProject);
       });
