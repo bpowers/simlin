@@ -43,5 +43,9 @@ export * from './types';
 export * from './json-types';
 
 // Optional WASM configuration for advanced use cases
-export { configureWasm, ensureInitialized as ready, isInitialized as isReady } from './internal/wasm';
-export type { WasmConfig, WasmSource, WasmSourceProvider } from './internal/wasm';
+export {
+  configureWasm,
+  ensureInitialized as ready,
+  isInitialized as isReady,
+} from '@system-dynamics/engine2/internal/wasm';
+export type { WasmConfig, WasmSource, WasmSourceProvider } from '@system-dynamics/engine2/internal/wasm';

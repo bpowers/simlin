@@ -16,6 +16,10 @@
       "module": "./lib.browser/index.js",
       "node": "./lib/index.js"
     },
+    "./internal/wasm": {
+      "module": "./lib.browser/internal/wasm.browser.js",
+      "node": "./lib/internal/wasm.node.js"
+    },
     "./*": {
       "module": "./lib.browser/*.js",
       "node": "./lib/*.js"

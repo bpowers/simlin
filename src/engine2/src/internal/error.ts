@@ -4,7 +4,7 @@
 
 // Error handling functions
 
-import { getExports, getMemory } from './wasm';
+import { getExports, getMemory } from '@system-dynamics/engine2/internal/wasm';
 import { wasmToString } from './memory';
 import { Ptr, SimlinErrorPtr, SimlinErrorCode, SimlinErrorKind, SimlinUnitErrorKind, ErrorDetail } from './types';
 

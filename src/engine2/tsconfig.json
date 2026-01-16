@@ -1,21 +1,17 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "baseUrl": ".",
     "rootDir": "src",
     "outDir": "lib",
     "module": "commonjs",
-    "lib": [
-      "es2020",
-      "dom"
-    ]
+    "lib": ["es2020", "dom"],
+    "paths": {
+      "@system-dynamics/engine2/internal/wasm": ["src/internal/wasm.node.ts"],
+      "@system-dynamics/engine2/*": ["src/*"],
+      "@system-dynamics/*": ["src/*"]
+    }
   },
-  "include": [
-    "src/**/*.ts"
-  ],
-  "exclude": [
-    "lib",
-    "lib.browser",
-    "tests",
-    "eslint.config.js"
-  ]
+  "include": ["src/**/*.ts"],
+  "exclude": ["lib", "lib.browser", "tests", "eslint.config.js"]
 }
