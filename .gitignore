@@ -68,6 +68,9 @@ yarn-error.log*
 /website/.docusaurus
 /website/.cache-loader
 /website/build
+/website/rspress.config.js
+/website/tsconfig.tsbuildinfo
+/website/docs/components/*.js
 
 /src/app/firebase-debug.log
 /src/app/ui-debug.log

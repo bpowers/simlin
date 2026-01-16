@@ -20,8 +20,11 @@ const projectName = inputFile.split('.')[0];
 let pb = readFileSync(inputFile);
 
 // Validate the protobuf by opening it with engine2
-let project = await Project.openProtobuf(pb, { wasm: wasmPath });
-if (!project) {
+// If it fails (throws), try decoding from base64 and retry
+let project;
+try {
+  project = await Project.openProtobuf(pb, { wasm: wasmPath });
+} catch {
   // Try decoding from base64
   pb = base64.toUint8Array(pb.toString('utf-8'));
   project = await Project.openProtobuf(pb, { wasm: wasmPath });
