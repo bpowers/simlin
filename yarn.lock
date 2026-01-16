@@ -12212,6 +12212,11 @@ router@^2.0.0, router@^2.2.0:
     parseurl "^1.3.3"
     path-to-regexp "^8.0.0"
 
+rsbuild-plugin-google-analytics@^1.0.2:
+  version "1.0.5"
+  resolved "https://registry.yarnpkg.com/rsbuild-plugin-google-analytics/-/rsbuild-plugin-google-analytics-1.0.5.tgz#dfd0e97a34fe467a3a9394f9b1d6b507045d6a84"
+  integrity sha512-1qSMjmH3HBNMIyrRjBFHQKmTdL86VNc42HjL3z25z4k4n+N7+cl9UvpD5ou3G6YAn1jNJ2GS2pia+PKNyaTzmg==
+
 rspack-plugin-virtual-module@0.1.13:
   version "0.1.13"
   resolved "https://registry.yarnpkg.com/rspack-plugin-virtual-module/-/rspack-plugin-virtual-module-0.1.13.tgz#2acb3e5bba6fff458fd3428322978e0a51bb3294"

@@ -1,5 +1,6 @@
 import { defineConfig } from 'rspress/config';
 import path from 'path';
+import { pluginGoogleAnalytics } from 'rsbuild-plugin-google-analytics';
 
 const GithubBase = 'https://github.com/bpowers/simlin';
 
@@ -104,12 +105,12 @@ export default defineConfig({
   },
   // Output configuration
   outDir: 'build',
-  // Analytics
-  analytics: {
-    ga: {
-      measurementId: 'G-DYC89XS4YM',
-    },
-  },
+  // Builder plugins (includes Google Analytics)
+  builderPlugins: [
+    pluginGoogleAnalytics({
+      id: 'G-DYC89XS4YM',
+    }),
+  ],
   // Generate sitemap
   ssg: true,
 });

@@ -77,18 +77,74 @@ else
         exit 1
     fi
 
-    echo -n "Checking TypeScript types... "
-    TSC_OUTPUT="$(mktemp)"
-    if yarn tsc > "$TSC_OUTPUT" 2>&1; then
-        echo -e "${GREEN}✓${NC}"
-        rm -f "$TSC_OUTPUT"
+    # Check if WASM modules are built (required for full type checking)
+    ENGINE_WASM="$REPO_ROOT/src/engine/core"
+    IMPORTER_WASM="$REPO_ROOT/src/importer/core"
+
+    if [ -d "$ENGINE_WASM" ] && [ -d "$IMPORTER_WASM" ]; then
+        # Full WASM build available - check all projects
+        echo -n "Checking TypeScript types (full)... "
+        TSC_OUTPUT="$(mktemp)"
+        if yarn tsc --build > "$TSC_OUTPUT" 2>&1; then
+            echo -e "${GREEN}✓${NC}"
+            rm -f "$TSC_OUTPUT"
+        else
+            echo -e "${RED}✗${NC}"
+            echo -e "${RED}TypeScript type checking failed:${NC}"
+            cat "$TSC_OUTPUT"
+            rm -f "$TSC_OUTPUT"
+            echo -e "${YELLOW}Run 'yarn tsc --build' to see errors${NC}"
+            exit 1
+        fi
     else
-        echo -e "${RED}✗${NC}"
-        echo -e "${RED}TypeScript type checking failed:${NC}"
-        cat "$TSC_OUTPUT"
+        # WASM not built - check projects that don't depend on WASM
+        echo -e "${YELLOW}WASM not built - checking independent projects only${NC}"
+        TSC_OUTPUT="$(mktemp)"
+        TSC_FAILED=0
+
+        echo -n "  Checking core... "
+        if yarn tsc --build src/core > "$TSC_OUTPUT" 2>&1; then
+            echo -e "${GREEN}✓${NC}"
+        else
+            echo -e "${RED}✗${NC}"
+            cat "$TSC_OUTPUT"
+            TSC_FAILED=1
+        fi
+
+        echo -n "  Checking website... "
+        if yarn tsc --build website > "$TSC_OUTPUT" 2>&1; then
+            echo -e "${GREEN}✓${NC}"
+        else
+            echo -e "${RED}✗${NC}"
+            cat "$TSC_OUTPUT"
+            TSC_FAILED=1
+        fi
+
+        echo -n "  Checking engine2... "
+        if yarn tsc --build src/engine2 > "$TSC_OUTPUT" 2>&1; then
+            echo -e "${GREEN}✓${NC}"
+        else
+            echo -e "${RED}✗${NC}"
+            cat "$TSC_OUTPUT"
+            TSC_FAILED=1
+        fi
+
+        echo -n "  Checking xmutil-js... "
+        if yarn tsc --build src/xmutil-js > "$TSC_OUTPUT" 2>&1; then
+            echo -e "${GREEN}✓${NC}"
+        else
+            echo -e "${RED}✗${NC}"
+            cat "$TSC_OUTPUT"
+            TSC_FAILED=1
+        fi
+
         rm -f "$TSC_OUTPUT"
-        echo -e "${YELLOW}Run 'yarn tsc' to see errors${NC}"
-        exit 1
+
+        if [ "$TSC_FAILED" -eq 1 ]; then
+            echo -e "${RED}TypeScript type checking failed${NC}"
+            echo -e "${YELLOW}Run 'yarn tsc --build' to see all errors${NC}"
+            exit 1
+        fi
     fi
 
     # Run engine2 tests if WASM is built
