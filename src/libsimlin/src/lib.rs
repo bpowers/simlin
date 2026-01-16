@@ -2523,11 +2523,11 @@ unsafe fn apply_project_patch_internal(
     out_collected_errors: *mut *mut SimlinError,
     out_error: *mut *mut SimlinError,
 ) {
-    // Collect existing unit warnings before applying the patch.
-    // We only reject patches that introduce NEW unit warnings, not pre-existing ones.
-    let existing_warnings = {
+    // Collect models that already have unit warnings before applying the patch.
+    // We only reject patches that introduce warnings in models that were previously clean.
+    let models_with_existing_warnings = {
         let project_locked = project_ref.project.lock().unwrap();
-        collect_unit_warnings(&project_locked)
+        collect_models_with_unit_warnings(&project_locked)
     };
 
     let mut staged_datamodel = {
@@ -2555,17 +2555,21 @@ unsafe fn apply_project_patch_internal(
         None
     };
 
-    // Check for NEW unit warnings (warnings that weren't present before the patch)
+    // Check for NEW unit warnings in models that were previously clean.
+    // If a model already had unit warnings, further changes to it are allowed.
     let new_unit_warning = if !allow_errors && maybe_first_code.is_none() {
-        let new_warnings = collect_unit_warnings(&staged_project);
-        // Find warnings that are in new_warnings but not in existing_warnings
-        new_warnings
-            .difference(&existing_warnings)
+        let models_with_new_warnings = collect_models_with_unit_warnings(&staged_project);
+        // Find models that now have warnings but didn't before
+        models_with_new_warnings
+            .difference(&models_with_existing_warnings)
             .next()
-            .map(|warning| {
+            .map(|model_name| {
                 (
                     SimlinErrorCode::UnitMismatch,
-                    format!("patch introduces new unit warning: {}", warning),
+                    format!(
+                        "patch introduces unit warning in model '{}' which previously had none",
+                        model_name
+                    ),
                 )
             })
     } else {
@@ -3165,7 +3169,7 @@ impl ErrorDetailBuilder {
 }
 
 fn collect_project_errors(project: &engine::Project) -> Vec<ErrorDetailData> {
-    errors::collect_formatted_errors(project)
+    errors::collect_formatted_issues(project)
         .errors
         .into_iter()
         .map(ErrorDetailBuilder::from_formatted)
@@ -3221,23 +3225,25 @@ fn first_error_code(
     sim_error.map(|error| SimlinErrorCode::from(error.code))
 }
 
-/// Collects all unit warnings from a project as a set of identifying strings.
-/// Each warning is identified by combining the model name with the error details.
-/// This allows comparing warnings before and after a patch to detect new warnings.
-fn collect_unit_warnings(project: &engine::Project) -> std::collections::HashSet<String> {
-    let mut warnings = std::collections::HashSet::new();
+/// Collects models that have unit warnings as a set of model names.
+///
+/// We use model names rather than (model, details) tuples because unit inference
+/// can produce different details strings (e.g., different variable ordering) for
+/// the same underlying issue when the model is recompiled. Comparing by model name
+/// ensures that if a model already had unit warnings before a patch, further patches
+/// to that model are allowed (even if they don't fix the existing warnings).
+fn collect_models_with_unit_warnings(
+    project: &engine::Project,
+) -> std::collections::HashSet<String> {
+    let mut models_with_warnings = std::collections::HashSet::new();
 
     for (model_name, model) in &project.models {
-        if let Some(unit_warnings) = &model.unit_warnings {
-            for warning in unit_warnings {
-                // Use model name + error details as the unique identifier
-                let details = warning.get_details().unwrap_or_default();
-                warnings.insert(format!("{}:{}", model_name, details));
-            }
+        if model.unit_warnings.is_some() {
+            models_with_warnings.insert(model_name.to_string());
         }
     }
 
-    warnings
+    models_with_warnings
 }
 
 /// Check if a project's model can be simulated
