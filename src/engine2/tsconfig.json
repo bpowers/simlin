@@ -14,5 +14,5 @@
     }
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["lib", "lib.browser", "tests", "eslint.config.js"]
+  "exclude": ["lib", "lib.browser", "src/internal/wasm.browser.ts", "tests", "eslint.config.js"]
 }

@@ -6,5 +6,6 @@ module.exports = createConfig({
     'lib/',
     'lib.browser/',
     'core/',
+    'src/internal/wasm.browser.ts',
   ],
 });

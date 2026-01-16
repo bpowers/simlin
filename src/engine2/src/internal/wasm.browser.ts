@@ -11,6 +11,11 @@ export interface WasmConfig {
   source?: WasmSourceProvider;
 }
 
+// This pattern is recognized by bundlers (webpack, rspack, vite, rollup, esbuild)
+// and will be rewritten to the correct URL for the bundled WASM asset.
+// Path is relative to this source file (src/internal/wasm.browser.ts -> core/libsimlin.wasm)
+const defaultWasmUrl = new URL('../../core/libsimlin.wasm', import.meta.url);
+
 let wasmInstance: WebAssembly.Instance | null = null;
 let wasmMemory: WebAssembly.Memory | null = null;
 let initPromise: Promise<void> | null = null;
@@ -32,27 +37,8 @@ export function isNode(): boolean {
   return typeof process !== 'undefined' && process.versions?.node !== undefined;
 }
 
-function getLocationHref(): string | undefined {
-  if (typeof globalThis === 'undefined' || !('location' in globalThis)) {
-    return undefined;
-  }
-  return (globalThis as { location?: Location }).location?.href;
-}
-
 function getDefaultBrowserWasmUrl(): string {
-  if (typeof document !== 'undefined') {
-    const currentScript = document.currentScript;
-    const scriptUrl = currentScript && 'src' in currentScript ? (currentScript as HTMLScriptElement).src : undefined;
-    const base = document.baseURI ?? scriptUrl ?? getLocationHref() ?? '';
-    if (base) {
-      return new URL('core/libsimlin.wasm', base).toString();
-    }
-  }
-  const locationHref = getLocationHref();
-  if (locationHref) {
-    return new URL('core/libsimlin.wasm', locationHref).toString();
-  }
-  return './core/libsimlin.wasm';
+  return defaultWasmUrl.href;
 }
 
 async function resolveWasmSource(source?: WasmSourceProvider): Promise<WasmSource> {
