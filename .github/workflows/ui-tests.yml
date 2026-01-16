@@ -52,6 +52,9 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install chromium
 
+      - name: Install Firestore emulator
+        run: sudo apt-get install -y google-cloud-cli-firestore-emulator
+
       - name: Run UI integration tests
         run: yarn test:ui
         env:
