@@ -5,7 +5,7 @@
   "repository": "http://github.com/bpowers/simlin",
   "author": "Bobby Powers <bobbypowers@gmail.com>",
   "license": "Apache-2.0",
-  "browser": "lib.browser",
+  "type": "module",
   "dependencies": {
     "@system-dynamics/core": "^1.0.0",
     "@system-dynamics/diagram": "^1.0.0",
@@ -18,7 +18,7 @@
     "@rsbuild/plugin-node-polyfill": "^1.3.0",
     "@rsbuild/plugin-react": "^1.3.2",
     "@rsbuild/plugin-type-check": "^1.2.3",
-    "@types/node": "^18.0.0",
+    "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@typescript-eslint/eslint-plugin": "^8.18.1",

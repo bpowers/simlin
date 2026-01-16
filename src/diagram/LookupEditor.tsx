@@ -29,7 +29,7 @@ import {
   GraphicalFunctionKind,
 } from '@system-dynamics/core/datamodel';
 
-import { isEqual } from './drawing/common';
+import { isEqual } from './drawing/common.js';
 
 // GFTable is a consistent format for the data from a GF that can be
 // used for efficient lookup operations

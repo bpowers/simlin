@@ -8,9 +8,9 @@ import { styled } from '@mui/material/styles';
 
 import { LinkViewElement, ModuleViewElement, StockViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 
-import { Arrowhead } from './Arrowhead';
-import { Circle, isInf, isZero, Point, Rect, square } from './common';
-import { ArrowheadRadius, AuxRadius, StraightLineMax } from './default';
+import { Arrowhead } from './Arrowhead.js';
+import { Circle, isInf, isZero, Point, Rect, square } from './common.js';
+import { ArrowheadRadius, AuxRadius, StraightLineMax } from './default.js';
 
 // math functions we care about
 const atan2 = Math.atan2;

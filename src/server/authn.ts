@@ -10,9 +10,9 @@ import { v4 as uuidV4 } from 'uuid';
 import * as logger from 'winston';
 import * as admin from 'firebase-admin';
 
-import { Application } from './application';
-import { Table } from './models/table';
-import { User } from './schemas/user_pb';
+import { Application } from './application.js';
+import { Table } from './models/table.js';
+import { User } from './schemas/user_pb.js';
 
 interface StrategyOptions {}
 

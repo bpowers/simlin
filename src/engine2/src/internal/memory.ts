@@ -5,7 +5,7 @@
 // Memory management helpers for WASM interop
 
 import { getExports, getMemory } from '@system-dynamics/engine2/internal/wasm';
-import { Ptr } from './types';
+import { Ptr } from './types.js';
 
 // Text encoder/decoder for string conversion
 const textEncoder = new TextEncoder();

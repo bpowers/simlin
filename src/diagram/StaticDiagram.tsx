@@ -10,8 +10,8 @@ import { createTheme, ThemeProvider } from '@mui/material/styles';
 
 import { defined, Series } from '@system-dynamics/core/common';
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
-import { Point } from './drawing/common';
-import { Canvas } from './drawing/Canvas';
+import { Point } from './drawing/common.js';
+import { Canvas } from './drawing/Canvas.js';
 
 interface DiagramProps {
   isDarkTheme?: boolean;

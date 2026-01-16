@@ -9,8 +9,8 @@ import { styled } from '@mui/material/styles';
 import { ViewElement, CloudViewElement } from '@system-dynamics/core/datamodel';
 import { defined } from '@system-dynamics/core/common';
 
-import { Point, Rect, square } from './common';
-import { CloudRadius, CloudWidth } from './default';
+import { Point, Rect, square } from './common.js';
+import { CloudRadius, CloudWidth } from './default.js';
 
 const CloudPath =
   'M 25.731189,3.8741489 C 21.525742,3.8741489 18.07553,7.4486396 17.497605,' +

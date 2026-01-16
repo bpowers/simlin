@@ -21,16 +21,16 @@ import {
   simlin_project_is_simulatable,
   simlin_project_get_errors,
   simlin_project_apply_patch_json,
-} from './internal/project';
-import { simlin_import_xmile, simlin_export_xmile } from './internal/import-export';
-import { simlin_analyze_get_loops, readLoops, simlin_free_loops } from './internal/analysis';
-import { SimlinProjectPtr, SimlinJsonFormat, ErrorDetail } from './internal/types';
-import { readAllErrorDetails, simlin_error_free } from './internal/error';
-import { registerFinalizer, unregisterFinalizer } from './internal/dispose';
+} from './internal/project.js';
+import { simlin_import_xmile, simlin_export_xmile } from './internal/import-export.js';
+import { simlin_analyze_get_loops, readLoops, simlin_free_loops } from './internal/analysis.js';
+import { SimlinProjectPtr, SimlinJsonFormat, ErrorDetail } from './internal/types.js';
+import { readAllErrorDetails, simlin_error_free } from './internal/error.js';
+import { registerFinalizer, unregisterFinalizer } from './internal/dispose.js';
 import { ensureInitialized, WasmSourceProvider } from '@system-dynamics/engine2/internal/wasm';
-import { Loop, LoopPolarity } from './types';
-import { Model } from './model';
-import { JsonProjectPatch } from './json-types';
+import { Loop, LoopPolarity } from './types.js';
+import { Model } from './model.js';
+import { JsonProjectPatch } from './json-types.js';
 
 type ProjectOpenOptions = {
   wasm?: WasmSourceProvider;

@@ -4,14 +4,14 @@
 
 import { Firestore } from '@google-cloud/firestore';
 
-import { File } from '../schemas/file_pb';
-import { Preview } from '../schemas/preview_pb';
-import { Project } from '../schemas/project_pb';
-import { User } from '../schemas/user_pb';
+import { File } from '../schemas/file_pb.js';
+import { Preview } from '../schemas/preview_pb.js';
+import { Project } from '../schemas/project_pb.js';
+import { User } from '../schemas/user_pb.js';
 
-import { Database, DatabaseOptions } from './db-interfaces';
-import { FirestoreTable } from './table-firestore';
-import { Table } from './table';
+import { Database, DatabaseOptions } from './db-interfaces.js';
+import { FirestoreTable } from './table-firestore.js';
+import { Table } from './table.js';
 
 export class FirestoreDatabase implements Database {
   private readonly client: Firestore;

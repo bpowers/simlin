@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import { styled } from '@mui/material/styles';
 
-import { Point } from './common';
+import { Point } from './common.js';
 
 export interface ArrowheadProps {
   isSelected: boolean;

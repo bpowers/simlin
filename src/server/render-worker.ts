@@ -6,7 +6,7 @@ import { parentPort, workerData } from 'worker_threads';
 
 import { Box } from '@system-dynamics/diagram/drawing/common';
 
-import { renderToPNG } from './render-inner';
+import { renderToPNG } from './render-inner.js';
 
 setImmediate(async () => {
   const result = await renderToPNG(workerData.svgString as string, workerData.viewbox as Box);

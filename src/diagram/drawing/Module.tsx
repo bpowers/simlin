@@ -8,9 +8,9 @@ import { styled } from '@mui/material/styles';
 
 import { ModuleViewElement } from '@system-dynamics/core/datamodel';
 
-import { displayName, Rect } from './common';
-import { ModuleRadius } from './default';
-import { Label } from './Label';
+import { displayName, Rect } from './common.js';
+import { ModuleRadius } from './default.js';
+import { Label } from './Label.js';
 
 import { defined } from '@system-dynamics/core/common';
 

@@ -5,15 +5,15 @@
 // Import and export functions
 
 import { getExports } from '@system-dynamics/engine2/internal/wasm';
-import { free, copyToWasm, copyFromWasm, allocOutPtr, readOutPtr, allocOutUsize, readOutUsize } from './memory';
-import { SimlinProjectPtr, SimlinErrorCode } from './types';
+import { free, copyToWasm, copyFromWasm, allocOutPtr, readOutPtr, allocOutUsize, readOutUsize } from './memory.js';
+import { SimlinProjectPtr, SimlinErrorCode } from './types.js';
 import {
   simlin_error_free,
   simlin_error_get_code,
   simlin_error_get_message,
   readAllErrorDetails,
   SimlinError,
-} from './error';
+} from './error.js';
 
 /**
  * Import a project from XMILE format.

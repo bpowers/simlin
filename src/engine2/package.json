@@ -8,21 +8,22 @@
     "email": "bobbypowers@gmail.com"
   },
   "license": "Apache-2.0",
-  "main": "lib/index.js",
-  "browser": "lib.browser/index.js",
-  "types": "lib/index.d.ts",
+  "type": "module",
+  "main": "./lib/index.js",
+  "browser": "./lib.browser/index.js",
+  "types": "./lib/index.d.ts",
   "exports": {
     ".": {
-      "module": "./lib.browser/index.js",
-      "node": "./lib/index.js"
+      "browser": "./lib.browser/index.js",
+      "default": "./lib/index.js"
     },
     "./internal/wasm": {
-      "module": "./lib.browser/internal/wasm.browser.js",
-      "node": "./lib/internal/wasm.node.js"
+      "browser": "./lib.browser/internal/wasm.browser.js",
+      "default": "./lib/internal/wasm.node.js"
     },
     "./*": {
-      "module": "./lib.browser/*.js",
-      "node": "./lib/*.js"
+      "browser": "./lib.browser/*.js",
+      "default": "./lib/*.js"
     }
   },
   "sideEffects": false,
@@ -52,7 +53,7 @@
     "lint": "eslint src",
     "clean": "rm -rf ./lib ./lib.browser ./core",
     "build": "./build.sh",
-    "test": "jest",
-    "test:watch": "jest --watch"
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch"
   }
 }

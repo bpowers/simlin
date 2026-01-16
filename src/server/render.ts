@@ -2,11 +2,15 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Worker } from 'worker_threads';
 
 import { Project as DmProject } from '@system-dynamics/core/datamodel';
 import { renderSvgToString } from '@system-dynamics/diagram/render-common';
-import { File } from './schemas/file_pb';
+import { File } from './schemas/file_pb.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export function renderToPNG(fileDoc: File): Promise<Uint8Array> {
   const project = DmProject.deserializeBinary(fileDoc.getProjectContents_asU8());

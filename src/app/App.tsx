@@ -21,10 +21,10 @@ import CssBaseline from '@mui/material/CssBaseline';
 import { defined } from '@system-dynamics/core/common';
 import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';
 
-import Home from './Home';
-import { Login } from './Login';
-import { NewUser } from './NewUser';
-import { User } from './User';
+import Home from './Home.js';
+import { Login } from './Login.js';
+import { NewUser } from './NewUser.js';
+import { User } from './User.js';
 
 // Only import VisualTestPage in development/test environments
 const VisualTestPage =

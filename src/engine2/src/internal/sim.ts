@@ -15,15 +15,15 @@ import {
   readDouble,
   readFloat64Array,
   malloc,
-} from './memory';
-import { SimlinModelPtr, SimlinSimPtr } from './types';
+} from './memory.js';
+import { SimlinModelPtr, SimlinSimPtr } from './types.js';
 import {
   simlin_error_free,
   simlin_error_get_code,
   simlin_error_get_message,
   readAllErrorDetails,
   SimlinError,
-} from './error';
+} from './error.js';
 
 /**
  * Create a new simulation context.

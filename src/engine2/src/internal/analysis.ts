@@ -15,7 +15,7 @@ import {
   readOutUsize,
   readFloat64Array,
   malloc,
-} from './memory';
+} from './memory.js';
 import {
   SimlinProjectPtr,
   SimlinSimPtr,
@@ -25,14 +25,14 @@ import {
   SimlinLoopPolarity,
   Link,
   Loop,
-} from './types';
+} from './types.js';
 import {
   simlin_error_free,
   simlin_error_get_code,
   simlin_error_get_message,
   readAllErrorDetails,
   SimlinError,
-} from './error';
+} from './error.js';
 
 /**
  * Analyze a project and get feedback loops.

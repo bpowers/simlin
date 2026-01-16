@@ -3,11 +3,12 @@
   "compilerOptions": {
     "rootDir": ".",
     "outDir": "lib",
-    "module": "commonjs",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
     "lib": [
-      "es2020",
-      "dom",
-      "dom.iterable"
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
     ]
   },
   "include": [
@@ -15,8 +16,7 @@
     "**/*.tsx"
   ],
   "exclude": [
-    "lib",
-    "lib.browser"
+    "lib"
   ],
   "references": [
     { "path": "../core/tsconfig.json" },

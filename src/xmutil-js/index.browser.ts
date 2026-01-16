@@ -2,8 +2,22 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { promises as fs } from 'fs';
-import { join } from 'path';
+// Type definition for the xmutil WASM module exports
+interface XmutilWasmExports {
+  memory: WebAssembly.Memory;
+  malloc(size: number): number;
+  free(ptr: number): void;
+  xmutil_clear_log(): void;
+  xmutil_get_log(): number;
+  xmutil_convert_mdl_to_xmile(
+    mdlSourcePtr: number,
+    mdlSourceLen: number,
+    fileNamePtr: number,
+    isCompact: boolean,
+    isLongName: boolean,
+    isAsSectors: boolean,
+  ): number;
+}
 
 export function defined<T>(object: T | undefined): T {
   if (object === undefined) {
@@ -12,22 +26,19 @@ export function defined<T>(object: T | undefined): T {
   return object;
 }
 
-let cachedWasmModule: typeof import('./xmutil.wasm') | undefined;
-function getWasmModule(): Promise<typeof import('./xmutil.wasm')> {
+let cachedWasmModule: XmutilWasmExports | undefined;
+function getWasmModule(): Promise<XmutilWasmExports> {
   return new Promise((resolve, reject) => {
     if (cachedWasmModule) {
       resolve(cachedWasmModule);
       return;
     }
 
-    fs.readFile(join(__dirname, 'xmutil.wasm'))
-      .then((contents) => {
-        WebAssembly.instantiate(contents as BufferSource)
-          .then((source) => {
-            cachedWasmModule = source.instance.exports as unknown as typeof import('./xmutil.wasm');
-            resolve(cachedWasmModule);
-          })
-          .catch(reject);
+    // Dynamic import of WASM module - handled by bundler
+    import('./xmutil.wasm')
+      .then((module) => {
+        cachedWasmModule = module as unknown as XmutilWasmExports;
+        resolve(cachedWasmModule);
       })
       .catch(reject);
   });
@@ -74,7 +85,7 @@ export async function convertMdlToXmile(
     .subarray(mdlSourcePtr, mdlSourcePtr + mdlSource.length)
     .set(mdlSource);
 
-  const resultPtr = wasm.xmutil_convert_mdl_to_xmile(mdlSourcePtr, mdlSource.length, 0, !pretty, false, false);
+  const resultPtr = wasm.xmutil_convert_mdl_to_xmile(mdlSourcePtr, mdlSource.length, 0, !pretty, false, true);
   const result = getStringFromWasm(resultPtr);
   wasm.free(resultPtr);
 

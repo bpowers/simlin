@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { defined, Series } from './common';
+import { defined, Series } from './common.js';
 
 import { List, Map, Record } from 'immutable';
 
@@ -22,8 +22,8 @@ import {
   Rect as PbRect,
   Source as PbSource,
   LoopMetadata as PbLoopMetadata,
-} from './pb/project_io_pb';
-import { canonicalize } from './canonicalize';
+} from './pb/project_io_pb.js';
+import { canonicalize } from './canonicalize.js';
 
 export type UID = number;
 

@@ -28,7 +28,7 @@ import { canonicalize } from '@system-dynamics/core/canonicalize';
 import { Project as Engine2Project, SimlinErrorKind, SimlinUnitErrorKind } from '@system-dynamics/engine2';
 import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs, JsonArrayedEquation } from '@system-dynamics/engine2';
 import type { ErrorDetail } from '@system-dynamics/engine2';
-import { stockFlowViewToJson } from './view-conversion';
+import { stockFlowViewToJson } from './view-conversion.js';
 import {
   Project,
   Model,
@@ -59,22 +59,22 @@ import {
 } from '@system-dynamics/core/datamodel';
 import { defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
 
-import { AuxIcon } from './AuxIcon';
-import { Toast } from './ErrorToast';
-import { FlowIcon } from './FlowIcon';
-import { LinkIcon } from './LinkIcon';
-import { ModelPropertiesDrawer } from './ModelPropertiesDrawer';
-import { renderSvgToString } from './render-common';
-import { Status } from './Status';
-import { StockIcon } from './StockIcon';
-import { UndoRedoBar } from './UndoRedoBar';
-import { VariableDetails } from './VariableDetails';
-import { ErrorDetails } from './ErrorDetails';
-import { ZoomBar } from './ZoomBar';
-import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
-import { Point } from './drawing/common';
-import { takeoffθ } from './drawing/Connector';
-import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
+import { AuxIcon } from './AuxIcon.js';
+import { Toast } from './ErrorToast.js';
+import { FlowIcon } from './FlowIcon.js';
+import { LinkIcon } from './LinkIcon.js';
+import { ModelPropertiesDrawer } from './ModelPropertiesDrawer.js';
+import { renderSvgToString } from './render-common.js';
+import { Status } from './Status.js';
+import { StockIcon } from './StockIcon.js';
+import { UndoRedoBar } from './UndoRedoBar.js';
+import { VariableDetails } from './VariableDetails.js';
+import { ErrorDetails } from './ErrorDetails.js';
+import { ZoomBar } from './ZoomBar.js';
+import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas.js';
+import { Point } from './drawing/common.js';
+import { takeoffθ } from './drawing/Connector.js';
+import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow.js';
 
 const MaxUndoSize = 5;
 const SearchbarWidthSm = 359;

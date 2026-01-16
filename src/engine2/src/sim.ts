@@ -20,12 +20,12 @@ import {
   simlin_sim_get_value,
   simlin_sim_set_value,
   simlin_sim_get_series,
-} from './internal/sim';
-import { simlin_model_get_var_names } from './internal/model';
-import { simlin_analyze_get_links, simlin_free_links, readLinks } from './internal/analysis';
-import { SimlinSimPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types';
-import { Link, LinkPolarity } from './types';
-import { registerFinalizer, unregisterFinalizer } from './internal/dispose';
+} from './internal/sim.js';
+import { simlin_model_get_var_names } from './internal/model.js';
+import { simlin_analyze_get_links, simlin_free_links, readLinks } from './internal/analysis.js';
+import { SimlinSimPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types.js';
+import { Link, LinkPolarity } from './types.js';
+import { registerFinalizer, unregisterFinalizer } from './internal/dispose.js';
 
 /**
  * Convert low-level link polarity to high-level type with validation.
@@ -42,8 +42,8 @@ function convertLinkPolarity(rawPolarity: SimlinLinkPolarity): LinkPolarity {
       throw new Error(`Invalid link polarity value: ${rawPolarity}`);
   }
 }
-import { Model } from './model';
-import { Run } from './run';
+import { Model } from './model.js';
+import { Run } from './run.js';
 
 /**
  * A simulation context for step-by-step execution.

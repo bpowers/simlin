@@ -8,37 +8,17 @@
     "email": "bobbypowers@gmail.com"
   },
   "license": "Apache-2.0",
-  "module": "lib.module",
-  "main": "lib",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "exports": {
-    "./pb": {
-      "module": "./lib.module/pb/index.js",
-      "node": "./lib/pb/index.js"
-    },
-    "./pb/*": {
-      "module": "./lib.module/pb/*.js",
-      "node": "./lib/pb/*.js"
-    },
-    "./*": {
-      "module": "./lib.module/*.js",
-      "node": "./lib/*.js"
-    },
-    "./common": {
-      "module": "./lib.module/common.js",
-      "node": "./lib/common.js"
-    },
-    "./canonicalize": {
-      "module": "./lib.module/canonicalize.js",
-      "node": "./lib/canonicalize.js"
-    },
-    "./datamodel": {
-      "module": "./lib.module/datamodel.js",
-      "node": "./lib/datamodel.js"
-    },
-    ".": {
-      "module": "./lib.module/index.js",
-      "node": "./lib/index.js"
-    }
+    ".": "./lib/index.js",
+    "./pb": "./lib/pb/index.js",
+    "./pb/*": "./lib/pb/*.js",
+    "./common": "./lib/common.js",
+    "./canonicalize": "./lib/canonicalize.js",
+    "./datamodel": "./lib/datamodel.js",
+    "./*": "./lib/*.js"
   },
   "sideEffects": false,
   "dependencies": {
@@ -61,7 +41,7 @@
     "format": "prettier --write '*.ts' 'pb/*.ts'",
     "lint": "eslint .",
     "prepublishOnly": "yarn build",
-    "clean": "rm -rf ./lib ./lib.module",
-    "build": "tsc && tsc -p tsconfig.browser.json && cp pb/*.js lib/pb/ && cp pb/*.js lib.module/pb/"
+    "clean": "rm -rf ./lib",
+    "build": "tsc && cp pb/*.js lib/pb/ && echo '{\"type\":\"commonjs\"}' > lib/pb/package.json"
   }
 }

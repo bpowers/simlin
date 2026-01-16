@@ -24,9 +24,9 @@ import { PopoverOrigin } from '@mui/material/Popover';
 import AccountCircle from '@mui/icons-material/AccountCircle';
 import MenuIcon from '@mui/icons-material/Menu';
 
-import { NewProject } from './NewProject';
-import { Project } from './Project';
-import { User } from './User';
+import { NewProject } from './NewProject.js';
+import { Project } from './Project.js';
+import { User } from './User.js';
 
 interface HomeState {
   anchorEl?: HTMLElement;

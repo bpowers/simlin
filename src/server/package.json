@@ -6,7 +6,8 @@
   "author": "Bobby Powers <bobbypowers@gmail.com>",
   "license": "Apache-2.0",
   "private": true,
-  "main": "lib",
+  "type": "module",
+  "main": "./lib/index.js",
   "dependencies": {
     "@google-cloud/firestore": "^7.11.0",
     "@google-cloud/trace-agent": "^8.0.0",
@@ -35,7 +36,7 @@
     "@types/cors": "^2.8.9",
     "@types/express": "^5.0.0",
     "@types/google-protobuf": "^3.7.2",
-    "@types/node": "^18.0.0",
+    "@types/node": "^22.0.0",
     "@types/passport": "^1.0.1",
     "@types/passport-strategy": "^0.2.35",
     "@types/serve-favicon": "^2.2.31",

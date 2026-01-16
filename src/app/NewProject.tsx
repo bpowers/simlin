@@ -17,8 +17,8 @@ import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 
-import { Project } from './Project';
-import { User } from './User';
+import { Project } from './Project.js';
+import { User } from './User.js';
 import { Project as ProjectDM } from '@system-dynamics/core/datamodel';
 import { convertMdlToXmile } from '@system-dynamics/xmutil';
 import { Project as Engine2Project } from '@system-dynamics/engine2';

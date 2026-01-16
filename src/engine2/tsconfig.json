@@ -5,12 +5,11 @@
     "rootDir": "src",
     "outDir": "lib",
     "tsBuildInfoFile": "lib/tsconfig.tsbuildinfo",
-    "module": "commonjs",
-    "lib": ["es2020", "dom"],
+    "lib": ["ES2022", "DOM"],
     "paths": {
       "@system-dynamics/engine2/internal/wasm": ["src/internal/wasm.node.ts"],
       "@system-dynamics/engine2/*": ["src/*"],
-      "@system-dynamics/*": ["src/*"]
+      "@system-dynamics/*": ["../../src/*"]
     }
   },
   "include": ["src/**/*.ts"],

@@ -8,8 +8,20 @@
     "email": "bobbypowers@gmail.com"
   },
   "license": "MIT",
-  "main": "lib",
-  "browser": "lib.browser",
+  "type": "module",
+  "main": "./lib/index.js",
+  "browser": "./lib.browser/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "browser": "./lib.browser/index.js",
+      "default": "./lib/index.js"
+    },
+    "./impl": {
+      "browser": "./lib.browser/index.browser.js",
+      "default": "./lib/index.node.js"
+    }
+  },
   "sideEffects": false,
   "dependencies": {},
   "devDependencies": {
@@ -28,6 +40,6 @@
     "lint": "eslint .",
     "clean": "rm -rf ./lib ./lib.browser",
     "prepublishOnly": "yarn build",
-    "build": "yarn clean && tsc && tsc -p tsconfig.browser.json && cp xmutil.wasm* lib/ && cp xmutil.wasm* lib.browser/ && mv lib/index_main.js lib/index.js && mv lib/index_main.js.map lib/index.js.map && mv lib/index_main.d.ts lib/index.d.ts"
+    "build": "yarn clean && tsc && tsc -p tsconfig.browser.json && cp xmutil.wasm* lib/ && cp xmutil.wasm* lib.browser/"
   }
 }

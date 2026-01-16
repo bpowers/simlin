@@ -9,12 +9,16 @@
  * The API should be idiomatic TypeScript and mirror the pysimlin API for consistency.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder, configureWasm, ready } from '../src';
-import { JsonStock, JsonFlow, JsonAuxiliary } from '../src/json-types';
+import { Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder, configureWasm, ready } from '../src.js';
+import { JsonStock, JsonFlow, JsonAuxiliary } from '../src/json-types.js';
 import { reset } from '@system-dynamics/engine2/internal/wasm';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Helper to load the WASM module
 async function loadWasm(): Promise<void> {

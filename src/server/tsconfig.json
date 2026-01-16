@@ -2,8 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": ".",
-    "outDir": "lib",
-    "module": "commonjs"
+    "outDir": "lib"
   },
   "include": [
     "**/*.ts",
@@ -11,8 +10,7 @@
     "schemas/**/*.js"
   ],
   "exclude": [
-    "lib",
-    "lib.browser"
+    "lib"
   ],
   "references": [
     { "path": "../core/tsconfig.json" },

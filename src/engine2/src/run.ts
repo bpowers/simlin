@@ -9,8 +9,8 @@
  * time series data for all variables, overrides used, and loop analysis.
  */
 
-import { Link, Loop } from './types';
-import { Sim } from './sim';
+import { Link, Loop } from './types.js';
+import { Sim } from './sim.js';
 
 /**
  * Results of a completed simulation run.

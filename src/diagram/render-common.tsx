@@ -4,8 +4,6 @@
 
 // eslint-disable @typescript-eslint/no-empty-function
 
-import * as React from 'react';
-
 import { Set } from 'immutable';
 import { renderToString } from 'react-dom/server';
 
@@ -14,8 +12,8 @@ import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
 import { createTheme, ThemeProvider } from '@mui/material/styles';
 
 import { defined } from '@system-dynamics/core/common';
-import { Canvas } from './drawing/Canvas';
-import { Box, Point } from './drawing/common';
+import { Canvas } from './drawing/Canvas.js';
+import { Box, Point } from './drawing/common.js';
 
 const theme = createTheme({
   palette: {},

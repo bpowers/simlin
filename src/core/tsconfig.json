@@ -2,15 +2,13 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": ".",
-    "outDir": "lib",
-    "module": "commonjs",
+    "outDir": "lib"
   },
   "include": [
     "**/*.ts",
     "**/*.tsx"
   ],
   "exclude": [
-    "lib",
-    "lib.module"
+    "lib"
   ]
 }

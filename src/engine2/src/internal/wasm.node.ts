@@ -38,6 +38,8 @@ export function isNode(): boolean {
 
 async function getDefaultNodeWasmPath(): Promise<string> {
   const path = await import('node:path');
+  const url = await import('node:url');
+  const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
   return path.join(__dirname, '..', 'core', 'libsimlin.wasm');
 }
 

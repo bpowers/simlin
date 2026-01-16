@@ -24,7 +24,7 @@ import {
   RenameVariableOp,
   UpsertViewOp,
   DeleteViewOp,
-} from './json-types';
+} from './json-types.js';
 
 /**
  * Builder for accumulating model operations before applying them as a JSON patch.

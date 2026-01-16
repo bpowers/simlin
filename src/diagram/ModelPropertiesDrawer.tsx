@@ -15,7 +15,7 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ClearIcon from '@mui/icons-material/Clear';
 import CloudDownloadIcon from '@mui/icons-material/CloudDownload';
 
-import { ModelIcon } from './ModelIcon';
+import { ModelIcon } from './ModelIcon.js';
 
 const iOS = typeof navigator !== undefined && /iPad|iPhone|iPod/.test(navigator.userAgent);
 

@@ -1,17 +1,21 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "baseUrl": ".",
     "rootDir": ".",
     "outDir": "lib",
-    "module": "commonjs",
-    "lib": [
-      "ES2020",
-      "dom"
-    ]
+    "lib": ["ES2022", "DOM"],
+    "paths": {
+      "@system-dynamics/xmutil/impl": ["index.node.ts"],
+      "@system-dynamics/xmutil/*": ["./*"],
+      "@system-dynamics/*": ["../../src/*"]
+    }
   },
+  "include": ["*.ts", "*.d.ts"],
   "exclude": [
     "lib",
     "lib.browser",
-    "eslint.config.js"
+    "eslint.config.cjs",
+    "index.browser.ts"
   ]
 }

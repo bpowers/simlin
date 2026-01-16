@@ -32,22 +32,22 @@
  */
 
 // High-level API classes
-export { Project } from './project';
-export { Model } from './model';
-export { Sim } from './sim';
-export { Run } from './run';
-export { ModelPatchBuilder } from './patch';
+export { Project } from './project.js';
+export { Model } from './model.js';
+export { Sim } from './sim.js';
+export { Run } from './run.js';
+export { ModelPatchBuilder } from './patch.js';
 
 // Error utilities
-export { errorCodeDescription, ErrorCode } from './errors';
+export { errorCodeDescription, ErrorCode } from './errors.js';
 
 // High-level types
-export * from './types';
-export * from './json-types';
+export * from './types.js';
+export * from './json-types.js';
 
 // Internal types needed for error handling
-export type { ErrorDetail } from './internal/types';
-export { SimlinErrorKind, SimlinUnitErrorKind } from './internal/types';
+export type { ErrorDetail } from './internal/types.js';
+export { SimlinErrorKind, SimlinUnitErrorKind } from './internal/types.js';
 
 // Optional WASM configuration for advanced use cases
 export {

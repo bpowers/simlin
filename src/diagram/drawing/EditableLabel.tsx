@@ -10,8 +10,8 @@ import { createEditor, Descendant, Node, Editor, Transforms } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, Slate, withReact } from 'slate-react';
 
-import { CommonLabelProps, LabelPadding as baseLabelPadding, lineSpacing as baseLineSpacing } from './CommonLabel';
-import { AuxRadius } from './default';
+import { CommonLabelProps, LabelPadding as baseLabelPadding, lineSpacing as baseLineSpacing } from './CommonLabel.js';
+import { AuxRadius } from './default.js';
 
 interface EditingLabelProps extends CommonLabelProps {
   value: Descendant[];

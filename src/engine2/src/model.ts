@@ -16,16 +16,34 @@ import {
   simlin_model_get_incoming_links,
   simlin_model_get_links,
   simlin_model_get_latex_equation,
-} from './internal/model';
-import { readLinks, simlin_free_links } from './internal/analysis';
-import { SimlinModelPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types';
-import { registerFinalizer, unregisterFinalizer } from './internal/dispose';
-import { Stock, Flow, Aux, Variable, TimeSpec, Link, Loop, LinkPolarity, ModelIssue, GraphicalFunction } from './types';
-import { JsonModel, JsonStock, JsonFlow, JsonAuxiliary, JsonGraphicalFunction, JsonProjectPatch } from './json-types';
-import { Project } from './project';
-import { Sim } from './sim';
-import { Run } from './run';
-import { ModelPatchBuilder } from './patch';
+} from './internal/model.js';
+import { readLinks, simlin_free_links } from './internal/analysis.js';
+import { SimlinModelPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types.js';
+import { registerFinalizer, unregisterFinalizer } from './internal/dispose.js';
+import {
+  Stock,
+  Flow,
+  Aux,
+  Variable,
+  TimeSpec,
+  Link,
+  Loop,
+  LinkPolarity,
+  ModelIssue,
+  GraphicalFunction,
+} from './types.js';
+import {
+  JsonModel,
+  JsonStock,
+  JsonFlow,
+  JsonAuxiliary,
+  JsonGraphicalFunction,
+  JsonProjectPatch,
+} from './json-types.js';
+import { Project } from './project.js';
+import { Sim } from './sim.js';
+import { Run } from './run.js';
+import { ModelPatchBuilder } from './patch.js';
 
 /**
  * Convert low-level link polarity to high-level type with validation.

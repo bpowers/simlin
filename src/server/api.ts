@@ -6,15 +6,15 @@ import { Request, Response, Router } from 'express';
 import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
 import * as logger from 'winston';
 
-import { Application } from './application';
-import { Database } from './models/db-interfaces';
-import { populateExamples } from './new-user';
-import { createFile, createProject, emptyProject } from './project-creation';
-import { renderToPNG } from './render';
-import { Preview as PreviewPb } from './schemas/preview_pb';
-import { Project as ProjectPb } from './schemas/project_pb';
-import { User as UserPb } from './schemas/user_pb';
-import { UsernameDenylist } from './usernames';
+import { Application } from './application.js';
+import { Database } from './models/db-interfaces.js';
+import { populateExamples } from './new-user.js';
+import { createFile, createProject, emptyProject } from './project-creation.js';
+import { renderToPNG } from './render.js';
+import { Preview as PreviewPb } from './schemas/preview_pb.js';
+import { Project as ProjectPb } from './schemas/project_pb.js';
+import { User as UserPb } from './schemas/user_pb.js';
+import { UsernameDenylist } from './usernames.js';
 
 export async function updatePreview(db: Database, project: ProjectPb): Promise<PreviewPb> {
   const fileDoc = await db.file.findOne(project.getFileId());

@@ -10,10 +10,10 @@ import { styled } from '@mui/material/styles';
 import { AuxViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 import { defined, Series } from '@system-dynamics/core/common';
 
-import { displayName, mergeBounds, Point, Rect, square } from './common';
-import { AuxRadius } from './default';
-import { Label, labelBounds, LabelProps } from './Label';
-import { Sparkline } from './Sparkline';
+import { displayName, mergeBounds, Point, Rect, square } from './common.js';
+import { AuxRadius } from './default.js';
+import { Label, labelBounds, LabelProps } from './Label.js';
+import { Sparkline } from './Sparkline.js';
 
 export interface AuxProps {
   isSelected: boolean;

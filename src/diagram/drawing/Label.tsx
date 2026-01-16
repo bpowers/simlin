@@ -6,10 +6,10 @@ import * as React from 'react';
 
 import { styled } from '@mui/material/styles';
 
-import { Rect } from './common';
-import { AuxRadius } from './default';
+import { Rect } from './common.js';
+import { AuxRadius } from './default.js';
 
-import { CommonLabelProps, LabelPadding, lineSpacing } from './CommonLabel';
+import { CommonLabelProps, LabelPadding, lineSpacing } from './CommonLabel.js';
 
 interface LabelLayout {
   textX: number;

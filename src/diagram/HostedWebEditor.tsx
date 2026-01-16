@@ -10,7 +10,7 @@ import { fromUint8Array, toUint8Array } from 'js-base64';
 
 import { baseURL, defined } from '@system-dynamics/core/common';
 
-import { Editor } from './Editor';
+import { Editor } from './Editor.js';
 
 class HostedWebEditorError implements Error {
   name = 'HostedWebEditorError';

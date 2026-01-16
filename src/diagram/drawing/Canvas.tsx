@@ -31,17 +31,25 @@ import {
 } from '@system-dynamics/core/datamodel';
 import { canonicalize } from '@system-dynamics/core/canonicalize';
 
-import { Alias, AliasProps } from './Alias';
-import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';
-import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
-import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect, screenToCanvasPoint } from './common';
-import { Connector, ConnectorProps } from './Connector';
-import { AuxRadius } from './default';
-import { EditableLabel } from './EditableLabel';
-import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
-import { Module, moduleBounds, ModuleProps } from './Module';
-import { CustomElement } from './SlateEditor';
-import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
+import { Alias, AliasProps } from './Alias.js';
+import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary.js';
+import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud.js';
+import {
+  calcViewBox,
+  displayName,
+  plainDeserialize,
+  plainSerialize,
+  Point,
+  Rect,
+  screenToCanvasPoint,
+} from './common.js';
+import { Connector, ConnectorProps } from './Connector.js';
+import { AuxRadius } from './default.js';
+import { EditableLabel } from './EditableLabel.js';
+import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow.js';
+import { Module, moduleBounds, ModuleProps } from './Module.js';
+import { CustomElement } from './SlateEditor.js';
+import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock.js';
 
 export const inCreationUid = -2;
 export const fauxTargetUid = -3;

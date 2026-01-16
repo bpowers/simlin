@@ -10,9 +10,9 @@ import { styled } from '@mui/material/styles';
 import { StockViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 import { defined, Series } from '@system-dynamics/core/common';
 
-import { displayName, mergeBounds, Point, Rect } from './common';
-import { Label, labelBounds, LabelProps } from './Label';
-import { Sparkline } from './Sparkline';
+import { displayName, mergeBounds, Point, Rect } from './common.js';
+import { Label, labelBounds, LabelProps } from './Label.js';
+import { Sparkline } from './Sparkline.js';
 
 export const StockWidth = 45;
 export const StockHeight = 35;

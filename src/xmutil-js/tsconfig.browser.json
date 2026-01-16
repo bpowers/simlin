@@ -1,20 +1,19 @@
 {
-  "extends": "../../tsconfig.base.json",
+  "extends": "./tsconfig.json",
   "compilerOptions": {
-    "rootDir": ".",
     "outDir": "lib.browser",
-    "module": "esnext",
-    "lib": [
-      "es2020",
-      "dom",
-      "dom.iterable",
-      "scripthost"
-    ]
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "paths": {
+      "@system-dynamics/xmutil/impl": ["index.browser.ts"],
+      "@system-dynamics/xmutil/*": ["./*"],
+      "@system-dynamics/*": ["../../src/*"]
+    }
   },
   "exclude": [
     "lib",
     "lib.browser",
-    "eslint.config.js",
-    "index_main.ts"
+    "eslint.config.cjs",
+    "index.node.ts"
   ]
 }

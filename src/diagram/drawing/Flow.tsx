@@ -17,12 +17,12 @@ import {
 } from '@system-dynamics/core/datamodel';
 import { defined, Series } from '@system-dynamics/core/common';
 
-import { Arrowhead } from './Arrowhead';
-import { displayName, Point as IPoint, Rect } from './common';
-import { AuxRadius, CloudRadius, FlowArrowheadRadius } from './default';
-import { Label, labelBounds, LabelProps } from './Label';
-import { Sparkline } from './Sparkline';
-import { StockHeight, StockWidth } from './Stock';
+import { Arrowhead } from './Arrowhead.js';
+import { displayName, Point as IPoint, Rect } from './common.js';
+import { AuxRadius, CloudRadius, FlowArrowheadRadius } from './default.js';
+import { Label, labelBounds, LabelProps } from './Label.js';
+import { Sparkline } from './Sparkline.js';
+import { StockHeight, StockWidth } from './Stock.js';
 
 const atan2 = Math.atan2;
 const PI = Math.PI;

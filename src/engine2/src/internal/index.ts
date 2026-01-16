@@ -11,11 +11,11 @@
  */
 
 export * from '@system-dynamics/engine2/internal/wasm';
-export * from './memory';
-export * from './types';
-export * from './error';
-export * from './project';
-export * from './model';
-export * from './sim';
-export * from './analysis';
-export * from './import-export';
+export * from './memory.js';
+export * from './types.js';
+export * from './error.js';
+export * from './project.js';
+export * from './model.js';
+export * from './sim.js';
+export * from './analysis.js';
+export * from './import-export.js';

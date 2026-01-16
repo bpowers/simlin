@@ -28,9 +28,9 @@ import {
 } from '@system-dynamics/core/datamodel';
 
 import { defined, Series } from '@system-dynamics/core/common';
-import { plainDeserialize, plainSerialize } from './drawing/common';
-import { CustomElement, FormattedText, CustomEditor } from './drawing/SlateEditor';
-import { LookupEditor } from './LookupEditor';
+import { plainDeserialize, plainSerialize } from './drawing/common.js';
+import { CustomElement, FormattedText, CustomEditor } from './drawing/SlateEditor.js';
+import { LookupEditor } from './LookupEditor.js';
 import { errorCodeDescription } from '@system-dynamics/engine2';
 
 const SearchbarWidthSm = 359;

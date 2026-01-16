@@ -17,15 +17,15 @@ import favicon from 'serve-favicon';
 import { seshcookie } from 'seshcookie';
 import * as logger from 'winston';
 
-import { apiRouter } from './api';
+import { apiRouter } from './api.js';
 import { defined } from '@system-dynamics/core/common';
-import { Application } from './application';
-import { authn } from './authn';
-import authz from './authz';
-import { createDatabase } from './models/db';
-import { redirectToHttps } from './redirect-to-https';
-import { requestLogger } from './request-logger';
-import { User as UserPb } from './schemas/user_pb';
+import { Application } from './application.js';
+import { authn } from './authn.js';
+import authz from './authz.js';
+import { createDatabase } from './models/db.js';
+import { redirectToHttps } from './redirect-to-https.js';
+import { requestLogger } from './request-logger.js';
+import { User as UserPb } from './schemas/user_pb.js';
 
 // redefinition from Helmet, as they don't export it
 interface ContentSecurityPolicyDirectiveValueFunction {

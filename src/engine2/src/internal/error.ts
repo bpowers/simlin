@@ -5,8 +5,8 @@
 // Error handling functions
 
 import { getExports, getMemory } from '@system-dynamics/engine2/internal/wasm';
-import { wasmToString } from './memory';
-import { Ptr, SimlinErrorPtr, SimlinErrorCode, SimlinErrorKind, SimlinUnitErrorKind, ErrorDetail } from './types';
+import { wasmToString } from './memory.js';
+import { Ptr, SimlinErrorPtr, SimlinErrorCode, SimlinErrorKind, SimlinUnitErrorKind, ErrorDetail } from './types.js';
 
 /**
  * Get the string representation of an error code.

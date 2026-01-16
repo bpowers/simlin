@@ -1,7 +1,7 @@
 const { createConfig } = require('../../eslint.config.shared');
 
 module.exports = createConfig({
-  project: './tsconfig.json',
+  project: ['./tsconfig.json', './tsconfig.browser.json'],
   ignorePatterns: [
     'lib/',
     'lib.browser/',

@@ -5,9 +5,9 @@
 import { createHash } from 'crypto';
 import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
 
-import { File as DbFilePb } from './schemas/file_pb';
-import { Project as DbProjectPb } from './schemas/project_pb';
-import { User as UserPb } from './schemas/user_pb';
+import { File as DbFilePb } from './schemas/file_pb.js';
+import { Project as DbProjectPb } from './schemas/project_pb.js';
+import { User as UserPb } from './schemas/user_pb.js';
 
 import { Model, Dt, SimSpecs, Project, View } from '@system-dynamics/core/pb/project_io_pb';
 

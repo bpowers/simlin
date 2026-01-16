@@ -4,7 +4,7 @@
 
 import { Application as ExpressApplication } from 'express';
 
-import { Database } from './models/db-interfaces';
+import { Database } from './models/db-interfaces.js';
 
 export interface Application extends ExpressApplication {
   db: Database;

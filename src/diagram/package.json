@@ -5,19 +5,14 @@
   "repository": "http://github.com/bpowers/model-app",
   "author": "Bobby Powers <bobbypowers@gmail.com>",
   "license": "Apache-2.0",
-  "sideEffects": false,
-  "browser": "lib.browser",
-  "main": "lib",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "exports": {
-    "./*": {
-      "browser": "./lib.browser/*.js",
-      "node": "./lib/*.js"
-    },
-    ".": {
-      "browser": "./lib.browser/index.js",
-      "node": "./lib/index.js"
-    }
+    ".": "./lib/index.js",
+    "./*": "./lib/*.js"
   },
+  "sideEffects": false,
   "dependencies": {
     "@emotion/core": "^11.0.0",
     "@emotion/react": "^11.0.0",
@@ -63,7 +58,7 @@
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
     "lint": "eslint .",
     "prepublishOnly": "yarn build",
-    "clean": "rm -rf ./lib ./lib.browser",
-    "build": "tsc && tsc -p tsconfig.browser.json"
+    "clean": "rm -rf ./lib",
+    "build": "tsc"
   }
 }

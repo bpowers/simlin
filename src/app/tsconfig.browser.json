@@ -3,12 +3,10 @@
   "compilerOptions": {
     "rootDir": "..",
     "outDir": "lib.browser",
-    "module": "esnext",
     "lib": [
-      "es2020",
-      "dom",
-      "dom.iterable",
-      "scripthost"
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
     ],
     "noEmit": true
   },
@@ -27,11 +25,12 @@
     "../**/*.spec.ts",
     "../server/**",
     "../**/node_modules/**",
-    "../engine2/src/internal/wasm.node.ts"
+    "../engine2/src/internal/wasm.node.ts",
+    "../xmutil-js/index.node.ts"
   ],
   "references": [
-    { "path": "../core/tsconfig.browser.json" },
-    { "path": "../diagram/tsconfig.browser.json" },
+    { "path": "../core/tsconfig.json" },
+    { "path": "../diagram/tsconfig.json" },
     { "path": "../engine2/tsconfig.browser.json" },
     { "path": "../xmutil-js/tsconfig.browser.json" }
   ]

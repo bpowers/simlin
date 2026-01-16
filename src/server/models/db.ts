@@ -2,9 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { Database, DatabaseOptions } from './db-interfaces';
+import { Database, DatabaseOptions } from './db-interfaces.js';
 
-import { createFirestoreDatabase } from './db-firestore';
+import { createFirestoreDatabase } from './db-firestore.js';
 
 export async function createDatabase(opts: DatabaseOptions): Promise<Database> {
   switch (opts.backend) {

@@ -5,7 +5,7 @@
 import { List } from 'immutable';
 import { Node, Descendant } from 'slate';
 
-import { CustomText, CustomElement } from './SlateEditor';
+import { CustomText, CustomElement } from './SlateEditor.js';
 
 export function plainDeserialize(type: 'label' | 'equation', str: string): CustomElement[] {
   return str.split('\n').map((line: string): CustomElement => {

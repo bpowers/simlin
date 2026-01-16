@@ -16,15 +16,15 @@ import {
   readOutPtr,
   allocOutUsize,
   readOutUsize,
-} from './memory';
-import { SimlinProjectPtr, SimlinModelPtr, SimlinErrorPtr, SimlinJsonFormat } from './types';
+} from './memory.js';
+import { SimlinProjectPtr, SimlinModelPtr, SimlinErrorPtr, SimlinJsonFormat } from './types.js';
 import {
   simlin_error_free,
   simlin_error_get_code,
   simlin_error_get_message,
   SimlinError,
   readAllErrorDetails,
-} from './error';
+} from './error.js';
 
 /**
  * Open a project from protobuf data.

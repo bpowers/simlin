@@ -6,7 +6,7 @@ import { CollectionReference, Firestore } from '@google-cloud/firestore';
 import { FieldPath } from '@google-cloud/firestore/build/src';
 import { Message } from 'google-protobuf';
 
-import { SerializableClass, Table } from './table';
+import { SerializableClass, Table } from './table.js';
 
 interface FirestoreTableOptions {
   readonly db: Firestore;

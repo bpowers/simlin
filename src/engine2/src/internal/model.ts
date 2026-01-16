@@ -14,15 +14,15 @@ import {
   readOutPtr,
   allocOutUsize,
   readOutUsize,
-} from './memory';
-import { SimlinModelPtr, SimlinLinksPtr } from './types';
+} from './memory.js';
+import { SimlinModelPtr, SimlinLinksPtr } from './types.js';
 import {
   simlin_error_free,
   simlin_error_get_code,
   simlin_error_get_message,
   readAllErrorDetails,
   SimlinError,
-} from './error';
+} from './error.js';
 
 /**
  * Increment the reference count of a model.

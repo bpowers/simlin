@@ -5,7 +5,7 @@
 import { NextFunction, Request, Response } from 'express';
 import * as logger from 'winston';
 
-import { interceptWriteHeaders } from './headers';
+import { interceptWriteHeaders } from './headers.js';
 
 function now(): number {
   const time: [number, number] = process.hrtime();

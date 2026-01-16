@@ -2,13 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-if (process.env.NODE_ENV === 'production') {
-  require('@google-cloud/trace-agent').start();
-}
-
 import * as logger from 'winston';
 
-import { createApp } from './app';
+import { createApp } from './app.js';
 
 process.on('unhandledRejection', (reason, p) => {
   logger.error(`Unhandled Rejection at: Promise ${p}: ${reason}`);
@@ -17,6 +13,11 @@ process.on('unhandledRejection', (reason, p) => {
 });
 
 async function main(): Promise<void> {
+  if (process.env.NODE_ENV === 'production') {
+    const traceAgent = await import('@google-cloud/trace-agent');
+    traceAgent.start();
+  }
+
   const app = await createApp();
   app.listen();
 }

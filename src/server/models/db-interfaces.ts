@@ -2,11 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { File } from '../schemas/file_pb';
-import { Preview } from '../schemas/preview_pb';
-import { Project } from '../schemas/project_pb';
-import { User } from '../schemas/user_pb';
-import { Table } from './table';
+import { File } from '../schemas/file_pb.js';
+import { Preview } from '../schemas/preview_pb.js';
+import { Project } from '../schemas/project_pb.js';
+import { User } from '../schemas/user_pb.js';
+import { Table } from './table.js';
 
 export type DatabaseBackend = 'firestore';
 

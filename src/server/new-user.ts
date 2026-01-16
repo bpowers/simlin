@@ -6,11 +6,11 @@ import { parse as parseToml } from '@iarna/toml';
 import { promises as fs } from 'fs';
 import * as logger from 'winston';
 
-import { Database } from './models/db-interfaces';
-import { Table } from './models/table';
-import { createFile, createProject } from './project-creation';
-import { File } from './schemas/file_pb';
-import { User } from './schemas/user_pb';
+import { Database } from './models/db-interfaces.js';
+import { Table } from './models/table.js';
+import { createFile, createProject } from './project-creation.js';
+import { File } from './schemas/file_pb.js';
+import { User } from './schemas/user_pb.js';
 import { Project as Engine2Project } from '@system-dynamics/engine2';
 
 async function fileFromXmile(files: Table<File>, projectId: string, userId: string, xmile: string): Promise<File> {
