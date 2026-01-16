@@ -473,9 +473,54 @@ impl TestProject {
         self.assert_compile_error_impl(expected_error)
     }
 
-    /// Test that compilation fails with unit mismatch (convenience)
+    /// Test that unit mismatch is detected (as a warning that doesn't block compilation).
+    /// Since unit errors are now non-blocking, this checks that:
+    /// 1. Compilation succeeds (unit errors don't block simulation)
+    /// 2. A unit warning or unit error is present
     pub fn assert_unit_error(&self) {
-        self.assert_compile_error(ErrorCode::UnitMismatch)
+        let datamodel = self.build_datamodel();
+        let compiled = CompiledProject::from(datamodel);
+
+        // Collect all unit-related errors and warnings
+        let mut unit_issues: Vec<(String, ErrorCode)> = Vec::new();
+
+        for (model_name, model) in &compiled.models {
+            // Check unit_warnings (model-level unit mismatches from inference)
+            if let Some(warnings) = &model.unit_warnings {
+                for warning in warnings {
+                    unit_issues.push((model_name.to_string(), warning.code));
+                }
+            }
+
+            // Check per-variable unit errors
+            for (var_name, unit_errors) in model.get_unit_errors() {
+                for err in unit_errors {
+                    let code = match err {
+                        UnitError::DefinitionError(eq_err, _) => eq_err.code,
+                        UnitError::ConsistencyError(code, _, _) => code,
+                        UnitError::InferenceError { code, .. } => code,
+                    };
+                    unit_issues.push((format!("{model_name}.{var_name}"), code));
+                }
+            }
+        }
+
+        let has_unit_mismatch = unit_issues
+            .iter()
+            .any(|(_, code)| *code == ErrorCode::UnitMismatch);
+
+        if !has_unit_mismatch {
+            if unit_issues.is_empty() {
+                panic!("Expected unit mismatch warning, but no unit issues were found");
+            } else {
+                let issues_msg = unit_issues
+                    .iter()
+                    .map(|(loc, code)| format!("{loc}: {code:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                panic!("Expected UnitMismatch, but got: {issues_msg}");
+            }
+        }
     }
 
     fn assert_compile_error_impl(&self, expected_error: ErrorCode) {

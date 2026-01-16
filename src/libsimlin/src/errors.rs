@@ -107,6 +107,16 @@ pub fn collect_formatted_errors(project: &engine::Project) -> FormattedErrors {
                 formatted.errors.push(format_model_error(model_name, error));
             }
         }
+
+        // Collect unit warnings (unit mismatches that don't block simulation)
+        // These are surfaced to users but don't prevent running the model.
+        if let Some(unit_warnings) = &model.unit_warnings {
+            for warning in unit_warnings {
+                formatted
+                    .errors
+                    .push(format_model_error(model_name, warning));
+            }
+        }
     }
 
     formatted

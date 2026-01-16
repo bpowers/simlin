@@ -73,18 +73,20 @@ impl From<datamodel::Project> for Project {
 
             let inferred_units = crate::units_infer::infer(models, units_ctx, model)
                 .unwrap_or_else(|err| {
-                    // Only surface unit mismatches for models that have declared units
+                    // Only surface unit mismatches for models that have declared units.
+                    // Store in unit_warnings (not errors) so simulation can still proceed.
+                    // Unit mismatches are common in real-world models and shouldn't block simulation.
                     if has_declared_units
                         && let crate::common::UnitError::InferenceError { code, .. } = &err
                         && *code == crate::common::ErrorCode::UnitMismatch
                     {
-                        let mut errors = model.errors.take().unwrap_or_default();
-                        errors.push(crate::common::Error {
+                        let mut warnings = model.unit_warnings.take().unwrap_or_default();
+                        warnings.push(crate::common::Error {
                             kind: crate::common::ErrorKind::Model,
                             code: *code,
                             details: Some(format!("{}", err)),
                         });
-                        model.errors = Some(errors);
+                        model.unit_warnings = Some(warnings);
                     }
                     Default::default()
                 });

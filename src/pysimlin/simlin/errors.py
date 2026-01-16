@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 class ErrorCode(IntEnum):
     """Error codes from the Simlin engine."""
-    
+
     NO_ERROR = 0
     DOES_NOT_EXIST = 1
     XML_DESERIALIZATION = 2
@@ -43,26 +43,50 @@ class ErrorCode(IntEnum):
     GENERIC = 32
 
 
+class ErrorKind(IntEnum):
+    """Error kind categorizing where in the project the error originates."""
+
+    PROJECT = 0
+    MODEL = 1
+    VARIABLE = 2
+    UNITS = 3
+    SIMULATION = 4
+
+
+class UnitErrorKind(IntEnum):
+    """Unit error kind for distinguishing types of unit-related errors."""
+
+    NOT_APPLICABLE = 0
+    DEFINITION = 1
+    CONSISTENCY = 2
+    INFERENCE = 3
+
+
 class ErrorDetailDict(TypedDict, total=False):
     """Type definition for error details dictionary."""
+
     code: ErrorCode
     message: str
     model_name: str
     variable_name: str
     start_offset: int
     end_offset: int
+    kind: ErrorKind
+    unit_error_kind: UnitErrorKind
 
 
 @dataclass
 class ErrorDetail:
     """Detailed information about a compilation or validation error."""
-    
+
     code: ErrorCode
     message: str
     model_name: Optional[str] = None
     variable_name: Optional[str] = None
     start_offset: int = 0
     end_offset: int = 0
+    kind: ErrorKind = ErrorKind.VARIABLE
+    unit_error_kind: UnitErrorKind = UnitErrorKind.NOT_APPLICABLE
     
     def __str__(self) -> str:
         """Return a human-readable string representation."""

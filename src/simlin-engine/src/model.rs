@@ -45,6 +45,10 @@ pub struct ModelStage1 {
     pub display_name: String,
     pub variables: HashMap<Ident<Canonical>, Variable>,
     pub errors: Option<Vec<Error>>,
+    /// unit_warnings contains unit-related issues that should be surfaced to users
+    /// but should NOT block simulation. Unit mismatches are common in real-world
+    /// models and shouldn't prevent running simulations.
+    pub unit_warnings: Option<Vec<Error>>,
     /// model_deps is the transitive set of model names referenced from modules in this model
     pub model_deps: Option<BTreeSet<Ident<Canonical>>>,
     pub instantiations: Option<HashMap<ModuleInputSet, ModuleStage2>>,
@@ -819,6 +823,7 @@ impl ModelStage1 {
                 .map(|(ident, v)| (ident.clone(), lower_variable(&model_scope, v)))
                 .collect(),
             errors: model_s0.errors.clone(),
+            unit_warnings: None,
             model_deps: Some(model_deps),
             instantiations: None,
             implicit: model_s0.implicit,

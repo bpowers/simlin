@@ -181,6 +181,10 @@ pub struct SimlinModel {
 /// Internal state for SimlinSim
 struct SimState {
     vm: Option<Vm>,
+    /// Stores the error from VM creation if it failed.
+    /// This allows us to surface the actual error when users try to run
+    /// the simulation, instead of a generic "VM not initialized" message.
+    vm_error: Option<engine::Error>,
     results: Option<engine::Results>,
 }
 
@@ -1279,11 +1283,21 @@ pub unsafe extern "C" fn simlin_sim_new(
 
     simlin_model_ref(model);
 
-    let vm = create_vm(&project_variant, &model_ref.model_name).ok();
+    // Capture both the VM and any error from creation.
+    // This allows us to surface the actual error when users try to run
+    // the simulation, instead of a generic "VM not initialized" message.
+    let (vm, vm_error) = match create_vm(&project_variant, &model_ref.model_name) {
+        Ok(vm) => (Some(vm), None),
+        Err(err) => (None, Some(err)),
+    };
     let sim = Box::new(SimlinSim {
         model: model_ref as *const _,
         enable_ltm,
-        state: Mutex::new(SimState { vm, results: None }),
+        state: Mutex::new(SimState {
+            vm,
+            vm_error,
+            results: None,
+        }),
         ref_count: AtomicUsize::new(1),
     });
 
@@ -1333,6 +1347,9 @@ pub unsafe extern "C" fn simlin_sim_run_to(
         if let Err(err) = vm.run_to(time) {
             store_ffi_error(out_error, ffi_error_from_engine(&err));
         }
+    } else if let Some(ref err) = state.vm_error {
+        // Return the actual VM creation error instead of a generic message
+        store_ffi_error(out_error, ffi_error_from_engine(err));
     } else {
         store_error(
             out_error,
@@ -1364,11 +1381,16 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(
             }
         }
     } else if state.results.is_none() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("simulation has not been initialised with a VM"),
-        );
+        // Return the actual VM creation error if available, otherwise generic message
+        if let Some(ref err) = state.vm_error {
+            store_ffi_error(out_error, ffi_error_from_engine(err));
+        } else {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("simulation has not been initialised with a VM"),
+            );
+        }
     }
 }
 /// Gets the number of time steps in the results
@@ -1441,6 +1463,7 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
     let mut state = sim_ref.state.lock().unwrap();
     state.results = None;
     state.vm = Some(new_vm);
+    state.vm_error = None; // Clear any previous VM creation error
 }
 /// Gets a single value from the simulation
 ///
@@ -3159,6 +3182,13 @@ fn first_error_code(
             .any(|errors| !errors.is_empty())
         {
             return Some(SimlinErrorCode::UnitDefinitionErrors);
+        }
+
+        // Include unit warnings (unit mismatches that don't block simulation)
+        if let Some(warnings) = &model.unit_warnings {
+            if let Some(warning) = warnings.first() {
+                return Some(SimlinErrorCode::from(warning.code));
+            }
         }
     }
 

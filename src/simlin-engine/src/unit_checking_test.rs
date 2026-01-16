@@ -788,4 +788,129 @@ mod tests {
             )
             .assert_unit_error();
     }
+
+    #[test]
+    fn test_unit_mismatch_allows_simulation() {
+        // Critical test: Unit errors should NOT block simulation.
+        // Many real-world models have unit errors but should still run.
+        // The unit error should be detected and surfaced, but simulation should proceed.
+        use crate::project::Project as CompiledProject;
+
+        let project = TestProject::new("unit_mismatch_runs_test")
+            .unit("apples", None)
+            .unit("oranges", None)
+            // Create a unit mismatch: apples + oranges
+            .aux_with_units("apple_count", "10", Some("apples"))
+            .aux_with_units("orange_count", "20", Some("oranges"))
+            .aux_with_units("fruit_total", "apple_count + orange_count", None); // Mismatch!
+
+        // Check that unit warning exists
+        let datamodel = project.build_datamodel();
+        let compiled = CompiledProject::from(datamodel);
+
+        // Verify there's a unit warning but no blocking errors
+        let has_unit_warning = compiled
+            .models
+            .values()
+            .any(|m| m.unit_warnings.as_ref().is_some_and(|w| !w.is_empty()));
+
+        let has_blocking_errors = compiled.models.values().any(|m| {
+            m.errors.as_ref().is_some_and(|e| !e.is_empty()) || !m.get_variable_errors().is_empty()
+        });
+
+        // Unit warnings should be present OR per-variable unit errors
+        let has_unit_issues = has_unit_warning
+            || compiled
+                .models
+                .values()
+                .any(|m| !m.get_unit_errors().is_empty());
+
+        assert!(
+            has_unit_issues,
+            "Should have unit warnings or errors for the mismatch"
+        );
+        assert!(
+            !has_blocking_errors,
+            "Should NOT have blocking compilation errors"
+        );
+
+        // Verify simulation can still run
+        let results = project
+            .run_interpreter()
+            .expect("Simulation should run despite unit mismatch");
+
+        // The simulation should produce results
+        let total = results
+            .get("fruit_total")
+            .expect("fruit_total should be in results");
+        assert_eq!(
+            total.last().copied(),
+            Some(30.0),
+            "fruit_total should be 10 + 20 = 30"
+        );
+    }
+
+    #[test]
+    fn test_unit_mismatch_in_stock_allows_simulation() {
+        // Test that unit mismatch with stocks also allows simulation
+        use crate::project::Project as CompiledProject;
+
+        let project = TestProject::new("stock_unit_mismatch_runs")
+            .unit("widgets", None)
+            .unit("gadgets", None)
+            .aux_with_units("widget_rate", "5", Some("widgets/Month"))
+            .aux_with_units("gadget_initial", "100", Some("gadgets"))
+            // Stock with mismatched units: flow is widgets/Month, initial is gadgets
+            .stock_with_units(
+                "mixed_inventory",
+                "gadget_initial",
+                &["widget_rate"],
+                &[],
+                Some("widgets"),
+            );
+
+        // Check that unit warning exists
+        let datamodel = project.build_datamodel();
+        let compiled = CompiledProject::from(datamodel);
+
+        // Verify there's a unit warning but no blocking errors
+        let has_unit_warning = compiled
+            .models
+            .values()
+            .any(|m| m.unit_warnings.as_ref().is_some_and(|w| !w.is_empty()));
+
+        let has_blocking_errors = compiled.models.values().any(|m| {
+            m.errors.as_ref().is_some_and(|e| !e.is_empty()) || !m.get_variable_errors().is_empty()
+        });
+
+        // Unit warnings should be present OR per-variable unit errors
+        let has_unit_issues = has_unit_warning
+            || compiled
+                .models
+                .values()
+                .any(|m| !m.get_unit_errors().is_empty());
+
+        assert!(
+            has_unit_issues,
+            "Should have unit warnings or errors for the mismatch"
+        );
+        assert!(
+            !has_blocking_errors,
+            "Should NOT have blocking compilation errors"
+        );
+
+        // Simulation should still run
+        let results = project
+            .run_interpreter()
+            .expect("Simulation should run despite unit mismatch");
+
+        // Verify we got results
+        let inventory = results
+            .get("mixed_inventory")
+            .expect("mixed_inventory should be in results");
+        assert!(
+            !inventory.is_empty(),
+            "Should have simulation results for mixed_inventory"
+        );
+    }
 }
