@@ -4,6 +4,12 @@
 
 // WASM module loading and access (browser build)
 
+// Import WASM as a module - with asyncWebAssembly enabled in the bundler,
+// this import is handled automatically (like wasm-bindgen does for src/engine).
+// The bundler loads the WASM, instantiates it, and returns the exports.
+// @ts-expect-error TypeScript doesn't understand .wasm imports
+import * as wasmModule from '../../core/libsimlin.wasm';
+
 export type WasmSource = string | URL | ArrayBuffer | Uint8Array;
 export type WasmSourceProvider = WasmSource | (() => WasmSource | Promise<WasmSource>);
 
@@ -11,15 +17,9 @@ export interface WasmConfig {
   source?: WasmSourceProvider;
 }
 
-// This pattern is recognized by bundlers (webpack, rspack, vite, rollup, esbuild)
-// and will be rewritten to the correct URL for the bundled WASM asset.
-// Path is relative to this source file (src/internal/wasm.browser.ts -> core/libsimlin.wasm)
-const defaultWasmUrl = new URL('../../core/libsimlin.wasm', import.meta.url);
-
-let wasmInstance: WebAssembly.Instance | null = null;
+let wasmExports: WebAssembly.Exports | null = null;
 let wasmMemory: WebAssembly.Memory | null = null;
 let initPromise: Promise<void> | null = null;
-let wasmSourceOverride: WasmSourceProvider | null = null;
 
 /**
  * Check if a string looks like a URL (http://, https://, or file://)
@@ -37,18 +37,6 @@ export function isNode(): boolean {
   return typeof process !== 'undefined' && process.versions?.node !== undefined;
 }
 
-function getDefaultBrowserWasmUrl(): string {
-  return defaultWasmUrl.href;
-}
-
-async function resolveWasmSource(source?: WasmSourceProvider): Promise<WasmSource> {
-  const provider = source ?? wasmSourceOverride;
-  if (provider !== undefined && provider !== null) {
-    return typeof provider === 'function' ? await provider() : provider;
-  }
-  return getDefaultBrowserWasmUrl();
-}
-
 /**
  * Load a file from the filesystem in Node.js.
  * @internal Exported for testing
@@ -59,50 +47,22 @@ export async function loadFileNode(_pathOrUrl: string | URL): Promise<ArrayBuffe
 
 /**
  * Initialize the WASM module.
- * Must be called before any other functions.
- * @param wasmPathOrBuffer - Either a path/URL to the WASM file, or an ArrayBuffer/Uint8Array containing the WASM binary.
- *                           In browsers, paths are fetched as URLs.
+ * In browser builds with bundler support, this uses the pre-loaded WASM module.
+ * The wasmPathOrBuffer parameter is ignored in browser builds since the bundler
+ * handles WASM loading automatically.
  */
-export async function init(wasmPathOrBuffer?: WasmSourceProvider): Promise<void> {
-  if (wasmInstance !== null) {
+export async function init(_wasmPathOrBuffer?: WasmSourceProvider): Promise<void> {
+  if (wasmExports !== null) {
     return; // Already initialized
   }
 
-  const resolvedSource = await resolveWasmSource(wasmPathOrBuffer);
-  let buffer: ArrayBuffer;
+  // The bundler has already loaded and instantiated the WASM module.
+  // wasmModule contains the exports directly.
+  wasmExports = wasmModule as unknown as WebAssembly.Exports;
 
-  if (resolvedSource instanceof ArrayBuffer) {
-    buffer = resolvedSource;
-  } else if (resolvedSource instanceof Uint8Array) {
-    // Copy to a new ArrayBuffer to handle SharedArrayBuffer case
-    const copy = new Uint8Array(resolvedSource.length);
-    copy.set(resolvedSource);
-    buffer = copy.buffer;
-  } else {
-    const pathOrUrl = resolvedSource instanceof URL ? resolvedSource.toString() : resolvedSource;
-    const response = await fetch(pathOrUrl);
-    if (!response.ok) {
-      throw new Error(`Failed to load WASM from ${pathOrUrl}: ${response.status} ${response.statusText}`);
-    }
-    buffer = await response.arrayBuffer();
-  }
-
-  const module = await WebAssembly.compile(buffer);
-
-  // Create memory - libsimlin manages its own memory
-  wasmMemory = new WebAssembly.Memory({ initial: 256, maximum: 16384 });
-
-  // Instantiate with imports
-  wasmInstance = await WebAssembly.instantiate(module, {
-    env: {
-      memory: wasmMemory,
-    },
-  });
-
-  // The WASM module may export its own memory
-  const exports = wasmInstance.exports;
-  if (exports.memory instanceof WebAssembly.Memory) {
-    wasmMemory = exports.memory;
+  // Get memory from exports if available
+  if (wasmExports.memory instanceof WebAssembly.Memory) {
+    wasmMemory = wasmExports.memory;
   }
 }
 
@@ -111,10 +71,10 @@ export async function init(wasmPathOrBuffer?: WasmSourceProvider): Promise<void>
  * @throws Error if WASM is not initialized
  */
 export function getExports(): WebAssembly.Exports {
-  if (wasmInstance === null) {
+  if (wasmExports === null) {
     throw new Error('WASM not initialized. Call Project.open() or ready() first.');
   }
-  return wasmInstance.exports;
+  return wasmExports;
 }
 
 /**
@@ -132,7 +92,7 @@ export function getMemory(): WebAssembly.Memory {
  * Check if the WASM module is initialized.
  */
 export function isInitialized(): boolean {
-  return wasmInstance !== null;
+  return wasmExports !== null;
 }
 
 /**
@@ -140,11 +100,10 @@ export function isInitialized(): boolean {
  * This is a convenience function that will initialize WASM with default settings
  * if it hasn't been initialized yet. Safe to call multiple times.
  *
- * @param wasmSource - Optional WASM source or provider. Defaults to auto-detected
- *                     runtime settings for browsers.
+ * @param wasmSource - Ignored in browser builds (bundler handles WASM loading).
  */
 export async function ensureInitialized(wasmSource?: WasmSourceProvider): Promise<void> {
-  if (wasmInstance !== null) {
+  if (wasmExports !== null) {
     return;
   }
 
@@ -161,19 +120,19 @@ export async function ensureInitialized(wasmSource?: WasmSourceProvider): Promis
   }
 }
 
-export function configureWasm(config: WasmConfig = {}): void {
-  if (wasmInstance !== null || initPromise !== null) {
-    throw new Error('WASM already initialized');
-  }
-  wasmSourceOverride = config.source ?? null;
+/**
+ * Configure WASM source. In browser builds, this is a no-op since the bundler
+ * handles WASM loading automatically.
+ */
+export function configureWasm(_config: WasmConfig = {}): void {
+  // No-op in browser builds - bundler handles WASM loading
 }
 
 /**
  * Reset the WASM state (for testing).
  */
 export function reset(): void {
-  wasmInstance = null;
+  wasmExports = null;
   wasmMemory = null;
   initPromise = null;
-  wasmSourceOverride = null;
 }
