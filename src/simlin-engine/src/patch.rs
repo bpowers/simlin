@@ -1647,4 +1647,60 @@ mod tests {
             _ => panic!("expected stock variable"),
         }
     }
+
+    #[test]
+    fn upsert_stock_to_model_with_empty_name() {
+        let mut project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "".to_string(),
+                sim_specs: None,
+                variables: vec![],
+                views: vec![],
+                loop_metadata: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let stock = datamodel::Stock {
+            ident: "inventory".to_string(),
+            equation: Equation::Scalar("100".to_string(), None),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            non_negative: false,
+            can_be_module_input: false,
+            visibility: Visibility::Private,
+            ai_state: None,
+            uid: None,
+        };
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::UpsertStock(
+                        project_io::UpsertStockOp {
+                            stock: Some(stock_proto(stock.clone())),
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+
+        let model = project.get_model("main").unwrap();
+        let var = model.get_variable("inventory").unwrap();
+        match var {
+            Variable::Stock(actual) => assert_eq!(actual.equation, stock.equation),
+            _ => panic!("expected stock"),
+        }
+    }
 }

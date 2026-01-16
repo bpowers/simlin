@@ -788,6 +788,8 @@ impl Project {
             .find(|m| m.name == model_name || (model_name == "main" && m.name.is_empty()))
     }
     pub fn get_model_mut(&mut self, model_name: &str) -> Option<&mut Model> {
-        self.models.iter_mut().find(|m| m.name == model_name)
+        self.models
+            .iter_mut()
+            .find(|m| m.name == model_name || (model_name == "main" && m.name.is_empty()))
     }
 }
