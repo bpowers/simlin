@@ -80,7 +80,7 @@ impl Context {
             ("person", &["people", "persons"]),
             ("minute", &["minutes"]),
             ("month", &["months"]),
-            ("year", &["years"]),
+            ("year", &["years", "yr", "yrs"]),
             ("day", &["days"]),
             ("week", &["weeks"]),
             ("hour", &["hours"]),
@@ -775,4 +775,60 @@ fn test_unit_canonicalization() {
         .cloned()
         .collect();
     assert_eq!(result, expected, "Aliases should be resolved correctly");
+}
+
+#[test]
+fn test_year_years_builtin_alias() {
+    // Test that the year/years builtin alias works correctly
+    // This tests the `new_with_builtins` path which adds built-in aliases
+    let context = Context::new_with_builtins(&[], &Default::default()).unwrap();
+
+    // Test singular form
+    let expr = Expr0::new("year", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    let expected: UnitMap = [("year".to_owned(), 1)].iter().cloned().collect();
+    assert_eq!(result, expected, "year should parse correctly");
+
+    // Test plural form - should resolve to singular
+    let expr = Expr0::new("years", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    assert_eq!(result, expected, "years should resolve to year");
+
+    // Test "yr" abbreviation - common in system dynamics models
+    let expr = Expr0::new("yr", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    assert_eq!(result, expected, "yr should resolve to year");
+
+    // Test "yrs" abbreviation
+    let expr = Expr0::new("yrs", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    assert_eq!(result, expected, "yrs should resolve to year");
+
+    // Test that year and years are treated as the same unit in expressions
+    let expr = Expr0::new("year/years", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    let expected_dmnl: UnitMap = UnitMap::new();
+    assert_eq!(
+        result, expected_dmnl,
+        "year/years should be dimensionless (cancel out)"
+    );
+
+    // Test yr/years - all aliases should be interchangeable
+    let expr = Expr0::new("yr/years", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    assert_eq!(
+        result, expected_dmnl,
+        "yr/years should be dimensionless (cancel out)"
+    );
+
+    // Test compound expressions
+    let expr = Expr0::new("1/years", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    let expected_inverse: UnitMap = [("year".to_owned(), -1)].iter().cloned().collect();
+    assert_eq!(result, expected_inverse, "1/years should be 1/year");
+
+    // Test 1/yr
+    let expr = Expr0::new("1/yr", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    assert_eq!(result, expected_inverse, "1/yr should be 1/year");
 }
