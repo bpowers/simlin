@@ -50,6 +50,7 @@ typedef enum {
   SIMLIN_ERROR_CODE_VARIABLES_HAVE_ERRORS = 30,
   SIMLIN_ERROR_CODE_UNIT_DEFINITION_ERRORS = 31,
   SIMLIN_ERROR_CODE_GENERIC = 32,
+  SIMLIN_ERROR_CODE_UNIT_MISMATCH = 33,
 } SimlinErrorCode;
 
 // Error kind categorizing where in the project the error originates.
