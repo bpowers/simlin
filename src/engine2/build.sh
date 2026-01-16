@@ -19,6 +19,7 @@ cp ../../target/wasm32-unknown-unknown/release/simlin.wasm core/libsimlin.wasm
 if command -v wasm-opt &> /dev/null && [ "1" != "${DISABLE_WASM_OPT-0}" ]; then
   echo "Running wasm-opt..."
   wasm-opt core/libsimlin.wasm -o core/libsimlin.wasm-opt -O3 \
+    --enable-mutable-globals \
     --enable-bulk-memory \
     --enable-bulk-memory-opt \
     --enable-nontrapping-float-to-int
