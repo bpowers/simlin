@@ -1,8 +1,8 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- Yarn workspaces under `src/`: `app` (React UI), `server` (Express API), `diagram` (editor components), `core` (shared TS utils), `engine`/`importer`/`xmutil-js` (WASM bindings). Site docs in `website/`.
-- Rust workspace under `src/`: `simlin-engine` (core), `engine`, `importer`, `simlin-cli`, `simlin-compat`, `xmutil`.
+- Yarn workspaces under `src/`: `app` (React UI), `server` (Express API), `diagram` (editor components), `core` (shared TS utils), `engine2`/`xmutil-js` (WASM bindings). Site docs in `website/`.
+- Rust workspace under `src/`: `simlin-engine` (core), `simlin-cli`, `simlin-compat`, `libsimlin`, `xmutil`.
 - Tests: Playwright UI tests in `ui-tests/{visual,integration}`; model fixtures in `test/`; Playwright output in `test-results/`.
 - Assets: `public/`, `stdlib/*.stmx` (compiled to protobuf), protobufs in `src/**/schemas`.
 
@@ -33,4 +33,4 @@
 
 ## Security & Configuration Tips
 - Do not commit secrets; use local emulators (Firestore 8092, Auth 9099). Cloud deploy uses `app.yaml`/`gcloud`.
-- Ensure Rust toolchain from `rust-toolchain.toml`; Node with Yarn. Install `wasm-bindgen-cli` for WASM workflows.
+- Ensure Rust toolchain from `rust-toolchain.toml`; Node with Yarn.

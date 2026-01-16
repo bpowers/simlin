@@ -5,7 +5,7 @@
 // WASM module loading and access (browser build)
 
 // Import WASM as a module - with asyncWebAssembly enabled in the bundler,
-// this import is handled automatically (like wasm-bindgen does for src/engine).
+// this import is handled automatically.
 // The bundler loads the WASM, instantiates it, and returns the exports.
 // @ts-expect-error TypeScript doesn't understand .wasm imports
 import * as wasmModule from '../../core/libsimlin.wasm';

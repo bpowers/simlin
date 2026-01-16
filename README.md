@@ -30,13 +30,6 @@ Simlin is an [open source](LICENSE) tool for creating and editing [System Dynami
 ### Prerequisites
 
 - **GCLOUD:** Make sure that you have installed the Google Cloud CLI and its firestore emulator. You can follow this [guide](https://cloud.google.com/sdk/docs/install-sdk#deb).
-- **wasm-bindgen**. In addition, install the latest version of wasm-bindgen:
-  ```bash
-  $ cargo uninstall wasm-bindgen-cli
-  $ cargo install wasm-bindgen-cli
-  $ wasm-bindgen --version
-  wasm-bindgen 0.2.92
-  ```
 
 ### Running the development version
 

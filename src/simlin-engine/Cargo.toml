@@ -11,7 +11,6 @@ crate-type = ["rlib"]
 
 [features]
 default = ["schema"]
-wasm = ["wasm-bindgen"]
 schema = ["dep:schemars"]
 
 [dependencies]
@@ -23,7 +22,6 @@ prost = "0.14"
 float-cmp = "0.10"
 ordered-float = "5"
 smallvec = { version = "1", features = [ "union" ] }
-wasm-bindgen = { version = "0.2", optional = true }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 ed25519 = "2"
 base64 = "0.22"

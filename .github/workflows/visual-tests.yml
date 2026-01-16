@@ -45,10 +45,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       
-      - name: Install wasm-bindgen-cli
-        run: |
-          cargo install wasm-bindgen-cli
-      
       - name: Install dependencies and build project
         run: |
           rustup target add wasm32-unknown-unknown
@@ -118,19 +114,9 @@ jobs:
         with:
           toolchain: stable
       
-      - name: Install wasm-bindgen-cli
-        run: |
-          cargo install wasm-bindgen-cli --version 0.2.92 || true
-      
       - name: Install dependencies
         run: yarn install --frozen-lockfile
-      
-      - name: Build WASM modules
-        run: |
-          cd src/engine && ./build.sh && cd ../..
-          cd src/importer && ./build.sh && cd ../..
-          cd src/xmutil && cargo build --release --target wasm32-unknown-unknown && cd ../..
-      
+
       - name: Build application
         run: yarn build
       

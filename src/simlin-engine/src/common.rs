@@ -2,9 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// FIXME: remove when wasm-bindgen is updated past 0.2.79
-#![allow(clippy::unused_unit)]
-
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::marker::PhantomData;
@@ -14,8 +11,6 @@ use crate::ast::Loc;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::borrow::Cow;
-#[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
 
 // Legacy type aliases - to be deprecated
 pub type DimensionName = String;
@@ -49,7 +44,6 @@ pub struct CanonicalElementName(String);
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RawElementName(String);
 
-#[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     NoError,      // will never be produced
@@ -166,7 +160,6 @@ impl fmt::Display for ErrorCode {
     }
 }
 
-#[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EquationError {
     pub start: u16,
@@ -309,7 +302,6 @@ macro_rules! sim_err {
     }};
 }
 
-#[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     Import,
@@ -318,7 +310,6 @@ pub enum ErrorKind {
     Variable,
 }
 
-#[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,
@@ -336,7 +327,6 @@ impl From<Box<dyn std::error::Error>> for Error {
     }
 }
 
-#[cfg_attr(feature = "wasm", wasm_bindgen)]
 impl Error {
     pub fn new(kind: ErrorKind, code: ErrorCode, details: Option<String>) -> Self {
         Error {
@@ -346,7 +336,6 @@ impl Error {
         }
     }
 
-    #[cfg_attr(feature = "wasm", wasm_bindgen(js_name = getDetails))]
     pub fn get_details(&self) -> Option<String> {
         self.details.clone()
     }

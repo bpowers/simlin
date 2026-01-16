@@ -8,8 +8,6 @@ use std::iter::Iterator;
 
 use crate::canonicalize;
 use crate::common::{DimensionName, ElementName};
-#[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Default, Eq, Clone)]
 pub struct UnitMap {
@@ -175,7 +173,6 @@ impl FromIterator<(String, i32)> for UnitMap {
     }
 }
 
-#[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum GraphicalFunctionKind {
     Continuous,
@@ -183,7 +180,6 @@ pub enum GraphicalFunctionKind {
     Discrete,
 }
 
-#[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Clone, PartialEq, Debug)]
 pub struct GraphicalFunctionScale {
     pub min: f64,
@@ -408,10 +404,6 @@ impl Variable {
 }
 
 pub mod view_element {
-    #[cfg(feature = "wasm")]
-    use wasm_bindgen::prelude::*;
-
-    #[cfg_attr(feature = "wasm", wasm_bindgen)]
     #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum LabelSide {
         Top,
@@ -439,7 +431,6 @@ pub mod view_element {
         pub label_side: LabelSide,
     }
 
-    #[cfg_attr(feature = "wasm", wasm_bindgen)]
     #[derive(Clone, PartialEq, Debug)]
     pub struct FlowPoint {
         pub x: f64,
@@ -483,7 +474,6 @@ pub mod view_element {
         pub label_side: LabelSide,
     }
 
-    #[cfg_attr(feature = "wasm", wasm_bindgen)]
     #[derive(Clone, PartialEq, Debug)]
     pub struct Alias {
         pub uid: i32,
@@ -604,7 +594,6 @@ impl Model {
     }
 }
 
-#[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SimMethod {
     Euler,
@@ -747,7 +736,6 @@ pub struct Unit {
     pub aliases: Vec<String>,
 }
 
-#[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Extension {
     Unspecified,

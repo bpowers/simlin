@@ -76,24 +76,20 @@ First is the Rust workspace with these packages:
 - `src/simlin-engine` - Core simulation engine
 - `src/simlin-compat` - Helpers to convert between our internal project representation and XMILE + Vensim formats, and open various types of result data formats (like CSVs).
 - `src/libsimlin` - C-compatible FFI interface to simlin-engine for language-agnostic access via WebAssembly
-- `src/importer` - Expose simlin-compat import functionality to JavaScript with wasm-bindgen
-- `src/engine` - Expose simlin-engine functionality to JavaScript with wasm-bindgen
 - `src/simlin-cli` - a command line tool for simulating system dynamics models, mostly for testing/debugging.
 - `src/xmutil` - Rust wrapper around Bob Eberlein's tool to convert Vensim models to XMILE format, including diagrams.
 
 This is a yarn workspace with these packages:
 - `@system-dynamics/core` - Shared TypeScript utilities
-- `@system-dynamics/diagram` - React diagram components  
+- `@system-dynamics/diagram` - React diagram components
 - `@system-dynamics/app` - Frontend application
 - `@system-dynamics/server` - Backend API server
-- `@system-dynamics/engine` - WASM simulation engine
-- `@system-dynamics/importer` - WASM model import utilities
+- `@system-dynamics/engine2` - WASM simulation engine
 - `@system-dynamics/xmutil` - WASM XML utilities
 
 ### Prerequisites for Development
 
 - Google Cloud CLI with Firestore emulator
-- wasm-bindgen CLI tool (`cargo install wasm-bindgen-cli`)
 - Node.js and Yarn
 - Rust toolchain (specified in `rust-toolchain.toml`)
 

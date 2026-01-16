@@ -1873,7 +1873,6 @@ dependencies = [
  "serde_json",
  "smallvec",
  "unicode-xid",
- "wasm-bindgen",
 ]
 
 [[package]]
