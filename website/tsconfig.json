@@ -16,8 +16,7 @@
       "@/*": ["src/*"],
       "@system-dynamics/core": ["../src/core"],
       "@system-dynamics/diagram": ["../src/diagram"],
-      "@system-dynamics/engine": ["../src/engine"],
-      "@system-dynamics/importer": ["../src/importer"],
+      "@system-dynamics/engine2": ["../src/engine2"],
       "@system-dynamics/xmutil": ["../src/xmutil-js"]
     }
   },

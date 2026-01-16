@@ -1102,9 +1102,7 @@ export const Editor = styled(
       // Convert saveStep Dt to the actual numeric step size
       let saveStep: number | undefined;
       if (simSpec.saveStep) {
-        saveStep = simSpec.saveStep.isReciprocal
-          ? 1 / simSpec.saveStep.value
-          : simSpec.saveStep.value;
+        saveStep = simSpec.saveStep.isReciprocal ? 1 / simSpec.saveStep.value : simSpec.saveStep.value;
       }
 
       const simSpecs: JsonSimSpecs = {
@@ -1554,10 +1552,13 @@ export const Editor = styled(
         return {
           arrayed_equation: {
             dimensions: eq.dimensionNames.toArray(),
-            elements: eq.elements.entrySeq().map(([subscript, eqStr]) => ({
-              subscript,
-              equation: eqStr,
-            })).toArray(),
+            elements: eq.elements
+              .entrySeq()
+              .map(([subscript, eqStr]) => ({
+                subscript,
+                equation: eqStr,
+              }))
+              .toArray(),
           },
         };
       }

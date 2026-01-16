@@ -7,12 +7,18 @@ import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 
-import { fromXmile, toXmile } from '@system-dynamics/importer';
+import { Project as Engine2Project } from '@system-dynamics/engine2';
 import { convertMdlToXmile } from '@system-dynamics/xmutil';
-import { open } from '@system-dynamics/engine';
 import { Project as ProjectDM } from '@system-dynamics/core/datamodel';
 import { renderSvgToString } from '@system-dynamics/diagram/render-common';
+
+// Compute the WASM path relative to the engine2 package
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const wasmPath = resolve(__dirname, '../src/engine2/core/libsimlin.wasm');
 
 /**
  * Generate an SVG from a project and save it to a file
@@ -91,8 +97,9 @@ async function main() {
       }
     }
 
-    // Import the XMILE content to get a Project
-    const projectPB = await fromXmile(contents);
+    // Import the XMILE content using engine2
+    const engine2Project = await Engine2Project.open(contents, { wasm: wasmPath });
+    const projectPB = engine2Project.serializeProtobuf();
     const project = ProjectDM.deserializeBinary(projectPB);
 
     // Generate and open the original SVG
@@ -127,23 +134,15 @@ async function main() {
     console.log(`Created XMILE file without views: ${outputFile}`);
 
     // Load the no-views XMILE into the engine
-    console.log('\nLoading model into engine and generating views...');
-    const noViewsProjectPB = await fromXmile(xmileWithoutViews);
-    const engine = await open(noViewsProjectPB);
+    console.log('\nLoading model into engine...');
+    const noViewsEngine2Project = await Engine2Project.open(xmileWithoutViews, { wasm: wasmPath });
 
-    if (!engine) {
-      throw new Error('Failed to open model in engine');
-    }
-
-    // Call the new generateViews method
-    const error = engine.generateViews();
-    if (error) {
-      console.warn('generateViews returned error:', error);
-    }
+    // Note: generateViews is not yet implemented in engine2
+    console.log('Note: View generation is not yet implemented');
 
     // Serialize back to protobuf and then to XMILE
-    const regeneratedPB = engine.serializeToProtobuf();
-    const regeneratedXmile = await toXmile(regeneratedPB);
+    const regeneratedPB = noViewsEngine2Project.serializeProtobuf();
+    const regeneratedXmile = noViewsEngine2Project.toXmileString();
 
     if (!regeneratedXmile) {
       throw new Error('Failed to convert regenerated model to XMILE');
@@ -157,8 +156,7 @@ async function main() {
 
     // Parse the regenerated XMILE back into a project to generate SVG
     console.log('\nGenerating SVG from regenerated model...');
-    const regeneratedProjectPB = await fromXmile(regeneratedXmile);
-    const regeneratedProject = ProjectDM.deserializeBinary(regeneratedProjectPB);
+    const regeneratedProject = ProjectDM.deserializeBinary(regeneratedPB);
 
     // Check if the regenerated model has views before trying to render
     const regeneratedMainModel = regeneratedProject.models.get('main');

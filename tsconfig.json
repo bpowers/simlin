@@ -5,8 +5,7 @@
     { "path": "./src/diagram" },
     { "path": "./src/app" },
     { "path": "./src/server" },
-    { "path": "./src/engine" },
-    { "path": "./src/importer" },
+    { "path": "./src/engine2" },
     { "path": "./src/xmutil-js" },
     { "path": "./website" }
   ]

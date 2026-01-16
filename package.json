@@ -12,9 +12,7 @@
   "workspaces": {
     "packages": [
       "src/xmutil-js",
-      "src/engine",
       "src/engine2",
-      "src/importer",
       "src/core",
       "src/diagram",
       "src/app",
@@ -34,7 +32,7 @@
   "scripts": {
     "js-needs-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|core)/' | xargs prettier -l",
     "rust-needs-format": "cargo fmt -- --check",
-    "js-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|importer/core|engine/core)/' | xargs prettier --write",
+    "js-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|core)/' | xargs prettier --write",
     "rust-format": "cargo fmt",
     "format": "npm-run-all -p js-format rust-format",
     "precommit": "npm-run-all -p js-needs-format rust-needs-format lint",
