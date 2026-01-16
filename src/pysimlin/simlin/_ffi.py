@@ -66,7 +66,7 @@ def extract_error_details(err_ptr: Any) -> List[Any]:
     Returns:
         List of ErrorDetail objects
     """
-    from .errors import ErrorDetail, ErrorCode
+    from .errors import ErrorDetail, ErrorCode, ErrorKind, UnitErrorKind
 
     if err_ptr == ffi.NULL:
         return []
@@ -83,6 +83,8 @@ def extract_error_details(err_ptr: Any) -> List[Any]:
                 variable_name=c_to_string(c_detail.variable_name),
                 start_offset=c_detail.start_offset,
                 end_offset=c_detail.end_offset,
+                kind=ErrorKind(c_detail.kind),
+                unit_error_kind=UnitErrorKind(c_detail.unit_error_kind),
             ))
     return details
 

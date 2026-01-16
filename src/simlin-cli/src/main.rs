@@ -10,7 +10,7 @@ use std::result::Result as StdResult;
 use pico_args::Arguments;
 
 use simlin::errors::{
-    FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_errors,
+    FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_issues,
     format_simulation_error,
 };
 use simlin_compat::engine::common::ErrorKind;
@@ -172,7 +172,7 @@ fn report_formatted_errors(formatted: &FormattedErrors) {
 }
 
 fn format_and_report_project_errors(project: &Project) -> FormattedErrors {
-    let formatted = collect_formatted_errors(project);
+    let formatted = collect_formatted_issues(project);
     report_formatted_errors(&formatted);
     formatted
 }

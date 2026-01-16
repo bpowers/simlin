@@ -62,6 +62,7 @@ pub enum SimlinErrorCode {
     VariablesHaveErrors = 30,
     UnitDefinitionErrors = 31,
     Generic = 32,
+    UnitMismatch = 33,
 }
 
 /// Error kind categorizing where in the project the error originates.
@@ -155,7 +156,7 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::DuplicateUnit => SimlinErrorCode::Generic,
             engine::ErrorCode::ExpectedModule => SimlinErrorCode::Generic,
             engine::ErrorCode::ExpectedIdent => SimlinErrorCode::Generic,
-            engine::ErrorCode::UnitMismatch => SimlinErrorCode::Generic,
+            engine::ErrorCode::UnitMismatch => SimlinErrorCode::UnitMismatch,
             engine::ErrorCode::TodoWildcard => SimlinErrorCode::Generic,
             engine::ErrorCode::TodoStarRange => SimlinErrorCode::Generic,
             engine::ErrorCode::TodoRange => SimlinErrorCode::Generic,
@@ -181,6 +182,10 @@ pub struct SimlinModel {
 /// Internal state for SimlinSim
 struct SimState {
     vm: Option<Vm>,
+    /// Stores the error from VM creation if it failed.
+    /// This allows us to surface the actual error when users try to run
+    /// the simulation, instead of a generic "VM not initialized" message.
+    vm_error: Option<engine::Error>,
     results: Option<engine::Results>,
 }
 
@@ -324,6 +329,7 @@ pub extern "C" fn simlin_error_str(err: SimlinErrorCode) -> *const c_char {
         SimlinErrorCode::VariablesHaveErrors => "variables_have_errors\0",
         SimlinErrorCode::UnitDefinitionErrors => "unit_definition_errors\0",
         SimlinErrorCode::Generic => "generic\0",
+        SimlinErrorCode::UnitMismatch => "unit_mismatch\0",
     };
     s.as_ptr() as *const c_char
 }
@@ -1279,11 +1285,21 @@ pub unsafe extern "C" fn simlin_sim_new(
 
     simlin_model_ref(model);
 
-    let vm = create_vm(&project_variant, &model_ref.model_name).ok();
+    // Capture both the VM and any error from creation.
+    // This allows us to surface the actual error when users try to run
+    // the simulation, instead of a generic "VM not initialized" message.
+    let (vm, vm_error) = match create_vm(&project_variant, &model_ref.model_name) {
+        Ok(vm) => (Some(vm), None),
+        Err(err) => (None, Some(err)),
+    };
     let sim = Box::new(SimlinSim {
         model: model_ref as *const _,
         enable_ltm,
-        state: Mutex::new(SimState { vm, results: None }),
+        state: Mutex::new(SimState {
+            vm,
+            vm_error,
+            results: None,
+        }),
         ref_count: AtomicUsize::new(1),
     });
 
@@ -1333,6 +1349,9 @@ pub unsafe extern "C" fn simlin_sim_run_to(
         if let Err(err) = vm.run_to(time) {
             store_ffi_error(out_error, ffi_error_from_engine(&err));
         }
+    } else if let Some(ref err) = state.vm_error {
+        // Return the actual VM creation error instead of a generic message
+        store_ffi_error(out_error, ffi_error_from_engine(err));
     } else {
         store_error(
             out_error,
@@ -1364,11 +1383,16 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(
             }
         }
     } else if state.results.is_none() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("simulation has not been initialised with a VM"),
-        );
+        // Return the actual VM creation error if available, otherwise generic message
+        if let Some(ref err) = state.vm_error {
+            store_ffi_error(out_error, ffi_error_from_engine(err));
+        } else {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("simulation has not been initialised with a VM"),
+            );
+        }
     }
 }
 /// Gets the number of time steps in the results
@@ -1441,6 +1465,7 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
     let mut state = sim_ref.state.lock().unwrap();
     state.results = None;
     state.vm = Some(new_vm);
+    state.vm_error = None; // Clear any previous VM creation error
 }
 /// Gets a single value from the simulation
 ///
@@ -2498,6 +2523,13 @@ unsafe fn apply_project_patch_internal(
     out_collected_errors: *mut *mut SimlinError,
     out_error: *mut *mut SimlinError,
 ) {
+    // Collect models that already have unit warnings before applying the patch.
+    // We only reject patches that introduce warnings in models that were previously clean.
+    let models_with_existing_warnings = {
+        let project_locked = project_ref.project.lock().unwrap();
+        collect_models_with_unit_warnings(&project_locked)
+    };
+
     let mut staged_datamodel = {
         let project_locked = project_ref.project.lock().unwrap();
         project_locked.datamodel.clone()
@@ -2516,14 +2548,37 @@ unsafe fn apply_project_patch_internal(
 
     let (all_errors, sim_error) = gather_error_details(&staged_project);
 
+    // Check for blocking errors (not including unit warnings, which are handled separately)
     let maybe_first_code = if !allow_errors {
         first_error_code(&staged_project, sim_error.as_ref())
     } else {
         None
     };
 
+    // Check for NEW unit warnings in models that were previously clean.
+    // If a model already had unit warnings, further changes to it are allowed.
+    let new_unit_warning = if !allow_errors && maybe_first_code.is_none() {
+        let models_with_new_warnings = collect_models_with_unit_warnings(&staged_project);
+        // Find models that now have warnings but didn't before
+        models_with_new_warnings
+            .difference(&models_with_existing_warnings)
+            .next()
+            .map(|model_name| {
+                (
+                    SimlinErrorCode::UnitMismatch,
+                    format!(
+                        "patch introduces unit warning in model '{}' which previously had none",
+                        model_name
+                    ),
+                )
+            })
+    } else {
+        None
+    };
+
     if !out_collected_errors.is_null() && !all_errors.is_empty() {
         let code = maybe_first_code
+            .or(new_unit_warning.as_ref().map(|(code, _)| *code))
             .or_else(|| all_errors.first().map(|detail| detail.code))
             .unwrap_or(SimlinErrorCode::NoError);
         let aggregate = build_simlin_error(code, &all_errors);
@@ -2533,6 +2588,11 @@ unsafe fn apply_project_patch_internal(
     if let Some(code) = maybe_first_code {
         let error = build_simlin_error(code, &all_errors);
         store_error(out_error, error);
+        return;
+    }
+
+    if let Some((code, message)) = new_unit_warning {
+        store_error(out_error, SimlinError::new(code).with_message(message));
         return;
     }
 
@@ -3109,7 +3169,7 @@ impl ErrorDetailBuilder {
 }
 
 fn collect_project_errors(project: &engine::Project) -> Vec<ErrorDetailData> {
-    errors::collect_formatted_errors(project)
+    errors::collect_formatted_issues(project)
         .errors
         .into_iter()
         .map(ErrorDetailBuilder::from_formatted)
@@ -3163,6 +3223,27 @@ fn first_error_code(
     }
 
     sim_error.map(|error| SimlinErrorCode::from(error.code))
+}
+
+/// Collects models that have unit warnings as a set of model names.
+///
+/// We use model names rather than (model, details) tuples because unit inference
+/// can produce different details strings (e.g., different variable ordering) for
+/// the same underlying issue when the model is recompiled. Comparing by model name
+/// ensures that if a model already had unit warnings before a patch, further patches
+/// to that model are allowed (even if they don't fix the existing warnings).
+fn collect_models_with_unit_warnings(
+    project: &engine::Project,
+) -> std::collections::HashSet<String> {
+    let mut models_with_warnings = std::collections::HashSet::new();
+
+    for (model_name, model) in &project.models {
+        if model.unit_warnings.is_some() {
+            models_with_warnings.insert(model_name.to_string());
+        }
+    }
+
+    models_with_warnings
 }
 
 /// Check if a project's model can be simulated
@@ -9166,6 +9247,234 @@ mod tests {
             );
 
             simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    /// Helper to create an aux with units for patching
+    fn aux_with_units_patch(model: &str, name: &str, equation: &str, units: &str) -> Vec<u8> {
+        let aux = engine::datamodel::Aux {
+            ident: name.to_string(),
+            equation: engine::datamodel::Equation::Scalar(equation.to_string(), None),
+            documentation: String::new(),
+            units: Some(units.to_string()),
+            gf: None,
+            can_be_module_input: false,
+            visibility: engine::datamodel::Visibility::Private,
+            ai_state: None,
+            uid: None,
+        };
+        aux_patch(model, aux)
+    }
+
+    #[test]
+    fn test_patch_with_preexisting_unit_warnings_succeeds() {
+        // Create a project that already has unit warnings (apples + oranges)
+        let datamodel = TestProject::new("unit_test")
+            .unit("apples", None)
+            .unit("oranges", None)
+            .aux("a", "10", Some("apples"))
+            .aux("b", "20", Some("oranges"))
+            .aux("c", "a + b", None) // unit mismatch: apples + oranges
+            .build_datamodel();
+
+        let proj = open_project_from_datamodel(&datamodel);
+
+        // Verify the project has unit warnings
+        {
+            let project_locked = unsafe { (*proj).project.lock().unwrap() };
+            let model = project_locked
+                .models
+                .get(&engine::canonicalize("main"))
+                .unwrap();
+            assert!(
+                model.unit_warnings.is_some(),
+                "expected unit warnings in the model"
+            );
+        }
+
+        // Apply a patch that doesn't introduce new unit warnings
+        let patch_bytes = aux_with_units_patch("main", "d", "5", "apples");
+
+        unsafe {
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_apply_patch(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                false,
+                false, // allow_errors = false
+                &mut collected_errors as *mut *mut SimlinError,
+                &mut out_error as *mut *mut SimlinError,
+            );
+
+            // Should succeed despite pre-existing unit warnings
+            if !out_error.is_null() {
+                let msg_ptr = simlin_error_get_message(out_error);
+                let msg = if !msg_ptr.is_null() {
+                    CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
+                } else {
+                    ""
+                };
+                panic!("unexpected error: {}", msg);
+            }
+            if !collected_errors.is_null() {
+                simlin_error_free(collected_errors);
+            }
+
+            // Verify the patch was applied
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
+            assert!(model.get_variable("d").is_some(), "patch should be applied");
+            drop(project_locked);
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_patch_introducing_new_unit_warning_rejected() {
+        // Create a clean project with no unit warnings
+        let datamodel = TestProject::new("unit_test")
+            .unit("apples", None)
+            .unit("oranges", None)
+            .aux("a", "10", Some("apples"))
+            .aux("b", "20", Some("oranges"))
+            .build_datamodel();
+
+        let proj = open_project_from_datamodel(&datamodel);
+
+        // Verify no unit warnings initially
+        {
+            let project_locked = unsafe { (*proj).project.lock().unwrap() };
+            let model = project_locked
+                .models
+                .get(&engine::canonicalize("main"))
+                .unwrap();
+            assert!(
+                model.unit_warnings.is_none(),
+                "should not have unit warnings initially"
+            );
+        }
+
+        // Apply a patch that introduces a unit mismatch (apples + oranges)
+        let patch_bytes = aux_patch(
+            "main",
+            engine::datamodel::Aux {
+                ident: "bad_sum".to_string(),
+                equation: engine::datamodel::Equation::Scalar("a + b".to_string(), None),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                can_be_module_input: false,
+                visibility: engine::datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+            },
+        );
+
+        unsafe {
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_apply_patch(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                false,
+                false, // allow_errors = false
+                &mut collected_errors as *mut *mut SimlinError,
+                &mut out_error as *mut *mut SimlinError,
+            );
+
+            // Should fail because patch introduces a new unit warning
+            assert!(
+                !out_error.is_null(),
+                "expected error when introducing new unit warning"
+            );
+            let code = simlin_error_get_code(out_error);
+            assert_eq!(
+                code,
+                SimlinErrorCode::UnitMismatch,
+                "expected UnitMismatch error"
+            );
+            simlin_error_free(out_error);
+            if !collected_errors.is_null() {
+                simlin_error_free(collected_errors);
+            }
+
+            // Verify the patch was NOT applied
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
+            assert!(
+                model.get_variable("bad_sum").is_none(),
+                "patch should NOT be applied"
+            );
+            drop(project_locked);
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_patch_introducing_new_unit_warning_allowed_with_flag() {
+        // Create a clean project with no unit warnings
+        let datamodel = TestProject::new("unit_test")
+            .unit("apples", None)
+            .unit("oranges", None)
+            .aux("a", "10", Some("apples"))
+            .aux("b", "20", Some("oranges"))
+            .build_datamodel();
+
+        let proj = open_project_from_datamodel(&datamodel);
+
+        // Apply a patch that introduces a unit mismatch, but with allow_errors = true
+        let patch_bytes = aux_patch(
+            "main",
+            engine::datamodel::Aux {
+                ident: "bad_sum".to_string(),
+                equation: engine::datamodel::Equation::Scalar("a + b".to_string(), None),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                can_be_module_input: false,
+                visibility: engine::datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+            },
+        );
+
+        unsafe {
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_apply_patch(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                false,
+                true, // allow_errors = true
+                &mut collected_errors as *mut *mut SimlinError,
+                &mut out_error as *mut *mut SimlinError,
+            );
+
+            // Should succeed because allow_errors is true
+            assert!(
+                out_error.is_null(),
+                "expected no error when allow_errors = true"
+            );
+            if !collected_errors.is_null() {
+                simlin_error_free(collected_errors);
+            }
+
+            // Verify the patch WAS applied
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
+            assert!(
+                model.get_variable("bad_sum").is_some(),
+                "patch should be applied"
+            );
+            drop(project_locked);
+
             simlin_project_unref(proj);
         }
     }

@@ -50,6 +50,7 @@ typedef enum {
   SIMLIN_ERROR_CODE_VARIABLES_HAVE_ERRORS = 30,
   SIMLIN_ERROR_CODE_UNIT_DEFINITION_ERRORS = 31,
   SIMLIN_ERROR_CODE_GENERIC = 32,
+  SIMLIN_ERROR_CODE_UNIT_MISMATCH = 33,
 } SimlinErrorCode;
 
 typedef enum {
@@ -67,6 +68,21 @@ typedef enum {
   SIMLIN_JSON_FORMAT_NATIVE = 0,
   SIMLIN_JSON_FORMAT_SDAI = 1,
 } SimlinJsonFormat;
+
+typedef enum {
+  SIMLIN_ERROR_KIND_PROJECT = 0,
+  SIMLIN_ERROR_KIND_MODEL = 1,
+  SIMLIN_ERROR_KIND_VARIABLE = 2,
+  SIMLIN_ERROR_KIND_UNITS = 3,
+  SIMLIN_ERROR_KIND_SIMULATION = 4,
+} SimlinErrorKind;
+
+typedef enum {
+  SIMLIN_UNIT_ERROR_KIND_NOT_APPLICABLE = 0,
+  SIMLIN_UNIT_ERROR_KIND_DEFINITION = 1,
+  SIMLIN_UNIT_ERROR_KIND_CONSISTENCY = 2,
+  SIMLIN_UNIT_ERROR_KIND_INFERENCE = 3,
+} SimlinUnitErrorKind;
 
 typedef struct SimlinModel SimlinModel;
 typedef struct SimlinProject SimlinProject;
@@ -104,6 +120,8 @@ typedef struct {
   char *variable_name;
   uint16_t start_offset;
   uint16_t end_offset;
+  SimlinErrorKind kind;
+  SimlinUnitErrorKind unit_error_kind;
 } SimlinErrorDetail;
 
 typedef struct SimlinError SimlinError;

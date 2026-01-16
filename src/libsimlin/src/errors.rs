@@ -53,8 +53,18 @@ pub struct FormattedErrors {
     pub has_variable_errors: bool,
 }
 
-/// Format all static errors for a compiled project, matching the CLI style.
-pub fn collect_formatted_errors(project: &engine::Project) -> FormattedErrors {
+/// Collect and format all issues (errors and warnings) for a compiled project.
+///
+/// This includes:
+/// - Project-level errors
+/// - Variable equation errors
+/// - Unit definition errors
+/// - Model-level errors
+/// - Unit warnings (mismatches that don't block simulation but should be surfaced)
+///
+/// Note: Unit warnings are non-blocking issues that allow simulation to proceed,
+/// but are included here so they can be displayed to users for awareness.
+pub fn collect_formatted_issues(project: &engine::Project) -> FormattedErrors {
     let mut formatted = FormattedErrors::default();
 
     for error in &project.errors {
@@ -105,6 +115,16 @@ pub fn collect_formatted_errors(project: &engine::Project) -> FormattedErrors {
                 }
                 formatted.has_model_errors = true;
                 formatted.errors.push(format_model_error(model_name, error));
+            }
+        }
+
+        // Collect unit warnings (unit mismatches that don't block simulation)
+        // These are surfaced to users but don't prevent running the model.
+        if let Some(unit_warnings) = &model.unit_warnings {
+            for warning in unit_warnings {
+                formatted
+                    .errors
+                    .push(format_model_error(model_name, warning));
             }
         }
     }
@@ -336,7 +356,7 @@ mod tests {
             .aux("bad", "1 + bogus", None)
             .build_datamodel();
         let project = engine::Project::from(datamodel);
-        let formatted = collect_formatted_errors(&project);
+        let formatted = collect_formatted_issues(&project);
 
         assert!(formatted.has_variable_errors);
         let error = formatted
@@ -367,7 +387,7 @@ mod tests {
             .aux("bad_units", "source", Some("Person"))
             .build_datamodel();
         let project = engine::Project::from(datamodel);
-        let formatted = collect_formatted_errors(&project);
+        let formatted = collect_formatted_issues(&project);
 
         let error = formatted
             .errors
