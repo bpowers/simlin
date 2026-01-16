@@ -15,7 +15,7 @@ default = ["vensim"]
 vensim = ["simlin-compat/vensim"]
 
 [dependencies]
-simlin-engine = { version = "0.1", path = "../simlin-engine" }
+simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
 simlin-compat = { version = "0.1", path = "../simlin-compat" }
 prost = "0.14"
 serde_json = "1.0"

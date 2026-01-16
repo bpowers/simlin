@@ -362,6 +362,12 @@ proptest! {
         prop_assert_eq!(model.variables.len(), sdai_back.variables.len());
     }
 
+}
+
+#[cfg(feature = "schema")]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
     // Schema validation tests
 
     #[test]
@@ -378,7 +384,7 @@ proptest! {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "schema"))]
 mod schema_tests {
     use super::*;
     use std::fs;

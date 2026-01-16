@@ -16,7 +16,7 @@ csv = "1"
 float-cmp = "0.10"
 quick-xml = { version = "0.38", features = [ "serialize", "overlapped-lists" ] }
 serde = { version = "1", features = [ "derive" ] }
-simlin-engine = { version = "0.1", path = "../simlin-engine" }
+simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
 xmutil = { version = "1", path = "../xmutil", optional = true }
 
 [dev-dependencies]

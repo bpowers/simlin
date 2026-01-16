@@ -17,6 +17,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+#[cfg(feature = "schema")]
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -26,18 +27,21 @@ fn is_none<T>(val: &Option<T>) -> bool {
     val.is_none()
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Point {
     pub x: f64,
     pub y: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct GraphicalFunction {
     pub points: Vec<Point>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct StockFields {
     pub name: String,
     #[serde(skip_serializing_if = "is_none")]
@@ -51,11 +55,12 @@ pub struct StockFields {
     #[serde(skip_serializing_if = "is_none")]
     pub outflows: Option<Vec<String>>,
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
-    #[schemars(rename = "graphicalFunction")]
+    #[cfg_attr(feature = "schema", schemars(rename = "graphicalFunction"))]
     pub graphical_function: Option<GraphicalFunction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct FlowFields {
     pub name: String,
     #[serde(skip_serializing_if = "is_none")]
@@ -65,11 +70,12 @@ pub struct FlowFields {
     #[serde(skip_serializing_if = "is_none")]
     pub units: Option<String>,
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
-    #[schemars(rename = "graphicalFunction")]
+    #[cfg_attr(feature = "schema", schemars(rename = "graphicalFunction"))]
     pub graphical_function: Option<GraphicalFunction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct AuxiliaryFields {
     pub name: String,
     #[serde(skip_serializing_if = "is_none")]
@@ -79,13 +85,14 @@ pub struct AuxiliaryFields {
     #[serde(skip_serializing_if = "is_none")]
     pub units: Option<String>,
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
-    #[schemars(rename = "graphicalFunction")]
+    #[cfg_attr(feature = "schema", schemars(rename = "graphicalFunction"))]
     pub graphical_function: Option<GraphicalFunction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "type", rename_all = "lowercase")]
-#[schemars(tag = "type", rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", schemars(tag = "type", rename_all = "lowercase"))]
 pub enum Variable {
     Stock(StockFields),
     Flow(FlowFields),
@@ -95,7 +102,8 @@ pub enum Variable {
 /// Polarity of a causal relationship in a system dynamics model.
 /// Indicates whether an increase in the source variable causes an
 /// increase (+), decrease (-), or unknown effect (?) on the target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub enum Polarity {
     /// Positive polarity: increase in source causes increase in target
     #[serde(rename = "+")]
@@ -118,7 +126,8 @@ impl std::fmt::Display for Polarity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Relationship {
     #[serde(skip_serializing_if = "is_none")]
     pub reasoning: Option<String>,
@@ -126,31 +135,33 @@ pub struct Relationship {
     pub to: String,
     pub polarity: Polarity,
     #[serde(rename = "polarityReasoning", skip_serializing_if = "is_none")]
-    #[schemars(rename = "polarityReasoning")]
+    #[cfg_attr(feature = "schema", schemars(rename = "polarityReasoning"))]
     pub polarity_reasoning: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct SimSpecs {
     #[serde(rename = "startTime")]
-    #[schemars(rename = "startTime")]
+    #[cfg_attr(feature = "schema", schemars(rename = "startTime"))]
     pub start_time: f64,
     #[serde(rename = "stopTime")]
-    #[schemars(rename = "stopTime")]
+    #[cfg_attr(feature = "schema", schemars(rename = "stopTime"))]
     pub stop_time: f64,
     #[serde(skip_serializing_if = "is_none")]
     pub dt: Option<f64>,
     #[serde(rename = "timeUnits", skip_serializing_if = "is_none")]
-    #[schemars(rename = "timeUnits")]
+    #[cfg_attr(feature = "schema", schemars(rename = "timeUnits"))]
     pub time_units: Option<String>,
     #[serde(rename = "saveStep", skip_serializing_if = "is_none")]
-    #[schemars(rename = "saveStep")]
+    #[cfg_attr(feature = "schema", schemars(rename = "saveStep"))]
     pub save_step: Option<f64>,
     #[serde(skip_serializing_if = "is_none")]
     pub method: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct SdaiModel {
     pub variables: Vec<Variable>,
     #[serde(skip_serializing_if = "is_none")]
@@ -162,11 +173,13 @@ pub struct SdaiModel {
 }
 
 /// Generate the JSON Schema for the SdaiModel type
+#[cfg(feature = "schema")]
 pub fn generate_schema() -> schemars::Schema {
     schemars::schema_for!(SdaiModel)
 }
 
 /// Generate the JSON Schema as a formatted JSON string
+#[cfg(feature = "schema")]
 pub fn generate_schema_json() -> String {
     let schema = generate_schema();
     serde_json::to_string_pretty(&schema).expect("schema serialization should never fail")

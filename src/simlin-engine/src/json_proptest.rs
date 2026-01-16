@@ -859,6 +859,12 @@ proptest! {
         prop_assert_eq!(dm_original, dm_roundtrip);
     }
 
+}
+
+#[cfg(feature = "schema")]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
     // Schema validation tests
 
     #[test]
@@ -1471,7 +1477,7 @@ mod protobuf_roundtrip_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "schema"))]
 mod schema_tests {
     use super::*;
     use std::fs;

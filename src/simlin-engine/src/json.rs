@@ -17,6 +17,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+#[cfg(feature = "schema")]
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -57,7 +58,8 @@ where
 // Type alias matching Go's Ident
 pub type Ident = String;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct ElementEquation {
     pub subscript: String,
     pub equation: String,
@@ -67,7 +69,8 @@ pub struct ElementEquation {
     pub graphical_function: Option<GraphicalFunction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct ArrayedEquation {
     pub dimensions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -78,13 +81,15 @@ pub struct ArrayedEquation {
     pub elements: Option<Vec<ElementEquation>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct GraphicalFunction {
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub points: Vec<[f64; 2]>,
@@ -98,7 +103,8 @@ pub struct GraphicalFunction {
     pub y_scale: Option<GraphicalFunctionScale>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Stock {
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub uid: i32,
@@ -121,7 +127,8 @@ pub struct Stock {
     pub arrayed_equation: Option<ArrayedEquation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Flow {
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub uid: i32,
@@ -144,7 +151,8 @@ pub struct Flow {
     pub arrayed_equation: Option<ArrayedEquation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Auxiliary {
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub uid: i32,
@@ -167,13 +175,15 @@ pub struct Auxiliary {
     pub arrayed_equation: Option<ArrayedEquation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct ModuleReference {
     pub src: String,
     pub dst: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Module {
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub uid: i32,
@@ -191,7 +201,8 @@ pub struct Module {
     pub is_public: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct SimSpecs {
     pub start_time: f64,
     pub end_time: f64,
@@ -207,7 +218,8 @@ pub struct SimSpecs {
 
 // View element types
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct FlowPoint {
     pub x: f64,
     pub y: f64,
@@ -215,13 +227,15 @@ pub struct FlowPoint {
     pub attached_to_uid: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct LinkPoint {
     pub x: f64,
     pub y: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Rect {
     pub x: f64,
     pub y: f64,
@@ -229,7 +243,8 @@ pub struct Rect {
     pub height: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct StockViewElement {
     pub uid: i32,
     pub name: String,
@@ -239,7 +254,8 @@ pub struct StockViewElement {
     pub label_side: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct FlowViewElement {
     pub uid: i32,
     pub name: String,
@@ -250,7 +266,8 @@ pub struct FlowViewElement {
     pub points: Vec<FlowPoint>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct AuxiliaryViewElement {
     pub uid: i32,
     pub name: String,
@@ -260,7 +277,8 @@ pub struct AuxiliaryViewElement {
     pub label_side: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct CloudViewElement {
     pub uid: i32,
     pub flow_uid: i32,
@@ -268,7 +286,8 @@ pub struct CloudViewElement {
     pub y: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct LinkViewElement {
     pub uid: i32,
     pub from_uid: i32,
@@ -279,7 +298,8 @@ pub struct LinkViewElement {
     pub multi_points: Vec<LinkPoint>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct ModuleViewElement {
     pub uid: i32,
     pub name: String,
@@ -289,7 +309,8 @@ pub struct ModuleViewElement {
     pub label_side: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct AliasViewElement {
     pub uid: i32,
     pub alias_of_uid: i32,
@@ -299,7 +320,8 @@ pub struct AliasViewElement {
     pub label_side: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ViewElement {
     Stock(StockViewElement),
@@ -312,7 +334,8 @@ pub enum ViewElement {
     Alias(AliasViewElement),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct View {
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub kind: String,
@@ -323,7 +346,8 @@ pub struct View {
     pub zoom: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Model {
     pub name: String,
     pub stocks: Vec<Stock>,
@@ -343,7 +367,8 @@ pub struct Model {
     pub loop_metadata: Vec<LoopMetadata>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Dimension {
     pub name: String,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
@@ -357,7 +382,8 @@ pub struct Dimension {
     pub maps_to: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Unit {
     pub name: String,
     #[serde(skip_serializing_if = "is_empty_string", default)]
@@ -368,7 +394,8 @@ pub struct Unit {
     pub aliases: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct LoopMetadata {
     pub uids: Vec<i32>,
     #[serde(skip_serializing_if = "is_false", default)]
@@ -378,7 +405,8 @@ pub struct LoopMetadata {
     pub description: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Project {
     pub name: String,
     pub sim_specs: SimSpecs,
@@ -390,11 +418,13 @@ pub struct Project {
 }
 
 /// Generate the JSON Schema for the Project type
+#[cfg(feature = "schema")]
 pub fn generate_schema() -> schemars::Schema {
     schemars::schema_for!(Project)
 }
 
 /// Generate the JSON Schema as a formatted JSON string
+#[cfg(feature = "schema")]
 pub fn generate_schema_json() -> String {
     let schema = generate_schema();
     serde_json::to_string_pretty(&schema).expect("schema serialization should never fail")
