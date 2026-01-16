@@ -6,6 +6,7 @@ module.exports = createConfig({
     'lib/',
     'public/',
     'default_projects/',
+    'schemas/*_pb.js',
     'schemas/*.d.ts',
   ],
 });

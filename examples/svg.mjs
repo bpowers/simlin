@@ -1,9 +1,16 @@
 import { readFileSync, createWriteStream } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
 
 import { convertMdlToXmile } from '@system-dynamics/xmutil';
-import { fromXmile } from '@system-dynamics/importer';
+import { Project as Engine2Project } from '@system-dynamics/engine2';
 import { Project } from '@system-dynamics/core/datamodel';
 import { renderSvgToString } from '@system-dynamics/diagram/render-common';
+
+// Compute the WASM path relative to the engine2 package
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const wasmPath = resolve(__dirname, '../src/engine2/core/libsimlin.wasm');
 
 const args = process.argv.slice(2);
 const inputFile = args[0];
@@ -13,8 +20,9 @@ if (inputFile.endsWith('.mdl')) {
   contents = await convertMdlToXmile(contents, false);
 }
 
-let pb = await fromXmile(contents);
-let project = Project.deserializeBinary(pb);
+const engine2Project = await Engine2Project.open(contents, { wasm: wasmPath });
+const pb = engine2Project.serializeProtobuf();
+const project = Project.deserializeBinary(pb);
 
 
 const [ svgString ] = renderSvgToString(project, 'main');

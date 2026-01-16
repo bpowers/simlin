@@ -25,6 +25,7 @@ import { simlin_model_get_var_names } from './internal/model';
 import { simlin_analyze_get_links, simlin_free_links, readLinks } from './internal/analysis';
 import { SimlinSimPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types';
 import { Link, LinkPolarity } from './types';
+import { registerFinalizer, unregisterFinalizer } from './internal/dispose';
 
 /**
  * Convert low-level link polarity to high-level type with validation.
@@ -68,6 +69,7 @@ export class Sim {
     this._model = model;
     this._overrides = { ...overrides };
     this._enableLtm = enableLtm;
+    registerFinalizer(this, ptr, simlin_sim_unref);
 
     // Apply any overrides
     for (const [name, value] of Object.entries(overrides)) {
@@ -236,6 +238,7 @@ export class Sim {
       return;
     }
 
+    unregisterFinalizer(this);
     simlin_sim_unref(this._ptr);
     this._ptr = 0;
     this._disposed = true;

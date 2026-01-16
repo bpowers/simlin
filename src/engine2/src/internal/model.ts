@@ -4,7 +4,7 @@
 
 // Model functions
 
-import { getExports, getMemory } from './wasm';
+import { getExports, getMemory } from '@system-dynamics/engine2/internal/wasm';
 import {
   malloc,
   free,

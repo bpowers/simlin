@@ -18,18 +18,8 @@ import {
 } from './internal/model';
 import { readLinks, simlin_free_links } from './internal/analysis';
 import { SimlinModelPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types';
-import {
-  Stock,
-  Flow,
-  Aux,
-  Variable,
-  TimeSpec,
-  Link,
-  Loop,
-  LinkPolarity,
-  ModelIssue,
-  GraphicalFunction,
-} from './types';
+import { registerFinalizer, unregisterFinalizer } from './internal/dispose';
+import { Stock, Flow, Aux, Variable, TimeSpec, Link, Loop, LinkPolarity, ModelIssue, GraphicalFunction } from './types';
 import { JsonModel, JsonStock, JsonFlow, JsonAuxiliary, JsonGraphicalFunction, JsonProjectPatch } from './json-types';
 import { Project } from './project';
 import { Sim } from './sim';
@@ -115,6 +105,7 @@ export class Model {
 
     // Increment reference count since we're holding a reference
     simlin_model_ref(ptr);
+    registerFinalizer(this, ptr, simlin_model_unref);
   }
 
   /**
@@ -574,6 +565,7 @@ export class Model {
       return;
     }
 
+    unregisterFinalizer(this);
     simlin_model_unref(this._ptr);
     this._ptr = 0;
     this._disposed = true;

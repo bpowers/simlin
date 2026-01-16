@@ -2,6 +2,13 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "outDir": "lib.browser",
-    "module": "esnext"
-  }
+    "tsBuildInfoFile": "lib.browser/tsconfig.browser.tsbuildinfo",
+    "module": "esnext",
+    "paths": {
+      "@system-dynamics/engine2/internal/wasm": ["src/internal/wasm.browser.ts"],
+      "@system-dynamics/engine2/*": ["src/*"],
+      "@system-dynamics/*": ["src/*"]
+    }
+  },
+  "exclude": ["lib", "lib.browser", "src/internal/wasm.node.ts", "tests", "eslint.config.js"]
 }

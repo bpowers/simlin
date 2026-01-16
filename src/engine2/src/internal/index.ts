@@ -10,7 +10,7 @@
  * high-level API exported from the package root.
  */
 
-export * from './wasm';
+export * from '@system-dynamics/engine2/internal/wasm';
 export * from './memory';
 export * from './types';
 export * from './error';

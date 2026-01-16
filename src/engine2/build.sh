@@ -4,8 +4,8 @@ set -euo pipefail
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$DIR"
 
-# Clean previous builds
-rm -rf lib lib.browser core
+# Clean previous builds (including tsbuildinfo for incremental compilation)
+rm -rf lib lib.browser core *.tsbuildinfo
 
 # Build libsimlin as WASM (without vensim feature due to C++ xmutil dependency)
 echo "Building libsimlin for wasm32-unknown-unknown..."
@@ -18,7 +18,11 @@ cp ../../target/wasm32-unknown-unknown/release/simlin.wasm core/libsimlin.wasm
 # Optimize WASM if wasm-opt is available
 if command -v wasm-opt &> /dev/null && [ "1" != "${DISABLE_WASM_OPT-0}" ]; then
   echo "Running wasm-opt..."
-  wasm-opt core/libsimlin.wasm -o core/libsimlin.wasm-opt -O3
+  wasm-opt core/libsimlin.wasm -o core/libsimlin.wasm-opt -O3 \
+    --enable-mutable-globals \
+    --enable-bulk-memory \
+    --enable-bulk-memory-opt \
+    --enable-nontrapping-float-to-int
   mv core/libsimlin.wasm-opt core/libsimlin.wasm
 else
   echo "Skipping wasm-opt (not installed or disabled)"

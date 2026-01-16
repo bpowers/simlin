@@ -8,6 +8,9 @@ const config = {
   testEnvironment: 'node',
   testMatch: ['<rootDir>/tests/**/*.test.ts'],
   moduleFileExtensions: ['ts', 'js'],
+  moduleNameMapper: {
+    '^@system-dynamics/engine2/internal/wasm$': '<rootDir>/src/internal/wasm.node.ts',
+  },
 };
 
 module.exports = config;
