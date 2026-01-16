@@ -91,56 +91,56 @@
 					flow3
 					</inflow>
 			</stock>
-			<aux name="flow7">
+			<flow name="flow7">
 				<units></units>
 				<doc></doc>
 					<eqn>Time					</eqn>
-			</aux>
-			<aux name="flow1">
+			</flow>
+			<flow name="flow1">
 				<units></units>
 				<doc></doc>
 					<eqn>.34					</eqn>
-			</aux>
-			<aux name="flow1n">
+			</flow>
+			<flow name="flow1n">
 				<units></units>
 				<doc></doc>
 					<eqn>.1					</eqn>
-			</aux>
-			<aux name="flow1p">
+			</flow>
+			<flow name="flow1p">
 				<units></units>
 				<doc></doc>
 					<eqn>.4					</eqn>
-			</aux>
-			<aux name="flow2">
+			</flow>
+			<flow name="flow2">
 				<units></units>
 				<doc></doc>
 					<eqn>-.67					</eqn>
-			</aux>
-			<aux name="flow3">
+			</flow>
+			<flow name="flow3">
 				<units></units>
 				<doc></doc>
 					<eqn>+.72					</eqn>
-			</aux>
-			<aux name="flow4">
+			</flow>
+			<flow name="flow4">
 				<units></units>
 				<doc></doc>
 					<eqn>3e-05					</eqn>
-			</aux>
-			<aux name="flow5">
+			</flow>
+			<flow name="flow5">
 				<units></units>
 				<doc></doc>
 					<eqn>.5					</eqn>
-			</aux>
-			<aux name="flow6">
+			</flow>
+			<flow name="flow6">
 				<units></units>
 				<doc></doc>
 					<eqn>.1223					</eqn>
-			</aux>
-			<aux name="flow8">
+			</flow>
+			<flow name="flow8">
 				<units></units>
 				<doc></doc>
 					<eqn>.3					</eqn>
-			</aux>
+			</flow>
 		</variables>
 	</model>
 </xmile>

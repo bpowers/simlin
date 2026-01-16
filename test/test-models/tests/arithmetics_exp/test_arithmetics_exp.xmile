@@ -1,121 +1,208 @@
-<?xml version="1.0" encoding="utf-8" ?>
-<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
-	<header>
-		<product version="1.0" lang="en">Vensim</product>
-		<vendor>Ventana Systems, Inc.</vendor>
-		<created>
-		</created>
-		<modified>
-		</modified>
-		<name>
-		</name>
-		<caption>
-		</caption>
-	</header>
-	<sim_specs method="RK4" time_units="Month">
-		<start>1</start>
-		<stop>10</stop>
-		<dt>0.1</dt>
-	</sim_specs>
-	<dimensions>
-		<dim name="subs">
-			<elem name="sub1" />
-			<elem name="sub2" />
-			<elem name="sub3" />
-			<elem name="sub4" />
-			<elem name="sub5" />
-			<elem name="sub6" />
-			<elem name="sub7" />
-			<elem name="sub8" />
-			<elem name="sub9" />
-		</dim>
-	</dimensions>
-	<model>
-		<variables>
-			<aux name="add substract">
-				<units></units>
-				<doc></doc>
-				<dimensions>
-				<dim name="subs" />
-				</dimensions>
-					<eqn>cons-time2+time3-cons					</eqn>
-					<eqn>-cons - time2 + time3 - cons					</eqn>
-					<eqn>-(cons-time2+time3-cons)					</eqn>
-					<eqn>-(-cons -time2+ time3-cons)					</eqn>
-					<eqn>-(0.01- time2)+(time3-cons)					</eqn>
-					<eqn>-(cons- time2)- (time3-cons)					</eqn>
-					<eqn>-(cons-    time2)+(time3-cons)					</eqn>
-					<eqn>(cons-time2)-    (time3-cons)					</eqn>
-					<eqn>(0.01-time2)   +(time3-cons)					</eqn>
-			</aux>
-			<aux name="combined">
-				<units></units>
-				<doc></doc>
-				<dimensions>
-				<dim name="subs" />
-				</dimensions>
-					<eqn>(0.01/time2)+(time3 /cons)					</eqn>
-					<eqn>-(cons/ time2+time3/cons)					</eqn>
-					<eqn>-cons/(time2^(2+cons)-time3/cons)					</eqn>
-					<eqn>1/(-cons+3/time2*time3/(cons-Time))					</eqn>
-					<eqn>-(0.01/ time2)*(time3/cons)					</eqn>
-					<eqn>-(+0.012/time2)+(cons/  time2)/(time3/cons)					</eqn>
-					<eqn>((+0.012 +cons-Time) / time2)/(  time3/cons)					</eqn>
-					<eqn>(-0.012 +cons- Time / time2)/(time3/cons)					</eqn>
-					<eqn>(120/time2-120)*(time3/(cons-120))					</eqn>
-			</aux>
-			<aux name="expo">
-				<units></units>
-				<doc></doc>
-				<dimensions>
-				<dim name="subs" />
-				</dimensions>
-					<eqn>30 ^cons					</eqn>
-					<eqn>30^ cons ^ cons					</eqn>
-					<eqn>cons^(   cons^  0.003)					</eqn>
-					<eqn>(cons    ^cons)   ^30					</eqn>
-					<eqn>- Time ^ 30					</eqn>
-					<eqn>30^ - 30^-cons					</eqn>
-					<eqn>(-Time)^ 30					</eqn>
-					<eqn>Time ^ (-30  )					</eqn>
-					<eqn>Time^-0.03					</eqn>
-			</aux>
-			<aux name="product">
-				<units></units>
-				<doc></doc>
-				<dimensions>
-				<dim name="subs" />
-				</dimensions>
-					<eqn>cons/ time2*time3/0.03					</eqn>
-					<eqn>-cons/time2*time3 /0.03					</eqn>
-					<eqn>-(cons/time2 *time3/0.03)					</eqn>
-					<eqn>1/(-cons/time2*time3/0.03)					</eqn>
-					<eqn>-(cons/ time2)*(time3/0.03)					</eqn>
-					<eqn>-(cons/time2)/ (time3/0.13)					</eqn>
-					<eqn>-(cons/time2)*(time3/0.13)					</eqn>
-					<eqn>(cons/time2) /(time3/0.13)					</eqn>
-					<eqn>(cons /time2 )*(time3/0.13)					</eqn>
-			</aux>
-			<aux name="time1">
-				<units></units>
-				<doc></doc>
-					<eqn>-Time					</eqn>
-			</aux>
-			<aux name="time2">
-				<units></units>
-				<doc></doc>
-					<eqn>2*Time					</eqn>
-			</aux>
-			<aux name="time3">
-				<units></units>
-				<doc></doc>
-					<eqn>3*Time					</eqn>
-			</aux>
-			<aux name="cons">
-				<units></units>
-				<doc></doc>
-					<eqn>1.2					</eqn>
-			</aux>
-		</variables>
-	</model>
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler" time_units="Month">
+        <start>1</start>
+        <stop>10</stop>
+        <dt>0.1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="subs">
+            <elem name="sub1"></elem>
+            <elem name="sub2"></elem>
+            <elem name="sub3"></elem>
+            <elem name="sub4"></elem>
+            <elem name="sub5"></elem>
+            <elem name="sub6"></elem>
+            <elem name="sub7"></elem>
+            <elem name="sub8"></elem>
+            <elem name="sub9"></elem>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="add substract">
+                <dimensions>
+                    <dim name="subs"></dim>
+                </dimensions>
+                <element subscript="sub1">
+                    <eqn>cons-time2+time3-cons</eqn>
+                </element>
+                <element subscript="sub2">
+                    <eqn>-cons-time2+time3-cons</eqn>
+                </element>
+                <element subscript="sub3">
+                    <eqn>-(cons-time2+time3-cons)</eqn>
+                </element>
+                <element subscript="sub4">
+                    <eqn>-(-cons-time2+time3-cons)</eqn>
+                </element>
+                <element subscript="sub5">
+                    <eqn>-(0.01-time2)+(time3-cons)</eqn>
+                </element>
+                <element subscript="sub6">
+                    <eqn>-(cons-time2)-(time3-cons)</eqn>
+                </element>
+                <element subscript="sub7">
+                    <eqn>-(cons-time2)+(time3-cons)</eqn>
+                </element>
+                <element subscript="sub8">
+                    <eqn>(cons-time2)-(time3-cons)</eqn>
+                </element>
+                <element subscript="sub9">
+                    <eqn>(0.01-time2)+(time3-cons)</eqn>
+                </element>
+            </aux>
+            <aux name="combined">
+                <dimensions>
+                    <dim name="subs"></dim>
+                </dimensions>
+                <element subscript="sub1">
+                    <eqn>(0.01/time2)+(time3/cons)</eqn>
+                </element>
+                <element subscript="sub2">
+                    <eqn>-(cons/time2+time3/cons)</eqn>
+                </element>
+                <element subscript="sub3">
+                    <eqn>-cons/(time2^(2+cons)-time3/cons)</eqn>
+                </element>
+                <element subscript="sub4">
+                    <eqn>1/(-cons+3/time2*time3/(cons-Time))</eqn>
+                </element>
+                <element subscript="sub5">
+                    <eqn>-(0.01/time2)*(time3/cons)</eqn>
+                </element>
+                <element subscript="sub6">
+                    <eqn>-(+0.012/time2)+(cons/time2)/(time3/cons)</eqn>
+                </element>
+                <element subscript="sub7">
+                    <eqn>((0.012+cons-Time)/time2)/(time3/cons)</eqn>
+                </element>
+                <element subscript="sub8">
+                    <eqn>(-0.012+cons-Time/time2)/(time3/cons)</eqn>
+                </element>
+                <element subscript="sub9">
+                    <eqn>(120/time2-120)*(time3/(cons-120))</eqn>
+                </element>
+            </aux>
+            <aux name="cons">
+                <eqn>1.2</eqn>
+            </aux>
+            <aux name="expo">
+                <dimensions>
+                    <dim name="subs"></dim>
+                </dimensions>
+                <element subscript="sub1">
+                    <eqn>30^cons</eqn>
+                </element>
+                <element subscript="sub2">
+                    <eqn>30^cons^cons</eqn>
+                </element>
+                <element subscript="sub3">
+                    <eqn>cons^(cons^0.003)</eqn>
+                </element>
+                <element subscript="sub4">
+                    <eqn>(cons^cons)^30</eqn>
+                </element>
+                <element subscript="sub5">
+                    <eqn>-Time^30</eqn>
+                </element>
+                <element subscript="sub6">
+                    <eqn>30^-30^-cons</eqn>
+                </element>
+                <element subscript="sub7">
+                    <eqn>(-Time)^30</eqn>
+                </element>
+                <element subscript="sub8">
+                    <eqn>Time^(-30)</eqn>
+                </element>
+                <element subscript="sub9">
+                    <eqn>Time^-0.03</eqn>
+                </element>
+            </aux>
+            <aux name="product">
+                <dimensions>
+                    <dim name="subs"></dim>
+                </dimensions>
+                <element subscript="sub1">
+                    <eqn>cons/time2*time3/0.03</eqn>
+                </element>
+                <element subscript="sub2">
+                    <eqn>-cons/time2*time3/0.03</eqn>
+                </element>
+                <element subscript="sub3">
+                    <eqn>-(cons/time2*time3/0.03)</eqn>
+                </element>
+                <element subscript="sub4">
+                    <eqn>1/(-cons/time2*time3/0.03)</eqn>
+                </element>
+                <element subscript="sub5">
+                    <eqn>-(cons/time2)*(time3/0.03)</eqn>
+                </element>
+                <element subscript="sub6">
+                    <eqn>-(cons/time2)/(time3/0.13)</eqn>
+                </element>
+                <element subscript="sub7">
+                    <eqn>-(cons/time2)*(time3/0.13)</eqn>
+                </element>
+                <element subscript="sub8">
+                    <eqn>(cons/time2)/(time3/0.13)</eqn>
+                </element>
+                <element subscript="sub9">
+                    <eqn>(cons/time2)*(time3/0.13)</eqn>
+                </element>
+            </aux>
+            <aux name="time1">
+                <eqn>-Time</eqn>
+            </aux>
+            <aux name="time2">
+                <eqn>2*Time</eqn>
+            </aux>
+            <aux name="time3">
+                <eqn>3*Time</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view isee:show_pages="false" page_width="800" page_height="600" view_type="stock_flow">
+                <aux name="cons" x="215" y="317" label_side="bottom"></aux>
+                <aux name="time1" x="206" y="406" label_side="bottom"></aux>
+                <aux name="time2" x="198" y="511" label_side="bottom"></aux>
+                <aux name="time3" x="197" y="579" label_side="bottom"></aux>
+                <aux name="expo" x="464" y="120" label_side="bottom"></aux>
+                <connector angle="39.28155998183638">
+                    <from>cons</from>
+                    <to>expo</to>
+                </connector>
+                <aux name="add_substract" x="502" y="257" label_side="bottom"></aux>
+                <connector angle="40.18418052400432">
+                    <from>time2</from>
+                    <to>add_substract</to>
+                </connector>
+                <connector angle="46.88001411451546">
+                    <from>time3</from>
+                    <to>add_substract</to>
+                </connector>
+                <aux name="product" x="500" y="388" label_side="bottom"></aux>
+                <connector angle="22.147318043836435">
+                    <from>time2</from>
+                    <to>product</to>
+                </connector>
+                <connector angle="32.54970933084218">
+                    <from>time3</from>
+                    <to>product</to>
+                </connector>
+                <connector angle="12.647035748820144">
+                    <from>cons</from>
+                    <to>add_substract</to>
+                </connector>
+                <connector angle="-13.493332938974447">
+                    <from>cons</from>
+                    <to>product</to>
+                </connector>
+            </view>
+        </views>
+    </model>
 </xmile>

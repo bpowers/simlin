@@ -38,6 +38,7 @@
             <flow name="if_else3">
                 <eqn>IF Time &gt; 10 THEN Time ELSE -Time</eqn>
                 <non_negative>FALSE  </non_negative>
+            </flow>
             <stock name="TestStock2">
                 <inflow>if_else2</inflow>
                 <eqn>10</eqn>
