@@ -79,7 +79,9 @@ async function resolveWasmSource(source?: WasmSourceProvider): Promise<WasmSourc
 export async function loadFileNode(pathOrUrl: string | URL): Promise<ArrayBuffer> {
   const fs = await import('node:fs/promises');
   const nodeBuffer = await fs.readFile(pathOrUrl);
-  return nodeBuffer.buffer.slice(nodeBuffer.byteOffset, nodeBuffer.byteOffset + nodeBuffer.byteLength);
+  // fs.readFile always returns a Buffer backed by ArrayBuffer, not SharedArrayBuffer
+  const buffer = nodeBuffer.buffer as ArrayBuffer;
+  return buffer.slice(nodeBuffer.byteOffset, nodeBuffer.byteOffset + nodeBuffer.byteLength);
 }
 
 /**

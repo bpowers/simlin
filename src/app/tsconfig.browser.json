@@ -26,7 +26,8 @@
     "../**/*.test.ts",
     "../**/*.spec.ts",
     "../server/**",
-    "../**/node_modules/**"
+    "../**/node_modules/**",
+    "../engine2/src/internal/wasm.node.ts"
   ],
   "references": [
     { "path": "../core/tsconfig.browser.json" },
