@@ -42,6 +42,7 @@ import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows }
 import { Module, moduleBounds, ModuleProps } from './Module';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
+import { updateArcAngle } from '../arc-utils';
 
 export const inCreationUid = -2;
 export const fauxTargetUid = -3;
@@ -471,8 +472,7 @@ export const Canvas = styled(
         const oldθ = Math.atan2(oldTo.cy - oldFrom.cy, oldTo.cx - oldFrom.cx);
         const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
         const diffθ = oldθ - newθ;
-        const angle = element.arc || 180.0;
-        element = element.set('arc', angle - radToDeg(diffθ));
+        element = element.set('arc', updateArcAngle(element.arc, radToDeg(diffθ)));
       }
       const props: ConnectorProps = {
         element,

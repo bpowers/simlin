@@ -29,6 +29,7 @@ import { Project as Engine2Project, SimlinErrorKind, SimlinUnitErrorKind } from 
 import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs, JsonArrayedEquation } from '@system-dynamics/engine2';
 import type { ErrorDetail } from '@system-dynamics/engine2';
 import { stockFlowViewToJson } from './view-conversion';
+import { updateArcAngle, radToDeg } from './arc-utils';
 import {
   Project,
   Model,
@@ -81,9 +82,6 @@ const SearchbarWidthSm = 359;
 const SearchbarWidthMd = 420;
 const SearchbarWidthLg = 480;
 
-function radToDeg(r: number): number {
-  return (r * 180) / Math.PI;
-}
 
 function convertErrorDetails(
   errors: ErrorDetail[],
@@ -835,7 +833,7 @@ export const Editor = styled(
         const oldθ = Math.atan2(oldTo.cy - from.cy, oldTo.cx - from.cx);
         const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
         const diffθ = oldθ - newθ;
-        const angle = (element.arc || 180) - radToDeg(diffθ);
+        const angle = updateArcAngle(element.arc, radToDeg(diffθ));
 
         return element.merge({
           arc: angle,
@@ -850,7 +848,7 @@ export const Editor = styled(
         const oldθ = Math.atan2(0 - from.cy, 0 - from.cx);
         const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
         const diffθ = oldθ - newθ;
-        const angle = (link.arc || 180) - radToDeg(diffθ);
+        const angle = updateArcAngle(link.arc, radToDeg(diffθ));
 
         const newLink = link.merge({
           uid: nextUid++,
@@ -1072,9 +1070,7 @@ export const Editor = styled(
         const newθ = atan2(to.cy - from.cy, to.cx - from.cx);
         const diffθ = oldθ - newθ;
 
-        return element.update('arc', (angle) => {
-          return defined(angle) - radToDeg(diffθ);
-        });
+        return element.update('arc', (angle) => updateArcAngle(angle, radToDeg(diffθ)));
       });
       this.updateView(view.merge({ elements }));
     };
