@@ -49,14 +49,8 @@
     "clean": "yarn workspaces run clean",
     "deploy": "export NODE_ENV=production && yarn clean && yarn build && yarn workspace @system-dynamics/app deploy && gcloud app deploy ./.app.prod.yaml && yarn workspace @system-dynamics/app deploy-clean",
     "start": "node src/server/lib",
-    "test": "playwright test",
-    "test:visual": "playwright test --project=visual",
-    "test:visual:update": "playwright test --project=visual --update-snapshots",
-    "test:visual:ui": "playwright test --project=visual --ui",
-    "test:basic": "playwright test ui-tests/visual/basic.spec.ts --project=visual",
-    "test:debug": "playwright test ui-tests/visual/debug.spec.ts --project=visual --headed",
-    "test:integration": "TEST_MODE=integration playwright test --project=integration",
-    "test:integration:ui": "TEST_MODE=integration playwright test --project=integration --ui"
+    "test:ui": "playwright test",
+    "test:ui:ui": "playwright test --ui"
   },
   "dependencies": {}
 }

@@ -26,12 +26,6 @@ import { Login } from './Login';
 import { NewUser } from './NewUser';
 import { User } from './User';
 
-// Only import VisualTestPage in development/test environments
-const VisualTestPage =
-  process.env.NODE_ENV !== 'production'
-    ? React.lazy(() => import('./VisualTestPage').then((m) => ({ default: m.VisualTestPage })))
-    : null;
-
 const config = {
   apiKey: 'AIzaSyConH72HQl9xOtjmYJO9o2kQ9nZZzl96G8',
   authDomain: 'auth.simlin.com',
@@ -243,34 +237,8 @@ const InnerApp = styled(
       return <Home isNewProject={isNewProject} user={defined(this.state.user)} />;
     };
 
-    visualTest = (_props: RouteComponentProps) => {
-      if (VisualTestPage) {
-        return (
-          <React.Suspense fallback={<div>Loading...</div>}>
-            <VisualTestPage />
-          </React.Suspense>
-        );
-      }
-      return <div>Not available in production</div>;
-    };
-
     render() {
       const { className } = this.props;
-
-      // Allow visual test page to bypass authentication (only in development)
-      const currentPath = window.location.pathname;
-      if (currentPath === '/visual-test' && process.env.NODE_ENV !== 'production' && VisualTestPage) {
-        return (
-          <React.Fragment>
-            <CssBaseline />
-            <div className={className}>
-              <React.Suspense fallback={<div>Loading test page...</div>}>
-                <VisualTestPage />
-              </React.Suspense>
-            </div>
-          </React.Fragment>
-        );
-      }
 
       const urlParams = new URLSearchParams(window.location.search);
       const projectParam = urlParams.get('project');
@@ -294,7 +262,6 @@ const InnerApp = styled(
           <Switch>
             <div className={className}>
               <Route path="/" component={this.home} />
-              {process.env.NODE_ENV !== 'production' && <Route path="/visual-test" component={this.visualTest} />}
               <Route path="/:username/:projectName" component={this.editor} />
               <Route path="/new" component={this.home} />
             </div>

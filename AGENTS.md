@@ -3,13 +3,13 @@
 ## Project Structure & Module Organization
 - Yarn workspaces under `src/`: `app` (React UI), `server` (Express API), `diagram` (editor components), `core` (shared TS utils), `engine2`/`xmutil-js` (WASM bindings). Site docs in `website/`.
 - Rust workspace under `src/`: `simlin-engine` (core), `simlin-cli`, `simlin-compat`, `libsimlin`, `xmutil`.
-- Tests: Playwright UI tests in `ui-tests/{visual,integration}`; model fixtures in `test/`; Playwright output in `test-results/`.
+- Tests: Playwright UI tests in `ui-tests/integration/`; model fixtures in `test/`; Playwright output in `test-results/`.
 - Assets: `public/`, `stdlib/*.stmx` (compiled to protobuf), protobufs in `src/**/schemas`.
 
 ## Build, Test, and Development Commands
 - `yarn start:firestore` / `yarn start:backend` / `yarn start:frontend`: Run emulators, API (3030), and UI (3000) locally.
 - `yarn build` / `yarn clean`: Build or clean all workspaces; compiles Rust→WASM.
-- `yarn test`: Run Playwright tests; `yarn test:visual`, `yarn test:integration` for specific suites.
+- `yarn test:ui`: Run Playwright integration tests.
 - `cargo test`: Run Rust engine tests.
 - `yarn lint` / `yarn format`: Lint and format TS and Rust (`cargo clippy`, `cargo fmt`).
 - `yarn build:gen-protobufs` / `yarn rebuild-stdlib`: Regenerate TypeScript protobufs and stdlib model protobufs.
@@ -20,8 +20,8 @@
 - File names: TS source in package folders (`src/<pkg>/`), tests `*.spec.ts` under `ui-tests/`.
 
 ## Testing Guidelines
-- UI: Playwright projects `visual` and `integration` (naming: `ui-tests/visual/foo.spec.ts`). Update snapshots with `yarn test:visual:update`.
-- Integration tests require services running; Playwright config can auto-start servers.
+- UI: Playwright integration tests in `ui-tests/integration/` (e.g., `auth.spec.ts`, `caret-mapping.spec.ts`). Run with `yarn test:ui`.
+- Integration tests require services running; Playwright config auto-starts servers (Firestore, Auth emulator, backend, frontend).
 - Rust: Unit/integration tests live alongside crates; run via `cargo test`.
 
 ## Commit & Pull Request Guidelines
