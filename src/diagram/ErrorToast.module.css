@@ -1,0 +1,29 @@
+.success {
+  background-color: #43a047;
+}
+
+.error {
+  background-color: #c62828;
+}
+
+.info {
+  background-color: #1976d2;
+}
+
+.warning {
+  background-color: #ffa000;
+}
+
+.icon {
+  font-size: 20px;
+}
+
+.iconVariant {
+  opacity: 0.9;
+  margin-right: var(--spacing-1);
+}
+
+.message {
+  display: flex;
+  align-items: center;
+}

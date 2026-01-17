@@ -1,0 +1,12 @@
+.connector {
+  stroke-width: 4px;
+  stroke: gray;
+  fill: none;
+}
+
+.arrowhead {
+  stroke-width: 2px;
+  stroke-linejoin: round;
+  stroke: gray;
+  fill: gray;
+}

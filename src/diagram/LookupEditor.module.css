@@ -1,0 +1,36 @@
+.yAxisMax {
+  width: 30%;
+  padding-right: 4px;
+  margin-top: 0;
+}
+
+.yAxisMin {
+  width: 30%;
+  padding-right: 4px;
+  margin-top: 4px;
+}
+
+.xScaleMin {
+  width: 30%;
+  padding-right: 4px;
+}
+
+.xScaleMax {
+  width: 30%;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+.datapoints {
+  width: 40%;
+  padding-left: 4px;
+}
+
+.buttonLeft {
+  float: left;
+  margin-right: auto;
+}
+
+.buttonRight {
+  float: right;
+}

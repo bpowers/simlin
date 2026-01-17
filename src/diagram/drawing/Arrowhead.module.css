@@ -1,0 +1,32 @@
+.arrowheadFlow {
+  stroke-width: 1px;
+  stroke-linejoin: round;
+  stroke: var(--color-black);
+  fill: var(--color-white);
+}
+
+.arrowheadFlowSelected {
+  stroke-width: 1;
+  stroke-linejoin: round;
+  stroke: var(--color-selected);
+  fill: white;
+}
+
+.arrowheadConnector {
+  stroke-width: 1;
+  stroke-linejoin: round;
+  stroke: var(--color-connector);
+  fill: var(--color-connector);
+}
+
+.arrowheadConnectorSelected {
+  stroke-width: 1;
+  stroke-linejoin: round;
+  stroke: var(--color-selected);
+  fill: var(--color-selected);
+}
+
+.arrowheadBg {
+  fill: white;
+  opacity: 0;
+}

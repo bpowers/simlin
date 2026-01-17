@@ -1,0 +1,46 @@
+.flow .outer {
+  fill: none;
+  stroke-width: 4px;
+  stroke: var(--color-black);
+}
+
+.flow .outerSelected {
+  fill: none;
+  stroke-width: 4px;
+  stroke: var(--color-selected);
+}
+
+.flow .inner {
+  fill: none;
+  stroke-width: 2px;
+  stroke: var(--color-white);
+}
+
+.flow circle {
+  stroke-width: 1px;
+  fill: var(--color-white);
+  stroke: var(--color-black);
+}
+
+.flow.targetGood circle {
+  stroke: var(--color-target-good);
+  stroke-width: 2px;
+}
+
+.flow.targetBad circle {
+  stroke: var(--color-target-bad);
+  stroke-width: 2px;
+}
+
+.flow.selected text {
+  fill: var(--color-selected);
+}
+
+.flow.selected circle {
+  stroke: var(--color-selected);
+}
+
+.flow .errorIndicator {
+  stroke-width: 0px;
+  fill: var(--color-indicator-warning);
+}

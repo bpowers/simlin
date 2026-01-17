@@ -4,13 +4,13 @@
 
 import * as React from 'react';
 
-import { styled } from '@mui/material/styles';
-
 import { ViewElement, CloudViewElement } from '@system-dynamics/core/datamodel';
 import { defined } from '@system-dynamics/core/common';
 
 import { Point, Rect, square } from './common';
 import { CloudRadius, CloudWidth } from './default';
+
+import styles from './Cloud.module.css';
 
 const CloudPath =
   'M 25.731189,3.8741489 C 21.525742,3.8741489 18.07553,7.4486396 17.497605,' +
@@ -52,34 +52,24 @@ export function cloudBounds(element: CloudViewElement): Rect {
   };
 }
 
-export const Cloud = styled(
-  class Cloud extends React.PureComponent<CloudProps & { className?: string }> {
-    handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.props.onSelection(this.props.element, e);
-    };
+export class Cloud extends React.PureComponent<CloudProps> {
+  handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    this.props.onSelection(this.props.element, e);
+  };
 
-    render() {
-      const { element, className } = this.props;
-      const x = defined(element.x);
-      const y = defined(element.y);
+  render() {
+    const { element } = this.props;
+    const x = defined(element.x);
+    const y = defined(element.y);
 
-      const radius = CloudRadius;
-      const diameter = radius * 2;
+    const radius = CloudRadius;
+    const diameter = radius * 2;
 
-      const scale = diameter / CloudWidth;
-      const t = `matrix(${scale}, 0, 0, ${scale}, ${x - radius}, ${y - radius})`;
+    const scale = diameter / CloudWidth;
+    const t = `matrix(${scale}, 0, 0, ${scale}, ${x - radius}, ${y - radius})`;
 
-      return <path d={CloudPath} className={className} transform={t} onPointerDown={this.handlePointerDown} />;
-    }
-  },
-)(
-  ({ theme }) => `
-    stroke-width: 2px;
-    stroke-linejoin: round;
-    stroke-miterlimit: 4px;
-    fill: ${theme.palette.common.white};
-    stroke: ${theme.palette.mode === 'dark' ? '#2D498A' : '#6388dc'};
-    `,
-);
+    return <path d={CloudPath} className={styles.cloud} transform={t} onPointerDown={this.handlePointerDown} />;
+  }
+}

@@ -1,0 +1,16 @@
+.initial {
+  fill: none;
+  fill-rule: evenodd;
+  stroke: none;
+}
+
+.red {
+  fill: #ffffff;
+  stroke: #c83639;
+  stroke-width: 3.5px;
+  stroke-linejoin: round;
+  stroke-miterlimit: 4px;
+  stroke-opacity: 1;
+  stroke-dasharray: none;
+  fill-opacity: 1;
+}

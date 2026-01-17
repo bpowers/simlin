@@ -1,0 +1,25 @@
+.connector {
+  stroke-width: 0.5px;
+  stroke: var(--color-connector);
+  fill: none;
+}
+
+.connectorDashed {
+  stroke-width: 0.5px;
+  stroke: var(--color-connector);
+  stroke-dasharray: 2px;
+  fill: none;
+}
+
+.connectorSelected {
+  stroke-width: 1px;
+  stroke: var(--color-selected);
+  fill: none;
+}
+
+.connectorBg {
+  stroke-width: 7px;
+  stroke: white;
+  opacity: 0;
+  fill: none;
+}

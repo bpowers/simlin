@@ -1,0 +1,27 @@
+.card {
+  width: 359px;
+}
+
+@media (min-width: 900px) and (max-width: 1199.95px) {
+  .card {
+    width: 420px;
+  }
+}
+
+@media (min-width: 1200px) {
+  .card {
+    width: 480px;
+  }
+}
+
+.inner {
+  padding-top: 72px;
+}
+
+.list {
+  color: #cc0000;
+}
+
+.yay {
+  text-align: center;
+}

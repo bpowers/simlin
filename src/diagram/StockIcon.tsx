@@ -4,20 +4,19 @@
 
 import * as React from 'react';
 
-import { styled } from '@mui/material/styles';
 import SvgIcon from '@mui/material/SvgIcon';
 
-export const StockIcon: React.FunctionComponent = styled((props) => {
+import styles from './StockIcon.module.css';
+
+export const StockIcon: React.FunctionComponent = (props) => {
   return (
-    <SvgIcon viewBox="0 0 50 50" {...props}>
+    <SvgIcon viewBox="0 0 50 50" className={styles.stockIcon} {...props}>
       <g>
         <rect x={2.5} y={7.5} width={45} height={35} />
       </g>
     </SvgIcon>
   );
-})(`
-  fill: gray;
-`);
+};
 
 StockIcon.displayName = 'Stock';
 
