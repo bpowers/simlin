@@ -115,7 +115,7 @@ class TestProjectSerialization:
         # Verify it's valid JSON
         project_dict = json.loads(json_data.decode("utf-8"))
         assert "name" in project_dict
-        assert "sim_specs" in project_dict
+        assert "simSpecs" in project_dict
         assert "models" in project_dict
         assert len(project_dict["models"]) > 0
 
@@ -212,14 +212,14 @@ class TestProjectEditing:
 
         # Verify via JSON
         project_json = json.loads(project.serialize_json().decode("utf-8"))
-        sim_specs = project_json["sim_specs"]
+        sim_specs = project_json["simSpecs"]
 
-        assert sim_specs["start_time"] == pytest.approx(0.0)
-        assert sim_specs["end_time"] == pytest.approx(42.0)
+        assert sim_specs["startTime"] == pytest.approx(0.0)
+        assert sim_specs["endTime"] == pytest.approx(42.0)
         assert sim_specs["dt"] == "0.25"
-        assert sim_specs["save_step"] == pytest.approx(0.5)
+        assert sim_specs["saveStep"] == pytest.approx(0.5)
         assert sim_specs["method"] == "rk4"
-        assert sim_specs["time_units"] == "Minutes"
+        assert sim_specs["timeUnits"] == "Minutes"
 
     def test_new_project_creates_valid_json(self) -> None:
         """Project.new() should create a project with valid JSON representation."""
@@ -228,9 +228,9 @@ class TestProjectEditing:
         project_json = json.loads(project.serialize_json().decode("utf-8"))
 
         assert project_json["name"] == "test"
-        assert project_json["sim_specs"]["start_time"] == 5.0
-        assert project_json["sim_specs"]["end_time"] == 20.0
-        assert project_json["sim_specs"]["dt"] == "0.5"
+        assert project_json["simSpecs"]["startTime"] == 5.0
+        assert project_json["simSpecs"]["endTime"] == 20.0
+        assert project_json["simSpecs"]["dt"] == "0.5"
         assert len(project_json["models"]) == 1
         assert project_json["models"][0]["name"] == "main"
 
@@ -272,7 +272,7 @@ class TestProjectEditing:
         project.set_sim_specs(dt="1/4")
 
         project_json = json.loads(project.serialize_json().decode("utf-8"))
-        assert project_json["sim_specs"]["dt"] == "1/4"
+        assert project_json["simSpecs"]["dt"] == "1/4"
 
 
 class TestProjectRepr:

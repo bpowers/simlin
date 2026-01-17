@@ -110,7 +110,7 @@ describe('High-Level API', () => {
 
       const parsed = JSON.parse(json);
       expect(parsed).toHaveProperty('models');
-      expect(parsed).toHaveProperty('sim_specs');
+      expect(parsed).toHaveProperty('simSpecs');
 
       project.dispose();
     });
@@ -571,7 +571,7 @@ describe('High-Level API', () => {
       const builder = new ModelPatchBuilder('test_model');
       const stock: JsonStock = {
         name: 'population',
-        initial_equation: '100',
+        initialEquation: '100',
         inflows: ['births'],
         outflows: ['deaths'],
       };
@@ -581,7 +581,7 @@ describe('High-Level API', () => {
       expect(builder.hasOperations()).toBe(true);
       const patch = builder.build();
       expect(patch.ops.length).toBe(1);
-      expect(patch.ops[0]).toEqual({ type: 'upsert_stock', payload: { stock } });
+      expect(patch.ops[0]).toEqual({ type: 'upsertStock', payload: { stock } });
     });
 
     it('should add upsert flow operation', () => {
@@ -594,7 +594,7 @@ describe('High-Level API', () => {
       builder.upsertFlow(flow);
 
       const patch = builder.build();
-      expect(patch.ops[0]).toEqual({ type: 'upsert_flow', payload: { flow } });
+      expect(patch.ops[0]).toEqual({ type: 'upsertFlow', payload: { flow } });
     });
 
     it('should add upsert aux operation', () => {
@@ -607,7 +607,7 @@ describe('High-Level API', () => {
       builder.upsertAux(aux);
 
       const patch = builder.build();
-      expect(patch.ops[0]).toEqual({ type: 'upsert_aux', payload: { aux } });
+      expect(patch.ops[0]).toEqual({ type: 'upsertAux', payload: { aux } });
     });
 
     it('should add delete variable operation', () => {
@@ -615,7 +615,7 @@ describe('High-Level API', () => {
       builder.deleteVariable('old_var');
 
       const patch = builder.build();
-      expect(patch.ops[0]).toEqual({ type: 'delete_variable', payload: { ident: 'old_var' } });
+      expect(patch.ops[0]).toEqual({ type: 'deleteVariable', payload: { ident: 'old_var' } });
     });
 
     it('should add rename variable operation', () => {
@@ -623,13 +623,13 @@ describe('High-Level API', () => {
       builder.renameVariable('old_name', 'new_name');
 
       const patch = builder.build();
-      expect(patch.ops[0]).toEqual({ type: 'rename_variable', payload: { from: 'old_name', to: 'new_name' } });
+      expect(patch.ops[0]).toEqual({ type: 'renameVariable', payload: { from: 'old_name', to: 'new_name' } });
     });
 
     it('should accumulate multiple operations', () => {
       const builder = new ModelPatchBuilder('test_model');
 
-      builder.upsertStock({ name: 'stock1', initial_equation: '0' });
+      builder.upsertStock({ name: 'stock1', initialEquation: '0' });
       builder.upsertFlow({ name: 'flow1', equation: '1' });
       builder.upsertAux({ name: 'aux1', equation: '2' });
       builder.deleteVariable('old_var');
@@ -722,7 +722,7 @@ describe('High-Level API', () => {
       model.edit((currentVars, patch) => {
         patch.upsertStock({
           name: 'new_stock',
-          initial_equation: '50',
+          initialEquation: '50',
           inflows: [],
           outflows: [],
         });
@@ -799,25 +799,25 @@ describe('High-Level API', () => {
   });
 
   describe('Issue fixes', () => {
-    // Test for: Model.timeSpec should use model-level sim_specs when present
-    it('should use model-level sim_specs when present', async () => {
-      // Create a project with model-level sim_specs override via JSON
+    // Test for: Model.timeSpec should use model-level simSpecs when present
+    it('should use model-level simSpecs when present', async () => {
+      // Create a project with model-level simSpecs override via JSON
       const projectJson = {
         name: 'test_project',
-        sim_specs: {
-          start_time: 0,
-          end_time: 100,
+        simSpecs: {
+          startTime: 0,
+          endTime: 100,
           dt: '1',
-          time_units: 'years',
+          timeUnits: 'years',
         },
         models: [
           {
             name: 'model_with_override',
-            sim_specs: {
-              start_time: 10,
-              end_time: 50,
+            simSpecs: {
+              startTime: 10,
+              endTime: 50,
               dt: '0.5',
-              time_units: 'months',
+              timeUnits: 'months',
             },
             stocks: [],
             flows: [],
@@ -849,13 +849,13 @@ describe('High-Level API', () => {
       project.dispose();
     });
 
-    // Test for: Stock initial_equation should read from arrayed_equation.initial_equation
-    it('should read arrayed stock initial_equation correctly', async () => {
+    // Test for: Stock initialEquation should read from arrayedEquation.initialEquation
+    it('should read arrayed stock initialEquation correctly', async () => {
       const projectJson = {
         name: 'test_project',
-        sim_specs: {
-          start_time: 0,
-          end_time: 10,
+        simSpecs: {
+          startTime: 0,
+          endTime: 10,
           dt: '1',
         },
         dimensions: [{ name: 'Region', elements: ['north', 'south'] }],
@@ -865,9 +865,9 @@ describe('High-Level API', () => {
             stocks: [
               {
                 name: 'population',
-                arrayed_equation: {
+                arrayedEquation: {
                   dimensions: ['Region'],
-                  initial_equation: '1000',
+                  initialEquation: '1000',
                 },
                 inflows: [],
                 outflows: [],
@@ -943,9 +943,9 @@ describe('High-Level API', () => {
       // Create project with error in main model only
       const projectJson = {
         name: 'test_project',
-        sim_specs: {
-          start_time: 0,
-          end_time: 10,
+        simSpecs: {
+          startTime: 0,
+          endTime: 10,
           dt: '1',
         },
         models: [

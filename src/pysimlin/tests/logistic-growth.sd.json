@@ -1,8 +1,8 @@
 {
     "name": "logistic-growth",
-    "sim_specs": {
-        "start_time": 0,
-        "end_time": 100,
+    "simSpecs": {
+        "startTime": 0,
+        "endTime": 100,
         "dt": "1",
         "method": "euler"
     },
@@ -12,7 +12,7 @@
             "stocks": [
                 {
                     "name": "population",
-                    "initial_equation": "5",
+                    "initialEquation": "5",
                     "inflows": [
                         "net_birth_rate"
                     ],
@@ -44,9 +44,9 @@
                 }
             ],
             "modules": null,
-            "sim_specs": {
-                "start_time": 0,
-                "end_time": 100,
+            "simSpecs": {
+                "startTime": 0,
+                "endTime": 100,
                 "dt": "1",
                 "method": "euler"
             },
@@ -54,7 +54,7 @@
                 {
                     "elements": [
                         {
-                            "label_side": "top",
+                            "labelSide": "top",
                             "name": "Population",
                             "type": "stock",
                             "uid": 1,
@@ -62,16 +62,16 @@
                             "y": 259.8000183105469
                         },
                         {
-                            "label_side": "top",
+                            "labelSide": "top",
                             "name": "net birth rate",
                             "points": [
                                 {
-                                    "attached_to_uid": 13,
+                                    "attachedToUid": 13,
                                     "x": 456.79998779296875,
                                     "y": 258.60003662109375
                                 },
                                 {
-                                    "attached_to_uid": 1,
+                                    "attachedToUid": 1,
                                     "x": 579.9000244140625,
                                     "y": 258.60003662109375
                                 }
@@ -82,7 +82,7 @@
                             "y": 258.60003662109375
                         },
                         {
-                            "label_side": "left",
+                            "labelSide": "left",
                             "name": "maximum\ngrowth rate",
                             "type": "aux",
                             "uid": 3,
@@ -90,7 +90,7 @@
                             "y": 400.44000244140625
                         },
                         {
-                            "label_side": "right",
+                            "labelSide": "right",
                             "name": "carrying capacity",
                             "type": "aux",
                             "uid": 4,
@@ -98,7 +98,7 @@
                             "y": 399.23996582031253
                         },
                         {
-                            "label_side": "left",
+                            "labelSide": "left",
                             "name": "fractional \ngrowth rate",
                             "type": "aux",
                             "uid": 5,
@@ -106,7 +106,7 @@
                             "y": 344.20001220703125
                         },
                         {
-                            "label_side": "right",
+                            "labelSide": "right",
                             "name": "fraction of carrying\ncapacity used",
                             "type": "aux",
                             "uid": 6,
@@ -115,48 +115,48 @@
                         },
                         {
                             "arc": 230.32515249820716,
-                            "from_uid": 4,
-                            "to_uid": 6,
+                            "fromUid": 4,
+                            "toUid": 6,
                             "type": "link",
                             "uid": 7
                         },
                         {
                             "arc": 49.638563408603886,
-                            "from_uid": 1,
-                            "to_uid": 6,
+                            "fromUid": 1,
+                            "toUid": 6,
                             "type": "link",
                             "uid": 8
                         },
                         {
                             "arc": 131.65921988573643,
-                            "from_uid": 6,
-                            "to_uid": 5,
+                            "fromUid": 6,
+                            "toUid": 5,
                             "type": "link",
                             "uid": 9
                         },
                         {
                             "arc": 300.9615515537398,
-                            "from_uid": 3,
-                            "to_uid": 5,
+                            "fromUid": 3,
+                            "toUid": 5,
                             "type": "link",
                             "uid": 10
                         },
                         {
                             "arc": 241.17801396704323,
-                            "from_uid": 5,
-                            "to_uid": 2,
+                            "fromUid": 5,
+                            "toUid": 2,
                             "type": "link",
                             "uid": 11
                         },
                         {
                             "arc": 102.57380061282629,
-                            "from_uid": 1,
-                            "to_uid": 2,
+                            "fromUid": 1,
+                            "toUid": 2,
                             "type": "link",
                             "uid": 12
                         },
                         {
-                            "flow_uid": 2,
+                            "flowUid": 2,
                             "type": "cloud",
                             "uid": 13,
                             "x": 456.79998779296875,
@@ -164,7 +164,7 @@
                         }
                     ],
                     "kind": "stock_flow",
-                    "view_box": {
+                    "viewBox": {
                         "x": 0,
                         "y": 0,
                         "width": 0,

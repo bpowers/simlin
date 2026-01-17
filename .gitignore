@@ -82,7 +82,7 @@ simlin/_clib*
 /src/pysimlin/build
 /src/pysimlin/dist
 /src/pysimlin/simlin.egg-info
-src/pysimlin/simlin/_clib*.so
+src/pysimlin/simlin/_clib*
 
 # Python caches
 __pycache__/

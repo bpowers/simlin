@@ -311,7 +311,7 @@ pub extern "C" fn simlin_error_str(err: SimlinErrorCode) -> *const c_char {
         SimlinErrorCode::BadModuleInputSrc => "bad_module_input_src\0",
         SimlinErrorCode::NotSimulatable => "not_simulatable\0",
         SimlinErrorCode::BadTable => "bad_table\0",
-        SimlinErrorCode::BadSimSpecs => "bad_sim_specs\0",
+        SimlinErrorCode::BadSimSpecs => "bad_simSpecs\0",
         SimlinErrorCode::NoAbsoluteReferences => "no_absolute_references\0",
         SimlinErrorCode::CircularDependency => "circular_dependency\0",
         SimlinErrorCode::ArraysNotImplemented => "arrays_not_implemented\0",
@@ -319,7 +319,7 @@ pub extern "C" fn simlin_error_str(err: SimlinErrorCode) -> *const c_char {
             "multi_dimensional_arrays_not_implemented\0"
         }
         SimlinErrorCode::BadDimensionName => "bad_dimension_name\0",
-        SimlinErrorCode::BadModelName => "bad_model_name\0",
+        SimlinErrorCode::BadModelName => "bad_modelName\0",
         SimlinErrorCode::MismatchedDimensions => "mismatched_dimensions\0",
         SimlinErrorCode::ArrayReferenceNeedsExplicitSubscripts => {
             "array_reference_needs_explicit_subscripts\0"
@@ -631,11 +631,11 @@ pub unsafe extern "C" fn simlin_project_get_model_names(
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
-/// - `model_name` must be a valid C string
+/// - `modelName` must be a valid C string
 ///
 /// # Returns
 /// - 0 on success
-/// - SimlinErrorCode::Generic if project or model_name is null or empty
+/// - SimlinErrorCode::Generic if project or modelName is null or empty
 /// - SimlinErrorCode::DuplicateVariable if a model with that name already exists
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_add_model(
@@ -711,7 +711,7 @@ pub unsafe extern "C" fn simlin_project_add_model(
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
-/// - `model_name` may be null (uses default model)
+/// - `modelName` may be null (uses default model)
 /// - The returned model must be freed with simlin_model_unref
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_get_model(
@@ -2891,12 +2891,16 @@ pub unsafe extern "C" fn simlin_project_apply_patch_json(
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 enum JsonProjectOperation {
-    SetSimSpecs { sim_specs: engine::json::SimSpecs },
+    SetSimSpecs {
+        #[serde(rename = "simSpecs")]
+        sim_specs: engine::json::SimSpecs,
+    },
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct JsonProjectPatch {
     #[serde(default)]
     project_ops: Vec<JsonProjectOperation>,
@@ -2912,7 +2916,7 @@ struct JsonModelPatch {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 enum JsonModelOperation {
     UpsertAux {
         aux: engine::json::Auxiliary,
@@ -3301,8 +3305,8 @@ pub unsafe extern "C" fn simlin_project_is_simulatable(
 ///     for (size_t i = 0; i < errors->count; i++) {
 ///         SimlinErrorDetail* error = &errors->errors[i];
 ///         printf("Error %d", error->code);
-///         if (error->model_name != NULL) {
-///             printf(" in model %s", error->model_name);
+///         if (error->modelName != NULL) {
+///             printf(" in model %s", error->modelName);
 ///         }
 ///         if (error->variable_name != NULL) {
 ///             printf(" for variable %s", error->variable_name);
@@ -3816,7 +3820,7 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "upsert_aux",
+                            "type": "upsertAux",
                             "payload": {
                                 "aux": {
                                     "name": "json_aux",
@@ -3897,11 +3901,11 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "upsert_stock",
+                            "type": "upsertStock",
                             "payload": {
                                 "stock": {
                                     "name": "inventory",
-                                    "initial_equation": "50",
+                                    "initialEquation": "50",
                                     "inflows": [],
                                     "outflows": []
                                 }
@@ -3951,12 +3955,12 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "upsert_flow",
+                            "type": "upsertFlow",
                             "payload": {
                                 "flow": {
                                     "name": "production",
                                     "equation": "10",
-                                    "non_negative": true
+                                    "nonNegative": true
                                 }
                             }
                         }
@@ -4015,11 +4019,11 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "upsert_module",
+                            "type": "upsertModule",
                             "payload": {
                                 "module": {
                                     "name": "submodel",
-                                    "model_name": "SubModel",
+                                    "modelName": "SubModel",
                                     "references": []
                                 }
                             }
@@ -4080,7 +4084,7 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "delete_variable",
+                            "type": "deleteVariable",
                             "payload": {
                                 "ident": "to_delete"
                             }
@@ -4142,7 +4146,7 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "rename_variable",
+                            "type": "renameVariable",
                             "payload": {
                                 "from": "old_name",
                                 "to": "new_name"
@@ -4198,13 +4202,13 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "upsert_view",
+                            "type": "upsertView",
                             "payload": {
                                 "index": 0,
                                 "view": {
                                     "kind": "stock_flow",
                                     "elements": [],
-                                    "view_box": {
+                                    "viewBox": {
                                         "x": 0,
                                         "y": 0,
                                         "width": 800,
@@ -4258,13 +4262,13 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "upsert_view",
+                            "type": "upsertView",
                             "payload": {
                                 "index": 0,
                                 "view": {
                                     "kind": "stock_flow",
                                     "elements": [],
-                                    "view_box": {"x": 0, "y": 0, "width": 800, "height": 600},
+                                    "viewBox": {"x": 0, "y": 0, "width": 800, "height": 600},
                                     "zoom": 1.0
                                 }
                             }
@@ -4302,7 +4306,7 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "delete_view",
+                            "type": "deleteView",
                             "payload": {
                                 "index": 0
                             }
@@ -4348,17 +4352,17 @@ mod tests {
         let original_stop = unsafe { (*proj).project.lock().unwrap().datamodel.sim_specs.stop };
 
         let patch_json = r#"{
-            "project_ops": [
+            "projectOps": [
                 {
-                    "type": "set_sim_specs",
+                    "type": "setSimSpecs",
                     "payload": {
-                        "sim_specs": {
-                            "start_time": 2020.0,
-                            "end_time": 2030.0,
+                        "simSpecs": {
+                            "startTime": 2020.0,
+                            "endTime": 2030.0,
                             "dt": "1",
-                            "save_step": 1.0,
+                            "saveStep": 1.0,
                             "method": "euler",
-                            "time_units": "years"
+                            "timeUnits": "years"
                         }
                     }
                 }
@@ -4420,17 +4424,17 @@ mod tests {
         let proj = open_project_from_datamodel(&datamodel);
 
         let patch_json = r#"{
-            "project_ops": [
+            "projectOps": [
                 {
-                    "type": "set_sim_specs",
+                    "type": "setSimSpecs",
                     "payload": {
-                        "sim_specs": {
-                            "start_time": 0.0,
-                            "end_time": 100.0,
+                        "simSpecs": {
+                            "startTime": 0.0,
+                            "endTime": 100.0,
                             "dt": "0.5",
-                            "save_step": 0.5,
+                            "saveStep": 0.5,
                             "method": "euler",
-                            "time_units": "months"
+                            "timeUnits": "months"
                         }
                     }
                 }
@@ -4440,7 +4444,7 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "upsert_aux",
+                            "type": "upsertAux",
                             "payload": {
                                 "aux": {
                                     "name": "combined_test",
@@ -4609,7 +4613,7 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "upsert_aux",
+                            "type": "upsertAux",
                             "payload": {
                                 "aux": {
                                     "name": "dry_run_var",
@@ -4703,7 +4707,7 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "upsert_aux",
+                            "type": "upsertAux",
                             "payload": {
                                 "aux": {
                                     "name": "main_var",
@@ -4717,7 +4721,7 @@ mod tests {
                     "name": "SecondModel",
                     "ops": [
                         {
-                            "type": "upsert_aux",
+                            "type": "upsertAux",
                             "payload": {
                                 "aux": {
                                     "name": "second_var",
@@ -4771,7 +4775,7 @@ mod tests {
                     "name": "main",
                     "ops": [
                         {
-                            "type": "upsert_aux",
+                            "type": "upsertAux",
                             "payload": {
                                 "aux": {
                                     "name": "var1",
@@ -4780,7 +4784,7 @@ mod tests {
                             }
                         },
                         {
-                            "type": "upsert_aux",
+                            "type": "upsertAux",
                             "payload": {
                                 "aux": {
                                     "name": "var2",
@@ -4789,7 +4793,7 @@ mod tests {
                             }
                         },
                         {
-                            "type": "upsert_aux",
+                            "type": "upsertAux",
                             "payload": {
                                 "aux": {
                                     "name": "var3",
@@ -8168,20 +8172,20 @@ mod tests {
     fn test_project_json_open() {
         let json_str = r#"{
             "name": "test_json_project",
-            "sim_specs": {
-                "start_time": 0.0,
-                "end_time": 10.0,
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 10.0,
                 "dt": "1",
-                "save_step": 1.0,
+                "saveStep": 1.0,
                 "method": "euler",
-                "time_units": "days"
+                "timeUnits": "days"
             },
             "models": [{
                 "name": "main",
                 "stocks": [{
                     "uid": 1,
                     "name": "population",
-                    "initial_equation": "100",
+                    "initialEquation": "100",
                     "inflows": [],
                     "outflows": [],
                     "units": "people",
@@ -8202,13 +8206,13 @@ mod tests {
                     "dimensions": []
                 }],
                 "modules": [],
-                "sim_specs": {
-                    "start_time": 0.0,
-                    "end_time": 10.0,
+                "simSpecs": {
+                    "startTime": 0.0,
+                    "endTime": 10.0,
                     "dt": "1",
-                    "save_step": 1.0,
+                    "saveStep": 1.0,
                     "method": "",
-                    "time_units": ""
+                    "timeUnits": ""
                 },
                 "views": []
             }],

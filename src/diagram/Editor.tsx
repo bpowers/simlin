@@ -82,7 +82,6 @@ const SearchbarWidthSm = 359;
 const SearchbarWidthMd = 420;
 const SearchbarWidthLg = 480;
 
-
 function convertErrorDetails(
   errors: ErrorDetail[],
   modelName: string,

@@ -31,7 +31,7 @@ function pointToFlowPoint(point: Point): JsonFlowPoint {
   return {
     x: point.x,
     y: point.y,
-    attached_to_uid: point.attachedToUid,
+    attachedToUid: point.attachedToUid,
   };
 }
 
@@ -50,7 +50,7 @@ function elementToJson(element: ViewElement): JsonViewElement | null {
       name: element.name,
       x: element.x,
       y: element.y,
-      label_side: element.labelSide,
+      labelSide: element.labelSide,
     };
   }
 
@@ -62,7 +62,7 @@ function elementToJson(element: ViewElement): JsonViewElement | null {
       x: element.x,
       y: element.y,
       points: element.points.map(pointToFlowPoint).toArray(),
-      label_side: element.labelSide,
+      labelSide: element.labelSide,
     };
   }
 
@@ -73,7 +73,7 @@ function elementToJson(element: ViewElement): JsonViewElement | null {
       name: element.name,
       x: element.x,
       y: element.y,
-      label_side: element.labelSide,
+      labelSide: element.labelSide,
     };
   }
 
@@ -81,7 +81,7 @@ function elementToJson(element: ViewElement): JsonViewElement | null {
     return {
       type: 'cloud',
       uid: element.uid,
-      flow_uid: element.flowUid,
+      flowUid: element.flowUid,
       x: element.x,
       y: element.y,
     };
@@ -91,8 +91,8 @@ function elementToJson(element: ViewElement): JsonViewElement | null {
     const result: JsonViewElement = {
       type: 'link',
       uid: element.uid,
-      from_uid: element.fromUid,
-      to_uid: element.toUid,
+      fromUid: element.fromUid,
+      toUid: element.toUid,
     };
 
     if (element.arc !== undefined) {
@@ -100,7 +100,7 @@ function elementToJson(element: ViewElement): JsonViewElement | null {
     }
 
     if (element.multiPoint) {
-      (result as any).multi_points = element.multiPoint.map(pointToLinkPoint).toArray();
+      (result as any).multiPoints = element.multiPoint.map(pointToLinkPoint).toArray();
     }
 
     return result;
@@ -113,7 +113,7 @@ function elementToJson(element: ViewElement): JsonViewElement | null {
       name: element.name,
       x: element.x,
       y: element.y,
-      label_side: element.labelSide,
+      labelSide: element.labelSide,
     };
   }
 
@@ -121,10 +121,10 @@ function elementToJson(element: ViewElement): JsonViewElement | null {
     return {
       type: 'alias',
       uid: element.uid,
-      alias_of_uid: element.aliasOfUid,
+      aliasOfUid: element.aliasOfUid,
       x: element.x,
       y: element.y,
-      label_side: element.labelSide,
+      labelSide: element.labelSide,
     };
   }
 
@@ -149,7 +149,7 @@ export function stockFlowViewToJson(view: StockFlowView): JsonView {
   };
 
   if (view.viewBox && view.viewBox.width > 0 && view.viewBox.height > 0) {
-    result.view_box = rectToJson(view.viewBox);
+    result.viewBox = rectToJson(view.viewBox);
   }
 
   if (view.zoom > 0) {

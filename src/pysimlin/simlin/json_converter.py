@@ -55,6 +55,12 @@ from .json_types import (
 )
 
 
+def _to_camel_case(snake_str: str) -> str:
+    """Convert a snake_case string to camelCase."""
+    components = snake_str.split("_")
+    return components[0] + "".join(x.title() for x in components[1:])
+
+
 def _make_omit_default_hook(
     cls: type,
     conv: cattrs.Converter,
@@ -65,6 +71,8 @@ def _make_omit_default_hook(
     Pre-computes field information at registration time for performance.
     Only omits a value if it equals the field's declared default. This preserves
     meaningful values like 0.0 for optional numeric fields when the default is None.
+
+    Output field names are converted from snake_case to camelCase for JSON.
 
     Args:
         cls: The dataclass type
@@ -78,7 +86,8 @@ def _make_omit_default_hook(
     _NO_DEFAULT = object()
 
     # Pre-compute field metadata at registration time
-    field_info: list[tuple[str, Any, bool]] = []
+    # Store (python_name, json_name, default, is_required)
+    field_info: list[tuple[str, str, Any, bool]] = []
     for fld in fields(cls):
         # Compute default value
         if fld.default is not MISSING:
@@ -89,21 +98,22 @@ def _make_omit_default_hook(
             default = _NO_DEFAULT
 
         is_required = fld.name in required_fields
-        field_info.append((fld.name, default, is_required))
+        json_name = _to_camel_case(fld.name)
+        field_info.append((fld.name, json_name, default, is_required))
 
     def unstructure(obj: Any) -> dict[str, Any]:
         result: dict[str, Any] = {}
-        for name, default, is_required in field_info:
-            val = getattr(obj, name)
+        for py_name, json_name, default, is_required in field_info:
+            val = getattr(obj, py_name)
 
             # Always include required fields
             if is_required:
-                result[name] = conv.unstructure(val)
+                result[json_name] = conv.unstructure(val)
                 continue
 
             # Always include fields without defaults
             if default is _NO_DEFAULT:
-                result[name] = conv.unstructure(val)
+                result[json_name] = conv.unstructure(val)
                 continue
 
             # Skip if value equals the field's default (handles None, 0, "", [], False correctly)
@@ -111,7 +121,7 @@ def _make_omit_default_hook(
                 continue
 
             # Include all other values
-            result[name] = conv.unstructure(val)
+            result[json_name] = conv.unstructure(val)
 
         return result
 
@@ -130,26 +140,26 @@ def _create_converter() -> cattrs.Converter:
         if gf.points:
             result["points"] = [[p[0], p[1]] for p in gf.points]
         if gf.y_points:
-            result["y_points"] = gf.y_points
+            result["yPoints"] = gf.y_points
         if gf.kind:
             result["kind"] = gf.kind
         if gf.x_scale is not None:
-            result["x_scale"] = conv.unstructure(gf.x_scale)
+            result["xScale"] = conv.unstructure(gf.x_scale)
         if gf.y_scale is not None:
-            result["y_scale"] = conv.unstructure(gf.y_scale)
+            result["yScale"] = conv.unstructure(gf.y_scale)
         return result
 
     def structure_gf(d: dict[str, Any], _: type) -> GraphicalFunction:
         points = [(p[0], p[1]) for p in d.get("points", [])]
         return GraphicalFunction(
             points=points,
-            y_points=d.get("y_points", []),
+            y_points=d.get("yPoints", []),
             kind=d.get("kind", ""),
-            x_scale=conv.structure(d["x_scale"], GraphicalFunctionScale)
-            if d.get("x_scale") is not None
+            x_scale=conv.structure(d["xScale"], GraphicalFunctionScale)
+            if d.get("xScale") is not None
             else None,
-            y_scale=conv.structure(d["y_scale"], GraphicalFunctionScale)
-            if d.get("y_scale") is not None
+            y_scale=conv.structure(d["yScale"], GraphicalFunctionScale)
+            if d.get("yScale") is not None
             else None,
         )
 
@@ -185,47 +195,47 @@ def _create_converter() -> cattrs.Converter:
 
     # Register hooks for each concrete operation type
     conv.register_unstructure_hook(
-        UpsertStock, _make_upsert_unstructure_hook("upsert_stock", "stock")
+        UpsertStock, _make_upsert_unstructure_hook("upsertStock", "stock")
     )
-    conv.register_unstructure_hook(UpsertFlow, _make_upsert_unstructure_hook("upsert_flow", "flow"))
-    conv.register_unstructure_hook(UpsertAux, _make_upsert_unstructure_hook("upsert_aux", "aux"))
+    conv.register_unstructure_hook(UpsertFlow, _make_upsert_unstructure_hook("upsertFlow", "flow"))
+    conv.register_unstructure_hook(UpsertAux, _make_upsert_unstructure_hook("upsertAux", "aux"))
     conv.register_unstructure_hook(
-        UpsertModule, _make_upsert_unstructure_hook("upsert_module", "module")
+        UpsertModule, _make_upsert_unstructure_hook("upsertModule", "module")
     )
 
     def unstructure_delete_variable(op: DeleteVariable) -> dict[str, Any]:
-        return {"type": "delete_variable", "payload": {"ident": op.ident}}
+        return {"type": "deleteVariable", "payload": {"ident": op.ident}}
 
     conv.register_unstructure_hook(DeleteVariable, unstructure_delete_variable)
 
     def unstructure_rename_variable(op: RenameVariable) -> dict[str, Any]:
-        return {"type": "rename_variable", "payload": {"from": op.from_, "to": op.to}}
+        return {"type": "renameVariable", "payload": {"from": op.from_, "to": op.to}}
 
     conv.register_unstructure_hook(RenameVariable, unstructure_rename_variable)
 
     def unstructure_upsert_view(op: UpsertView) -> dict[str, Any]:
         return {
-            "type": "upsert_view",
+            "type": "upsertView",
             "payload": {"index": op.index, "view": conv.unstructure(op.view)},
         }
 
     conv.register_unstructure_hook(UpsertView, unstructure_upsert_view)
 
     def unstructure_delete_view(op: DeleteView) -> dict[str, Any]:
-        return {"type": "delete_view", "payload": {"index": op.index}}
+        return {"type": "deleteView", "payload": {"index": op.index}}
 
     conv.register_unstructure_hook(DeleteView, unstructure_delete_view)
 
     # Valid model operation type names for error messages
     _valid_model_op_types = (
-        "upsert_stock",
-        "upsert_flow",
-        "upsert_aux",
-        "upsert_module",
-        "delete_variable",
-        "rename_variable",
-        "upsert_view",
-        "delete_view",
+        "upsertStock",
+        "upsertFlow",
+        "upsertAux",
+        "upsertModule",
+        "deleteVariable",
+        "renameVariable",
+        "upsertView",
+        "deleteView",
     )
 
     # Structure hook for parsing tagged JSON back to concrete types
@@ -233,21 +243,21 @@ def _create_converter() -> cattrs.Converter:
         type_name = d["type"]
         payload = d["payload"]
 
-        if type_name == "upsert_stock":
+        if type_name == "upsertStock":
             return UpsertStock(stock=conv.structure(payload["stock"], Stock))
-        elif type_name == "upsert_flow":
+        elif type_name == "upsertFlow":
             return UpsertFlow(flow=conv.structure(payload["flow"], Flow))
-        elif type_name == "upsert_aux":
+        elif type_name == "upsertAux":
             return UpsertAux(aux=conv.structure(payload["aux"], Auxiliary))
-        elif type_name == "upsert_module":
+        elif type_name == "upsertModule":
             return UpsertModule(module=conv.structure(payload["module"], Module))
-        elif type_name == "delete_variable":
+        elif type_name == "deleteVariable":
             return DeleteVariable(ident=payload["ident"])
-        elif type_name == "rename_variable":
+        elif type_name == "renameVariable":
             return RenameVariable(from_=payload["from"], to=payload["to"])
-        elif type_name == "upsert_view":
+        elif type_name == "upsertView":
             return UpsertView(index=payload["index"], view=conv.structure(payload["view"], View))
-        elif type_name == "delete_view":
+        elif type_name == "deleteView":
             return DeleteView(index=payload["index"])
         else:
             valid = ", ".join(_valid_model_op_types)
@@ -271,14 +281,14 @@ def _create_converter() -> cattrs.Converter:
     )
 
     # Handle JsonProjectOperation tagged union
-    # Rust expects: {"type": "set_sim_specs", "payload": {"sim_specs": {...}}}
-    _valid_project_op_types = ("set_sim_specs",)
+    # Rust expects: {"type": "setSimSpecs", "payload": {"simSpecs": {...}}}
+    _valid_project_op_types = ("setSimSpecs",)
 
     def unstructure_project_op(op: JsonProjectOperation) -> dict[str, Any]:
         if isinstance(op, SetSimSpecs):
             return {
-                "type": "set_sim_specs",
-                "payload": {"sim_specs": conv.unstructure(op.sim_specs)},
+                "type": "setSimSpecs",
+                "payload": {"simSpecs": conv.unstructure(op.sim_specs)},
             }
         valid = ", ".join(_valid_project_op_types)
         raise ValueError(
@@ -288,8 +298,8 @@ def _create_converter() -> cattrs.Converter:
     def structure_project_op(d: dict[str, Any], _: type) -> JsonProjectOperation:
         type_name = d["type"]
         payload = d["payload"]
-        if type_name == "set_sim_specs":
-            return SetSimSpecs(sim_specs=conv.structure(payload["sim_specs"], SimSpecs))
+        if type_name == "setSimSpecs":
+            return SetSimSpecs(sim_specs=conv.structure(payload["simSpecs"], SimSpecs))
         valid = ", ".join(_valid_project_op_types)
         raise ValueError(f"Unknown project operation type: {type_name!r}. Expected one of: {valid}")
 
@@ -358,6 +368,90 @@ def _create_converter() -> cattrs.Converter:
         structure_view_element,
     )
 
+    # Structure hooks for individual view element types (reading camelCase JSON)
+    def structure_stock_view_element(d: dict[str, Any], _: type) -> StockViewElement:
+        return StockViewElement(
+            uid=d["uid"],
+            name=d["name"],
+            x=d["x"],
+            y=d["y"],
+            label_side=d.get("labelSide", ""),
+        )
+
+    def structure_flow_view_element(d: dict[str, Any], _: type) -> FlowViewElement:
+        points = [conv.structure(p, FlowPoint) for p in d.get("points", [])]
+        return FlowViewElement(
+            uid=d["uid"],
+            name=d["name"],
+            x=d["x"],
+            y=d["y"],
+            points=points,
+            label_side=d.get("labelSide", ""),
+        )
+
+    def structure_auxiliary_view_element(d: dict[str, Any], _: type) -> AuxiliaryViewElement:
+        return AuxiliaryViewElement(
+            uid=d["uid"],
+            name=d["name"],
+            x=d["x"],
+            y=d["y"],
+            label_side=d.get("labelSide", ""),
+        )
+
+    def structure_cloud_view_element(d: dict[str, Any], _: type) -> CloudViewElement:
+        return CloudViewElement(
+            uid=d["uid"],
+            flow_uid=d["flowUid"],
+            x=d["x"],
+            y=d["y"],
+        )
+
+    def structure_link_view_element(d: dict[str, Any], _: type) -> LinkViewElement:
+        multi_points = None
+        if "multiPoints" in d and d["multiPoints"]:
+            multi_points = [conv.structure(p, LinkPoint) for p in d["multiPoints"]]
+        return LinkViewElement(
+            uid=d["uid"],
+            from_uid=d["fromUid"],
+            to_uid=d["toUid"],
+            arc=d.get("arc"),
+            multi_points=multi_points,
+        )
+
+    def structure_module_view_element(d: dict[str, Any], _: type) -> ModuleViewElement:
+        return ModuleViewElement(
+            uid=d["uid"],
+            name=d["name"],
+            x=d["x"],
+            y=d["y"],
+            label_side=d.get("labelSide", ""),
+        )
+
+    def structure_alias_view_element(d: dict[str, Any], _: type) -> AliasViewElement:
+        return AliasViewElement(
+            uid=d["uid"],
+            alias_of_uid=d["aliasOfUid"],
+            x=d["x"],
+            y=d["y"],
+            label_side=d.get("labelSide", ""),
+        )
+
+    def structure_flow_point(d: dict[str, Any], _: type) -> FlowPoint:
+        return FlowPoint(
+            x=d["x"],
+            y=d["y"],
+            attached_to_uid=d.get("attachedToUid"),
+        )
+
+    conv.register_structure_hook(StockViewElement, structure_stock_view_element)
+    conv.register_structure_hook(FlowViewElement, structure_flow_view_element)
+    conv.register_structure_hook(AuxiliaryViewElement, structure_auxiliary_view_element)
+    conv.register_structure_hook(CloudViewElement, structure_cloud_view_element)
+    conv.register_structure_hook(LinkViewElement, structure_link_view_element)
+    conv.register_structure_hook(ModuleViewElement, structure_module_view_element)
+    conv.register_structure_hook(AliasViewElement, structure_alias_view_element)
+    conv.register_structure_hook(FlowPoint, structure_flow_point)
+
     # Register omit-default hooks for variable types
     # These skip fields that match their defaults (matching Rust's skip_serializing_if)
     # Required fields are always included (based on the JSON schema)
@@ -393,15 +487,15 @@ def _create_converter() -> cattrs.Converter:
         lambda d, _: GraphicalFunctionScale(min=d["min"], max=d["max"]),
     )
 
-    # ElementEquation: handle optional graphical_function
+    # ElementEquation: handle optional graphicalFunction
     def structure_element_equation(d: dict[str, Any], _: type) -> ElementEquation:
         gf = None
-        if "graphical_function" in d and d["graphical_function"]:
-            gf = conv.structure(d["graphical_function"], GraphicalFunction)
+        if "graphicalFunction" in d and d["graphicalFunction"]:
+            gf = conv.structure(d["graphicalFunction"], GraphicalFunction)
         return ElementEquation(
             subscript=d["subscript"],
             equation=d.get("equation", ""),
-            initial_equation=d.get("initial_equation", ""),
+            initial_equation=d.get("initialEquation", ""),
             graphical_function=gf,
         )
 
@@ -415,7 +509,7 @@ def _create_converter() -> cattrs.Converter:
         return ArrayedEquation(
             dimensions=d.get("dimensions", []),
             equation=d.get("equation"),
-            initial_equation=d.get("initial_equation"),
+            initial_equation=d.get("initialEquation"),
             elements=elements,
         )
 
@@ -430,19 +524,19 @@ def _create_converter() -> cattrs.Converter:
     # Stock: handle nested types
     def structure_stock(d: dict[str, Any], _: type) -> Stock:
         arrayed_equation = None
-        if "arrayed_equation" in d and d["arrayed_equation"]:
-            arrayed_equation = conv.structure(d["arrayed_equation"], ArrayedEquation)
+        if "arrayedEquation" in d and d["arrayedEquation"]:
+            arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
         return Stock(
             name=d["name"],
             inflows=d.get("inflows", []),
             outflows=d.get("outflows", []),
             uid=d.get("uid", 0),
-            initial_equation=d.get("initial_equation", ""),
+            initial_equation=d.get("initialEquation", ""),
             units=d.get("units", ""),
-            non_negative=d.get("non_negative", False),
+            non_negative=d.get("nonNegative", False),
             documentation=d.get("documentation", ""),
-            can_be_module_input=d.get("can_be_module_input", False),
-            is_public=d.get("is_public", False),
+            can_be_module_input=d.get("canBeModuleInput", False),
+            is_public=d.get("isPublic", False),
             arrayed_equation=arrayed_equation,
         )
 
@@ -451,21 +545,21 @@ def _create_converter() -> cattrs.Converter:
     # Flow: handle nested types
     def structure_flow(d: dict[str, Any], _: type) -> Flow:
         gf = None
-        if "graphical_function" in d and d["graphical_function"]:
-            gf = conv.structure(d["graphical_function"], GraphicalFunction)
+        if "graphicalFunction" in d and d["graphicalFunction"]:
+            gf = conv.structure(d["graphicalFunction"], GraphicalFunction)
         arrayed_equation = None
-        if "arrayed_equation" in d and d["arrayed_equation"]:
-            arrayed_equation = conv.structure(d["arrayed_equation"], ArrayedEquation)
+        if "arrayedEquation" in d and d["arrayedEquation"]:
+            arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
         return Flow(
             name=d["name"],
             uid=d.get("uid", 0),
             equation=d.get("equation", ""),
             units=d.get("units", ""),
-            non_negative=d.get("non_negative", False),
+            non_negative=d.get("nonNegative", False),
             graphical_function=gf,
             documentation=d.get("documentation", ""),
-            can_be_module_input=d.get("can_be_module_input", False),
-            is_public=d.get("is_public", False),
+            can_be_module_input=d.get("canBeModuleInput", False),
+            is_public=d.get("isPublic", False),
             arrayed_equation=arrayed_equation,
         )
 
@@ -474,21 +568,21 @@ def _create_converter() -> cattrs.Converter:
     # Auxiliary: handle nested types
     def structure_auxiliary(d: dict[str, Any], _: type) -> Auxiliary:
         gf = None
-        if "graphical_function" in d and d["graphical_function"]:
-            gf = conv.structure(d["graphical_function"], GraphicalFunction)
+        if "graphicalFunction" in d and d["graphicalFunction"]:
+            gf = conv.structure(d["graphicalFunction"], GraphicalFunction)
         arrayed_equation = None
-        if "arrayed_equation" in d and d["arrayed_equation"]:
-            arrayed_equation = conv.structure(d["arrayed_equation"], ArrayedEquation)
+        if "arrayedEquation" in d and d["arrayedEquation"]:
+            arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
         return Auxiliary(
             name=d["name"],
             uid=d.get("uid", 0),
             equation=d.get("equation", ""),
-            initial_equation=d.get("initial_equation", ""),
+            initial_equation=d.get("initialEquation", ""),
             units=d.get("units", ""),
             graphical_function=gf,
             documentation=d.get("documentation", ""),
-            can_be_module_input=d.get("can_be_module_input", False),
-            is_public=d.get("is_public", False),
+            can_be_module_input=d.get("canBeModuleInput", False),
+            is_public=d.get("isPublic", False),
             arrayed_equation=arrayed_equation,
         )
 
@@ -499,13 +593,13 @@ def _create_converter() -> cattrs.Converter:
         references = [conv.structure(ref, ModuleReference) for ref in d.get("references", [])]
         return Module(
             name=d["name"],
-            model_name=d["model_name"],
+            model_name=d["modelName"],
             uid=d.get("uid", 0),
             units=d.get("units", ""),
             documentation=d.get("documentation", ""),
             references=references,
-            can_be_module_input=d.get("can_be_module_input", False),
-            is_public=d.get("is_public", False),
+            can_be_module_input=d.get("canBeModuleInput", False),
+            is_public=d.get("isPublic", False),
         )
 
     conv.register_structure_hook(Module, structure_module)
@@ -516,7 +610,7 @@ def _create_converter() -> cattrs.Converter:
             name=d["name"],
             elements=d.get("elements", []),
             size=d.get("size", 0),
-            maps_to=d.get("maps_to"),
+            maps_to=d.get("mapsTo"),
         )
 
     conv.register_structure_hook(Dimension, structure_dimension)
@@ -546,12 +640,12 @@ def _create_converter() -> cattrs.Converter:
     # SimSpecs: handle all fields
     def structure_sim_specs(d: dict[str, Any], _: type) -> SimSpecs:
         return SimSpecs(
-            start_time=d["start_time"],
-            end_time=d["end_time"],
+            start_time=d["startTime"],
+            end_time=d["endTime"],
             dt=d.get("dt", ""),
-            save_step=d.get("save_step", 0.0),
+            save_step=d.get("saveStep", 0.0),
             method=d.get("method", ""),
-            time_units=d.get("time_units", ""),
+            time_units=d.get("timeUnits", ""),
         )
 
     conv.register_structure_hook(SimSpecs, structure_sim_specs)
@@ -563,8 +657,8 @@ def _create_converter() -> cattrs.Converter:
             for e in d.get("elements", [])
         ]
         view_box = None
-        if "view_box" in d and d["view_box"]:
-            vb = d["view_box"]
+        if "viewBox" in d and d["viewBox"]:
+            vb = d["viewBox"]
             view_box = Rect(x=vb["x"], y=vb["y"], width=vb["width"], height=vb["height"])
         return View(
             elements=elements,
@@ -582,11 +676,11 @@ def _create_converter() -> cattrs.Converter:
         auxiliaries = [conv.structure(a, Auxiliary) for a in d.get("auxiliaries", [])]
         modules = [conv.structure(m, Module) for m in d.get("modules", [])]
         sim_specs = None
-        if "sim_specs" in d and d["sim_specs"]:
-            sim_specs = conv.structure(d["sim_specs"], SimSpecs)
+        if "simSpecs" in d and d["simSpecs"]:
+            sim_specs = conv.structure(d["simSpecs"], SimSpecs)
         views = [conv.structure(v, View) for v in d.get("views", [])]
         loop_metadata = [
-            conv.structure(lm, LoopMetadata) for lm in d.get("loop_metadata", [])
+            conv.structure(lm, LoopMetadata) for lm in d.get("loopMetadata", [])
         ]
         return Model(
             name=d["name"],
@@ -603,7 +697,7 @@ def _create_converter() -> cattrs.Converter:
 
     # Project: handle all nested types
     def structure_project(d: dict[str, Any], _: type) -> Project:
-        sim_specs = conv.structure(d["sim_specs"], SimSpecs)
+        sim_specs = conv.structure(d["simSpecs"], SimSpecs)
         models = [conv.structure(m, Model) for m in d.get("models", [])]
         dimensions = [conv.structure(dim, Dimension) for dim in d.get("dimensions", [])]
         units = [conv.structure(u, Unit) for u in d.get("units", [])]
@@ -624,6 +718,8 @@ def _create_converter() -> cattrs.Converter:
         LoopMetadata: {"uids", "name"},
         Model: {"name", "stocks", "flows", "auxiliaries"},
         Project: {"name", "sim_specs"},
+        JsonModelPatch: {"name"},
+        JsonProjectPatch: set(),  # both fields have defaults
     }
 
     for cls, required in additional_type_required_fields.items():

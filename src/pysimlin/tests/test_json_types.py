@@ -405,7 +405,7 @@ class TestPatchJsonFormat:
         assert len(model_patch["ops"]) == 1
 
         op_dict = model_patch["ops"][0]
-        assert op_dict["type"] == "upsert_stock"
+        assert op_dict["type"] == "upsertStock"
         assert "payload" in op_dict
         assert "stock" in op_dict["payload"]
         assert op_dict["payload"]["stock"]["name"] == "population"
@@ -419,7 +419,7 @@ class TestPatchJsonFormat:
         json_dict = converter.unstructure(project_patch)
         op_dict = json_dict["models"][0]["ops"][0]
 
-        assert op_dict["type"] == "rename_variable"
+        assert op_dict["type"] == "renameVariable"
         assert op_dict["payload"]["from"] == "old_name"
         assert op_dict["payload"]["to"] == "new_name"
         assert "from_" not in op_dict["payload"]
@@ -433,7 +433,7 @@ class TestPatchJsonFormat:
         json_dict = converter.unstructure(project_patch)
         op_dict = json_dict["models"][0]["ops"][0]
 
-        assert op_dict["type"] == "delete_variable"
+        assert op_dict["type"] == "deleteVariable"
         assert op_dict["payload"]["ident"] == "unused_var"
 
 
@@ -472,32 +472,32 @@ class TestOptionalFieldSerialization:
         # For Flow, non_negative defaults to False
         flow_default = Flow(name="test", non_negative=False)
         result_default = converter.unstructure(flow_default)
-        assert "non_negative" not in result_default, (
-            "non_negative=False should be omitted (equals default)"
+        assert "nonNegative" not in result_default, (
+            "nonNegative=False should be omitted (equals default)"
         )
 
         # True should be included
         flow_true = Flow(name="test", non_negative=True)
         result_true = converter.unstructure(flow_true)
-        assert result_true.get("non_negative") is True
+        assert result_true.get("nonNegative") is True
 
 
 class TestNullValueHandling:
     """Tests for correct handling of explicit null values in JSON."""
 
     def test_graphical_function_with_explicit_null_scales(self) -> None:
-        """GraphicalFunction should accept explicit null for x_scale/y_scale.
+        """GraphicalFunction should accept explicit null for xScale/yScale.
 
         The JSON schema allows null for optional fields. When incoming JSON
-        explicitly sets x_scale or y_scale to null, we should treat it as None,
+        explicitly sets xScale or yScale to null, we should treat it as None,
         not raise an error.
         """
-        # JSON with explicit null values for x_scale and y_scale
+        # JSON with explicit null values for xScale and yScale
         json_with_null_scales = {
             "points": [[0.0, 1.0], [1.0, 2.0]],
             "kind": "continuous",
-            "x_scale": None,
-            "y_scale": None,
+            "xScale": None,
+            "yScale": None,
         }
         gf = converter.structure(json_with_null_scales, GraphicalFunction)
         assert gf.x_scale is None
@@ -506,11 +506,11 @@ class TestNullValueHandling:
         assert gf.kind == "continuous"
 
     def test_graphical_function_with_null_x_scale_only(self) -> None:
-        """GraphicalFunction should handle null x_scale with valid y_scale."""
+        """GraphicalFunction should handle null xScale with valid yScale."""
         json_with_mixed = {
             "points": [[0.0, 1.0], [1.0, 2.0]],
-            "x_scale": None,
-            "y_scale": {"min": 0.0, "max": 10.0},
+            "xScale": None,
+            "yScale": {"min": 0.0, "max": 10.0},
         }
         gf = converter.structure(json_with_mixed, GraphicalFunction)
         assert gf.x_scale is None
@@ -519,11 +519,11 @@ class TestNullValueHandling:
         assert gf.y_scale.max == 10.0
 
     def test_graphical_function_with_null_y_scale_only(self) -> None:
-        """GraphicalFunction should handle valid x_scale with null y_scale."""
+        """GraphicalFunction should handle valid xScale with null yScale."""
         json_with_mixed = {
             "points": [[0.0, 1.0], [1.0, 2.0]],
-            "x_scale": {"min": -5.0, "max": 5.0},
-            "y_scale": None,
+            "xScale": {"min": -5.0, "max": 5.0},
+            "yScale": None,
         }
         gf = converter.structure(json_with_mixed, GraphicalFunction)
         assert gf.x_scale is not None
