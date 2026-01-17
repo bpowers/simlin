@@ -26,7 +26,13 @@ import CardContent from '@mui/material/CardContent';
 import { canonicalize } from '@system-dynamics/core/canonicalize';
 
 import { Project as Engine2Project, SimlinErrorKind, SimlinUnitErrorKind } from '@system-dynamics/engine2';
-import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs, JsonArrayedEquation } from '@system-dynamics/engine2';
+import type {
+  JsonProjectPatch,
+  JsonModelOperation,
+  JsonSimSpecs,
+  JsonArrayedEquation,
+  JsonProject,
+} from '@system-dynamics/engine2';
 import type { ErrorDetail } from '@system-dynamics/engine2';
 import { stockFlowViewToJson } from './view-conversion';
 import { updateArcAngle, radToDeg } from './arc-utils';
@@ -138,7 +144,7 @@ class EditorError implements Error {
 
 interface EditorState {
   modelErrors: List<Error>;
-  activeProject: Project;
+  activeProject: Project | undefined;
   projectHistory: Stack<Readonly<Uint8Array>>;
   projectOffset: number;
   modelName: string;
@@ -177,10 +183,8 @@ export const Editor = styled(
     constructor(props: EditorProps) {
       super(props);
 
-      const activeProject = Project.deserializeBinary(props.initialProjectBinary);
-
       this.state = {
-        activeProject,
+        activeProject: undefined,
         projectHistory: Stack<Readonly<Uint8Array>>([props.initialProjectBinary]),
         projectOffset: 0,
         modelErrors: List<Error>(),
@@ -200,7 +204,7 @@ export const Editor = styled(
       };
 
       setTimeout(async () => {
-        await this.openEngine2Project(props.initialProjectBinary, activeProject);
+        await this.openEngine2Project(props.initialProjectBinary);
         this.scheduleSimRun();
       });
     }
@@ -269,7 +273,12 @@ export const Editor = styled(
         }
       }
 
-      let activeProject = this.updateVariableErrors(Project.deserializeBinary(serializedProject));
+      const engine2 = this.engine2Project;
+      if (!engine2) {
+        return;
+      }
+      const json = JSON.parse(engine2.serializeJson()) as JsonProject;
+      let activeProject = this.updateVariableErrors(Project.fromJson(json));
       if (this.state.data) {
         activeProject = activeProject.attachData(this.state.data, this.state.modelName);
       }
@@ -1938,10 +1947,7 @@ export const Editor = styled(
       return project;
     }
 
-    async openEngine2Project(
-      serializedProject: Readonly<Uint8Array>,
-      project: Project,
-    ): Promise<Engine2Project | undefined> {
+    async openEngine2Project(serializedProject: Readonly<Uint8Array>): Promise<Engine2Project | undefined> {
       this.engine2Project?.dispose();
       this.engine2Project = undefined;
 
@@ -1953,6 +1959,9 @@ export const Editor = styled(
         return;
       }
       this.engine2Project = engine2;
+
+      const json = JSON.parse(engine2.serializeJson()) as JsonProject;
+      let project = Project.fromJson(json);
 
       if (this.newEngineShouldPullView) {
         const queuedView = defined(this.newEngineQueuedView);
@@ -1995,11 +2004,10 @@ export const Editor = styled(
       projectOffset = Math.max(projectOffset, 0);
       const serializedProject = defined(this.state.projectHistory.get(projectOffset));
       const projectVersion = this.state.projectVersion + 0.01;
-      const activeProject = Project.deserializeBinary(serializedProject);
-      this.setState({ activeProject, projectOffset, projectVersion });
+      this.setState({ projectOffset, projectVersion });
 
       setTimeout(async () => {
-        await this.openEngine2Project(serializedProject, activeProject);
+        await this.openEngine2Project(serializedProject);
         this.scheduleSimRun();
         this.scheduleSave(serializedProject);
       });

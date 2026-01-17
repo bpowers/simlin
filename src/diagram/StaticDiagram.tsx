@@ -10,6 +10,8 @@ import { createTheme, ThemeProvider } from '@mui/material/styles';
 
 import { defined, Series } from '@system-dynamics/core/common';
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
+import { Project as Engine2Project } from '@system-dynamics/engine2';
+import type { JsonProject } from '@system-dynamics/engine2';
 import { Point } from './drawing/common';
 import { Canvas } from './drawing/Canvas';
 
@@ -20,25 +22,44 @@ interface DiagramProps {
 }
 
 interface DiagramState {
-  project: Project;
+  project: Project | undefined;
 }
 
 export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramState> {
   constructor(props: DiagramProps) {
     super(props);
 
-    const serializedProject = toUint8Array(this.props.projectPbBase64);
-    let project = Project.deserializeBinary(serializedProject);
-    if (props.data !== undefined) {
-      project = project.attachData(props.data, 'main');
-    }
-
     this.state = {
-      project,
+      project: undefined,
     };
   }
 
+  componentDidMount() {
+    this.loadProject();
+  }
+
+  async loadProject() {
+    const serializedProject = toUint8Array(this.props.projectPbBase64);
+    const engine2Project = await Engine2Project.openProtobuf(serializedProject);
+    const json = JSON.parse(engine2Project.serializeJson()) as JsonProject;
+    let project = Project.fromJson(json);
+    engine2Project.dispose();
+
+    if (this.props.data !== undefined) {
+      project = project.attachData(this.props.data, 'main');
+    }
+
+    this.setState({
+      project,
+    });
+  }
+
   render(): React.ReactNode {
+    const { project } = this.state;
+    if (!project) {
+      return null;
+    }
+
     const canUseDOM = !!(typeof window !== 'undefined' && window.document && window.document.createElement);
     const isDarkTheme = this.props.isDarkTheme;
     const theme = createTheme({
@@ -51,7 +72,7 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
       },
     });
 
-    const model = defined(this.state.project.models.get('main'));
+    const model = defined(project.models.get('main'));
 
     const renameVariable = (_oldName: string, _newName: string): void => {};
     const onSelection = (_selected: Set<UID>): void => {};
@@ -65,7 +86,7 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
     const canvasElement = (
       <Canvas
         embedded={true}
-        project={this.state.project}
+        project={project}
         model={model}
         view={defined(model.views.get(0))}
         version={1}

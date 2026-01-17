@@ -16,8 +16,6 @@ import {
   StockViewElement,
   FlowViewElement,
   LinkViewElement,
-  ModuleViewElement,
-  AliasViewElement,
   CloudViewElement,
   Point,
   Rect,
@@ -234,6 +232,7 @@ describe('View Elements', () => {
       x: 100,
       y: 200,
       labelSide: 'top',
+      isZeroRadius: false,
       inflows: List(),
       outflows: List(),
     });
@@ -323,6 +322,7 @@ describe('View Elements', () => {
       flowUid: 2,
       x: 0,
       y: 200,
+      isZeroRadius: false,
     });
 
     const json = elem.toJson();
@@ -470,6 +470,7 @@ describe('StockFlowView', () => {
       x: 200,
       y: 200,
       labelSide: 'top',
+      isZeroRadius: false,
       inflows: List([2]),
       outflows: List([]),
     });
@@ -497,6 +498,7 @@ describe('StockFlowView', () => {
       x: 100,
       y: 100,
       labelSide: 'right',
+      isZeroRadius: false,
     });
 
     const linkElem = new LinkViewElement({
@@ -513,6 +515,7 @@ describe('StockFlowView', () => {
       flowUid: 2,
       x: 50,
       y: 200,
+      isZeroRadius: false,
     });
 
     const view = new StockFlowView({
