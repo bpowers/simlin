@@ -5,4 +5,3 @@
 export * as canonicalize from './canonicalize';
 export * as common from './common';
 export * as datamodel from './datamodel';
-export * as pb from './pb';
