@@ -3,8 +3,20 @@ name: UI Integration Tests
 on:
   push:
     branches: [main]
+    paths:
+      - 'src/app/**'
+      - 'src/diagram/**'
+      - 'src/server/**'
+      - 'ui-tests/**'
+      - '.github/workflows/ui-tests.yml'
   pull_request:
     branches: [main]
+    paths:
+      - 'src/app/**'
+      - 'src/diagram/**'
+      - 'src/server/**'
+      - 'ui-tests/**'
+      - '.github/workflows/ui-tests.yml'
 
 jobs:
   ui-tests:
@@ -33,7 +45,7 @@ jobs:
         run: rustup show
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
