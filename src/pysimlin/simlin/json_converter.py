@@ -440,7 +440,7 @@ def _create_converter() -> cattrs.Converter:
         return FlowPoint(
             x=d["x"],
             y=d["y"],
-            attached_to_uid=d.get("attachedToUid"),
+            attached_to_uid=d.get("attachedToUid", 0),
         )
 
     conv.register_structure_hook(StockViewElement, structure_stock_view_element)
