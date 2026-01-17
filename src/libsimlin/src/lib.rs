@@ -311,7 +311,7 @@ pub extern "C" fn simlin_error_str(err: SimlinErrorCode) -> *const c_char {
         SimlinErrorCode::BadModuleInputSrc => "bad_module_input_src\0",
         SimlinErrorCode::NotSimulatable => "not_simulatable\0",
         SimlinErrorCode::BadTable => "bad_table\0",
-        SimlinErrorCode::BadSimSpecs => "bad_simSpecs\0",
+        SimlinErrorCode::BadSimSpecs => "bad_sim_specs\0",
         SimlinErrorCode::NoAbsoluteReferences => "no_absolute_references\0",
         SimlinErrorCode::CircularDependency => "circular_dependency\0",
         SimlinErrorCode::ArraysNotImplemented => "arrays_not_implemented\0",
@@ -319,7 +319,7 @@ pub extern "C" fn simlin_error_str(err: SimlinErrorCode) -> *const c_char {
             "multi_dimensional_arrays_not_implemented\0"
         }
         SimlinErrorCode::BadDimensionName => "bad_dimension_name\0",
-        SimlinErrorCode::BadModelName => "bad_modelName\0",
+        SimlinErrorCode::BadModelName => "bad_model_name\0",
         SimlinErrorCode::MismatchedDimensions => "mismatched_dimensions\0",
         SimlinErrorCode::ArrayReferenceNeedsExplicitSubscripts => {
             "array_reference_needs_explicit_subscripts\0"
