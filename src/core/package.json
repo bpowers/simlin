@@ -47,13 +47,16 @@
     "google-protobuf": "^4.0.0"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@typescript-eslint/eslint-plugin": "^8.18.1",
     "@typescript-eslint/parser": "^8.18.1",
     "eslint": "^9.0.0",
     "eslint-config-prettier": "^9.0.0",
     "eslint-plugin-import": "^2.20.1",
     "eslint-plugin-prettier": "^5.0.0",
+    "jest": "^30.0.0",
     "prettier": "^3.0.0",
+    "ts-jest": "^29.4.0",
     "typescript": "^5.7.2"
   },
   "scripts": {
@@ -62,6 +65,8 @@
     "lint": "eslint .",
     "prepublishOnly": "yarn build",
     "clean": "rm -rf ./lib ./lib.module",
-    "build": "tsc && tsc -p tsconfig.browser.json && cp pb/*.js lib/pb/ && cp pb/*.js lib.module/pb/"
+    "build": "tsc && tsc -p tsconfig.browser.json && cp pb/*.js lib/pb/ && cp pb/*.js lib.module/pb/",
+    "test": "jest",
+    "test:watch": "jest --watch"
   }
 }
