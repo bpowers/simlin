@@ -235,14 +235,15 @@ function stockEquationFromJson(
   arrayedEquation: JsonArrayedEquation | undefined,
 ): Equation {
   if (arrayedEquation) {
+    const dimensionNames = List(arrayedEquation.dimensions ?? []);
     if (arrayedEquation.elements && arrayedEquation.elements.length > 0) {
       return new ArrayedEquation({
-        dimensionNames: List(arrayedEquation.dimensions),
+        dimensionNames,
         elements: Map<string, string>(arrayedEquation.elements.map((el: JsonElementEquation) => [el.subscript, el.equation] as [string, string])),
       });
     } else {
       return new ApplyToAllEquation({
-        dimensionNames: List(arrayedEquation.dimensions),
+        dimensionNames,
         equation: arrayedEquation.equation ?? '',
       });
     }
@@ -261,10 +262,11 @@ function auxEquationFromJson(
   }
 
   if (arrayedEquation) {
+    const dimensionNames = List(arrayedEquation.dimensions ?? []);
     if (arrayedEquation.elements && arrayedEquation.elements.length > 0) {
       return {
         equation: new ArrayedEquation({
-          dimensionNames: List(arrayedEquation.dimensions),
+          dimensionNames,
           elements: Map<string, string>(arrayedEquation.elements.map((el: JsonElementEquation) => [el.subscript, el.equation] as [string, string])),
         }),
         graphicalFunction,
@@ -272,7 +274,7 @@ function auxEquationFromJson(
     } else {
       return {
         equation: new ApplyToAllEquation({
-          dimensionNames: List(arrayedEquation.dimensions),
+          dimensionNames,
           equation: arrayedEquation.equation ?? '',
         }),
         graphicalFunction,

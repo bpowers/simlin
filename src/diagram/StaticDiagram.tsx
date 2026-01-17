@@ -18,6 +18,7 @@ import { Canvas } from './drawing/Canvas';
 interface DiagramProps {
   isDarkTheme?: boolean;
   projectPbBase64: string;
+  project?: Project; // Pre-loaded project for SSR
   data?: Map<string, Series>;
 }
 
@@ -29,13 +30,22 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
   constructor(props: DiagramProps) {
     super(props);
 
+    // Use pre-loaded project if provided (for SSR), otherwise undefined
+    let project = props.project;
+    if (project && props.data !== undefined) {
+      project = project.attachData(props.data, 'main');
+    }
+
     this.state = {
-      project: undefined,
+      project,
     };
   }
 
   componentDidMount() {
-    this.loadProject();
+    // Only load if we don't already have a project (i.e., not SSR)
+    if (!this.state.project) {
+      this.loadProject();
+    }
   }
 
   async loadProject() {
