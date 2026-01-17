@@ -430,6 +430,16 @@ pub struct LoopMetadata {
     pub description: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Source {
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub extension: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub content: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -441,6 +451,8 @@ pub struct Project {
     pub dimensions: Vec<Dimension>,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub units: Vec<Unit>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source: Option<Source>,
 }
 
 /// Generate the JSON Schema for the Project type
@@ -955,6 +967,20 @@ impl From<LoopMetadata> for datamodel::LoopMetadata {
     }
 }
 
+impl From<Source> for datamodel::Source {
+    fn from(source: Source) -> Self {
+        let extension = match source.extension.as_str() {
+            "xmile" => datamodel::Extension::Xmile,
+            "vensim" => datamodel::Extension::Vensim,
+            _ => datamodel::Extension::Unspecified,
+        };
+        datamodel::Source {
+            extension,
+            content: source.content,
+        }
+    }
+}
+
 impl From<Project> for datamodel::Project {
     fn from(project: Project) -> Self {
         datamodel::Project {
@@ -963,7 +989,7 @@ impl From<Project> for datamodel::Project {
             dimensions: project.dimensions.into_iter().map(|d| d.into()).collect(),
             units: project.units.into_iter().map(|u| u.into()).collect(),
             models: project.models.into_iter().map(|m| m.into()).collect(),
-            source: None,
+            source: project.source.map(|s| s.into()),
             ai_information: None,
         }
     }
@@ -1434,6 +1460,21 @@ impl From<datamodel::LoopMetadata> for LoopMetadata {
     }
 }
 
+impl From<datamodel::Source> for Source {
+    fn from(source: datamodel::Source) -> Self {
+        let extension = match source.extension {
+            datamodel::Extension::Xmile => "xmile",
+            datamodel::Extension::Vensim => "vensim",
+            datamodel::Extension::Unspecified => "",
+        }
+        .to_string();
+        Source {
+            extension,
+            content: source.content,
+        }
+    }
+}
+
 impl From<datamodel::Project> for Project {
     fn from(project: datamodel::Project) -> Self {
         Project {
@@ -1442,6 +1483,7 @@ impl From<datamodel::Project> for Project {
             models: project.models.into_iter().map(|m| m.into()).collect(),
             dimensions: project.dimensions.into_iter().map(|d| d.into()).collect(),
             units: project.units.into_iter().map(|u| u.into()).collect(),
+            source: project.source.map(|s| s.into()),
         }
     }
 }
@@ -2202,6 +2244,7 @@ mod tests {
                 disabled: false,
                 aliases: vec![],
             }],
+            source: Default::default(),
         };
 
         // Roundtrip
@@ -2354,5 +2397,198 @@ mod tests {
 
         let result: Result<Project, _> = serde_json::from_str(json_str);
         assert!(result.is_ok(), "Failed to deserialize: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_source_roundtrip() {
+        let cases = vec![
+            (
+                "xmile extension with content",
+                Source {
+                    extension: "xmile".to_string(),
+                    content: "<xmile>...</xmile>".to_string(),
+                },
+                datamodel::Extension::Xmile,
+            ),
+            (
+                "vensim extension with content",
+                Source {
+                    extension: "vensim".to_string(),
+                    content: "{UTF-8}\nPopulation= INTEG (...)".to_string(),
+                },
+                datamodel::Extension::Vensim,
+            ),
+            (
+                "empty extension",
+                Source {
+                    extension: "".to_string(),
+                    content: "some content".to_string(),
+                },
+                datamodel::Extension::Unspecified,
+            ),
+            (
+                "unknown extension maps to unspecified",
+                Source {
+                    extension: "unknown_format".to_string(),
+                    content: "".to_string(),
+                },
+                datamodel::Extension::Unspecified,
+            ),
+            (
+                "empty source",
+                Source {
+                    extension: "".to_string(),
+                    content: "".to_string(),
+                },
+                datamodel::Extension::Unspecified,
+            ),
+        ];
+
+        for (name, json_source, expected_extension) in cases {
+            // Convert to datamodel
+            let dm_source: datamodel::Source = json_source.clone().into();
+
+            // Verify the extension was correctly mapped
+            assert_eq!(
+                dm_source.extension, expected_extension,
+                "Extension mapping failed for: {}",
+                name
+            );
+            assert_eq!(
+                dm_source.content, json_source.content,
+                "Content not preserved for: {}",
+                name
+            );
+
+            // Convert back to JSON
+            let json_source2: Source = dm_source.into();
+
+            // Serialize and deserialize through JSON
+            let json_str = serde_json::to_string(&json_source2).unwrap();
+            let json_source3: Source = serde_json::from_str(&json_str).unwrap();
+
+            // Content should always be preserved
+            assert_eq!(
+                json_source.content, json_source3.content,
+                "Content roundtrip failed for: {}",
+                name
+            );
+
+            // Extension roundtrip: known extensions should survive, unknown ones become empty
+            match expected_extension {
+                datamodel::Extension::Xmile => {
+                    assert_eq!(
+                        "xmile", json_source3.extension,
+                        "Xmile extension roundtrip failed for: {}",
+                        name
+                    );
+                }
+                datamodel::Extension::Vensim => {
+                    assert_eq!(
+                        "vensim", json_source3.extension,
+                        "Vensim extension roundtrip failed for: {}",
+                        name
+                    );
+                }
+                datamodel::Extension::Unspecified => {
+                    assert_eq!(
+                        "", json_source3.extension,
+                        "Unspecified extension should serialize as empty for: {}",
+                        name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_source_datamodel_to_json() {
+        // Test datamodel::Source -> Source conversion directly
+        let cases = vec![
+            (
+                "xmile",
+                datamodel::Source {
+                    extension: datamodel::Extension::Xmile,
+                    content: "<xmile version=\"1.0\">...</xmile>".to_string(),
+                },
+                "xmile",
+            ),
+            (
+                "vensim",
+                datamodel::Source {
+                    extension: datamodel::Extension::Vensim,
+                    content: "Model content here".to_string(),
+                },
+                "vensim",
+            ),
+            (
+                "unspecified",
+                datamodel::Source {
+                    extension: datamodel::Extension::Unspecified,
+                    content: "".to_string(),
+                },
+                "",
+            ),
+        ];
+
+        for (name, dm_source, expected_ext_str) in cases {
+            let json_source: Source = dm_source.clone().into();
+
+            assert_eq!(
+                json_source.extension, expected_ext_str,
+                "Extension string mismatch for: {}",
+                name
+            );
+            assert_eq!(
+                json_source.content, dm_source.content,
+                "Content mismatch for: {}",
+                name
+            );
+
+            // Verify serialization produces valid JSON
+            let json_str = serde_json::to_string(&json_source).unwrap();
+            let parsed: Source = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(
+                parsed.extension, expected_ext_str,
+                "JSON serialization roundtrip failed for: {}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_source_json_to_datamodel() {
+        // Test Source -> datamodel::Source conversion directly
+        let cases = vec![
+            ("xmile", "xmile", datamodel::Extension::Xmile),
+            ("vensim", "vensim", datamodel::Extension::Vensim),
+            ("empty", "", datamodel::Extension::Unspecified),
+            ("unknown", "mdl", datamodel::Extension::Unspecified),
+            (
+                "XMILE uppercase",
+                "XMILE",
+                datamodel::Extension::Unspecified,
+            ), // case sensitive
+        ];
+
+        for (name, ext_str, expected_extension) in cases {
+            let json_source = Source {
+                extension: ext_str.to_string(),
+                content: "test content".to_string(),
+            };
+
+            let dm_source: datamodel::Source = json_source.into();
+
+            assert_eq!(
+                dm_source.extension, expected_extension,
+                "Extension enum mismatch for: {}",
+                name
+            );
+            assert_eq!(
+                dm_source.content, "test content",
+                "Content mismatch for: {}",
+                name
+            );
+        }
     }
 }

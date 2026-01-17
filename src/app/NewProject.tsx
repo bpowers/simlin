@@ -22,6 +22,7 @@ import { User } from './User';
 import { Project as ProjectDM } from '@system-dynamics/core/datamodel';
 import { convertMdlToXmile } from '@system-dynamics/xmutil';
 import { Project as Engine2Project } from '@system-dynamics/engine2';
+import type { JsonProject } from '@system-dynamics/engine2';
 
 interface NewProjectProps {
   user: User;
@@ -155,7 +156,8 @@ export const NewProject = styled(
 
         const engine2Project = await Engine2Project.open(contents);
         const projectPB = engine2Project.serializeProtobuf();
-        const activeProject = ProjectDM.deserializeBinary(projectPB);
+        const json = JSON.parse(engine2Project.serializeJson()) as JsonProject;
+        const activeProject = ProjectDM.fromJson(json);
         const views = activeProject.models.get('main')?.views;
         if (!views || views.isEmpty()) {
           let errorMsg = `can't import model with no view at this time.`;

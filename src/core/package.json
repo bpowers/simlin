@@ -11,14 +11,6 @@
   "module": "lib.module",
   "main": "lib",
   "exports": {
-    "./pb": {
-      "module": "./lib.module/pb/index.js",
-      "node": "./lib/pb/index.js"
-    },
-    "./pb/*": {
-      "module": "./lib.module/pb/*.js",
-      "node": "./lib/pb/*.js"
-    },
     "./*": {
       "module": "./lib.module/*.js",
       "node": "./lib/*.js"
@@ -42,26 +34,29 @@
   },
   "sideEffects": false,
   "dependencies": {
-    "immutable": "^5.0.3",
-    "js-base64": "^3.7.7",
-    "google-protobuf": "^4.0.0"
+    "immutable": "^5.0.3"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@typescript-eslint/eslint-plugin": "^8.18.1",
     "@typescript-eslint/parser": "^8.18.1",
     "eslint": "^9.0.0",
     "eslint-config-prettier": "^9.0.0",
     "eslint-plugin-import": "^2.20.1",
     "eslint-plugin-prettier": "^5.0.0",
+    "jest": "^30.0.0",
     "prettier": "^3.0.0",
+    "ts-jest": "^29.4.0",
     "typescript": "^5.7.2"
   },
   "scripts": {
-    "needs-format": "prettier -l '*.ts' 'pb/*.ts'",
-    "format": "prettier --write '*.ts' 'pb/*.ts'",
+    "needs-format": "prettier -l '*.ts'",
+    "format": "prettier --write '*.ts'",
     "lint": "eslint .",
     "prepublishOnly": "yarn build",
     "clean": "rm -rf ./lib ./lib.module",
-    "build": "tsc && tsc -p tsconfig.browser.json && cp pb/*.js lib/pb/ && cp pb/*.js lib.module/pb/"
+    "build": "tsc && tsc -p tsconfig.browser.json",
+    "test": "jest",
+    "test:watch": "jest --watch"
   }
 }
