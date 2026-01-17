@@ -359,7 +359,7 @@ class Project:
 
         # Read current specs via JSON
         project_json = json.loads(self.serialize_json().decode("utf-8"))
-        current = converter.structure(project_json["sim_specs"], JsonSimSpecs)
+        current = converter.structure(project_json["simSpecs"], JsonSimSpecs)
 
         # Map from legacy protobuf-style field names to JSON field names
         field_mapping = {"start": "start_time", "stop": "end_time", "sim_method": "method"}

@@ -24,10 +24,10 @@ export interface JsonGraphicalFunctionScale {
  */
 export interface JsonGraphicalFunction {
   points?: [number, number][];
-  y_points?: number[];
+  yPoints?: number[];
   kind?: string;
-  x_scale?: JsonGraphicalFunctionScale;
-  y_scale?: JsonGraphicalFunctionScale;
+  xScale?: JsonGraphicalFunctionScale;
+  yScale?: JsonGraphicalFunctionScale;
 }
 
 /**
@@ -36,8 +36,8 @@ export interface JsonGraphicalFunction {
 export interface JsonElementEquation {
   subscript: string;
   equation: string;
-  initial_equation?: string;
-  graphical_function?: JsonGraphicalFunction;
+  initialEquation?: string;
+  graphicalFunction?: JsonGraphicalFunction;
 }
 
 /**
@@ -46,7 +46,7 @@ export interface JsonElementEquation {
 export interface JsonArrayedEquation {
   dimensions: string[];
   equation?: string;
-  initial_equation?: string;
+  initialEquation?: string;
   elements?: JsonElementEquation[];
 }
 
@@ -68,13 +68,13 @@ export interface JsonStock {
   inflows: string[];
   outflows: string[];
   uid?: number;
-  initial_equation?: string;
+  initialEquation?: string;
   units?: string;
-  non_negative?: boolean;
+  nonNegative?: boolean;
   documentation?: string;
-  can_be_module_input?: boolean;
-  is_public?: boolean;
-  arrayed_equation?: JsonArrayedEquation;
+  canBeModuleInput?: boolean;
+  isPublic?: boolean;
+  arrayedEquation?: JsonArrayedEquation;
 }
 
 /**
@@ -85,12 +85,12 @@ export interface JsonFlow {
   uid?: number;
   equation?: string;
   units?: string;
-  non_negative?: boolean;
-  graphical_function?: JsonGraphicalFunction;
+  nonNegative?: boolean;
+  graphicalFunction?: JsonGraphicalFunction;
   documentation?: string;
-  can_be_module_input?: boolean;
-  is_public?: boolean;
-  arrayed_equation?: JsonArrayedEquation;
+  canBeModuleInput?: boolean;
+  isPublic?: boolean;
+  arrayedEquation?: JsonArrayedEquation;
 }
 
 /**
@@ -100,13 +100,13 @@ export interface JsonAuxiliary {
   name: string;
   uid?: number;
   equation?: string;
-  initial_equation?: string;
+  initialEquation?: string;
   units?: string;
-  graphical_function?: JsonGraphicalFunction;
+  graphicalFunction?: JsonGraphicalFunction;
   documentation?: string;
-  can_be_module_input?: boolean;
-  is_public?: boolean;
-  arrayed_equation?: JsonArrayedEquation;
+  canBeModuleInput?: boolean;
+  isPublic?: boolean;
+  arrayedEquation?: JsonArrayedEquation;
 }
 
 /**
@@ -114,13 +114,13 @@ export interface JsonAuxiliary {
  */
 export interface JsonModule {
   name: string;
-  model_name: string;
+  modelName: string;
   uid?: number;
   units?: string;
   documentation?: string;
   references?: JsonModuleReference[];
-  can_be_module_input?: boolean;
-  is_public?: boolean;
+  canBeModuleInput?: boolean;
+  isPublic?: boolean;
 }
 
 /**
@@ -136,7 +136,7 @@ export type JsonVariable = JsonStock | JsonFlow | JsonAuxiliary | JsonModule;
 export interface JsonFlowPoint {
   x: number;
   y: number;
-  attached_to_uid?: number;
+  attachedToUid?: number;
 }
 
 /**
@@ -166,7 +166,7 @@ export interface JsonStockViewElement {
   name: string;
   x: number;
   y: number;
-  label_side?: string;
+  labelSide?: string;
 }
 
 /**
@@ -179,7 +179,7 @@ export interface JsonFlowViewElement {
   x: number;
   y: number;
   points: JsonFlowPoint[];
-  label_side?: string;
+  labelSide?: string;
 }
 
 /**
@@ -191,7 +191,7 @@ export interface JsonAuxiliaryViewElement {
   name: string;
   x: number;
   y: number;
-  label_side?: string;
+  labelSide?: string;
 }
 
 /**
@@ -200,7 +200,7 @@ export interface JsonAuxiliaryViewElement {
 export interface JsonCloudViewElement {
   type: 'cloud';
   uid: number;
-  flow_uid: number;
+  flowUid: number;
   x: number;
   y: number;
 }
@@ -211,10 +211,10 @@ export interface JsonCloudViewElement {
 export interface JsonLinkViewElement {
   type: 'link';
   uid: number;
-  from_uid: number;
-  to_uid: number;
+  fromUid: number;
+  toUid: number;
   arc?: number;
-  multi_points?: JsonLinkPoint[];
+  multiPoints?: JsonLinkPoint[];
 }
 
 /**
@@ -226,7 +226,7 @@ export interface JsonModuleViewElement {
   name: string;
   x: number;
   y: number;
-  label_side?: string;
+  labelSide?: string;
 }
 
 /**
@@ -235,10 +235,10 @@ export interface JsonModuleViewElement {
 export interface JsonAliasViewElement {
   type: 'alias';
   uid: number;
-  alias_of_uid: number;
+  aliasOfUid: number;
   x: number;
   y: number;
-  label_side?: string;
+  labelSide?: string;
 }
 
 /**
@@ -259,7 +259,7 @@ export type JsonViewElement =
 export interface JsonView {
   elements: JsonViewElement[];
   kind?: string;
-  view_box?: JsonRect;
+  viewBox?: JsonRect;
   zoom?: number;
 }
 
@@ -269,12 +269,12 @@ export interface JsonView {
  * Simulation specification.
  */
 export interface JsonSimSpecs {
-  start_time: number;
-  end_time: number;
+  startTime: number;
+  endTime: number;
   dt?: string;
-  save_step?: number;
+  saveStep?: number;
   method?: string;
-  time_units?: string;
+  timeUnits?: string;
 }
 
 // Project structure types
@@ -286,7 +286,7 @@ export interface JsonDimension {
   name: string;
   elements?: string[];
   size?: number;
-  maps_to?: string;
+  mapsTo?: string;
 }
 
 /**
@@ -318,9 +318,9 @@ export interface JsonModel {
   flows: JsonFlow[];
   auxiliaries: JsonAuxiliary[];
   modules?: JsonModule[];
-  sim_specs?: JsonSimSpecs;
+  simSpecs?: JsonSimSpecs;
   views?: JsonView[];
-  loop_metadata?: JsonLoopMetadata[];
+  loopMetadata?: JsonLoopMetadata[];
 }
 
 /**
@@ -328,7 +328,7 @@ export interface JsonModel {
  */
 export interface JsonProject {
   name: string;
-  sim_specs: JsonSimSpecs;
+  simSpecs: JsonSimSpecs;
   models: JsonModel[];
   dimensions?: JsonDimension[];
   units?: JsonUnit[];
@@ -398,53 +398,53 @@ export interface DeleteViewPayload {
  * Payload for set sim specs operation.
  */
 export interface SetSimSpecsPayload {
-  sim_specs: JsonSimSpecs;
+  simSpecs: JsonSimSpecs;
 }
 
 // Operation types with type discriminator
 
 export interface UpsertStockOp {
-  type: 'upsert_stock';
+  type: 'upsertStock';
   payload: UpsertStockPayload;
 }
 
 export interface UpsertFlowOp {
-  type: 'upsert_flow';
+  type: 'upsertFlow';
   payload: UpsertFlowPayload;
 }
 
 export interface UpsertAuxOp {
-  type: 'upsert_aux';
+  type: 'upsertAux';
   payload: UpsertAuxPayload;
 }
 
 export interface UpsertModuleOp {
-  type: 'upsert_module';
+  type: 'upsertModule';
   payload: UpsertModulePayload;
 }
 
 export interface DeleteVariableOp {
-  type: 'delete_variable';
+  type: 'deleteVariable';
   payload: DeleteVariablePayload;
 }
 
 export interface RenameVariableOp {
-  type: 'rename_variable';
+  type: 'renameVariable';
   payload: RenameVariablePayload;
 }
 
 export interface UpsertViewOp {
-  type: 'upsert_view';
+  type: 'upsertView';
   payload: UpsertViewPayload;
 }
 
 export interface DeleteViewOp {
-  type: 'delete_view';
+  type: 'deleteView';
   payload: DeleteViewPayload;
 }
 
 export interface SetSimSpecsOp {
-  type: 'set_sim_specs';
+  type: 'setSimSpecs';
   payload: SetSimSpecsPayload;
 }
 
@@ -480,40 +480,40 @@ export interface JsonModelPatch {
  * A patch containing project-level and model-level operations.
  */
 export interface JsonProjectPatch {
-  project_ops?: JsonProjectOperation[];
+  projectOps?: JsonProjectOperation[];
   models?: JsonModelPatch[];
 }
 
 // Type guards for discriminating operations
 
 export function isUpsertStock(op: JsonModelOperation): op is UpsertStockOp {
-  return op.type === 'upsert_stock';
+  return op.type === 'upsertStock';
 }
 
 export function isUpsertFlow(op: JsonModelOperation): op is UpsertFlowOp {
-  return op.type === 'upsert_flow';
+  return op.type === 'upsertFlow';
 }
 
 export function isUpsertAux(op: JsonModelOperation): op is UpsertAuxOp {
-  return op.type === 'upsert_aux';
+  return op.type === 'upsertAux';
 }
 
 export function isUpsertModule(op: JsonModelOperation): op is UpsertModuleOp {
-  return op.type === 'upsert_module';
+  return op.type === 'upsertModule';
 }
 
 export function isDeleteVariable(op: JsonModelOperation): op is DeleteVariableOp {
-  return op.type === 'delete_variable';
+  return op.type === 'deleteVariable';
 }
 
 export function isRenameVariable(op: JsonModelOperation): op is RenameVariableOp {
-  return op.type === 'rename_variable';
+  return op.type === 'renameVariable';
 }
 
 export function isUpsertView(op: JsonModelOperation): op is UpsertViewOp {
-  return op.type === 'upsert_view';
+  return op.type === 'upsertView';
 }
 
 export function isDeleteView(op: JsonModelOperation): op is DeleteViewOp {
-  return op.type === 'delete_view';
+  return op.type === 'deleteView';
 }

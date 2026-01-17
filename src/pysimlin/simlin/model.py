@@ -507,13 +507,13 @@ class Model:
                 raise SimlinRuntimeError("Model is not attached to a Project")
 
             project_json = json.loads(self._project.serialize_json().decode("utf-8"))
-            sim_specs = project_json["sim_specs"]
+            sim_specs = project_json["simSpecs"]
 
             self._cached_time_spec = TimeSpec(
-                start=sim_specs.get("start_time", 0.0),
-                stop=sim_specs.get("end_time", 10.0),
+                start=sim_specs.get("startTime", 0.0),
+                stop=sim_specs.get("endTime", 10.0),
                 dt=parse_dt(sim_specs.get("dt", "1")),
-                units=sim_specs.get("time_units") or None,
+                units=sim_specs.get("timeUnits") or None,
             )
         return self._cached_time_spec
 

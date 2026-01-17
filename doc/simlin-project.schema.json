@@ -6,7 +6,7 @@
     "name": {
       "type": "string"
     },
-    "sim_specs": {
+    "simSpecs": {
       "$ref": "#/$defs/SimSpecs"
     },
     "models": {
@@ -30,38 +30,38 @@
   },
   "required": [
     "name",
-    "sim_specs",
+    "simSpecs",
     "models"
   ],
   "$defs": {
     "SimSpecs": {
       "type": "object",
       "properties": {
-        "start_time": {
+        "startTime": {
           "type": "number",
           "format": "double"
         },
-        "end_time": {
+        "endTime": {
           "type": "number",
           "format": "double"
         },
         "dt": {
           "type": "string"
         },
-        "save_step": {
+        "saveStep": {
           "type": "number",
           "format": "double"
         },
         "method": {
           "type": "string"
         },
-        "time_units": {
+        "timeUnits": {
           "type": "string"
         }
       },
       "required": [
-        "start_time",
-        "end_time"
+        "startTime",
+        "endTime"
       ]
     },
     "Model": {
@@ -94,7 +94,7 @@
             "$ref": "#/$defs/Module"
           }
         },
-        "sim_specs": {
+        "simSpecs": {
           "anyOf": [
             {
               "$ref": "#/$defs/SimSpecs"
@@ -110,7 +110,7 @@
             "$ref": "#/$defs/View"
           }
         },
-        "loop_metadata": {
+        "loopMetadata": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/LoopMetadata"
@@ -134,7 +134,7 @@
         "name": {
           "type": "string"
         },
-        "initial_equation": {
+        "initialEquation": {
           "type": "string"
         },
         "units": {
@@ -152,19 +152,19 @@
             "type": "string"
           }
         },
-        "non_negative": {
+        "nonNegative": {
           "type": "boolean"
         },
         "documentation": {
           "type": "string"
         },
-        "can_be_module_input": {
+        "canBeModuleInput": {
           "type": "boolean"
         },
-        "is_public": {
+        "isPublic": {
           "type": "boolean"
         },
-        "arrayed_equation": {
+        "arrayedEquation": {
           "anyOf": [
             {
               "$ref": "#/$defs/ArrayedEquation"
@@ -196,7 +196,7 @@
             "null"
           ]
         },
-        "initial_equation": {
+        "initialEquation": {
           "type": [
             "string",
             "null"
@@ -225,10 +225,10 @@
         "equation": {
           "type": "string"
         },
-        "initial_equation": {
+        "initialEquation": {
           "type": "string"
         },
-        "graphical_function": {
+        "graphicalFunction": {
           "anyOf": [
             {
               "$ref": "#/$defs/GraphicalFunction"
@@ -259,7 +259,7 @@
             "maxItems": 2
           }
         },
-        "y_points": {
+        "yPoints": {
           "type": "array",
           "items": {
             "type": "number",
@@ -269,7 +269,7 @@
         "kind": {
           "type": "string"
         },
-        "x_scale": {
+        "xScale": {
           "anyOf": [
             {
               "$ref": "#/$defs/GraphicalFunctionScale"
@@ -279,7 +279,7 @@
             }
           ]
         },
-        "y_scale": {
+        "yScale": {
           "anyOf": [
             {
               "$ref": "#/$defs/GraphicalFunctionScale"
@@ -324,10 +324,10 @@
         "units": {
           "type": "string"
         },
-        "non_negative": {
+        "nonNegative": {
           "type": "boolean"
         },
-        "graphical_function": {
+        "graphicalFunction": {
           "anyOf": [
             {
               "$ref": "#/$defs/GraphicalFunction"
@@ -340,13 +340,13 @@
         "documentation": {
           "type": "string"
         },
-        "can_be_module_input": {
+        "canBeModuleInput": {
           "type": "boolean"
         },
-        "is_public": {
+        "isPublic": {
           "type": "boolean"
         },
-        "arrayed_equation": {
+        "arrayedEquation": {
           "anyOf": [
             {
               "$ref": "#/$defs/ArrayedEquation"
@@ -374,13 +374,13 @@
         "equation": {
           "type": "string"
         },
-        "initial_equation": {
+        "initialEquation": {
           "type": "string"
         },
         "units": {
           "type": "string"
         },
-        "graphical_function": {
+        "graphicalFunction": {
           "anyOf": [
             {
               "$ref": "#/$defs/GraphicalFunction"
@@ -393,13 +393,13 @@
         "documentation": {
           "type": "string"
         },
-        "can_be_module_input": {
+        "canBeModuleInput": {
           "type": "boolean"
         },
-        "is_public": {
+        "isPublic": {
           "type": "boolean"
         },
-        "arrayed_equation": {
+        "arrayedEquation": {
           "anyOf": [
             {
               "$ref": "#/$defs/ArrayedEquation"
@@ -424,7 +424,7 @@
         "name": {
           "type": "string"
         },
-        "model_name": {
+        "modelName": {
           "type": "string"
         },
         "units": {
@@ -439,16 +439,16 @@
             "$ref": "#/$defs/ModuleReference"
           }
         },
-        "can_be_module_input": {
+        "canBeModuleInput": {
           "type": "boolean"
         },
-        "is_public": {
+        "isPublic": {
           "type": "boolean"
         }
       },
       "required": [
         "name",
-        "model_name"
+        "modelName"
       ]
     },
     "ModuleReference": {
@@ -478,7 +478,7 @@
             "$ref": "#/$defs/ViewElement"
           }
         },
-        "view_box": {
+        "viewBox": {
           "anyOf": [
             {
               "$ref": "#/$defs/Rect"
@@ -610,7 +610,7 @@
           "type": "number",
           "format": "double"
         },
-        "label_side": {
+        "labelSide": {
           "type": "string"
         }
       },
@@ -632,7 +632,7 @@
           "type": "number",
           "format": "double"
         },
-        "attached_to_uid": {
+        "attachedToUid": {
           "type": "integer",
           "format": "int32"
         }
@@ -660,7 +660,7 @@
           "type": "number",
           "format": "double"
         },
-        "label_side": {
+        "labelSide": {
           "type": "string"
         },
         "points": {
@@ -696,7 +696,7 @@
           "type": "number",
           "format": "double"
         },
-        "label_side": {
+        "labelSide": {
           "type": "string"
         }
       },
@@ -714,7 +714,7 @@
           "type": "integer",
           "format": "int32"
         },
-        "flow_uid": {
+        "flowUid": {
           "type": "integer",
           "format": "int32"
         },
@@ -729,7 +729,7 @@
       },
       "required": [
         "uid",
-        "flow_uid",
+        "flowUid",
         "x",
         "y"
       ]
@@ -758,11 +758,11 @@
           "type": "integer",
           "format": "int32"
         },
-        "from_uid": {
+        "fromUid": {
           "type": "integer",
           "format": "int32"
         },
-        "to_uid": {
+        "toUid": {
           "type": "integer",
           "format": "int32"
         },
@@ -773,7 +773,7 @@
           ],
           "format": "double"
         },
-        "multi_points": {
+        "multiPoints": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/LinkPoint"
@@ -782,8 +782,8 @@
       },
       "required": [
         "uid",
-        "from_uid",
-        "to_uid"
+        "fromUid",
+        "toUid"
       ]
     },
     "ModuleViewElement": {
@@ -804,7 +804,7 @@
           "type": "number",
           "format": "double"
         },
-        "label_side": {
+        "labelSide": {
           "type": "string"
         }
       },
@@ -822,7 +822,7 @@
           "type": "integer",
           "format": "int32"
         },
-        "alias_of_uid": {
+        "aliasOfUid": {
           "type": "integer",
           "format": "int32"
         },
@@ -834,13 +834,13 @@
           "type": "number",
           "format": "double"
         },
-        "label_side": {
+        "labelSide": {
           "type": "string"
         }
       },
       "required": [
         "uid",
-        "alias_of_uid",
+        "aliasOfUid",
         "x",
         "y"
       ]
@@ -913,7 +913,7 @@
           "type": "integer",
           "format": "int32"
         },
-        "maps_to": {
+        "mapsTo": {
           "description": "Optional dimension mapping target (e.g., DimA: A1, A2, A3 -> DimB).\nThis establishes a positional correspondence between this dimension's\nelements and the target dimension's elements.",
           "type": [
             "string",

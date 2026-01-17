@@ -172,8 +172,8 @@ export class Model {
 
   private extractEquation(
     topLevel: string | undefined,
-    arrayed: { equation?: string; initial_equation?: string } | undefined,
-    field: 'equation' | 'initial_equation' = 'equation',
+    arrayed: { equation?: string; initialEquation?: string } | undefined,
+    field: 'equation' | 'initialEquation' = 'equation',
   ): string {
     if (topLevel) {
       return topLevel;
@@ -195,16 +195,16 @@ export class Model {
     if (gf.points && gf.points.length > 0) {
       // Already in [x, y] format
       points = gf.points;
-    } else if (gf.y_points && gf.y_points.length > 0) {
+    } else if (gf.yPoints && gf.yPoints.length > 0) {
       // y_points only format
-      yPoints = gf.y_points;
+      yPoints = gf.yPoints;
     }
 
     return {
       points,
       yPoints,
-      xScale: gf.x_scale ? { min: gf.x_scale.min, max: gf.x_scale.max } : undefined,
-      yScale: gf.y_scale ? { min: gf.y_scale.min, max: gf.y_scale.max } : undefined,
+      xScale: gf.xScale ? { min: gf.xScale.min, max: gf.xScale.max } : undefined,
+      yScale: gf.yScale ? { min: gf.yScale.min, max: gf.yScale.max } : undefined,
       kind: gf.kind,
     };
   }
@@ -222,13 +222,13 @@ export class Model {
     this._cachedStocks = (model.stocks || []).map((s: JsonStock) => ({
       type: 'stock' as const,
       name: s.name,
-      initialEquation: this.extractEquation(s.initial_equation, s.arrayed_equation, 'initial_equation'),
+      initialEquation: this.extractEquation(s.initialEquation, s.arrayedEquation, 'initialEquation'),
       inflows: s.inflows || [],
       outflows: s.outflows || [],
       units: s.units || undefined,
       documentation: s.documentation || undefined,
-      dimensions: s.arrayed_equation?.dimensions || [],
-      nonNegative: s.non_negative || false,
+      dimensions: s.arrayedEquation?.dimensions || [],
+      nonNegative: s.nonNegative || false,
     }));
 
     return this._cachedStocks;
@@ -246,18 +246,18 @@ export class Model {
     const model = this.getModelJson();
     this._cachedFlows = (model.flows || []).map((f: JsonFlow) => {
       let gf: GraphicalFunction | undefined;
-      if (f.graphical_function) {
-        gf = this.parseJsonGraphicalFunction(f.graphical_function);
+      if (f.graphicalFunction) {
+        gf = this.parseJsonGraphicalFunction(f.graphicalFunction);
       }
 
       return {
         type: 'flow' as const,
         name: f.name,
-        equation: this.extractEquation(f.equation, f.arrayed_equation),
+        equation: this.extractEquation(f.equation, f.arrayedEquation),
         units: f.units || undefined,
         documentation: f.documentation || undefined,
-        dimensions: f.arrayed_equation?.dimensions || [],
-        nonNegative: f.non_negative || false,
+        dimensions: f.arrayedEquation?.dimensions || [],
+        nonNegative: f.nonNegative || false,
         graphicalFunction: gf,
       };
     });
@@ -277,12 +277,12 @@ export class Model {
     const model = this.getModelJson();
     this._cachedAuxs = (model.auxiliaries || []).map((a: JsonAuxiliary) => {
       let gf: GraphicalFunction | undefined;
-      if (a.graphical_function) {
-        gf = this.parseJsonGraphicalFunction(a.graphical_function);
+      if (a.graphicalFunction) {
+        gf = this.parseJsonGraphicalFunction(a.graphicalFunction);
       }
 
-      const equation = this.extractEquation(a.equation, a.arrayed_equation);
-      const initialEquation = this.extractEquation(a.initial_equation, a.arrayed_equation, 'initial_equation');
+      const equation = this.extractEquation(a.equation, a.arrayedEquation);
+      const initialEquation = this.extractEquation(a.initialEquation, a.arrayedEquation, 'initialEquation');
 
       return {
         type: 'aux' as const,
@@ -291,7 +291,7 @@ export class Model {
         initialEquation: initialEquation || undefined,
         units: a.units || undefined,
         documentation: a.documentation || undefined,
-        dimensions: a.arrayed_equation?.dimensions || [],
+        dimensions: a.arrayedEquation?.dimensions || [],
         graphicalFunction: gf,
       };
     });
@@ -330,13 +330,13 @@ export class Model {
     const modelJson = this.getModelJson();
 
     // Use model-level sim_specs if present, otherwise fall back to project-level
-    const simSpecs = modelJson.sim_specs ?? projectJson.sim_specs;
+    const simSpecs = modelJson.simSpecs ?? projectJson.simSpecs;
 
     this._cachedTimeSpec = {
-      start: simSpecs.start_time ?? 0,
-      stop: simSpecs.end_time ?? 10,
+      start: simSpecs.startTime ?? 0,
+      stop: simSpecs.endTime ?? 10,
       dt: parseDt(simSpecs.dt ?? '1'),
-      units: simSpecs.time_units || undefined,
+      units: simSpecs.timeUnits || undefined,
     };
 
     return this._cachedTimeSpec;

@@ -82,7 +82,6 @@ const SearchbarWidthSm = 359;
 const SearchbarWidthMd = 420;
 const SearchbarWidthLg = 480;
 
-
 function convertErrorDetails(
   errors: ErrorDetail[],
   modelName: string,
@@ -389,11 +388,11 @@ export const Editor = styled(
 
       const ops: JsonModelOperation[] = [
         {
-          type: 'rename_variable',
+          type: 'renameVariable',
           payload: { from: oldIdent, to: canonicalize(newName) },
         },
         {
-          type: 'upsert_view',
+          type: 'upsertView',
           payload: { index: 0, view: stockFlowViewToJson(updatedView) },
         },
       ];
@@ -493,7 +492,7 @@ export const Editor = styled(
       }
 
       const deleteOps: JsonModelOperation[] = this.getSelectionIdents().map((ident) => ({
-        type: 'delete_variable' as const,
+        type: 'deleteVariable' as const,
         payload: { ident },
       }));
 
@@ -715,7 +714,7 @@ export const Editor = styled(
 
       if (isCreatingNew) {
         ops.push({
-          type: 'upsert_flow',
+          type: 'upsertFlow',
           payload: {
             flow: {
               name: (flow as NamedViewElement).name,
@@ -730,7 +729,7 @@ export const Editor = styled(
         const stockVar = model.variables.get(sourceStockIdent);
         if (stockVar instanceof StockVar) {
           ops.push({
-            type: 'upsert_stock',
+            type: 'upsertStock',
             payload: {
               stock: {
                 name: stockVar.ident,
@@ -747,7 +746,7 @@ export const Editor = styled(
         const stockVar = model.variables.get(stockAttachingIdent);
         if (stockVar instanceof StockVar) {
           ops.push({
-            type: 'upsert_stock',
+            type: 'upsertStock',
             payload: {
               stock: {
                 name: stockVar.ident,
@@ -764,7 +763,7 @@ export const Editor = styled(
         const stockVar = model.variables.get(stockDetachingIdent);
         if (stockVar instanceof StockVar) {
           ops.push({
-            type: 'upsert_stock',
+            type: 'upsertStock',
             payload: {
               stock: {
                 name: stockVar.ident,
@@ -869,7 +868,7 @@ export const Editor = styled(
       if (engine2) {
         const ops: JsonModelOperation[] = [
           {
-            type: 'upsert_view',
+            type: 'upsertView',
             payload: { index: 0, view: stockFlowViewToJson(view) },
           },
         ];
@@ -902,19 +901,19 @@ export const Editor = styled(
       let op: JsonModelOperation;
       if (elementType === 'stock') {
         op = {
-          type: 'upsert_stock',
+          type: 'upsertStock',
           payload: {
             stock: {
               name,
               inflows: [],
               outflows: [],
-              initial_equation: '',
+              initialEquation: '',
             },
           },
         };
       } else if (elementType === 'flow') {
         op = {
-          type: 'upsert_flow',
+          type: 'upsertFlow',
           payload: {
             flow: {
               name,
@@ -924,7 +923,7 @@ export const Editor = styled(
         };
       } else {
         op = {
-          type: 'upsert_aux',
+          type: 'upsertAux',
           payload: {
             aux: {
               name,
@@ -1102,19 +1101,19 @@ export const Editor = styled(
       }
 
       const simSpecs: JsonSimSpecs = {
-        start_time: updates.start_time ?? simSpec.start,
-        end_time: updates.end_time ?? simSpec.stop,
+        startTime: updates.startTime ?? simSpec.start,
+        endTime: updates.endTime ?? simSpec.stop,
         dt: updates.dt ?? dt,
-        time_units: updates.time_units ?? simSpec.timeUnits,
-        save_step: updates.save_step ?? saveStep,
+        timeUnits: updates.timeUnits ?? simSpec.timeUnits,
+        saveStep: updates.saveStep ?? saveStep,
         method: updates.method ?? simSpec.simMethod,
       };
 
       const patch: JsonProjectPatch = {
-        project_ops: [
+        projectOps: [
           {
-            type: 'set_sim_specs',
-            payload: { sim_specs: simSpecs },
+            type: 'setSimSpecs',
+            payload: { simSpecs: simSpecs },
           },
         ],
       };
@@ -1132,12 +1131,12 @@ export const Editor = styled(
 
     handleStartTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
       const value = Number(event.target.value);
-      this.applySimSpecChange({ start_time: value });
+      this.applySimSpecChange({ startTime: value });
     };
 
     handleStopTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
       const value = Number(event.target.value);
-      this.applySimSpecChange({ end_time: value });
+      this.applySimSpecChange({ endTime: value });
     };
 
     handleDtChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1147,7 +1146,7 @@ export const Editor = styled(
 
     handleTimeUnitsChange = (event: React.ChangeEvent<HTMLInputElement>) => {
       const value = event.target.value;
-      this.applySimSpecChange({ time_units: value });
+      this.applySimSpecChange({ timeUnits: value });
     };
 
     handleDownloadXmile = () => {
@@ -1247,7 +1246,7 @@ export const Editor = styled(
       if (engine2) {
         const ops: JsonModelOperation[] = [
           {
-            type: 'upsert_view',
+            type: 'upsertView',
             payload: { index: 0, view: stockFlowViewToJson(view) },
           },
         ];
@@ -1532,21 +1531,21 @@ export const Editor = styled(
 
     // Returns the equation fields for a JSON patch operation.
     // For scalar equations, returns { equation: string }.
-    // For arrayed equations, returns { arrayed_equation: JsonArrayedEquation }.
-    getEquationFields(variable: Variable): { equation?: string; arrayed_equation?: JsonArrayedEquation } {
+    // For arrayed equations, returns { arrayedEquation: JsonArrayedEquation }.
+    getEquationFields(variable: Variable): { equation?: string; arrayedEquation?: JsonArrayedEquation } {
       const eq = variable.equation;
       if (eq instanceof ScalarEquation) {
         return { equation: eq.equation };
       } else if (eq instanceof ApplyToAllEquation) {
         return {
-          arrayed_equation: {
+          arrayedEquation: {
             dimensions: eq.dimensionNames.toArray(),
             equation: eq.equation,
           },
         };
       } else if (eq instanceof ArrayedEquation) {
         return {
-          arrayed_equation: {
+          arrayedEquation: {
             dimensions: eq.dimensionNames.toArray(),
             elements: eq.elements
               .entrySeq()
@@ -1589,15 +1588,14 @@ export const Editor = styled(
       let op: JsonModelOperation;
       if (variable instanceof StockVar) {
         op = {
-          type: 'upsert_stock',
+          type: 'upsertStock',
           payload: {
             stock: {
               name: variable.ident,
               inflows: variable.inflows.toArray(),
               outflows: variable.outflows.toArray(),
-              // For stocks, the scalar equation field is initial_equation
-              initial_equation: newEquation ?? existingEqFields.equation,
-              arrayed_equation: newEquation !== undefined ? undefined : existingEqFields.arrayed_equation,
+              initialEquation: newEquation ?? existingEqFields.equation,
+              arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
               units: newUnits ?? variable.units ?? undefined,
               documentation: newDocs ?? variable.documentation ?? undefined,
             },
@@ -1606,22 +1604,22 @@ export const Editor = styled(
       } else if (variable instanceof Flow) {
         const gf = variable.gf
           ? {
-              y_points: variable.gf.yPoints?.toArray(),
+              yPoints: variable.gf.yPoints?.toArray(),
               kind: variable.gf.kind,
-              x_scale: variable.gf.xScale ? { min: variable.gf.xScale.min, max: variable.gf.xScale.max } : undefined,
-              y_scale: variable.gf.yScale ? { min: variable.gf.yScale.min, max: variable.gf.yScale.max } : undefined,
+              xScale: variable.gf.xScale ? { min: variable.gf.xScale.min, max: variable.gf.xScale.max } : undefined,
+              yScale: variable.gf.yScale ? { min: variable.gf.yScale.min, max: variable.gf.yScale.max } : undefined,
             }
           : undefined;
         op = {
-          type: 'upsert_flow',
+          type: 'upsertFlow',
           payload: {
             flow: {
               name: variable.ident,
               equation: newEquation ?? existingEqFields.equation,
-              arrayed_equation: newEquation !== undefined ? undefined : existingEqFields.arrayed_equation,
+              arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
               units: newUnits ?? variable.units ?? undefined,
               documentation: newDocs ?? variable.documentation ?? undefined,
-              graphical_function: gf,
+              graphicalFunction: gf,
             },
           },
         };
@@ -1629,22 +1627,22 @@ export const Editor = styled(
         const auxVar = variable as Aux;
         const gf = auxVar.gf
           ? {
-              y_points: auxVar.gf.yPoints?.toArray(),
+              yPoints: auxVar.gf.yPoints?.toArray(),
               kind: auxVar.gf.kind,
-              x_scale: auxVar.gf.xScale ? { min: auxVar.gf.xScale.min, max: auxVar.gf.xScale.max } : undefined,
-              y_scale: auxVar.gf.yScale ? { min: auxVar.gf.yScale.min, max: auxVar.gf.yScale.max } : undefined,
+              xScale: auxVar.gf.xScale ? { min: auxVar.gf.xScale.min, max: auxVar.gf.xScale.max } : undefined,
+              yScale: auxVar.gf.yScale ? { min: auxVar.gf.yScale.min, max: auxVar.gf.yScale.max } : undefined,
             }
           : undefined;
         op = {
-          type: 'upsert_aux',
+          type: 'upsertAux',
           payload: {
             aux: {
               name: auxVar.ident,
               equation: newEquation ?? existingEqFields.equation,
-              arrayed_equation: newEquation !== undefined ? undefined : existingEqFields.arrayed_equation,
+              arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
               units: newUnits ?? auxVar.units ?? undefined,
               documentation: newDocs ?? auxVar.documentation ?? undefined,
-              graphical_function: gf,
+              graphicalFunction: gf,
             },
           },
         };
@@ -1683,10 +1681,10 @@ export const Editor = styled(
 
       const gf = newTable
         ? {
-            y_points: newTable.yPoints?.toArray(),
+            yPoints: newTable.yPoints?.toArray(),
             kind: newTable.kind,
-            x_scale: newTable.xScale ? { min: newTable.xScale.min, max: newTable.xScale.max } : undefined,
-            y_scale: newTable.yScale ? { min: newTable.yScale.min, max: newTable.yScale.max } : undefined,
+            xScale: newTable.xScale ? { min: newTable.xScale.min, max: newTable.xScale.max } : undefined,
+            yScale: newTable.yScale ? { min: newTable.yScale.min, max: newTable.yScale.max } : undefined,
           }
         : undefined;
 
@@ -1696,30 +1694,30 @@ export const Editor = styled(
       let op: JsonModelOperation;
       if (variable instanceof Flow) {
         op = {
-          type: 'upsert_flow',
+          type: 'upsertFlow',
           payload: {
             flow: {
               name: variable.ident,
               equation: existingEqFields.equation,
-              arrayed_equation: existingEqFields.arrayed_equation,
+              arrayedEquation: existingEqFields.arrayedEquation,
               units: variable.units ?? undefined,
               documentation: variable.documentation ?? undefined,
-              graphical_function: gf,
+              graphicalFunction: gf,
             },
           },
         };
       } else {
         const auxVar = variable as Aux;
         op = {
-          type: 'upsert_aux',
+          type: 'upsertAux',
           payload: {
             aux: {
               name: auxVar.ident,
               equation: existingEqFields.equation,
-              arrayed_equation: existingEqFields.arrayed_equation,
+              arrayedEquation: existingEqFields.arrayedEquation,
               units: auxVar.units ?? undefined,
               documentation: auxVar.documentation ?? undefined,
-              graphical_function: gf,
+              graphicalFunction: gf,
             },
           },
         };

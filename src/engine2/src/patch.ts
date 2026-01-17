@@ -82,7 +82,7 @@ export class ModelPatchBuilder {
    * @returns The stock (for chaining)
    */
   upsertStock(stock: JsonStock): JsonStock {
-    const op: UpsertStockOp = { type: 'upsert_stock', payload: { stock } };
+    const op: UpsertStockOp = { type: 'upsertStock', payload: { stock } };
     this._ops.push(op);
     return stock;
   }
@@ -93,7 +93,7 @@ export class ModelPatchBuilder {
    * @returns The flow (for chaining)
    */
   upsertFlow(flow: JsonFlow): JsonFlow {
-    const op: UpsertFlowOp = { type: 'upsert_flow', payload: { flow } };
+    const op: UpsertFlowOp = { type: 'upsertFlow', payload: { flow } };
     this._ops.push(op);
     return flow;
   }
@@ -104,7 +104,7 @@ export class ModelPatchBuilder {
    * @returns The auxiliary (for chaining)
    */
   upsertAux(aux: JsonAuxiliary): JsonAuxiliary {
-    const op: UpsertAuxOp = { type: 'upsert_aux', payload: { aux } };
+    const op: UpsertAuxOp = { type: 'upsertAux', payload: { aux } };
     this._ops.push(op);
     return aux;
   }
@@ -115,7 +115,7 @@ export class ModelPatchBuilder {
    * @returns The module (for chaining)
    */
   upsertModule(module: JsonModule): JsonModule {
-    const op: UpsertModuleOp = { type: 'upsert_module', payload: { module } };
+    const op: UpsertModuleOp = { type: 'upsertModule', payload: { module } };
     this._ops.push(op);
     return module;
   }
@@ -125,7 +125,7 @@ export class ModelPatchBuilder {
    * @param ident Variable identifier to delete
    */
   deleteVariable(ident: string): void {
-    const op: DeleteVariableOp = { type: 'delete_variable', payload: { ident } };
+    const op: DeleteVariableOp = { type: 'deleteVariable', payload: { ident } };
     this._ops.push(op);
   }
 
@@ -135,7 +135,7 @@ export class ModelPatchBuilder {
    * @param newIdent New variable name
    */
   renameVariable(currentIdent: string, newIdent: string): void {
-    const op: RenameVariableOp = { type: 'rename_variable', payload: { from: currentIdent, to: newIdent } };
+    const op: RenameVariableOp = { type: 'renameVariable', payload: { from: currentIdent, to: newIdent } };
     this._ops.push(op);
   }
 
@@ -146,7 +146,7 @@ export class ModelPatchBuilder {
    * @returns The view (for chaining)
    */
   upsertView(index: number, view: JsonView): JsonView {
-    const op: UpsertViewOp = { type: 'upsert_view', payload: { index, view } };
+    const op: UpsertViewOp = { type: 'upsertView', payload: { index, view } };
     this._ops.push(op);
     return view;
   }
@@ -156,7 +156,7 @@ export class ModelPatchBuilder {
    * @param index View index to delete
    */
   deleteView(index: number): void {
-    const op: DeleteViewOp = { type: 'delete_view', payload: { index } };
+    const op: DeleteViewOp = { type: 'deleteView', payload: { index } };
     this._ops.push(op);
   }
 }

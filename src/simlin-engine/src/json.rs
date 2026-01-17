@@ -11,7 +11,7 @@
 //! ```no_run
 //! use simlin_engine::json;
 //!
-//! let json_str = r#"{"name": "test", "sim_specs": {...}, ...}"#;
+//! let json_str = r#"{"name": "test", "simSpecs": {...}, ...}"#;
 //! let json_proj: json::Project = serde_json::from_str(json_str)?;
 //! let datamodel_proj: simlin_engine::datamodel::Project = json_proj.into();
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -60,6 +60,7 @@ pub type Ident = String;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct ElementEquation {
     pub subscript: String,
     pub equation: String,
@@ -71,6 +72,7 @@ pub struct ElementEquation {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct ArrayedEquation {
     pub dimensions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -83,6 +85,7 @@ pub struct ArrayedEquation {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,
@@ -90,6 +93,7 @@ pub struct GraphicalFunctionScale {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct GraphicalFunction {
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub points: Vec<[f64; 2]>,
@@ -105,6 +109,7 @@ pub struct GraphicalFunction {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct Stock {
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub uid: i32,
@@ -129,6 +134,7 @@ pub struct Stock {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct Flow {
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub uid: i32,
@@ -153,6 +159,7 @@ pub struct Flow {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct Auxiliary {
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub uid: i32,
@@ -177,6 +184,7 @@ pub struct Auxiliary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct ModuleReference {
     pub src: String,
     pub dst: String,
@@ -184,6 +192,7 @@ pub struct ModuleReference {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct Module {
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub uid: i32,
@@ -203,6 +212,7 @@ pub struct Module {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct SimSpecs {
     pub start_time: f64,
     pub end_time: f64,
@@ -220,6 +230,7 @@ pub struct SimSpecs {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct FlowPoint {
     pub x: f64,
     pub y: f64,
@@ -229,6 +240,7 @@ pub struct FlowPoint {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct LinkPoint {
     pub x: f64,
     pub y: f64,
@@ -236,6 +248,7 @@ pub struct LinkPoint {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct Rect {
     pub x: f64,
     pub y: f64,
@@ -245,6 +258,7 @@ pub struct Rect {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct StockViewElement {
     pub uid: i32,
     pub name: String,
@@ -256,6 +270,7 @@ pub struct StockViewElement {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct FlowViewElement {
     pub uid: i32,
     pub name: String,
@@ -268,6 +283,7 @@ pub struct FlowViewElement {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct AuxiliaryViewElement {
     pub uid: i32,
     pub name: String,
@@ -279,6 +295,7 @@ pub struct AuxiliaryViewElement {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct CloudViewElement {
     pub uid: i32,
     pub flow_uid: i32,
@@ -288,6 +305,7 @@ pub struct CloudViewElement {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct LinkViewElement {
     pub uid: i32,
     pub from_uid: i32,
@@ -300,6 +318,7 @@ pub struct LinkViewElement {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct ModuleViewElement {
     pub uid: i32,
     pub name: String,
@@ -311,6 +330,7 @@ pub struct ModuleViewElement {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct AliasViewElement {
     pub uid: i32,
     pub alias_of_uid: i32,
@@ -336,6 +356,7 @@ pub enum ViewElement {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct View {
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub kind: String,
@@ -348,6 +369,7 @@ pub struct View {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct Model {
     pub name: String,
     pub stocks: Vec<Stock>,
@@ -369,6 +391,7 @@ pub struct Model {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct Dimension {
     pub name: String,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
@@ -384,6 +407,7 @@ pub struct Dimension {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct Unit {
     pub name: String,
     #[serde(skip_serializing_if = "is_empty_string", default)]
@@ -396,6 +420,7 @@ pub struct Unit {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct LoopMetadata {
     pub uids: Vec<i32>,
     #[serde(skip_serializing_if = "is_false", default)]
@@ -407,6 +432,7 @@ pub struct LoopMetadata {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct Project {
     pub name: String,
     pub sim_specs: SimSpecs,
@@ -2253,11 +2279,11 @@ mod tests {
 
     #[test]
     fn test_dimension_maps_to_preserved_in_json() {
-        // Verify that maps_to is correctly serialized to/from JSON
+        // Verify that mapsTo is correctly serialized to/from JSON
         let json_str = r#"{
             "name": "DimA",
             "elements": ["A1", "A2", "A3"],
-            "maps_to": "DimB"
+            "mapsTo": "DimB"
         }"#;
 
         let dim: Dimension = serde_json::from_str(json_str).unwrap();
@@ -2271,18 +2297,18 @@ mod tests {
         let json_dim: Dimension = dm_dim.into();
         assert_eq!(json_dim.maps_to, Some("DimB".to_string()));
 
-        // Serialize and verify maps_to is present
+        // Serialize and verify mapsTo is present
         let serialized = serde_json::to_string(&json_dim).unwrap();
         assert!(
-            serialized.contains("\"maps_to\":\"DimB\""),
-            "maps_to should be serialized: {}",
+            serialized.contains("\"mapsTo\":\"DimB\""),
+            "mapsTo should be serialized: {}",
             serialized
         );
     }
 
     #[test]
     fn test_dimension_maps_to_omitted_when_none() {
-        // Verify maps_to is not serialized when None (due to skip_serializing_if)
+        // Verify mapsTo is not serialized when None (due to skip_serializing_if)
         let dim = Dimension {
             name: "Region".to_string(),
             elements: vec!["North".to_string(), "South".to_string()],
@@ -2292,8 +2318,8 @@ mod tests {
 
         let serialized = serde_json::to_string(&dim).unwrap();
         assert!(
-            !serialized.contains("maps_to"),
-            "maps_to should not appear when None: {}",
+            !serialized.contains("mapsTo"),
+            "mapsTo should not appear when None: {}",
             serialized
         );
     }
@@ -2302,9 +2328,9 @@ mod tests {
     fn test_deserialize_with_null_modules() {
         let json_str = r#"{
             "name": "test",
-            "sim_specs": {
-                "start_time": 0.0,
-                "end_time": 10.0,
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 10.0,
                 "dt": "1",
                 "method": "euler"
             },
@@ -2314,9 +2340,9 @@ mod tests {
                 "flows": [],
                 "auxiliaries": [],
                 "modules": null,
-                "sim_specs": {
-                    "start_time": 0.0,
-                    "end_time": 10.0,
+                "simSpecs": {
+                    "startTime": 0.0,
+                    "endTime": 10.0,
                     "dt": "1",
                     "method": "euler"
                 },
