@@ -310,6 +310,14 @@ export interface JsonLoopMetadata {
 }
 
 /**
+ * Source information for imported projects.
+ */
+export interface JsonSource {
+  extension?: 'xmile' | 'vensim';
+  content?: string;
+}
+
+/**
  * A model in the project.
  */
 export interface JsonModel {
@@ -332,6 +340,7 @@ export interface JsonProject {
   models: JsonModel[];
   dimensions?: JsonDimension[];
   units?: JsonUnit[];
+  source?: JsonSource;
 }
 
 // Patch operation payloads

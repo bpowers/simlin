@@ -430,6 +430,16 @@ pub struct LoopMetadata {
     pub description: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Source {
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub extension: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub content: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -441,6 +451,8 @@ pub struct Project {
     pub dimensions: Vec<Dimension>,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub units: Vec<Unit>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source: Option<Source>,
 }
 
 /// Generate the JSON Schema for the Project type
@@ -955,6 +967,20 @@ impl From<LoopMetadata> for datamodel::LoopMetadata {
     }
 }
 
+impl From<Source> for datamodel::Source {
+    fn from(source: Source) -> Self {
+        let extension = match source.extension.as_str() {
+            "xmile" => datamodel::Extension::Xmile,
+            "vensim" => datamodel::Extension::Vensim,
+            _ => datamodel::Extension::Unspecified,
+        };
+        datamodel::Source {
+            extension,
+            content: source.content,
+        }
+    }
+}
+
 impl From<Project> for datamodel::Project {
     fn from(project: Project) -> Self {
         datamodel::Project {
@@ -963,7 +989,7 @@ impl From<Project> for datamodel::Project {
             dimensions: project.dimensions.into_iter().map(|d| d.into()).collect(),
             units: project.units.into_iter().map(|u| u.into()).collect(),
             models: project.models.into_iter().map(|m| m.into()).collect(),
-            source: None,
+            source: project.source.map(|s| s.into()),
             ai_information: None,
         }
     }
@@ -1434,6 +1460,21 @@ impl From<datamodel::LoopMetadata> for LoopMetadata {
     }
 }
 
+impl From<datamodel::Source> for Source {
+    fn from(source: datamodel::Source) -> Self {
+        let extension = match source.extension {
+            datamodel::Extension::Xmile => "xmile",
+            datamodel::Extension::Vensim => "vensim",
+            datamodel::Extension::Unspecified => "",
+        }
+        .to_string();
+        Source {
+            extension,
+            content: source.content,
+        }
+    }
+}
+
 impl From<datamodel::Project> for Project {
     fn from(project: datamodel::Project) -> Self {
         Project {
@@ -1442,6 +1483,7 @@ impl From<datamodel::Project> for Project {
             models: project.models.into_iter().map(|m| m.into()).collect(),
             dimensions: project.dimensions.into_iter().map(|d| d.into()).collect(),
             units: project.units.into_iter().map(|u| u.into()).collect(),
+            source: project.source.map(|s| s.into()),
         }
     }
 }
@@ -2202,6 +2244,7 @@ mod tests {
                 disabled: false,
                 aliases: vec![],
             }],
+            source: Default::default(),
         };
 
         // Roundtrip

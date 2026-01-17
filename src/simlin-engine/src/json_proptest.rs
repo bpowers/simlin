@@ -699,6 +699,7 @@ fn project_strategy() -> BoxedStrategy<Project> {
             models,
             dimensions,
             units,
+            source: Default::default(),
         })
         .boxed()
 }
@@ -1193,6 +1194,7 @@ mod protobuf_roundtrip_tests {
                 disabled: false,
                 aliases: vec!["persons".to_string()],
             }],
+            source: Default::default(),
         };
 
         // First roundtrip
@@ -1295,6 +1297,7 @@ mod protobuf_roundtrip_tests {
                 },
             ],
             units: vec![],
+            source: Default::default(),
         };
 
         let (pb_bytes1, json_str1) = roundtrip_pb_json(&json_project);
@@ -1359,6 +1362,7 @@ mod protobuf_roundtrip_tests {
             }],
             dimensions: vec![],
             units: vec![],
+            source: Default::default(),
         };
 
         let (pb_bytes1, json_str1) = roundtrip_pb_json(&json_project);
@@ -1416,6 +1420,7 @@ mod protobuf_roundtrip_tests {
                 },
             ],
             units: vec![],
+            source: Default::default(),
         };
 
         let (pb_bytes1, json_str1) = roundtrip_pb_json(&json_project);
@@ -1461,6 +1466,7 @@ mod protobuf_roundtrip_tests {
                 maps_to: None,
             }],
             units: vec![],
+            source: Default::default(),
         };
 
         let (pb_bytes1, json_str1) = roundtrip_pb_json(&json_project);

@@ -25,61 +25,40 @@ import {
 } from './pb/project_io_pb';
 import { canonicalize } from './canonicalize';
 
-export type UID = number;
+import {
+  ErrorCode,
+  type JsonProject,
+  type JsonModel,
+  type JsonStock,
+  type JsonFlow,
+  type JsonAuxiliary,
+  type JsonModule,
+  type JsonModuleReference,
+  type JsonSimSpecs,
+  type JsonDimension,
+  type JsonGraphicalFunction,
+  type JsonGraphicalFunctionScale,
+  type JsonArrayedEquation,
+  type JsonElementEquation,
+  type JsonView,
+  type JsonViewElement,
+  type JsonStockViewElement,
+  type JsonFlowViewElement,
+  type JsonAuxiliaryViewElement,
+  type JsonCloudViewElement,
+  type JsonLinkViewElement,
+  type JsonModuleViewElement,
+  type JsonAliasViewElement,
+  type JsonRect,
+  type JsonFlowPoint,
+  type JsonLinkPoint,
+  type JsonLoopMetadata,
+  type JsonSource,
+} from '@system-dynamics/engine2';
 
-export enum ErrorCode {
-  NoError = 0,
-  DoesNotExist = 1,
-  XmlDeserialization = 2,
-  VensimConversion = 3,
-  ProtobufDecode = 4,
-  InvalidToken = 5,
-  UnrecognizedEof = 6,
-  UnrecognizedToken = 7,
-  ExtraToken = 8,
-  UnclosedComment = 9,
-  UnclosedQuotedIdent = 10,
-  ExpectedNumber = 11,
-  UnknownBuiltin = 12,
-  BadBuiltinArgs = 13,
-  EmptyEquation = 14,
-  BadModuleInputDst = 15,
-  BadModuleInputSrc = 16,
-  NotSimulatable = 17,
-  BadTable = 18,
-  BadSimSpecs = 19,
-  NoAbsoluteReferences = 20,
-  CircularDependency = 21,
-  ArraysNotImplemented = 22,
-  MultiDimensionalArraysNotImplemented = 23,
-  BadDimensionName = 24,
-  BadModelName = 25,
-  MismatchedDimensions = 26,
-  ArrayReferenceNeedsExplicitSubscripts = 27,
-  DuplicateVariable = 28,
-  UnknownDependency = 29,
-  VariablesHaveErrors = 30,
-  UnitDefinitionErrors = 31,
-  Generic = 32,
-  NoAppInUnits = 33,
-  NoSubscriptInUnits = 34,
-  NoIfInUnits = 35,
-  NoUnaryOpInUnits = 36,
-  BadBinaryOpInUnits = 37,
-  NoConstInUnits = 38,
-  ExpectedInteger = 39,
-  ExpectedIntegerOne = 40,
-  DuplicateUnit = 41,
-  ExpectedModule = 42,
-  ExpectedIdent = 43,
-  UnitMismatch = 44,
-  TodoWildcard = 45,
-  TodoStarRange = 46,
-  TodoRange = 47,
-  TodoArrayBuiltin = 48,
-  CantSubscriptScalar = 49,
-  DimensionInScalarContext = 50,
-}
+export { ErrorCode };
+
+export type UID = number;
 
 const equationErrorDefaults = {
   code: ErrorCode.NoError,
@@ -163,6 +142,18 @@ export class GraphicalFunctionScale extends Record(graphicalFunctionScaleDefault
   static default(): GraphicalFunctionScale {
     return new GraphicalFunctionScale(graphicalFunctionScaleDefaults);
   }
+  static fromJson(json: JsonGraphicalFunctionScale): GraphicalFunctionScale {
+    return new GraphicalFunctionScale({
+      min: json.min,
+      max: json.max,
+    });
+  }
+  toJson(): JsonGraphicalFunctionScale {
+    return {
+      min: this.min,
+      max: this.max,
+    };
+  }
 }
 
 const graphicalFunctionDefaults = {
@@ -218,6 +209,65 @@ export class GraphicalFunction extends Record(graphicalFunctionDefaults) {
       gf.setYScale(this.yScale.toPb());
     }
     return gf;
+  }
+  static fromJson(json: JsonGraphicalFunction): GraphicalFunction {
+    let xPoints: List<number> | undefined;
+    let yPoints: List<number>;
+
+    if (json.points && json.points.length > 0) {
+      xPoints = List(json.points.map((p: [number, number]) => p[0]));
+      yPoints = List(json.points.map((p: [number, number]) => p[1]));
+    } else {
+      xPoints = undefined;
+      yPoints = List(json.yPoints ?? []);
+    }
+
+    const xScale = json.xScale
+      ? GraphicalFunctionScale.fromJson(json.xScale)
+      : new GraphicalFunctionScale({ min: 0, max: Math.max(0, yPoints.size - 1) });
+    const yScale = json.yScale
+      ? GraphicalFunctionScale.fromJson(json.yScale)
+      : GraphicalFunctionScale.default();
+
+    let kind: GraphicalFunctionKind = 'continuous';
+    if (json.kind === 'discrete') {
+      kind = 'discrete';
+    } else if (json.kind === 'extrapolate') {
+      kind = 'extrapolate';
+    }
+
+    return new GraphicalFunction({
+      kind,
+      xPoints,
+      yPoints,
+      xScale,
+      yScale,
+    });
+  }
+  toJson(): JsonGraphicalFunction {
+    const result: JsonGraphicalFunction = {};
+
+    if (this.xPoints && this.xPoints.size > 0) {
+      result.points = this.xPoints
+        .zip(this.yPoints)
+        .map(([x, y]) => [x, y] as [number, number])
+        .toArray();
+    } else {
+      result.yPoints = this.yPoints.toArray();
+    }
+
+    if (this.kind && this.kind !== 'continuous') {
+      result.kind = this.kind;
+    }
+
+    if (this.xScale) {
+      result.xScale = this.xScale.toJson();
+    }
+    if (this.yScale) {
+      result.yScale = this.yScale.toJson();
+    }
+
+    return result;
   }
 }
 
@@ -317,6 +367,109 @@ function equationFromPb(pbEquation: PbVariable.Equation | undefined): Equation {
   }
 }
 
+function stockEquationFromJson(
+  initialEquation: string | undefined,
+  arrayedEquation: JsonArrayedEquation | undefined,
+): Equation {
+  if (arrayedEquation) {
+    if (arrayedEquation.elements && arrayedEquation.elements.length > 0) {
+      return new ArrayedEquation({
+        dimensionNames: List(arrayedEquation.dimensions),
+        elements: Map<string, string>(arrayedEquation.elements.map((el: JsonElementEquation) => [el.subscript, el.equation] as [string, string])),
+      });
+    } else {
+      return new ApplyToAllEquation({
+        dimensionNames: List(arrayedEquation.dimensions),
+        equation: arrayedEquation.equation ?? '',
+      });
+    }
+  }
+  return new ScalarEquation({ equation: initialEquation ?? '' });
+}
+
+function auxEquationFromJson(
+  equation: string | undefined,
+  arrayedEquation: JsonArrayedEquation | undefined,
+  gf: JsonGraphicalFunction | undefined,
+): { equation: Equation; graphicalFunction: GraphicalFunction | undefined } {
+  let graphicalFunction: GraphicalFunction | undefined;
+  if (gf) {
+    graphicalFunction = GraphicalFunction.fromJson(gf);
+  }
+
+  if (arrayedEquation) {
+    if (arrayedEquation.elements && arrayedEquation.elements.length > 0) {
+      return {
+        equation: new ArrayedEquation({
+          dimensionNames: List(arrayedEquation.dimensions),
+          elements: Map<string, string>(arrayedEquation.elements.map((el: JsonElementEquation) => [el.subscript, el.equation] as [string, string])),
+        }),
+        graphicalFunction,
+      };
+    } else {
+      return {
+        equation: new ApplyToAllEquation({
+          dimensionNames: List(arrayedEquation.dimensions),
+          equation: arrayedEquation.equation ?? '',
+        }),
+        graphicalFunction,
+      };
+    }
+  }
+  return {
+    equation: new ScalarEquation({ equation: equation ?? '' }),
+    graphicalFunction,
+  };
+}
+
+function stockEquationToJson(equation: Equation): { initialEquation?: string; arrayedEquation?: JsonArrayedEquation } {
+  if (equation instanceof ScalarEquation) {
+    return { initialEquation: equation.equation || undefined };
+  } else if (equation instanceof ApplyToAllEquation) {
+    return {
+      arrayedEquation: {
+        dimensions: equation.dimensionNames.toArray(),
+        equation: equation.equation || undefined,
+      },
+    };
+  } else if (equation instanceof ArrayedEquation) {
+    return {
+      arrayedEquation: {
+        dimensions: equation.dimensionNames.toArray(),
+        elements: equation.elements
+          .map((eqn, subscript) => ({ subscript, equation: eqn }))
+          .valueSeq()
+          .toArray(),
+      },
+    };
+  }
+  return {};
+}
+
+function auxEquationToJson(equation: Equation): { equation?: string; arrayedEquation?: JsonArrayedEquation } {
+  if (equation instanceof ScalarEquation) {
+    return { equation: equation.equation || undefined };
+  } else if (equation instanceof ApplyToAllEquation) {
+    return {
+      arrayedEquation: {
+        dimensions: equation.dimensionNames.toArray(),
+        equation: equation.equation || undefined,
+      },
+    };
+  } else if (equation instanceof ArrayedEquation) {
+    return {
+      arrayedEquation: {
+        dimensions: equation.dimensionNames.toArray(),
+        elements: equation.elements
+          .map((eqn, subscript) => ({ subscript, equation: eqn }))
+          .valueSeq()
+          .toArray(),
+      },
+    };
+  }
+  return {};
+}
+
 export interface Variable {
   readonly ident: string;
   readonly equation: Equation | undefined;
@@ -367,6 +520,48 @@ export class Stock extends Record(stockDefaults) implements Variable {
       uid: stock.getUid() || undefined,
     });
   }
+  static fromJson(json: JsonStock): Stock {
+    return new Stock({
+      ident: canonicalize(json.name),
+      equation: stockEquationFromJson(json.initialEquation, json.arrayedEquation),
+      documentation: json.documentation ?? '',
+      units: json.units ?? '',
+      inflows: List(json.inflows ?? []),
+      outflows: List(json.outflows ?? []),
+      nonNegative: json.nonNegative ?? false,
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: json.uid,
+    });
+  }
+  toJson(): JsonStock {
+    const eqJson = stockEquationToJson(this.equation);
+    const result: JsonStock = {
+      name: this.ident,
+      inflows: this.inflows.toArray(),
+      outflows: this.outflows.toArray(),
+    };
+    if (this.uid !== undefined) {
+      result.uid = this.uid;
+    }
+    if (eqJson.initialEquation) {
+      result.initialEquation = eqJson.initialEquation;
+    }
+    if (eqJson.arrayedEquation) {
+      result.arrayedEquation = eqJson.arrayedEquation;
+    }
+    if (this.units) {
+      result.units = this.units;
+    }
+    if (this.nonNegative) {
+      result.nonNegative = this.nonNegative;
+    }
+    if (this.documentation) {
+      result.documentation = this.documentation;
+    }
+    return result;
+  }
   get gf(): undefined {
     return undefined;
   }
@@ -411,6 +606,53 @@ export class Flow extends Record(flowDefaults) implements Variable {
       uid: flow.getUid() || undefined,
     });
   }
+  static fromJson(json: JsonFlow): Flow {
+    const { equation, graphicalFunction } = auxEquationFromJson(
+      json.equation,
+      json.arrayedEquation,
+      json.graphicalFunction,
+    );
+    return new Flow({
+      ident: canonicalize(json.name),
+      equation,
+      documentation: json.documentation ?? '',
+      units: json.units ?? '',
+      gf: graphicalFunction,
+      nonNegative: json.nonNegative ?? false,
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: json.uid,
+    });
+  }
+  toJson(): JsonFlow {
+    const eqJson = auxEquationToJson(this.equation);
+    const result: JsonFlow = {
+      name: this.ident,
+    };
+    if (this.uid !== undefined) {
+      result.uid = this.uid;
+    }
+    if (eqJson.equation) {
+      result.equation = eqJson.equation;
+    }
+    if (eqJson.arrayedEquation) {
+      result.arrayedEquation = eqJson.arrayedEquation;
+    }
+    if (this.gf) {
+      result.graphicalFunction = this.gf.toJson();
+    }
+    if (this.units) {
+      result.units = this.units;
+    }
+    if (this.nonNegative) {
+      result.nonNegative = this.nonNegative;
+    }
+    if (this.documentation) {
+      result.documentation = this.documentation;
+    }
+    return result;
+  }
   get isArrayed(): boolean {
     return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
   }
@@ -450,6 +692,49 @@ export class Aux extends Record(auxDefaults) implements Variable {
       uid: aux.getUid() || undefined,
     });
   }
+  static fromJson(json: JsonAuxiliary): Aux {
+    const { equation, graphicalFunction } = auxEquationFromJson(
+      json.equation,
+      json.arrayedEquation,
+      json.graphicalFunction,
+    );
+    return new Aux({
+      ident: canonicalize(json.name),
+      equation,
+      documentation: json.documentation ?? '',
+      units: json.units ?? '',
+      gf: graphicalFunction,
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: json.uid,
+    });
+  }
+  toJson(): JsonAuxiliary {
+    const eqJson = auxEquationToJson(this.equation);
+    const result: JsonAuxiliary = {
+      name: this.ident,
+    };
+    if (this.uid !== undefined) {
+      result.uid = this.uid;
+    }
+    if (eqJson.equation) {
+      result.equation = eqJson.equation;
+    }
+    if (eqJson.arrayedEquation) {
+      result.arrayedEquation = eqJson.arrayedEquation;
+    }
+    if (this.gf) {
+      result.graphicalFunction = this.gf.toJson();
+    }
+    if (this.units) {
+      result.units = this.units;
+    }
+    if (this.documentation) {
+      result.documentation = this.documentation;
+    }
+    return result;
+  }
   get isArrayed(): boolean {
     return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
   }
@@ -463,11 +748,26 @@ const moduleReferenceDefaults = {
   dst: '',
 };
 export class ModuleReference extends Record(moduleReferenceDefaults) {
-  constructor(modRef: PbVariable.Module.Reference) {
-    super({
+  constructor(props: typeof moduleReferenceDefaults) {
+    super(props);
+  }
+  static fromPb(modRef: PbVariable.Module.Reference): ModuleReference {
+    return new ModuleReference({
       src: modRef.getSrc(),
       dst: modRef.getDst(),
     });
+  }
+  static fromJson(json: JsonModuleReference): ModuleReference {
+    return new ModuleReference({
+      src: json.src,
+      dst: json.dst,
+    });
+  }
+  toJson(): JsonModuleReference {
+    return {
+      src: this.src,
+      dst: this.dst,
+    };
   }
 }
 
@@ -494,12 +794,44 @@ export class Module extends Record(moduleDefaults) implements Variable {
       modelName: module.getModelName(),
       documentation: module.getDocumentation(),
       units: module.getUnits(),
-      references: List(module.getReferencesList().map((modRef) => new ModuleReference(modRef))),
+      references: List(module.getReferencesList().map((modRef) => ModuleReference.fromPb(modRef))),
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
       uid: module.getUid() || undefined,
     });
+  }
+  static fromJson(json: JsonModule): Module {
+    return new Module({
+      ident: canonicalize(json.name),
+      modelName: json.modelName,
+      documentation: json.documentation ?? '',
+      units: json.units ?? '',
+      references: List((json.references ?? []).map((ref: JsonModuleReference) => ModuleReference.fromJson(ref))),
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: json.uid,
+    });
+  }
+  toJson(): JsonModule {
+    const result: JsonModule = {
+      name: this.ident,
+      modelName: this.modelName,
+    };
+    if (this.uid !== undefined) {
+      result.uid = this.uid;
+    }
+    if (this.references.size > 0) {
+      result.references = this.references.map((ref) => ref.toJson()).toArray();
+    }
+    if (this.units) {
+      result.units = this.units;
+    }
+    if (this.documentation) {
+      result.documentation = this.documentation;
+    }
+    return result;
   }
   get equation(): undefined {
     return undefined;
@@ -589,6 +921,19 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
       isZeroRadius: false,
     });
   }
+  static fromJson(json: JsonAuxiliaryViewElement, auxVar?: Variable | undefined): AuxViewElement {
+    const ident = canonicalize(json.name);
+    return new AuxViewElement({
+      uid: json.uid,
+      name: json.name,
+      ident,
+      var: auxVar instanceof Aux ? auxVar : undefined,
+      x: json.x,
+      y: json.y,
+      labelSide: (json.labelSide ?? 'right') as LabelSide,
+      isZeroRadius: false,
+    });
+  }
   toPb(): PbViewElement.Aux {
     const element = new PbViewElement.Aux();
     element.setUid(this.uid);
@@ -597,6 +942,16 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
     element.setY(this.y);
     element.setLabelSide(labelSideToPb(this.labelSide));
     return element;
+  }
+  toJson(): JsonAuxiliaryViewElement {
+    return {
+      type: 'aux',
+      uid: this.uid,
+      name: this.name,
+      x: this.x,
+      y: this.y,
+      labelSide: this.labelSide,
+    };
   }
   get cx(): number {
     return this.x;
@@ -641,6 +996,21 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
       outflows: List<UID>(),
     });
   }
+  static fromJson(json: JsonStockViewElement, stockVar?: Variable | undefined): StockViewElement {
+    const ident = canonicalize(json.name);
+    return new StockViewElement({
+      uid: json.uid,
+      name: json.name,
+      ident,
+      var: stockVar instanceof Stock ? stockVar : undefined,
+      x: json.x,
+      y: json.y,
+      labelSide: (json.labelSide ?? 'center') as LabelSide,
+      isZeroRadius: false,
+      inflows: List<UID>(),
+      outflows: List<UID>(),
+    });
+  }
   toPb(): PbViewElement.Stock {
     const element = new PbViewElement.Stock();
     element.setUid(this.uid);
@@ -649,6 +1019,16 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
     element.setY(this.y);
     element.setLabelSide(labelSideToPb(this.labelSide));
     return element;
+  }
+  toJson(): JsonStockViewElement {
+    return {
+      type: 'stock',
+      uid: this.uid,
+      name: this.name,
+      x: this.x,
+      y: this.y,
+      labelSide: this.labelSide,
+    };
   }
   get cx(): number {
     return this.x;
@@ -680,6 +1060,13 @@ export class Point extends Record(pointDefaults) {
       attachedToUid: attachedToUid ? attachedToUid : undefined,
     });
   }
+  static fromJson(json: JsonFlowPoint): Point {
+    return new Point({
+      x: json.x,
+      y: json.y,
+      attachedToUid: json.attachedToUid,
+    });
+  }
   toPb(): PbViewElement.FlowPoint {
     const element = new PbViewElement.FlowPoint();
     element.setX(this.x);
@@ -688,6 +1075,16 @@ export class Point extends Record(pointDefaults) {
       element.setAttachedToUid(this.attachedToUid);
     }
     return element;
+  }
+  toJson(): JsonFlowPoint {
+    const result: JsonFlowPoint = {
+      x: this.x,
+      y: this.y,
+    };
+    if (this.attachedToUid !== undefined) {
+      result.attachedToUid = this.attachedToUid;
+    }
+    return result;
   }
 }
 
@@ -721,6 +1118,20 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
       isZeroRadius: false,
     });
   }
+  static fromJson(json: JsonFlowViewElement, flowVar?: Variable | undefined): FlowViewElement {
+    const ident = canonicalize(json.name);
+    return new FlowViewElement({
+      uid: json.uid,
+      name: json.name,
+      ident,
+      var: flowVar instanceof Flow ? flowVar : undefined,
+      x: json.x,
+      y: json.y,
+      labelSide: (json.labelSide ?? 'center') as LabelSide,
+      points: List((json.points ?? []).map((p: JsonFlowPoint) => Point.fromJson(p))),
+      isZeroRadius: false,
+    });
+  }
   toPb(): PbViewElement.Flow {
     const element = new PbViewElement.Flow();
     element.setUid(this.uid);
@@ -730,6 +1141,17 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
     element.setPointsList(this.points.map((p) => p.toPb()).toArray());
     element.setLabelSide(labelSideToPb(this.labelSide));
     return element;
+  }
+  toJson(): JsonFlowViewElement {
+    return {
+      type: 'flow',
+      uid: this.uid,
+      name: this.name,
+      x: this.x,
+      y: this.y,
+      points: this.points.map((p) => p.toJson()).toArray(),
+      labelSide: this.labelSide,
+    };
   }
   get cx(): number {
     return this.x;
@@ -790,6 +1212,28 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
       multiPoint,
     });
   }
+  static fromJson(json: JsonLinkViewElement): LinkViewElement {
+    let arc: number | undefined = undefined;
+    let isStraight = false;
+    let multiPoint: List<Point> | undefined = undefined;
+
+    if (json.arc !== undefined) {
+      arc = json.arc;
+    } else if (json.multiPoints && json.multiPoints.length > 0) {
+      multiPoint = List(json.multiPoints.map((p: JsonLinkPoint) => new Point({ x: p.x, y: p.y, attachedToUid: undefined })));
+    } else {
+      isStraight = true;
+    }
+
+    return new LinkViewElement({
+      uid: json.uid,
+      fromUid: json.fromUid,
+      toUid: json.toUid,
+      arc,
+      isStraight,
+      multiPoint,
+    });
+  }
   toPb(): PbViewElement.Link {
     const element = new PbViewElement.Link();
     element.setUid(this.uid);
@@ -805,6 +1249,20 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
       element.setIsStraight(this.isStraight);
     }
     return element;
+  }
+  toJson(): JsonLinkViewElement {
+    const result: JsonLinkViewElement = {
+      type: 'link',
+      uid: this.uid,
+      fromUid: this.fromUid,
+      toUid: this.toUid,
+    };
+    if (this.arc !== undefined) {
+      result.arc = this.arc;
+    } else if (this.multiPoint) {
+      result.multiPoints = this.multiPoint.map((p) => ({ x: p.x, y: p.y })).toArray();
+    }
+    return result;
   }
   get cx(): number {
     return NaN;
@@ -851,6 +1309,19 @@ export class ModuleViewElement extends Record(moduleViewElementDefaults) impleme
       isZeroRadius: false,
     });
   }
+  static fromJson(json: JsonModuleViewElement, moduleVar?: Variable | undefined): ModuleViewElement {
+    const ident = canonicalize(json.name);
+    return new ModuleViewElement({
+      uid: json.uid,
+      name: json.name,
+      ident,
+      var: moduleVar instanceof Module ? moduleVar : undefined,
+      x: json.x,
+      y: json.y,
+      labelSide: (json.labelSide ?? 'center') as LabelSide,
+      isZeroRadius: false,
+    });
+  }
   toPb(): PbViewElement.Module {
     const element = new PbViewElement.Module();
     element.setUid(this.uid);
@@ -859,6 +1330,16 @@ export class ModuleViewElement extends Record(moduleViewElementDefaults) impleme
     element.setY(this.y);
     element.setLabelSide(labelSideToPb(this.labelSide));
     return element;
+  }
+  toJson(): JsonModuleViewElement {
+    return {
+      type: 'module',
+      uid: this.uid,
+      name: this.name,
+      x: this.x,
+      y: this.y,
+      labelSide: this.labelSide,
+    };
   }
   get cx(): number {
     return this.x;
@@ -895,6 +1376,16 @@ export class AliasViewElement extends Record(aliasViewElementDefaults) implement
       isZeroRadius: false,
     });
   }
+  static fromJson(json: JsonAliasViewElement): AliasViewElement {
+    return new AliasViewElement({
+      uid: json.uid,
+      aliasOfUid: json.aliasOfUid,
+      x: json.x,
+      y: json.y,
+      labelSide: (json.labelSide ?? 'center') as LabelSide,
+      isZeroRadius: false,
+    });
+  }
   toPb(): PbViewElement.Alias {
     const element = new PbViewElement.Alias();
     element.setUid(this.uid);
@@ -903,6 +1394,16 @@ export class AliasViewElement extends Record(aliasViewElementDefaults) implement
     element.setY(this.y);
     element.setLabelSide(labelSideToPb(this.labelSide));
     return element;
+  }
+  toJson(): JsonAliasViewElement {
+    return {
+      type: 'alias',
+      uid: this.uid,
+      aliasOfUid: this.aliasOfUid,
+      x: this.x,
+      y: this.y,
+      labelSide: this.labelSide,
+    };
   }
   get cx(): number {
     return this.x;
@@ -940,6 +1441,15 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
       isZeroRadius: false,
     });
   }
+  static fromJson(json: JsonCloudViewElement): CloudViewElement {
+    return new CloudViewElement({
+      uid: json.uid,
+      flowUid: json.flowUid,
+      x: json.x,
+      y: json.y,
+      isZeroRadius: false,
+    });
+  }
   toPb(): PbViewElement.Cloud {
     const element = new PbViewElement.Cloud();
     element.setUid(this.uid);
@@ -947,6 +1457,15 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
     element.setX(this.x);
     element.setY(this.y);
     return element;
+  }
+  toJson(): JsonCloudViewElement {
+    return {
+      type: 'cloud',
+      uid: this.uid,
+      flowUid: this.flowUid,
+      x: this.x,
+      y: this.y,
+    };
   }
   get cx(): number {
     return this.x;
@@ -984,6 +1503,14 @@ export class Rect extends Record(rectDefaults) {
       height: rect.getHeight(),
     });
   }
+  static fromJson(json: JsonRect): Rect {
+    return new Rect({
+      x: json.x,
+      y: json.y,
+      width: json.width,
+      height: json.height,
+    });
+  }
   toPb(): PbRect {
     const rect = new PbRect();
     rect.setX(this.x);
@@ -991,6 +1518,14 @@ export class Rect extends Record(rectDefaults) {
     rect.setWidth(this.width);
     rect.setHeight(this.height);
     return rect;
+  }
+  toJson(): JsonRect {
+    return {
+      x: this.x,
+      y: this.y,
+      width: this.width,
+      height: this.height,
+    };
   }
 
   static default(): Rect {
@@ -1101,6 +1636,79 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
       zoom: view.getZoom() || 1,
     });
   }
+  static fromJson(json: JsonView, variables: Map<string, Variable>): StockFlowView {
+    let maxUid = -1;
+    let namedElements = Map<string, UID>();
+
+    const elements = List<ViewElement>(
+      (json.elements ?? []).map((element: JsonViewElement) => {
+        let e: ViewElement;
+        const ident = 'name' in element ? canonicalize(element.name) : undefined;
+        const variable = ident ? variables.get(ident) : undefined;
+
+        switch (element.type) {
+          case 'aux':
+            e = AuxViewElement.fromJson(element as JsonAuxiliaryViewElement, variable);
+            if (ident) namedElements = namedElements.set(ident, e.uid);
+            break;
+          case 'stock':
+            e = StockViewElement.fromJson(element as JsonStockViewElement, variable);
+            if (ident) namedElements = namedElements.set(ident, e.uid);
+            break;
+          case 'flow':
+            e = FlowViewElement.fromJson(element as JsonFlowViewElement, variable);
+            if (ident) namedElements = namedElements.set(ident, e.uid);
+            break;
+          case 'link':
+            e = LinkViewElement.fromJson(element as JsonLinkViewElement);
+            break;
+          case 'module':
+            e = ModuleViewElement.fromJson(element as JsonModuleViewElement, variable);
+            if (ident) namedElements = namedElements.set(ident, e.uid);
+            break;
+          case 'alias':
+            e = AliasViewElement.fromJson(element as JsonAliasViewElement);
+            break;
+          case 'cloud':
+            e = CloudViewElement.fromJson(element as JsonCloudViewElement);
+            break;
+          default:
+            throw new Error(`unknown view element type: ${(element as JsonViewElement).type}`);
+        }
+        maxUid = Math.max(e.uid, maxUid);
+        return e;
+      }),
+    ).map((element) => {
+      if (element instanceof StockViewElement && element.var) {
+        const stock = element.var;
+        const inflows = List<UID>(
+          stock.inflows.filter((ident: string) => namedElements.has(ident)).map((ident: string) => defined(namedElements.get(ident))),
+        );
+        const outflows = List<UID>(
+          stock.outflows.filter((ident: string) => namedElements.has(ident)).map((ident: string) => defined(namedElements.get(ident))),
+        );
+        return element.merge({
+          inflows,
+          outflows,
+        });
+      }
+      return element;
+    });
+
+    let nextUid = maxUid + 1;
+    if (nextUid === 0) {
+      nextUid = 1;
+    }
+
+    const viewBox = json.viewBox ? Rect.fromJson(json.viewBox) : Rect.default();
+
+    return new StockFlowView({
+      elements,
+      nextUid,
+      viewBox,
+      zoom: json.zoom ?? 1,
+    });
+  }
   toPb(): PbView {
     const view = new PbView();
     view.setKind(PbView.ViewType.STOCK_FLOW);
@@ -1133,6 +1741,43 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
     view.setZoom(this.zoom);
 
     return view;
+  }
+  toJson(): JsonView {
+    const elements: JsonViewElement[] = this.elements
+      .map((element) => {
+        if (element instanceof AuxViewElement) {
+          return element.toJson();
+        } else if (element instanceof StockViewElement) {
+          return element.toJson();
+        } else if (element instanceof FlowViewElement) {
+          return element.toJson();
+        } else if (element instanceof LinkViewElement) {
+          return element.toJson();
+        } else if (element instanceof ModuleViewElement) {
+          return element.toJson();
+        } else if (element instanceof AliasViewElement) {
+          return element.toJson();
+        } else if (element instanceof CloudViewElement) {
+          return element.toJson();
+        } else {
+          throw new Error('unknown view element variant');
+        }
+      })
+      .toArray();
+
+    const result: JsonView = {
+      elements,
+    };
+
+    if (this.viewBox && (this.viewBox.width > 0 || this.viewBox.height > 0)) {
+      result.viewBox = this.viewBox.toJson();
+    }
+
+    if (this.zoom > 0) {
+      result.zoom = this.zoom;
+    }
+
+    return result;
   }
 }
 
@@ -1175,6 +1820,27 @@ export class LoopMetadata extends Record(loopMetadataDefaults) {
       name: loopMetadata.getName(),
       description: loopMetadata.getDescription(),
     });
+  }
+  static fromJson(json: JsonLoopMetadata): LoopMetadata {
+    return new LoopMetadata({
+      uids: List(json.uids),
+      deleted: json.deleted ?? false,
+      name: json.name,
+      description: json.description ?? '',
+    });
+  }
+  toJson(): JsonLoopMetadata {
+    const result: JsonLoopMetadata = {
+      uids: this.uids.toArray(),
+      name: this.name,
+    };
+    if (this.deleted) {
+      result.deleted = this.deleted;
+    }
+    if (this.description) {
+      result.description = this.description;
+    }
+    return result;
   }
 }
 
@@ -1226,6 +1892,60 @@ export class Model extends Record(modelDefaults) {
       loopMetadata: List(model.getLoopMetadataList().map((lm) => LoopMetadata.fromPb(lm))),
     });
   }
+  static fromJson(json: JsonModel): Model {
+    const variables = Map<string, Variable>(
+      [
+        ...(json.stocks ?? []).map((s: JsonStock) => Stock.fromJson(s) as Variable),
+        ...(json.flows ?? []).map((f: JsonFlow) => Flow.fromJson(f) as Variable),
+        ...(json.auxiliaries ?? []).map((a: JsonAuxiliary) => Aux.fromJson(a) as Variable),
+        ...(json.modules ?? []).map((m: JsonModule) => Module.fromJson(m) as Variable),
+      ].map((v: Variable) => [v.ident, v] as [string, Variable]),
+    );
+
+    return new Model({
+      name: json.name,
+      variables,
+      views: List((json.views ?? []).map((view: JsonView) => StockFlowView.fromJson(view, variables))),
+      loopMetadata: List((json.loopMetadata ?? []).map((lm: JsonLoopMetadata) => LoopMetadata.fromJson(lm))),
+    });
+  }
+  toJson(): JsonModel {
+    const stocks: JsonStock[] = [];
+    const flows: JsonFlow[] = [];
+    const auxiliaries: JsonAuxiliary[] = [];
+    const modules: JsonModule[] = [];
+
+    for (const variable of this.variables.values()) {
+      if (variable instanceof Stock) {
+        stocks.push(variable.toJson());
+      } else if (variable instanceof Flow) {
+        flows.push(variable.toJson());
+      } else if (variable instanceof Aux) {
+        auxiliaries.push(variable.toJson());
+      } else if (variable instanceof Module) {
+        modules.push(variable.toJson());
+      }
+    }
+
+    const result: JsonModel = {
+      name: this.name,
+      stocks,
+      flows,
+      auxiliaries,
+    };
+
+    if (modules.length > 0) {
+      result.modules = modules;
+    }
+    if (this.views.size > 0) {
+      result.views = this.views.map((v: StockFlowView) => v.toJson()).toArray();
+    }
+    if (this.loopMetadata.size > 0) {
+      result.loopMetadata = this.loopMetadata.map((lm: LoopMetadata) => lm.toJson()).toArray();
+    }
+
+    return result;
+  }
 }
 
 const dtDefaults = {
@@ -1244,11 +1964,24 @@ export class Dt extends Record(dtDefaults) {
       isReciprocal: dt.getIsReciprocal(),
     });
   }
+  static fromJson(dt: string): Dt {
+    if (dt.startsWith('1/')) {
+      const value = parseFloat(dt.substring(2));
+      return new Dt({ value, isReciprocal: true });
+    }
+    return new Dt({ value: parseFloat(dt), isReciprocal: false });
+  }
   toPb(): PbDt {
     const dt = new PbDt();
     dt.setValue(this.value);
     dt.setIsReciprocal(this.isReciprocal);
     return dt;
+  }
+  toJson(): string {
+    if (this.isReciprocal) {
+      return `1/${this.value}`;
+    }
+    return String(this.value);
   }
   static default(): Dt {
     return new Dt(dtDefaults);
@@ -1293,6 +2026,33 @@ export class SimSpecs extends Record(simSpecsDefaults) {
       timeUnits: simSpecs.getTimeUnits(),
     });
   }
+  static fromJson(json: JsonSimSpecs): SimSpecs {
+    return new SimSpecs({
+      start: json.startTime,
+      stop: json.endTime,
+      dt: Dt.fromJson(json.dt ?? '1'),
+      saveStep: json.saveStep ? new Dt({ value: json.saveStep, isReciprocal: false }) : undefined,
+      simMethod: (json.method ?? 'euler') as SimMethod,
+      timeUnits: json.timeUnits,
+    });
+  }
+  toJson(): JsonSimSpecs {
+    const result: JsonSimSpecs = {
+      startTime: this.start,
+      endTime: this.stop,
+      dt: this.dt.toJson(),
+    };
+    if (this.saveStep) {
+      result.saveStep = this.saveStep.isReciprocal ? 1 / this.saveStep.value : this.saveStep.value;
+    }
+    if (this.simMethod && this.simMethod !== 'euler') {
+      result.method = this.simMethod;
+    }
+    if (this.timeUnits) {
+      result.timeUnits = this.timeUnits;
+    }
+    return result;
+  }
   static default(): SimSpecs {
     return new SimSpecs(simSpecsDefaults);
   }
@@ -1314,11 +2074,26 @@ export class Dimension extends Record(dimensionDefaults) {
       subscripts: List(dim.getObsoleteElementsList()),
     });
   }
+  static fromJson(json: JsonDimension): Dimension {
+    return new Dimension({
+      name: json.name,
+      subscripts: List(json.elements ?? []),
+    });
+  }
   toPb(): PbDimension {
     const dim = new PbDimension();
     dim.setName(this.name);
     dim.setObsoleteElementsList(this.subscripts.toArray());
     return dim;
+  }
+  toJson(): JsonDimension {
+    const result: JsonDimension = {
+      name: this.name,
+    };
+    if (this.subscripts.size > 0) {
+      result.elements = this.subscripts.toArray();
+    }
+    return result;
   }
 }
 
@@ -1364,11 +2139,35 @@ export class Source extends Record(sourceDefaults) {
       content: source.getContent(),
     });
   }
+  static fromJson(json: JsonSource): Source {
+    let extension: Extension;
+    if (json.extension === 'xmile') {
+      extension = 'xmile';
+    } else if (json.extension === 'vensim') {
+      extension = 'vensim';
+    } else {
+      extension = undefined;
+    }
+    return new Source({
+      extension,
+      content: json.content ?? '',
+    });
+  }
   toPb(): PbSource {
     const source = new PbSource();
     source.setExtension$(extensionToPb(this.extension));
     source.setContent(this.content);
     return source;
+  }
+  toJson(): JsonSource {
+    const result: JsonSource = {};
+    if (this.extension) {
+      result.extension = this.extension;
+    }
+    if (this.content) {
+      result.content = this.content;
+    }
+    return result;
   }
 }
 
@@ -1396,6 +2195,36 @@ export class Project extends Record(projectDefaults) {
       hasNoEquations: false,
       source: source ? Source.fromPb(source) : undefined,
     });
+  }
+  static fromJson(json: JsonProject): Project {
+    return new Project({
+      name: json.name,
+      simSpecs: SimSpecs.fromJson(json.simSpecs),
+      models: Map<string, Model>(json.models.map((model: JsonModel) => [model.name, Model.fromJson(model)] as [string, Model])),
+      dimensions: Map<string, Dimension>((json.dimensions ?? []).map((dim: JsonDimension) => [dim.name, Dimension.fromJson(dim)] as [string, Dimension])),
+      hasNoEquations: false,
+      source: json.source ? Source.fromJson(json.source) : undefined,
+    });
+  }
+  toJson(): JsonProject {
+    const result: JsonProject = {
+      name: this.name,
+      simSpecs: this.simSpecs.toJson(),
+      models: this.models
+        .valueSeq()
+        .map((m: Model) => m.toJson())
+        .toArray(),
+    };
+    if (this.dimensions.size > 0) {
+      result.dimensions = this.dimensions
+        .valueSeq()
+        .map((d: Dimension) => d.toJson())
+        .toArray();
+    }
+    if (this.source) {
+      result.source = this.source.toJson();
+    }
+    return result;
   }
   static deserializeBinary(serializedPb: Readonly<Uint8Array>): Project {
     const project = PbProject.deserializeBinary(serializedPb as Uint8Array);

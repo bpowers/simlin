@@ -26,6 +26,16 @@
       "items": {
         "$ref": "#/$defs/Unit"
       }
+    },
+    "source": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Source"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
@@ -947,6 +957,17 @@
       "required": [
         "name"
       ]
+    },
+    "Source": {
+      "type": "object",
+      "properties": {
+        "extension": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        }
+      }
     }
   }
 }
