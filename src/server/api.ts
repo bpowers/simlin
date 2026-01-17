@@ -89,7 +89,7 @@ export const apiRouter = (app: Application): Router => {
       if (req.body.projectPB) {
         sdPB = Buffer.from(req.body.projectPB, 'base64');
       } else {
-        sdPB = Buffer.from(emptyProject(projectName, user.getDisplayName()).serializeBinary());
+        sdPB = Buffer.from(await emptyProject(projectName, user.getDisplayName()));
       }
 
       const filePb = createFile(project.getId(), user.getId(), undefined, sdPB);

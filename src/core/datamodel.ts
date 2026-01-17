@@ -8,8 +8,9 @@ import { List, Map, Record } from 'immutable';
 
 import { canonicalize } from './canonicalize';
 
+import { ErrorCode } from './errors';
+
 import {
-  ErrorCode,
   type JsonProject,
   type JsonModel,
   type JsonStock,

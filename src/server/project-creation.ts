@@ -9,27 +9,33 @@ import { File as DbFilePb } from './schemas/file_pb';
 import { Project as DbProjectPb } from './schemas/project_pb';
 import { User as UserPb } from './schemas/user_pb';
 
-import { Model, Dt, SimSpecs, Project, View } from '@system-dynamics/core/pb/project_io_pb';
+import { Project as Engine2Project } from '@system-dynamics/engine2';
+import type { JsonProject } from '@system-dynamics/engine2';
 
-export function emptyProject(name: string, _userName: string): Project {
-  const model = new Model();
-  model.setName('main');
-  model.setViewsList([new View()]);
+export async function emptyProject(name: string, _userName: string): Promise<Uint8Array> {
+  const emptyJson: JsonProject = {
+    name,
+    simSpecs: {
+      startTime: 0,
+      endTime: 100,
+      dt: '1',
+    },
+    models: [
+      {
+        name: 'main',
+        stocks: [],
+        flows: [],
+        auxiliaries: [],
+        views: [{ kind: 'stock_flow', elements: [] }],
+      },
+    ],
+  };
 
-  const dt = new Dt();
-  dt.setValue(1);
+  const engine2Project = await Engine2Project.openJson(JSON.stringify(emptyJson));
+  const protobuf = engine2Project.serializeProtobuf();
+  engine2Project.dispose();
 
-  const simSpecs = new SimSpecs();
-  simSpecs.setStart(0);
-  simSpecs.setStop(100);
-  simSpecs.setDt(dt);
-
-  const project = new Project();
-  project.setName(name);
-  project.setModelsList([model]);
-  project.setSimSpecs(simSpecs);
-
-  return project;
+  return protobuf;
 }
 
 const whitespace = /\s/gi;
