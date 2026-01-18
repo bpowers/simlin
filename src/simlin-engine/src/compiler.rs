@@ -1289,19 +1289,24 @@ impl Context<'_> {
         Ok(result)
     }
 
-    fn fold_flows(&self, flows: &[Ident<Canonical>]) -> Option<Expr> {
+    fn fold_flows(&self, flows: &[Ident<Canonical>]) -> Result<Option<Expr>> {
         if flows.is_empty() {
-            return None;
+            return Ok(None);
         }
 
-        let mut loads = flows
+        let loads: Result<Vec<Expr>> = flows
             .iter()
-            .map(|flow| Expr::Var(self.get_offset(flow).unwrap(), Loc::default()));
+            .map(|flow| {
+                self.get_offset(flow)
+                    .map(|off| Expr::Var(off, Loc::default()))
+            })
+            .collect();
+        let mut loads = loads?.into_iter();
 
         let first = loads.next().unwrap();
-        Some(loads.fold(first, |acc, flow| {
+        Ok(Some(loads.fold(first, |acc, flow| {
             Expr::Op2(BinaryOp::Add, Box::new(acc), Box::new(flow), Loc::default())
-        }))
+        })))
     }
 
     /// Apply dimension reordering to an expression
@@ -1380,20 +1385,17 @@ impl Context<'_> {
         sim_err!(DoesNotExist, "Variable not found by offset".to_string())
     }
 
-    fn build_stock_update_expr(&self, stock_off: usize, var: &Variable) -> Expr {
+    fn build_stock_update_expr(&self, stock_off: usize, var: &Variable) -> Result<Expr> {
         if let Variable::Stock {
             inflows, outflows, ..
         } = var
         {
-            // TODO: simplify the expressions we generate
-            let inflows = match self.fold_flows(inflows) {
-                None => Expr::Const(0.0, Loc::default()),
-                Some(flows) => flows,
-            };
-            let outflows = match self.fold_flows(outflows) {
-                None => Expr::Const(0.0, Loc::default()),
-                Some(flows) => flows,
-            };
+            let inflows = self
+                .fold_flows(inflows)?
+                .unwrap_or(Expr::Const(0.0, Loc::default()));
+            let outflows = self
+                .fold_flows(outflows)?
+                .unwrap_or(Expr::Const(0.0, Loc::default()));
 
             let dt_update = Expr::Op2(
                 BinaryOp::Mul,
@@ -1407,14 +1409,14 @@ impl Context<'_> {
                 Loc::default(),
             );
 
-            Expr::Op2(
+            Ok(Expr::Op2(
                 BinaryOp::Add,
                 Box::new(Expr::Var(stock_off, Loc::default())),
                 Box::new(dt_update),
                 Loc::default(),
-            )
+            ))
         } else {
-            panic!(
+            unreachable!(
                 "build_stock_update_expr called with non-stock {}",
                 var.ident()
             );
@@ -2886,20 +2888,24 @@ fn test_fold_flows() {
         preserve_wildcards_for_iteration: false,
     };
 
-    assert_eq!(None, ctx.fold_flows(&[]));
+    assert_eq!(Ok(None), ctx.fold_flows(&[]));
     assert_eq!(
-        Some(Expr::Var(1, Loc::default())),
+        Ok(Some(Expr::Var(1, Loc::default()))),
         ctx.fold_flows(&[canonicalize("a")])
     );
     assert_eq!(
-        Some(Expr::Op2(
+        Ok(Some(Expr::Op2(
             BinaryOp::Add,
             Box::new(Expr::Var(1, Loc::default())),
             Box::new(Expr::Var(4, Loc::default())),
             Loc::default(),
-        )),
+        ))),
         ctx.fold_flows(&[canonicalize("a"), canonicalize("d")])
     );
+
+    // Test that fold_flows returns an error for non-existent flows
+    let result = ctx.fold_flows(&[canonicalize("nonexistent")]);
+    assert!(result.is_err(), "Expected error for non-existent flow");
 }
 
 impl Var {
@@ -3009,7 +3015,7 @@ impl Var {
                         match ast.as_ref().unwrap() {
                             Ast::Scalar(_) => vec![Expr::AssignNext(
                                 off,
-                                Box::new(ctx.build_stock_update_expr(off, var)),
+                                Box::new(ctx.build_stock_update_expr(off, var)?),
                             )],
                             Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _) => {
                                 let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
@@ -3023,12 +3029,10 @@ impl Var {
                                                 .map(|s| CanonicalElementName::from_raw(s))
                                                 .collect(),
                                         );
-                                        // when building the stock update expression, we need
-                                        // the specific index of this subscript, not the base offset
                                         let update_expr = ctx.build_stock_update_expr(
                                             ctx.get_offset(&canonicalize(var.ident()))?,
                                             var,
-                                        );
+                                        )?;
                                         Ok(Expr::AssignNext(off + i, Box::new(update_expr)))
                                     })
                                     .collect();
@@ -6100,5 +6104,28 @@ mod tests {
         assert_eq!(broadcast.dims, vec![2, 3]);
         assert_eq!(broadcast.strides, vec![1, 0]); // x uses stride 1, y uses stride 0 (broadcast)
         assert_eq!(broadcast.offset, 0);
+    }
+
+    #[test]
+    fn test_stock_with_nonexistent_flow() {
+        // Regression test for crash when a stock references a flow that doesn't exist.
+        // This should return a proper error, not panic.
+        use crate::test_common::TestProject;
+
+        let project = TestProject::new("stock_missing_flow").stock(
+            "inventory",
+            "100",
+            &["nonexistent_inflow"],
+            &[],
+            None,
+        );
+
+        // Trying to build a simulation should fail gracefully, not panic.
+        // The stock references "nonexistent_inflow" which doesn't exist.
+        let result = project.build_sim();
+        assert!(
+            result.is_err(),
+            "Expected an error for missing flow reference, but got Ok"
+        );
     }
 }
