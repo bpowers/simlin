@@ -67,6 +67,7 @@
     "test": "jest",
     "prepublishOnly": "yarn build",
     "clean": "rm -rf ./lib ./lib.browser",
-    "build": "tsc && tsc -p tsconfig.browser.json"
+    "build": "tsc && tsc -p tsconfig.browser.json && yarn build:css-stubs",
+    "build:css-stubs": "find . -name '*.module.css' -not -path './lib*' -not -path './node_modules/*' | while read src; do dir=$(dirname \"$src\" | sed 's|^\\./||'); mkdir -p \"lib/$dir\"; echo 'module.exports = {};' > \"lib/$dir/$(basename \"$src\")\"; done"
   }
 }
