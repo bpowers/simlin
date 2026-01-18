@@ -16,6 +16,9 @@ cargo build --release --manifest-path src/libsimlin/Cargo.toml
 echo "Installing pysimlin with dev dependencies..."
 cd src/pysimlin
 uv sync --extra dev
+# Build the cffi extension in-place for editable installs
+uv pip install setuptools
+uv run python setup.py build_ext --inplace 2>/dev/null || true
 cd "$REPO_ROOT"
 
 echo "Running pysimlin tests..."

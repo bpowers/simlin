@@ -2602,76 +2602,6 @@ unsafe fn apply_project_patch_internal(
     }
 }
 
-/// Applies a patch to the project datamodel.
-///
-/// On success returns without populating `out_error`. When `out_collected_errors` is
-/// non-null it receives a pointer to a `SimlinError` describing all detected issues; callers
-/// must free it with `simlin_error_free`.
-///
-/// # Safety
-/// - `project` must be a valid pointer to a SimlinProject
-/// - `patch_data` must be a valid pointer to at least `patch_len` bytes
-/// - `out_collected_errors` and `out_error` may be null
-#[no_mangle]
-pub unsafe extern "C" fn simlin_project_apply_patch(
-    project: *mut SimlinProject,
-    patch_data: *const u8,
-    patch_len: usize,
-    dry_run: bool,
-    allow_errors: bool,
-    out_collected_errors: *mut *mut SimlinError,
-    out_error: *mut *mut SimlinError,
-) {
-    clear_out_error(out_error);
-    if !out_collected_errors.is_null() {
-        *out_collected_errors = ptr::null_mut();
-    }
-
-    let project_ref = match require_project(project) {
-        Ok(p) => p,
-        Err(err) => {
-            store_anyhow_error(out_error, err);
-            return;
-        }
-    };
-
-    if patch_len > 0 && patch_data.is_null() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("patch_data pointer must not be NULL when patch_len > 0"),
-        );
-        return;
-    }
-
-    let patch_slice = if patch_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(patch_data, patch_len)
-    };
-
-    let patch = match engine::project_io::ProjectPatch::decode(patch_slice) {
-        Ok(patch) => patch,
-        Err(err) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::ProtobufDecode)
-                    .with_message(format!("failed to decode patch: {err}")),
-            );
-            return;
-        }
-    };
-
-    apply_project_patch_internal(
-        project_ref,
-        patch,
-        dry_run,
-        allow_errors,
-        out_collected_errors,
-        out_error,
-    );
-}
-
 /// Serializes a project to JSON format.
 ///
 /// # Safety
@@ -2795,17 +2725,11 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
 /// - When `dry_run` is true, the project remains unchanged and no modifications are committed.
 /// - The `project` pointer remains valid and usable after this function returns.
 /// - The project is not consumed or moved by this operation.
-///
-/// # Format Support
-/// - Only `SimlinJsonFormat::Native` is supported for patches.
-/// - SDAI format is only supported for full project import via `simlin_project_json_open`.
-/// - Attempting to use SDAI format will return an error.
 #[no_mangle]
-pub unsafe extern "C" fn simlin_project_apply_patch_json(
+pub unsafe extern "C" fn simlin_project_apply_patch(
     project: *mut SimlinProject,
     patch_data: *const u8,
     patch_len: usize,
-    format: ffi::SimlinJsonFormat,
     dry_run: bool,
     allow_errors: bool,
     out_collected_errors: *mut *mut SimlinError,
@@ -2814,15 +2738,6 @@ pub unsafe extern "C" fn simlin_project_apply_patch_json(
     clear_out_error(out_error);
     if !out_collected_errors.is_null() {
         *out_collected_errors = ptr::null_mut();
-    }
-
-    if format != ffi::SimlinJsonFormat::Native {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("only native JSON format is supported"),
-        );
-        return;
     }
 
     if patch_len > 0 && patch_data.is_null() {
@@ -3389,184 +3304,6 @@ mod tests {
         }
     }
 
-    fn aux_patch(model: &str, aux: engine::datamodel::Aux) -> Vec<u8> {
-        let variable = engine::datamodel::Variable::Aux(aux);
-        let aux_pb = match engine::project_io::Variable::from(variable).v.unwrap() {
-            engine::project_io::variable::V::Aux(aux) => aux,
-            _ => unreachable!(),
-        };
-        let patch = engine::project_io::ProjectPatch {
-            project_ops: vec![],
-            models: vec![engine::project_io::ModelPatch {
-                name: model.to_string(),
-                ops: vec![engine::project_io::ModelOperation {
-                    op: Some(engine::project_io::model_operation::Op::UpsertAux(
-                        engine::project_io::UpsertAuxOp { aux: Some(aux_pb) },
-                    )),
-                }],
-            }],
-        };
-        let mut bytes = Vec::new();
-        patch.encode(&mut bytes).unwrap();
-        bytes
-    }
-
-    #[test]
-    fn test_project_apply_patch_commits() {
-        let datamodel = TestProject::new("test").build_datamodel();
-        let proj = open_project_from_datamodel(&datamodel);
-
-        let aux = engine::datamodel::Aux {
-            ident: "new_aux".to_string(),
-            equation: engine::datamodel::Equation::Scalar("5".to_string(), None),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            can_be_module_input: false,
-            visibility: engine::datamodel::Visibility::Private,
-            ai_state: None,
-            uid: None,
-        };
-        let patch_bytes = aux_patch("main", aux);
-
-        unsafe {
-            let mut collected_errors: *mut SimlinError = ptr::null_mut();
-            let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch(
-                proj,
-                patch_bytes.as_ptr(),
-                patch_bytes.len(),
-                false,
-                true,
-                &mut collected_errors as *mut *mut SimlinError,
-                &mut out_error as *mut *mut SimlinError,
-            );
-            assert!(out_error.is_null(), "expected no error");
-            assert!(collected_errors.is_null());
-
-            let project_locked = (*proj).project.lock().unwrap();
-            let model = project_locked.datamodel.get_model("main").unwrap();
-            assert!(model.get_variable("new_aux").is_some());
-            drop(project_locked);
-
-            simlin_project_unref(proj);
-        }
-    }
-
-    #[test]
-    fn test_project_apply_patch_errors_respected() {
-        let datamodel = TestProject::new("test").build_datamodel();
-        let proj = open_project_from_datamodel(&datamodel);
-
-        let aux = engine::datamodel::Aux {
-            ident: "bad_aux".to_string(),
-            equation: engine::datamodel::Equation::Scalar(String::new(), None),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            can_be_module_input: false,
-            visibility: engine::datamodel::Visibility::Private,
-            ai_state: None,
-            uid: None,
-        };
-        let patch_bytes = aux_patch("main", aux);
-
-        unsafe {
-            let mut collected_errors: *mut SimlinError = ptr::null_mut();
-            let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch(
-                proj,
-                patch_bytes.as_ptr(),
-                patch_bytes.len(),
-                false,
-                false,
-                &mut collected_errors as *mut *mut SimlinError,
-                &mut out_error as *mut *mut SimlinError,
-            );
-            assert!(!out_error.is_null(), "expected an error");
-            let code = simlin_error_get_code(out_error);
-            assert_eq!(code, SimlinErrorCode::VariablesHaveErrors);
-            simlin_error_free(out_error);
-            assert!(!collected_errors.is_null());
-            simlin_error_free(collected_errors);
-
-            // Project should remain unchanged
-            {
-                let project_locked = (*proj).project.lock().unwrap();
-                let model = project_locked.datamodel.get_model("main").unwrap();
-                assert!(model.get_variable("bad_aux").is_none());
-            }
-
-            let mut collected_errors_allow: *mut SimlinError = ptr::null_mut();
-            let mut out_error_allow: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch(
-                proj,
-                patch_bytes.as_ptr(),
-                patch_bytes.len(),
-                false,
-                true,
-                &mut collected_errors_allow as *mut *mut SimlinError,
-                &mut out_error_allow as *mut *mut SimlinError,
-            );
-            assert!(
-                out_error_allow.is_null(),
-                "expected no error when allowing errors"
-            );
-            assert!(!collected_errors_allow.is_null());
-            simlin_error_free(collected_errors_allow);
-
-            let project_locked = (*proj).project.lock().unwrap();
-            let model = project_locked.datamodel.get_model("main").unwrap();
-            assert!(model.get_variable("bad_aux").is_some());
-            drop(project_locked);
-
-            simlin_project_unref(proj);
-        }
-    }
-
-    #[test]
-    fn test_project_apply_patch_dry_run() {
-        let datamodel = TestProject::new("test").build_datamodel();
-        let proj = open_project_from_datamodel(&datamodel);
-
-        let aux = engine::datamodel::Aux {
-            ident: "dry_aux".to_string(),
-            equation: engine::datamodel::Equation::Scalar("3".to_string(), None),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            can_be_module_input: false,
-            visibility: engine::datamodel::Visibility::Private,
-            ai_state: None,
-            uid: None,
-        };
-        let patch_bytes = aux_patch("main", aux);
-
-        unsafe {
-            let mut collected_errors: *mut SimlinError = ptr::null_mut();
-            let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch(
-                proj,
-                patch_bytes.as_ptr(),
-                patch_bytes.len(),
-                true,
-                true,
-                &mut collected_errors as *mut *mut SimlinError,
-                &mut out_error as *mut *mut SimlinError,
-            );
-            assert!(out_error.is_null(), "expected no error");
-            assert!(collected_errors.is_null());
-
-            // Dry run should not commit changes
-            let project_locked = (*proj).project.lock().unwrap();
-            let model = project_locked.datamodel.get_model("main").unwrap();
-            assert!(model.get_variable("dry_aux").is_none());
-            drop(project_locked);
-
-            simlin_project_unref(proj);
-        }
-    }
-
     #[test]
     fn test_project_serialize_json_native() {
         let datamodel = TestProject::new("json_native").build_datamodel();
@@ -3810,7 +3547,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_apply_patch_json_commits() {
+    fn test_project_apply_patch_commits() {
         let datamodel = TestProject::new("json_patch").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -3837,11 +3574,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors as *mut *mut SimlinError,
@@ -3861,7 +3597,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_apply_patch_json_invalid() {
+    fn test_project_apply_patch_invalid() {
         let datamodel = TestProject::new("json_patch").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -3870,11 +3606,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors as *mut *mut SimlinError,
@@ -3891,7 +3626,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_apply_patch_json_upsert_stock() {
+    fn test_project_apply_patch_upsert_stock() {
         let datamodel = TestProject::new("json_patch_stock").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -3920,11 +3655,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -3945,7 +3679,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_apply_patch_json_upsert_flow() {
+    fn test_project_apply_patch_upsert_flow() {
         let datamodel = TestProject::new("json_patch_flow").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -3973,11 +3707,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -3998,7 +3731,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_apply_patch_json_upsert_module() {
+    fn test_project_apply_patch_upsert_module() {
         // Create a project with a submodel that the module can reference
         let mut datamodel = TestProject::new("json_patch_module").build_datamodel();
         // Add a submodel to the project
@@ -4037,11 +3770,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -4063,7 +3795,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_apply_patch_json_delete_variable() {
+    fn test_project_apply_patch_delete_variable() {
         let datamodel = TestProject::new("json_patch_delete")
             .aux("to_delete", "42", None)
             .build_datamodel();
@@ -4098,11 +3830,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -4125,7 +3856,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_apply_patch_json_rename_variable() {
+    fn test_project_apply_patch_rename_variable() {
         let datamodel = TestProject::new("json_patch_rename")
             .aux("old_name", "123", None)
             .build_datamodel();
@@ -4161,11 +3892,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -4192,7 +3922,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_apply_patch_json_upsert_view() {
+    fn test_project_apply_patch_upsert_view() {
         let datamodel = TestProject::new("json_patch_view").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -4227,11 +3957,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -4251,7 +3980,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_apply_patch_json_delete_view() {
+    fn test_project_apply_patch_delete_view() {
         let datamodel = TestProject::new("json_patch_delete_view").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -4282,11 +4011,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 upsert_bytes.as_ptr(),
                 upsert_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -4320,11 +4048,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 delete_bytes.as_ptr(),
                 delete_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -4344,7 +4071,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_apply_patch_json_set_sim_specs() {
+    fn test_project_apply_patch_set_sim_specs() {
         let datamodel = TestProject::new("json_patch_sim_specs").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -4374,11 +4101,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -4419,7 +4145,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_apply_patch_json_project_and_model_ops() {
+    fn test_project_apply_patch_project_and_model_ops() {
         let datamodel = TestProject::new("json_patch_combined").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -4461,11 +4187,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -4503,40 +4228,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_apply_patch_json_unsupported_format() {
-        let datamodel = TestProject::new("json_patch_format").build_datamodel();
-        let proj = open_project_from_datamodel(&datamodel);
-
-        let patch_json = r#"{"models": []}"#;
-        let patch_bytes = patch_json.as_bytes();
-
-        unsafe {
-            let mut collected_errors: *mut SimlinError = ptr::null_mut();
-            let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
-                proj,
-                patch_bytes.as_ptr(),
-                patch_bytes.len(),
-                ffi::SimlinJsonFormat::Sdai,
-                false,
-                true,
-                &mut collected_errors,
-                &mut out_error,
-            );
-
-            assert!(
-                !out_error.is_null(),
-                "expected error for SDAI format in apply_patch"
-            );
-            assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
-            simlin_error_free(out_error);
-
-            simlin_project_unref(proj);
-        }
-    }
-
-    #[test]
-    fn test_apply_patch_json_invalid_utf8() {
+    fn test_apply_patch_invalid_utf8() {
         let datamodel = TestProject::new("utf8_test").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -4545,11 +4237,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 invalid_utf8.as_ptr(),
                 invalid_utf8.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -4565,7 +4256,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_patch_json_empty_patch() {
+    fn test_apply_patch_empty_patch() {
         let datamodel = TestProject::new("empty_patch").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -4575,11 +4266,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -4594,7 +4284,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_patch_json_dry_run_no_changes() {
+    fn test_apply_patch_dry_run_no_changes() {
         let datamodel = TestProject::new("dry_run_test").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -4630,11 +4320,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 true,
                 true,
                 &mut collected_errors,
@@ -4657,18 +4346,17 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_patch_json_null_data_with_length() {
+    fn test_apply_patch_null_data_with_length() {
         let datamodel = TestProject::new("null_test").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 ptr::null(),
                 10,
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -4687,7 +4375,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_patch_json_multiple_models() {
+    fn test_apply_patch_multiple_models() {
         // Create a project with multiple models
         let mut datamodel = TestProject::new("multi_model").build_datamodel();
         let second_model = engine::datamodel::Model {
@@ -4738,11 +4426,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -4765,7 +4452,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_patch_json_multiple_ops_per_model() {
+    fn test_apply_patch_multiple_ops_per_model() {
         let datamodel = TestProject::new("multi_ops").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -4810,11 +4497,10 @@ mod tests {
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
             let mut out_error: *mut SimlinError = ptr::null_mut();
-            simlin_project_apply_patch_json(
+            simlin_project_apply_patch(
                 proj,
                 patch_bytes.as_ptr(),
                 patch_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
                 false,
                 true,
                 &mut collected_errors,
@@ -9255,22 +8941,6 @@ mod tests {
         }
     }
 
-    /// Helper to create an aux with units for patching
-    fn aux_with_units_patch(model: &str, name: &str, equation: &str, units: &str) -> Vec<u8> {
-        let aux = engine::datamodel::Aux {
-            ident: name.to_string(),
-            equation: engine::datamodel::Equation::Scalar(equation.to_string(), None),
-            documentation: String::new(),
-            units: Some(units.to_string()),
-            gf: None,
-            can_be_module_input: false,
-            visibility: engine::datamodel::Visibility::Private,
-            ai_state: None,
-            uid: None,
-        };
-        aux_patch(model, aux)
-    }
-
     #[test]
     fn test_patch_with_preexisting_unit_warnings_succeeds() {
         // Create a project that already has unit warnings (apples + oranges)
@@ -9298,7 +8968,26 @@ mod tests {
         }
 
         // Apply a patch that doesn't introduce new unit warnings
-        let patch_bytes = aux_with_units_patch("main", "d", "5", "apples");
+        let patch_json = r#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "upsertAux",
+                            "payload": {
+                                "aux": {
+                                    "name": "d",
+                                    "equation": "5",
+                                    "units": "apples"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
 
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
@@ -9363,20 +9052,25 @@ mod tests {
         }
 
         // Apply a patch that introduces a unit mismatch (apples + oranges)
-        let patch_bytes = aux_patch(
-            "main",
-            engine::datamodel::Aux {
-                ident: "bad_sum".to_string(),
-                equation: engine::datamodel::Equation::Scalar("a + b".to_string(), None),
-                documentation: String::new(),
-                units: None,
-                gf: None,
-                can_be_module_input: false,
-                visibility: engine::datamodel::Visibility::Private,
-                ai_state: None,
-                uid: None,
-            },
-        );
+        let patch_json = r#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "upsertAux",
+                            "payload": {
+                                "aux": {
+                                    "name": "bad_sum",
+                                    "equation": "a + b"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
 
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
@@ -9433,20 +9127,25 @@ mod tests {
         let proj = open_project_from_datamodel(&datamodel);
 
         // Apply a patch that introduces a unit mismatch, but with allow_errors = true
-        let patch_bytes = aux_patch(
-            "main",
-            engine::datamodel::Aux {
-                ident: "bad_sum".to_string(),
-                equation: engine::datamodel::Equation::Scalar("a + b".to_string(), None),
-                documentation: String::new(),
-                units: None,
-                gf: None,
-                can_be_module_input: false,
-                visibility: engine::datamodel::Visibility::Private,
-                ai_state: None,
-                uid: None,
-            },
-        );
+        let patch_json = r#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "upsertAux",
+                            "payload": {
+                                "aux": {
+                                    "name": "bad_sum",
+                                    "equation": "a + b"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
 
         unsafe {
             let mut collected_errors: *mut SimlinError = ptr::null_mut();
