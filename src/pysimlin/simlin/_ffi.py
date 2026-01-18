@@ -171,12 +171,10 @@ def apply_patch_json(
     out_collected_errors_ptr = ffi.new("SimlinError **")
     err_ptr = ffi.new("SimlinError **")
 
-    # SimlinJsonFormat::Native = 0
-    lib.simlin_project_apply_patch_json(
+    lib.simlin_project_apply_patch(
         project_ptr,
         c_patch,
         len(patch_json),
-        0,  # SIMLIN_JSON_FORMAT_NATIVE
         dry_run,
         allow_errors,
         out_collected_errors_ptr,

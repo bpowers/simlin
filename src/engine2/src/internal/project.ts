@@ -398,9 +398,9 @@ export function simlin_project_add_model(project: SimlinProjectPtr, modelName: s
 }
 
 /**
- * Apply a patch to the project datamodel (protobuf format).
+ * Apply a JSON patch to the project datamodel.
  * @param project Project pointer
- * @param patchData Protobuf-encoded patch data
+ * @param patchData JSON-encoded patch data
  * @param dryRun If true, validate without applying
  * @param allowErrors If true, continue despite errors
  * @returns Collected errors if any (caller should free with simlin_error_free)
@@ -428,68 +428,6 @@ export function simlin_project_apply_patch(
 
   try {
     fn(project, dataPtr, patchData.length, dryRun ? 1 : 0, allowErrors ? 1 : 0, outCollectedPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-
-      // Also free any collected errors to prevent memory leak
-      const collectedPtr = readOutPtr(outCollectedPtr);
-      if (collectedPtr !== 0) {
-        // Read collected error details and merge with main error details
-        const collectedDetails = readAllErrorDetails(collectedPtr);
-        details.push(...collectedDetails);
-        simlin_error_free(collectedPtr);
-      }
-
-      throw new SimlinError(message, code, details);
-    }
-
-    return readOutPtr(outCollectedPtr);
-  } finally {
-    free(dataPtr);
-    free(outCollectedPtr);
-    free(outErrPtr);
-  }
-}
-
-/**
- * Apply a JSON patch to the project datamodel.
- * @param project Project pointer
- * @param patchData JSON-encoded patch data
- * @param format JSON format (only Native supported for patches)
- * @param dryRun If true, validate without applying
- * @param allowErrors If true, continue despite errors
- * @returns Collected errors if any (caller should free with simlin_error_free)
- */
-export function simlin_project_apply_patch_json(
-  project: SimlinProjectPtr,
-  patchData: Uint8Array,
-  format: SimlinJsonFormat,
-  dryRun: boolean,
-  allowErrors: boolean,
-): SimlinErrorPtr {
-  const exports = getExports();
-  const fn = exports.simlin_project_apply_patch_json as (
-    proj: number,
-    data: number,
-    len: number,
-    fmt: number,
-    dryRun: number,
-    allowErrors: number,
-    outCollected: number,
-    outErr: number,
-  ) => void;
-
-  const dataPtr = copyToWasm(patchData);
-  const outCollectedPtr = allocOutPtr();
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(project, dataPtr, patchData.length, format, dryRun ? 1 : 0, allowErrors ? 1 : 0, outCollectedPtr, outErrPtr);
     const errPtr = readOutPtr(outErrPtr);
 
     if (errPtr !== 0) {

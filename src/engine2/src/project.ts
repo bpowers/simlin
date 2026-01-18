@@ -20,7 +20,7 @@ import {
   simlin_project_serialize_json,
   simlin_project_is_simulatable,
   simlin_project_get_errors,
-  simlin_project_apply_patch_json,
+  simlin_project_apply_patch,
 } from './internal/project';
 import { simlin_import_xmile, simlin_export_xmile } from './internal/import-export';
 import { simlin_analyze_get_loops, readLoops, simlin_free_loops } from './internal/analysis';
@@ -313,13 +313,7 @@ export class Project {
     const patchJson = JSON.stringify(patch);
     const patchBytes = new TextEncoder().encode(patchJson);
 
-    const collectedPtr = simlin_project_apply_patch_json(
-      this._ptr,
-      patchBytes,
-      SimlinJsonFormat.Native,
-      dryRun,
-      allowErrors,
-    );
+    const collectedPtr = simlin_project_apply_patch(this._ptr, patchBytes, dryRun, allowErrors);
 
     // Invalidate all model caches since the project state changed
     if (!dryRun) {

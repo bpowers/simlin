@@ -175,7 +175,6 @@ void simlin_export_xmile(SimlinProject *project, uint8_t **out_buffer, uintptr_t
 void simlin_project_serialize(SimlinProject *project, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
 void simlin_project_serialize_json(SimlinProject *project, SimlinJsonFormat format, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
 void simlin_project_apply_patch(SimlinProject *project, const uint8_t *patch_data, uintptr_t patch_len, bool dry_run, bool allow_errors, SimlinError **out_collected_errors, OutError out_error);
-void simlin_project_apply_patch_json(SimlinProject *project, const uint8_t *patch_data, uintptr_t patch_len, SimlinJsonFormat format, bool dry_run, bool allow_errors, SimlinError **out_collected_errors, OutError out_error);
 SimlinError *simlin_project_get_errors(SimlinProject *project, OutError out_error);
 """
 

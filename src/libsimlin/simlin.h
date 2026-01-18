@@ -62,6 +62,18 @@ typedef enum {
   SIMLIN_ERROR_KIND_SIMULATION = 4,
 } SimlinErrorKind;
 
+// Unit error kind for distinguishing types of unit-related errors.
+typedef enum {
+  // Not a unit error
+  SIMLIN_UNIT_ERROR_KIND_NOT_APPLICABLE = 0,
+  // Syntax error in unit string definition
+  SIMLIN_UNIT_ERROR_KIND_DEFINITION = 1,
+  // Dimensional analysis mismatch
+  SIMLIN_UNIT_ERROR_KIND_CONSISTENCY = 2,
+  // Inference error spanning multiple variables
+  SIMLIN_UNIT_ERROR_KIND_INFERENCE = 3,
+} SimlinUnitErrorKind;
+
 // JSON format specifier for C API
 typedef enum {
   SIMLIN_JSON_FORMAT_NATIVE = 0,
@@ -80,18 +92,6 @@ typedef enum {
   SIMLIN_LOOP_POLARITY_REINFORCING = 0,
   SIMLIN_LOOP_POLARITY_BALANCING = 1,
 } SimlinLoopPolarity;
-
-// Unit error kind for distinguishing types of unit-related errors.
-typedef enum {
-  // Not a unit error
-  SIMLIN_UNIT_ERROR_KIND_NOT_APPLICABLE = 0,
-  // Syntax error in unit string definition
-  SIMLIN_UNIT_ERROR_KIND_DEFINITION = 1,
-  // Dimensional analysis mismatch
-  SIMLIN_UNIT_ERROR_KIND_CONSISTENCY = 2,
-  // Inference error spanning multiple variables
-  SIMLIN_UNIT_ERROR_KIND_INFERENCE = 3,
-} SimlinUnitErrorKind;
 
 // Opaque error structure returned by the API
 typedef struct {
@@ -253,11 +253,11 @@ void simlin_project_get_model_names(SimlinProject *project,
 //
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
-// - `model_name` must be a valid C string
+// - `modelName` must be a valid C string
 //
 // # Returns
 // - 0 on success
-// - SimlinErrorCode::Generic if project or model_name is null or empty
+// - SimlinErrorCode::Generic if project or modelName is null or empty
 // - SimlinErrorCode::DuplicateVariable if a model with that name already exists
 void simlin_project_add_model(SimlinProject *project,
                               const char *model_name,
@@ -267,7 +267,7 @@ void simlin_project_add_model(SimlinProject *project,
 //
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
-// - `model_name` may be null (uses default model)
+// - `modelName` may be null (uses default model)
 // - The returned model must be freed with simlin_model_unref
 SimlinModel *simlin_project_get_model(SimlinProject *project,
                                       const char *model_name,
@@ -331,6 +331,19 @@ void simlin_model_get_incoming_links(SimlinModel *model,
 // - `model` must be a valid pointer to a SimlinModel
 // - The returned SimlinLinks must be freed with simlin_free_links
 SimlinLinks *simlin_model_get_links(SimlinModel *model, SimlinError **out_error);
+
+// Gets the LaTeX representation of a variable's equation
+//
+// Returns the equation rendered as a LaTeX string, or NULL if the variable
+// doesn't exist or doesn't have an equation (e.g., modules).
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `ident` must be a valid C string
+// - The returned string must be freed with simlin_free_string
+char *simlin_model_get_latex_equation(SimlinModel *model,
+                                      const char *ident,
+                                      SimlinError **out_error);
 
 // Creates a new simulation context
 //
@@ -550,24 +563,6 @@ void simlin_project_serialize(SimlinProject *project,
                               uintptr_t *out_len,
                               SimlinError **out_error);
 
-// Applies a patch to the project datamodel.
-//
-// On success returns without populating `out_error`. When `out_collected_errors` is
-// non-null it receives a pointer to a `SimlinError` describing all detected issues; callers
-// must free it with `simlin_error_free`.
-//
-// # Safety
-// - `project` must be a valid pointer to a SimlinProject
-// - `patch_data` must be a valid pointer to at least `patch_len` bytes
-// - `out_collected_errors` and `out_error` may be null
-void simlin_project_apply_patch(SimlinProject *project,
-                                const uint8_t *patch_data,
-                                uintptr_t patch_len,
-                                bool dry_run,
-                                bool allow_errors,
-                                SimlinError **out_collected_errors,
-                                SimlinError **out_error);
-
 // Serializes a project to JSON format.
 //
 // # Safety
@@ -619,19 +614,13 @@ void simlin_project_serialize_json(SimlinProject *project,
 // - When `dry_run` is true, the project remains unchanged and no modifications are committed.
 // - The `project` pointer remains valid and usable after this function returns.
 // - The project is not consumed or moved by this operation.
-//
-// # Format Support
-// - Only `SimlinJsonFormat::Native` is supported for patches.
-// - SDAI format is only supported for full project import via `simlin_project_json_open`.
-// - Attempting to use SDAI format will return an error.
-void simlin_project_apply_patch_json(SimlinProject *project,
-                                     const uint8_t *patch_data,
-                                     uintptr_t patch_len,
-                                     SimlinJsonFormat format,
-                                     bool dry_run,
-                                     bool allow_errors,
-                                     SimlinError **out_collected_errors,
-                                     SimlinError **out_error);
+void simlin_project_apply_patch(SimlinProject *project,
+                                const uint8_t *patch_data,
+                                uintptr_t patch_len,
+                                bool dry_run,
+                                bool allow_errors,
+                                SimlinError **out_collected_errors,
+                                SimlinError **out_error);
 
 // Check if a project's model can be simulated
 //
@@ -661,8 +650,8 @@ bool simlin_project_is_simulatable(SimlinProject *project,
 //     for (size_t i = 0; i < errors->count; i++) {
 //         SimlinErrorDetail* error = &errors->errors[i];
 //         printf("Error %d", error->code);
-//         if (error->model_name != NULL) {
-//             printf(" in model %s", error->model_name);
+//         if (error->modelName != NULL) {
+//             printf(" in model %s", error->modelName);
 //         }
 //         if (error->variable_name != NULL) {
 //             printf(" for variable %s", error->variable_name);
