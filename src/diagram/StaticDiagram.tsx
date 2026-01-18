@@ -6,7 +6,8 @@ import React from 'react';
 import { renderToString } from 'react-dom/server';
 import { toUint8Array } from 'js-base64';
 import { Map, Set } from 'immutable';
-import { createTheme, ThemeProvider } from '@mui/material/styles';
+
+import './theme.css';
 
 import { defined, Series } from '@system-dynamics/core/common';
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
@@ -72,15 +73,6 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
 
     const canUseDOM = !!(typeof window !== 'undefined' && window.document && window.document.createElement);
     const isDarkTheme = this.props.isDarkTheme;
-    const theme = createTheme({
-      palette: {
-        mode: isDarkTheme ? 'dark' : 'light',
-        common: {
-          white: isDarkTheme ? '#222222' : '#ffffff',
-          black: isDarkTheme ? '#bbbbbb' : '#000000',
-        },
-      },
-    });
 
     const model = defined(project.models.get('main'));
 
@@ -116,7 +108,7 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
       />
     );
 
-    const themedCanvas = <ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>;
+    const themedCanvas = <div data-theme={isDarkTheme ? 'dark' : undefined}>{canvasElement}</div>;
 
     if (canUseDOM) {
       return themedCanvas;
