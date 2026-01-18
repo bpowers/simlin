@@ -2767,6 +2767,14 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
         }
     };
 
+    // Treat empty input as a valid no-op patch (maintains backwards compatibility
+    // with callers that pass NULL+0 for "no changes")
+    let json_str = if json_str.trim().is_empty() {
+        r#"{"projectOps":[],"models":[]}"#
+    } else {
+        json_str
+    };
+
     let json_patch: JsonProjectPatch = match serde_json::from_str(json_str) {
         Ok(patch) => patch,
         Err(err) => {
@@ -4277,6 +4285,56 @@ mod tests {
             );
 
             assert!(out_error.is_null(), "empty patch should succeed as no-op");
+            assert!(collected_errors.is_null());
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_apply_patch_zero_length_input() {
+        // Test that zero-length input is treated as a no-op (backwards compatibility)
+        let datamodel = TestProject::new("zero_len_patch").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+
+            // Zero-length patch with null pointer (documented as valid)
+            simlin_project_apply_patch(
+                proj,
+                ptr::null(),
+                0,
+                false,
+                true,
+                &mut collected_errors,
+                &mut out_error,
+            );
+
+            assert!(
+                out_error.is_null(),
+                "zero-length patch should succeed as no-op"
+            );
+            assert!(collected_errors.is_null());
+
+            // Also test empty string (whitespace only)
+            let whitespace_patch = "   \n\t  ";
+            let patch_bytes = whitespace_patch.as_bytes();
+            simlin_project_apply_patch(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                false,
+                true,
+                &mut collected_errors,
+                &mut out_error,
+            );
+
+            assert!(
+                out_error.is_null(),
+                "whitespace-only patch should succeed as no-op"
+            );
             assert!(collected_errors.is_null());
 
             simlin_project_unref(proj);
