@@ -600,7 +600,7 @@ export class Flow extends React.PureComponent<FlowProps> {
     const indicator = this.indicators();
 
     const groupClassName = clsx(styles.flow, {
-      [styles.selected]: isSelected,
+      [styles.selected]: isSelected && isValidTarget === undefined,
       [styles.targetGood]: isValidTarget === true,
       [styles.targetBad]: isValidTarget === false,
     });

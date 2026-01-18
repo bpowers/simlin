@@ -135,7 +135,7 @@ export class Aux extends React.PureComponent<AuxProps> {
     const indicator = this.indicators();
 
     const groupClassName = clsx(styles.aux, {
-      [styles.selected]: isSelected,
+      [styles.selected]: isSelected && isValidTarget === undefined,
       [styles.targetGood]: isValidTarget === true,
       [styles.targetBad]: isValidTarget === false,
     });
