@@ -14,7 +14,6 @@ import {
   simlin_project_get_model,
   simlin_project_get_errors,
   simlin_project_apply_patch,
-  simlin_project_apply_patch_json,
 } from '../src/internal/project';
 import { simlin_model_unref, simlin_model_get_latex_equation, simlin_model_get_var_names } from '../src/internal/model';
 import { simlin_import_xmile } from '../src/internal/import-export';
@@ -722,36 +721,13 @@ describe('WASM Integration Tests', () => {
     });
 
     it('should throw SimlinError when apply_patch fails with invalid project', () => {
-      // Create an invalid patch (empty data)
-      const invalidPatch = new Uint8Array([]);
+      // Create an invalid JSON patch (empty object)
+      const invalidPatch = new TextEncoder().encode('{}');
 
       expect(() => simlin_project_apply_patch(0, invalidPatch, false, false)).toThrow(SimlinError);
 
       try {
         simlin_project_apply_patch(0, invalidPatch, false, false);
-      } catch (e) {
-        expect(e).toBeInstanceOf(SimlinError);
-        if (e instanceof SimlinError) {
-          expect(e.code).toBe(SimlinErrorCode.Generic);
-          // Verify the error has details array (may be empty for this error type)
-          expect(Array.isArray(e.details)).toBe(true);
-          // Verify the error has a message
-          expect(typeof e.message).toBe('string');
-          expect(e.message.length).toBeGreaterThan(0);
-        }
-      }
-    });
-
-    it('should throw SimlinError when apply_patch_json fails with invalid project', () => {
-      // Create an invalid JSON patch
-      const invalidPatch = new TextEncoder().encode('{}');
-
-      expect(() => simlin_project_apply_patch_json(0, invalidPatch, SimlinJsonFormat.Native, false, false)).toThrow(
-        SimlinError,
-      );
-
-      try {
-        simlin_project_apply_patch_json(0, invalidPatch, SimlinJsonFormat.Native, false, false);
       } catch (e) {
         expect(e).toBeInstanceOf(SimlinError);
         if (e instanceof SimlinError) {
@@ -774,13 +750,7 @@ describe('WASM Integration Tests', () => {
       const emptyPatch = new TextEncoder().encode('{"project_ops":[],"models":[]}');
 
       // Apply the patch - should not throw
-      const collectedErrors = simlin_project_apply_patch_json(
-        project,
-        emptyPatch,
-        SimlinJsonFormat.Native,
-        false,
-        false,
-      );
+      const collectedErrors = simlin_project_apply_patch(project, emptyPatch, false, false);
 
       // No errors should be collected for a valid empty patch
       expect(collectedErrors).toBe(0);
