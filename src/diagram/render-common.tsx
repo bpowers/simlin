@@ -11,15 +11,10 @@ import { renderToString } from 'react-dom/server';
 
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
 
-import { createTheme, ThemeProvider } from '@mui/material/styles';
-
 import { defined } from '@system-dynamics/core/common';
 import { Canvas } from './drawing/Canvas';
 import { Box, Point } from './drawing/common';
-
-const theme = createTheme({
-  palette: {},
-});
+import { renderStyles } from './drawing/render-styles';
 
 export function renderSvgToString(project: Project, modelName: string): [string, Box] {
   const model = defined(project.models.get(modelName));
@@ -56,42 +51,12 @@ export function renderSvgToString(project: Project, modelName: string): [string,
     />
   );
 
-  // material ui returns two tags: the <style> tag, then the <svg>
-  let svg = renderToString(<ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>);
-  let contents = '';
+  // Render the canvas to an SVG string
+  let svg = renderToString(canvasElement);
 
-  // our svg is wrapped in a div, which is handled below.
-  const divStart = svg.indexOf('<div');
-  if (divStart > 0) {
-    let svgTag = svg.slice(0, divStart);
-    svgTag = svgTag.replace(/<style[^>]*>/, '');
-    svgTag = svgTag.replace(/<\/style>/, '');
-    contents += svgTag;
-    contents += '\n';
-    svg = svg.slice(divStart);
-  }
-
-  const origSvg = svg;
-  let consumedLen = 0;
-  svg = '';
-  const styleRe = /<style.*?<\/style>/g;
-  for (const match of origSvg.matchAll(styleRe)) {
-    let svgTag = match[0];
-    const svgTagLen = svgTag.length;
-    svgTag = svgTag.replace(/<style[^>]*>/, '');
-    svgTag = svgTag.replace(/<\/style>/, '');
-    contents += svgTag;
-    contents += '\n';
-    svg += origSvg.slice(consumedLen, match.index);
-    consumedLen = (match.index || 0) + svgTagLen;
-  }
-  svg += origSvg.slice(consumedLen);
-
-  const styles = `<style>\n${contents}\n</style>\n<defs>\n`;
-
+  // Extract dimensions from viewBox
   let width = 100;
   let height = 100;
-
   const viewboxMatch = svg.match(/viewBox="[^"]*"/);
   if (viewboxMatch) {
     const viewboxStr = viewboxMatch[0].split('"')[1].trim();
@@ -100,6 +65,7 @@ export function renderSvgToString(project: Project, modelName: string): [string,
     height = viewboxParts[3];
   }
 
+  // Extract root class from wrapper div if present
   let rootClass = '';
   const svgStart = svg.indexOf('<svg');
   if (svgStart > 0) {
@@ -108,19 +74,22 @@ export function renderSvgToString(project: Project, modelName: string): [string,
     if (match && match.groups) {
       rootClass = match.groups['className'];
     }
-
     svg = svg.slice(svgStart);
   }
 
+  // Remove wrapper div tags
   svg = svg.replace(/^<div[^>]*>/, '');
   svg = svg.replace(/<\/div>$/, '');
-  svg = svg.replace('class="', `class="${rootClass} `);
-  svg = svg.replace('<svg ', `<svg style="width: ${width}; height: ${height};" xmlns="http://www.w3.org/2000/svg" `);
-  svg = svg.replace(/<defs[^>]*>/, styles);
 
-  // generate a random string like 'qaqb3rusiha'
-  const prefix = Math.random().toString(36).substr(2);
-  svg = svg.replace(/jss/g, 'simlin-' + prefix);
+  // Add root class and SVG attributes
+  if (rootClass) {
+    svg = svg.replace('class="', `class="${rootClass} `);
+  }
+  svg = svg.replace('<svg ', `<svg style="width: ${width}; height: ${height};" xmlns="http://www.w3.org/2000/svg" `);
+
+  // Inject our static CSS styles into the SVG defs section
+  const styles = `<style>\n${renderStyles}\n</style>\n<defs>\n`;
+  svg = svg.replace(/<defs[^>]*>/, styles);
 
   return [svg, { width, height }];
 }

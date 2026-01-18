@@ -5,7 +5,7 @@
   "repository": "http://github.com/bpowers/model-app",
   "author": "Bobby Powers <bobbypowers@gmail.com>",
   "license": "Apache-2.0",
-  "sideEffects": false,
+  "sideEffects": ["*.css", "**/*.css"],
   "browser": "lib.browser",
   "main": "lib",
   "exports": {
@@ -19,7 +19,6 @@
     }
   },
   "dependencies": {
-    "@emotion/core": "^11.0.0",
     "@emotion/react": "^11.0.0",
     "@emotion/styled": "^11.0.0",
     "@mui/material": "^5.0.0",

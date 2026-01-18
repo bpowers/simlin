@@ -1,0 +1,50 @@
+.googleIcon {
+  fill: white;
+}
+
+.outer {
+  display: table;
+  position: absolute;
+  height: 100%;
+  width: 100%;
+}
+
+.middle {
+  display: table-cell;
+  vertical-align: middle;
+}
+
+.inner {
+  margin-left: auto;
+  margin-right: auto;
+  text-align: center;
+}
+
+.innerInner {
+  display: inline-block;
+}
+
+.optionsButtons button {
+  margin: var(--spacing-1);
+  width: 220px;
+  justify-content: left;
+}
+
+.recoverInstructions {
+  margin-top: var(--spacing-2);
+  margin-bottom: var(--spacing-2);
+}
+
+.disabled {
+  pointer-events: none;
+  opacity: 0;
+}
+
+.logo {
+  width: 160px;
+  height: 160px;
+}
+
+.emailForm {
+  text-align: left;
+}

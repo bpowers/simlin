@@ -1,0 +1,7 @@
+.editableLabel {
+  font-family: "Roboto", "Open Sans", "Arial", sans-serif;
+  font-weight: 300;
+  text-anchor: middle;
+  white-space: nowrap;
+  vertical-align: middle;
+}

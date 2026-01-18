@@ -1,0 +1,38 @@
+.card {
+  height: 40px;
+  margin-right: var(--spacing-1);
+}
+
+.divider1 {
+  display: inline-block;
+  top: 0;
+  left: 0;
+  margin-right: 6px;
+  margin-top: 12px;
+  height: 16px;
+  border-left-width: 1px;
+  border-left-style: solid;
+  border-color: var(--color-divider);
+}
+
+.divider2 {
+  display: inline-block;
+  top: 0;
+  left: 0;
+  margin-left: 8px;
+  margin-top: 12px;
+  height: 16px;
+  border-left-width: 1px;
+  border-left-style: solid;
+  border-color: var(--color-divider);
+}
+
+.zoomText {
+  width: 21px;
+  font-size: 0.6rem;
+  color: var(--color-text-light);
+  text-align: center;
+  display: inline-block;
+  vertical-align: 4px;
+  margin: 0;
+}

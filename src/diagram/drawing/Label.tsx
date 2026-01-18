@@ -4,8 +4,6 @@
 
 import * as React from 'react';
 
-import { styled } from '@mui/material/styles';
-
 import { Rect } from './common';
 import { AuxRadius } from './default';
 
@@ -132,81 +130,79 @@ interface LabelPropsFull extends CommonLabelProps {
 
 export type LabelProps = Pick<LabelPropsFull, 'text' | 'onSelection' | 'cx' | 'cy' | 'side' | 'rw' | 'rh'>;
 
-export const Label = styled(
-  class LabelInner extends React.PureComponent<LabelPropsFull> {
-    pointerId: number | undefined;
-    inMove = false;
+export class Label extends React.PureComponent<LabelPropsFull> {
+  pointerId: number | undefined;
+  inMove = false;
 
-    constructor(props: LabelPropsFull) {
-      super(props);
+  constructor(props: LabelPropsFull) {
+    super(props);
 
-      this.state = {};
+    this.state = {};
+  }
+
+  handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+    if (!e.isPrimary) {
+      return;
     }
+    e.preventDefault();
+    e.stopPropagation();
 
-    handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
-      if (!e.isPrimary) {
-        return;
-      }
-      e.preventDefault();
-      e.stopPropagation();
+    this.pointerId = e.pointerId;
+  };
 
-      this.pointerId = e.pointerId;
-    };
-
-    handlePointerMove = (e: React.PointerEvent<SVGElement>): void => {
-      if (this.pointerId !== e.pointerId) {
-        return;
-      }
-      this.inMove = true;
-
-      (e.target as any).setPointerCapture(e.pointerId);
-      this.props.onLabelDrag?.(this.props.uid, e);
-    };
-
-    handlePointerUp = (e: React.PointerEvent<SVGElement>): void => {
-      if (this.pointerId !== e.pointerId) {
-        return;
-      }
-      this.pointerId = undefined;
-      this.inMove = false;
-    };
-
-    handleDoubleClick = (e: React.MouseEvent<SVGElement>): void => {
-      if (!this.inMove) {
-        this.props.onSelection?.(e as unknown as React.PointerEvent<SVGElement>);
-      }
-    };
-
-    render() {
-      const { textX, textY, x, lines, reverseBaseline, align } = labelLayout(this.props);
-      const linesCount = lines.length;
-
-      return (
-        <g>
-          <text
-            x={textX}
-            y={textY}
-            style={align ? { textAnchor: align, filter: 'url(#labelBackground)' } : { filter: 'url(#labelBackground)' }}
-            onPointerDown={this.handlePointerDown}
-            onPointerMove={this.handlePointerMove}
-            onPointerUp={this.handlePointerUp}
-            onDoubleClick={this.handleDoubleClick}
-            textRendering="optimizeLegibility"
-          >
-            {lines.map((l, i) => {
-              let dy: string = i === 0 ? '1em' : `${lineSpacing}px`;
-              if (reverseBaseline && i === 0) {
-                dy = `${-(lineSpacing * (linesCount - 1))}px`;
-              }
-              return (
-                <tspan key={l} x={x} dy={dy}>
-                  {l}
-                </tspan>
-              );
-            })}
-          </text>
-        </g>
-      );
+  handlePointerMove = (e: React.PointerEvent<SVGElement>): void => {
+    if (this.pointerId !== e.pointerId) {
+      return;
     }
-  },
-)(``);
+    this.inMove = true;
+
+    (e.target as any).setPointerCapture(e.pointerId);
+    this.props.onLabelDrag?.(this.props.uid, e);
+  };
+
+  handlePointerUp = (e: React.PointerEvent<SVGElement>): void => {
+    if (this.pointerId !== e.pointerId) {
+      return;
+    }
+    this.pointerId = undefined;
+    this.inMove = false;
+  };
+
+  handleDoubleClick = (e: React.MouseEvent<SVGElement>): void => {
+    if (!this.inMove) {
+      this.props.onSelection?.(e as unknown as React.PointerEvent<SVGElement>);
+    }
+  };
+
+  render() {
+    const { textX, textY, x, lines, reverseBaseline, align } = labelLayout(this.props);
+    const linesCount = lines.length;
+
+    return (
+      <g>
+        <text
+          x={textX}
+          y={textY}
+          style={align ? { textAnchor: align, filter: 'url(#labelBackground)' } : { filter: 'url(#labelBackground)' }}
+          onPointerDown={this.handlePointerDown}
+          onPointerMove={this.handlePointerMove}
+          onPointerUp={this.handlePointerUp}
+          onDoubleClick={this.handleDoubleClick}
+          textRendering="optimizeLegibility"
+        >
+          {lines.map((l, i) => {
+            let dy: string = i === 0 ? '1em' : `${lineSpacing}px`;
+            if (reverseBaseline && i === 0) {
+              dy = `${-(lineSpacing * (linesCount - 1))}px`;
+            }
+            return (
+              <tspan key={l} x={x} dy={dy}>
+                {l}
+              </tspan>
+            );
+          })}
+        </text>
+      </g>
+    );
+  }
+}

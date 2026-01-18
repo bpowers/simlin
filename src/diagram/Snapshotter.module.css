@@ -1,0 +1,8 @@
+.card {
+  height: 40px;
+  margin-right: var(--spacing-1);
+}
+
+.button {
+  padding-top: 8px;
+}

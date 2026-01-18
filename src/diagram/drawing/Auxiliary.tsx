@@ -5,7 +5,6 @@
 import * as React from 'react';
 
 import clsx from 'clsx';
-import { styled } from '@mui/material/styles';
 
 import { AuxViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 import { defined, Series } from '@system-dynamics/core/common';
@@ -14,6 +13,8 @@ import { displayName, mergeBounds, Point, Rect, square } from './common';
 import { AuxRadius } from './default';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
+
+import styles from './Auxiliary.module.css';
 
 export interface AuxProps {
   isSelected: boolean;
@@ -56,134 +57,106 @@ export function auxBounds(element: AuxViewElement): Rect {
   return mergeBounds(bounds, labelBounds(labelProps));
 }
 
-export const Aux = styled(
-  class AuxInner extends React.PureComponent<AuxProps & { className?: string }> {
-    handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.props.onSelection(this.props.element, e);
-    };
+export class Aux extends React.PureComponent<AuxProps> {
+  handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    this.props.onSelection(this.props.element, e);
+  };
 
-    handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.props.onSelection(this.props.element, e, true);
-    };
+  handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    this.props.onSelection(this.props.element, e, true);
+  };
 
-    radius(): number {
-      return AuxRadius;
-    }
-
-    indicators() {
-      if (!this.props.hasWarning) {
-        return undefined;
-      }
-
-      const { element } = this.props;
-      const r = this.radius();
-      const θ = -Math.PI / 4; // 45 degrees
-
-      const cx = element.cx + r * Math.cos(θ);
-      const cy = element.cy + r * Math.sin(θ);
-
-      return <circle className="simlin-error-indicator" cx={cx} cy={cy} r={3} />;
-    }
-
-    sparkline(series: Readonly<Array<Series>> | undefined) {
-      if (!series || series.length === 0) {
-        return undefined;
-      }
-      const { element } = this.props;
-      const isArrayed = element.var?.isArrayed || false;
-      const arrayedOffset = isArrayed ? 3 : 0;
-      const cx = element.cx - arrayedOffset;
-      const cy = element.cy - arrayedOffset;
-      const r = this.radius();
-
-      return (
-        <g transform={`translate(${cx + 1 - r / 2} ${cy + 1 - r / 2})`}>
-          <Sparkline series={series} width={r - 2} height={r - 2} />
-        </g>
-      );
-    }
-
-    render() {
-      const { className, element, isEditingName, isSelected, isValidTarget, series } = this.props;
-      const cx = element.cx;
-      const cy = element.cy;
-      const r = this.radius();
-
-      const isArrayed = element.var?.isArrayed || false;
-      const arrayedOffset = isArrayed ? 3 : 0;
-
-      const side = element.labelSide;
-      const label = isEditingName ? undefined : (
-        <Label
-          uid={element.uid}
-          cx={cx}
-          cy={cy}
-          side={side}
-          rw={r + arrayedOffset}
-          rh={r + arrayedOffset}
-          text={displayName(defined(element.name))}
-          onSelection={this.handleLabelSelection}
-          onLabelDrag={this.props.onLabelDrag}
-        />
-      );
-
-      const sparkline = this.sparkline(series);
-      const indicator = this.indicators();
-
-      let groupClassName = isSelected ? 'simlin-selected' : undefined;
-      if (isValidTarget !== undefined) {
-        groupClassName = isValidTarget ? 'simlin-target-good' : 'simlin-target-bad';
-      }
-
-      let circles = [<circle key="1" cx={cx} cy={cy} r={r} />];
-      if (isArrayed) {
-        circles = [
-          <circle key="0" cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
-          <circle key="1" cx={cx} cy={cy} r={r} />,
-          <circle key="2" cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
-        ];
-      }
-
-      return (
-        <g className={clsx(className, groupClassName)} onPointerDown={this.handlePointerDown}>
-          {circles}
-          {sparkline}
-          {indicator}
-          {label}
-        </g>
-      );
-    }
-  },
-)(
-  ({ theme }) => `
-  & circle {
-    stroke-width: 1px;
-    stroke: ${theme.palette.common.black};
-    fill: ${theme.palette.common.white};
+  radius(): number {
+    return AuxRadius;
   }
-  &.simlin-target-good circle {
-    stroke: rgb(76, 175, 80);
-    stroke-width: 2px;
-  }
-  &.simlin-target-bad circle {
-    stroke: rgb(244, 67, 54);
-    stroke-width: 2px;
-  }
-  &.simlin-selected {
-    text {
-      fill: #4444dd;
+
+  indicators() {
+    if (!this.props.hasWarning) {
+      return undefined;
     }
-    circle {
-      stroke: #4444dd;
+
+    const { element } = this.props;
+    const r = this.radius();
+    const θ = -Math.PI / 4; // 45 degrees
+
+    const cx = element.cx + r * Math.cos(θ);
+    const cy = element.cy + r * Math.sin(θ);
+
+    return <circle className={styles.errorIndicator} cx={cx} cy={cy} r={3} />;
+  }
+
+  sparkline(series: Readonly<Array<Series>> | undefined) {
+    if (!series || series.length === 0) {
+      return undefined;
     }
+    const { element } = this.props;
+    const isArrayed = element.var?.isArrayed || false;
+    const arrayedOffset = isArrayed ? 3 : 0;
+    const cx = element.cx - arrayedOffset;
+    const cy = element.cy - arrayedOffset;
+    const r = this.radius();
+
+    return (
+      <g transform={`translate(${cx + 1 - r / 2} ${cy + 1 - r / 2})`}>
+        <Sparkline series={series} width={r - 2} height={r - 2} />
+      </g>
+    );
   }
-  & .simlin-error-indicator {
-    stroke-width: 0px;
-    fill: rgb(255, 152, 0);
+
+  render() {
+    const { element, isEditingName, isSelected, isValidTarget, series } = this.props;
+    const cx = element.cx;
+    const cy = element.cy;
+    const r = this.radius();
+
+    const isArrayed = element.var?.isArrayed || false;
+    const arrayedOffset = isArrayed ? 3 : 0;
+
+    const side = element.labelSide;
+    const label = isEditingName ? undefined : (
+      <Label
+        uid={element.uid}
+        cx={cx}
+        cy={cy}
+        side={side}
+        rw={r + arrayedOffset}
+        rh={r + arrayedOffset}
+        text={displayName(defined(element.name))}
+        onSelection={this.handleLabelSelection}
+        onLabelDrag={this.props.onLabelDrag}
+      />
+    );
+
+    const sparkline = this.sparkline(series);
+    const indicator = this.indicators();
+
+    const groupClassName = clsx(styles.aux, 'simlin-aux', {
+      [styles.selected]: isSelected && isValidTarget === undefined,
+      'simlin-selected': isSelected && isValidTarget === undefined,
+      [styles.targetGood]: isValidTarget === true,
+      [styles.targetBad]: isValidTarget === false,
+    });
+
+    let circles = [<circle key="1" cx={cx} cy={cy} r={r} />];
+    if (isArrayed) {
+      circles = [
+        <circle key="0" cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
+        <circle key="1" cx={cx} cy={cy} r={r} />,
+        <circle key="2" cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
+      ];
+    }
+
+    return (
+      <g className={groupClassName} onPointerDown={this.handlePointerDown}>
+        {circles}
+        {sparkline}
+        {indicator}
+        {label}
+      </g>
+    );
   }
-  `,
-);
+}

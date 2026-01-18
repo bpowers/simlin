@@ -4,40 +4,28 @@
 
 import * as React from 'react';
 
-import clsx from 'clsx';
-import { styled } from '@mui/material/styles';
 import IconButton from '@mui/material/IconButton';
 import Paper from '@mui/material/Paper';
 import PhotoCamera from '@mui/icons-material/PhotoCamera';
+
+import styles from './Snapshotter.module.css';
 
 interface SnapshotterProps {
   onSnapshot: (kind: 'show' | 'close') => void;
 }
 
-export const Snapshotter = styled(
-  class InnerSnapshotter extends React.PureComponent<SnapshotterProps & { className?: string }> {
-    handleSnapshot = () => {
-      this.props.onSnapshot('show');
-    };
+export class Snapshotter extends React.PureComponent<SnapshotterProps> {
+  handleSnapshot = () => {
+    this.props.onSnapshot('show');
+  };
 
-    render() {
-      const { className } = this.props;
-
-      return (
-        <Paper className={clsx(className, 'simlin-snapshotter-card')} elevation={2}>
-          <IconButton className="simlin-snapshotter-button" aria-label="Snapshot" onClick={this.handleSnapshot}>
-            <PhotoCamera />
-          </IconButton>
-        </Paper>
-      );
-    }
-  },
-)(() => ({
-  '&.simlin-snapshotter-card': {
-    height: 40,
-    marginRight: 8,
-  },
-  '.simlin-snapshotter-button': {
-    paddingTop: 8,
-  },
-}));
+  render() {
+    return (
+      <Paper className={styles.card} elevation={2}>
+        <IconButton className={styles.button} aria-label="Snapshot" onClick={this.handleSnapshot}>
+          <PhotoCamera />
+        </IconButton>
+      </Paper>
+    );
+  }
+}

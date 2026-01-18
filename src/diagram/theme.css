@@ -1,0 +1,45 @@
+/* Theme CSS Custom Properties for Simlin Diagram Components */
+
+:root {
+  /* Spacing (base: 8px) */
+  --spacing-1: 8px;
+  --spacing-1-5: 12px;
+  --spacing-2: 16px;
+  --spacing-3: 24px;
+  --spacing-10: 80px;
+
+  /* Palette - Common */
+  --color-black: #000000;
+  --color-white: #ffffff;
+
+  /* Palette - Brand */
+  --color-primary: #1976d2;
+  --color-secondary: #dc004e;
+  --color-selected: #4444dd;
+
+  /* Palette - Status */
+  --color-error: #c62828;
+  --color-success: #2e7d32;
+  --color-warning: #f57f17;
+
+  /* Palette - UI */
+  --color-target-good: rgb(76, 175, 80);
+  --color-target-bad: rgb(244, 67, 54);
+  --color-indicator-warning: rgb(255, 152, 0);
+  --color-drag-selection: #6363ff;
+  --color-divider: #ddd;
+  --color-text-muted: #666;
+  --color-text-light: #888;
+  --color-connector: gray;
+
+  /* Diagram - Cloud colors */
+  --color-cloud-stroke: #6388dc;
+}
+
+/* Dark mode overrides (for StaticDiagram) */
+[data-theme="dark"] {
+  --color-black: #bbbbbb;
+  --color-white: #222222;
+  --color-cloud-stroke: #2d498a;
+  --color-connector: #777777;
+}

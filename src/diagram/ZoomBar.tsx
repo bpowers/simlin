@@ -5,11 +5,12 @@
 import * as React from 'react';
 
 import clsx from 'clsx';
-import { styled } from '@mui/material/styles';
 import IconButton from '@mui/material/IconButton';
 import Paper from '@mui/material/Paper';
 import AddIcon from '@mui/icons-material/Add';
 import RemoveIcon from '@mui/icons-material/Remove';
+
+import styles from './ZoomBar.module.css';
 
 interface ZoomBarProps {
   zoom: number;
@@ -52,91 +53,49 @@ function findNext(zoom: number, dir: 'out' | 'in'): number | undefined {
   return zooms[snappedIndex + (dir === 'in' ? 1 : -1)];
 }
 
-// export type UndoRedoProps = Pick<ZoomBarPropsFull, 'undoEnabled' | 'redoEnabled' | 'onUndoRedo'>;
-
-export const ZoomBar = styled(
-  class InnerVariableDetails extends React.PureComponent<ZoomBarProps & { className?: string }> {
-    handleZoomOut = () => {
-      const next = findNext(this.props.zoom, 'out');
-      if (next) {
-        this.props.onChangeZoom(next);
-      }
-    };
-
-    handleZoomIn = () => {
-      const next = findNext(this.props.zoom, 'in');
-      if (next) {
-        this.props.onChangeZoom(next);
-      }
-    };
-
-    render() {
-      const { className } = this.props;
-
-      const zoom = snapToZoom(this.props.zoom);
-
-      const zoomInEnabled = zoom < zooms[zooms.length - 1];
-      const zoomOutEnabled = zoom > zooms[0];
-
-      return (
-        <Paper className={clsx(className, 'simlin-zoombar-card')} elevation={2}>
-          <IconButton
-            disabled={!zoomOutEnabled}
-            style={{ display: 'inline-block' }}
-            aria-label="Zoom Out"
-            onClick={this.handleZoomOut}
-          >
-            <RemoveIcon />
-          </IconButton>
-          <div className="simlin-zoombar-divider1" />
-          <p className="simlin-zoombar-zoomtext">{(zoom * 100).toFixed(0)}%</p>
-          <div className="simlin-zoombar-divider2" />
-          <IconButton
-            disabled={!zoomInEnabled}
-            style={{ display: 'inline-block' }}
-            aria-label="Zoom In"
-            onClick={this.handleZoomIn}
-          >
-            <AddIcon />
-          </IconButton>
-        </Paper>
-      );
+export class ZoomBar extends React.PureComponent<ZoomBarProps> {
+  handleZoomOut = () => {
+    const next = findNext(this.props.zoom, 'out');
+    if (next) {
+      this.props.onChangeZoom(next);
     }
-  },
-)(({ theme }) => ({
-  '&.simlin-zoombar-card': {
-    height: 40,
-    marginRight: theme.spacing(1),
-  },
-  '.simlin-zoombar-divider1': {
-    display: 'inline-block',
-    top: 0,
-    left: 0,
-    marginRight: 6,
-    marginTop: 12,
-    height: 16,
-    borderLeftWidth: 1,
-    borderLeftStyle: 'solid',
-    borderColor: '#ddd',
-  },
-  '.simlin-zoombar-divider2': {
-    display: 'inline-block',
-    top: 0,
-    left: 0,
-    marginLeft: 8,
-    marginTop: 12,
-    height: 16,
-    borderLeftWidth: 1,
-    borderLeftStyle: 'solid',
-    borderColor: '#ddd',
-  },
-  '.simlin-zoombar-zoomtext': {
-    width: 21,
-    fontSize: '.6rem',
-    color: '#888',
-    textAlign: 'center',
-    display: 'inline-block',
-    verticalAlign: 4,
-    margin: 0,
-  },
-}));
+  };
+
+  handleZoomIn = () => {
+    const next = findNext(this.props.zoom, 'in');
+    if (next) {
+      this.props.onChangeZoom(next);
+    }
+  };
+
+  render() {
+    const zoom = snapToZoom(this.props.zoom);
+
+    const zoomInEnabled = zoom < zooms[zooms.length - 1];
+    const zoomOutEnabled = zoom > zooms[0];
+
+    return (
+      <Paper className={clsx(styles.card)} elevation={2}>
+        <IconButton
+          disabled={!zoomOutEnabled}
+          style={{ display: 'inline-block' }}
+          aria-label="Zoom Out"
+          onClick={this.handleZoomOut}
+        >
+          <RemoveIcon />
+        </IconButton>
+        <div className={styles.divider1} />
+        <p className={styles.zoomText}>{(zoom * 100).toFixed(0)}%</p>
+        <div className={styles.divider2} />
+        <IconButton
+          disabled={!zoomInEnabled}
+          style={{ display: 'inline-block' }}
+          aria-label="Zoom In"
+          onClick={this.handleZoomIn}
+        >
+          <AddIcon />
+        </IconButton>
+      </Paper>
+    );
+  }
+}

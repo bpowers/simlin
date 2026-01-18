@@ -1,0 +1,13 @@
+.sparkline {
+  stroke-width: 0.5px;
+  stroke-linecap: round;
+  stroke: #2299dd;
+  fill: none;
+}
+
+.axis {
+  stroke-width: 0.75px;
+  stroke-linecap: round;
+  stroke: #999;
+  fill: none;
+}

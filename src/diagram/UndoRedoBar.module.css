@@ -1,0 +1,17 @@
+.card {
+  height: 40px;
+  margin-right: var(--spacing-1);
+}
+
+.divider {
+  display: inline-block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  margin-left: 40px;
+  margin-top: 12px;
+  height: 16px;
+  border-left-width: 1px;
+  border-left-style: solid;
+  border-color: var(--color-divider);
+}

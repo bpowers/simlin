@@ -6,7 +6,6 @@ import * as React from 'react';
 
 import { List } from 'immutable';
 import clsx from 'clsx';
-import { styled } from '@mui/material/styles';
 
 import {
   Point,
@@ -23,6 +22,8 @@ import { AuxRadius, CloudRadius, FlowArrowheadRadius } from './default';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
 import { StockHeight, StockWidth } from './Stock';
+
+import styles from './Flow.module.css';
 
 const atan2 = Math.atan2;
 const PI = Math.PI;
@@ -454,233 +455,194 @@ export interface FlowProps {
   sink: StockViewElement | CloudViewElement;
 }
 
-export const Flow = styled(
-  class Flow extends React.PureComponent<FlowProps & { className?: string }> {
-    handlePointerUp = (_e: React.PointerEvent<SVGElement>): void => {
-      // e.preventDefault();
-      // e.stopPropagation();
-    };
+export class Flow extends React.PureComponent<FlowProps> {
+  handlePointerUp = (_e: React.PointerEvent<SVGElement>): void => {
+    // e.preventDefault();
+    // e.stopPropagation();
+  };
 
-    handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.props.onSelection(this.props.element, e);
-    };
+  handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    this.props.onSelection(this.props.element, e);
+  };
 
-    handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.props.onSelection(this.props.element, e, true);
-    };
+  handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    this.props.onSelection(this.props.element, e, true);
+  };
 
-    handlePointerDownArrowhead = (e: React.PointerEvent<SVGElement>): void => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.props.onSelection(this.props.element, e, false, true);
-    };
+  handlePointerDownArrowhead = (e: React.PointerEvent<SVGElement>): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    this.props.onSelection(this.props.element, e, false, true);
+  };
 
-    radius(): number {
-      return AuxRadius;
+  radius(): number {
+    return AuxRadius;
+  }
+
+  indicators() {
+    if (!this.props.hasWarning) {
+      return undefined;
     }
 
-    indicators() {
-      if (!this.props.hasWarning) {
-        return undefined;
-      }
+    const { element } = this.props;
+    const r = this.radius();
+    const θ = -Math.PI / 4; // 45 degrees
 
-      const { element } = this.props;
-      const r = this.radius();
-      const θ = -Math.PI / 4; // 45 degrees
+    const cx = element.cx + r * Math.cos(θ);
+    const cy = element.cy + r * Math.sin(θ);
 
-      const cx = element.cx + r * Math.cos(θ);
-      const cy = element.cy + r * Math.sin(θ);
+    return <circle className={styles.errorIndicator} cx={cx} cy={cy} r={3} />;
+  }
 
-      return <circle className="simlin-error-indicator" cx={cx} cy={cy} r={3} />;
+  sparkline(series: Readonly<Array<Series>> | undefined) {
+    if (!series || series.length === 0) {
+      return undefined;
+    }
+    const { element } = this.props;
+    const isArrayed = element.var?.isArrayed || false;
+    const arrayedOffset = isArrayed ? 3 : 0;
+    const cx = element.cx - arrayedOffset;
+    const cy = element.cy - arrayedOffset;
+    const r = this.radius();
+
+    return (
+      <g transform={`translate(${cx + 1 - r / 2} ${cy + 1 - r / 2})`}>
+        <Sparkline series={series} width={r - 2} height={r - 2} />
+      </g>
+    );
+  }
+
+  render() {
+    const { element, isEditingName, isMovingArrow, isSelected, isValidTarget, series, sink } = this.props;
+
+    const isArrayed = element.var?.isArrayed || false;
+    const arrayedOffset = isArrayed ? 3 : 0;
+
+    let pts = this.props.element.points;
+    if (pts.size < 2) {
+      throw new Error('expected at least two points on a flow');
     }
 
-    sparkline(series: Readonly<Array<Series>> | undefined) {
-      if (!series || series.length === 0) {
-        return undefined;
-      }
-      const { element } = this.props;
-      const isArrayed = element.var?.isArrayed || false;
-      const arrayedOffset = isArrayed ? 3 : 0;
-      const cx = element.cx - arrayedOffset;
-      const cy = element.cy - arrayedOffset;
-      const r = this.radius();
+    if (sink instanceof CloudViewElement && !isMovingArrow) {
+      const x = defined(pts.get(pts.size - 1)).x;
+      const y = defined(pts.get(pts.size - 1)).y;
+      const prevX = defined(pts.get(pts.size - 2)).x;
+      const prevY = defined(pts.get(pts.size - 2)).y;
 
-      return (
-        <g transform={`translate(${cx + 1 - r / 2} ${cy + 1 - r / 2})`}>
-          <Sparkline series={series} width={r - 2} height={r - 2} />
-        </g>
-      );
+      if (prevX < x) {
+        pts = pts.update(pts.size - 1, (pt) => defined(pt).set('x', x - CloudRadius));
+      } else if (prevX > x) {
+        pts = pts.update(pts.size - 1, (pt) => defined(pt).set('x', x + CloudRadius));
+      }
+      if (prevY < y) {
+        pts = pts.update(pts.size - 1, (pt) => defined(pt).set('y', y - CloudRadius));
+      } else if (prevY > y) {
+        pts = pts.update(pts.size - 1, (pt) => defined(pt).set('y', y + CloudRadius));
+      }
     }
 
-    render() {
-      const { className, element, isEditingName, isMovingArrow, isSelected, isValidTarget, series, sink } = this.props;
-
-      const isArrayed = element.var?.isArrayed || false;
-      const arrayedOffset = isArrayed ? 3 : 0;
-
-      let pts = this.props.element.points;
-      if (pts.size < 2) {
-        throw new Error('expected at least two points on a flow');
-      }
-
-      if (sink instanceof CloudViewElement && !isMovingArrow) {
-        const x = defined(pts.get(pts.size - 1)).x;
-        const y = defined(pts.get(pts.size - 1)).y;
-        const prevX = defined(pts.get(pts.size - 2)).x;
-        const prevY = defined(pts.get(pts.size - 2)).y;
-
-        if (prevX < x) {
-          pts = pts.update(pts.size - 1, (pt) => defined(pt).set('x', x - CloudRadius));
-        } else if (prevX > x) {
-          pts = pts.update(pts.size - 1, (pt) => defined(pt).set('x', x + CloudRadius));
+    const finalAdjust = 7.5;
+    let spath = '';
+    let arrowθ = 0;
+    for (let j = 0; j < pts.size; j++) {
+      let x = defined(pts.get(j)).x;
+      let y = defined(pts.get(j)).y;
+      if (j === pts.size - 1) {
+        const dx = x - defined(pts.get(j - 1)).x;
+        const dy = y - defined(pts.get(j - 1)).y;
+        let θ = (atan2(dy, dx) * 180) / PI;
+        if (θ < 0) {
+          θ += 360;
         }
-        if (prevY < y) {
-          pts = pts.update(pts.size - 1, (pt) => defined(pt).set('y', y - CloudRadius));
-        } else if (prevY > y) {
-          pts = pts.update(pts.size - 1, (pt) => defined(pt).set('y', y + CloudRadius));
+        if (θ >= 315 || θ < 45) {
+          x -= finalAdjust;
+          arrowθ = 0;
+        } else if (θ >= 45 && θ < 135) {
+          y -= finalAdjust;
+          arrowθ = 90;
+        } else if (θ >= 135 && θ < 225) {
+          x += finalAdjust;
+          arrowθ = 180;
+        } else {
+          y += finalAdjust;
+          arrowθ = 270;
         }
       }
+      const prefix = j === 0 ? 'M' : 'L';
+      spath += `${prefix}${x},${y}`;
+    }
 
-      const finalAdjust = 7.5;
-      let spath = '';
-      let arrowθ = 0;
-      for (let j = 0; j < pts.size; j++) {
-        let x = defined(pts.get(j)).x;
-        let y = defined(pts.get(j)).y;
-        if (j === pts.size - 1) {
-          const dx = x - defined(pts.get(j - 1)).x;
-          const dy = y - defined(pts.get(j - 1)).y;
-          let θ = (atan2(dy, dx) * 180) / PI;
-          if (θ < 0) {
-            θ += 360;
-          }
-          if (θ >= 315 || θ < 45) {
-            x -= finalAdjust;
-            arrowθ = 0;
-          } else if (θ >= 45 && θ < 135) {
-            y -= finalAdjust;
-            arrowθ = 90;
-          } else if (θ >= 135 && θ < 225) {
-            x += finalAdjust;
-            arrowθ = 180;
-          } else {
-            y += finalAdjust;
-            arrowθ = 270;
-          }
-        }
-        const prefix = j === 0 ? 'M' : 'L';
-        spath += `${prefix}${x},${y}`;
-      }
+    const cx = element.cx;
+    const cy = element.cy;
+    const r = this.radius();
 
-      const cx = element.cx;
-      const cy = element.cy;
-      const r = this.radius();
+    const lastPt = defined(pts.get(pts.size - 1));
+    const side = element.labelSide;
+    const label = isEditingName ? undefined : (
+      <Label
+        uid={element.uid}
+        cx={cx}
+        cy={cy}
+        side={side}
+        rw={r + arrayedOffset}
+        rh={r + arrayedOffset}
+        text={displayName(defined(element.name))}
+        onSelection={this.handleLabelSelection}
+        onLabelDrag={this.props.onLabelDrag}
+      />
+    );
 
-      const lastPt = defined(pts.get(pts.size - 1));
-      const side = element.labelSide;
-      const label = isEditingName ? undefined : (
-        <Label
-          uid={element.uid}
-          cx={cx}
-          cy={cy}
-          side={side}
-          rw={r + arrayedOffset}
-          rh={r + arrayedOffset}
-          text={displayName(defined(element.name))}
-          onSelection={this.handleLabelSelection}
-          onLabelDrag={this.props.onLabelDrag}
+    const sparkline = this.sparkline(series);
+    const indicator = this.indicators();
+
+    const groupClassName = clsx(styles.flow, 'simlin-flow', {
+      [styles.selected]: isSelected && isValidTarget === undefined,
+      'simlin-selected': isSelected && isValidTarget === undefined,
+      [styles.targetGood]: isValidTarget === true,
+      [styles.targetBad]: isValidTarget === false,
+    });
+
+    let circles = [<circle key="1" cx={cx} cy={cy} r={r} />];
+    if (isArrayed) {
+      circles = [
+        <circle key="0" cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
+        <circle key="1" cx={cx} cy={cy} r={r} />,
+        <circle key="2" cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
+      ];
+    }
+
+    const outerClassName = isSelected
+      ? clsx(styles.outerSelected, 'simlin-outer-selected')
+      : clsx(styles.outer, 'simlin-outer');
+
+    return (
+      <g className={groupClassName}>
+        <path
+          d={spath}
+          className={outerClassName}
+          onPointerDown={this.handlePointerDown}
+          onPointerUp={this.handlePointerUp}
         />
-      );
-
-      const sparkline = this.sparkline(series);
-      const indicator = this.indicators();
-
-      let groupClassName = isSelected ? 'simlin-selected' : undefined;
-      if (isValidTarget !== undefined) {
-        groupClassName = isValidTarget ? 'simlin-target-good' : 'simlin-target-bad';
-      }
-
-      let circles = [<circle key="1" cx={cx} cy={cy} r={r} />];
-      if (isArrayed) {
-        circles = [
-          <circle key="0" cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
-          <circle key="1" cx={cx} cy={cy} r={r} />,
-          <circle key="2" cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
-        ];
-      }
-
-      return (
-        <g className={clsx(className, groupClassName)}>
-          <path
-            d={spath}
-            className={isSelected ? 'simlin-flow-outer-selected' : 'simlin-flow-outer'}
-            onPointerDown={this.handlePointerDown}
-            onPointerUp={this.handlePointerUp}
-          />
-          <Arrowhead
-            point={lastPt}
-            angle={arrowθ}
-            size={FlowArrowheadRadius}
-            type="flow"
-            isSelected={this.props.isSelected}
-            onSelection={this.handlePointerDownArrowhead}
-          />
-          <path d={spath} className="simlin-flow-inner" />
-          <g onPointerDown={this.handlePointerDown} onPointerUp={this.handlePointerUp}>
-            {circles}
-            {sparkline}
-          </g>
-          {indicator}
-          {label}
+        <Arrowhead
+          point={lastPt}
+          angle={arrowθ}
+          size={FlowArrowheadRadius}
+          type="flow"
+          isSelected={this.props.isSelected}
+          onSelection={this.handlePointerDownArrowhead}
+        />
+        <path d={spath} className={clsx(styles.inner, 'simlin-inner')} />
+        <g onPointerDown={this.handlePointerDown} onPointerUp={this.handlePointerUp}>
+          {circles}
+          {sparkline}
         </g>
-      );
-    }
-  },
-)(
-  ({ theme }) => `
-  & .simlin-flow-outer {
-    fill: none;
-    stroke-width: 4px;
-    stroke: ${theme.palette.common.black};
+        {indicator}
+        {label}
+      </g>
+    );
   }
-  & .simlin-flow-outer-selected {
-    fill: none;
-    stroke-width: 4px;
-    stroke: #4444dd;
-  }
-  & .simlin-flow-inner {
-    fill: none;
-    stroke-width: 2px;
-    stroke: ${theme.palette.common.white};
-  }
-  & circle {
-    stroke-width: 1px;
-    fill: ${theme.palette.common.white};
-    stroke: ${theme.palette.common.black};
-  }
-  &.simlin-target-good circle {
-    stroke: rgb(76, 175, 80);
-    stroke-width: 2px;
-  }
-  &.simlin-target-bad circle {
-    stroke: rgb(244, 67, 54);
-    stroke-width: 2px;
-  }
-  &.simlin-selected {
-    text {
-      fill: #4444dd;
-    }
-    circle {
-      stroke: #4444dd;
-    }
-  }
-  & .simlin-error-indicator {
-    stroke-width: 0px;
-    fill: rgb(255, 152, 0);
-  }
-`,
-);
+}

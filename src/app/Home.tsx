@@ -6,7 +6,6 @@ import * as React from 'react';
 
 import { Link } from 'wouter';
 import clsx from 'clsx';
-import { styled } from '@mui/material/styles';
 import AppBar from '@mui/material/AppBar';
 import Button from '@mui/material/Button';
 import Grid from '@mui/material/Grid';
@@ -28,6 +27,8 @@ import { NewProject } from './NewProject';
 import { Project } from './Project';
 import { User } from './User';
 
+import styles from './Home.module.css';
+
 interface HomeState {
   anchorEl?: HTMLElement;
   projects: List<Project>;
@@ -44,214 +45,157 @@ const AnchorOrigin: PopoverOrigin = {
   horizontal: 'right',
 };
 
-const Home = styled(
-  class HomeInner extends React.Component<HomeProps & { className?: string }, HomeState> {
-    state: HomeState;
+class Home extends React.Component<HomeProps, HomeState> {
+  state: HomeState;
 
-    constructor(props: HomeProps) {
-      super(props);
+  constructor(props: HomeProps) {
+    super(props);
 
-      this.state = {
-        anchorEl: undefined,
-        projects: List<Project>(),
-      };
+    this.state = {
+      anchorEl: undefined,
+      projects: List<Project>(),
+    };
 
-      setTimeout(this.getProjects);
+    setTimeout(this.getProjects);
+  }
+
+  getProjects = async (): Promise<void> => {
+    const response = await fetch('/api/projects', { credentials: 'same-origin' });
+    const status = response.status;
+    if (!(status >= 200 && status < 400)) {
+      console.log("couldn't fetch projects.");
+      return;
     }
+    const projects = (await response.json()) as Project[];
+    this.setState({
+      projects: List(projects),
+    });
+  };
 
-    getProjects = async (): Promise<void> => {
-      const response = await fetch('/api/projects', { credentials: 'same-origin' });
-      const status = response.status;
-      if (!(status >= 200 && status < 400)) {
-        console.log("couldn't fetch projects.");
-        return;
-      }
-      const projects = (await response.json()) as Project[];
-      this.setState({
-        projects: List(projects),
-      });
-    };
+  handleClose = () => {
+    this.setState({
+      anchorEl: undefined,
+    });
+  };
 
-    handleClose = () => {
-      this.setState({
-        anchorEl: undefined,
-      });
-    };
+  handleMenu = (event: React.MouseEvent<HTMLElement>) => {
+    this.setState({
+      anchorEl: event.currentTarget,
+    });
+  };
 
-    handleMenu = (event: React.MouseEvent<HTMLElement>) => {
-      this.setState({
-        anchorEl: event.currentTarget,
-      });
-    };
+  handleProjectCreated = (project: Project) => {
+    window.location.pathname = '/' + project.id;
+  };
 
-    handleProjectCreated = (project: Project) => {
-      window.location.pathname = '/' + project.id;
-    };
+  getGridListCols = () => {
+    // TODO: this should be 1 on small screens, but useMediaQuery doesn't
+    //       work in class components, only function components.
+    return 2;
+  };
 
-    getGridListCols = () => {
-      // TODO: this should be 1 on small screens, but useMediaQuery doesn't
-      //       work in class components, only function components.
-      return 2;
-    };
-
-    newProjectForm() {
-      return (
-        <div className="simlin-home-newprojectform">
-          <Grid container direction="row" justifyContent="center" alignItems="center">
-            <Grid item>
-              <NewProject user={this.props.user} onProjectCreated={this.handleProjectCreated} />
-            </Grid>
+  newProjectForm() {
+    return (
+      <div className={styles.newProjectForm}>
+        <Grid container direction="row" justifyContent="center" alignItems="center">
+          <Grid item>
+            <NewProject user={this.props.user} onProjectCreated={this.handleProjectCreated} />
           </Grid>
-        </div>
-      );
-    }
+        </Grid>
+      </div>
+    );
+  }
 
-    projects() {
-      const { projects } = this.state;
-      return (
-        <div className="simlin-home-projectgrid">
-          <ImageList cols={this.getGridListCols()} gap={0}>
-            {projects.map((project) => (
-              <ImageListItem key={project.id} style={{ height: 'auto' }}>
-                <Link to={`/${project.id}`} className="simlin-home-modellink">
-                  <Paper className="simlin-home-paper" elevation={4}>
-                    <div className="simlin-home-preview">
-                      <img src={`/api/preview/${project.id}`} alt="model preview" className="simlin-home-previewimg" />
-                    </div>
-                    <Typography variant="h5" component="h3">
-                      {project.displayName}
-                    </Typography>
-                    <Typography component="p">{project.description}&nbsp;</Typography>
-                  </Paper>
-                </Link>
-              </ImageListItem>
-            ))}
-          </ImageList>
-        </div>
-      );
-    }
+  projects() {
+    const { projects } = this.state;
+    return (
+      <div className={styles.projectGrid}>
+        <ImageList cols={this.getGridListCols()} gap={0}>
+          {projects.map((project) => (
+            <ImageListItem key={project.id} style={{ height: 'auto' }}>
+              <Link to={`/${project.id}`} className={styles.modelLink}>
+                <Paper className={styles.paper} elevation={4}>
+                  <div className={styles.preview}>
+                    <img src={`/api/preview/${project.id}`} alt="model preview" className={styles.previewImg} />
+                  </div>
+                  <Typography variant="h5" component="h3">
+                    {project.displayName}
+                  </Typography>
+                  <Typography component="p">{project.description}&nbsp;</Typography>
+                </Paper>
+              </Link>
+            </ImageListItem>
+          ))}
+        </ImageList>
+      </div>
+    );
+  }
 
-    render() {
-      const { className } = this.props;
-      const { anchorEl } = this.state;
-      const { photoUrl } = this.props.user;
-      const open = Boolean(anchorEl);
+  render() {
+    const { anchorEl } = this.state;
+    const { photoUrl } = this.props.user;
+    const open = Boolean(anchorEl);
 
-      const account = photoUrl ? (
-        <Avatar alt={this.props.user.displayName} src={photoUrl} className="simlin-home-avatar" />
-      ) : (
-        <AccountCircle />
-      );
+    const account = photoUrl ? (
+      <Avatar alt={this.props.user.displayName} src={photoUrl} className={styles.avatar} />
+    ) : (
+      <AccountCircle />
+    );
 
-      const content = this.props.isNewProject ? this.newProjectForm() : this.projects();
+    const content = this.props.isNewProject ? this.newProjectForm() : this.projects();
 
-      return (
-        <div className={clsx(className, 'simlin-home-root')}>
-          <AppBar position="fixed">
-            <Toolbar variant="dense">
-              <IconButton className="simlin-home-menubutton" color="inherit" aria-label="Menu">
-                <MenuIcon />
+    return (
+      <div className={clsx(styles.root)}>
+        <AppBar position="fixed">
+          <Toolbar variant="dense">
+            <IconButton className={styles.menuButton} color="inherit" aria-label="Menu">
+              <MenuIcon />
+            </IconButton>
+            <Typography variant="h6" color="inherit" className={styles.flex}>
+              <Link to="/" className={styles.modelLink}>
+                Simlin
+              </Link>
+              {/*&nbsp;*/}
+              {/*<span className={classes.sdTitle}>*/}
+              {/*  System Dynamics*/}
+              {/*</span>*/}
+            </Typography>
+            <div>
+              <Link to="/new" className={styles.modelLink}>
+                <Button variant="outlined" className={styles.newProjectButton}>
+                  New Project
+                </Button>
+              </Link>
+
+              <IconButton
+                className={styles.profileIcon}
+                aria-owns={open ? 'menu-appbar' : undefined}
+                aria-haspopup="true"
+                onClick={this.handleMenu}
+                color="inherit"
+              >
+                {account}
               </IconButton>
-              <Typography variant="h6" color="inherit" className="simlin-home-flex">
-                <Link to="/" className="simlin-home-modellink">
-                  Simlin
-                </Link>
-                {/*&nbsp;*/}
-                {/*<span className={classes.sdTitle}>*/}
-                {/*  System Dynamics*/}
-                {/*</span>*/}
-              </Typography>
-              <div>
-                <Link to="/new" className="simlin-home-modellink">
-                  <Button variant="outlined" className="simlin-home-newprojectbutton">
-                    New Project
-                  </Button>
-                </Link>
-
-                <IconButton
-                  className="simlin-home-profileicon"
-                  aria-owns={open ? 'menu-appbar' : undefined}
-                  aria-haspopup="true"
-                  onClick={this.handleMenu}
-                  color="inherit"
-                >
-                  {account}
-                </IconButton>
-                <Menu
-                  id="menu-appbar"
-                  anchorEl={anchorEl}
-                  anchorOrigin={AnchorOrigin}
-                  transformOrigin={AnchorOrigin}
-                  open={open}
-                  onClose={this.handleClose}
-                >
-                  <MenuItem onClick={this.handleClose}>Logout</MenuItem>
-                </Menu>
-              </div>
-            </Toolbar>
-          </AppBar>
-          <br />
-          <br />
-          <br />
-          {content}
-        </div>
-      );
-    }
-  },
-)(() => ({
-  '&.simlin-home-root': {
-    flexGrow: 1,
-  },
-  '.simlin-home-flex': {
-    flex: 1,
-  },
-  '.simlin-home-profileicon': {
-    padding: 8,
-  },
-  '.simlin-home-sdtitle': {
-    fontWeight: 300,
-  },
-  '.simlin-home-avatar': {
-    width: 32,
-    height: 32,
-  },
-  '.simlin-home-menubutton': {
-    marginLeft: -12,
-    marginRight: 20,
-  },
-  '.simlin-home-newprojectbutton': {
-    color: 'white',
-    border: '1px solid rgba(255, 255, 255, 0.76)',
-    textDecoration: 'none',
-    marginRight: 16,
-  },
-  '.simlin-home-paper': {
-    margin: 24,
-    padding: 12,
-  },
-  '.simlin-home-preview': {
-    textAlign: 'center',
-    height: 200,
-  },
-  '.simlin-home-previewimg': {
-    width: '100%',
-    maxHeight: 200,
-    objectFit: 'scale-down',
-  },
-  '.simlin-home-modellink': {
-    color: 'white',
-    textDecoration: 'none',
-  },
-  '.simlin-home-newform': {
-    margin: 32,
-    padding: 12,
-  },
-  '.simlin-home-projectgrid': {
-    boxSizing: 'border-box',
-    marginLeft: 'auto',
-    marginRight: 'auto',
-    maxWidth: 1024,
-  },
-}));
+              <Menu
+                id="menu-appbar"
+                anchorEl={anchorEl}
+                anchorOrigin={AnchorOrigin}
+                transformOrigin={AnchorOrigin}
+                open={open}
+                onClose={this.handleClose}
+              >
+                <MenuItem onClick={this.handleClose}>Logout</MenuItem>
+              </Menu>
+            </div>
+          </Toolbar>
+        </AppBar>
+        <br />
+        <br />
+        <br />
+        {content}
+      </div>
+    );
+  }
+}
 
 export default Home;

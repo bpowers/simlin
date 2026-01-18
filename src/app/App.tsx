@@ -14,7 +14,6 @@ import {
 } from '@firebase/auth';
 
 import { useLocation, Route, RouteComponentProps, Switch, Redirect } from 'wouter';
-import { styled } from '@mui/material/styles';
 import { createTheme, ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 
@@ -25,6 +24,8 @@ import Home from './Home';
 import { Login } from './Login';
 import { NewUser } from './NewUser';
 import { User } from './User';
+
+import styles from './App.module.css';
 
 const config = {
   apiKey: 'AIzaSyConH72HQl9xOtjmYJO9o2kQ9nZZzl96G8',
@@ -98,185 +99,172 @@ interface AppState {
   auth: FirebaseAuth;
   firebaseIdToken?: string | null;
 }
-interface AppProps {
-  className?: string;
-}
 
-const InnerApp = styled(
-  class InnerApp extends React.PureComponent<AppProps, AppState> {
-    state: AppState;
+class InnerApp extends React.PureComponent<{}, AppState> {
+  state: AppState;
 
-    constructor(props: AppProps) {
-      super(props);
+  constructor(props: {}) {
+    super(props);
 
-      const isDevServer = process.env.NODE_ENV === 'development';
-      const auth = getAuth(firebaseApp);
-      if (isDevServer) {
-        connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
-      }
-
-      this.state = {
-        authUnknown: true,
-        auth,
-      };
-
-      // notify our app when a user logs in
-      onAuthStateChanged(auth, this.authStateChanged);
-
-      setTimeout(this.getUserInfo);
+    const isDevServer = process.env.NODE_ENV === 'development';
+    const auth = getAuth(firebaseApp);
+    if (isDevServer) {
+      connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
     }
 
-    authStateChanged = (user: FirebaseUser | null) => {
-      setTimeout(this.asyncAuthStateChanged, undefined, user);
+    this.state = {
+      authUnknown: true,
+      auth,
     };
 
-    asyncAuthStateChanged = async (user: FirebaseUser | null) => {
-      if (!user) {
-        this.setState({ firebaseIdToken: null });
-        return;
-      }
+    // notify our app when a user logs in
+    onAuthStateChanged(auth, this.authStateChanged);
 
-      const firebaseIdToken = await user.getIdToken();
-      this.setState({ firebaseIdToken });
-      await this.maybeLogin(undefined, firebaseIdToken);
-    };
+    setTimeout(this.getUserInfo);
+  }
 
-    async maybeLogin(authIsKnown = false, firebaseIdToken?: string): Promise<void> {
-      authIsKnown = authIsKnown || !this.state.authUnknown;
-      if (!authIsKnown) {
-        return;
-      }
+  authStateChanged = (user: FirebaseUser | null) => {
+    setTimeout(this.asyncAuthStateChanged, undefined, user);
+  };
 
-      // if we know the user, we don't need to log in
-      const [user] = await userInfo.get();
-      if (user) {
-        return;
-      }
-
-      const idToken = firebaseIdToken ?? this.state.firebaseIdToken;
-      if (idToken === null || idToken === undefined) {
-        return;
-      }
-
-      const bodyContents = {
-        idToken,
-      };
-
-      const base = this.getBaseURL();
-      const apiPath = `${base}/session`;
-      const response = await fetch(apiPath, {
-        credentials: 'same-origin',
-        method: 'POST',
-        cache: 'no-cache',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(bodyContents),
-      });
-
-      const status = response.status;
-      if (!(status >= 200 && status < 400)) {
-        const body = await response.json();
-        const errorMsg =
-          body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
-        // this.appendModelError(errorMsg);
-        console.log(`session error: ${errorMsg}`);
-        return undefined;
-      }
-
-      this.handleUsernameChanged();
+  asyncAuthStateChanged = async (user: FirebaseUser | null) => {
+    if (!user) {
+      this.setState({ firebaseIdToken: null });
+      return;
     }
 
-    getUserInfo = async (): Promise<void> => {
-      const [user, status] = await userInfo.get();
-      if (!(status >= 200 && status < 400) || !user) {
-        this.setState({
-          authUnknown: false,
-        });
-        await this.maybeLogin(true);
-        return;
-      }
-      const isNewUser = user.id.startsWith(`temp-`);
+    const firebaseIdToken = await user.getIdToken();
+    this.setState({ firebaseIdToken });
+    await this.maybeLogin(undefined, firebaseIdToken);
+  };
+
+  async maybeLogin(authIsKnown = false, firebaseIdToken?: string): Promise<void> {
+    authIsKnown = authIsKnown || !this.state.authUnknown;
+    if (!authIsKnown) {
+      return;
+    }
+
+    // if we know the user, we don't need to log in
+    const [user] = await userInfo.get();
+    if (user) {
+      return;
+    }
+
+    const idToken = firebaseIdToken ?? this.state.firebaseIdToken;
+    if (idToken === null || idToken === undefined) {
+      return;
+    }
+
+    const bodyContents = {
+      idToken,
+    };
+
+    const base = this.getBaseURL();
+    const apiPath = `${base}/session`;
+    const response = await fetch(apiPath, {
+      credentials: 'same-origin',
+      method: 'POST',
+      cache: 'no-cache',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(bodyContents),
+    });
+
+    const status = response.status;
+    if (!(status >= 200 && status < 400)) {
+      const body = await response.json();
+      const errorMsg =
+        body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
+      // this.appendModelError(errorMsg);
+      console.log(`session error: ${errorMsg}`);
+      return undefined;
+    }
+
+    this.handleUsernameChanged();
+  }
+
+  getUserInfo = async (): Promise<void> => {
+    const [user, status] = await userInfo.get();
+    if (!(status >= 200 && status < 400) || !user) {
       this.setState({
         authUnknown: false,
-        isNewUser,
-        user,
       });
-    };
-
-    handleUsernameChanged = () => {
-      setTimeout(async () => {
-        await userInfo.invalidate();
-        await this.getUserInfo();
-      });
-    };
-
-    getBaseURL(): string {
-      return '';
+      await this.maybeLogin(true);
+      return;
     }
+    const isNewUser = user.id.startsWith(`temp-`);
+    this.setState({
+      authUnknown: false,
+      isNewUser,
+      user,
+    });
+  };
 
-    editor = (props: RouteComponentProps<EditorMatchParams>) => {
-      const { username, projectName } = props.params;
-      const user = this.state.user;
-      const readOnlyMode = !user || user.id !== username;
+  handleUsernameChanged = () => {
+    setTimeout(async () => {
+      await userInfo.invalidate();
+      await this.getUserInfo();
+    });
+  };
 
-      return (
-        <HostedWebEditor
-          username={username}
-          projectName={projectName}
-          baseURL={this.getBaseURL()}
-          readOnlyMode={readOnlyMode}
-        />
-      );
-    };
+  getBaseURL(): string {
+    return '';
+  }
 
-    home = (_props: RouteComponentProps) => {
-      const location = useLocation()[0];
+  editor = (props: RouteComponentProps<EditorMatchParams>) => {
+    const { username, projectName } = props.params;
+    const user = this.state.user;
+    const readOnlyMode = !user || user.id !== username;
 
-      const isNewProject = location === '/new';
-      return <Home isNewProject={isNewProject} user={defined(this.state.user)} />;
-    };
+    return (
+      <HostedWebEditor
+        username={username}
+        projectName={projectName}
+        baseURL={this.getBaseURL()}
+        readOnlyMode={readOnlyMode}
+      />
+    );
+  };
 
-    render() {
-      const { className } = this.props;
+  home = (_props: RouteComponentProps) => {
+    const location = useLocation()[0];
 
-      const urlParams = new URLSearchParams(window.location.search);
-      const projectParam = urlParams.get('project');
-      if (projectParam) return <Redirect to={projectParam} />;
+    const isNewProject = location === '/new';
+    return <Home isNewProject={isNewProject} user={defined(this.state.user)} />;
+  };
 
-      // if a user is navigating to a project,
-      // skip the high level auth check, to enable public models
-      if (!/\/.*\/.*/.test(window.location.pathname)) {
-        if (!this.state.user) {
-          return <Login disabled={this.state.authUnknown} auth={this.state.auth} />;
-        }
+  render() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const projectParam = urlParams.get('project');
+    if (projectParam) return <Redirect to={projectParam} />;
 
-        if (this.state.isNewUser) {
-          return <NewUser user={defined(this.state.user)} onUsernameChanged={this.handleUsernameChanged} />;
-        }
+    // if a user is navigating to a project,
+    // skip the high level auth check, to enable public models
+    if (!/\/.*\/.*/.test(window.location.pathname)) {
+      if (!this.state.user) {
+        return <Login disabled={this.state.authUnknown} auth={this.state.auth} />;
       }
 
-      return (
-        <React.Fragment>
-          <CssBaseline />
-          <Switch>
-            <div className={className}>
-              <Route path="/" component={this.home} />
-              <Route path="/:username/:projectName" component={this.editor} />
-              <Route path="/new" component={this.home} />
-            </div>
-          </Switch>
-        </React.Fragment>
-      );
+      if (this.state.isNewUser) {
+        return <NewUser user={defined(this.state.user)} onUsernameChanged={this.handleUsernameChanged} />;
+      }
     }
-  },
-)(`
-    height: 100%;
-    width: 100%;
-    margin: 0px;
-    border: 0px;
-    padding: 0px;
-`);
+
+    return (
+      <React.Fragment>
+        <CssBaseline />
+        <Switch>
+          <div className={styles.inner}>
+            <Route path="/" component={this.home} />
+            <Route path="/:username/:projectName" component={this.editor} />
+            <Route path="/new" component={this.home} />
+          </div>
+        </Switch>
+      </React.Fragment>
+    );
+  }
+}
 
 export class App extends React.PureComponent {
   render(): React.JSX.Element {

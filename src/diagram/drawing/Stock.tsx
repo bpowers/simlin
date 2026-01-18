@@ -5,7 +5,6 @@
 import * as React from 'react';
 
 import clsx from 'clsx';
-import { styled } from '@mui/material/styles';
 
 import { StockViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 import { defined, Series } from '@system-dynamics/core/common';
@@ -13,6 +12,8 @@ import { defined, Series } from '@system-dynamics/core/common';
 import { displayName, mergeBounds, Point, Rect } from './common';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
+
+import styles from './Stock.module.css';
 
 export const StockWidth = 45;
 export const StockHeight = 35;
@@ -64,146 +65,114 @@ export function stockBounds(element: StockViewElement): Rect {
   return mergeBounds(bounds, labelBounds(labelProps));
 }
 
-export const Stock = styled(
-  class StockInner extends React.PureComponent<StockProps & { className?: string }> {
-    handlePointerUp = (_e: React.PointerEvent<SVGElement>): void => {
-      // e.preventDefault();
-      // e.stopPropagation();
-    };
+export class Stock extends React.PureComponent<StockProps> {
+  handlePointerUp = (_e: React.PointerEvent<SVGElement>): void => {
+    // e.preventDefault();
+    // e.stopPropagation();
+  };
 
-    handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.props.onSelection(this.props.element, e);
-    };
+  handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    this.props.onSelection(this.props.element, e);
+  };
 
-    handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.props.onSelection(this.props.element, e, true);
-    };
+  handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    this.props.onSelection(this.props.element, e, true);
+  };
 
-    indicators() {
-      if (!this.props.hasWarning) {
-        return undefined;
-      }
-
-      const { element } = this.props;
-      const w = StockWidth;
-      const h = StockHeight;
-
-      const cx = element.cx + w / 2 - 1;
-      const cy = element.cy - h / 2 + 1;
-
-      return <circle className="simlin-error-indicator" cx={cx} cy={cy} r={3} />;
+  indicators() {
+    if (!this.props.hasWarning) {
+      return undefined;
     }
 
-    sparkline(series: Readonly<Array<Series>> | undefined) {
-      if (!series || series.length === 0) {
-        return undefined;
-      }
-      const { element } = this.props;
-      const isArrayed = element.var?.isArrayed || false;
-      const arrayedOffset = isArrayed ? 3 : 0;
-      const cx = element.cx - arrayedOffset;
-      const cy = element.cy - arrayedOffset;
-      const w = StockWidth;
-      const h = StockHeight;
+    const { element } = this.props;
+    const w = StockWidth;
+    const h = StockHeight;
 
-      return (
-        <g transform={`translate(${cx + 1 - w / 2} ${cy + 1 - h / 2})`}>
-          <Sparkline series={series} width={w - 2} height={h - 2} />
-        </g>
-      );
+    const cx = element.cx + w / 2 - 1;
+    const cy = element.cy - h / 2 + 1;
+
+    return <circle className={styles.errorIndicator} cx={cx} cy={cy} r={3} />;
+  }
+
+  sparkline(series: Readonly<Array<Series>> | undefined) {
+    if (!series || series.length === 0) {
+      return undefined;
+    }
+    const { element } = this.props;
+    const isArrayed = element.var?.isArrayed || false;
+    const arrayedOffset = isArrayed ? 3 : 0;
+    const cx = element.cx - arrayedOffset;
+    const cy = element.cy - arrayedOffset;
+    const w = StockWidth;
+    const h = StockHeight;
+
+    return (
+      <g transform={`translate(${cx + 1 - w / 2} ${cy + 1 - h / 2})`}>
+        <Sparkline series={series} width={w - 2} height={h - 2} />
+      </g>
+    );
+  }
+
+  render() {
+    const { element, isEditingName, isSelected, isValidTarget } = this.props;
+    const w = StockWidth;
+    const h = StockHeight;
+    const cx = element.cx;
+    const cy = element.cy;
+
+    const series = this.props.series;
+
+    const isArrayed = element.var?.isArrayed || false;
+    const arrayedOffset = isArrayed ? 3 : 0;
+
+    const side = element.labelSide;
+    const label = isEditingName ? undefined : (
+      <Label
+        uid={element.uid}
+        cx={cx}
+        cy={cy}
+        side={side}
+        rw={w / 2 + arrayedOffset}
+        rh={h / 2 + arrayedOffset}
+        text={displayName(defined(element.name))}
+        onSelection={this.handleLabelSelection}
+        onLabelDrag={this.props.onLabelDrag}
+      />
+    );
+
+    const sparkline = this.sparkline(series);
+    const indicator = this.indicators();
+
+    const groupClassName = clsx(styles.stock, 'simlin-stock', {
+      [styles.selected]: isSelected && isValidTarget === undefined,
+      'simlin-selected': isSelected && isValidTarget === undefined,
+      [styles.targetGood]: isValidTarget === true,
+      [styles.targetBad]: isValidTarget === false,
+    });
+
+    const x = cx - w / 2;
+    const y = cy - h / 2;
+
+    let rects = [<rect key="1" x={x} y={y} width={w} height={h} />];
+    if (isArrayed) {
+      rects = [
+        <rect key="0" x={x + arrayedOffset} y={y + arrayedOffset} width={w} height={h} />,
+        <rect key="1" x={x} y={y} width={w} height={h} />,
+        <rect key="2" x={x - arrayedOffset} y={y - arrayedOffset} width={w} height={h} />,
+      ];
     }
 
-    render() {
-      const { element, isEditingName, isSelected, isValidTarget, className } = this.props;
-      const w = StockWidth;
-      const h = StockHeight;
-      const cx = element.cx;
-      const cy = element.cy;
-
-      const series = this.props.series;
-
-      const isArrayed = element.var?.isArrayed || false;
-      const arrayedOffset = isArrayed ? 3 : 0;
-
-      const side = element.labelSide;
-      const label = isEditingName ? undefined : (
-        <Label
-          uid={element.uid}
-          cx={cx}
-          cy={cy}
-          side={side}
-          rw={w / 2 + arrayedOffset}
-          rh={h / 2 + arrayedOffset}
-          text={displayName(defined(element.name))}
-          onSelection={this.handleLabelSelection}
-          onLabelDrag={this.props.onLabelDrag}
-        />
-      );
-
-      const sparkline = this.sparkline(series);
-      const indicator = this.indicators();
-
-      let groupClassName = isSelected ? 'simlin-selected' : undefined;
-      if (isValidTarget !== undefined) {
-        groupClassName = isValidTarget ? 'simlin-target-good' : 'simlin-target-bad';
-      }
-
-      const x = cx - w / 2;
-      const y = cy - h / 2;
-
-      let rects = [<rect key="1" x={x} y={y} width={w} height={h} />];
-      if (isArrayed) {
-        rects = [
-          <rect key="0" x={x + arrayedOffset} y={y + arrayedOffset} width={w} height={h} />,
-          <rect key="1" x={x} y={y} width={w} height={h} />,
-          <rect key="2" x={x - arrayedOffset} y={y - arrayedOffset} width={w} height={h} />,
-        ];
-      }
-
-      return (
-        <g
-          className={clsx(className, groupClassName)}
-          onPointerDown={this.handlePointerDown}
-          onPointerUp={this.handlePointerUp}
-        >
-          {rects}
-          {sparkline}
-          {indicator}
-          {label}
-        </g>
-      );
-    }
-  },
-)(
-  ({ theme }) => `
-    & rect {
-      stroke-width: 1px;
-      stroke: ${theme.palette.common.black};
-      fill: ${theme.palette.common.white};
-    }
-    &.simlin-selected {
-      & text {
-        fill: #4444dd;
-      }
-      & rect {
-        stroke: #4444dd;
-      }
-    }
-    &.simlin-target-good rect {
-      stroke: rgb(76, 175, 80);
-      stroke-width: 2px;
-    }
-    &.simlin-target-bad rect {
-      stroke: rgb(244, 67, 54);
-      stroke-width: 2px;
-    }
-    & .simlin-error-indicator {
-      stroke-width: 0px;
-      fill: rgb(255, 152, 0);
-    }
-`,
-);
+    return (
+      <g className={groupClassName} onPointerDown={this.handlePointerDown} onPointerUp={this.handlePointerUp}>
+        {rects}
+        {sparkline}
+        {indicator}
+        {label}
+      </g>
+    );
+  }
+}

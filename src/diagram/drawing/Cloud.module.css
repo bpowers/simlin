@@ -1,0 +1,7 @@
+.cloud {
+  stroke-width: 2px;
+  stroke-linejoin: round;
+  stroke-miterlimit: 4px;
+  fill: var(--color-white);
+  stroke: var(--color-cloud-stroke);
+}

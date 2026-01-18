@@ -1,0 +1,102 @@
+.card {
+  width: 359px;
+}
+
+@media (min-width: 900px) and (max-width: 1199.95px) {
+  .card {
+    width: 420px;
+  }
+}
+
+@media (min-width: 1200px) {
+  .card {
+    width: 480px;
+  }
+}
+
+.inner {
+  padding-top: 52px;
+}
+
+.eqnEditor {
+  background-color: rgba(245, 245, 245);
+  border-radius: 4px;
+  margin-top: 4px;
+  padding: 4px;
+  height: 80px;
+  font-family: 'Roboto Mono', monospace;
+  overflow-y: auto;
+}
+
+.eqnPreview {
+  background-color: rgba(245, 245, 245);
+  border-radius: 4px;
+  margin-top: 4px;
+  padding: 8px;
+  min-height: 80px;
+  cursor: text;
+  transition: opacity 120ms ease-in-out;
+  display: flex;
+  align-items: center;
+}
+
+.eqnPreview :global(.katex-display) {
+  margin: 0 !important;
+  text-align: left;
+  width: 100%;
+}
+
+.eqnPreview :global(.katex) {
+  font-size: 1.1em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+.unitsEditor {
+  background-color: rgba(245, 245, 245);
+  border-radius: 4px;
+  margin-top: 4px;
+  padding: 4px;
+  height: 36px;
+  font-family: 'Roboto Mono', monospace;
+  overflow-y: auto;
+}
+
+.notesEditor {
+  background-color: rgba(245, 245, 245);
+  border-radius: 4px;
+  margin-top: 4px;
+  padding: 4px;
+  height: 56px;
+  font-family: 'Roboto Mono', monospace;
+  overflow-y: auto;
+}
+
+.eqnError {
+  text-decoration: underline wavy red;
+}
+
+.eqnWarning {
+  text-decoration: underline wavy orange;
+}
+
+.buttonLeft {
+  float: left;
+  margin-right: auto;
+}
+
+.buttonRight {
+  float: right;
+}
+
+.addLookupButton {
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.errorList {
+  color: #cc0000;
+}

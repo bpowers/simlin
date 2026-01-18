@@ -1,0 +1,119 @@
+.undoRedoBar {
+  display: flex;
+  position: absolute;
+  bottom: var(--spacing-3);
+  left: var(--spacing-10);
+}
+
+.speedDial {
+  position: absolute;
+  bottom: var(--spacing-2);
+  left: var(--spacing-1-5);
+}
+
+.snapshotCard {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 240px;
+  margin-top: 12px;
+  margin-left: 12px;
+}
+
+.snapshotImg {
+  width: 100%;
+  object-fit: scale-down;
+}
+
+.searchBox {
+  position: relative;
+  top: 0;
+  left: 0;
+  padding-left: 52px;
+  padding-right: 64px;
+  padding-top: 8px;
+  border: 0;
+}
+
+.menuButton {
+  margin-left: 4px;
+  position: absolute;
+  z-index: 100;
+  left: 0;
+  top: 0;
+  display: block;
+  color: #666;
+}
+
+.searchBar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  height: 48px;
+  width: 359px;
+}
+
+@media (min-width: 900px) and (max-width: 1199.95px) {
+  .searchBar {
+    width: 420px;
+  }
+}
+
+@media (min-width: 1200px) {
+  .searchBar {
+    width: 480px;
+  }
+}
+
+.searchBarMd {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  height: 48px;
+  width: 359px;
+}
+
+.varDetails {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+
+.searchButton {
+  color: #aaa;
+}
+
+.clearSearchButton {
+  color: #aaa;
+  cursor: pointer;
+}
+
+.divider {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 28px;
+  margin-top: 10px;
+  margin-right: 54px;
+  border-left-width: 1px;
+  border-left-style: solid;
+  border-color: #ddd;
+}
+
+.editor {
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.editorBg {
+  width: 100%;
+  height: 100%;
+}
+
+.selectedTool {
+  background-color: var(--color-secondary);
+}
+
+:global(.MuiAutocomplete-option[data-focus="true"]) {
+  background: #ADD8E6;
+}

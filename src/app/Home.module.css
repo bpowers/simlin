@@ -1,0 +1,68 @@
+.root {
+  flex-grow: 1;
+}
+
+.flex {
+  flex: 1;
+}
+
+.profileIcon {
+  padding: 8px;
+}
+
+.sdTitle {
+  font-weight: 300;
+}
+
+.avatar {
+  width: 32px;
+  height: 32px;
+}
+
+.menuButton {
+  margin-left: -12px;
+  margin-right: 20px;
+}
+
+.newProjectButton {
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.76);
+  text-decoration: none;
+  margin-right: 16px;
+}
+
+.paper {
+  margin: 24px;
+  padding: 12px;
+}
+
+.preview {
+  text-align: center;
+  height: 200px;
+}
+
+.previewImg {
+  width: 100%;
+  max-height: 200px;
+  object-fit: scale-down;
+}
+
+.modelLink {
+  color: white;
+  text-decoration: none;
+}
+
+.newForm {
+  margin: 32px;
+  padding: 12px;
+}
+
+.projectGrid {
+  box-sizing: border-box;
+  margin-left: auto;
+  margin-right: auto;
+  max-width: 1024px;
+}
+
+.newProjectForm {
+}

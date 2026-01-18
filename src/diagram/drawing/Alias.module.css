@@ -1,0 +1,29 @@
+.alias circle {
+  stroke-width: 1px;
+  stroke: var(--color-black);
+  fill: var(--color-white);
+  stroke-dasharray: 2px;
+}
+
+.alias.targetGood circle {
+  stroke: var(--color-target-good);
+  stroke-width: 2px;
+}
+
+.alias.targetBad circle {
+  stroke: var(--color-target-bad);
+  stroke-width: 2px;
+}
+
+.alias.selected text {
+  fill: var(--color-selected);
+}
+
+.alias.selected circle {
+  stroke: var(--color-selected);
+}
+
+.alias .errorIndicator {
+  stroke-width: 0px;
+  fill: var(--color-indicator-warning);
+}

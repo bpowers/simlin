@@ -4,20 +4,19 @@
 
 import * as React from 'react';
 
-import { styled } from '@mui/material/styles';
 import SvgIcon from '@mui/material/SvgIcon';
 
-export const AuxIcon: React.FunctionComponent = styled((props) => {
+import styles from './AuxIcon.module.css';
+
+export const AuxIcon: React.FunctionComponent = (props) => {
   return (
-    <SvgIcon viewBox="0 0 24 24" {...props}>
+    <SvgIcon viewBox="0 0 24 24" className={styles.auxIcon} {...props}>
       <g>
         <circle cx={12} cy={12} r={9} />
       </g>
     </SvgIcon>
   );
-})(`
-  fill: gray;
-`);
+};
 
 AuxIcon.displayName = 'Variable';
 
