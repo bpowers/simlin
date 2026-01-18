@@ -2094,20 +2094,15 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     let transform;
     let viewBox: string | undefined;
     if (embedded) {
-      // Use the ViewBox passed from props if available
-      const passedViewBox = this.props.view.viewBox;
-      if (passedViewBox && passedViewBox.width > 0 && passedViewBox.height > 0) {
-        viewBox = `${passedViewBox.x} ${passedViewBox.y} ${passedViewBox.width} ${passedViewBox.height}`;
-      } else {
-        // Calculate from element bounds if no valid viewBox was passed
-        const bounds = calcViewBox(this.elementBounds);
-        if (bounds) {
-          const left = Math.floor(bounds.left) - 10;
-          const top = Math.floor(bounds.top) - 10;
-          const width = Math.ceil(bounds.right - left) + 10;
-          const height = Math.ceil(bounds.bottom - top) + 10;
-          viewBox = `${left} ${top} ${width} ${height}`;
-        }
+      // For embedded/export mode, always calculate tight bounds from elements.
+      // The stored view.viewBox represents the editor viewport, not diagram bounds.
+      const bounds = calcViewBox(this.elementBounds);
+      if (bounds) {
+        const left = Math.floor(bounds.left) - 10;
+        const top = Math.floor(bounds.top) - 10;
+        const width = Math.ceil(bounds.right - left) + 10;
+        const height = Math.ceil(bounds.bottom - top) + 10;
+        viewBox = `${left} ${top} ${width} ${height}`;
       }
     } else {
       const zoom = this.props.view.zoom >= 0.2 ? this.props.view.zoom : 1;
