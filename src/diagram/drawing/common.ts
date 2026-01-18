@@ -78,6 +78,12 @@ export const displayName = (name: string): string => {
   return name.replace(/\\n/g, '\n').replace(/_/g, ' ');
 };
 
+// Convert a display name to a single-line searchable format.
+// Handles both actual newlines (from XMILE parsing) and escaped newlines (from edits).
+export const searchableName = (name: string): string => {
+  return name.replace(/\\n|\n/g, ' ');
+};
+
 // FIXME: this is sort of gross, but works.  The main use is to check
 // the result
 export const isInf = (n: number): boolean => {
