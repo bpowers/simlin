@@ -20,6 +20,18 @@ pub struct NamedDimension {
     pub maps_to: Option<CanonicalDimensionName>,
 }
 
+impl NamedDimension {
+    /// Get the 0-based index of an element by name using O(1) hash lookup.
+    ///
+    /// The input should be in canonical form (lowercase, spaces as underscores).
+    /// This is more efficient than iterating through `elements` for large dimensions.
+    pub fn get_element_index(&self, element: &str) -> Option<usize> {
+        self.indexed_elements
+            .get(&CanonicalElementName::from_raw(element))
+            .map(|&idx| idx - 1) // Convert from 1-based to 0-based
+    }
+}
+
 /// Relationship between a subdimension and parent dimension.
 /// Maps each subdim element index to its offset in the parent.
 #[allow(dead_code)]
@@ -554,6 +566,45 @@ mod tests {
     use super::*;
     use crate::common::CanonicalElementName;
     use crate::datamodel;
+
+    // ========== Tests for get_element_index ==========
+
+    #[test]
+    fn test_get_element_index_basic() {
+        let dim = datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["North".to_string(), "South".to_string(), "East".to_string()],
+        );
+        let dim = Dimension::from(dim);
+        if let Dimension::Named(_, named_dim) = dim {
+            // Test exact matches (canonical form)
+            assert_eq!(named_dim.get_element_index("north"), Some(0));
+            assert_eq!(named_dim.get_element_index("south"), Some(1));
+            assert_eq!(named_dim.get_element_index("east"), Some(2));
+
+            // Test non-existent element
+            assert_eq!(named_dim.get_element_index("west"), None);
+            assert_eq!(named_dim.get_element_index(""), None);
+        } else {
+            panic!("Expected Named dimension");
+        }
+    }
+
+    #[test]
+    fn test_get_element_index_with_spaces() {
+        let dim = datamodel::Dimension::named(
+            "Product Type".to_string(),
+            vec!["Product A".to_string(), "Product B".to_string()],
+        );
+        let dim = Dimension::from(dim);
+        if let Dimension::Named(_, named_dim) = dim {
+            // Spaces are converted to underscores in canonical form
+            assert_eq!(named_dim.get_element_index("product_a"), Some(0));
+            assert_eq!(named_dim.get_element_index("product_b"), Some(1));
+        } else {
+            panic!("Expected Named dimension");
+        }
+    }
 
     // ========== Tests for get_maps_to ==========
 

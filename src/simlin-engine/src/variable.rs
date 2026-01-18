@@ -593,12 +593,11 @@ impl IdentifierSetVisitor<'_> {
             if ident == canonicalize(dim.name()).as_str() {
                 return true;
             }
-            // Check if it's an element of a named dimension
-            if let Dimension::Named(_, named_dim) = dim {
-                let is_element = named_dim.elements.iter().any(|elem| elem.as_str() == ident);
-                if is_element {
-                    return true;
-                }
+            // Check if it's an element of a named dimension using O(1) hash lookup
+            if let Dimension::Named(_, named_dim) = dim
+                && named_dim.get_element_index(ident).is_some()
+            {
+                return true;
             }
         }
         false

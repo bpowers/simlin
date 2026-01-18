@@ -189,12 +189,9 @@ fn normalize_subscripts3(args: &[IndexExpr3], config: &Subscript3Config) -> Opti
                             Some((*val as isize - 1).max(0) as usize)
                         }
                         Expr3::Var(ident, _, _) => {
-                            // Could be a named dimension element
+                            // Could be a named dimension element - use O(1) hash lookup
                             if let Dimension::Named(_, named_dim) = parent_dim {
-                                named_dim
-                                    .elements
-                                    .iter()
-                                    .position(|elem| elem.as_str() == ident.as_str())
+                                named_dim.get_element_index(ident.as_str())
                             } else {
                                 None
                             }
@@ -223,11 +220,9 @@ fn normalize_subscripts3(args: &[IndexExpr3], config: &Subscript3Config) -> Opti
                     }
                     Expr3::Var(ident, _, _) => {
                         // First check if it's a named dimension element (takes priority)
+                        // Use O(1) hash lookup instead of linear search
                         let element_idx = if let Dimension::Named(_, named_dim) = parent_dim {
-                            named_dim
-                                .elements
-                                .iter()
-                                .position(|elem| elem.as_str() == ident.as_str())
+                            named_dim.get_element_index(ident.as_str())
                         } else {
                             None
                         };
@@ -296,11 +291,9 @@ fn normalize_subscripts3(args: &[IndexExpr3], config: &Subscript3Config) -> Opti
                 // First check if the name matches an element of the parent dimension.
                 // An element name that happens to match a dimension name should be
                 // resolved as an element, not as an A2A dimension reference.
+                // Use O(1) hash lookup instead of linear search.
                 if let Dimension::Named(_, named_dim) = parent_dim
-                    && let Some(idx) = named_dim
-                        .elements
-                        .iter()
-                        .position(|elem| elem.as_str() == name.as_str())
+                    && let Some(idx) = named_dim.get_element_index(name.as_str())
                 {
                     operations.push(IndexOp::Single(idx));
                     continue;
@@ -896,11 +889,10 @@ impl Context<'_> {
                 subscript.as_str().parse::<f64>().unwrap_or(1.0)
             }
             Dimension::Named(_, named_dim) => {
-                // For named dimensions, find the element's position (0-based) and add 1
+                // For named dimensions, find the element's position using O(1) hash lookup
+                // get_element_index returns 0-based, so add 1 for 1-based subscript offset
                 named_dim
-                    .elements
-                    .iter()
-                    .position(|elem| elem.as_str() == subscript.as_str())
+                    .get_element_index(subscript.as_str())
                     .map(|off| (off + 1) as f64)
                     .unwrap_or(1.0)
             }
