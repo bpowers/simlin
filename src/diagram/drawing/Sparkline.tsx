@@ -93,7 +93,7 @@ export class Sparkline extends React.PureComponent<SparklineProps> {
         p += `${prefix}${x + (w * (time[i] - xMin)) / xSpan},${y + h - (h * (values[i] - yMin)) / ySpan}`;
       }
       const style = this.props.series.length === 1 ? undefined : { stroke: colors[i % colors.length] };
-      sparklines.push(<path key={dataset.name} d={p} className={styles.sparkline} style={style} />);
+      sparklines.push(<path key={dataset.name} d={p} className={`${styles.sparkline} simlin-sparkline-line`} style={style} />);
       i++;
     }
 

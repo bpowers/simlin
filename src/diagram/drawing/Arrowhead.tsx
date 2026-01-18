@@ -35,18 +35,21 @@ export class Arrowhead extends React.PureComponent<ArrowheadProps> {
     }z`;
 
     let pathClassName: string;
+    let staticClass: string;
     if (type === 'connector') {
       pathClassName = isSelected ? styles.arrowheadConnectorSelected : styles.arrowheadConnector;
+      staticClass = isSelected ? 'simlin-arrowhead-link simlin-selected' : 'simlin-arrowhead-link';
     } else {
       pathClassName = isSelected ? styles.arrowheadFlowSelected : styles.arrowheadFlow;
+      staticClass = isSelected ? 'simlin-arrowhead-flow simlin-selected' : 'simlin-arrowhead-flow';
     }
 
     const transform = `rotate(${this.props.angle},${x},${y})`;
 
     return (
       <g>
-        <path d={bgPath} className={styles.arrowheadBg} transform={transform} onPointerDown={this.handlePointerDown} />
-        <path d={path} className={pathClassName} transform={transform} onPointerDown={this.handlePointerDown} />
+        <path d={bgPath} className={`${styles.arrowheadBg} simlin-arrowhead-bg`} transform={transform} onPointerDown={this.handlePointerDown} />
+        <path d={path} className={`${pathClassName} ${staticClass}`} transform={transform} onPointerDown={this.handlePointerDown} />
       </g>
     );
   }

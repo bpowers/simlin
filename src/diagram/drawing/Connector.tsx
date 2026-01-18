@@ -189,14 +189,16 @@ export class Connector extends React.PureComponent<ConnectorProps> {
     const arrowθ = radToDeg(θ);
     const path = `M${start.x},${start.y}L${end.x},${end.y}`;
 
-    let connectorClass = isSelected ? styles.connectorSelected : styles.connector;
+    let connectorClass = isSelected
+      ? `${styles.connectorSelected} simlin-connector simlin-connector-selected`
+      : `${styles.connector} simlin-connector`;
     if (isDashed && !isSelected) {
-      connectorClass = styles.connectorDashed;
+      connectorClass = `${styles.connectorDashed} simlin-connector simlin-connector-dashed`;
     }
 
     return (
       <g key={this.props.element.uid}>
-        <path d={path} className={styles.connectorBg} onPointerDown={this.handlePointerDownArc} />
+        <path d={path} className={`${styles.connectorBg} simlin-connector-bg`} onPointerDown={this.handlePointerDownArc} />
         <path d={path} className={connectorClass} onPointerDown={this.handlePointerDownArc} />
         <Arrowhead
           point={end}
@@ -323,14 +325,16 @@ export class Connector extends React.PureComponent<ConnectorProps> {
       arrowθ += 180;
     }
 
-    let connectorClass = isSelected ? styles.connectorSelected : styles.connector;
+    let connectorClass = isSelected
+      ? `${styles.connectorSelected} simlin-connector simlin-connector-selected`
+      : `${styles.connector} simlin-connector`;
     if (isDashed && !isSelected) {
-      connectorClass = styles.connectorDashed;
+      connectorClass = `${styles.connectorDashed} simlin-connector simlin-connector-dashed`;
     }
 
     return (
       <g key={this.props.element.uid}>
-        <path d={path} className={styles.connectorBg} onPointerDown={this.handlePointerDownArc} />
+        <path d={path} className={`${styles.connectorBg} simlin-connector-bg`} onPointerDown={this.handlePointerDownArc} />
         <path d={path} className={connectorClass} onPointerDown={this.handlePointerDownArc} />
         <Arrowhead
           point={end}

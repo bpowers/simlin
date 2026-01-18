@@ -134,8 +134,9 @@ export class Aux extends React.PureComponent<AuxProps> {
     const sparkline = this.sparkline(series);
     const indicator = this.indicators();
 
-    const groupClassName = clsx(styles.aux, {
+    const groupClassName = clsx(styles.aux, 'simlin-aux', {
       [styles.selected]: isSelected && isValidTarget === undefined,
+      'simlin-selected': isSelected && isValidTarget === undefined,
       [styles.targetGood]: isValidTarget === true,
       [styles.targetBad]: isValidTarget === false,
     });

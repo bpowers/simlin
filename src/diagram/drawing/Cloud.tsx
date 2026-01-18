@@ -70,6 +70,13 @@ export class Cloud extends React.PureComponent<CloudProps> {
     const scale = diameter / CloudWidth;
     const t = `matrix(${scale}, 0, 0, ${scale}, ${x - radius}, ${y - radius})`;
 
-    return <path d={CloudPath} className={styles.cloud} transform={t} onPointerDown={this.handlePointerDown} />;
+    return (
+      <path
+        d={CloudPath}
+        className={`${styles.cloud} simlin-cloud`}
+        transform={t}
+        onPointerDown={this.handlePointerDown}
+      />
+    );
   }
 }

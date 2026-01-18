@@ -2131,11 +2131,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // n.b. we don't want to clear this.elements as thats used when handling callbacks
 
     return (
-      <div style={{ height: '100%', width: '100%' }} ref={this.svgRef} className={styles.canvas}>
+      <div style={{ height: '100%', width: '100%' }} ref={this.svgRef} className={`${styles.canvas} simlin-canvas`}>
         <svg
           viewBox={viewBox}
           preserveAspectRatio="xMinYMin"
-          className={clsx(styles.canvas, styles.simlinCanvas)}
+          className={clsx(styles.canvas, styles.simlinCanvas, 'simlin-canvas')}
           onPointerDown={this.handlePointerDown}
           onPointerMove={this.handlePointerMove}
           onPointerCancel={this.handlePointerCancel}

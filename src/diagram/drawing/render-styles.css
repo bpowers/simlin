@@ -1,0 +1,206 @@
+/* Static CSS styles for SVG export rendering.
+ * These use non-hashed class names that can be reliably injected into exported SVGs.
+ * Drawing components include both CSS module classes (for interactive editor)
+ * and these static classes (for SVG/PNG export).
+ */
+
+/* CSS Custom Properties - must be included for var() references to work */
+:root {
+  --color-black: #000000;
+  --color-white: #ffffff;
+  --color-selected: #4444dd;
+  --color-target-good: rgb(76, 175, 80);
+  --color-target-bad: rgb(244, 67, 54);
+  --color-indicator-warning: rgb(255, 152, 0);
+  --color-cloud-stroke: #6388dc;
+  --color-connector: gray;
+}
+
+/* Canvas */
+.simlin-canvas text {
+  fill: var(--color-black);
+  font-size: 12px;
+  font-family: "Roboto", "Open Sans", "Arial", sans-serif;
+  font-weight: 300;
+  text-anchor: middle;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* Stock */
+.simlin-stock rect {
+  stroke-width: 1px;
+  stroke: var(--color-black);
+  fill: var(--color-white);
+}
+
+.simlin-stock.simlin-selected text {
+  fill: var(--color-selected);
+}
+
+.simlin-stock.simlin-selected rect {
+  stroke: var(--color-selected);
+}
+
+/* Auxiliary */
+.simlin-aux circle {
+  stroke-width: 1px;
+  stroke: var(--color-black);
+  fill: var(--color-white);
+}
+
+.simlin-aux.simlin-selected text {
+  fill: var(--color-selected);
+}
+
+.simlin-aux.simlin-selected circle {
+  stroke: var(--color-selected);
+}
+
+/* Flow */
+.simlin-flow .simlin-outer {
+  fill: none;
+  stroke-width: 4px;
+  stroke: var(--color-black);
+}
+
+.simlin-flow .simlin-outer-selected {
+  fill: none;
+  stroke-width: 4px;
+  stroke: var(--color-selected);
+}
+
+.simlin-flow .simlin-inner {
+  fill: none;
+  stroke-width: 2px;
+  stroke: var(--color-white);
+}
+
+.simlin-flow circle {
+  stroke-width: 1px;
+  fill: var(--color-white);
+  stroke: var(--color-black);
+}
+
+.simlin-flow.simlin-selected text {
+  fill: var(--color-selected);
+}
+
+.simlin-flow.simlin-selected circle {
+  stroke: var(--color-selected);
+}
+
+/* Cloud */
+path.simlin-cloud {
+  stroke-width: 2px;
+  stroke-linejoin: round;
+  stroke-miterlimit: 4px;
+  fill: var(--color-white);
+  stroke: var(--color-cloud-stroke);
+}
+
+/* Alias */
+.simlin-alias circle {
+  stroke-width: 1px;
+  stroke: var(--color-black);
+  fill: var(--color-white);
+}
+
+.simlin-alias.simlin-selected text {
+  fill: var(--color-selected);
+}
+
+.simlin-alias.simlin-selected circle {
+  stroke: var(--color-selected);
+}
+
+/* Module */
+.simlin-module rect {
+  stroke-width: 1px;
+  stroke: #000000;
+  fill: #ffffff;
+}
+
+.simlin-module.simlin-selected text {
+  fill: var(--color-selected);
+}
+
+.simlin-module.simlin-selected rect {
+  stroke: var(--color-selected);
+}
+
+/* Connector */
+.simlin-connector {
+  stroke-width: 0.5px;
+  stroke: var(--color-connector);
+  fill: none;
+}
+
+.simlin-connector-dashed {
+  stroke-width: 0.5px;
+  stroke: var(--color-connector);
+  stroke-dasharray: 2px;
+  fill: none;
+}
+
+.simlin-connector-selected {
+  stroke-width: 1px;
+  stroke: var(--color-selected);
+  fill: none;
+}
+
+.simlin-connector-bg {
+  stroke-width: 7px;
+  stroke: white;
+  opacity: 0;
+  fill: none;
+}
+
+/* Arrowhead */
+path.simlin-arrowhead-flow {
+  stroke-width: 1px;
+  stroke-linejoin: round;
+  stroke: var(--color-black);
+  fill: var(--color-white);
+}
+
+path.simlin-arrowhead-flow.simlin-selected {
+  stroke: var(--color-selected);
+  fill: white;
+}
+
+path.simlin-arrowhead-link {
+  stroke-width: 1px;
+  stroke-linejoin: round;
+  stroke: var(--color-connector);
+  fill: var(--color-connector);
+}
+
+path.simlin-arrowhead-link.simlin-selected {
+  stroke: var(--color-selected);
+  fill: var(--color-selected);
+}
+
+path.simlin-arrowhead-bg {
+  fill: white;
+  opacity: 0;
+}
+
+/* Error indicators */
+.simlin-error-indicator {
+  stroke-width: 0px;
+  fill: var(--color-indicator-warning);
+}
+
+/* Sparkline */
+.simlin-sparkline-area {
+  stroke: none;
+  fill: lightsteelblue;
+  opacity: 0.5;
+}
+
+.simlin-sparkline-line {
+  stroke: steelblue;
+  stroke-width: 1px;
+  fill: none;
+}

@@ -147,8 +147,9 @@ export class Stock extends React.PureComponent<StockProps> {
     const sparkline = this.sparkline(series);
     const indicator = this.indicators();
 
-    const groupClassName = clsx(styles.stock, {
+    const groupClassName = clsx(styles.stock, 'simlin-stock', {
       [styles.selected]: isSelected && isValidTarget === undefined,
+      'simlin-selected': isSelected && isValidTarget === undefined,
       [styles.targetGood]: isValidTarget === true,
       [styles.targetBad]: isValidTarget === false,
     });

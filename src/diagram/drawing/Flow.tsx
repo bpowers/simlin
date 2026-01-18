@@ -599,8 +599,9 @@ export class Flow extends React.PureComponent<FlowProps> {
     const sparkline = this.sparkline(series);
     const indicator = this.indicators();
 
-    const groupClassName = clsx(styles.flow, {
+    const groupClassName = clsx(styles.flow, 'simlin-flow', {
       [styles.selected]: isSelected && isValidTarget === undefined,
+      'simlin-selected': isSelected && isValidTarget === undefined,
       [styles.targetGood]: isValidTarget === true,
       [styles.targetBad]: isValidTarget === false,
     });
@@ -614,11 +615,15 @@ export class Flow extends React.PureComponent<FlowProps> {
       ];
     }
 
+    const outerClassName = isSelected
+      ? clsx(styles.outerSelected, 'simlin-outer-selected')
+      : clsx(styles.outer, 'simlin-outer');
+
     return (
       <g className={groupClassName}>
         <path
           d={spath}
-          className={isSelected ? styles.outerSelected : styles.outer}
+          className={outerClassName}
           onPointerDown={this.handlePointerDown}
           onPointerUp={this.handlePointerUp}
         />
@@ -630,7 +635,7 @@ export class Flow extends React.PureComponent<FlowProps> {
           isSelected={this.props.isSelected}
           onSelection={this.handlePointerDownArrowhead}
         />
-        <path d={spath} className={styles.inner} />
+        <path d={spath} className={clsx(styles.inner, 'simlin-inner')} />
         <g onPointerDown={this.handlePointerDown} onPointerUp={this.handlePointerUp}>
           {circles}
           {sparkline}

@@ -44,7 +44,7 @@ export class Module extends React.PureComponent<ModuleProps> {
     const side = element.labelSide;
 
     return (
-      <g className={styles.module}>
+      <g className={`${styles.module} simlin-module`}>
         <rect
           x={Math.ceil(cx - w / 2)}
           y={Math.ceil(cy - h / 2)}

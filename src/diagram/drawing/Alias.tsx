@@ -117,8 +117,9 @@ export class Alias extends React.PureComponent<AliasProps> {
 
     const sparkline = this.sparkline(series);
 
-    const groupClassName = clsx(styles.alias, {
+    const groupClassName = clsx(styles.alias, 'simlin-alias', {
       [styles.selected]: isSelected && isValidTarget === undefined,
+      'simlin-selected': isSelected && isValidTarget === undefined,
       [styles.targetGood]: isValidTarget === true,
       [styles.targetBad]: isValidTarget === false,
     });
