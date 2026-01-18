@@ -4,7 +4,7 @@
 
 import { List } from 'immutable';
 
-import { calcViewBox, mergeBounds, Rect } from '../drawing/common';
+import { calcViewBox, mergeBounds, Rect, searchableName } from '../drawing/common';
 
 describe('common', () => {
   describe('mergeBounds', () => {
@@ -83,6 +83,42 @@ describe('common', () => {
       ]);
       const result = calcViewBox(elements);
       expect(result).toEqual({ top: -50, left: -100, right: 100, bottom: 100 });
+    });
+  });
+
+  describe('searchableName', () => {
+    it('should convert actual newlines to spaces', () => {
+      const name = 'maximum\ngrowth rate';
+      expect(searchableName(name)).toBe('maximum growth rate');
+    });
+
+    it('should convert escaped newlines to spaces', () => {
+      const name = 'maximum\\ngrowth rate';
+      expect(searchableName(name)).toBe('maximum growth rate');
+    });
+
+    it('should handle multiple actual newlines', () => {
+      const name = 'fraction\nof carrying\ncapacity used';
+      expect(searchableName(name)).toBe('fraction of carrying capacity used');
+    });
+
+    it('should handle multiple escaped newlines', () => {
+      const name = 'fraction\\nof carrying\\ncapacity used';
+      expect(searchableName(name)).toBe('fraction of carrying capacity used');
+    });
+
+    it('should handle mixed actual and escaped newlines', () => {
+      const name = 'mixed\nnewline\\nformat';
+      expect(searchableName(name)).toBe('mixed newline format');
+    });
+
+    it('should return unchanged names without newlines', () => {
+      const name = 'simple name';
+      expect(searchableName(name)).toBe('simple name');
+    });
+
+    it('should handle empty strings', () => {
+      expect(searchableName('')).toBe('');
     });
   });
 });

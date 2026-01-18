@@ -78,7 +78,7 @@ import { VariableDetails } from './VariableDetails';
 import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
-import { Point } from './drawing/common';
+import { Point, searchableName } from './drawing/common';
 import { takeoffθ } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
 
@@ -1485,7 +1485,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (elements) {
       autocompleteOptions = elements
         .filter((e) => e.isNamed())
-        .map((e) => (e as NamedViewElement).name.replace('\\n', ' '))
+        .map((e) => searchableName((e as NamedViewElement).name))
         .toArray();
     }
 
@@ -1493,7 +1493,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     let name;
     let placeholder: string | undefined = 'Find in Model';
     if (namedElement) {
-      name = defined((namedElement as NamedViewElement).name).replace('\\n', ' ');
+      name = searchableName(defined((namedElement as NamedViewElement).name));
       placeholder = undefined;
     }
 
