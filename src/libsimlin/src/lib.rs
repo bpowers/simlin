@@ -9145,7 +9145,7 @@ mod tests {
             let mut out_error: *mut SimlinError = ptr::null_mut();
             let latex_ptr = simlin_model_get_latex_equation(
                 model,
-                invalid_utf8.as_ptr() as *const i8,
+                invalid_utf8.as_ptr() as *const c_char,
                 &mut out_error,
             );
 
