@@ -1,6 +1,7 @@
-// Auto-generated CSS content for SVG export rendering.
-// This mirrors render-styles.css but as a string for injection into exported SVGs.
-// CSS custom properties (var()) are resolved to their actual values for standalone SVG compatibility.
+// Static CSS content for SVG export rendering.
+// These styles use hardcoded color values (not CSS variables) because standalone SVGs
+// don't support CSS custom properties. The class names (simlin-*) are static and match
+// those added to drawing components alongside their CSS module classes.
 
 export const renderStyles = `
 /* Canvas */
@@ -180,15 +181,17 @@ path.simlin-arrowhead-bg {
 }
 
 /* Sparkline */
-.simlin-sparkline-area {
-  stroke: none;
-  fill: lightsteelblue;
-  opacity: 0.5;
+.simlin-sparkline-line {
+  stroke-width: 0.5px;
+  stroke-linecap: round;
+  stroke: #2299dd;
+  fill: none;
 }
 
-.simlin-sparkline-line {
-  stroke: steelblue;
-  stroke-width: 1px;
+.simlin-sparkline-axis {
+  stroke-width: 0.75px;
+  stroke-linecap: round;
+  stroke: #999;
   fill: none;
 }
 `;

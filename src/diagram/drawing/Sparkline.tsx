@@ -110,7 +110,7 @@ export class Sparkline extends React.PureComponent<SparklineProps> {
     return (
       <g>
         <>
-          <path key="$axis" d={this.pAxis} className={styles.axis} />
+          <path key="$axis" d={this.pAxis} className={`${styles.axis} simlin-sparkline-axis`} />
           {this.sparklines}
         </>
       </g>
