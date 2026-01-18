@@ -115,9 +115,9 @@ typedef struct {
 
 typedef struct {
   SimlinErrorCode code;
-  char *message;
-  char *model_name;
-  char *variable_name;
+  const char *message;
+  const char *model_name;
+  const char *variable_name;
   uint16_t start_offset;
   uint16_t end_offset;
   SimlinErrorKind kind;
