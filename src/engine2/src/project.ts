@@ -10,19 +10,19 @@
  */
 
 import {
-  simlin_project_open,
-  simlin_project_json_open,
+  simlin_project_open_protobuf,
+  simlin_project_open_json,
   simlin_project_unref,
   simlin_project_get_model_count,
   simlin_project_get_model_names,
   simlin_project_get_model,
-  simlin_project_serialize,
+  simlin_project_serialize_protobuf,
   simlin_project_serialize_json,
   simlin_project_is_simulatable,
   simlin_project_get_errors,
   simlin_project_apply_patch,
 } from './internal/project';
-import { simlin_import_xmile, simlin_export_xmile } from './internal/import-export';
+import { simlin_project_open_xmile, simlin_project_serialize_xmile } from './internal/import-export';
 import { simlin_analyze_get_loops, readLoops, simlin_free_loops } from './internal/analysis';
 import { SimlinProjectPtr, SimlinJsonFormat, ErrorDetail } from './internal/types';
 import { readAllErrorDetails, simlin_error_free } from './internal/error';
@@ -67,7 +67,7 @@ export class Project {
    * @throws SimlinError if the XMILE data is invalid
    */
   private static fromXmile(data: Uint8Array): Project {
-    const ptr = simlin_import_xmile(data);
+    const ptr = simlin_project_open_xmile(data);
     return new Project(ptr);
   }
 
@@ -78,7 +78,7 @@ export class Project {
    * @throws SimlinError if the protobuf data is invalid
    */
   private static fromProtobuf(data: Uint8Array): Project {
-    const ptr = simlin_project_open(data);
+    const ptr = simlin_project_open_protobuf(data);
     return new Project(ptr);
   }
 
@@ -91,7 +91,7 @@ export class Project {
    */
   private static fromJson(data: string | Uint8Array, format: SimlinJsonFormat = SimlinJsonFormat.Native): Project {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-    const ptr = simlin_project_json_open(bytes, format);
+    const ptr = simlin_project_open_json(bytes, format);
     return new Project(ptr);
   }
 
@@ -234,7 +234,7 @@ export class Project {
    */
   serializeProtobuf(): Uint8Array {
     this.checkDisposed();
-    return simlin_project_serialize(this._ptr);
+    return simlin_project_serialize_protobuf(this._ptr);
   }
 
   /**
@@ -254,7 +254,7 @@ export class Project {
    */
   toXmile(): Uint8Array {
     this.checkDisposed();
-    return simlin_export_xmile(this._ptr);
+    return simlin_project_serialize_xmile(this._ptr);
   }
 
   /**

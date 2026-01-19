@@ -408,14 +408,20 @@ pub unsafe extern "C" fn simlin_error_get_detail(
     }
     (*err).detail_at(index)
 }
-/// simlin_project_open opens a project from protobuf data.
+/// Open a project from binary protobuf data
+///
+/// Deserializes a project from Simlin's native protobuf format. This is the
+/// recommended format for loading previously saved projects, as it preserves
+/// all project data with perfect fidelity.
+///
 /// Returns NULL and populates `out_error` on failure.
 ///
 /// # Safety
 /// - `data` must be a valid pointer to at least `len` bytes
 /// - `out_error` may be null
+/// - The returned project must be freed with `simlin_project_unref`
 #[no_mangle]
-pub unsafe extern "C" fn simlin_project_open(
+pub unsafe extern "C" fn simlin_project_open_protobuf(
     data: *const u8,
     len: usize,
     out_error: *mut *mut SimlinError,
@@ -451,13 +457,20 @@ pub unsafe extern "C" fn simlin_project_open(
     }
 }
 
-/// simlin_project_json_open opens a project from JSON data.
+/// Open a project from JSON data
+///
+/// Deserializes a project from JSON format. Supports two formats:
+/// - `SimlinJsonFormat::Native`: Simlin's native JSON representation
+/// - `SimlinJsonFormat::Sdai`: System Dynamics AI (SDAI) interchange format
+///
+/// Returns NULL and populates `out_error` on failure.
 ///
 /// # Safety
 /// - `data` must be a valid pointer to at least `len` bytes of UTF-8 JSON
 /// - `out_error` may be null
+/// - The returned project must be freed with `simlin_project_unref`
 #[no_mangle]
-pub unsafe extern "C" fn simlin_project_json_open(
+pub unsafe extern "C" fn simlin_project_open_json(
     data: *const u8,
     len: usize,
     format: ffi::SimlinJsonFormat,
@@ -510,7 +523,11 @@ pub unsafe extern "C" fn simlin_project_json_open(
         }
     }
 }
-/// Increments the reference count of a project
+
+/// Increment the reference count of a project
+///
+/// Call this when you want to share a project handle with another component
+/// that will independently manage its lifetime.
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
@@ -520,7 +537,8 @@ pub unsafe extern "C" fn simlin_project_ref(project: *mut SimlinProject) {
         (*project).ref_count.fetch_add(1, Ordering::SeqCst);
     }
 }
-/// Decrements the reference count and frees the project if it reaches zero
+
+/// Decrement the reference count and free the project if it reaches zero
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
@@ -2284,13 +2302,20 @@ pub unsafe extern "C" fn simlin_free(ptr: *mut u8) {
     let layout = Layout::from_size_align_unchecked(total_size, align_of::<usize>());
     dealloc(actual_ptr, layout);
 }
-/// simlin_import_xmile opens a project from XMILE/STMX format data.
+/// Open a project from XMILE/STMX format data
+///
+/// Parses and imports a system dynamics model from XMILE format, the industry
+/// standard interchange format for system dynamics models. Also supports the
+/// STMX variant used by Stella.
+///
+/// Returns NULL and populates `out_error` on failure.
 ///
 /// # Safety
 /// - `data` must be a valid pointer to at least `len` bytes
 /// - `out_error` may be null
+/// - The returned project must be freed with `simlin_project_unref`
 #[no_mangle]
-pub unsafe extern "C" fn simlin_import_xmile(
+pub unsafe extern "C" fn simlin_project_open_xmile(
     data: *const u8,
     len: usize,
     out_error: *mut *mut SimlinError,
@@ -2327,14 +2352,21 @@ pub unsafe extern "C" fn simlin_import_xmile(
         }
     }
 }
-/// simlin_import_mdl opens a project from Vensim MDL format data.
+
+/// Open a project from Vensim MDL format data
+///
+/// Parses and imports a system dynamics model from Vensim's MDL format.
+/// Requires the "vensim" feature to be enabled at compile time.
+///
+/// Returns NULL and populates `out_error` on failure.
 ///
 /// # Safety
 /// - `data` must be a valid pointer to at least `len` bytes
 /// - `out_error` may be null
+/// - The returned project must be freed with `simlin_project_unref`
 #[cfg(feature = "vensim")]
 #[no_mangle]
-pub unsafe extern "C" fn simlin_import_mdl(
+pub unsafe extern "C" fn simlin_project_open_vensim(
     data: *const u8,
     len: usize,
     out_error: *mut *mut SimlinError,
@@ -2371,15 +2403,21 @@ pub unsafe extern "C" fn simlin_import_mdl(
         }
     }
 }
-/// simlin_export_xmile exports a project to XMILE format.
-/// Returns 0 on success, error code on failure.
-/// Caller must free output with simlin_free().
+
+/// Serialize a project to XMILE format
+///
+/// Exports a project to XMILE format, the industry standard interchange format
+/// for system dynamics models. The output buffer contains the XML document as
+/// UTF-8 encoded bytes.
+///
+/// Caller must free output with `simlin_free`.
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
-/// - `output` and `output_len` must be valid pointers
+/// - `out_buffer` and `out_len` must be valid pointers
+/// - `out_error` may be null
 #[no_mangle]
-pub unsafe extern "C" fn simlin_export_xmile(
+pub unsafe extern "C" fn simlin_project_serialize_xmile(
     project: *mut SimlinProject,
     out_buffer: *mut *mut u8,
     out_len: *mut usize,
@@ -2434,20 +2472,21 @@ pub unsafe extern "C" fn simlin_export_xmile(
     }
 }
 
-/// Serializes a project to binary protobuf format
+/// Serialize a project to binary protobuf format
 ///
-/// Returns the project's datamodel serialized as protobuf bytes.
-/// This is the native format expected by simlin_project_open.
-/// Useful for saving projects or transferring them between systems.
+/// Serializes the project's datamodel to Simlin's native protobuf format.
+/// This is the recommended format for saving and restoring projects, as it
+/// preserves all project data with perfect fidelity. The serialized bytes
+/// can be loaded later with `simlin_project_open_protobuf`.
 ///
-/// Returns 0 on success, error code on failure.
-/// Caller must free output with simlin_free().
+/// Caller must free output with `simlin_free`.
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
-/// - `output` and `output_len` must be valid pointers
+/// - `out_buffer` and `out_len` must be valid pointers
+/// - `out_error` may be null
 #[no_mangle]
-pub unsafe extern "C" fn simlin_project_serialize(
+pub unsafe extern "C" fn simlin_project_serialize_protobuf(
     project: *mut SimlinProject,
     out_buffer: *mut *mut u8,
     out_len: *mut usize,
@@ -3294,8 +3333,11 @@ mod tests {
         pb.encode(&mut buf).unwrap();
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             assert!(!proj.is_null(), "project open failed");
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
@@ -3410,7 +3452,7 @@ mod tests {
 
             // Re-open from SDAI JSON
             let mut open_error: *mut SimlinError = ptr::null_mut();
-            let proj2 = simlin_project_json_open(
+            let proj2 = simlin_project_open_json(
                 out_buffer,
                 out_len,
                 ffi::SimlinJsonFormat::Sdai,
@@ -4592,8 +4634,11 @@ mod tests {
         unsafe {
             // Open project
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(data.as_ptr(), data.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                data.as_ptr(),
+                data.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -4783,8 +4828,11 @@ mod tests {
         unsafe {
             // Open project
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(data.as_ptr(), data.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                data.as_ptr(),
+                data.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -5058,8 +5106,11 @@ mod tests {
         project.encode(&mut buf).unwrap();
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -5094,8 +5145,11 @@ mod tests {
         unsafe {
             // Import XMILE
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_import_xmile(data.as_ptr(), data.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_xmile(
+                data.as_ptr(),
+                data.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -5178,8 +5232,11 @@ mod tests {
         unsafe {
             // Import MDL
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_import_mdl(data.as_ptr(), data.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_vensim(
+                data.as_ptr(),
+                data.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -5261,8 +5318,11 @@ mod tests {
         unsafe {
             // Open project
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(data.as_ptr(), data.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                data.as_ptr(),
+                data.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -5280,7 +5340,7 @@ mod tests {
             let mut output: *mut u8 = std::ptr::null_mut();
             let mut output_len: usize = 0;
             err = ptr::null_mut();
-            simlin_export_xmile(
+            simlin_project_serialize_xmile(
                 proj,
                 &mut output as *mut *mut u8,
                 &mut output_len as *mut usize,
@@ -5325,8 +5385,11 @@ mod tests {
         unsafe {
             // Import XMILE
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj1 =
-                simlin_import_xmile(data.as_ptr(), data.len(), &mut err as *mut *mut SimlinError);
+            let proj1 = simlin_project_open_xmile(
+                data.as_ptr(),
+                data.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -5344,7 +5407,7 @@ mod tests {
             let mut output: *mut u8 = std::ptr::null_mut();
             let mut output_len: usize = 0;
             err = ptr::null_mut();
-            simlin_export_xmile(
+            simlin_project_serialize_xmile(
                 proj1,
                 &mut output as *mut *mut u8,
                 &mut output_len as *mut usize,
@@ -5364,7 +5427,8 @@ mod tests {
 
             // Import the exported XMILE
             err = ptr::null_mut();
-            let proj2 = simlin_import_xmile(output, output_len, &mut err as *mut *mut SimlinError);
+            let proj2 =
+                simlin_project_open_xmile(output, output_len, &mut err as *mut *mut SimlinError);
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -5449,7 +5513,8 @@ mod tests {
         unsafe {
             // Test with null data
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_import_xmile(std::ptr::null(), 0, &mut err as *mut *mut SimlinError);
+            let proj =
+                simlin_project_open_xmile(std::ptr::null(), 0, &mut err as *mut *mut SimlinError);
             assert!(proj.is_null());
             assert!(!err.is_null(), "Expected an error but got success");
             simlin_error_free(err);
@@ -5457,7 +5522,7 @@ mod tests {
             // Test with invalid XML
             let bad_data = b"not xml at all";
             err = ptr::null_mut();
-            let proj = simlin_import_xmile(
+            let proj = simlin_project_open_xmile(
                 bad_data.as_ptr(),
                 bad_data.len(),
                 &mut err as *mut *mut SimlinError,
@@ -5470,7 +5535,7 @@ mod tests {
             #[cfg(feature = "vensim")]
             {
                 err = ptr::null_mut();
-                let proj = simlin_import_mdl(
+                let proj = simlin_project_open_vensim(
                     bad_data.as_ptr(),
                     bad_data.len(),
                     &mut err as *mut *mut SimlinError,
@@ -5488,7 +5553,7 @@ mod tests {
             let mut output: *mut u8 = std::ptr::null_mut();
             let mut output_len: usize = 0;
             let mut err: *mut SimlinError = ptr::null_mut();
-            simlin_export_xmile(
+            simlin_project_serialize_xmile(
                 std::ptr::null_mut(),
                 &mut output as *mut *mut u8,
                 &mut output_len as *mut usize,
@@ -5582,8 +5647,11 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -5721,7 +5789,7 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
             // The project should have compilation errors due to circular reference
@@ -5811,7 +5879,7 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
             // Test that there are no errors (including compilation errors)
@@ -5893,7 +5961,7 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
             let mut err_get_errors: *mut SimlinError = ptr::null_mut();
@@ -5975,8 +6043,11 @@ mod tests {
         project.encode(&mut buf).unwrap();
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -6051,8 +6122,11 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -6236,7 +6310,7 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
             let mut err_get_model: *mut SimlinError = ptr::null_mut();
@@ -6314,7 +6388,7 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
             // Create simulation with LTM enabled
@@ -6411,8 +6485,11 @@ mod tests {
         unsafe {
             // Open the project
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -6430,7 +6507,7 @@ mod tests {
             let mut output: *mut u8 = std::ptr::null_mut();
             let mut output_len: usize = 0;
             err = ptr::null_mut();
-            simlin_project_serialize(
+            simlin_project_serialize_protobuf(
                 proj,
                 &mut output as *mut *mut u8,
                 &mut output_len as *mut usize,
@@ -6441,7 +6518,7 @@ mod tests {
             assert!(output_len > 0);
 
             // Verify we can open the serialized project
-            let proj2 = simlin_project_open(output, output_len, &mut err);
+            let proj2 = simlin_project_open_protobuf(output, output_len, &mut err);
             assert!(!proj2.is_null());
             // Get models and create simulations from both projects and verify they work identically
             let mut err_get_model1: *mut SimlinError = ptr::null_mut();
@@ -6541,7 +6618,7 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
             // LTM will be enabled when creating simulation
@@ -6550,7 +6627,7 @@ mod tests {
             let mut output: *mut u8 = std::ptr::null_mut();
             let mut output_len: usize = 0;
             err = ptr::null_mut();
-            simlin_project_serialize(
+            simlin_project_serialize_protobuf(
                 proj,
                 &mut output as *mut *mut u8,
                 &mut output_len as *mut usize,
@@ -6558,7 +6635,7 @@ mod tests {
             );
             assert!(err.is_null());
             // Open the serialized project
-            let proj2 = simlin_project_open(output, output_len, &mut err);
+            let proj2 = simlin_project_open_protobuf(output, output_len, &mut err);
             assert!(!proj2.is_null());
 
             // Create sims from both
@@ -6635,7 +6712,7 @@ mod tests {
             let mut output: *mut u8 = std::ptr::null_mut();
             let mut output_len: usize = 0;
             let mut err: *mut SimlinError = ptr::null_mut();
-            simlin_project_serialize(
+            simlin_project_serialize_protobuf(
                 ptr::null_mut(),
                 &mut output as *mut *mut u8,
                 &mut output_len as *mut usize,
@@ -6673,11 +6750,11 @@ mod tests {
             project.encode(&mut buf).unwrap();
 
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
             err = ptr::null_mut();
-            simlin_project_serialize(
+            simlin_project_serialize_protobuf(
                 proj,
                 ptr::null_mut(),
                 &mut output_len as *mut usize,
@@ -6687,7 +6764,7 @@ mod tests {
             simlin_error_free(err);
             // Test with null output_len pointer
             err = ptr::null_mut();
-            simlin_project_serialize(
+            simlin_project_serialize_protobuf(
                 proj,
                 &mut output as *mut *mut u8,
                 ptr::null_mut(),
@@ -6859,8 +6936,11 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -7134,8 +7214,11 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -7207,8 +7290,11 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -7451,8 +7537,11 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -7567,8 +7656,11 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -7724,8 +7816,11 @@ mod tests {
         unsafe {
             // Open the project
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut *mut SimlinError);
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
             if !err.is_null() {
                 let code = simlin_error_get_code(err);
                 let msg_ptr = simlin_error_get_message(err);
@@ -7881,7 +7976,7 @@ mod tests {
             project.encode(&mut buf).unwrap();
 
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
             // Test with null model name
@@ -7967,7 +8062,7 @@ mod tests {
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
             let json_bytes = json_str.as_bytes();
-            let proj = simlin_project_json_open(
+            let proj = simlin_project_open_json(
                 json_bytes.as_ptr(),
                 json_bytes.len(),
                 ffi::SimlinJsonFormat::Native,
@@ -8013,7 +8108,7 @@ mod tests {
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
             let invalid_json = b"not valid json {";
-            let proj = simlin_project_json_open(
+            let proj = simlin_project_open_json(
                 invalid_json.as_ptr(),
                 invalid_json.len(),
                 ffi::SimlinJsonFormat::Native,
@@ -8030,7 +8125,7 @@ mod tests {
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
             let proj =
-                simlin_project_json_open(ptr::null(), 0, ffi::SimlinJsonFormat::Native, &mut err);
+                simlin_project_open_json(ptr::null(), 0, ffi::SimlinJsonFormat::Native, &mut err);
 
             assert!(proj.is_null());
             // assert_eq!(err, engine::ErrorCode::Generic as c_int);  // Obsolete assertion from old API
@@ -8043,7 +8138,7 @@ mod tests {
 
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_json_open(
+            let proj = simlin_project_open_json(
                 json_bytes.as_ptr(),
                 json_bytes.len(),
                 ffi::SimlinJsonFormat::Native,
@@ -8097,7 +8192,7 @@ mod tests {
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
             let json_bytes = json_str.as_bytes();
-            let proj = simlin_project_json_open(
+            let proj = simlin_project_open_json(
                 json_bytes.as_ptr(),
                 json_bytes.len(),
                 ffi::SimlinJsonFormat::Sdai,
@@ -8156,7 +8251,7 @@ mod tests {
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
             let json_bytes = invalid_sdai.as_bytes();
-            let proj = simlin_project_json_open(
+            let proj = simlin_project_open_json(
                 json_bytes.as_ptr(),
                 json_bytes.len(),
                 ffi::SimlinJsonFormat::Sdai,
@@ -8182,7 +8277,7 @@ mod tests {
             let encoded = pb_project.encode_to_vec();
 
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_open(
+            let proj = simlin_project_open_protobuf(
                 encoded.as_ptr(),
                 encoded.len(),
                 &mut err as *mut *mut SimlinError,
@@ -8240,7 +8335,7 @@ mod tests {
             let encoded = pb_project.encode_to_vec();
 
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_open(
+            let proj = simlin_project_open_protobuf(
                 encoded.as_ptr(),
                 encoded.len(),
                 &mut err as *mut *mut SimlinError,
@@ -8326,7 +8421,7 @@ mod tests {
             let encoded = pb_project.encode_to_vec();
 
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_open(
+            let proj = simlin_project_open_protobuf(
                 encoded.as_ptr(),
                 encoded.len(),
                 &mut err as *mut *mut SimlinError,
@@ -8411,7 +8506,7 @@ mod tests {
             let encoded = pb_project.encode_to_vec();
 
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj = simlin_project_open(
+            let proj = simlin_project_open_protobuf(
                 encoded.as_ptr(),
                 encoded.len(),
                 &mut err as *mut *mut SimlinError,

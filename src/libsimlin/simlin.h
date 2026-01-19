@@ -62,18 +62,6 @@ typedef enum {
   SIMLIN_ERROR_KIND_SIMULATION = 4,
 } SimlinErrorKind;
 
-// Unit error kind for distinguishing types of unit-related errors.
-typedef enum {
-  // Not a unit error
-  SIMLIN_UNIT_ERROR_KIND_NOT_APPLICABLE = 0,
-  // Syntax error in unit string definition
-  SIMLIN_UNIT_ERROR_KIND_DEFINITION = 1,
-  // Dimensional analysis mismatch
-  SIMLIN_UNIT_ERROR_KIND_CONSISTENCY = 2,
-  // Inference error spanning multiple variables
-  SIMLIN_UNIT_ERROR_KIND_INFERENCE = 3,
-} SimlinUnitErrorKind;
-
 // JSON format specifier for C API
 typedef enum {
   SIMLIN_JSON_FORMAT_NATIVE = 0,
@@ -92,6 +80,18 @@ typedef enum {
   SIMLIN_LOOP_POLARITY_REINFORCING = 0,
   SIMLIN_LOOP_POLARITY_BALANCING = 1,
 } SimlinLoopPolarity;
+
+// Unit error kind for distinguishing types of unit-related errors.
+typedef enum {
+  // Not a unit error
+  SIMLIN_UNIT_ERROR_KIND_NOT_APPLICABLE = 0,
+  // Syntax error in unit string definition
+  SIMLIN_UNIT_ERROR_KIND_DEFINITION = 1,
+  // Dimensional analysis mismatch
+  SIMLIN_UNIT_ERROR_KIND_CONSISTENCY = 2,
+  // Inference error spanning multiple variables
+  SIMLIN_UNIT_ERROR_KIND_INFERENCE = 3,
+} SimlinUnitErrorKind;
 
 // Opaque error structure returned by the API
 typedef struct {
@@ -196,31 +196,49 @@ const SimlinErrorDetail *simlin_error_get_details(const SimlinError *err);
 // The returned detail pointer is valid only as long as the error object is not freed.
 const SimlinErrorDetail *simlin_error_get_detail(const SimlinError *err, uintptr_t index);
 
-// simlin_project_open opens a project from protobuf data.
+// Open a project from binary protobuf data
+//
+// Deserializes a project from Simlin's native protobuf format. This is the
+// recommended format for loading previously saved projects, as it preserves
+// all project data with perfect fidelity.
+//
 // Returns NULL and populates `out_error` on failure.
 //
 // # Safety
 // - `data` must be a valid pointer to at least `len` bytes
 // - `out_error` may be null
-SimlinProject *simlin_project_open(const uint8_t *data, uintptr_t len, SimlinError **out_error);
+// - The returned project must be freed with `simlin_project_unref`
+SimlinProject *simlin_project_open_protobuf(const uint8_t *data,
+                                            uintptr_t len,
+                                            SimlinError **out_error);
 
-// simlin_project_json_open opens a project from JSON data.
+// Open a project from JSON data
+//
+// Deserializes a project from JSON format. Supports two formats:
+// - `SimlinJsonFormat::Native`: Simlin's native JSON representation
+// - `SimlinJsonFormat::Sdai`: System Dynamics AI (SDAI) interchange format
+//
+// Returns NULL and populates `out_error` on failure.
 //
 // # Safety
 // - `data` must be a valid pointer to at least `len` bytes of UTF-8 JSON
 // - `out_error` may be null
-SimlinProject *simlin_project_json_open(const uint8_t *data,
+// - The returned project must be freed with `simlin_project_unref`
+SimlinProject *simlin_project_open_json(const uint8_t *data,
                                         uintptr_t len,
                                         SimlinJsonFormat format,
                                         SimlinError **out_error);
 
-// Increments the reference count of a project
+// Increment the reference count of a project
+//
+// Call this when you want to share a project handle with another component
+// that will independently manage its lifetime.
 //
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
 void simlin_project_ref(SimlinProject *project);
 
-// Decrements the reference count and frees the project if it reaches zero
+// Decrement the reference count and free the project if it reaches zero
 //
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
@@ -520,48 +538,71 @@ uint8_t *simlin_malloc(uintptr_t size);
 // - The pointer must not be used after calling this function
 void simlin_free(uint8_t *ptr);
 
-// simlin_import_xmile opens a project from XMILE/STMX format data.
+// Open a project from XMILE/STMX format data
+//
+// Parses and imports a system dynamics model from XMILE format, the industry
+// standard interchange format for system dynamics models. Also supports the
+// STMX variant used by Stella.
+//
+// Returns NULL and populates `out_error` on failure.
 //
 // # Safety
 // - `data` must be a valid pointer to at least `len` bytes
 // - `out_error` may be null
-SimlinProject *simlin_import_xmile(const uint8_t *data, uintptr_t len, SimlinError **out_error);
+// - The returned project must be freed with `simlin_project_unref`
+SimlinProject *simlin_project_open_xmile(const uint8_t *data,
+                                         uintptr_t len,
+                                         SimlinError **out_error);
 
-// simlin_import_mdl opens a project from Vensim MDL format data.
+// Open a project from Vensim MDL format data
+//
+// Parses and imports a system dynamics model from Vensim's MDL format.
+// Requires the "vensim" feature to be enabled at compile time.
+//
+// Returns NULL and populates `out_error` on failure.
 //
 // # Safety
 // - `data` must be a valid pointer to at least `len` bytes
 // - `out_error` may be null
-SimlinProject *simlin_import_mdl(const uint8_t *data, uintptr_t len, SimlinError **out_error);
+// - The returned project must be freed with `simlin_project_unref`
+SimlinProject *simlin_project_open_vensim(const uint8_t *data,
+                                          uintptr_t len,
+                                          SimlinError **out_error);
 
-// simlin_export_xmile exports a project to XMILE format.
-// Returns 0 on success, error code on failure.
-// Caller must free output with simlin_free().
+// Serialize a project to XMILE format
+//
+// Exports a project to XMILE format, the industry standard interchange format
+// for system dynamics models. The output buffer contains the XML document as
+// UTF-8 encoded bytes.
+//
+// Caller must free output with `simlin_free`.
 //
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
-// - `output` and `output_len` must be valid pointers
-void simlin_export_xmile(SimlinProject *project,
-                         uint8_t **out_buffer,
-                         uintptr_t *out_len,
-                         SimlinError **out_error);
+// - `out_buffer` and `out_len` must be valid pointers
+// - `out_error` may be null
+void simlin_project_serialize_xmile(SimlinProject *project,
+                                    uint8_t **out_buffer,
+                                    uintptr_t *out_len,
+                                    SimlinError **out_error);
 
-// Serializes a project to binary protobuf format
+// Serialize a project to binary protobuf format
 //
-// Returns the project's datamodel serialized as protobuf bytes.
-// This is the native format expected by simlin_project_open.
-// Useful for saving projects or transferring them between systems.
+// Serializes the project's datamodel to Simlin's native protobuf format.
+// This is the recommended format for saving and restoring projects, as it
+// preserves all project data with perfect fidelity. The serialized bytes
+// can be loaded later with `simlin_project_open_protobuf`.
 //
-// Returns 0 on success, error code on failure.
-// Caller must free output with simlin_free().
+// Caller must free output with `simlin_free`.
 //
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
-// - `output` and `output_len` must be valid pointers
-void simlin_project_serialize(SimlinProject *project,
-                              uint8_t **out_buffer,
-                              uintptr_t *out_len,
-                              SimlinError **out_error);
+// - `out_buffer` and `out_len` must be valid pointers
+// - `out_error` may be null
+void simlin_project_serialize_protobuf(SimlinProject *project,
+                                       uint8_t **out_buffer,
+                                       uintptr_t *out_len,
+                                       SimlinError **out_error);
 
 // Serializes a project to JSON format.
 //

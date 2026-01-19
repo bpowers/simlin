@@ -283,7 +283,7 @@ class Project:
         output_len_ptr = ffi.new("uintptr_t *")
         err_ptr = ffi.new("SimlinError **")
 
-        lib.simlin_export_xmile(self._ptr, output_ptr, output_len_ptr, err_ptr)
+        lib.simlin_project_serialize_xmile(self._ptr, output_ptr, output_len_ptr, err_ptr)
         check_out_error(err_ptr, "Export to XMILE")
 
         if output_ptr[0] == ffi.NULL:
@@ -406,7 +406,7 @@ class Project:
         output_len_ptr = ffi.new("uintptr_t *")
         err_ptr = ffi.new("SimlinError **")
 
-        lib.simlin_project_serialize(self._ptr, output_ptr, output_len_ptr, err_ptr)
+        lib.simlin_project_serialize_protobuf(self._ptr, output_ptr, output_len_ptr, err_ptr)
         check_out_error(err_ptr, "Project serialization")
 
         if output_ptr[0] == ffi.NULL:

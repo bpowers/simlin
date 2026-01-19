@@ -32,9 +32,9 @@ import {
  * @returns Project pointer
  * @throws SimlinError on failure
  */
-export function simlin_project_open(data: Uint8Array): SimlinProjectPtr {
+export function simlin_project_open_protobuf(data: Uint8Array): SimlinProjectPtr {
   const exports = getExports();
-  const fn = exports.simlin_project_open as (ptr: number, len: number, outErr: number) => number;
+  const fn = exports.simlin_project_open_protobuf as (ptr: number, len: number, outErr: number) => number;
 
   const dataPtr = copyToWasm(data);
   const outErrPtr = allocOutPtr();
@@ -65,9 +65,9 @@ export function simlin_project_open(data: Uint8Array): SimlinProjectPtr {
  * @returns Project pointer
  * @throws SimlinError on failure
  */
-export function simlin_project_json_open(data: Uint8Array, format: SimlinJsonFormat): SimlinProjectPtr {
+export function simlin_project_open_json(data: Uint8Array, format: SimlinJsonFormat): SimlinProjectPtr {
   const exports = getExports();
-  const fn = exports.simlin_project_json_open as (ptr: number, len: number, fmt: number, outErr: number) => number;
+  const fn = exports.simlin_project_open_json as (ptr: number, len: number, fmt: number, outErr: number) => number;
 
   const dataPtr = copyToWasm(data);
   const outErrPtr = allocOutPtr();
@@ -237,9 +237,14 @@ export function simlin_project_get_model(project: SimlinProjectPtr, modelName: s
  * @param project Project pointer
  * @returns Protobuf-encoded project data
  */
-export function simlin_project_serialize(project: SimlinProjectPtr): Uint8Array {
+export function simlin_project_serialize_protobuf(project: SimlinProjectPtr): Uint8Array {
   const exports = getExports();
-  const fn = exports.simlin_project_serialize as (proj: number, outBuf: number, outLen: number, outErr: number) => void;
+  const fn = exports.simlin_project_serialize_protobuf as (
+    proj: number,
+    outBuf: number,
+    outLen: number,
+    outErr: number,
+  ) => void;
 
   const outBufPtr = allocOutPtr();
   const outLenPtr = allocOutUsize();

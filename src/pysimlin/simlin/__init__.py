@@ -80,25 +80,25 @@ def load(path: Union[str, Path]) -> Model:
     err_ptr = ffi.new("SimlinError **")
 
     if suffix in (".xmile", ".stmx", ".xml"):
-        project_ptr = lib.simlin_import_xmile(c_data, len(data), err_ptr)
+        project_ptr = lib.simlin_project_open_xmile(c_data, len(data), err_ptr)
     elif suffix in (".mdl", ".vpm"):
-        project_ptr = lib.simlin_import_mdl(c_data, len(data), err_ptr)
+        project_ptr = lib.simlin_project_open_vensim(c_data, len(data), err_ptr)
     elif suffix in (".pb", ".bin", ".proto"):
-        project_ptr = lib.simlin_project_open(c_data, len(data), err_ptr)
+        project_ptr = lib.simlin_project_open_protobuf(c_data, len(data), err_ptr)
     elif suffix == ".json":
         # Default to simlin JSON format
         c_format = lib.SIMLIN_JSON_FORMAT_NATIVE
-        project_ptr = lib.simlin_project_json_open(c_data, len(data), c_format, err_ptr)
+        project_ptr = lib.simlin_project_open_json(c_data, len(data), c_format, err_ptr)
     else:
         # Try to auto-detect based on content
         if data.startswith(b"<?xml") or data.startswith(b"<xmile"):
-            project_ptr = lib.simlin_import_xmile(c_data, len(data), err_ptr)
+            project_ptr = lib.simlin_project_open_xmile(c_data, len(data), err_ptr)
         elif data.startswith(b"{"):
             c_format = lib.SIMLIN_JSON_FORMAT_NATIVE
-            project_ptr = lib.simlin_project_json_open(c_data, len(data), c_format, err_ptr)
+            project_ptr = lib.simlin_project_open_json(c_data, len(data), c_format, err_ptr)
         else:
             # Default to protobuf
-            project_ptr = lib.simlin_project_open(c_data, len(data), err_ptr)
+            project_ptr = lib.simlin_project_open_protobuf(c_data, len(data), err_ptr)
 
     check_out_error(err_ptr, f"Load model from {path}")
 

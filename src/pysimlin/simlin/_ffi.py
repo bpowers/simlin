@@ -238,7 +238,7 @@ def open_json(json_data: bytes) -> Any:
     err_ptr = ffi.new("SimlinError **")
 
     # SIMLIN_JSON_FORMAT_NATIVE = 0
-    project_ptr = lib.simlin_project_json_open(c_data, len(json_data), 0, err_ptr)
+    project_ptr = lib.simlin_project_open_json(c_data, len(json_data), 0, err_ptr)
     check_out_error(err_ptr, "Open JSON project")
 
     return project_ptr
