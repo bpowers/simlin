@@ -47,7 +47,13 @@ The C API exposes approximately 25 functions with the `simlin_` prefix, see [sim
 Some major components are: 
 
 ### Project Operations
-- `simlin_project_open`: Load a project from protobuf bytes
+- `simlin_project_open_protobuf`: Load a project from protobuf bytes
+- `simlin_project_open_json`: Load a project from JSON
+- `simlin_project_open_xmile`: Load a project from XMILE/STMX
+- `simlin_project_open_vensim`: Load a project from Vensim MDL (feature-gated)
+- `simlin_project_serialize_protobuf`: Serialize a project to protobuf bytes
+- `simlin_project_serialize_json`: Serialize a project to JSON
+- `simlin_project_serialize_xmile`: Serialize a project to XMILE/STMX
 - `simlin_project_ref/unref`: Reference counting
 - `simlin_project_enable_ltm`: Enable Loop Thinking Method analysis
 
