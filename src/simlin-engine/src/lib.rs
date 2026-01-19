@@ -31,6 +31,7 @@ mod variable;
 mod stdlib {
     include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));
 }
+#[cfg(feature = "ai_info")]
 pub mod ai_info;
 #[cfg(test)]
 mod array_tests;

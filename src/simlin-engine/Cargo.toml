@@ -10,8 +10,9 @@ build = "build.rs"
 crate-type = ["rlib"]
 
 [features]
-default = ["schema"]
+default = ["schema", "ai_info"]
 schema = ["dep:schemars"]
+ai_info = ["dep:ed25519", "dep:base64"]
 
 [dependencies]
 lazy_static = "1"
@@ -23,8 +24,8 @@ float-cmp = "0.10"
 ordered-float = "5"
 smallvec = { version = "1", features = [ "union" ] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
-ed25519 = "2"
-base64 = "0.22"
+ed25519 = { version = "2", optional = true }
+base64 = { version = "0.22", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = { version = "1", features = ["preserve_order"], optional = true }
