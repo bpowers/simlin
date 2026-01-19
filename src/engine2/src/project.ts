@@ -275,13 +275,18 @@ export class Project {
     if (loopsPtr === 0) {
       return [];
     }
-    const rawLoops = readLoops(loopsPtr);
-    simlin_free_loops(loopsPtr);
-    return rawLoops.map((loop) => ({
-      id: loop.id,
-      variables: loop.variables,
-      polarity: loop.polarity as unknown as LoopPolarity,
-    }));
+    let loops: Loop[] = [];
+    try {
+      const rawLoops = readLoops(loopsPtr);
+      loops = rawLoops.map((loop) => ({
+        id: loop.id,
+        variables: loop.variables,
+        polarity: loop.polarity as unknown as LoopPolarity,
+      }));
+    } finally {
+      simlin_free_loops(loopsPtr);
+    }
+    return loops;
   }
 
   /**

@@ -210,15 +210,20 @@ export class Sim {
       return [];
     }
 
-    const rawLinks = readLinks(linksPtr);
-    simlin_free_links(linksPtr);
+    let links: Link[] = [];
+    try {
+      const rawLinks = readLinks(linksPtr);
+      links = rawLinks.map((link: LowLevelLink) => ({
+        from: link.from,
+        to: link.to,
+        polarity: convertLinkPolarity(link.polarity),
+        score: link.score || undefined,
+      }));
+    } finally {
+      simlin_free_links(linksPtr);
+    }
 
-    return rawLinks.map((link: LowLevelLink) => ({
-      from: link.from,
-      to: link.to,
-      polarity: convertLinkPolarity(link.polarity),
-      score: link.score || undefined,
-    }));
+    return links;
   }
 
   /**
