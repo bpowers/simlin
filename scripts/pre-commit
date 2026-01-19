@@ -91,24 +91,33 @@ else
         exit 1
     fi
 
-    # Run engine2 tests if WASM is built
-    ENGINE2_WASM="$REPO_ROOT/src/engine2/core/libsimlin.wasm"
-    if [ -f "$ENGINE2_WASM" ]; then
-        echo -n "Running engine2 tests... "
-        ENGINE2_OUTPUT="$(mktemp)"
-        if yarn workspace @system-dynamics/engine2 test > "$ENGINE2_OUTPUT" 2>&1; then
-            echo -e "${GREEN}✓${NC}"
-            rm -f "$ENGINE2_OUTPUT"
-        else
-            echo -e "${RED}✗${NC}"
-            echo -e "${RED}engine2 tests failed:${NC}"
-            cat "$ENGINE2_OUTPUT"
-            rm -f "$ENGINE2_OUTPUT"
-            echo -e "${YELLOW}Run 'yarn workspace @system-dynamics/engine2 test' to see failures${NC}"
-            exit 1
-        fi
+    # Build WASM and run engine2 tests
+    echo -n "Building WASM module... "
+    BUILD_OUTPUT="$(mktemp)"
+    if yarn build > "$BUILD_OUTPUT" 2>&1; then
+        echo -e "${GREEN}✓${NC}"
+        rm -f "$BUILD_OUTPUT"
     else
-        echo -e "${YELLOW}Skipping engine2 tests (WASM not built). Run 'yarn build' to enable.${NC}"
+        echo -e "${RED}✗${NC}"
+        echo -e "${RED}WASM build failed:${NC}"
+        cat "$BUILD_OUTPUT"
+        rm -f "$BUILD_OUTPUT"
+        echo -e "${YELLOW}Run 'yarn build' to see errors${NC}"
+        exit 1
+    fi
+
+    echo -n "Running engine2 tests... "
+    ENGINE2_OUTPUT="$(mktemp)"
+    if yarn workspace @system-dynamics/engine2 test > "$ENGINE2_OUTPUT" 2>&1; then
+        echo -e "${GREEN}✓${NC}"
+        rm -f "$ENGINE2_OUTPUT"
+    else
+        echo -e "${RED}✗${NC}"
+        echo -e "${RED}engine2 tests failed:${NC}"
+        cat "$ENGINE2_OUTPUT"
+        rm -f "$ENGINE2_OUTPUT"
+        echo -e "${YELLOW}Run 'yarn workspace @system-dynamics/engine2 test' to see failures${NC}"
+        exit 1
     fi
 fi
 

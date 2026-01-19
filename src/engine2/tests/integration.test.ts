@@ -16,7 +16,7 @@ import {
   simlin_project_apply_patch,
 } from '../src/internal/project';
 import { simlin_model_unref, simlin_model_get_latex_equation, simlin_model_get_var_names } from '../src/internal/model';
-import { simlin_import_xmile } from '../src/internal/import-export';
+import { simlin_project_open_xmile } from '../src/internal/import-export';
 
 // Load the teacup test model in XMILE format from pysimlin fixtures.
 function loadTestXmile(): Uint8Array {
@@ -69,9 +69,9 @@ describe('WASM Integration Tests', () => {
       expect(typeof exports.simlin_malloc).toBe('function');
       expect(typeof exports.simlin_free).toBe('function');
       expect(typeof exports.simlin_free_string).toBe('function');
-      expect(typeof exports.simlin_project_open).toBe('function');
+      expect(typeof exports.simlin_project_open_protobuf).toBe('function');
       expect(typeof exports.simlin_project_unref).toBe('function');
-      expect(typeof exports.simlin_project_serialize).toBe('function');
+      expect(typeof exports.simlin_project_serialize_protobuf).toBe('function');
       expect(typeof exports.simlin_sim_new).toBe('function');
       expect(typeof exports.simlin_sim_run_to_end).toBe('function');
       expect(typeof exports.simlin_error_str).toBe('function');
@@ -197,7 +197,7 @@ describe('WASM Integration Tests', () => {
 
       const malloc_fn = instance.exports.simlin_malloc as (size: number) => number;
       const free_fn = instance.exports.simlin_free as (ptr: number) => void;
-      const import_xmile_fn = instance.exports.simlin_import_xmile as (
+      const import_xmile_fn = instance.exports.simlin_project_open_xmile as (
         ptr: number,
         len: number,
         outErr: number,
@@ -313,7 +313,7 @@ describe('WASM Integration Tests', () => {
 
       const malloc_fn = instance.exports.simlin_malloc as (size: number) => number;
       const free_fn = instance.exports.simlin_free as (ptr: number) => void;
-      const import_xmile_fn = instance.exports.simlin_import_xmile as (
+      const import_xmile_fn = instance.exports.simlin_project_open_xmile as (
         ptr: number,
         len: number,
         outErr: number,
@@ -364,17 +364,17 @@ describe('WASM Integration Tests', () => {
 
       const malloc_fn = instance.exports.simlin_malloc as (size: number) => number;
       const free_fn = instance.exports.simlin_free as (ptr: number) => void;
-      const import_xmile_fn = instance.exports.simlin_import_xmile as (
+      const import_xmile_fn = instance.exports.simlin_project_open_xmile as (
         ptr: number,
         len: number,
         outErr: number,
       ) => number;
-      const project_open_fn = instance.exports.simlin_project_open as (
+      const project_open_fn = instance.exports.simlin_project_open_protobuf as (
         ptr: number,
         len: number,
         outErr: number,
       ) => number;
-      const project_serialize_fn = instance.exports.simlin_project_serialize as (
+      const project_serialize_fn = instance.exports.simlin_project_serialize_protobuf as (
         proj: number,
         outBuf: number,
         outLen: number,
@@ -453,7 +453,7 @@ describe('WASM Integration Tests', () => {
       const invalidXmile = new TextEncoder().encode('<?xml version="1.0"?><xmile><invalid_model/></xmile>');
 
       try {
-        simlin_import_xmile(new Uint8Array(invalidXmile));
+        simlin_project_open_xmile(new Uint8Array(invalidXmile));
         // If no error was thrown, the import succeeded (unlikely with invalid data)
       } catch (e) {
         if (e instanceof SimlinError) {
@@ -533,7 +533,7 @@ describe('WASM Integration Tests', () => {
       const xmileData = loadTestXmile();
 
       // Import XMILE using our wrapper
-      const project = simlin_import_xmile(xmileData);
+      const project = simlin_project_open_xmile(xmileData);
       expect(project).toBeGreaterThan(0);
 
       // Get model using our wrapper
@@ -557,7 +557,7 @@ describe('WASM Integration Tests', () => {
       const xmileData = loadTestXmile();
 
       // Import XMILE
-      const project = simlin_import_xmile(xmileData);
+      const project = simlin_project_open_xmile(xmileData);
       expect(project).toBeGreaterThan(0);
 
       // Get model
@@ -579,7 +579,7 @@ describe('WASM Integration Tests', () => {
       const xmileData = loadTestXmile();
 
       // Import XMILE
-      const project = simlin_import_xmile(xmileData);
+      const project = simlin_project_open_xmile(xmileData);
       expect(project).toBeGreaterThan(0);
 
       // Get model
@@ -699,7 +699,7 @@ describe('WASM Integration Tests', () => {
 
     it('should return 0 for a valid project with no errors', () => {
       const xmileData = loadTestXmile();
-      const project = simlin_import_xmile(xmileData);
+      const project = simlin_project_open_xmile(xmileData);
       expect(project).toBeGreaterThan(0);
 
       // The teacup model is valid, so it should have no errors
@@ -743,7 +743,7 @@ describe('WASM Integration Tests', () => {
 
     it('should apply a valid JSON patch successfully', () => {
       const xmileData = loadTestXmile();
-      const project = simlin_import_xmile(xmileData);
+      const project = simlin_project_open_xmile(xmileData);
       expect(project).toBeGreaterThan(0);
 
       // An empty JSON patch is valid and does nothing

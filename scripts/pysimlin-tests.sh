@@ -13,6 +13,16 @@ fi
 echo "Building libsimlin (release)..."
 cargo build --release --manifest-path src/libsimlin/Cargo.toml
 
+echo "Cleaning stale pysimlin build artifacts..."
+cd src/pysimlin
+# Remove any cached cffi extension modules to ensure they're rebuilt with new declarations
+rm -f simlin/_clib*.so
+rm -rf build/
+# Clear Python bytecode caches
+find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+find . -type f -name "*.pyc" -delete 2>/dev/null || true
+cd "$REPO_ROOT"
+
 echo "Installing pysimlin with dev dependencies..."
 cd src/pysimlin
 uv sync --extra dev
