@@ -23,7 +23,6 @@ prost = "0.14"
 float-cmp = "0.10"
 ordered-float = "5"
 smallvec = { version = "1", features = [ "union" ] }
-getrandom = { version = "0.3", features = ["wasm_js"] }
 ed25519 = { version = "2", optional = true }
 base64 = { version = "0.22", optional = true }
 serde = { version = "1", features = ["derive"] }

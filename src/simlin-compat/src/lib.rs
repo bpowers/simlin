@@ -2,15 +2,25 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
-use std::error::Error;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::result::Result as StdResult;
+use std::io::BufRead;
+#[cfg(any(feature = "file_io", feature = "vensim"))]
+use std::io::BufReader;
 
-use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::datamodel::Project;
 pub use simlin_engine::{self as engine, Result, Results, prost};
+
+#[cfg(feature = "file_io")]
+use std::collections::HashMap;
+#[cfg(feature = "file_io")]
+use std::error::Error;
+#[cfg(feature = "file_io")]
+use std::fs::File;
+#[cfg(feature = "file_io")]
+use std::result::Result as StdResult;
+
+#[cfg(feature = "file_io")]
+use simlin_engine::common::{Canonical, Ident};
+#[cfg(feature = "file_io")]
 use simlin_engine::{Method, SimSpecs, canonicalize};
 
 pub mod xmile;
@@ -58,6 +68,7 @@ pub fn open_xmile(reader: &mut dyn BufRead) -> Result<Project> {
     xmile::project_from_reader(reader)
 }
 
+#[cfg(feature = "file_io")]
 pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
     use float_cmp::approx_eq;
 
@@ -162,6 +173,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
     })
 }
 
+#[cfg(feature = "file_io")]
 pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Error>> {
     let mut rdr = csv::ReaderBuilder::new()
         .delimiter(delimiter)

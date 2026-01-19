@@ -9,10 +9,12 @@ edition = "2024"
 crate-type = ["rlib"]
 
 [features]
+default = ["file_io"]
 vensim = ["xmutil"]
+file_io = ["dep:csv"]
 
 [dependencies]
-csv = "1"
+csv = { version = "1", optional = true }
 float-cmp = "0.10"
 quick-xml = { version = "0.38", features = [ "serialize", "overlapped-lists" ] }
 serde = { version = "1", features = [ "derive" ] }
