@@ -140,8 +140,12 @@ jobs:
             exit 1
           fi
 
-          echo "Installing wheel with test dependencies: $WHEEL"
-          uv pip install --system "$WHEEL[test]"
+          echo "Installing wheel: $WHEEL"
+          uv pip install --system "$WHEEL"
+
+          # Install test dependencies explicitly (extras don't work reliably with local wheel paths)
+          echo "Installing test dependencies..."
+          uv pip install --system "pytest>=7.0.0" "pytest-cov>=4.0.0" "hypothesis>=6.100.0" "jsonschema>=4.20.0"
 
           # Debug: Check if the module was installed correctly
           echo "Checking installed package..."
