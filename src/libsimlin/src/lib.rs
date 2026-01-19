@@ -302,33 +302,33 @@ macro_rules! ffi_try {
     };
 }
 
-unsafe fn require_project<'a>(project: *mut SimlinProject) -> Result<&'a mut SimlinProject> {
+unsafe fn require_project<'a>(project: *mut SimlinProject) -> Result<&'a SimlinProject> {
     if project.is_null() {
         Err(FfiError::new(SimlinErrorCode::Generic)
             .with_message("project pointer must not be NULL")
             .into())
     } else {
-        Ok(&mut *project)
+        Ok(&*project)
     }
 }
 
-unsafe fn require_model<'a>(model: *mut SimlinModel) -> Result<&'a mut SimlinModel> {
+unsafe fn require_model<'a>(model: *mut SimlinModel) -> Result<&'a SimlinModel> {
     if model.is_null() {
         Err(FfiError::new(SimlinErrorCode::Generic)
             .with_message("model pointer must not be NULL")
             .into())
     } else {
-        Ok(&mut *model)
+        Ok(&*model)
     }
 }
 
-unsafe fn require_sim<'a>(sim: *mut SimlinSim) -> Result<&'a mut SimlinSim> {
+unsafe fn require_sim<'a>(sim: *mut SimlinSim) -> Result<&'a SimlinSim> {
     if sim.is_null() {
         Err(FfiError::new(SimlinErrorCode::Generic)
             .with_message("simulation pointer must not be NULL")
             .into())
     } else {
-        Ok(&mut *sim)
+        Ok(&*sim)
     }
 }
 
@@ -2688,7 +2688,7 @@ pub unsafe extern "C" fn simlin_project_serialize_protobuf(
 /// It handles datamodel cloning, patch application, error gathering, validation, and
 /// committing changes (unless dry_run is true).
 unsafe fn apply_project_patch_internal(
-    project_ref: &mut SimlinProject,
+    project_ref: &SimlinProject,
     patch: engine::project_io::ProjectPatch,
     dry_run: bool,
     allow_errors: bool,
