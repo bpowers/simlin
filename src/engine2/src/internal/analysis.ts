@@ -171,6 +171,14 @@ const LOOP_SIZE = 16;
 const LINK_SIZE = 20;
 // Pointer size for wasm32
 const PTR_SIZE = 4;
+let structSizesValidated = false;
+
+function ensureStructSizesValidated(): void {
+  if (!structSizesValidated) {
+    validateStructSizes();
+    structSizesValidated = true;
+  }
+}
 
 /**
  * Validate struct sizes match expected wasm32 layout.
@@ -202,6 +210,7 @@ export function validateStructSizes(): void {
  */
 export function readLoops(loopsPtr: SimlinLoopsPtr): Loop[] {
   if (loopsPtr === 0) return [];
+  ensureStructSizesValidated();
 
   const memory = getMemory();
   const view = new DataView(memory.buffer);
@@ -241,6 +250,7 @@ export function readLoops(loopsPtr: SimlinLoopsPtr): Loop[] {
  */
 export function readLinks(linksPtr: SimlinLinksPtr): Link[] {
   if (linksPtr === 0) return [];
+  ensureStructSizesValidated();
 
   const memory = getMemory();
   const view = new DataView(memory.buffer);

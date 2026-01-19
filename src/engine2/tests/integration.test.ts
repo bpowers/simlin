@@ -9,6 +9,7 @@ import { init, reset, getMemory, isUrl, isNode } from '@system-dynamics/engine2/
 import { malloc, free } from '../src/internal/memory';
 import { SimlinError, readErrorDetail } from '../src/internal/error';
 import { SimlinErrorCode, SimlinJsonFormat } from '../src/internal/types';
+import { validateStructSizes } from '../src/internal/analysis';
 import {
   simlin_project_unref,
   simlin_project_get_model,
@@ -517,6 +518,12 @@ describe('WASM Integration Tests', () => {
       expect(detail.unitErrorKind).toBe(1);
 
       free(structPtr);
+    });
+  });
+
+  describe('Analysis Struct Layout', () => {
+    it('should validate loop and link struct sizes', () => {
+      expect(() => validateStructSizes()).not.toThrow();
     });
   });
 

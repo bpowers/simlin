@@ -682,24 +682,28 @@ bool simlin_project_is_simulatable(SimlinProject *project,
 // static errors (equation parsing, unit checking, etc.) and also attempts to
 // compile the "main" model to find any compilation-time errors.
 //
-// The caller must free the returned error details using `simlin_free_error_details`.
+// The caller must free the returned error object using `simlin_error_free`.
 //
 // # Example Usage (C)
 // ```c
-// SimlinErrorDetails* errors = simlin_project_get_errors(project);
+// SimlinError* errors = simlin_project_get_errors(project, NULL);
 // if (errors != NULL) {
-//     for (size_t i = 0; i < errors->count; i++) {
-//         SimlinErrorDetail* error = &errors->errors[i];
-//         printf("Error %d", error->code);
-//         if (error->modelName != NULL) {
-//             printf(" in model %s", error->modelName);
+//     uintptr_t count = simlin_error_get_detail_count(errors);
+//     for (uintptr_t i = 0; i < count; i++) {
+//         const SimlinErrorDetail* detail = simlin_error_get_detail(errors, i);
+//         if (detail == NULL) {
+//             continue;
 //         }
-//         if (error->variable_name != NULL) {
-//             printf(" for variable %s", error->variable_name);
+//         printf("Error %d", detail->code);
+//         if (detail->model_name != NULL) {
+//             printf(" in model %s", detail->model_name);
+//         }
+//         if (detail->variable_name != NULL) {
+//             printf(" for variable %s", detail->variable_name);
 //         }
 //         printf("\n");
 //     }
-//     simlin_free_error_details(errors);
+//     simlin_error_free(errors);
 // } else {
 //     // Project has no errors and is ready to simulate
 // }
@@ -707,7 +711,7 @@ bool simlin_project_is_simulatable(SimlinProject *project,
 //
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
-// - The returned pointer must be freed with `simlin_free_error_details`
+// - The returned pointer must be freed with `simlin_error_free`
 SimlinError *simlin_project_get_errors(SimlinProject *project, SimlinError **out_error);
 
 #ifdef __cplusplus

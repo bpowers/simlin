@@ -11,7 +11,6 @@
  */
 
 import {
-  simlin_model_ref,
   simlin_model_unref,
   simlin_model_get_incoming_links,
   simlin_model_get_links,
@@ -104,8 +103,6 @@ export class Model {
     this._project = project;
     this._name = name;
 
-    // Increment reference count since we're holding a reference
-    simlin_model_ref(ptr);
     registerFinalizer(this, ptr, simlin_model_unref);
   }
 

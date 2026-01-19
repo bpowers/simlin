@@ -10,6 +10,7 @@ use simlin_engine::{self as engine, canonicalize, serde as engine_serde, Vm};
 use std::alloc::{alloc, dealloc, Layout};
 use std::ffi::{CStr, CString};
 use std::io::BufReader;
+use std::mem::{align_of, size_of};
 use std::os::raw::{c_char, c_double};
 use std::ptr;
 use std::str::FromStr;
@@ -234,6 +235,53 @@ fn error_from_anyhow(err: AnyError) -> SimlinError {
 
 fn store_anyhow_error(out_error: *mut *mut SimlinError, err: AnyError) {
     store_error(out_error, error_from_anyhow(err));
+}
+
+unsafe fn drop_c_string(ptr: *mut c_char) {
+    if !ptr.is_null() {
+        let _ = CString::from_raw(ptr);
+    }
+}
+
+unsafe fn drop_c_string_array(ptr: *mut *mut c_char, count: usize) {
+    if ptr.is_null() || count == 0 {
+        return;
+    }
+    let vars = std::slice::from_raw_parts_mut(ptr, count);
+    for var in vars {
+        drop_c_string(*var);
+    }
+    let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, count));
+}
+
+unsafe fn drop_f64_array(ptr: *mut f64, count: usize) {
+    if ptr.is_null() || count == 0 {
+        return;
+    }
+    let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, count));
+}
+
+unsafe fn drop_loop(loop_item: &mut SimlinLoop) {
+    drop_c_string(loop_item.id);
+    drop_c_string_array(loop_item.variables, loop_item.var_count);
+}
+
+unsafe fn drop_link(link: &mut SimlinLink) {
+    drop_c_string(link.from);
+    drop_c_string(link.to);
+    drop_f64_array(link.score, link.score_len);
+}
+
+unsafe fn drop_loops_vec(loops: &mut Vec<SimlinLoop>) {
+    for mut loop_item in loops.drain(..) {
+        drop_loop(&mut loop_item);
+    }
+}
+
+unsafe fn drop_links_vec(links: &mut Vec<SimlinLink>) {
+    for mut link in links.drain(..) {
+        drop_link(&mut link);
+    }
 }
 
 fn build_simlin_error(code: SimlinErrorCode, details: &[ErrorDetailData]) -> SimlinError {
@@ -622,11 +670,15 @@ pub unsafe extern "C" fn simlin_project_get_model_names(
     }
 
     let count = models.len().min(max);
+    let mut allocated: Vec<*mut c_char> = Vec::with_capacity(count);
 
     for (i, model) in models.iter().take(count).enumerate() {
         let c_string = match CString::new(model.name.clone()) {
             Ok(s) => s,
             Err(_) => {
+                for ptr in allocated {
+                    drop_c_string(ptr);
+                }
                 store_error(
                     out_error,
                     SimlinError::new(SimlinErrorCode::Generic).with_message(
@@ -636,7 +688,9 @@ pub unsafe extern "C" fn simlin_project_get_model_names(
                 return;
             }
         };
-        *result.add(i) = c_string.into_raw();
+        let raw = c_string.into_raw();
+        allocated.push(raw);
+        *result.add(i) = raw;
     }
 
     *out_written = count;
@@ -897,10 +951,15 @@ pub unsafe extern "C" fn simlin_model_get_var_names(
     names.sort();
 
     let count = names.len().min(max);
+    let mut allocated: Vec<*mut c_char> = Vec::with_capacity(count);
+
     for (i, name) in names.iter().take(count).enumerate() {
         let c_string = match CString::new(name.as_str()) {
             Ok(s) => s,
             Err(_) => {
+                for ptr in allocated {
+                    drop_c_string(ptr);
+                }
                 store_error(
                     out_error,
                     SimlinError::new(SimlinErrorCode::Generic).with_message(
@@ -910,7 +969,9 @@ pub unsafe extern "C" fn simlin_model_get_var_names(
                 return;
             }
         };
-        *result.add(i) = c_string.into_raw();
+        let raw = c_string.into_raw();
+        allocated.push(raw);
+        *result.add(i) = raw;
     }
 
     *out_written = count;
@@ -1053,10 +1114,14 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         return;
     }
 
+    let mut allocated: Vec<*mut c_char> = Vec::with_capacity(deps.len());
     for (i, dep) in deps.iter().enumerate() {
         let c_string = match CString::new(dep.as_str()) {
             Ok(s) => s,
             Err(_) => {
+                for ptr in allocated {
+                    drop_c_string(ptr);
+                }
                 store_error(
                     out_error,
                     SimlinError::new(SimlinErrorCode::Generic).with_message(
@@ -1066,7 +1131,9 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
                 return;
             }
         };
-        *result.add(i) = c_string.into_raw();
+        let raw = c_string.into_raw();
+        allocated.push(raw);
+        *result.add(i) = raw;
     }
 
     *out_written = deps.len();
@@ -1156,9 +1223,34 @@ pub unsafe extern "C" fn simlin_model_get_links(
     // Convert to C structures (without LTM scores since this is model-level)
     let mut c_links = Vec::with_capacity(unique_links.len());
     for (_, link) in unique_links {
-        let c_link = SimlinLink {
-            from: CString::new(link.from.as_str()).unwrap().into_raw(),
-            to: CString::new(link.to.as_str()).unwrap().into_raw(),
+        let from = match CString::new(link.from.as_str()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                drop_links_vec(&mut c_links);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("link source contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+        let to = match CString::new(link.to.as_str()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                drop_c_string(from);
+                drop_links_vec(&mut c_links);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("link destination contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+        c_links.push(SimlinLink {
+            from,
+            to,
             polarity: match link.polarity {
                 engine::ltm::LinkPolarity::Positive => SimlinLinkPolarity::Positive,
                 engine::ltm::LinkPolarity::Negative => SimlinLinkPolarity::Negative,
@@ -1166,8 +1258,7 @@ pub unsafe extern "C" fn simlin_model_get_links(
             },
             score: ptr::null_mut(),
             score_len: 0,
-        };
-        c_links.push(c_link);
+        });
     }
 
     let links = Box::new(SimlinLinks {
@@ -1824,9 +1915,7 @@ pub unsafe extern "C" fn simlin_sim_get_series(
 /// - `s` must be a valid pointer returned by simlin API functions that return strings
 #[no_mangle]
 pub unsafe extern "C" fn simlin_free_string(s: *mut c_char) {
-    if !s.is_null() {
-        let _ = CString::from_raw(s);
-    }
+    drop_c_string(s);
 }
 /// Gets all feedback loops in the project
 ///
@@ -1873,27 +1962,61 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
         });
         return Box::into_raw(result);
     }
-    // Convert to C structures
     let mut c_loops = Vec::with_capacity(all_loops.len());
     for loop_item in all_loops {
-        // Convert loop ID to C string
-        let id = CString::new(loop_item.id).unwrap();
-        // Convert variable names to C strings
+        let id = match CString::new(loop_item.id) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                drop_loops_vec(&mut c_loops);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("loop id contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+
         let mut var_names = Vec::with_capacity(loop_item.links.len() + 1);
-        // Collect unique variables from the loop path
         let mut seen = std::collections::HashSet::new();
         if !loop_item.links.is_empty() {
-            // Add the first variable
             let first = &loop_item.links[0].from;
             if seen.insert(first.clone()) {
-                let c_str = CString::new(first.as_str()).unwrap();
-                var_names.push(c_str.into_raw());
+                match CString::new(first.as_str()) {
+                    Ok(s) => var_names.push(s.into_raw()),
+                    Err(_) => {
+                        drop_c_string(id);
+                        for ptr in var_names {
+                            drop_c_string(ptr);
+                        }
+                        drop_loops_vec(&mut c_loops);
+                        store_error(
+                            out_error,
+                            SimlinError::new(SimlinErrorCode::Generic)
+                                .with_message("loop variable name contains interior NUL byte"),
+                        );
+                        return ptr::null_mut();
+                    }
+                }
             }
-            // Add all 'to' variables
             for link in &loop_item.links {
                 if seen.insert(link.to.clone()) {
-                    let c_str = CString::new(link.to.as_str()).unwrap();
-                    var_names.push(c_str.into_raw());
+                    match CString::new(link.to.as_str()) {
+                        Ok(s) => var_names.push(s.into_raw()),
+                        Err(_) => {
+                            drop_c_string(id);
+                            for ptr in var_names {
+                                drop_c_string(ptr);
+                            }
+                            drop_loops_vec(&mut c_loops);
+                            store_error(
+                                out_error,
+                                SimlinError::new(SimlinErrorCode::Generic)
+                                    .with_message("loop variable name contains interior NUL byte"),
+                            );
+                            return ptr::null_mut();
+                        }
+                    }
                 }
             }
         }
@@ -1906,13 +2029,12 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
         } else {
             ptr::null_mut()
         };
-        // Convert polarity
         let polarity = match loop_item.polarity {
             LoopPolarity::Reinforcing => SimlinLoopPolarity::Reinforcing,
             LoopPolarity::Balancing => SimlinLoopPolarity::Balancing,
         };
         c_loops.push(SimlinLoop {
-            id: id.into_raw(),
+            id,
             variables,
             var_count,
             polarity,
@@ -1941,23 +2063,7 @@ pub unsafe extern "C" fn simlin_free_loops(loops: *mut SimlinLoops) {
     if !loops.loops.is_null() && loops.count > 0 {
         let loop_slice = std::slice::from_raw_parts_mut(loops.loops, loops.count);
         for loop_item in loop_slice {
-            // Free the loop ID
-            if !loop_item.id.is_null() {
-                let _ = CString::from_raw(loop_item.id);
-            }
-            // Free the variable names
-            if !loop_item.variables.is_null() && loop_item.var_count > 0 {
-                let vars = std::slice::from_raw_parts_mut(loop_item.variables, loop_item.var_count);
-                for var in vars {
-                    if !var.is_null() {
-                        let _ = CString::from_raw(*var);
-                    }
-                }
-                let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-                    loop_item.variables,
-                    loop_item.var_count,
-                ));
-            }
+            drop_loop(loop_item);
         }
         let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(loops.loops, loops.count));
     }
@@ -2073,8 +2179,31 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
 
     let mut c_links = Vec::with_capacity(unique_links.len());
     for (_, link) in unique_links {
-        let from = CString::new(link.from.as_str()).unwrap().into_raw();
-        let to = CString::new(link.to.as_str()).unwrap().into_raw();
+        let from = match CString::new(link.from.as_str()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                drop_links_vec(&mut c_links);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("link source contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+        let to = match CString::new(link.to.as_str()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                drop_c_string(from);
+                drop_links_vec(&mut c_links);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("link destination contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
         let polarity = match link.polarity {
             engine::ltm::LinkPolarity::Positive => SimlinLinkPolarity::Positive,
             engine::ltm::LinkPolarity::Negative => SimlinLinkPolarity::Negative,
@@ -2144,20 +2273,7 @@ pub unsafe extern "C" fn simlin_free_links(links: *mut SimlinLinks) {
     if !links.links.is_null() && links.count > 0 {
         let link_slice = std::slice::from_raw_parts_mut(links.links, links.count);
         for link in link_slice {
-            // Free the from and to strings
-            if !link.from.is_null() {
-                let _ = CString::from_raw(link.from);
-            }
-            if !link.to.is_null() {
-                let _ = CString::from_raw(link.to);
-            }
-            // Free the score array if present
-            if !link.score.is_null() && link.score_len > 0 {
-                let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-                    link.score,
-                    link.score_len,
-                ));
-            }
+            drop_link(link);
         }
         let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(links.links, links.count));
     }
@@ -2266,22 +2382,37 @@ pub unsafe extern "C" fn simlin_analyze_get_rel_loop_score(
 ) {
     simlin_analyze_get_relative_loop_score(sim, loop_id, results_ptr, len, out_written, out_error);
 }
+const ALLOC_ALIGN: usize = if align_of::<usize>() > align_of::<c_double>() {
+    align_of::<usize>()
+} else {
+    align_of::<c_double>()
+};
+const ALLOC_HEADER_SIZE: usize = 2 * size_of::<usize>();
+
+fn align_up(value: usize, align: usize) -> usize {
+    (value + (align - 1)) & !(align - 1)
+}
+
 // Memory management functions for WASM
-// We use a simple approach where we store the size before the allocated memory
 #[no_mangle]
 pub extern "C" fn simlin_malloc(size: usize) -> *mut u8 {
     unsafe {
-        // Allocate extra space to store the size
-        let total_size = size + size_of::<usize>();
-        let layout = Layout::from_size_align_unchecked(total_size, align_of::<usize>());
-        let ptr = alloc(layout);
-        if ptr.is_null() {
-            return ptr;
+        let total_size = size
+            .saturating_add(ALLOC_HEADER_SIZE)
+            .saturating_add(ALLOC_ALIGN - 1);
+        let layout = Layout::from_size_align_unchecked(total_size, ALLOC_ALIGN);
+        let base = alloc(layout);
+        if base.is_null() {
+            return base;
         }
-        // Store the size at the beginning
-        *(ptr as *mut usize) = size;
-        // Return pointer to the user data (after the size)
-        ptr.add(size_of::<usize>())
+        let base_addr = base as usize;
+        let aligned_addr = align_up(base_addr + ALLOC_HEADER_SIZE, ALLOC_ALIGN);
+        let aligned_ptr = aligned_addr as *mut u8;
+        let offset = aligned_addr - base_addr;
+        let header_ptr = aligned_ptr.sub(ALLOC_HEADER_SIZE);
+        *(header_ptr as *mut usize) = size;
+        *(header_ptr.add(size_of::<usize>()) as *mut usize) = offset;
+        aligned_ptr
     }
 }
 /// Frees memory allocated by simlin_malloc
@@ -2294,13 +2425,15 @@ pub unsafe extern "C" fn simlin_free(ptr: *mut u8) {
     if ptr.is_null() {
         return;
     }
-    // Get the actual allocation pointer (before the user data)
-    let actual_ptr = ptr.sub(size_of::<usize>());
-    // Read the size
-    let size = *(actual_ptr as *mut usize);
-    let total_size = size + size_of::<usize>();
-    let layout = Layout::from_size_align_unchecked(total_size, align_of::<usize>());
-    dealloc(actual_ptr, layout);
+    let header_ptr = ptr.sub(ALLOC_HEADER_SIZE);
+    let size = *(header_ptr as *mut usize);
+    let offset = *(header_ptr.add(size_of::<usize>()) as *mut usize);
+    let total_size = size
+        .saturating_add(ALLOC_HEADER_SIZE)
+        .saturating_add(ALLOC_ALIGN - 1);
+    let layout = Layout::from_size_align_unchecked(total_size, ALLOC_ALIGN);
+    let base = ptr.sub(offset);
+    dealloc(base, layout);
 }
 /// Open a project from XMILE/STMX format data
 ///
@@ -3258,24 +3391,28 @@ pub unsafe extern "C" fn simlin_project_is_simulatable(
 /// static errors (equation parsing, unit checking, etc.) and also attempts to
 /// compile the "main" model to find any compilation-time errors.
 ///
-/// The caller must free the returned error details using `simlin_free_error_details`.
+/// The caller must free the returned error object using `simlin_error_free`.
 ///
 /// # Example Usage (C)
 /// ```c
-/// SimlinErrorDetails* errors = simlin_project_get_errors(project);
+/// SimlinError* errors = simlin_project_get_errors(project, NULL);
 /// if (errors != NULL) {
-///     for (size_t i = 0; i < errors->count; i++) {
-///         SimlinErrorDetail* error = &errors->errors[i];
-///         printf("Error %d", error->code);
-///         if (error->modelName != NULL) {
-///             printf(" in model %s", error->modelName);
+///     uintptr_t count = simlin_error_get_detail_count(errors);
+///     for (uintptr_t i = 0; i < count; i++) {
+///         const SimlinErrorDetail* detail = simlin_error_get_detail(errors, i);
+///         if (detail == NULL) {
+///             continue;
 ///         }
-///         if (error->variable_name != NULL) {
-///             printf(" for variable %s", error->variable_name);
+///         printf("Error %d", detail->code);
+///         if (detail->model_name != NULL) {
+///             printf(" in model %s", detail->model_name);
+///         }
+///         if (detail->variable_name != NULL) {
+///             printf(" for variable %s", detail->variable_name);
 ///         }
 ///         printf("\n");
 ///     }
-///     simlin_free_error_details(errors);
+///     simlin_error_free(errors);
 /// } else {
 ///     // Project has no errors and is ready to simulate
 /// }
@@ -3283,7 +3420,7 @@ pub unsafe extern "C" fn simlin_project_is_simulatable(
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
-/// - The returned pointer must be freed with `simlin_free_error_details`
+/// - The returned pointer must be freed with `simlin_error_free`
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_get_errors(
     project: *mut SimlinProject,
@@ -9340,6 +9477,46 @@ mod tests {
             );
             drop(project_locked);
 
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_simlin_malloc_alignment() {
+        unsafe {
+            let ptr = simlin_malloc(1);
+            assert!(!ptr.is_null());
+            assert_eq!((ptr as usize) % align_of::<c_double>(), 0);
+            simlin_free(ptr);
+        }
+    }
+
+    #[test]
+    fn test_model_get_links_rejects_nul() {
+        let datamodel = TestProject::new("nul_links")
+            .stock("stock", "0", &["bad\0flow"], &[], None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+            assert!(!model.is_null());
+            assert!(err.is_null());
+
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            let links = simlin_model_get_links(model, &mut out_error);
+            assert!(links.is_null());
+            assert!(!out_error.is_null());
+            assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
+
+            let msg_ptr = simlin_error_get_message(out_error);
+            assert!(!msg_ptr.is_null());
+            let msg = CStr::from_ptr(msg_ptr).to_str().unwrap();
+            assert!(msg.contains("NUL"));
+
+            simlin_error_free(out_error);
+            simlin_model_unref(model);
             simlin_project_unref(proj);
         }
     }

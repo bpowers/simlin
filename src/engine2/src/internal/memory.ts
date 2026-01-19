@@ -19,7 +19,11 @@ const textDecoder = new TextDecoder();
 export function malloc(size: number): Ptr {
   const exports = getExports();
   const fn = exports.simlin_malloc as (size: number) => number;
-  return fn(size);
+  const ptr = fn(size);
+  if (ptr === 0 && size !== 0) {
+    throw new Error('WASM allocation failed');
+  }
+  return ptr;
 }
 
 /**
@@ -109,6 +113,9 @@ export function wasmToStringAndFree(ptr: Ptr): string | null {
  * @returns Pointer to the data in WASM memory
  */
 export function copyToWasm(data: Uint8Array): Ptr {
+  if (data.length === 0) {
+    return 0;
+  }
   const ptr = malloc(data.length);
   const memory = getMemory();
   const view = new Uint8Array(memory.buffer, ptr, data.length);
