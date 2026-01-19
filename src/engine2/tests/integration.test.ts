@@ -247,7 +247,7 @@ describe('WASM Integration Tests', () => {
 
       // Import XMILE project
       const project = import_xmile_fn(dataPtr, xmileData.length, outErrPtr);
-      checkError(outErrPtr, 'import_xmile');
+      checkError(outErrPtr, 'project_open_xmile');
       expect(project).toBeGreaterThan(0);
 
       // Get model (null name = default/main model)
@@ -346,7 +346,7 @@ describe('WASM Integration Tests', () => {
 
       // Import XMILE
       const project = import_xmile_fn(dataPtr, xmileData.length, outErrPtr);
-      checkError(outErrPtr, 'import_xmile');
+      checkError(outErrPtr, 'project_open_xmile');
       expect(project).toBeGreaterThan(0);
 
       // Check if simulatable
@@ -403,14 +403,14 @@ describe('WASM Integration Tests', () => {
 
       // Import XMILE project
       const project1 = import_xmile_fn(dataPtr, xmileData.length, outErrPtr);
-      checkError(outErrPtr, 'import_xmile');
+      checkError(outErrPtr, 'project_open_xmile');
       expect(project1).toBeGreaterThan(0);
 
       // Serialize to protobuf
       const outBufPtr = malloc_fn(4);
       const outLenPtr = malloc_fn(4);
       project_serialize_fn(project1, outBufPtr, outLenPtr, outErrPtr);
-      checkError(outErrPtr, 'project_serialize');
+      checkError(outErrPtr, 'project_serialize_protobuf');
 
       const serializedPtr = new DataView(memory.buffer).getUint32(outBufPtr, true);
       const serializedLen = new DataView(memory.buffer).getUint32(outLenPtr, true);
@@ -424,7 +424,7 @@ describe('WASM Integration Tests', () => {
       const dataPtr2 = malloc_fn(serializedData.length);
       new Uint8Array(memory.buffer, dataPtr2, serializedData.length).set(serializedData);
       const project2 = project_open_fn(dataPtr2, serializedData.length, outErrPtr);
-      checkError(outErrPtr, 'project_open');
+      checkError(outErrPtr, 'project_open_protobuf');
       expect(project2).toBeGreaterThan(0);
 
       // Cleanup

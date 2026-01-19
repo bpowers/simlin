@@ -5159,7 +5159,7 @@ mod tests {
                     CStr::from_ptr(msg_ptr).to_str().unwrap()
                 };
                 simlin_error_free(err);
-                panic!("import_xmile failed with error {:?}: {}", code, msg);
+                panic!("project_open_xmile failed with error {:?}: {}", code, msg);
             }
             assert!(!proj.is_null());
 
@@ -5246,7 +5246,7 @@ mod tests {
                     CStr::from_ptr(msg_ptr).to_str().unwrap()
                 };
                 simlin_error_free(err);
-                panic!("import_mdl failed with error {:?}: {}", code, msg);
+                panic!("project_open_vensim failed with error {:?}: {}", code, msg);
             }
             assert!(!proj.is_null());
 
@@ -5355,7 +5355,10 @@ mod tests {
                     CStr::from_ptr(msg_ptr).to_str().unwrap()
                 };
                 simlin_error_free(err);
-                panic!("export_xmile failed with error {:?}: {}", code, msg);
+                panic!(
+                    "project_serialize_xmile failed with error {:?}: {}",
+                    code, msg
+                );
             }
             assert!(!output.is_null());
             assert!(output_len > 0);
@@ -5399,7 +5402,7 @@ mod tests {
                     CStr::from_ptr(msg_ptr).to_str().unwrap()
                 };
                 simlin_error_free(err);
-                panic!("import_xmile failed with error {:?}: {}", code, msg);
+                panic!("project_open_xmile failed with error {:?}: {}", code, msg);
             }
             assert!(!proj1.is_null());
 
@@ -5422,7 +5425,10 @@ mod tests {
                     CStr::from_ptr(msg_ptr).to_str().unwrap()
                 };
                 simlin_error_free(err);
-                panic!("export_xmile failed with error {:?}: {}", code, msg);
+                panic!(
+                    "project_serialize_xmile failed with error {:?}: {}",
+                    code, msg
+                );
             }
 
             // Import the exported XMILE
@@ -5438,7 +5444,10 @@ mod tests {
                     CStr::from_ptr(msg_ptr).to_str().unwrap()
                 };
                 simlin_error_free(err);
-                panic!("import_xmile (2nd) failed with error {:?}: {}", code, msg);
+                panic!(
+                    "project_open_xmile (2nd) failed with error {:?}: {}",
+                    code, msg
+                );
             }
             assert!(!proj2.is_null());
 
