@@ -19,7 +19,6 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import { Project } from './Project';
 import { User } from './User';
 import { Project as ProjectDM } from '@system-dynamics/core/datamodel';
-import { convertMdlToXmile } from '@system-dynamics/xmutil';
 import { Project as Engine2Project } from '@system-dynamics/engine2';
 import type { JsonProject } from '@system-dynamics/engine2';
 
@@ -143,25 +142,12 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
     }
     const file = event.target.files[0];
     const contents = await readFile(file);
-    let logs: string | undefined;
 
     try {
       let engine2Project: Engine2Project;
 
       if (file.name.endsWith('.mdl')) {
-        // For Vensim MDL files, try direct import first if available
-        const hasVensim = await Engine2Project.hasVensimSupport();
-        if (hasVensim) {
-          engine2Project = await Engine2Project.openVensim(contents);
-        } else {
-          // Fall back to xmutil conversion when direct Vensim support is not available
-          const [xmileContents, conversionLogs] = await convertMdlToXmile(contents, true);
-          logs = conversionLogs;
-          if (xmileContents.length === 0) {
-            throw new Error('Vensim converter: ' + (logs || 'unknown error'));
-          }
-          engine2Project = await Engine2Project.open(xmileContents);
-        }
+        engine2Project = await Engine2Project.openVensim(contents);
       } else {
         // XMILE/STMX files open directly
         engine2Project = await Engine2Project.open(contents);
@@ -172,12 +158,8 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
       const activeProject = ProjectDM.fromJson(json);
       const views = activeProject.models.get('main')?.views;
       if (!views || views.isEmpty()) {
-        let errorMsg = `can't import model with no view at this time.`;
-        if (logs && logs.length !== 0) {
-          errorMsg = logs;
-        }
         this.setState({
-          errorMsg,
+          errorMsg: `can't import model with no view at this time.`,
         });
         return;
       }
