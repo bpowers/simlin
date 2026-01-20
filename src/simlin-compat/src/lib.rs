@@ -6,8 +6,9 @@ use std::io::BufRead;
 #[cfg(any(feature = "file_io", feature = "vensim"))]
 use std::io::BufReader;
 
-use simlin_engine::datamodel::Project;
-pub use simlin_engine::{self as engine, Result, Results, prost};
+use simlin_core::datamodel::Project;
+pub use simlin_core::{Result, Results};
+pub use simlin_engine::{self as engine, prost};
 
 #[cfg(feature = "file_io")]
 use std::collections::HashMap;
@@ -19,9 +20,9 @@ use std::fs::File;
 use std::result::Result as StdResult;
 
 #[cfg(feature = "file_io")]
-use simlin_engine::common::{Canonical, Ident};
+use simlin_core::common::{Canonical, Ident};
 #[cfg(feature = "file_io")]
-use simlin_engine::{Method, SimSpecs, canonicalize};
+use simlin_core::{Method, Specs, canonicalize};
 
 pub mod xmile;
 
@@ -162,7 +163,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
         data: step_data.into_boxed_slice(),
         step_size,
         step_count,
-        specs: SimSpecs {
+        specs: Specs {
             start: 0.0,
             stop: 0.0,
             dt: 0.0,
@@ -223,7 +224,7 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
         data: step_data.into_boxed_slice(),
         step_size,
         step_count,
-        specs: SimSpecs {
+        specs: Specs {
             start: 0.0,
             stop: 0.0,
             dt: 0.0,

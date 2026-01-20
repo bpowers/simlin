@@ -60,7 +60,6 @@ pub use self::model::{ModelStage1, resolve_non_private_dependencies};
 pub use self::patch::apply_patch;
 pub use self::project::Project;
 pub use self::variable::{Variable, identifier_set};
-pub use self::vm::Method;
-pub use self::vm::Results;
-pub use self::vm::Specs as SimSpecs;
 pub use self::vm::Vm;
+// Re-export results types from simlin-core
+pub use simlin_core::{Method, Results, Specs as SimSpecs};
