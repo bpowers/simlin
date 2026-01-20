@@ -695,20 +695,25 @@ export class Flow extends React.PureComponent<FlowProps> {
     e.preventDefault();
     e.stopPropagation();
 
-    // Convert screen coordinates to SVG model coordinates
-    const svg = (e.target as SVGElement).ownerSVGElement;
+    // Convert screen coordinates to model coordinates using the element's CTM.
+    // We must use the clicked element's CTM (not the SVG root's CTM) because
+    // Canvas applies zoom/pan via a parent <g transform="matrix(...)"> group.
+    // The element's CTM includes this transform, so inverting it correctly
+    // converts screen coordinates to model coordinates regardless of zoom/pan.
+    const target = e.currentTarget as SVGGraphicsElement;
+    const svg = target.ownerSVGElement;
     let segmentIndex: number | undefined;
 
     if (svg) {
       const pt = svg.createSVGPoint();
       pt.x = e.clientX;
       pt.y = e.clientY;
-      const ctm = svg.getScreenCTM();
+      const ctm = target.getScreenCTM();
       if (ctm) {
-        const svgPt = pt.matrixTransform(ctm.inverse());
+        const modelPt = pt.matrixTransform(ctm.inverse());
         segmentIndex = findClickedSegment(
-          svgPt.x,
-          svgPt.y,
+          modelPt.x,
+          modelPt.y,
           this.props.element.cx,
           this.props.element.cy,
           this.props.element.points,
