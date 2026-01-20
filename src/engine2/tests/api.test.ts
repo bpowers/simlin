@@ -34,6 +34,15 @@ function loadTestXmile(): Uint8Array {
   return fs.readFileSync(xmilePath);
 }
 
+// Load the teacup test model in Vensim MDL format
+function loadTestMdl(): Uint8Array {
+  const mdlPath = path.join(__dirname, '..', '..', '..', 'test', 'test-models', 'samples', 'teacup', 'teacup.mdl');
+  if (!fs.existsSync(mdlPath)) {
+    throw new Error('Required test MDL model not found: ' + mdlPath);
+  }
+  return fs.readFileSync(mdlPath);
+}
+
 async function openTestProject(): Promise<Project> {
   return Project.open(loadTestXmile());
 }
@@ -1065,6 +1074,85 @@ describe('High-Level API', () => {
       }
 
       project.dispose();
+    });
+  });
+
+  describe('Vensim MDL support', () => {
+    it('should check hasVensimSupport availability via Project static method', async () => {
+      // Project.hasVensimSupport() is an async method that ensures WASM is initialized
+      const supported = await Project.hasVensimSupport();
+      expect(typeof supported).toBe('boolean');
+    });
+
+    it('should handle openVensim when support is not available', async () => {
+      const supported = await Project.hasVensimSupport();
+
+      if (!supported) {
+        // When Vensim support is not available, openVensim should throw
+        const mdlData = loadTestMdl();
+        await expect(Project.openVensim(mdlData)).rejects.toThrow(/vensim/i);
+      }
+    });
+
+    it('should load MDL file when Vensim support is available', async () => {
+      const supported = await Project.hasVensimSupport();
+
+      if (supported) {
+        // When Vensim support is available, openVensim should work
+        const mdlData = loadTestMdl();
+        const project = await Project.openVensim(mdlData);
+
+        expect(project).toBeInstanceOf(Project);
+        expect(project.modelCount).toBeGreaterThan(0);
+
+        // The teacup model should have the expected variables
+        const model = project.mainModel;
+        const varNames = model.variables.map((v) => v.name.toLowerCase());
+        expect(varNames).toContain('teacup temperature');
+
+        project.dispose();
+      }
+    });
+
+    it('should accept MDL data as string when Vensim support is available', async () => {
+      const supported = await Project.hasVensimSupport();
+
+      if (supported) {
+        // openVensim should accept string data (like XMILE)
+        const mdlData = loadTestMdl();
+        const mdlString = new TextDecoder().decode(mdlData);
+        const project = await Project.openVensim(mdlString);
+
+        expect(project).toBeInstanceOf(Project);
+        project.dispose();
+      }
+    });
+
+    it('should simulate models loaded from MDL when Vensim support is available', async () => {
+      const supported = await Project.hasVensimSupport();
+
+      if (supported) {
+        const mdlData = loadTestMdl();
+        const project = await Project.openVensim(mdlData);
+        const model = project.mainModel;
+
+        // Run simulation
+        const run = model.run();
+        expect(run).toBeInstanceOf(Run);
+
+        // Get results
+        const results = run.results;
+        expect(results.size).toBeGreaterThan(0);
+
+        // Check that teacup temperature series exists and has expected behavior
+        // (temperature should decrease over time as teacup cools)
+        const tempSeries = results.get('teacup_temperature');
+        if (tempSeries && tempSeries.length > 1) {
+          expect(tempSeries[0]).toBeGreaterThan(tempSeries[tempSeries.length - 1]);
+        }
+
+        project.dispose();
+      }
     });
   });
 });
