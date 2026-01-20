@@ -441,32 +441,20 @@ const VALVE_HIT_TOLERANCE = 5;
 // Margin from segment endpoints when clamping valve position
 const VALVE_CLAMP_MARGIN = 10;
 
-// Check if a segment has an attached endpoint that would prevent dragging
+// Check if a segment has an attached endpoint that would prevent dragging.
+// Dragging a segment with an attached endpoint would create a diagonal segment,
+// which breaks the axis-alignment assumptions used by hit-testing and valve clamping.
 function segmentHasAttachedEndpoint(points: List<Point>, segmentIndex: number): boolean {
   const numSegments = points.size - 1;
   if (segmentIndex < 0 || segmentIndex >= numSegments) {
     return true;
   }
 
-  // Segment 0 connects point 0 and point 1
-  // If point 0 is attached, segment 0 has an attached endpoint at its start
-  if (segmentIndex === 0) {
-    const firstPoint = points.get(0);
-    if (firstPoint?.attachedToUid !== undefined) {
-      return true;
-    }
-  }
+  // Check both endpoints of the segment
+  const p1 = points.get(segmentIndex);
+  const p2 = points.get(segmentIndex + 1);
 
-  // Last segment connects point n-1 and point n
-  // If point n is attached, last segment has an attached endpoint at its end
-  if (segmentIndex === numSegments - 1) {
-    const lastPoint = points.get(points.size - 1);
-    if (lastPoint?.attachedToUid !== undefined) {
-      return true;
-    }
-  }
-
-  return false;
+  return p1?.attachedToUid !== undefined || p2?.attachedToUid !== undefined;
 }
 
 // Determine which segment was clicked, or undefined if clicking on the valve
@@ -593,14 +581,23 @@ export function UpdateFlow(
 
     // Only recalculate valve position if it was on the moved segment
     const newSegments = getSegments(points);
-    if (valveOnMovedSegment && segmentIndex < newSegments.length) {
-      const movedSeg = newSegments[segmentIndex];
-      const newValve = clampToSegment(currentValve, movedSeg);
-      flowEl = flowEl.merge({
-        x: newValve.x,
-        y: newValve.y,
-        points,
-      });
+    if (valveOnMovedSegment) {
+      if (segmentIndex >= newSegments.length) {
+        // This shouldn't happen since moveSegment doesn't change the number of points,
+        // but log an error if it does to help diagnose the issue.
+        console.error(
+          `UpdateFlow: Invalid segment index ${segmentIndex} for flow with ${newSegments.length} segments`,
+        );
+        flowEl = flowEl.set('points', points);
+      } else {
+        const movedSeg = newSegments[segmentIndex];
+        const newValve = clampToSegment(currentValve, movedSeg);
+        flowEl = flowEl.merge({
+          x: newValve.x,
+          y: newValve.y,
+          points,
+        });
+      }
     } else {
       flowEl = flowEl.set('points', points);
     }
