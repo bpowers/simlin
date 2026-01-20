@@ -6,7 +6,7 @@ import { List } from 'immutable';
 
 import { Point, FlowViewElement, StockViewElement } from '@system-dynamics/core/datamodel';
 
-import { computeFlowRoute, UpdateStockAndFlows } from '../drawing/Flow';
+import { computeFlowRoute, UpdateStockAndFlows, UpdateFlow, moveSegment } from '../drawing/Flow';
 import { StockWidth, StockHeight } from '../drawing/Stock';
 
 function makeStock(uid: number, x: number, y: number, inflows: number[] = [], outflows: number[] = []): StockViewElement {
@@ -339,6 +339,151 @@ describe('Flow routing', () => {
       // Both flows should be L-shaped
       expect(newFlows.get(0)!.points.size).toBe(3);
       expect(newFlows.get(1)!.points.size).toBe(3);
+    });
+  });
+
+  describe('UpdateFlow - valve movement', () => {
+    it('should move valve along horizontal segment', () => {
+      // Horizontal flow from cloud to stock
+      const flow = makeFlow(flowUid, 150, 100, [
+        { x: 100, y: 100, attachedToUid: cloudUid },
+        { x: 200, y: 100, attachedToUid: stockUid },
+      ]);
+      const stock = makeStock(stockUid, 200, 100);
+
+      // Move valve to the right along the segment
+      const [newFlow] = UpdateFlow(flow, List([stock]), { x: -20, y: 0 });
+
+      // Valve should move along the horizontal segment (Y stays same)
+      expect(newFlow.cy).toBe(100);
+      expect(newFlow.cx).toBe(170);
+    });
+
+    it('should move valve along vertical segment', () => {
+      // Vertical flow from cloud to stock
+      const flow = makeFlow(flowUid, 100, 150, [
+        { x: 100, y: 100, attachedToUid: cloudUid },
+        { x: 100, y: 200, attachedToUid: stockUid },
+      ]);
+      const stock = makeStock(stockUid, 100, 200);
+
+      // Move valve down along the segment
+      const [newFlow] = UpdateFlow(flow, List([stock]), { x: 0, y: -20 });
+
+      // Valve should move along the vertical segment (X stays same)
+      expect(newFlow.cx).toBe(100);
+      expect(newFlow.cy).toBe(170);
+    });
+
+    it('should constrain valve to segment bounds', () => {
+      // Short horizontal flow
+      const flow = makeFlow(flowUid, 150, 100, [
+        { x: 100, y: 100, attachedToUid: cloudUid },
+        { x: 200, y: 100, attachedToUid: stockUid },
+      ]);
+      const stock = makeStock(stockUid, 200, 100);
+
+      // Try to move valve way past the segment end
+      const [newFlow] = UpdateFlow(flow, List([stock]), { x: -500, y: 0 });
+
+      // Valve should be clamped to segment bounds (with margin)
+      expect(newFlow.cy).toBe(100);
+      expect(newFlow.cx).toBeLessThanOrEqual(190); // margin from end
+      expect(newFlow.cx).toBeGreaterThanOrEqual(110); // margin from start
+    });
+
+    it('should move valve on L-shaped flow along closest segment', () => {
+      // L-shaped flow: horizontal then vertical
+      const flow = makeFlow(flowUid, 150, 100, [
+        { x: 100, y: 100, attachedToUid: cloudUid }, // anchor
+        { x: 200, y: 100 }, // corner
+        { x: 200, y: 200, attachedToUid: stockUid }, // stock
+      ]);
+      const stock = makeStock(stockUid, 200, 200);
+
+      // Valve at (150, 100) is on the horizontal segment
+      // Move it along that segment
+      const [newFlow] = UpdateFlow(flow, List([stock]), { x: -30, y: 0 });
+
+      // Should stay on horizontal segment
+      expect(newFlow.cy).toBe(100);
+      expect(newFlow.cx).toBe(180);
+    });
+  });
+
+  describe('moveSegment', () => {
+    it('should move horizontal segment up/down', () => {
+      // L-shaped flow with horizontal middle concept:
+      // Actually for a simple test, let's use a 3-point L
+      const points = List([
+        new Point({ x: 100, y: 200, attachedToUid: cloudUid }),
+        new Point({ x: 100, y: 100, attachedToUid: undefined }), // corner
+        new Point({ x: 200, y: 100, attachedToUid: stockUid }),
+      ]);
+
+      // Move segment 1 (horizontal: corner to stock) up by 20
+      const newPoints = moveSegment(points, 1, { x: 0, y: 20 });
+
+      // The corner should move up (it's not an endpoint)
+      expect(newPoints.get(1)!.y).toBe(80);
+      // The stock endpoint should NOT move (it's attached)
+      expect(newPoints.get(2)!.y).toBe(100);
+      // The cloud endpoint should stay
+      expect(newPoints.get(0)!.y).toBe(200);
+    });
+
+    it('should move vertical segment left/right', () => {
+      const points = List([
+        new Point({ x: 100, y: 100, attachedToUid: cloudUid }),
+        new Point({ x: 100, y: 200, attachedToUid: undefined }), // corner
+        new Point({ x: 200, y: 200, attachedToUid: stockUid }),
+      ]);
+
+      // Move segment 0 (vertical: cloud to corner) right by 20
+      const newPoints = moveSegment(points, 0, { x: -20, y: 0 });
+
+      // The corner should move right (it's not an endpoint)
+      expect(newPoints.get(1)!.x).toBe(120);
+      // The cloud endpoint should NOT move (it's attached)
+      expect(newPoints.get(0)!.x).toBe(100);
+      // The stock endpoint should stay
+      expect(newPoints.get(2)!.x).toBe(200);
+    });
+
+    it('should not move attached endpoints', () => {
+      // Simple 2-point horizontal flow
+      const points = List([
+        new Point({ x: 100, y: 100, attachedToUid: cloudUid }),
+        new Point({ x: 200, y: 100, attachedToUid: stockUid }),
+      ]);
+
+      // Try to move the only segment
+      const newPoints = moveSegment(points, 0, { x: 0, y: -50 });
+
+      // Both endpoints are attached, so neither should move
+      expect(newPoints.get(0)!.y).toBe(100);
+      expect(newPoints.get(1)!.y).toBe(100);
+    });
+  });
+
+  describe('UpdateFlow - segment movement', () => {
+    it('should move a segment when segmentIndex is provided', () => {
+      // L-shaped flow
+      const flow = makeFlow(flowUid, 150, 100, [
+        { x: 100, y: 200, attachedToUid: cloudUid },
+        { x: 100, y: 100 }, // corner
+        { x: 200, y: 100, attachedToUid: stockUid },
+      ]);
+      const stock = makeStock(stockUid, 200, 100);
+
+      // Move segment 1 (horizontal) up
+      const [newFlow] = UpdateFlow(flow, List([stock]), { x: 0, y: 20 }, 1);
+
+      // Corner should have moved up
+      expect(newFlow.points.get(1)!.y).toBe(80);
+      // Endpoints should not have moved
+      expect(newFlow.points.get(0)!.y).toBe(200);
+      expect(newFlow.points.get(2)!.y).toBe(100);
     });
   });
 });

@@ -559,11 +559,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     flow: FlowViewElement,
     moveDelta: Point,
   ): [FlowViewElement, List<StockViewElement | CloudViewElement>] {
-    if (flow.points.size !== 2) {
-      console.log('TODO: non-simple flow');
-      return [flow, List<StockViewElement | CloudViewElement>()];
-    }
-
     const sourceId = defined(defined(flow.points.first()).attachedToUid);
     const source = this.getElementByUid(sourceId) as StockViewElement | CloudViewElement;
     if (!(source instanceof StockViewElement || source instanceof CloudViewElement)) {

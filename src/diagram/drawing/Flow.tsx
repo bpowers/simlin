@@ -357,90 +357,190 @@ export function UpdateCloudAndFlow(
   return [cloud, flow];
 }
 
+interface Segment {
+  index: number;
+  p1: IPoint;
+  p2: IPoint;
+  isHorizontal: boolean;
+}
+
+function getSegments(points: List<Point>): Segment[] {
+  const segments: Segment[] = [];
+  for (let i = 0; i < points.size - 1; i++) {
+    const p1 = defined(points.get(i));
+    const p2 = defined(points.get(i + 1));
+    segments.push({
+      index: i,
+      p1: { x: p1.x, y: p1.y },
+      p2: { x: p2.x, y: p2.y },
+      isHorizontal: p1.y === p2.y,
+    });
+  }
+  return segments;
+}
+
+function distanceToSegment(point: IPoint, seg: Segment): number {
+  const { p1, p2 } = seg;
+  if (seg.isHorizontal) {
+    const minX = Math.min(p1.x, p2.x);
+    const maxX = Math.max(p1.x, p2.x);
+    if (point.x >= minX && point.x <= maxX) {
+      return Math.abs(point.y - p1.y);
+    }
+    const distToP1 = Math.hypot(point.x - p1.x, point.y - p1.y);
+    const distToP2 = Math.hypot(point.x - p2.x, point.y - p2.y);
+    return Math.min(distToP1, distToP2);
+  } else {
+    const minY = Math.min(p1.y, p2.y);
+    const maxY = Math.max(p1.y, p2.y);
+    if (point.y >= minY && point.y <= maxY) {
+      return Math.abs(point.x - p1.x);
+    }
+    const distToP1 = Math.hypot(point.x - p1.x, point.y - p1.y);
+    const distToP2 = Math.hypot(point.x - p2.x, point.y - p2.y);
+    return Math.min(distToP1, distToP2);
+  }
+}
+
+function findClosestSegment(point: IPoint, segments: Segment[]): Segment {
+  let closest = segments[0];
+  let minDist = distanceToSegment(point, closest);
+  for (let i = 1; i < segments.length; i++) {
+    const dist = distanceToSegment(point, segments[i]);
+    if (dist < minDist) {
+      minDist = dist;
+      closest = segments[i];
+    }
+  }
+  return closest;
+}
+
+function clampToSegment(point: IPoint, seg: Segment, margin: number = 10): IPoint {
+  if (seg.isHorizontal) {
+    const minX = Math.min(seg.p1.x, seg.p2.x) + margin;
+    const maxX = Math.max(seg.p1.x, seg.p2.x) - margin;
+    return {
+      x: Math.max(minX, Math.min(maxX, point.x)),
+      y: seg.p1.y,
+    };
+  } else {
+    const minY = Math.min(seg.p1.y, seg.p2.y) + margin;
+    const maxY = Math.max(seg.p1.y, seg.p2.y) - margin;
+    return {
+      x: seg.p1.x,
+      y: Math.max(minY, Math.min(maxY, point.y)),
+    };
+  }
+}
+
+// Move a segment perpendicular to its direction, adjusting adjacent segments
+export function moveSegment(
+  points: List<Point>,
+  segmentIndex: number,
+  delta: IPoint,
+): List<Point> {
+  const segments = getSegments(points);
+  if (segmentIndex < 0 || segmentIndex >= segments.length) {
+    return points;
+  }
+
+  const seg = segments[segmentIndex];
+  const isFirst = segmentIndex === 0;
+  const isLast = segmentIndex === segments.length - 1;
+
+  return points.map((p, i) => {
+    if (seg.isHorizontal) {
+      // Horizontal segment: move up/down (change Y)
+      // Both endpoints of this segment move
+      if (i === segmentIndex || i === segmentIndex + 1) {
+        // Don't move attached endpoints (first and last points)
+        if ((i === 0 && isFirst) || (i === points.size - 1 && isLast)) {
+          return p;
+        }
+        return p.set('y', p.y - delta.y);
+      }
+    } else {
+      // Vertical segment: move left/right (change X)
+      if (i === segmentIndex || i === segmentIndex + 1) {
+        if ((i === 0 && isFirst) || (i === points.size - 1 && isLast)) {
+          return p;
+        }
+        return p.set('x', p.x - delta.x);
+      }
+    }
+    return p;
+  });
+}
+
 export function UpdateFlow(
   flowEl: FlowViewElement,
   ends: List<StockViewElement | CloudViewElement>,
   moveDelta: IPoint,
+  segmentIndex?: number,
 ): [FlowViewElement, List<CloudViewElement>] {
-  const stocks = ends.filter((e) => e instanceof StockViewElement);
   const clouds = ends.filter((e) => e instanceof CloudViewElement);
 
-  const center = new Point({
-    x: flowEl.cx,
-    y: flowEl.cy,
-    attachedToUid: undefined,
-  });
-
   let points = flowEl.points;
-  const origPoints = points;
-  const start = defined(points.get(0));
-  const end = defined(points.get(points.size - 1));
 
-  let proposed = new Point({
-    x: center.x - moveDelta.x,
-    y: center.y - moveDelta.y,
-    attachedToUid: undefined,
-  });
+  const currentValve: IPoint = { x: flowEl.cx, y: flowEl.cy };
+  const proposedValve: IPoint = {
+    x: currentValve.x - moveDelta.x,
+    y: currentValve.y - moveDelta.y,
+  };
 
-  // if we don't have any stocks, its a flow from cloud to cloud and as such
-  // doesn't need to be constrained.
-
-  // vertical line
-  if (center.x === start.x && center.x === end.x && stocks.size > 0) {
-    proposed = stocks.reduce((p, stock: ViewElement) => {
-      let x = p.x;
-      x = Math.max(x, stock.cx - StockWidth / 2 + 3);
-      x = Math.min(x, stock.cx + StockWidth / 2 - 3);
-      return p.set('x', x);
-    }, proposed);
-
-    const minY = points.reduce((m, p) => (p.y < m ? p.y : m), Infinity) + 20;
-    const maxY = points.reduce((m, p) => (p.y > m ? p.y : m), -Infinity) - 20;
-    const y = Math.max(minY, Math.min(maxY, proposed.y));
-    proposed = proposed.set('y', y);
-
-    points = points.map((p) => p.set('x', proposed.x));
-  } else if (center.y === start.y && center.y === end.y && stocks.size > 0) {
-    proposed = stocks.reduce((p, stock: ViewElement) => {
-      let y = p.y;
-      y = Math.max(y, stock.cy - StockHeight / 2 + 3);
-      y = Math.min(y, stock.cy + StockHeight / 2 - 3);
-      return p.set('y', y);
-    }, proposed);
-
-    const minX = points.reduce((m, p) => (p.x < m ? p.x : m), Infinity) + 20;
-    const maxX = points.reduce((m, p) => (p.x > m ? p.x : m), -Infinity) - 20;
-    const x = Math.max(minX, Math.min(maxX, proposed.x));
-    proposed = proposed.set('x', x);
-
-    points = points.map((p) => p.set('y', proposed.y));
-  } else if (stocks.size === 0) {
-    // if it is a cloud -> cloud flow, move all points uniformly
+  // For cloud-to-cloud flows, move everything uniformly
+  const hasStock = ends.some((e) => e instanceof StockViewElement);
+  if (!hasStock) {
     points = points.map((p) => p.merge({ x: p.x - moveDelta.x, y: p.y - moveDelta.y }));
-  } else {
-    console.log('TODO: unknown constraint?');
+    flowEl = flowEl.merge({
+      x: proposedValve.x,
+      y: proposedValve.y,
+      points,
+    });
+
+    const updatedClouds = clouds.map((cloud) => {
+      return cloud.merge({
+        x: cloud.cx - moveDelta.x,
+        y: cloud.cy - moveDelta.y,
+      }) as CloudViewElement;
+    });
+
+    return [flowEl, updatedClouds];
   }
 
-  const updatedClouds = clouds.map((cloud) => {
-    const origPoint = defined(origPoints.find((pt) => pt.attachedToUid === cloud.uid));
-    const updatedPoint = defined(points.find((pt) => pt.attachedToUid === cloud.uid));
-    const delta = {
-      x: updatedPoint.x - origPoint.x,
-      y: updatedPoint.y - origPoint.y,
-    };
+  const segments = getSegments(points);
 
-    return cloud.merge({
-      x: cloud.cx + delta.x,
-      y: cloud.cy + delta.y,
-    }) as CloudViewElement;
-  });
+  // If a specific segment is being moved, move that segment
+  if (segmentIndex !== undefined) {
+    points = moveSegment(points, segmentIndex, moveDelta);
+
+    // Recalculate valve position if it was on the moved segment
+    const newSegments = getSegments(points);
+    if (segmentIndex < newSegments.length) {
+      const movedSeg = newSegments[segmentIndex];
+      const newValve = clampToSegment(currentValve, movedSeg);
+      flowEl = flowEl.merge({
+        x: newValve.x,
+        y: newValve.y,
+        points,
+      });
+    } else {
+      flowEl = flowEl.set('points', points);
+    }
+
+    return [flowEl, List<CloudViewElement>()];
+  }
+
+  // Moving the valve along the flow path
+  const closestSegment = findClosestSegment(currentValve, segments);
+  const clampedValve = clampToSegment(proposedValve, closestSegment);
 
   flowEl = flowEl.merge({
-    x: proposed.x,
-    y: proposed.y,
-    points,
+    x: clampedValve.x,
+    y: clampedValve.y,
   });
-  return [flowEl, updatedClouds];
+
+  return [flowEl, List<CloudViewElement>()];
 }
 
 export function flowBounds(element: FlowViewElement): Rect {
