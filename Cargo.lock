@@ -1841,10 +1841,19 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
+ "simlin-core",
  "simlin-engine",
  "ssh-key",
  "test-generator",
  "xmutil",
+]
+
+[[package]]
+name = "simlin-core"
+version = "0.1.0"
+dependencies = [
+ "lazy_static",
+ "regex",
 ]
 
 [[package]]
@@ -1868,6 +1877,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "simlin-core",
  "smallvec",
  "unicode-xid",
 ]
