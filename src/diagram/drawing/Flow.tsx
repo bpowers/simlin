@@ -403,6 +403,9 @@ function distanceToSegment(point: IPoint, seg: Segment): number {
 }
 
 function findClosestSegment(point: IPoint, segments: Segment[]): Segment {
+  if (segments.length === 0) {
+    throw new Error('findClosestSegment called with empty segments array');
+  }
   let closest = segments[0];
   let minDist = distanceToSegment(point, closest);
   for (let i = 1; i < segments.length; i++) {
@@ -415,7 +418,7 @@ function findClosestSegment(point: IPoint, segments: Segment[]): Segment {
   return closest;
 }
 
-function clampToSegment(point: IPoint, seg: Segment, margin: number = 10): IPoint {
+function clampToSegment(point: IPoint, seg: Segment, margin: number = VALVE_CLAMP_MARGIN): IPoint {
   if (seg.isHorizontal) {
     const minX = Math.min(seg.p1.x, seg.p2.x) + margin;
     const maxX = Math.max(seg.p1.x, seg.p2.x) - margin;
@@ -435,6 +438,8 @@ function clampToSegment(point: IPoint, seg: Segment, margin: number = 10): IPoin
 
 const VALVE_RADIUS = 6;
 const VALVE_HIT_TOLERANCE = 5;
+// Margin from segment endpoints when clamping valve position
+const VALVE_CLAMP_MARGIN = 10;
 
 // Check if a segment has an attached endpoint that would prevent dragging
 function segmentHasAttachedEndpoint(points: List<Point>, segmentIndex: number): boolean {
@@ -574,7 +579,11 @@ export function UpdateFlow(
 
   const segments = getSegments(points);
 
-  // If a specific segment is being moved, move that segment
+  // If a specific segment is being moved, move that segment.
+  // Note: We return an empty clouds list because segment movement only affects
+  // interior points (corners), not attached endpoints. Attached endpoints stay
+  // fixed at their stock/cloud positions. Only draggable segments are interior
+  // segments (between two corners), so no cloud positions need updating.
   if (segmentIndex !== undefined) {
     // Find which segment the valve is currently on before moving
     const valveSegment = findClosestSegment(currentValve, segments);
@@ -599,7 +608,9 @@ export function UpdateFlow(
     return [flowEl, List<CloudViewElement>()];
   }
 
-  // Moving the valve along the flow path
+  // Moving the valve along the flow path.
+  // Note: Valve movement doesn't change any endpoint positions, so no cloud
+  // positions need updating. We return an empty clouds list.
   const closestSegment = findClosestSegment(currentValve, segments);
   const clampedValve = clampToSegment(proposedValve, closestSegment);
 
