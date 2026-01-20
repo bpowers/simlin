@@ -7,7 +7,10 @@ const config = {
   preset: 'ts-jest',
   testEnvironment: 'node',
   testMatch: ['<rootDir>/tests/**/*.test.ts'],
-  moduleFileExtensions: ['ts', 'js'],
+  moduleFileExtensions: ['ts', 'tsx', 'js'],
+  moduleNameMapper: {
+    '\\.css$': '<rootDir>/tests/css-module-stub.ts',
+  },
 };
 
 module.exports = config;

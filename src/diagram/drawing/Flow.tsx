@@ -28,81 +28,152 @@ import styles from './Flow.module.css';
 const atan2 = Math.atan2;
 const PI = Math.PI;
 
-// similar to Python's isclose, which is Apache 2 licensed
-function eq(a: number, b: number, relTol = 1e-9, absTol = 0.0): boolean {
-  if (relTol < 0 || absTol < 0) {
-    throw new Error(`relative and absolute tolerances must be non-negative.`);
-  }
-  if (a === b) {
-    return true;
-  }
+type Side = 'left' | 'right' | 'top' | 'bottom';
 
-  const diff = Math.abs(b - a);
-  return diff <= Math.abs(relTol * b) || diff <= Math.abs(relTol * a) || diff <= absTol;
+function getStockEdgePoint(stockCx: number, stockCy: number, side: Side): IPoint {
+  switch (side) {
+    case 'left':
+      return { x: stockCx - StockWidth / 2, y: stockCy };
+    case 'right':
+      return { x: stockCx + StockWidth / 2, y: stockCy };
+    case 'top':
+      return { x: stockCx, y: stockCy - StockHeight / 2 };
+    case 'bottom':
+      return { x: stockCx, y: stockCy + StockHeight / 2 };
+  }
 }
 
-function isAdjacent(
-  stockEl: StockViewElement,
-  flow: FlowViewElement,
-  side: 'left' | 'right' | 'top' | 'bottom',
+function canFlowBeStraight(
+  stockCx: number,
+  stockCy: number,
+  anchorX: number,
+  anchorY: number,
+  originalFlowIsHorizontal: boolean,
 ): boolean {
-  // want to look at first point and last point.
-  const point = defined(flow.points.filter((point) => point.attachedToUid === stockEl.uid).first());
-
-  if (side === 'left' && eq(point.x, stockEl.cx - StockWidth / 2)) {
-    return true;
-  } else if (side === 'right' && eq(point.x, stockEl.cx + StockWidth / 2)) {
-    return true;
-  } else if (side === 'top' && eq(point.y, stockEl.cy - StockHeight / 2)) {
-    return true;
-  } else if (side === 'bottom' && eq(point.y, stockEl.cy + StockHeight / 2)) {
-    return true;
+  if (originalFlowIsHorizontal) {
+    return Math.abs(stockCy - anchorY) <= StockHeight / 2;
+  } else {
+    return Math.abs(stockCx - anchorX) <= StockWidth / 2;
   }
-
-  const compare = getComparePoint(flow, stockEl);
-  const d = {
-    x: stockEl.cx - compare.x,
-    y: stockEl.cy - compare.y,
-  };
-  const horizontal = isHorizontal(flow);
-  const vertical = isVertical(flow);
-  if (horizontal && vertical) {
-    // nothing we can do
-    return false;
-  }
-
-  if (horizontal && d.x < 0 && side === 'right') {
-    return true;
-  } else if (horizontal && d.x > 0 && side === 'left') {
-    return true;
-  } else if (!horizontal && d.y < 0 && side === 'bottom') {
-    return true;
-  } else if (!horizontal && d.y > 0 && side === 'top') {
-    return true;
-  }
-
-  return false;
 }
 
-function getComparePoint(flow: FlowViewElement, stock: ViewElement): IPoint {
-  if (flow.points.size !== 2) {
-    console.log(`TODO: multipoint flows for ${flow.ident}`);
+// Exported for testing
+export function computeFlowRoute(
+  flow: FlowViewElement,
+  stockEl: StockViewElement,
+  newStockCx: number,
+  newStockCy: number,
+): FlowViewElement {
+  const points = flow.points;
+  if (points.size < 2) {
+    return flow;
   }
 
-  let i = 0;
-  for (const point of flow.points) {
-    if (point.attachedToUid === stock.uid) {
-      if (i === 0) {
-        return defined(flow.points.last());
-      } else {
-        return defined(flow.points.first());
-      }
+  const firstPoint = defined(points.first());
+  const lastPoint = defined(points.last());
+
+  const stockIsFirst = firstPoint.attachedToUid === stockEl.uid;
+  const stockIsLast = lastPoint.attachedToUid === stockEl.uid;
+
+  if (!stockIsFirst && !stockIsLast) {
+    return flow;
+  }
+
+  const anchor = stockIsFirst ? lastPoint : firstPoint;
+
+  // Determine original flow direction by looking at the anchor-side segment.
+  // This works for both 2-point (straight) and 3+ point (L-shaped) flows.
+  // For L-shaped flows, the anchor-side segment preserves the original direction.
+  let anchorAdjacentPoint: Point;
+  if (stockIsFirst) {
+    // anchor is last, so look at second-to-last point
+    anchorAdjacentPoint = points.size >= 2 ? defined(points.get(points.size - 2)) : firstPoint;
+  } else {
+    // anchor is first, so look at second point
+    anchorAdjacentPoint = points.size >= 2 ? defined(points.get(1)) : lastPoint;
+  }
+  const originalFlowIsHorizontal = anchor.y === anchorAdjacentPoint.y;
+
+  if (canFlowBeStraight(newStockCx, newStockCy, anchor.x, anchor.y, originalFlowIsHorizontal)) {
+    let stockEdge: IPoint;
+    if (originalFlowIsHorizontal) {
+      const side: Side = anchor.x > newStockCx ? 'right' : 'left';
+      stockEdge = getStockEdgePoint(newStockCx, anchor.y, side);
+    } else {
+      const side: Side = anchor.y > newStockCy ? 'bottom' : 'top';
+      stockEdge = getStockEdgePoint(anchor.x, newStockCy, side);
     }
 
-    i++;
+    const newStockPoint = new Point({
+      x: stockEdge.x,
+      y: stockEdge.y,
+      attachedToUid: stockEl.uid,
+    });
+
+    let newPoints: List<Point>;
+    if (stockIsFirst) {
+      newPoints = List([newStockPoint, anchor]);
+    } else {
+      newPoints = List([firstPoint, newStockPoint]);
+    }
+
+    const midX = (newStockPoint.x + anchor.x) / 2;
+    const midY = (newStockPoint.y + anchor.y) / 2;
+
+    return flow.merge({
+      x: midX,
+      y: midY,
+      points: newPoints,
+    });
   }
 
-  throw new Error('unreachable');
+  // For L-shaped flow, attach perpendicular to the original flow direction
+  let attachmentSide: Side;
+  if (originalFlowIsHorizontal) {
+    // Original was horizontal, so the new segment from stock should be vertical
+    attachmentSide = anchor.y < newStockCy ? 'top' : 'bottom';
+  } else {
+    // Original was vertical, so the new segment from stock should be horizontal
+    attachmentSide = anchor.x < newStockCx ? 'left' : 'right';
+  }
+  const stockEdge = getStockEdgePoint(newStockCx, newStockCy, attachmentSide);
+
+  // Corner connects the stock's perpendicular segment to the original flow direction
+  let corner: IPoint;
+  if (originalFlowIsHorizontal) {
+    // Vertical segment from stock, then horizontal to anchor
+    corner = { x: stockEdge.x, y: anchor.y };
+  } else {
+    // Horizontal segment from stock, then vertical to anchor
+    corner = { x: anchor.x, y: stockEdge.y };
+  }
+
+  const newStockPoint = new Point({
+    x: stockEdge.x,
+    y: stockEdge.y,
+    attachedToUid: stockEl.uid,
+  });
+  const cornerPoint = new Point({
+    x: corner.x,
+    y: corner.y,
+    attachedToUid: undefined,
+  });
+
+  let newPoints: List<Point>;
+  if (stockIsFirst) {
+    newPoints = List([newStockPoint, cornerPoint, anchor]);
+  } else {
+    newPoints = List([firstPoint, cornerPoint, newStockPoint]);
+  }
+
+  const valveMidX = (anchor.x + corner.x) / 2;
+  const valveMidY = (anchor.y + corner.y) / 2;
+
+  return flow.merge({
+    x: valveMidX,
+    y: valveMidY,
+    points: newPoints,
+  });
 }
 
 function adjustFlows(
@@ -217,41 +288,15 @@ export function UpdateStockAndFlows(
   flows: List<FlowViewElement>,
   moveDelta: IPoint,
 ): [StockViewElement, List<FlowViewElement>] {
-  const left = flows.filter((e) => isAdjacent(stockEl, e, 'left'));
-  const right = flows.filter((e) => isAdjacent(stockEl, e, 'right'));
-  const top = flows.filter((e) => isAdjacent(stockEl, e, 'top'));
-  const bottom = flows.filter((e) => isAdjacent(stockEl, e, 'bottom'));
-  if (flows.size !== left.size + right.size + top.size + bottom.size) {
-    console.log(`isAdjacent is acting up ${flows.size} !== ${left.size + right.size + top.size + bottom.size}`);
-  }
+  const newStockCx = stockEl.cx - moveDelta.x;
+  const newStockCy = stockEl.cy - moveDelta.y;
 
-  let proposed = new Point({
-    x: stockEl.cx - moveDelta.x,
-    y: stockEl.cy - moveDelta.y,
-    attachedToUid: undefined,
-  });
-
-  proposed = left.concat(right).reduce((p, flowEl: FlowViewElement) => {
-    let y = p.y;
-    y = Math.max(y, flowEl.cy - StockHeight / 2 + 3);
-    y = Math.min(y, flowEl.cy + StockHeight / 2 - 3);
-    return p.set('y', y);
-  }, proposed);
-
-  proposed = top.concat(bottom).reduce((p, flowEl: FlowViewElement) => {
-    let x = p.x;
-    x = Math.max(x, flowEl.cx - StockWidth / 2 + 3);
-    x = Math.min(x, flowEl.cx + StockWidth / 2 - 3);
-    return p.set('x', x);
-  }, proposed);
-
-  const origStockEl = stockEl;
   stockEl = stockEl.merge({
-    x: proposed.x,
-    y: proposed.y,
+    x: newStockCx,
+    y: newStockCy,
   });
 
-  flows = adjustFlows(origStockEl, stockEl, flows);
+  flows = flows.map((flow) => computeFlowRoute(flow, stockEl, newStockCx, newStockCy));
 
   return [stockEl, flows];
 }
