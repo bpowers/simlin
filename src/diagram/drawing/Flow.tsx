@@ -436,6 +436,34 @@ function clampToSegment(point: IPoint, seg: Segment, margin: number = 10): IPoin
 const VALVE_RADIUS = 6;
 const VALVE_HIT_TOLERANCE = 5;
 
+// Check if a segment has an attached endpoint that would prevent dragging
+function segmentHasAttachedEndpoint(points: List<Point>, segmentIndex: number): boolean {
+  const numSegments = points.size - 1;
+  if (segmentIndex < 0 || segmentIndex >= numSegments) {
+    return true;
+  }
+
+  // Segment 0 connects point 0 and point 1
+  // If point 0 is attached, segment 0 has an attached endpoint at its start
+  if (segmentIndex === 0) {
+    const firstPoint = points.get(0);
+    if (firstPoint?.attachedToUid !== undefined) {
+      return true;
+    }
+  }
+
+  // Last segment connects point n-1 and point n
+  // If point n is attached, last segment has an attached endpoint at its end
+  if (segmentIndex === numSegments - 1) {
+    const lastPoint = points.get(points.size - 1);
+    if (lastPoint?.attachedToUid !== undefined) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 // Determine which segment was clicked, or undefined if clicking on the valve
 export function findClickedSegment(
   clickX: number,
@@ -463,6 +491,13 @@ export function findClickedSegment(
   // For multi-segment flows, find closest segment
   const clickPoint: IPoint = { x: clickX, y: clickY };
   const closest = findClosestSegment(clickPoint, segments);
+
+  // Don't allow dragging segments that have an attached endpoint
+  // (would create diagonal segments which break axis-alignment assumptions)
+  if (segmentHasAttachedEndpoint(points, closest.index)) {
+    return undefined;
+  }
+
   return closest.index;
 }
 
@@ -541,11 +576,15 @@ export function UpdateFlow(
 
   // If a specific segment is being moved, move that segment
   if (segmentIndex !== undefined) {
+    // Find which segment the valve is currently on before moving
+    const valveSegment = findClosestSegment(currentValve, segments);
+    const valveOnMovedSegment = valveSegment.index === segmentIndex;
+
     points = moveSegment(points, segmentIndex, moveDelta);
 
-    // Recalculate valve position if it was on the moved segment
+    // Only recalculate valve position if it was on the moved segment
     const newSegments = getSegments(points);
-    if (segmentIndex < newSegments.length) {
+    if (valveOnMovedSegment && segmentIndex < newSegments.length) {
       const movedSeg = newSegments[segmentIndex];
       const newValve = clampToSegment(currentValve, movedSeg);
       flowEl = flowEl.merge({

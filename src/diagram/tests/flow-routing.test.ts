@@ -495,11 +495,12 @@ describe('Flow routing', () => {
 
   describe('findClickedSegment', () => {
     it('should return undefined when clicking on the valve', () => {
-      // L-shaped flow with valve at (150, 100)
+      // 4-point flow with valve at (150, 100)
       const points = List([
         new Point({ x: 100, y: 200, attachedToUid: cloudUid }),
         new Point({ x: 100, y: 100, attachedToUid: undefined }),
-        new Point({ x: 200, y: 100, attachedToUid: stockUid }),
+        new Point({ x: 200, y: 100, attachedToUid: undefined }),
+        new Point({ x: 200, y: 50, attachedToUid: stockUid }),
       ]);
       const valveCx = 150;
       const valveCy = 100;
@@ -527,8 +528,9 @@ describe('Flow routing', () => {
       expect(result).toBeUndefined();
     });
 
-    it('should return segment index for L-shaped flow when clicking on a segment', () => {
-      // L-shaped flow: vertical segment (0) then horizontal segment (1)
+    it('should return undefined for L-shaped flow segments with attached endpoints', () => {
+      // L-shaped flow: both segments have one attached endpoint
+      // Segment 0 has attached first point, segment 1 has attached last point
       const points = List([
         new Point({ x: 100, y: 200, attachedToUid: cloudUid }),
         new Point({ x: 100, y: 100, attachedToUid: undefined }), // corner
@@ -537,32 +539,40 @@ describe('Flow routing', () => {
       const valveCx = 150;
       const valveCy = 100;
 
-      // Click on the vertical segment (segment 0)
+      // Click on the vertical segment (segment 0) - has attached first point
       const result = findClickedSegment(100, 150, valveCx, valveCy, points);
-      expect(result).toBe(0);
+      expect(result).toBeUndefined();
 
-      // Click on the horizontal segment (segment 1), away from the valve
+      // Click on the horizontal segment (segment 1) - has attached last point
       const result2 = findClickedSegment(180, 100, valveCx, valveCy, points);
-      expect(result2).toBe(1);
+      expect(result2).toBeUndefined();
     });
 
-    it('should find closest segment when click is between segments', () => {
-      // L-shaped flow
+    it('should return segment index for middle segment of 4-point flow', () => {
+      // 4-point flow: 3 segments, middle segment has no attached endpoints
+      // Segment 0: attached -> corner1 (has attached endpoint)
+      // Segment 1: corner1 -> corner2 (no attached endpoints - CAN drag)
+      // Segment 2: corner2 -> attached (has attached endpoint)
       const points = List([
         new Point({ x: 100, y: 200, attachedToUid: cloudUid }),
-        new Point({ x: 100, y: 100, attachedToUid: undefined }), // corner at (100, 100)
-        new Point({ x: 200, y: 100, attachedToUid: stockUid }),
+        new Point({ x: 100, y: 100, attachedToUid: undefined }), // corner1
+        new Point({ x: 200, y: 100, attachedToUid: undefined }), // corner2
+        new Point({ x: 200, y: 50, attachedToUid: stockUid }),
       ]);
       const valveCx = 150;
       const valveCy = 100;
 
-      // Click near the corner but closer to vertical segment
-      const result = findClickedSegment(95, 110, valveCx, valveCy, points);
-      expect(result).toBe(0); // vertical segment
+      // Click on the middle horizontal segment (segment 1)
+      const result = findClickedSegment(150, 100 + 20, valveCx, valveCy, points);
+      expect(result).toBe(1);
 
-      // Click near the corner but closer to horizontal segment
-      const result2 = findClickedSegment(110, 95, valveCx, valveCy, points);
-      expect(result2).toBe(1); // horizontal segment
+      // Click on segment 0 (has attached endpoint) - should return undefined
+      const result2 = findClickedSegment(100, 150, valveCx, valveCy, points);
+      expect(result2).toBeUndefined();
+
+      // Click on segment 2 (has attached endpoint) - should return undefined
+      const result3 = findClickedSegment(200, 75, valveCx, valveCy, points);
+      expect(result3).toBeUndefined();
     });
 
     it('should return undefined for empty points list', () => {
