@@ -135,6 +135,8 @@ interface CanvasState {
   // Store the MODEL coordinates of the point under the initial pinch center.
   // This is the fixed point that should stay under the user's fingers during zoom.
   pinchModelPoint: Point | undefined;
+  // Which segment of a flow is being dragged (undefined = valve)
+  draggingSegmentIndex: number | undefined;
 }
 
 export interface CanvasProps {
@@ -222,6 +224,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       initialPinchDistance: 0,
       initialPinchZoom: 1,
       pinchModelPoint: undefined,
+      draggingSegmentIndex: undefined,
     };
   }
 
@@ -606,7 +609,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     }
 
     const ends = List<StockViewElement | CloudViewElement>([source, sink]);
-    return UpdateFlow(flow, ends, moveDelta);
+    return UpdateFlow(flow, ends, moveDelta, this.state.draggingSegmentIndex);
   }
 
   constrainCloudMovement(
@@ -705,6 +708,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       dragSelectionPoint: undefined,
       inCreation: undefined,
       inCreationCloud: undefined,
+      draggingSegmentIndex: undefined,
     });
 
     if (clearSelection) {
@@ -828,6 +832,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           inCreation: undefined,
           inCreationCloud: undefined,
           isMovingArrow: false,
+          draggingSegmentIndex: undefined,
         });
       }
       this.selectionCenterOffset = undefined;
@@ -1657,6 +1662,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     e: React.PointerEvent<SVGElement>,
     isText?: boolean,
     isArrowhead?: boolean,
+    segmentIndex?: number,
   ): void => {
     if (this.props.embedded) {
       return;
@@ -1758,6 +1764,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         x: 0,
         y: 0,
       },
+      draggingSegmentIndex: segmentIndex,
     });
 
     // Use the calculated selection instead of always single element

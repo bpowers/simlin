@@ -6,10 +6,16 @@ import { List } from 'immutable';
 
 import { Point, FlowViewElement, StockViewElement } from '@system-dynamics/core/datamodel';
 
-import { computeFlowRoute, UpdateStockAndFlows, UpdateFlow, moveSegment } from '../drawing/Flow';
+import { computeFlowRoute, UpdateStockAndFlows, UpdateFlow, moveSegment, findClickedSegment } from '../drawing/Flow';
 import { StockWidth, StockHeight } from '../drawing/Stock';
 
-function makeStock(uid: number, x: number, y: number, inflows: number[] = [], outflows: number[] = []): StockViewElement {
+function makeStock(
+  uid: number,
+  x: number,
+  y: number,
+  inflows: number[] = [],
+  outflows: number[] = [],
+): StockViewElement {
   return new StockViewElement({
     uid,
     name: 'TestStock',
@@ -484,6 +490,85 @@ describe('Flow routing', () => {
       // Endpoints should not have moved
       expect(newFlow.points.get(0)!.y).toBe(200);
       expect(newFlow.points.get(2)!.y).toBe(100);
+    });
+  });
+
+  describe('findClickedSegment', () => {
+    it('should return undefined when clicking on the valve', () => {
+      // L-shaped flow with valve at (150, 100)
+      const points = List([
+        new Point({ x: 100, y: 200, attachedToUid: cloudUid }),
+        new Point({ x: 100, y: 100, attachedToUid: undefined }),
+        new Point({ x: 200, y: 100, attachedToUid: stockUid }),
+      ]);
+      const valveCx = 150;
+      const valveCy = 100;
+
+      // Click exactly on the valve
+      const result = findClickedSegment(150, 100, valveCx, valveCy, points);
+      expect(result).toBeUndefined();
+
+      // Click near the valve (within tolerance)
+      const result2 = findClickedSegment(155, 103, valveCx, valveCy, points);
+      expect(result2).toBeUndefined();
+    });
+
+    it('should return undefined for single-segment (straight) flows', () => {
+      // Straight horizontal flow - only 2 points
+      const points = List([
+        new Point({ x: 100, y: 100, attachedToUid: cloudUid }),
+        new Point({ x: 200, y: 100, attachedToUid: stockUid }),
+      ]);
+      const valveCx = 150;
+      const valveCy = 100;
+
+      // Click away from the valve on the segment
+      const result = findClickedSegment(120, 100, valveCx, valveCy, points);
+      expect(result).toBeUndefined();
+    });
+
+    it('should return segment index for L-shaped flow when clicking on a segment', () => {
+      // L-shaped flow: vertical segment (0) then horizontal segment (1)
+      const points = List([
+        new Point({ x: 100, y: 200, attachedToUid: cloudUid }),
+        new Point({ x: 100, y: 100, attachedToUid: undefined }), // corner
+        new Point({ x: 200, y: 100, attachedToUid: stockUid }),
+      ]);
+      const valveCx = 150;
+      const valveCy = 100;
+
+      // Click on the vertical segment (segment 0)
+      const result = findClickedSegment(100, 150, valveCx, valveCy, points);
+      expect(result).toBe(0);
+
+      // Click on the horizontal segment (segment 1), away from the valve
+      const result2 = findClickedSegment(180, 100, valveCx, valveCy, points);
+      expect(result2).toBe(1);
+    });
+
+    it('should find closest segment when click is between segments', () => {
+      // L-shaped flow
+      const points = List([
+        new Point({ x: 100, y: 200, attachedToUid: cloudUid }),
+        new Point({ x: 100, y: 100, attachedToUid: undefined }), // corner at (100, 100)
+        new Point({ x: 200, y: 100, attachedToUid: stockUid }),
+      ]);
+      const valveCx = 150;
+      const valveCy = 100;
+
+      // Click near the corner but closer to vertical segment
+      const result = findClickedSegment(95, 110, valveCx, valveCy, points);
+      expect(result).toBe(0); // vertical segment
+
+      // Click near the corner but closer to horizontal segment
+      const result2 = findClickedSegment(110, 95, valveCx, valveCy, points);
+      expect(result2).toBe(1); // horizontal segment
+    });
+
+    it('should return undefined for empty points list', () => {
+      const points = List<Point>();
+      const result = findClickedSegment(100, 100, 100, 100, points);
+      expect(result).toBeUndefined();
     });
   });
 });

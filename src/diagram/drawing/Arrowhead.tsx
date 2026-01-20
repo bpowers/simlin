@@ -48,8 +48,18 @@ export class Arrowhead extends React.PureComponent<ArrowheadProps> {
 
     return (
       <g>
-        <path d={bgPath} className={`${styles.arrowheadBg} simlin-arrowhead-bg`} transform={transform} onPointerDown={this.handlePointerDown} />
-        <path d={path} className={`${pathClassName} ${staticClass}`} transform={transform} onPointerDown={this.handlePointerDown} />
+        <path
+          d={bgPath}
+          className={`${styles.arrowheadBg} simlin-arrowhead-bg`}
+          transform={transform}
+          onPointerDown={this.handlePointerDown}
+        />
+        <path
+          d={path}
+          className={`${pathClassName} ${staticClass}`}
+          transform={transform}
+          onPointerDown={this.handlePointerDown}
+        />
       </g>
     );
   }

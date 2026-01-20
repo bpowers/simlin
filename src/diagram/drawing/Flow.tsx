@@ -433,12 +433,41 @@ function clampToSegment(point: IPoint, seg: Segment, margin: number = 10): IPoin
   }
 }
 
-// Move a segment perpendicular to its direction, adjusting adjacent segments
-export function moveSegment(
+const VALVE_RADIUS = 6;
+const VALVE_HIT_TOLERANCE = 5;
+
+// Determine which segment was clicked, or undefined if clicking on the valve
+export function findClickedSegment(
+  clickX: number,
+  clickY: number,
+  valveCx: number,
+  valveCy: number,
   points: List<Point>,
-  segmentIndex: number,
-  delta: IPoint,
-): List<Point> {
+): number | undefined {
+  // If click is on/near the valve, return undefined (valve drag, not segment)
+  const distToValve = Math.hypot(clickX - valveCx, clickY - valveCy);
+  if (distToValve <= VALVE_RADIUS + VALVE_HIT_TOLERANCE) {
+    return undefined;
+  }
+
+  const segments = getSegments(points);
+  if (segments.length === 0) {
+    return undefined;
+  }
+
+  // For single-segment flows (straight lines), clicking anywhere drags the valve
+  if (segments.length === 1) {
+    return undefined;
+  }
+
+  // For multi-segment flows, find closest segment
+  const clickPoint: IPoint = { x: clickX, y: clickY };
+  const closest = findClosestSegment(clickPoint, segments);
+  return closest.index;
+}
+
+// Move a segment perpendicular to its direction, adjusting adjacent segments
+export function moveSegment(points: List<Point>, segmentIndex: number, delta: IPoint): List<Point> {
   const segments = getSegments(points);
   if (segmentIndex < 0 || segmentIndex >= segments.length) {
     return points;
@@ -593,7 +622,13 @@ export interface FlowProps {
   isMovingArrow: boolean;
   hasWarning?: boolean;
   series: Readonly<Array<Series>> | undefined;
-  onSelection: (el: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean, isArrowhead?: boolean) => void;
+  onSelection: (
+    el: ViewElement,
+    e: React.PointerEvent<SVGElement>,
+    isText?: boolean,
+    isArrowhead?: boolean,
+    segmentIndex?: number,
+  ) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   source: StockViewElement | CloudViewElement;
   element: FlowViewElement;
@@ -609,7 +644,29 @@ export class Flow extends React.PureComponent<FlowProps> {
   handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    this.props.onSelection(this.props.element, e);
+
+    // Convert screen coordinates to SVG model coordinates
+    const svg = (e.target as SVGElement).ownerSVGElement;
+    let segmentIndex: number | undefined;
+
+    if (svg) {
+      const pt = svg.createSVGPoint();
+      pt.x = e.clientX;
+      pt.y = e.clientY;
+      const ctm = svg.getScreenCTM();
+      if (ctm) {
+        const svgPt = pt.matrixTransform(ctm.inverse());
+        segmentIndex = findClickedSegment(
+          svgPt.x,
+          svgPt.y,
+          this.props.element.cx,
+          this.props.element.cy,
+          this.props.element.points,
+        );
+      }
+    }
+
+    this.props.onSelection(this.props.element, e, false, false, segmentIndex);
   };
 
   handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {
