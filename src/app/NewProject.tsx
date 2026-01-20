@@ -142,19 +142,31 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
       return;
     }
     const file = event.target.files[0];
-    let contents = await readFile(file);
+    const contents = await readFile(file);
     let logs: string | undefined;
 
     try {
-      // convert vensim files to xmile
+      let engine2Project: Engine2Project;
+
       if (file.name.endsWith('.mdl')) {
-        [contents, logs] = await convertMdlToXmile(contents, true);
-        if (contents.length === 0) {
-          throw new Error('Vensim converter: ' + (logs || 'unknown error'));
+        // For Vensim MDL files, try direct import first if available
+        const hasVensim = await Engine2Project.hasVensimSupport();
+        if (hasVensim) {
+          engine2Project = await Engine2Project.openVensim(contents);
+        } else {
+          // Fall back to xmutil conversion when direct Vensim support is not available
+          const [xmileContents, conversionLogs] = await convertMdlToXmile(contents, true);
+          logs = conversionLogs;
+          if (xmileContents.length === 0) {
+            throw new Error('Vensim converter: ' + (logs || 'unknown error'));
+          }
+          engine2Project = await Engine2Project.open(xmileContents);
         }
+      } else {
+        // XMILE/STMX files open directly
+        engine2Project = await Engine2Project.open(contents);
       }
 
-      const engine2Project = await Engine2Project.open(contents);
       const projectPB = engine2Project.serializeProtobuf();
       const json = JSON.parse(engine2Project.serializeJson()) as JsonProject;
       const activeProject = ProjectDM.fromJson(json);
