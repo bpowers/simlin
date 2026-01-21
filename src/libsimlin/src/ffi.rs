@@ -63,6 +63,18 @@ pub enum SimlinJsonFormat {
     Sdai = 1,
 }
 
+impl TryFrom<u32> for SimlinJsonFormat {
+    type Error = ();
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(SimlinJsonFormat::Native),
+            1 => Ok(SimlinJsonFormat::Sdai),
+            _ => Err(()),
+        }
+    }
+}
+
 /// A single feedback loop
 #[repr(C)]
 pub struct SimlinLoop {

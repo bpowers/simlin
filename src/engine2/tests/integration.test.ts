@@ -9,7 +9,7 @@ import { init, reset, getMemory, isUrl, isNode } from '@system-dynamics/engine2/
 import { malloc, free } from '../src/internal/memory';
 import { SimlinError, readErrorDetail } from '../src/internal/error';
 import { SimlinErrorCode, SimlinJsonFormat } from '../src/internal/types';
-import { validateStructSizes } from '../src/internal/analysis';
+import { validateStructSizes, getRustStructSizes } from '../src/internal/analysis';
 import {
   simlin_project_unref,
   simlin_project_get_model,
@@ -519,11 +519,65 @@ describe('WASM Integration Tests', () => {
 
       free(structPtr);
     });
+
+    it('should have SimlinErrorDetail size match Rust-reported size', () => {
+      // Verify the hardcoded TypeScript size (28 bytes) matches what Rust reports
+      const rustSizes = getRustStructSizes();
+      expect(rustSizes.errorDetailSize).toBe(28);
+    });
+
+    it('should read actual error details from Rust-generated errors', () => {
+      // Import invalid XMILE to trigger a real Rust error with details
+      const invalidXmile = new TextEncoder().encode(`<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><vendor>Test</vendor><product version="1.0">Test</product></header>
+  <sim_specs><start>0</start><stop>10</stop><dt>1</dt></sim_specs>
+  <model>
+    <variables>
+      <aux name="broken_var"><eqn>undefined_var + 1</eqn></aux>
+    </variables>
+  </model>
+</xmile>`);
+
+      try {
+        simlin_project_open_xmile(new Uint8Array(invalidXmile));
+        // If we get here, the import succeeded (model has errors but parsed)
+      } catch (e) {
+        if (e instanceof SimlinError) {
+          // Verify we can access actual Rust-generated error details
+          expect(typeof e.code).toBe('number');
+          expect(typeof e.message).toBe('string');
+          expect(Array.isArray(e.details)).toBe(true);
+
+          // Each detail should have the correct structure from Rust
+          for (const detail of e.details) {
+            expect(typeof detail.code).toBe('number');
+            expect(typeof detail.kind).toBe('number');
+            expect(typeof detail.unitErrorKind).toBe('number');
+            expect(typeof detail.startOffset).toBe('number');
+            expect(typeof detail.endOffset).toBe('number');
+            // These may be null or strings depending on the error
+            expect(detail.message === null || typeof detail.message === 'string').toBe(true);
+            expect(detail.modelName === null || typeof detail.modelName === 'string').toBe(true);
+            expect(detail.variableName === null || typeof detail.variableName === 'string').toBe(true);
+          }
+        } else {
+          throw e;
+        }
+      }
+    });
   });
 
   describe('Analysis Struct Layout', () => {
-    it('should validate loop and link struct sizes', () => {
+    it('should validate loop and link struct sizes against Rust-reported sizes', () => {
+      // This calls Rust's simlin_sizeof_* functions and compares against TypeScript constants
       expect(() => validateStructSizes()).not.toThrow();
+
+      // Also verify the actual values for documentation
+      const rustSizes = getRustStructSizes();
+      expect(rustSizes.ptrSize).toBe(4); // wasm32 pointers are 4 bytes
+      expect(rustSizes.loopSize).toBe(16); // SimlinLoop: id + variables + var_count + polarity
+      expect(rustSizes.linkSize).toBe(20); // SimlinLink: from + to + polarity + score + score_len
     });
   });
 

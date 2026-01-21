@@ -164,7 +164,7 @@ export function simlin_analyze_get_relative_loop_score(
   }
 }
 
-// Struct sizes for wasm32 target
+// Struct sizes for wasm32 target (expected values)
 // SimlinLoop: id: ptr(4), variables: ptr(4), var_count: usize(4), polarity: u32(4) = 16 bytes
 const LOOP_SIZE = 16;
 // SimlinLink: from: ptr(4), to: ptr(4), polarity: u32(4), score: ptr(4), score_len: usize(4) = 20 bytes
@@ -181,25 +181,57 @@ function ensureStructSizesValidated(): void {
 }
 
 /**
- * Validate struct sizes match expected wasm32 layout.
- * This helps catch ABI mismatches early.
+ * Get the actual struct sizes from the Rust/WASM module.
+ * Returns an object with sizes of Loop, Link, ErrorDetail, and pointer.
+ */
+export function getRustStructSizes(): {
+  loopSize: number;
+  linkSize: number;
+  errorDetailSize: number;
+  ptrSize: number;
+} {
+  const exports = getExports();
+  const sizeofLoop = exports.simlin_sizeof_loop as () => number;
+  const sizeofLink = exports.simlin_sizeof_link as () => number;
+  const sizeofErrorDetail = exports.simlin_sizeof_error_detail as () => number;
+  const sizeofPtr = exports.simlin_sizeof_ptr as () => number;
+
+  return {
+    loopSize: sizeofLoop(),
+    linkSize: sizeofLink(),
+    errorDetailSize: sizeofErrorDetail(),
+    ptrSize: sizeofPtr(),
+  };
+}
+
+/**
+ * Validate struct sizes match expected wasm32 layout by comparing
+ * TypeScript hardcoded values against actual Rust-exported sizes.
+ * This catches ABI drift between Rust struct changes and TypeScript code.
  * @throws Error if struct sizes don't match expected values
  */
 export function validateStructSizes(): void {
-  // These assertions document the expected ABI and will fail if
-  // the Rust struct layout changes incompatibly
-  if (PTR_SIZE !== 4) {
-    throw new Error(`Expected wasm32 pointer size of 4, got ${PTR_SIZE}`);
+  const rustSizes = getRustStructSizes();
+
+  // Validate pointer size - must be 4 for wasm32
+  if (rustSizes.ptrSize !== PTR_SIZE) {
+    throw new Error(
+      `Pointer size mismatch: Rust reports ${rustSizes.ptrSize}, TypeScript expects ${PTR_SIZE}`,
+    );
   }
-  // The LOOP_SIZE should be: ptr + ptr + usize + u32 = 4 + 4 + 4 + 4 = 16
-  const expectedLoopSize = PTR_SIZE + PTR_SIZE + PTR_SIZE + 4; // id, variables, var_count, polarity
-  if (LOOP_SIZE !== expectedLoopSize) {
-    throw new Error(`LOOP_SIZE ${LOOP_SIZE} does not match expected ${expectedLoopSize}`);
+
+  // Validate SimlinLoop size
+  if (rustSizes.loopSize !== LOOP_SIZE) {
+    throw new Error(
+      `SimlinLoop size mismatch: Rust reports ${rustSizes.loopSize}, TypeScript expects ${LOOP_SIZE}`,
+    );
   }
-  // The LINK_SIZE should be: ptr + ptr + u32 + ptr + usize = 4 + 4 + 4 + 4 + 4 = 20
-  const expectedLinkSize = PTR_SIZE + PTR_SIZE + 4 + PTR_SIZE + PTR_SIZE; // from, to, polarity, score, score_len
-  if (LINK_SIZE !== expectedLinkSize) {
-    throw new Error(`LINK_SIZE ${LINK_SIZE} does not match expected ${expectedLinkSize}`);
+
+  // Validate SimlinLink size
+  if (rustSizes.linkSize !== LINK_SIZE) {
+    throw new Error(
+      `SimlinLink size mismatch: Rust reports ${rustSizes.linkSize}, TypeScript expects ${LINK_SIZE}`,
+    );
   }
 }
 
