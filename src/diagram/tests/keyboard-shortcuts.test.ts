@@ -43,6 +43,31 @@ describe('keyboard-shortcuts', () => {
         const event = { key: 'Z', metaKey: true, ctrlKey: false, shiftKey: true, altKey: false };
         expect(detectUndoRedo(event)).toBe('redo');
       });
+
+      it('should detect Ctrl+Y as redo on Windows/Linux', () => {
+        const event = { key: 'y', metaKey: false, ctrlKey: true, shiftKey: false, altKey: false };
+        expect(detectUndoRedo(event)).toBe('redo');
+      });
+
+      it('should detect Ctrl+Y with uppercase Y as redo', () => {
+        const event = { key: 'Y', metaKey: false, ctrlKey: true, shiftKey: false, altKey: false };
+        expect(detectUndoRedo(event)).toBe('redo');
+      });
+
+      it('should not detect Cmd+Y as redo (Mac convention differs)', () => {
+        const event = { key: 'y', metaKey: true, ctrlKey: false, shiftKey: false, altKey: false };
+        expect(detectUndoRedo(event)).toBeNull();
+      });
+
+      it('should not detect Ctrl+Shift+Y as redo', () => {
+        const event = { key: 'y', metaKey: false, ctrlKey: true, shiftKey: true, altKey: false };
+        expect(detectUndoRedo(event)).toBeNull();
+      });
+
+      it('should not detect Ctrl+Alt+Y as redo', () => {
+        const event = { key: 'y', metaKey: false, ctrlKey: true, shiftKey: false, altKey: true };
+        expect(detectUndoRedo(event)).toBeNull();
+      });
     });
 
     describe('non-matching inputs', () => {
