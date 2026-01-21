@@ -426,6 +426,54 @@ describe('Flow routing', () => {
         expect(result.cx).toBe(150);
         expect(result.cy).toBe(150);
       });
+
+      it('should keep first segment horizontal when stock moves vertically on 4+ point flow', () => {
+        // 4-point flow with horizontal first segment: stock -> corner1 (horizontal)
+        const stock = makeStock(stockUid, 100, 100);
+        const flow = makeFlow(flowUid, 150, 150, [
+          { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid }, // stock right edge at y=100
+          { x: 150, y: 100 }, // corner1 at y=100 (horizontal segment)
+          { x: 150, y: 200 }, // corner2
+          { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
+        ]);
+
+        // Move stock vertically - this should NOT create a diagonal first segment
+        const newStockY = 120;
+        const result = computeFlowRoute(flow, stock, 100, newStockY);
+
+        // First segment (stock to corner1) should remain horizontal
+        const stockPoint = result.points.get(0)!;
+        const corner1 = result.points.get(1)!;
+
+        // The endpoint's Y should match corner1's Y (axis-aligned), not the stock center
+        expect(stockPoint.y).toBe(corner1.y);
+        // The segment is horizontal: same Y values
+        expect(stockPoint.y).toBe(100);
+      });
+
+      it('should keep first segment vertical when stock moves horizontally on 4+ point flow', () => {
+        // 4-point flow with vertical first segment: stock -> corner1 (vertical)
+        const stock = makeStock(stockUid, 100, 100);
+        const flow = makeFlow(flowUid, 150, 150, [
+          { x: 100, y: 100 + StockHeight / 2, attachedToUid: stockUid }, // stock bottom edge at x=100
+          { x: 100, y: 150 }, // corner1 at x=100 (vertical segment)
+          { x: 200, y: 150 }, // corner2
+          { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
+        ]);
+
+        // Move stock horizontally - this should NOT create a diagonal first segment
+        const newStockX = 120;
+        const result = computeFlowRoute(flow, stock, newStockX, 100);
+
+        // First segment (stock to corner1) should remain vertical
+        const stockPoint = result.points.get(0)!;
+        const corner1 = result.points.get(1)!;
+
+        // The endpoint's X should match corner1's X (axis-aligned), not the stock center
+        expect(stockPoint.x).toBe(corner1.x);
+        // The segment is vertical: same X values
+        expect(stockPoint.x).toBe(100);
+      });
     });
   });
 
@@ -619,6 +667,36 @@ describe('Flow routing', () => {
       // Endpoints should not have moved
       expect(newFlow.points.get(0)!.y).toBe(200);
       expect(newFlow.points.get(2)!.y).toBe(100);
+    });
+
+    it('should re-clamp valve when dragging adjacent segment that shares a corner', () => {
+      // 5-point flow with valve on segment 1
+      // Segments: [cloud-corner1], [corner1-corner2], [corner2-corner3], [corner3-stock]
+      // Valve is on segment 1 (corner1-corner2), segment 2 is dragged
+      const flow = makeFlow(flowUid, 100, 150, [
+        { x: 100, y: 100, attachedToUid: cloudUid }, // cloud
+        { x: 100, y: 200 }, // corner1
+        { x: 150, y: 200 }, // corner2 (shared by segments 1 and 2)
+        { x: 150, y: 300 }, // corner3
+        { x: 200, y: 300, attachedToUid: stockUid }, // stock
+      ]);
+      const stock = makeStock(stockUid, 200, 300);
+
+      // Valve at (100, 150) is on segment 0 (vertical from cloud to corner1)
+      // Drag segment 1 (horizontal corner1-corner2) down - this moves corner1 and corner2
+      const [newFlow] = UpdateFlow(flow, List([stock]), { x: 0, y: -20 }, 1);
+
+      // Segment 1 moved: corner1 and corner2 moved down by 20
+      expect(newFlow.points.get(1)!.y).toBe(220);
+      expect(newFlow.points.get(2)!.y).toBe(220);
+
+      // The valve was on segment 0 (cloud at y=100 to corner1 at y=200, vertical at x=100)
+      // Now segment 0 goes from y=100 to y=220 (longer), still vertical at x=100
+      // The valve should still be clamped to segment 0 since it's closest
+      expect(newFlow.cx).toBe(100);
+      // Valve y should still be within the segment (100+margin to 220-margin)
+      expect(newFlow.cy).toBeGreaterThanOrEqual(100);
+      expect(newFlow.cy).toBeLessThanOrEqual(220);
     });
   });
 

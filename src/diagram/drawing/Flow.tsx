@@ -105,14 +105,18 @@ export function computeFlowRoute(
 
     // Choose the side that best connects to the adjacent point
     let side: Side;
+    let stockEdge: IPoint;
     if (Math.abs(dx) > Math.abs(dy)) {
       // Primarily horizontal direction to adjacent point
       side = dx > 0 ? 'right' : 'left';
+      // Use adjacentPoint.y to keep the first segment horizontal (axis-aligned)
+      stockEdge = getStockEdgePoint(newStockCx, adjacentPoint.y, side);
     } else {
       // Primarily vertical direction to adjacent point
       side = dy > 0 ? 'bottom' : 'top';
+      // Use adjacentPoint.x to keep the first segment vertical (axis-aligned)
+      stockEdge = getStockEdgePoint(adjacentPoint.x, newStockCy, side);
     }
-    const stockEdge = getStockEdgePoint(newStockCx, newStockCy, side);
 
     const newStockPoint = new Point({
       x: stockEdge.x,
@@ -684,34 +688,20 @@ export function UpdateFlow(
   // fixed at their stock/cloud positions. Only draggable segments are interior
   // segments (between two corners), so no cloud positions need updating.
   if (segmentIndex !== undefined) {
-    // Find which segment the valve is currently on before moving
-    const valveSegment = findClosestSegment(currentValve, segments);
-    const valveOnMovedSegment = valveSegment.index === segmentIndex;
-
     points = moveSegment(points, segmentIndex, moveDelta);
 
-    // Only recalculate valve position if it was on the moved segment
+    // Always re-clamp the valve to the closest segment after any segment drag.
+    // Dragging any segment can affect adjacent segments via shared corners,
+    // so the valve's segment may have changed shape even if it wasn't the
+    // segment being dragged.
     const newSegments = getSegments(points);
-    if (valveOnMovedSegment) {
-      if (segmentIndex >= newSegments.length) {
-        // This shouldn't happen since moveSegment doesn't change the number of points,
-        // but log an error if it does to help diagnose the issue.
-        console.error(
-          `UpdateFlow: Invalid segment index ${segmentIndex} for flow with ${newSegments.length} segments`,
-        );
-        flowEl = flowEl.set('points', points);
-      } else {
-        const movedSeg = newSegments[segmentIndex];
-        const newValve = clampToSegment(currentValve, movedSeg);
-        flowEl = flowEl.merge({
-          x: newValve.x,
-          y: newValve.y,
-          points,
-        });
-      }
-    } else {
-      flowEl = flowEl.set('points', points);
-    }
+    const closestSeg = findClosestSegment(currentValve, newSegments);
+    const newValve = clampToSegment(currentValve, closestSeg);
+    flowEl = flowEl.merge({
+      x: newValve.x,
+      y: newValve.y,
+      points,
+    });
 
     return [flowEl, List<CloudViewElement>()];
   }
