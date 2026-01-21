@@ -298,6 +298,79 @@ describe('Flow routing', () => {
         expect(result.points.size).toBe(1);
       });
     });
+
+    describe('multi-point flow preservation', () => {
+      it('should preserve intermediate points when moving stock on 4+ point flow', () => {
+        // 4-point flow: stock -> corner1 -> corner2 -> cloud
+        const stock = makeStock(stockUid, 100, 100);
+        const flow = makeFlow(flowUid, 150, 150, [
+          { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid }, // stock right edge
+          { x: 150, y: 100 }, // corner1
+          { x: 150, y: 200 }, // corner2
+          { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
+        ]);
+
+        // Move stock up
+        const newStockY = 80;
+        const result = computeFlowRoute(flow, stock, 100, newStockY);
+
+        // Should preserve all 4 points
+        expect(result.points.size).toBe(4);
+
+        // Stock endpoint should be updated
+        const stockPoint = result.points.get(0)!;
+        expect(stockPoint.attachedToUid).toBe(stockUid);
+
+        // Intermediate points should be preserved (corner1 and corner2)
+        const corner1 = result.points.get(1)!;
+        const corner2 = result.points.get(2)!;
+        expect(corner1.x).toBe(150);
+        expect(corner1.y).toBe(100);
+        expect(corner2.x).toBe(150);
+        expect(corner2.y).toBe(200);
+
+        // Anchor should be unchanged
+        const anchor = result.points.get(3)!;
+        expect(anchor.x).toBe(200);
+        expect(anchor.y).toBe(200);
+        expect(anchor.attachedToUid).toBe(cloudUid);
+      });
+
+      it('should preserve intermediate points when stock is at end of 4+ point flow', () => {
+        // 4-point flow: cloud -> corner1 -> corner2 -> stock
+        const stock = makeStock(stockUid, 200, 200);
+        const flow = makeFlow(flowUid, 150, 150, [
+          { x: 100, y: 100, attachedToUid: cloudUid }, // cloud
+          { x: 150, y: 100 }, // corner1
+          { x: 150, y: 200 }, // corner2
+          { x: 200 - StockWidth / 2, y: 200, attachedToUid: stockUid }, // stock left edge
+        ]);
+
+        // Move stock right
+        const newStockX = 250;
+        const result = computeFlowRoute(flow, stock, newStockX, 200);
+
+        // Should preserve all 4 points
+        expect(result.points.size).toBe(4);
+
+        // Anchor should be unchanged
+        const anchor = result.points.get(0)!;
+        expect(anchor.x).toBe(100);
+        expect(anchor.attachedToUid).toBe(cloudUid);
+
+        // Intermediate points should be preserved
+        const corner1 = result.points.get(1)!;
+        const corner2 = result.points.get(2)!;
+        expect(corner1.x).toBe(150);
+        expect(corner1.y).toBe(100);
+        expect(corner2.x).toBe(150);
+        expect(corner2.y).toBe(200);
+
+        // Stock endpoint should be updated
+        const stockPoint = result.points.get(3)!;
+        expect(stockPoint.attachedToUid).toBe(stockUid);
+      });
+    });
   });
 
   describe('UpdateStockAndFlows', () => {

@@ -94,6 +94,39 @@ export function computeFlowRoute(
   }
   const originalFlowIsHorizontal = anchor.y === anchorAdjacentPoint.y;
 
+  // For flows with 4+ points (imported or manually-edited multi-segment flows),
+  // only update the attached endpoint to preserve the user's routing.
+  // We don't collapse these to straight or add/remove corners.
+  if (points.size >= 4) {
+    let stockEdge: IPoint;
+    // Determine which side to attach based on the adjacent point
+    const adjacentPoint = stockIsFirst ? defined(points.get(1)) : defined(points.get(points.size - 2));
+    const isHorizontalSegment = adjacentPoint.y === (stockIsFirst ? firstPoint.y : lastPoint.y);
+
+    if (isHorizontalSegment) {
+      const side: Side = adjacentPoint.x > newStockCx ? 'right' : 'left';
+      stockEdge = getStockEdgePoint(newStockCx, adjacentPoint.y, side);
+    } else {
+      const side: Side = adjacentPoint.y > newStockCy ? 'bottom' : 'top';
+      stockEdge = getStockEdgePoint(adjacentPoint.x, newStockCy, side);
+    }
+
+    const newStockPoint = new Point({
+      x: stockEdge.x,
+      y: stockEdge.y,
+      attachedToUid: stockEl.uid,
+    });
+
+    let newPoints: List<Point>;
+    if (stockIsFirst) {
+      newPoints = points.set(0, newStockPoint);
+    } else {
+      newPoints = points.set(points.size - 1, newStockPoint);
+    }
+
+    return flow.set('points', newPoints);
+  }
+
   if (canFlowBeStraight(newStockCx, newStockCy, anchor.x, anchor.y, originalFlowIsHorizontal)) {
     let stockEdge: IPoint;
     if (originalFlowIsHorizontal) {
