@@ -64,6 +64,7 @@ Add: Expr = {
 Mul: Expr = {
     <lpos:@L> <l:Mul> "*" <r:Unary> <rpos:@R> => Op2(Mul, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
     <lpos:@L> <l:Mul> "/" <r:Unary> <rpos:@R> => Op2(Div, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Mul> "//" <r:Unary> <rpos:@R> => App(UntypedBuiltinFn("safediv".to_string(), vec![l, r]), Loc::new(lpos, rpos)),
     <lpos:@L> <l:Mul> "%" <r:Unary> <rpos:@R> => Op2(Mod, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
     Unary,
 };
@@ -142,6 +143,7 @@ extern {
         "-" => Token::Minus,
         "*" => Token::Mul,
         "/" => Token::Div,
+        "//" => Token::SafeDiv,
         "%" => Token::Mod,
         "!" => Token::Not,
         "(" => Token::LParen,
