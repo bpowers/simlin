@@ -152,6 +152,10 @@ export function computeFlowRoute(
       newPoints = points.set(points.size - 1, newStockPoint).set(points.size - 2, newAdjacentPoint);
     }
 
+    // Normalize to remove any colinear or zero-length segments that may have
+    // been created by adjusting the adjacent corner.
+    newPoints = normalizeFlowPoints(newPoints);
+
     // Update valve position by clamping to the nearest segment.
     // This ensures the valve stays on the flow path after the endpoint moves.
     const newSegments = getSegments(newPoints);
@@ -465,6 +469,71 @@ export function getSegments(points: List<Point>): Segment[] {
   return segments;
 }
 
+/**
+ * Normalizes flow points to ensure valid geometry:
+ *
+ * 1. Segments must alternate between horizontal and vertical - no two adjacent
+ *    segments should have the same orientation (colinear segments).
+ * 2. No zero-length segments - adjacent points at the same position are redundant.
+ *
+ * This function removes interior points that violate these rules. The first and
+ * last points are always preserved since they're attached to stocks/clouds.
+ *
+ * Examples of normalization:
+ * - [A, B, C] where A-B and B-C are both horizontal → [A, C] (B is redundant)
+ * - [A, B, C] where B is at the same position as A → [A, C] (B is redundant)
+ *
+ * This should be called after any operation that modifies flow points (stock moves,
+ * segment drags) to maintain clean geometry.
+ */
+export function normalizeFlowPoints(points: List<Point>): List<Point> {
+  // Need at least 2 points for a valid flow
+  if (points.size <= 2) {
+    return points;
+  }
+
+  // First and last points are attached to stocks/clouds - always preserve them
+  const firstPoint = defined(points.first());
+  const lastPoint = defined(points.last());
+
+  let result = List<Point>([firstPoint]);
+
+  for (let i = 1; i < points.size - 1; i++) {
+    const prev = defined(result.last());
+    const curr = defined(points.get(i));
+    const next = defined(points.get(i + 1));
+
+    // Skip if this point creates a zero-length segment with prev
+    if (prev.x === curr.x && prev.y === curr.y) {
+      continue;
+    }
+
+    // Skip if this point creates a zero-length segment with next
+    if (curr.x === next.x && curr.y === next.y) {
+      continue;
+    }
+
+    // Check if prev-curr and curr-next are colinear (same orientation)
+    const prevToCurrIsHorizontal = prev.y === curr.y;
+    const prevToCurrIsVertical = prev.x === curr.x;
+    const currToNextIsHorizontal = curr.y === next.y;
+    const currToNextIsVertical = curr.x === next.x;
+
+    // Skip if both segments are horizontal or both are vertical (colinear)
+    if ((prevToCurrIsHorizontal && currToNextIsHorizontal) ||
+        (prevToCurrIsVertical && currToNextIsVertical)) {
+      continue;
+    }
+
+    result = result.push(curr);
+  }
+
+  // Always add the last point
+  result = result.push(lastPoint);
+
+  return result;
+}
+
 // General point-to-line-segment distance using vector projection
 function distanceToSegmentGeneral(point: IPoint, p1: IPoint, p2: IPoint): number {
   const dx = p2.x - p1.x;
@@ -747,6 +816,10 @@ export function UpdateFlow(
   // segments (between two corners), so no cloud positions need updating.
   if (segmentIndex !== undefined) {
     points = moveSegment(points, segmentIndex, moveDelta);
+
+    // Normalize to remove any colinear or zero-length segments that may have
+    // been created by the segment movement.
+    points = normalizeFlowPoints(points);
 
     // Always re-clamp the valve to the closest segment after any segment drag.
     // Dragging any segment can affect adjacent segments via shared corners,

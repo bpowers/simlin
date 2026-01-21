@@ -512,27 +512,92 @@ describe('Flow routing', () => {
           { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
         ]);
 
-        // Move stock way down - dy (100) > dx (27.5), which would flip to vertical
-        // if we used the naive Math.abs(dx) > Math.abs(dy) heuristic
-        const newStockY = 200;
+        // Move stock down but NOT to y=200 (which would make corner1 colinear with corner2).
+        // At y=180, dy (80) > dx (27.5), which would flip to vertical if we used
+        // the naive Math.abs(dx) > Math.abs(dy) heuristic.
+        const newStockY = 180;
         const result = computeFlowRoute(flow, stock, 100, newStockY);
+
+        // Should still be 4 points (no colinear segments to remove)
+        expect(result.points.size).toBe(4);
 
         // First segment should STILL be horizontal (Y values match)
         const stockPoint = result.points.get(0)!;
         const corner1 = result.points.get(1)!;
         expect(stockPoint.y).toBe(corner1.y);
+        expect(stockPoint.y).toBe(newStockY);
 
-        // Corner2 should be unchanged (no diagonal created)
+        // Corner2 should be unchanged
         const corner2 = result.points.get(2)!;
         expect(corner2.x).toBe(150);
         expect(corner2.y).toBe(200);
 
         // The first segment is horizontal, so corner1's X is preserved, Y is adjusted
         expect(corner1.x).toBe(150);
-        expect(corner1.y).toBe(newStockY); // Adjusted to match stock
+        expect(corner1.y).toBe(newStockY);
 
         // Second segment (corner1 to corner2) should be vertical
         expect(corner1.x).toBe(corner2.x);
+      });
+
+      it('should normalize to remove colinear segments when stock aligns with corner (horizontal)', () => {
+        // When stock moves to the same Y as corner2, corner1 becomes colinear
+        // and should be removed by normalization.
+        const stock = makeStock(stockUid, 100, 100);
+        const flow = makeFlow(flowUid, 150, 150, [
+          { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid },
+          { x: 150, y: 100 }, // corner1
+          { x: 150, y: 200 }, // corner2
+          { x: 200, y: 200, attachedToUid: cloudUid },
+        ]);
+
+        // Move stock to y=200 - same as corner2 and cloud
+        const newStockY = 200;
+        const result = computeFlowRoute(flow, stock, 100, newStockY);
+
+        // After normalization, the flow should be straight (2 points)
+        // because all segments become colinear (all at y=200)
+        expect(result.points.size).toBe(2);
+
+        const stockPoint = result.points.get(0)!;
+        const anchor = result.points.get(1)!;
+        expect(stockPoint.y).toBe(200);
+        expect(anchor.y).toBe(200);
+      });
+
+      it('should normalize to remove colinear segments when stock aligns with corner (vertical)', () => {
+        // When stock moves to the same X as corner2, corner1 becomes colinear
+        // and should be removed by normalization.
+        const stock = makeStock(stockUid, 100, 100);
+        const flow = makeFlow(flowUid, 150, 150, [
+          { x: 100, y: 100 + StockHeight / 2, attachedToUid: stockUid }, // stock bottom edge
+          { x: 100, y: 150 }, // corner1 at x=100 (vertical)
+          { x: 200, y: 150 }, // corner2
+          { x: 200, y: 200, attachedToUid: cloudUid },
+        ]);
+
+        // Move stock to x=200 - same as corner2 and cloud
+        const newStockX = 200;
+        const result = computeFlowRoute(flow, stock, newStockX, 100);
+
+        // After normalization, corner1 becomes (200, 150) same as corner2,
+        // so it's removed. The flow becomes 3 points: stock -> corner2 -> cloud
+        // Then since stock is also at x=200, we get a vertical line plus horizontal.
+        // Actually, let's trace through:
+        // - stockPoint at (200, 117.5) - bottom edge of stock
+        // - corner1 adjusted to (200, 150) to keep vertical - but that's same as corner2!
+        // - corner2 at (200, 150)
+        // - cloud at (200, 200)
+        // Normalization removes corner1 (zero-length segment with corner2)
+        // Then we have: stock(200,117.5) -> corner2(200,150) -> cloud(200,200)
+        // All at x=200, so corner2 is also removed (colinear)
+        // Final: stock(200,117.5) -> cloud(200,200) = 2 points (straight vertical)
+        expect(result.points.size).toBe(2);
+
+        const stockPoint = result.points.get(0)!;
+        const anchor = result.points.get(1)!;
+        expect(stockPoint.x).toBe(200);
+        expect(anchor.x).toBe(200);
       });
 
       it('should keep first segment horizontal when stock moves vertically on 4+ point flow', () => {
@@ -599,9 +664,10 @@ describe('Flow routing', () => {
           { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
         ]);
 
-        // Move stock way right - dx (100) > dy (32.5), which would flip to horizontal
-        // if we used the naive Math.abs(dx) > Math.abs(dy) heuristic
-        const newStockX = 200;
+        // Move stock right but NOT to x=200 (which would make corner1 colinear with corner2).
+        // dx (80) > dy (32.5), which would flip to horizontal if we used the naive
+        // Math.abs(dx) > Math.abs(dy) heuristic.
+        const newStockX = 180;
         const result = computeFlowRoute(flow, stock, newStockX, 100);
 
         // First segment should STILL be vertical (X values match)
@@ -609,14 +675,17 @@ describe('Flow routing', () => {
         const corner1 = result.points.get(1)!;
         expect(stockPoint.x).toBe(corner1.x);
 
+        // The first segment is vertical, so corner1's Y is preserved, X is adjusted
+        expect(corner1.y).toBe(150);
+        expect(corner1.x).toBe(newStockX); // Adjusted to match stock
+
+        // Should still have 4 points (no colinear segments created)
+        expect(result.points.size).toBe(4);
+
         // Corner2 should be unchanged (no diagonal created)
         const corner2 = result.points.get(2)!;
         expect(corner2.x).toBe(200);
         expect(corner2.y).toBe(150);
-
-        // The first segment is vertical, so corner1's Y is preserved, X is adjusted
-        expect(corner1.y).toBe(150);
-        expect(corner1.x).toBe(newStockX); // Adjusted to match stock
 
         // Second segment (corner1 to corner2) should be horizontal
         expect(corner1.y).toBe(corner2.y);
