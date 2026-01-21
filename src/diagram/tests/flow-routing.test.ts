@@ -155,6 +155,78 @@ describe('Flow routing', () => {
         expect(result.cx).toBe(180);
         expect(result.cy).toBe(100);
       });
+
+      it('should preserve valve fractional position when stock moves along flow axis', () => {
+        // Horizontal flow: stock at x=100, cloud at x=200
+        // Valve starts at x=150 (roughly at the midpoint of the segment)
+        const stock = makeStock(stockUid, 100, 100);
+        const stockEdgeX = 100 + StockWidth / 2; // 122.5
+        const anchorX = 200;
+        const valveX = 150;
+
+        const flow = makeFlow(flowUid, valveX, 100, [
+          { x: stockEdgeX, y: 100, attachedToUid: stockUid },
+          { x: anchorX, y: 100, attachedToUid: cloudUid },
+        ]);
+
+        // Calculate the valve's fractional position on the original segment
+        // Fraction = (valve - anchor) / (stockEdge - anchor) = (150 - 200) / (122.5 - 200) = 0.645
+        const originalFraction = (valveX - anchorX) / (stockEdgeX - anchorX);
+
+        // Move stock right along the flow axis (toward anchor)
+        // This makes the segment shorter
+        const newStockX = 160;
+        const newStockEdgeX = newStockX + StockWidth / 2; // 182.5
+        const result = computeFlowRoute(flow, stock, newStockX, 100);
+
+        // Flow should still be straight (2 points)
+        expect(result.points.size).toBe(2);
+
+        // Verify the new segment bounds
+        expect(result.points.get(0)!.x).toBe(newStockEdgeX);
+        expect(result.points.get(1)!.x).toBe(anchorX);
+
+        // The valve should preserve its fractional position along the segment.
+        // New valve x = anchor + fraction * (newStockEdge - anchor)
+        // = 200 + 0.645 * (182.5 - 200) = 200 + 0.645 * (-17.5) = 200 - 11.29 ≈ 188.7
+        const expectedValveX = anchorX + originalFraction * (newStockEdgeX - anchorX);
+        expect(result.cx).toBeCloseTo(expectedValveX, 1);
+        expect(result.cy).toBe(100);
+      });
+
+      it('should preserve valve fractional position when stock moves past valve position', () => {
+        // This is a more extreme case where the old valve position is outside the new segment.
+        // Horizontal flow: stock at x=100, cloud at x=200
+        // Valve starts at x=150 (roughly at the midpoint of the segment)
+        const stock = makeStock(stockUid, 100, 100);
+        const stockEdgeX = 100 + StockWidth / 2; // 122.5
+        const anchorX = 200;
+        const valveX = 150;
+
+        const flow = makeFlow(flowUid, valveX, 100, [
+          { x: stockEdgeX, y: 100, attachedToUid: stockUid },
+          { x: anchorX, y: 100, attachedToUid: cloudUid },
+        ]);
+
+        // Calculate the valve's fractional position on the original segment
+        const originalFraction = (valveX - anchorX) / (stockEdgeX - anchorX);
+
+        // Move stock PAST the old valve position (stock center at 170 means edge at 192.5)
+        const newStockX = 170;
+        const newStockEdgeX = newStockX + StockWidth / 2; // 192.5
+        const result = computeFlowRoute(flow, stock, newStockX, 100);
+
+        // Flow should still be straight (2 points)
+        expect(result.points.size).toBe(2);
+
+        // The valve should preserve its fractional position.
+        // Even though the old valve position (150) is now outside the new segment [192.5, 200],
+        // the fractional position places it correctly within the new segment.
+        // New valve x = 200 + 0.645 * (192.5 - 200) = 200 - 4.84 ≈ 195.16
+        const expectedValveX = anchorX + originalFraction * (newStockEdgeX - anchorX);
+        expect(result.cx).toBeCloseTo(expectedValveX, 1);
+        expect(result.cy).toBe(100);
+      });
     });
 
     describe('straight vertical flows', () => {

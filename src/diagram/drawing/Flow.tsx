@@ -193,15 +193,16 @@ export function computeFlowRoute(
       newPoints = List([firstPoint, newStockPoint]);
     }
 
-    // Preserve valve position by clamping to the new segment
+    // Preserve valve's fractional position along the segment.
+    // This prevents the valve from jumping when the stock moves past its position.
     const currentValve: IPoint = { x: flow.cx, y: flow.cy };
+    const oldSegments = getSegments(points);
     const newSegments = getSegments(newPoints);
-    const closestSegment = findClosestSegment(currentValve, newSegments);
-    const clampedValve = clampToSegment(currentValve, closestSegment);
+    const newValve = preserveValveFraction(currentValve, oldSegments[0], newSegments[0]);
 
     return flow.merge({
-      x: clampedValve.x,
-      y: clampedValve.y,
+      x: newValve.x,
+      y: newValve.y,
       points: newPoints,
     });
   }
@@ -675,6 +676,66 @@ const VALVE_RADIUS = 6;
 const VALVE_HIT_TOLERANCE = 5;
 // Margin from segment endpoints when clamping valve position
 const VALVE_CLAMP_MARGIN = 10;
+
+/**
+ * Preserves the valve's fractional position when a segment changes.
+ *
+ * When a stock moves along the flow axis, the segment gets longer or shorter.
+ * Instead of just clamping the valve to the new segment bounds (which causes it
+ * to jump to an endpoint when the stock moves past the valve), we preserve
+ * the valve's proportional position along the segment.
+ *
+ * For example, if the valve was at 65% from the anchor toward the stock on the
+ * old segment, it will be placed at 65% from the anchor toward the stock on the
+ * new segment.
+ *
+ * @param valve The current valve position
+ * @param oldSeg The segment before the stock moved
+ * @param newSeg The segment after the stock moved
+ * @param margin Minimum distance from segment endpoints
+ * @returns The new valve position preserving fractional placement
+ */
+function preserveValveFraction(
+  valve: IPoint,
+  oldSeg: Segment,
+  newSeg: Segment,
+): IPoint {
+  if (oldSeg.isHorizontal && newSeg.isHorizontal) {
+    const oldLen = oldSeg.p2.x - oldSeg.p1.x;
+    const newLen = newSeg.p2.x - newSeg.p1.x;
+
+    // Calculate valve's fraction along old segment (0 = at p1, 1 = at p2)
+    // Don't apply margin constraints - preserve the exact fractional position
+    // as the adjustFlows logic does. This prevents the valve from jumping
+    // when the stock moves past it.
+    let fraction = oldLen !== 0 ? (valve.x - oldSeg.p1.x) / oldLen : 0.5;
+
+    // Only clamp to [0, 1] to ensure the valve stays on the segment
+    fraction = Math.max(0, Math.min(1, fraction));
+
+    return {
+      x: newSeg.p1.x + fraction * newLen,
+      y: newSeg.p1.y,
+    };
+  } else if (oldSeg.isVertical && newSeg.isVertical) {
+    const oldLen = oldSeg.p2.y - oldSeg.p1.y;
+    const newLen = newSeg.p2.y - newSeg.p1.y;
+
+    // Calculate valve's fraction along old segment
+    let fraction = oldLen !== 0 ? (valve.y - oldSeg.p1.y) / oldLen : 0.5;
+
+    // Only clamp to [0, 1] to ensure the valve stays on the segment
+    fraction = Math.max(0, Math.min(1, fraction));
+
+    return {
+      x: newSeg.p1.x,
+      y: newSeg.p1.y + fraction * newLen,
+    };
+  }
+
+  // For mixed orientation or diagonal segments, fall back to clamping
+  return clampToSegment(valve, newSeg);
+}
 
 // Check if a segment has an attached endpoint that would prevent dragging.
 // Dragging a segment with an attached endpoint would create a diagonal segment,
