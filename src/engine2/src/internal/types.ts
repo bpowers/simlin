@@ -49,6 +49,7 @@ export enum SimlinErrorCode {
   VariablesHaveErrors = 30,
   UnitDefinitionErrors = 31,
   Generic = 32,
+  UnitMismatch = 33,
 }
 
 // Error kind categorizing where in the project the error originates

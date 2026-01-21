@@ -66,6 +66,50 @@ pub enum SimlinErrorCode {
     UnitMismatch = 33,
 }
 
+impl TryFrom<u32> for SimlinErrorCode {
+    type Error = ();
+
+    fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(SimlinErrorCode::NoError),
+            1 => Ok(SimlinErrorCode::DoesNotExist),
+            2 => Ok(SimlinErrorCode::XmlDeserialization),
+            3 => Ok(SimlinErrorCode::VensimConversion),
+            4 => Ok(SimlinErrorCode::ProtobufDecode),
+            5 => Ok(SimlinErrorCode::InvalidToken),
+            6 => Ok(SimlinErrorCode::UnrecognizedEof),
+            7 => Ok(SimlinErrorCode::UnrecognizedToken),
+            8 => Ok(SimlinErrorCode::ExtraToken),
+            9 => Ok(SimlinErrorCode::UnclosedComment),
+            10 => Ok(SimlinErrorCode::UnclosedQuotedIdent),
+            11 => Ok(SimlinErrorCode::ExpectedNumber),
+            12 => Ok(SimlinErrorCode::UnknownBuiltin),
+            13 => Ok(SimlinErrorCode::BadBuiltinArgs),
+            14 => Ok(SimlinErrorCode::EmptyEquation),
+            15 => Ok(SimlinErrorCode::BadModuleInputDst),
+            16 => Ok(SimlinErrorCode::BadModuleInputSrc),
+            17 => Ok(SimlinErrorCode::NotSimulatable),
+            18 => Ok(SimlinErrorCode::BadTable),
+            19 => Ok(SimlinErrorCode::BadSimSpecs),
+            20 => Ok(SimlinErrorCode::NoAbsoluteReferences),
+            21 => Ok(SimlinErrorCode::CircularDependency),
+            22 => Ok(SimlinErrorCode::ArraysNotImplemented),
+            23 => Ok(SimlinErrorCode::MultiDimensionalArraysNotImplemented),
+            24 => Ok(SimlinErrorCode::BadDimensionName),
+            25 => Ok(SimlinErrorCode::BadModelName),
+            26 => Ok(SimlinErrorCode::MismatchedDimensions),
+            27 => Ok(SimlinErrorCode::ArrayReferenceNeedsExplicitSubscripts),
+            28 => Ok(SimlinErrorCode::DuplicateVariable),
+            29 => Ok(SimlinErrorCode::UnknownDependency),
+            30 => Ok(SimlinErrorCode::VariablesHaveErrors),
+            31 => Ok(SimlinErrorCode::UnitDefinitionErrors),
+            32 => Ok(SimlinErrorCode::Generic),
+            33 => Ok(SimlinErrorCode::UnitMismatch),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Error kind categorizing where in the project the error originates.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -337,49 +381,85 @@ fn ffi_error_from_engine(error: &engine::Error) -> FfiError {
 }
 /// simlin_error_str returns a string representation of an error code.
 /// The returned string must not be freed or modified.
+///
+/// Accepts a u32 discriminant rather than an enum to safely handle invalid values
+/// from C/WASM callers. Returns "unknown_error" for invalid discriminants.
 #[no_mangle]
-pub extern "C" fn simlin_error_str(err: SimlinErrorCode) -> *const c_char {
-    let s: &'static str = match err {
-        SimlinErrorCode::NoError => "no_error\0",
-        SimlinErrorCode::DoesNotExist => "does_not_exist\0",
-        SimlinErrorCode::XmlDeserialization => "xml_deserialization\0",
-        SimlinErrorCode::VensimConversion => "vensim_conversion\0",
-        SimlinErrorCode::ProtobufDecode => "protobuf_decode\0",
-        SimlinErrorCode::InvalidToken => "invalid_token\0",
-        SimlinErrorCode::UnrecognizedEof => "unrecognized_eof\0",
-        SimlinErrorCode::UnrecognizedToken => "unrecognized_token\0",
-        SimlinErrorCode::ExtraToken => "extra_token\0",
-        SimlinErrorCode::UnclosedComment => "unclosed_comment\0",
-        SimlinErrorCode::UnclosedQuotedIdent => "unclosed_quoted_ident\0",
-        SimlinErrorCode::ExpectedNumber => "expected_number\0",
-        SimlinErrorCode::UnknownBuiltin => "unknown_builtin\0",
-        SimlinErrorCode::BadBuiltinArgs => "bad_builtin_args\0",
-        SimlinErrorCode::EmptyEquation => "empty_equation\0",
-        SimlinErrorCode::BadModuleInputDst => "bad_module_input_dst\0",
-        SimlinErrorCode::BadModuleInputSrc => "bad_module_input_src\0",
-        SimlinErrorCode::NotSimulatable => "not_simulatable\0",
-        SimlinErrorCode::BadTable => "bad_table\0",
-        SimlinErrorCode::BadSimSpecs => "bad_sim_specs\0",
-        SimlinErrorCode::NoAbsoluteReferences => "no_absolute_references\0",
-        SimlinErrorCode::CircularDependency => "circular_dependency\0",
-        SimlinErrorCode::ArraysNotImplemented => "arrays_not_implemented\0",
-        SimlinErrorCode::MultiDimensionalArraysNotImplemented => {
+pub extern "C" fn simlin_error_str(err: u32) -> *const c_char {
+    let s: &'static str = match SimlinErrorCode::try_from(err) {
+        Ok(SimlinErrorCode::NoError) => "no_error\0",
+        Ok(SimlinErrorCode::DoesNotExist) => "does_not_exist\0",
+        Ok(SimlinErrorCode::XmlDeserialization) => "xml_deserialization\0",
+        Ok(SimlinErrorCode::VensimConversion) => "vensim_conversion\0",
+        Ok(SimlinErrorCode::ProtobufDecode) => "protobuf_decode\0",
+        Ok(SimlinErrorCode::InvalidToken) => "invalid_token\0",
+        Ok(SimlinErrorCode::UnrecognizedEof) => "unrecognized_eof\0",
+        Ok(SimlinErrorCode::UnrecognizedToken) => "unrecognized_token\0",
+        Ok(SimlinErrorCode::ExtraToken) => "extra_token\0",
+        Ok(SimlinErrorCode::UnclosedComment) => "unclosed_comment\0",
+        Ok(SimlinErrorCode::UnclosedQuotedIdent) => "unclosed_quoted_ident\0",
+        Ok(SimlinErrorCode::ExpectedNumber) => "expected_number\0",
+        Ok(SimlinErrorCode::UnknownBuiltin) => "unknown_builtin\0",
+        Ok(SimlinErrorCode::BadBuiltinArgs) => "bad_builtin_args\0",
+        Ok(SimlinErrorCode::EmptyEquation) => "empty_equation\0",
+        Ok(SimlinErrorCode::BadModuleInputDst) => "bad_module_input_dst\0",
+        Ok(SimlinErrorCode::BadModuleInputSrc) => "bad_module_input_src\0",
+        Ok(SimlinErrorCode::NotSimulatable) => "not_simulatable\0",
+        Ok(SimlinErrorCode::BadTable) => "bad_table\0",
+        Ok(SimlinErrorCode::BadSimSpecs) => "bad_sim_specs\0",
+        Ok(SimlinErrorCode::NoAbsoluteReferences) => "no_absolute_references\0",
+        Ok(SimlinErrorCode::CircularDependency) => "circular_dependency\0",
+        Ok(SimlinErrorCode::ArraysNotImplemented) => "arrays_not_implemented\0",
+        Ok(SimlinErrorCode::MultiDimensionalArraysNotImplemented) => {
             "multi_dimensional_arrays_not_implemented\0"
         }
-        SimlinErrorCode::BadDimensionName => "bad_dimension_name\0",
-        SimlinErrorCode::BadModelName => "bad_model_name\0",
-        SimlinErrorCode::MismatchedDimensions => "mismatched_dimensions\0",
-        SimlinErrorCode::ArrayReferenceNeedsExplicitSubscripts => {
+        Ok(SimlinErrorCode::BadDimensionName) => "bad_dimension_name\0",
+        Ok(SimlinErrorCode::BadModelName) => "bad_model_name\0",
+        Ok(SimlinErrorCode::MismatchedDimensions) => "mismatched_dimensions\0",
+        Ok(SimlinErrorCode::ArrayReferenceNeedsExplicitSubscripts) => {
             "array_reference_needs_explicit_subscripts\0"
         }
-        SimlinErrorCode::DuplicateVariable => "duplicate_variable\0",
-        SimlinErrorCode::UnknownDependency => "unknown_dependency\0",
-        SimlinErrorCode::VariablesHaveErrors => "variables_have_errors\0",
-        SimlinErrorCode::UnitDefinitionErrors => "unit_definition_errors\0",
-        SimlinErrorCode::Generic => "generic\0",
-        SimlinErrorCode::UnitMismatch => "unit_mismatch\0",
+        Ok(SimlinErrorCode::DuplicateVariable) => "duplicate_variable\0",
+        Ok(SimlinErrorCode::UnknownDependency) => "unknown_dependency\0",
+        Ok(SimlinErrorCode::VariablesHaveErrors) => "variables_have_errors\0",
+        Ok(SimlinErrorCode::UnitDefinitionErrors) => "unit_definition_errors\0",
+        Ok(SimlinErrorCode::Generic) => "generic\0",
+        Ok(SimlinErrorCode::UnitMismatch) => "unit_mismatch\0",
+        Err(()) => "unknown_error\0",
     };
     s.as_ptr() as *const c_char
+}
+
+/// Returns the size of the SimlinLoop struct in bytes.
+///
+/// Use this to validate ABI compatibility between Rust and JS/WASM consumers.
+#[no_mangle]
+pub extern "C" fn simlin_sizeof_loop() -> usize {
+    size_of::<ffi::SimlinLoop>()
+}
+
+/// Returns the size of the SimlinLink struct in bytes.
+///
+/// Use this to validate ABI compatibility between Rust and JS/WASM consumers.
+#[no_mangle]
+pub extern "C" fn simlin_sizeof_link() -> usize {
+    size_of::<ffi::SimlinLink>()
+}
+
+/// Returns the size of the SimlinErrorDetail struct in bytes.
+///
+/// Use this to validate ABI compatibility between Rust and JS/WASM consumers.
+#[no_mangle]
+pub extern "C" fn simlin_sizeof_error_detail() -> usize {
+    size_of::<SimlinErrorDetail>()
+}
+
+/// Returns the size of a pointer on the current platform.
+///
+/// Use this to validate ABI compatibility (expected 4 for wasm32).
+#[no_mangle]
+pub extern "C" fn simlin_sizeof_ptr() -> usize {
+    size_of::<*const u8>()
 }
 
 /// # Safety
@@ -508,8 +588,8 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
 /// Open a project from JSON data
 ///
 /// Deserializes a project from JSON format. Supports two formats:
-/// - `SimlinJsonFormat::Native`: Simlin's native JSON representation
-/// - `SimlinJsonFormat::Sdai`: System Dynamics AI (SDAI) interchange format
+/// - `SimlinJsonFormat::Native` (0): Simlin's native JSON representation
+/// - `SimlinJsonFormat::Sdai` (1): System Dynamics AI (SDAI) interchange format
 ///
 /// Returns NULL and populates `out_error` on failure.
 ///
@@ -517,11 +597,12 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
 /// - `data` must be a valid pointer to at least `len` bytes of UTF-8 JSON
 /// - `out_error` may be null
 /// - The returned project must be freed with `simlin_project_unref`
+/// - `format` must be a valid discriminant (0 or 1), otherwise an error is returned
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_open_json(
     data: *const u8,
     len: usize,
-    format: ffi::SimlinJsonFormat,
+    format: u32,
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinProject {
     clear_out_error(out_error);
@@ -532,6 +613,11 @@ pub unsafe extern "C" fn simlin_project_open_json(
                 .with_message("data pointer must not be NULL")
                 .into());
         }
+
+        let format = ffi::SimlinJsonFormat::try_from(format).map_err(|()| {
+            FfiError::new(SimlinErrorCode::Generic)
+                .with_message(format!("invalid JSON format discriminant: {format}"))
+        })?;
 
         let slice = unsafe { std::slice::from_raw_parts(data, len) };
         let json_str = std::str::from_utf8(slice).map_err(|utf8_err| {
@@ -2566,6 +2652,10 @@ pub unsafe extern "C" fn simlin_project_serialize_xmile(
         return;
     }
 
+    // Clear output pointers upfront so callers that ignore errors don't free stale pointers
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
     let proj = match require_project(project) {
         Ok(p) => p,
         Err(err) => {
@@ -2634,6 +2724,10 @@ pub unsafe extern "C" fn simlin_project_serialize_protobuf(
         );
         return;
     }
+
+    // Clear output pointers upfront so callers that ignore errors don't free stale pointers
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
 
     let proj = match require_project(project) {
         Ok(p) => p,
@@ -2802,7 +2896,7 @@ unsafe fn apply_project_patch_internal(
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_serialize_json(
     project: *mut SimlinProject,
-    format: ffi::SimlinJsonFormat,
+    format: u32,
     out_buffer: *mut *mut u8,
     out_len: *mut usize,
     out_error: *mut *mut SimlinError,
@@ -2819,6 +2913,18 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
 
     *out_buffer = ptr::null_mut();
     *out_len = 0;
+
+    let format = match ffi::SimlinJsonFormat::try_from(format) {
+        Ok(f) => f,
+        Err(()) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("invalid JSON format discriminant: {format}")),
+            );
+            return;
+        }
+    };
 
     let project_ref = match require_project(project) {
         Ok(proj) => proj,
@@ -3457,10 +3563,16 @@ mod tests {
     #[test]
     fn test_error_str() {
         unsafe {
-            let err_str = simlin_error_str(SimlinErrorCode::NoError);
+            let err_str = simlin_error_str(SimlinErrorCode::NoError as u32);
             assert!(!err_str.is_null());
             let s = CStr::from_ptr(err_str);
             assert_eq!(s.to_str().unwrap(), "no_error");
+
+            // Test unknown error code returns "unknown_error"
+            let unknown_str = simlin_error_str(9999);
+            assert!(!unknown_str.is_null());
+            let s = CStr::from_ptr(unknown_str);
+            assert_eq!(s.to_str().unwrap(), "unknown_error");
         }
     }
 
@@ -3502,7 +3614,7 @@ mod tests {
             let mut out_error: *mut SimlinError = ptr::null_mut();
             simlin_project_serialize_json(
                 proj,
-                ffi::SimlinJsonFormat::Native,
+                ffi::SimlinJsonFormat::Native as u32,
                 &mut out_buffer,
                 &mut out_len,
                 &mut out_error,
@@ -3536,7 +3648,7 @@ mod tests {
             let mut out_error: *mut SimlinError = ptr::null_mut();
             simlin_project_serialize_json(
                 proj,
-                ffi::SimlinJsonFormat::Sdai,
+                ffi::SimlinJsonFormat::Sdai as u32,
                 &mut out_buffer,
                 &mut out_len,
                 &mut out_error,
@@ -3578,7 +3690,7 @@ mod tests {
             let mut out_error: *mut SimlinError = ptr::null_mut();
             simlin_project_serialize_json(
                 proj,
-                ffi::SimlinJsonFormat::Sdai,
+                ffi::SimlinJsonFormat::Sdai as u32,
                 &mut out_buffer,
                 &mut out_len,
                 &mut out_error,
@@ -3592,7 +3704,7 @@ mod tests {
             let proj2 = simlin_project_open_json(
                 out_buffer,
                 out_len,
-                ffi::SimlinJsonFormat::Sdai,
+                ffi::SimlinJsonFormat::Sdai as u32,
                 &mut open_error,
             );
 
@@ -3632,7 +3744,7 @@ mod tests {
             let mut out_error: *mut SimlinError = ptr::null_mut();
             simlin_project_serialize_json(
                 proj,
-                ffi::SimlinJsonFormat::Native,
+                ffi::SimlinJsonFormat::Native as u32,
                 ptr::null_mut(),
                 &mut out_len,
                 &mut out_error,
@@ -3656,7 +3768,7 @@ mod tests {
             let mut out_error: *mut SimlinError = ptr::null_mut();
             simlin_project_serialize_json(
                 proj,
-                ffi::SimlinJsonFormat::Native,
+                ffi::SimlinJsonFormat::Native as u32,
                 &mut out_buffer,
                 ptr::null_mut(),
                 &mut out_error,
@@ -3678,7 +3790,7 @@ mod tests {
             let mut out_error: *mut SimlinError = ptr::null_mut();
             simlin_project_serialize_json(
                 ptr::null_mut(),
-                ffi::SimlinJsonFormat::Native,
+                ffi::SimlinJsonFormat::Native as u32,
                 &mut out_buffer,
                 &mut out_len,
                 &mut out_error,
@@ -3702,7 +3814,7 @@ mod tests {
             let mut out_error: *mut SimlinError = ptr::null_mut();
             simlin_project_serialize_json(
                 proj,
-                ffi::SimlinJsonFormat::Native,
+                ffi::SimlinJsonFormat::Native as u32,
                 &mut out_buffer,
                 &mut out_len,
                 &mut out_error,
@@ -3718,7 +3830,7 @@ mod tests {
             out_len = 0;
             simlin_project_serialize_json(
                 proj,
-                ffi::SimlinJsonFormat::Sdai,
+                ffi::SimlinJsonFormat::Sdai as u32,
                 &mut out_buffer,
                 &mut out_len,
                 &mut out_error,
@@ -8211,7 +8323,7 @@ mod tests {
             let proj = simlin_project_open_json(
                 json_bytes.as_ptr(),
                 json_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
+                ffi::SimlinJsonFormat::Native as u32,
                 &mut err,
             );
 
@@ -8257,7 +8369,7 @@ mod tests {
             let proj = simlin_project_open_json(
                 invalid_json.as_ptr(),
                 invalid_json.len(),
-                ffi::SimlinJsonFormat::Native,
+                ffi::SimlinJsonFormat::Native as u32,
                 &mut err,
             );
 
@@ -8270,8 +8382,12 @@ mod tests {
     fn test_project_json_open_null_input() {
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
-            let proj =
-                simlin_project_open_json(ptr::null(), 0, ffi::SimlinJsonFormat::Native, &mut err);
+            let proj = simlin_project_open_json(
+                ptr::null(),
+                0,
+                ffi::SimlinJsonFormat::Native as u32,
+                &mut err,
+            );
 
             assert!(proj.is_null());
             // assert_eq!(err, engine::ErrorCode::Generic as c_int);  // Obsolete assertion from old API
@@ -8287,7 +8403,7 @@ mod tests {
             let proj = simlin_project_open_json(
                 json_bytes.as_ptr(),
                 json_bytes.len(),
-                ffi::SimlinJsonFormat::Native,
+                ffi::SimlinJsonFormat::Native as u32,
                 &mut err,
             );
 
@@ -8341,7 +8457,7 @@ mod tests {
             let proj = simlin_project_open_json(
                 json_bytes.as_ptr(),
                 json_bytes.len(),
-                ffi::SimlinJsonFormat::Sdai,
+                ffi::SimlinJsonFormat::Sdai as u32,
                 &mut err,
             );
 
@@ -8400,7 +8516,7 @@ mod tests {
             let proj = simlin_project_open_json(
                 json_bytes.as_ptr(),
                 json_bytes.len(),
-                ffi::SimlinJsonFormat::Sdai,
+                ffi::SimlinJsonFormat::Sdai as u32,
                 &mut err,
             );
 
@@ -8409,6 +8525,79 @@ mod tests {
                 "expected null project for invalid SDAI JSON"
             );
             // assert_ne!(err, engine::ErrorCode::NoError as c_int);  // Obsolete assertion from old API
+        }
+    }
+
+    #[test]
+    fn test_project_json_open_invalid_format() {
+        // Test that passing an invalid format discriminant returns an error
+        let valid_json = r#"{"name": "test"}"#;
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let json_bytes = valid_json.as_bytes();
+            let proj = simlin_project_open_json(
+                json_bytes.as_ptr(),
+                json_bytes.len(),
+                9999, // Invalid format discriminant
+                &mut err,
+            );
+
+            assert!(proj.is_null(), "expected null project for invalid format");
+            assert!(!err.is_null(), "expected error for invalid format");
+
+            // Verify error message mentions invalid format
+            let msg_ptr = simlin_error_get_message(err);
+            assert!(!msg_ptr.is_null());
+            let msg = CStr::from_ptr(msg_ptr).to_str().unwrap();
+            assert!(
+                msg.contains("invalid JSON format discriminant"),
+                "error message should mention invalid format: {}",
+                msg
+            );
+
+            simlin_error_free(err);
+        }
+    }
+
+    #[test]
+    fn test_project_serialize_json_invalid_format() {
+        unsafe {
+            let datamodel = TestProject::new("test_invalid_format").build_datamodel();
+            let proj = open_project_from_datamodel(&datamodel);
+            assert!(!proj.is_null());
+
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let mut err: *mut SimlinError = ptr::null_mut();
+
+            simlin_project_serialize_json(
+                proj,
+                9999, // Invalid format discriminant
+                &mut out_buffer,
+                &mut out_len,
+                &mut err,
+            );
+
+            assert!(
+                out_buffer.is_null(),
+                "expected null buffer for invalid format"
+            );
+            assert_eq!(out_len, 0, "expected zero length for invalid format");
+            assert!(!err.is_null(), "expected error for invalid format");
+
+            // Verify error message mentions invalid format
+            let msg_ptr = simlin_error_get_message(err);
+            assert!(!msg_ptr.is_null());
+            let msg = CStr::from_ptr(msg_ptr).to_str().unwrap();
+            assert!(
+                msg.contains("invalid JSON format discriminant"),
+                "error message should mention invalid format: {}",
+                msg
+            );
+
+            simlin_error_free(err);
+            simlin_project_unref(proj);
         }
     }
 
