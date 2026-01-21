@@ -244,3 +244,30 @@ fn unrecognized_token() {
 fn unclosed_quoted_ident() {
     test_err("\"ohno", ("~~~~~", UnclosedQuotedIdent));
 }
+
+#[test]
+fn safediv_operator() {
+    test(
+        "a // b",
+        vec![
+            ("~     ", Ident("a")),
+            ("  ~~  ", SafeDiv),
+            ("     ~", Ident("b")),
+        ],
+    );
+}
+
+#[test]
+fn safediv_mixed_with_div() {
+    // a / b // c should be: a / b, then // c
+    test(
+        "a / b // c",
+        vec![
+            ("~         ", Ident("a")),
+            ("  ~       ", Div),
+            ("    ~     ", Ident("b")),
+            ("      ~~  ", SafeDiv),
+            ("         ~", Ident("c")),
+        ],
+    );
+}

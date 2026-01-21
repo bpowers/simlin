@@ -575,6 +575,87 @@ fn test_dimension_position() {
 }
 
 #[test]
+fn test_safediv_operator() {
+    use crate::ast;
+    use Expr0::*;
+
+    // a // b should parse as safediv(a, b)
+    let safediv1 = Box::new(App(
+        UntypedBuiltinFn(
+            "safediv".to_owned(),
+            vec![
+                Var(RawIdent::new_from_str("a"), Loc::default()),
+                Var(RawIdent::new_from_str("b"), Loc::default()),
+            ],
+        ),
+        Loc::default(),
+    ));
+
+    // 1 // 2 should parse as safediv(1, 2)
+    let safediv2 = Box::new(App(
+        UntypedBuiltinFn(
+            "safediv".to_owned(),
+            vec![
+                Const("1".to_owned(), 1.0, Loc::default()),
+                Const("2".to_owned(), 2.0, Loc::default()),
+            ],
+        ),
+        Loc::default(),
+    ));
+
+    // a * b // c should be safediv(a * b, c) because // has same precedence as * and is left-associative
+    let safediv3 = Box::new(App(
+        UntypedBuiltinFn(
+            "safediv".to_owned(),
+            vec![
+                Op2(
+                    BinaryOp::Mul,
+                    Box::new(Var(RawIdent::new_from_str("a"), Loc::default())),
+                    Box::new(Var(RawIdent::new_from_str("b"), Loc::default())),
+                    Loc::default(),
+                ),
+                Var(RawIdent::new_from_str("c"), Loc::default()),
+            ],
+        ),
+        Loc::default(),
+    ));
+
+    // a + b // c should be a + safediv(b, c) because // binds tighter than +
+    let safediv4 = Box::new(Op2(
+        BinaryOp::Add,
+        Box::new(Var(RawIdent::new_from_str("a"), Loc::default())),
+        Box::new(App(
+            UntypedBuiltinFn(
+                "safediv".to_owned(),
+                vec![
+                    Var(RawIdent::new_from_str("b"), Loc::default()),
+                    Var(RawIdent::new_from_str("c"), Loc::default()),
+                ],
+            ),
+            Loc::default(),
+        )),
+        Loc::default(),
+    ));
+
+    let cases = [
+        ("a // b", safediv1, "safediv(a, b)"),
+        ("1 // 2", safediv2, "safediv(1, 2)"),
+        ("a * b // c", safediv3, "safediv(a * b, c)"),
+        ("a + b // c", safediv4, "a + safediv(b, c)"),
+    ];
+
+    for case in cases.iter() {
+        let eqn = case.0;
+        let ast = Expr0::new(eqn, LexerType::Equation).unwrap();
+        assert!(ast.is_some(), "Failed to parse: {}", eqn);
+        let ast = ast.unwrap().strip_loc();
+        assert_eq!(&*case.1, &ast, "AST mismatch for: {}", eqn);
+        let printed = ast::print_eqn(&ast);
+        assert_eq!(case.2, &printed, "Print mismatch for: {}", eqn);
+    }
+}
+
+#[test]
 fn test_parse_failures() {
     let failures = &[
         "(",

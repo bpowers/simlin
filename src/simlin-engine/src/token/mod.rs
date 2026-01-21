@@ -43,6 +43,7 @@ pub enum Token<'input> {
     Minus,
     Mul,
     Div,
+    SafeDiv,
     LParen,
     RParen,
     LBracket,
@@ -221,7 +222,13 @@ impl<'input> Iterator for Lexer<'input> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             return match self.lookahead {
-                Some((i, '/')) => self.consume(i, Div, 1),
+                Some((i, '/')) => {
+                    match self.bump() {
+                        Some((_, '/')) => self.consume(i, SafeDiv, 2),
+                        // we've already bumped, don't consume
+                        _ => Some(Ok((i, Div, i + 1))),
+                    }
+                }
                 Some((i, '=')) => self.consume(i, Eq, 1),
                 Some((i, '^')) => self.consume(i, Exp, 1),
                 Some((i, '<')) => {
