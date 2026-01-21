@@ -31,7 +31,13 @@ export function detectUndoRedo(e: {
   metaKey: boolean;
   ctrlKey: boolean;
   shiftKey: boolean;
+  altKey: boolean;
 }): UndoRedoAction {
+  // Alt modifier is used for other shortcuts, don't trigger undo/redo
+  if (e.altKey) {
+    return null;
+  }
+
   const isModifierPressed = e.metaKey || e.ctrlKey;
   const isZKey = e.key === 'z' || e.key === 'Z';
 

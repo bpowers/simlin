@@ -8,66 +8,81 @@ describe('keyboard-shortcuts', () => {
   describe('detectUndoRedo', () => {
     describe('undo detection', () => {
       it('should detect Cmd+Z as undo on Mac', () => {
-        const event = { key: 'z', metaKey: true, ctrlKey: false, shiftKey: false };
+        const event = { key: 'z', metaKey: true, ctrlKey: false, shiftKey: false, altKey: false };
         expect(detectUndoRedo(event)).toBe('undo');
       });
 
       it('should detect Ctrl+Z as undo on Windows/Linux', () => {
-        const event = { key: 'z', metaKey: false, ctrlKey: true, shiftKey: false };
+        const event = { key: 'z', metaKey: false, ctrlKey: true, shiftKey: false, altKey: false };
         expect(detectUndoRedo(event)).toBe('undo');
       });
 
       it('should detect uppercase Z key as undo', () => {
-        const event = { key: 'Z', metaKey: true, ctrlKey: false, shiftKey: false };
+        const event = { key: 'Z', metaKey: true, ctrlKey: false, shiftKey: false, altKey: false };
         expect(detectUndoRedo(event)).toBe('undo');
       });
 
       it('should detect Cmd+Z with Ctrl also pressed as undo', () => {
-        const event = { key: 'z', metaKey: true, ctrlKey: true, shiftKey: false };
+        const event = { key: 'z', metaKey: true, ctrlKey: true, shiftKey: false, altKey: false };
         expect(detectUndoRedo(event)).toBe('undo');
       });
     });
 
     describe('redo detection', () => {
       it('should detect Cmd+Shift+Z as redo on Mac', () => {
-        const event = { key: 'z', metaKey: true, ctrlKey: false, shiftKey: true };
+        const event = { key: 'z', metaKey: true, ctrlKey: false, shiftKey: true, altKey: false };
         expect(detectUndoRedo(event)).toBe('redo');
       });
 
       it('should detect Ctrl+Shift+Z as redo on Windows/Linux', () => {
-        const event = { key: 'z', metaKey: false, ctrlKey: true, shiftKey: true };
+        const event = { key: 'z', metaKey: false, ctrlKey: true, shiftKey: true, altKey: false };
         expect(detectUndoRedo(event)).toBe('redo');
       });
 
       it('should detect uppercase Z key with Shift as redo', () => {
-        const event = { key: 'Z', metaKey: true, ctrlKey: false, shiftKey: true };
+        const event = { key: 'Z', metaKey: true, ctrlKey: false, shiftKey: true, altKey: false };
         expect(detectUndoRedo(event)).toBe('redo');
       });
     });
 
     describe('non-matching inputs', () => {
       it('should return null when no modifier key is pressed', () => {
-        const event = { key: 'z', metaKey: false, ctrlKey: false, shiftKey: false };
+        const event = { key: 'z', metaKey: false, ctrlKey: false, shiftKey: false, altKey: false };
         expect(detectUndoRedo(event)).toBeNull();
       });
 
       it('should return null for non-Z keys', () => {
-        const event = { key: 'a', metaKey: true, ctrlKey: false, shiftKey: false };
+        const event = { key: 'a', metaKey: true, ctrlKey: false, shiftKey: false, altKey: false };
         expect(detectUndoRedo(event)).toBeNull();
       });
 
       it('should return null for Shift+Z without Cmd/Ctrl', () => {
-        const event = { key: 'z', metaKey: false, ctrlKey: false, shiftKey: true };
+        const event = { key: 'z', metaKey: false, ctrlKey: false, shiftKey: true, altKey: false };
         expect(detectUndoRedo(event)).toBeNull();
       });
 
       it('should return null for other letter keys with modifiers', () => {
-        const event = { key: 'y', metaKey: true, ctrlKey: false, shiftKey: false };
+        const event = { key: 'y', metaKey: true, ctrlKey: false, shiftKey: false, altKey: false };
         expect(detectUndoRedo(event)).toBeNull();
       });
 
       it('should return null for number keys with modifiers', () => {
-        const event = { key: '1', metaKey: true, ctrlKey: false, shiftKey: false };
+        const event = { key: '1', metaKey: true, ctrlKey: false, shiftKey: false, altKey: false };
+        expect(detectUndoRedo(event)).toBeNull();
+      });
+
+      it('should return null when Alt is pressed with Cmd+Z', () => {
+        const event = { key: 'z', metaKey: true, ctrlKey: false, shiftKey: false, altKey: true };
+        expect(detectUndoRedo(event)).toBeNull();
+      });
+
+      it('should return null when Alt is pressed with Ctrl+Z', () => {
+        const event = { key: 'z', metaKey: false, ctrlKey: true, shiftKey: false, altKey: true };
+        expect(detectUndoRedo(event)).toBeNull();
+      });
+
+      it('should return null when Alt is pressed with Cmd+Shift+Z', () => {
+        const event = { key: 'z', metaKey: true, ctrlKey: false, shiftKey: true, altKey: true };
         expect(detectUndoRedo(event)).toBeNull();
       });
     });
@@ -91,6 +106,14 @@ describe('keyboard-shortcuts', () => {
         expect(isEditableElement(div)).toBe(true);
       });
 
+      it('should return true when isContentEditable is true (inherited editability)', () => {
+        // Test the isContentEditable code path by mocking the property.
+        // In real browsers, child elements inside a contentEditable parent
+        // have isContentEditable=true even without the attribute set directly.
+        const span = document.createElement('span');
+        Object.defineProperty(span, 'isContentEditable', { value: true });
+        expect(isEditableElement(span)).toBe(true);
+      });
     });
 
     describe('non-editable elements', () => {
