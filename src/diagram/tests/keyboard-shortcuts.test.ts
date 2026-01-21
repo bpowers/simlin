@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { detectUndoRedo } from '../keyboard-shortcuts';
+import { detectUndoRedo, isEditableElement } from '../keyboard-shortcuts';
 
 describe('keyboard-shortcuts', () => {
   describe('detectUndoRedo', () => {
@@ -69,6 +69,59 @@ describe('keyboard-shortcuts', () => {
       it('should return null for number keys with modifiers', () => {
         const event = { key: '1', metaKey: true, ctrlKey: false, shiftKey: false };
         expect(detectUndoRedo(event)).toBeNull();
+      });
+    });
+  });
+
+  describe('isEditableElement', () => {
+    describe('editable elements', () => {
+      it('should return true for input elements', () => {
+        const input = document.createElement('input');
+        expect(isEditableElement(input)).toBe(true);
+      });
+
+      it('should return true for textarea elements', () => {
+        const textarea = document.createElement('textarea');
+        expect(isEditableElement(textarea)).toBe(true);
+      });
+
+      it('should return true for contentEditable elements', () => {
+        const div = document.createElement('div');
+        div.contentEditable = 'true';
+        expect(isEditableElement(div)).toBe(true);
+      });
+
+    });
+
+    describe('non-editable elements', () => {
+      it('should return false for null', () => {
+        expect(isEditableElement(null)).toBe(false);
+      });
+
+      it('should return false for regular div elements', () => {
+        const div = document.createElement('div');
+        expect(isEditableElement(div)).toBe(false);
+      });
+
+      it('should return false for span elements', () => {
+        const span = document.createElement('span');
+        expect(isEditableElement(span)).toBe(false);
+      });
+
+      it('should return false for button elements', () => {
+        const button = document.createElement('button');
+        expect(isEditableElement(button)).toBe(false);
+      });
+
+      it('should return false for svg elements', () => {
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        expect(isEditableElement(svg)).toBe(false);
+      });
+
+      it('should return false for contentEditable="false" elements', () => {
+        const div = document.createElement('div');
+        div.contentEditable = 'false';
+        expect(isEditableElement(div)).toBe(false);
       });
     });
   });

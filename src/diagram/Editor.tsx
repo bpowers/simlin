@@ -81,7 +81,7 @@ import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from '.
 import { Point, searchableName } from './drawing/common';
 import { takeoffθ } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
-import { detectUndoRedo } from './keyboard-shortcuts';
+import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 
 import styles from './Editor.module.css';
 
@@ -226,6 +226,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   handleKeyDown = (e: KeyboardEvent) => {
     if (this.props.embedded) {
+      return;
+    }
+
+    // Let editable fields (inputs, textareas, contentEditable) handle their own undo/redo
+    if (isEditableElement(e.target)) {
       return;
     }
 
