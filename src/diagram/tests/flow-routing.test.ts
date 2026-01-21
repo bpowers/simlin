@@ -133,6 +133,28 @@ describe('Flow routing', () => {
         // Stock should attach at BOTTOM (since anchor is below)
         expect(stockPoint.y).toBe(newStockY + StockHeight / 2);
       });
+
+      it('should preserve off-center valve position when stock moves on straight flow', () => {
+        // Horizontal flow with valve positioned off-center (closer to anchor)
+        const stock = makeStock(stockUid, 100, 100);
+        // Valve at x=180 (near anchor at x=200), not at midpoint x=161.25
+        const flow = makeFlow(flowUid, 180, 100, [
+          { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid }, // stock right edge at x=122.5
+          { x: 200, y: 100, attachedToUid: cloudUid },
+        ]);
+
+        // Move stock slightly (within bounds to keep flow straight)
+        const newStockY = 100 - 10;
+        const result = computeFlowRoute(flow, stock, 100, newStockY);
+
+        // Flow should still be straight
+        expect(result.points.size).toBe(2);
+
+        // Valve should preserve its x position (clamped to segment bounds)
+        // The valve was at x=180, which is still valid on the new segment
+        expect(result.cx).toBe(180);
+        expect(result.cy).toBe(100);
+      });
     });
 
     describe('straight vertical flows', () => {
@@ -247,6 +269,54 @@ describe('Flow routing', () => {
 
         // Should be a straight horizontal flow again
         expect(stockPoint.y).toBe(anchor.y);
+      });
+
+      it('should preserve off-center valve position when stock moves on L-shaped flow', () => {
+        // L-shaped flow with valve positioned near the anchor (not at midpoint)
+        // Flow: stock at top -> corner -> anchor at right (horizontal anchor segment)
+        const stock = makeStock(stockUid, 100, 50);
+        // Valve at (180, 100) is on the horizontal segment near the anchor
+        const flow = makeFlow(flowUid, 180, 100, [
+          { x: 100, y: 50 + StockHeight / 2, attachedToUid: stockUid }, // stock bottom
+          { x: 100, y: 100 }, // corner
+          { x: 200, y: 100, attachedToUid: cloudUid }, // anchor
+        ]);
+
+        // Move stock further up - this changes the vertical segment length
+        const newStockY = 30;
+        const result = computeFlowRoute(flow, stock, 100, newStockY);
+
+        // Flow should still be L-shaped
+        expect(result.points.size).toBe(3);
+
+        // Valve should preserve its position on the horizontal segment
+        // It was at (180, 100) which is still valid on the anchor segment
+        expect(result.cx).toBe(180);
+        expect(result.cy).toBe(100);
+      });
+
+      it('should clamp valve to nearest segment when straight flow becomes L-shaped', () => {
+        // Horizontal flow with valve near the center
+        const stock = makeStock(stockUid, 100, 100);
+        // Valve at (160, 100) on the horizontal segment
+        const flow = makeFlow(flowUid, 160, 100, [
+          { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid }, // stock right edge at x=122.5
+          { x: 200, y: 100, attachedToUid: cloudUid },
+        ]);
+
+        // Move stock down significantly to create L-shape
+        const newStockY = 100 + 50;
+        const result = computeFlowRoute(flow, stock, 100, newStockY);
+
+        // Flow should become L-shaped
+        expect(result.points.size).toBe(3);
+
+        // Valve was at (160, 100). The new L-shape has:
+        // - Vertical segment from stock at (100, 132.5) to corner at (100, 100)
+        // - Horizontal segment from corner at (100, 100) to anchor at (200, 100)
+        // The valve (160, 100) is on the horizontal segment, so it should stay there
+        expect(result.cx).toBe(160);
+        expect(result.cy).toBe(100);
       });
     });
 

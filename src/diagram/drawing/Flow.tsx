@@ -189,12 +189,15 @@ export function computeFlowRoute(
       newPoints = List([firstPoint, newStockPoint]);
     }
 
-    const midX = (newStockPoint.x + anchor.x) / 2;
-    const midY = (newStockPoint.y + anchor.y) / 2;
+    // Preserve valve position by clamping to the new segment
+    const currentValve: IPoint = { x: flow.cx, y: flow.cy };
+    const newSegments = getSegments(newPoints);
+    const closestSegment = findClosestSegment(currentValve, newSegments);
+    const clampedValve = clampToSegment(currentValve, closestSegment);
 
     return flow.merge({
-      x: midX,
-      y: midY,
+      x: clampedValve.x,
+      y: clampedValve.y,
       points: newPoints,
     });
   }
@@ -238,12 +241,15 @@ export function computeFlowRoute(
     newPoints = List([firstPoint, cornerPoint, newStockPoint]);
   }
 
-  const valveMidX = (anchor.x + corner.x) / 2;
-  const valveMidY = (anchor.y + corner.y) / 2;
+  // Preserve valve position by clamping to the closest segment of the new L-shape
+  const currentValve: IPoint = { x: flow.cx, y: flow.cy };
+  const newSegments = getSegments(newPoints);
+  const closestSegment = findClosestSegment(currentValve, newSegments);
+  const clampedValve = clampToSegment(currentValve, closestSegment);
 
   return flow.merge({
-    x: valveMidX,
-    y: valveMidY,
+    x: clampedValve.x,
+    y: clampedValve.y,
     points: newPoints,
   });
 }
