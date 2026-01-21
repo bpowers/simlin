@@ -370,6 +370,55 @@ describe('Flow routing', () => {
         const stockPoint = result.points.get(3)!;
         expect(stockPoint.attachedToUid).toBe(stockUid);
       });
+
+      it('should update valve position when moving stock on 4+ point flow', () => {
+        // 4-point flow with valve on middle segment
+        // Segments: [stock-corner1], [corner1-corner2], [corner2-cloud]
+        const stock = makeStock(stockUid, 100, 100);
+        // Valve at (150, 150) is on segment 1 (corner1-corner2)
+        const flow = makeFlow(flowUid, 150, 150, [
+          { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid }, // stock right edge
+          { x: 150, y: 100 }, // corner1
+          { x: 150, y: 200 }, // corner2
+          { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
+        ]);
+
+        // Move stock - this shouldn't affect the valve since it's on segment 1
+        const result = computeFlowRoute(flow, stock, 100, 80);
+
+        // Valve should still be clamped to a valid segment
+        // The segments are still the same, so valve should be on segment 1
+        expect(result.cx).toBe(150);
+        expect(result.cy).toBe(150);
+      });
+
+      it('should clamp valve to nearest segment when stock moves significantly', () => {
+        // 4-point flow with valve on the middle vertical segment
+        const stock = makeStock(stockUid, 100, 100);
+        // Valve at (150, 150) is on segment 1 (corner1-corner2, vertical at x=150)
+        const flow = makeFlow(flowUid, 150, 150, [
+          { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid }, // stock right edge (122.5, 100)
+          { x: 150, y: 100 }, // corner1
+          { x: 150, y: 200 }, // corner2
+          { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
+        ]);
+
+        // Move stock right - this changes the first segment but not the middle one
+        const newStockX = 130;
+        const result = computeFlowRoute(flow, stock, newStockX, 100);
+
+        // Stock endpoint should be updated to new right edge
+        const stockPoint = result.points.get(0)!;
+        expect(stockPoint.x).toBe(newStockX + StockWidth / 2); // 152.5
+        expect(stockPoint.y).toBe(100);
+        expect(stockPoint.attachedToUid).toBe(stockUid);
+
+        // Valve was at (150, 150) on segment 1 (vertical from corner1 to corner2)
+        // Segment 1 is still vertical at x=150 from y=100 to y=200
+        // The valve should still be at (150, 150) since it's on an unaffected segment
+        expect(result.cx).toBe(150);
+        expect(result.cy).toBe(150);
+      });
     });
   });
 

@@ -98,18 +98,21 @@ export function computeFlowRoute(
   // only update the attached endpoint to preserve the user's routing.
   // We don't collapse these to straight or add/remove corners.
   if (points.size >= 4) {
-    let stockEdge: IPoint;
-    // Determine which side to attach based on the adjacent point
+    // Determine which side to attach based on the adjacent point's direction
     const adjacentPoint = stockIsFirst ? defined(points.get(1)) : defined(points.get(points.size - 2));
-    const isHorizontalSegment = adjacentPoint.y === (stockIsFirst ? firstPoint.y : lastPoint.y);
+    const dx = adjacentPoint.x - newStockCx;
+    const dy = adjacentPoint.y - newStockCy;
 
-    if (isHorizontalSegment) {
-      const side: Side = adjacentPoint.x > newStockCx ? 'right' : 'left';
-      stockEdge = getStockEdgePoint(newStockCx, adjacentPoint.y, side);
+    // Choose the side that best connects to the adjacent point
+    let side: Side;
+    if (Math.abs(dx) > Math.abs(dy)) {
+      // Primarily horizontal direction to adjacent point
+      side = dx > 0 ? 'right' : 'left';
     } else {
-      const side: Side = adjacentPoint.y > newStockCy ? 'bottom' : 'top';
-      stockEdge = getStockEdgePoint(adjacentPoint.x, newStockCy, side);
+      // Primarily vertical direction to adjacent point
+      side = dy > 0 ? 'bottom' : 'top';
     }
+    const stockEdge = getStockEdgePoint(newStockCx, newStockCy, side);
 
     const newStockPoint = new Point({
       x: stockEdge.x,
@@ -124,7 +127,18 @@ export function computeFlowRoute(
       newPoints = points.set(points.size - 1, newStockPoint);
     }
 
-    return flow.set('points', newPoints);
+    // Update valve position by clamping to the nearest segment.
+    // This ensures the valve stays on the flow path after the endpoint moves.
+    const newSegments = getSegments(newPoints);
+    const currentValve: IPoint = { x: flow.cx, y: flow.cy };
+    const closestSegment = findClosestSegment(currentValve, newSegments);
+    const clampedValve = clampToSegment(currentValve, closestSegment);
+
+    return flow.merge({
+      x: clampedValve.x,
+      y: clampedValve.y,
+      points: newPoints,
+    });
   }
 
   if (canFlowBeStraight(newStockCx, newStockCy, anchor.x, anchor.y, originalFlowIsHorizontal)) {
