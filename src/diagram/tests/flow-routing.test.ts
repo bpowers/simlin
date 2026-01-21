@@ -1010,6 +1010,44 @@ describe('Flow routing', () => {
       const valveOnVertical = newFlow.cx === 200; // on the vertical segment at x=200
       expect(valveOnHorizontal || valveOnVertical).toBe(true);
     });
+
+    it('should not reroute on small perpendicular movement (threshold check)', () => {
+      // Straight horizontal flow: cloud to stock
+      const flow = makeFlow(flowUid, 150, 100, [
+        { x: 100, y: 100, attachedToUid: cloudUid },
+        { x: 200, y: 100, attachedToUid: stockUid },
+      ]);
+      const stock = makeStock(stockUid, 200, 100);
+      const cloud = makeCloud(cloudUid, flowUid, 100, 100);
+
+      // Small perpendicular movement (below threshold of 5px) should not reroute
+      const [newFlow, updatedClouds] = UpdateFlow(flow, List([cloud, stock]), { x: -20, y: 3 });
+
+      // Flow should remain straight (2 points) - not converted to L-shape
+      expect(newFlow.points.size).toBe(2);
+      // Cloud should not be updated
+      expect(updatedClouds.size).toBe(0);
+      // Valve should move along the segment
+      expect(newFlow.cy).toBe(100);
+      expect(newFlow.cx).toBe(170); // moved along segment by x delta
+    });
+
+    it('should not reroute when parallel movement is dominant', () => {
+      // Straight horizontal flow: cloud to stock
+      const flow = makeFlow(flowUid, 150, 100, [
+        { x: 100, y: 100, attachedToUid: cloudUid },
+        { x: 200, y: 100, attachedToUid: stockUid },
+      ]);
+      const stock = makeStock(stockUid, 200, 100);
+      const cloud = makeCloud(cloudUid, flowUid, 100, 100);
+
+      // Even with significant perpendicular movement, if parallel is larger, don't reroute
+      const [newFlow, updatedClouds] = UpdateFlow(flow, List([cloud, stock]), { x: -30, y: 20 });
+
+      // Flow should remain straight - parallel movement (30) > perpendicular (20)
+      expect(newFlow.points.size).toBe(2);
+      expect(updatedClouds.size).toBe(0);
+    });
   });
 
   describe('moveSegment', () => {

@@ -904,9 +904,17 @@ export function UpdateFlow(
   if (segments.length === 1 && clouds.size > 0) {
     const seg = segments[0];
     const perpDelta = seg.isHorizontal ? moveDelta.y : moveDelta.x;
+    const parDelta = seg.isHorizontal ? moveDelta.x : moveDelta.y;
 
-    // Only handle if there's a perpendicular component to the drag
-    if (perpDelta !== 0) {
+    // Require a significant and dominant perpendicular component to trigger reroute.
+    // This prevents accidental L-shape conversion during normal valve dragging,
+    // since pointer movement often has small perpendicular noise.
+    const PERP_THRESHOLD = 5;
+    const perpAbs = Math.abs(perpDelta);
+    const parAbs = Math.abs(parDelta);
+    const shouldReroute = perpAbs >= PERP_THRESHOLD && perpAbs > parAbs;
+
+    if (shouldReroute) {
       const firstPoint = defined(points.first());
       const lastPoint = defined(points.last());
 
