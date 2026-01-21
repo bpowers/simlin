@@ -898,6 +898,106 @@ export function UpdateFlow(
     return [flowEl, List<CloudViewElement>()];
   }
 
+  // For 2-point (straight) flows with at least one cloud, allow perpendicular offset.
+  // This converts the flow to an L-shape, letting users offset flows to avoid overlap
+  // without moving the stocks themselves.
+  if (segments.length === 1 && clouds.size > 0) {
+    const seg = segments[0];
+    const perpDelta = seg.isHorizontal ? moveDelta.y : moveDelta.x;
+
+    // Only handle if there's a perpendicular component to the drag
+    if (perpDelta !== 0) {
+      const firstPoint = defined(points.first());
+      const lastPoint = defined(points.last());
+
+      // Find which endpoint is the cloud vs stock
+      const firstIsCloud = clouds.some((c) => c.uid === firstPoint.attachedToUid);
+      const lastIsCloud = clouds.some((c) => c.uid === lastPoint.attachedToUid);
+
+      // Calculate new cloud position(s)
+      let newFirstPoint = firstPoint;
+      let newLastPoint = lastPoint;
+
+      if (seg.isHorizontal) {
+        // Horizontal segment: perpendicular movement is vertical (Y changes)
+        if (firstIsCloud) {
+          newFirstPoint = firstPoint.merge({ y: firstPoint.y - moveDelta.y });
+        }
+        if (lastIsCloud) {
+          newLastPoint = lastPoint.merge({ y: lastPoint.y - moveDelta.y });
+        }
+
+        // Create corner point to maintain orthogonality
+        // Corner connects the moved cloud to the fixed stock
+        let corner: Point;
+        if (firstIsCloud && !lastIsCloud) {
+          // Cloud is first, stock is last: corner at (stock.x, newCloud.y)
+          corner = new Point({ x: lastPoint.x, y: newFirstPoint.y, attachedToUid: undefined });
+          points = List([newFirstPoint, corner, lastPoint]);
+        } else if (!firstIsCloud && lastIsCloud) {
+          // Stock is first, cloud is last: corner at (stock.x, newCloud.y)
+          corner = new Point({ x: firstPoint.x, y: newLastPoint.y, attachedToUid: undefined });
+          points = List([firstPoint, corner, newLastPoint]);
+        } else {
+          // Both are clouds - move both endpoints uniformly
+          points = List([newFirstPoint, newLastPoint]);
+        }
+      } else {
+        // Vertical segment: perpendicular movement is horizontal (X changes)
+        if (firstIsCloud) {
+          newFirstPoint = firstPoint.merge({ x: firstPoint.x - moveDelta.x });
+        }
+        if (lastIsCloud) {
+          newLastPoint = lastPoint.merge({ x: lastPoint.x - moveDelta.x });
+        }
+
+        // Create corner point
+        let corner: Point;
+        if (firstIsCloud && !lastIsCloud) {
+          // Cloud is first, stock is last: corner at (newCloud.x, stock.y)
+          corner = new Point({ x: newFirstPoint.x, y: lastPoint.y, attachedToUid: undefined });
+          points = List([newFirstPoint, corner, lastPoint]);
+        } else if (!firstIsCloud && lastIsCloud) {
+          // Stock is first, cloud is last: corner at (newCloud.x, stock.y)
+          corner = new Point({ x: newLastPoint.x, y: firstPoint.y, attachedToUid: undefined });
+          points = List([firstPoint, corner, newLastPoint]);
+        } else {
+          // Both are clouds - move both endpoints uniformly
+          points = List([newFirstPoint, newLastPoint]);
+        }
+      }
+
+      // Update cloud positions
+      const updatedClouds = clouds.map((cloud) => {
+        if (cloud.uid === firstPoint.attachedToUid && firstIsCloud) {
+          return cloud.merge({
+            x: newFirstPoint.x,
+            y: newFirstPoint.y,
+          }) as CloudViewElement;
+        } else if (cloud.uid === lastPoint.attachedToUid && lastIsCloud) {
+          return cloud.merge({
+            x: newLastPoint.x,
+            y: newLastPoint.y,
+          }) as CloudViewElement;
+        }
+        return cloud;
+      });
+
+      // Clamp valve to the closest segment of the new shape
+      const newSegments = getSegments(points);
+      const closestSeg = findClosestSegment(currentValve, newSegments);
+      const newValve = clampToSegment(currentValve, closestSeg);
+
+      flowEl = flowEl.merge({
+        x: newValve.x,
+        y: newValve.y,
+        points,
+      });
+
+      return [flowEl, updatedClouds];
+    }
+  }
+
   // Moving the valve along the flow path.
   // Note: Valve movement doesn't change any endpoint positions, so no cloud
   // positions need updating. We return an empty clouds list.
