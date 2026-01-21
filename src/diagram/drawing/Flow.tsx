@@ -195,10 +195,13 @@ export function computeFlowRoute(
 
     // Preserve valve's fractional position along the segment.
     // This prevents the valve from jumping when the stock moves past its position.
+    // Find which segment the valve was actually on (for L-shaped flows, the valve
+    // might be on either segment, so we can't just assume it was on segment 0).
     const currentValve: IPoint = { x: flow.cx, y: flow.cy };
     const oldSegments = getSegments(points);
     const newSegments = getSegments(newPoints);
-    const newValve = preserveValveFraction(currentValve, oldSegments[0], newSegments[0]);
+    const valveSegment = findClosestSegment(currentValve, oldSegments);
+    const newValve = preserveValveFraction(currentValve, valveSegment, newSegments[0]);
 
     return flow.merge({
       x: newValve.x,

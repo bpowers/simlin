@@ -353,6 +353,46 @@ describe('Flow routing', () => {
         expect(stockPoint.y).toBe(anchor.y);
       });
 
+      it('should preserve valve fraction from second segment when L-shape straightens', () => {
+        // L-shaped flow where the valve is on segment 1 (horizontal, near anchor),
+        // not segment 0 (vertical, near stock).
+        // When the L-shape straightens, the valve fraction should be computed from
+        // the segment the valve was actually on, not always from segment 0.
+        const stock = makeStock(stockUid, 100, 150);
+        // L-shape: stock bottom -> corner -> anchor
+        // Segment 0: vertical from (100, 132.5) to (100, 100) - stock to corner
+        // Segment 1: horizontal from (100, 100) to (200, 100) - corner to anchor
+        // Valve at (180, 100) is on segment 1, at fraction 0.8 along that segment
+        const flow = makeFlow(flowUid, 180, 100, [
+          { x: 100, y: 150 - StockHeight / 2, attachedToUid: stockUid }, // stock top at y=132.5
+          { x: 100, y: 100 }, // corner
+          { x: 200, y: 100, attachedToUid: cloudUid }, // anchor
+        ]);
+
+        // Calculate valve's fractional position on OLD segment 1 (horizontal)
+        // Segment 1 goes from corner (100, 100) to anchor (200, 100)
+        const oldCornerX = 100;
+        const anchorX = 200;
+        const valveX = 180;
+        const oldFraction = (valveX - oldCornerX) / (anchorX - oldCornerX); // = 0.8
+
+        // Move stock back to anchor's Y level to straighten the L-shape
+        const newStockY = 100;
+        const result = computeFlowRoute(flow, stock, 100, newStockY);
+
+        // Should revert to 2 points (straight)
+        expect(result.points.size).toBe(2);
+
+        // New segment goes from stock edge (122.5, 100) to anchor (200, 100)
+        const newStockEdgeX = 100 + StockWidth / 2; // 122.5
+        // The valve should preserve its fraction (0.8) along the new segment
+        // Expected X = newStockEdgeX + 0.8 * (anchorX - newStockEdgeX)
+        // = 122.5 + 0.8 * 77.5 = 122.5 + 62 = 184.5
+        const expectedValveX = newStockEdgeX + oldFraction * (anchorX - newStockEdgeX);
+        expect(result.cx).toBeCloseTo(expectedValveX, 1);
+        expect(result.cy).toBe(100);
+      });
+
       it('should preserve off-center valve position when stock moves on L-shaped flow', () => {
         // L-shaped flow with valve positioned near the anchor (not at midpoint)
         // Flow: stock at top -> corner -> anchor at right (horizontal anchor segment)
