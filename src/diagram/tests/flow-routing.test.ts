@@ -722,6 +722,38 @@ describe('Flow routing', () => {
       expect(newFlow.cx).toBeGreaterThanOrEqual(110); // margin from start
     });
 
+    it('should clamp valve to midpoint on very short horizontal segment', () => {
+      // Very short horizontal flow (15px, less than 2 * margin of 20px)
+      const flow = makeFlow(flowUid, 107.5, 100, [
+        { x: 100, y: 100, attachedToUid: cloudUid },
+        { x: 115, y: 100, attachedToUid: stockUid },
+      ]);
+      const stock = makeStock(stockUid, 115, 100);
+
+      // Try to move valve - should clamp to midpoint since segment is too short
+      const [newFlow] = UpdateFlow(flow, List([stock]), { x: -50, y: 0 });
+
+      // Valve should be at segment midpoint
+      expect(newFlow.cy).toBe(100);
+      expect(newFlow.cx).toBe(107.5); // midpoint of 100 to 115
+    });
+
+    it('should clamp valve to midpoint on very short vertical segment', () => {
+      // Very short vertical flow (15px, less than 2 * margin of 20px)
+      const flow = makeFlow(flowUid, 100, 107.5, [
+        { x: 100, y: 100, attachedToUid: cloudUid },
+        { x: 100, y: 115, attachedToUid: stockUid },
+      ]);
+      const stock = makeStock(stockUid, 100, 115);
+
+      // Try to move valve - should clamp to midpoint since segment is too short
+      const [newFlow] = UpdateFlow(flow, List([stock]), { x: 0, y: -50 });
+
+      // Valve should be at segment midpoint
+      expect(newFlow.cx).toBe(100);
+      expect(newFlow.cy).toBe(107.5); // midpoint of 100 to 115
+    });
+
     it('should move valve on L-shaped flow along closest segment', () => {
       // L-shaped flow: horizontal then vertical
       const flow = makeFlow(flowUid, 150, 100, [

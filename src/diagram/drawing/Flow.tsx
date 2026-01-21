@@ -547,6 +547,14 @@ function clampToSegment(point: IPoint, seg: Segment, margin: number = VALVE_CLAM
       return { x: p1.x, y: p1.y };
     }
 
+    // If segment is shorter than 2 * margin, use the midpoint
+    if (len < 2 * margin) {
+      return {
+        x: (p1.x + p2.x) / 2,
+        y: (p1.y + p2.y) / 2,
+      };
+    }
+
     // Parameter t of the closest point on the infinite line
     let t = ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / (len * len);
 
@@ -561,6 +569,14 @@ function clampToSegment(point: IPoint, seg: Segment, margin: number = VALVE_CLAM
   }
 
   if (seg.isHorizontal) {
+    const segLen = Math.abs(p2.x - p1.x);
+    // If segment is shorter than 2 * margin, use the midpoint
+    if (segLen < 2 * margin) {
+      return {
+        x: (p1.x + p2.x) / 2,
+        y: p1.y,
+      };
+    }
     const minX = Math.min(p1.x, p2.x) + margin;
     const maxX = Math.max(p1.x, p2.x) - margin;
     return {
@@ -569,6 +585,14 @@ function clampToSegment(point: IPoint, seg: Segment, margin: number = VALVE_CLAM
     };
   } else {
     // Vertical segment
+    const segLen = Math.abs(p2.y - p1.y);
+    // If segment is shorter than 2 * margin, use the midpoint
+    if (segLen < 2 * margin) {
+      return {
+        x: p1.x,
+        y: (p1.y + p2.y) / 2,
+      };
+    }
     const minY = Math.min(p1.y, p2.y) + margin;
     const maxY = Math.max(p1.y, p2.y) - margin;
     return {
