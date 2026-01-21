@@ -307,13 +307,13 @@ describe('Flow routing', () => {
     });
 
     describe('multi-point flow preservation', () => {
-      it('should preserve intermediate points when moving stock on 4+ point flow', () => {
+      it('should preserve non-adjacent points and adjust adjacent corner on 4+ point flow', () => {
         // 4-point flow: stock -> corner1 -> corner2 -> cloud
         const stock = makeStock(stockUid, 100, 100);
         const flow = makeFlow(flowUid, 150, 150, [
           { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid }, // stock right edge
-          { x: 150, y: 100 }, // corner1
-          { x: 150, y: 200 }, // corner2
+          { x: 150, y: 100 }, // corner1 (adjacent to stock - will be adjusted)
+          { x: 150, y: 200 }, // corner2 (not adjacent - preserved)
           { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
         ]);
 
@@ -324,15 +324,18 @@ describe('Flow routing', () => {
         // Should preserve all 4 points
         expect(result.points.size).toBe(4);
 
-        // Stock endpoint should be updated
+        // Stock endpoint should be on stock's actual edge
         const stockPoint = result.points.get(0)!;
         expect(stockPoint.attachedToUid).toBe(stockUid);
+        expect(stockPoint.y).toBe(newStockY);
 
-        // Intermediate points should be preserved (corner1 and corner2)
+        // Corner1 is adjacent to stock - its Y is adjusted to maintain horizontal segment
         const corner1 = result.points.get(1)!;
-        const corner2 = result.points.get(2)!;
         expect(corner1.x).toBe(150);
-        expect(corner1.y).toBe(100);
+        expect(corner1.y).toBe(newStockY); // Adjusted to match stock edge
+
+        // Corner2 is not adjacent to stock - fully preserved
+        const corner2 = result.points.get(2)!;
         expect(corner2.x).toBe(150);
         expect(corner2.y).toBe(200);
 
@@ -437,7 +440,7 @@ describe('Flow routing', () => {
           { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
         ]);
 
-        // Move stock vertically - this should NOT create a diagonal first segment
+        // Move stock vertically - endpoint stays on stock edge, corner1 adjusts to maintain horizontal
         const newStockY = 120;
         const result = computeFlowRoute(flow, stock, 100, newStockY);
 
@@ -445,10 +448,12 @@ describe('Flow routing', () => {
         const stockPoint = result.points.get(0)!;
         const corner1 = result.points.get(1)!;
 
-        // The endpoint's Y should match corner1's Y (axis-aligned), not the stock center
+        // Endpoint stays on stock's actual edge (y = newStockY)
+        expect(stockPoint.y).toBe(newStockY);
+        // Corner1's Y is adjusted to match, preserving horizontal segment
+        expect(corner1.y).toBe(newStockY);
+        // Same Y values = horizontal segment
         expect(stockPoint.y).toBe(corner1.y);
-        // The segment is horizontal: same Y values
-        expect(stockPoint.y).toBe(100);
       });
 
       it('should keep first segment vertical when stock moves horizontally on 4+ point flow', () => {
@@ -461,7 +466,7 @@ describe('Flow routing', () => {
           { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
         ]);
 
-        // Move stock horizontally - this should NOT create a diagonal first segment
+        // Move stock horizontally - endpoint stays on stock edge, corner1 adjusts to maintain vertical
         const newStockX = 120;
         const result = computeFlowRoute(flow, stock, newStockX, 100);
 
@@ -469,10 +474,12 @@ describe('Flow routing', () => {
         const stockPoint = result.points.get(0)!;
         const corner1 = result.points.get(1)!;
 
-        // The endpoint's X should match corner1's X (axis-aligned), not the stock center
+        // Endpoint stays on stock's actual edge (x = newStockX)
+        expect(stockPoint.x).toBe(newStockX);
+        // Corner1's X is adjusted to match, preserving vertical segment
+        expect(corner1.x).toBe(newStockX);
+        // Same X values = vertical segment
         expect(stockPoint.x).toBe(corner1.x);
-        // The segment is vertical: same X values
-        expect(stockPoint.x).toBe(100);
       });
     });
   });

@@ -95,28 +95,31 @@ export function computeFlowRoute(
   const originalFlowIsHorizontal = anchor.y === anchorAdjacentPoint.y;
 
   // For flows with 4+ points (imported or manually-edited multi-segment flows),
-  // only update the attached endpoint to preserve the user's routing.
-  // We don't collapse these to straight or add/remove corners.
+  // update both the attached endpoint and the adjacent corner to preserve
+  // orthogonality. The endpoint stays on the stock edge, and the adjacent
+  // corner is adjusted to maintain axis alignment.
   if (points.size >= 4) {
     // Determine which side to attach based on the adjacent point's direction
-    const adjacentPoint = stockIsFirst ? defined(points.get(1)) : defined(points.get(points.size - 2));
+    const adjacentPointIndex = stockIsFirst ? 1 : points.size - 2;
+    const adjacentPoint = defined(points.get(adjacentPointIndex));
     const dx = adjacentPoint.x - newStockCx;
     const dy = adjacentPoint.y - newStockCy;
 
     // Choose the side that best connects to the adjacent point
     let side: Side;
-    let stockEdge: IPoint;
+    let isHorizontalSegment: boolean;
     if (Math.abs(dx) > Math.abs(dy)) {
       // Primarily horizontal direction to adjacent point
       side = dx > 0 ? 'right' : 'left';
-      // Use adjacentPoint.y to keep the first segment horizontal (axis-aligned)
-      stockEdge = getStockEdgePoint(newStockCx, adjacentPoint.y, side);
+      isHorizontalSegment = true;
     } else {
       // Primarily vertical direction to adjacent point
       side = dy > 0 ? 'bottom' : 'top';
-      // Use adjacentPoint.x to keep the first segment vertical (axis-aligned)
-      stockEdge = getStockEdgePoint(adjacentPoint.x, newStockCy, side);
+      isHorizontalSegment = false;
     }
+
+    // Keep the endpoint on the stock's actual edge
+    const stockEdge = getStockEdgePoint(newStockCx, newStockCy, side);
 
     const newStockPoint = new Point({
       x: stockEdge.x,
@@ -124,11 +127,29 @@ export function computeFlowRoute(
       attachedToUid: stockEl.uid,
     });
 
+    // Adjust the adjacent corner to preserve orthogonality
+    let newAdjacentPoint: Point;
+    if (isHorizontalSegment) {
+      // For horizontal segment, corner's Y must match endpoint's Y
+      newAdjacentPoint = new Point({
+        x: adjacentPoint.x,
+        y: stockEdge.y,
+        attachedToUid: adjacentPoint.attachedToUid,
+      });
+    } else {
+      // For vertical segment, corner's X must match endpoint's X
+      newAdjacentPoint = new Point({
+        x: stockEdge.x,
+        y: adjacentPoint.y,
+        attachedToUid: adjacentPoint.attachedToUid,
+      });
+    }
+
     let newPoints: List<Point>;
     if (stockIsFirst) {
-      newPoints = points.set(0, newStockPoint);
+      newPoints = points.set(0, newStockPoint).set(1, newAdjacentPoint);
     } else {
-      newPoints = points.set(points.size - 1, newStockPoint);
+      newPoints = points.set(points.size - 1, newStockPoint).set(points.size - 2, newAdjacentPoint);
     }
 
     // Update valve position by clamping to the nearest segment.
