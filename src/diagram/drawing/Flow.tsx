@@ -651,6 +651,13 @@ export function findClickedSegment(
   const clickPoint: IPoint = { x: clickX, y: clickY };
   const closest = findClosestSegment(clickPoint, segments);
 
+  // Don't allow dragging diagonal segments - they shouldn't exist in valid
+  // flow geometry, but could appear in imported models. moveSegment assumes
+  // all segments are axis-aligned, so dragging a diagonal would be incorrect.
+  if (closest.isDiagonal) {
+    return undefined;
+  }
+
   // Don't allow dragging segments that have an attached endpoint
   // (would create diagonal segments which break axis-alignment assumptions)
   if (segmentHasAttachedEndpoint(points, closest.index)) {

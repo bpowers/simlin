@@ -966,6 +966,24 @@ describe('Flow routing', () => {
       const result = findClickedSegment(100, 100, 100, 100, points);
       expect(result).toBeUndefined();
     });
+
+    it('should return undefined for diagonal segments (from imported models)', () => {
+      // 4-point flow with a diagonal middle segment (shouldn't exist in valid geometry,
+      // but could appear in imported models). Diagonal segments can't be dragged
+      // because moveSegment assumes axis-aligned segments.
+      const points = List([
+        new Point({ x: 100, y: 200, attachedToUid: cloudUid }),
+        new Point({ x: 100, y: 100, attachedToUid: undefined }), // corner1
+        new Point({ x: 200, y: 150, attachedToUid: undefined }), // corner2 - diagonal from corner1!
+        new Point({ x: 200, y: 50, attachedToUid: stockUid }),
+      ]);
+      const valveCx = 150;
+      const valveCy = 125;
+
+      // Click on the diagonal middle segment (segment 1) - should return undefined
+      const result = findClickedSegment(150, 125, valveCx, valveCy, points);
+      expect(result).toBeUndefined();
+    });
   });
 
   describe('getSegments', () => {
