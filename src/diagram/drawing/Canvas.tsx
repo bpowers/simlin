@@ -149,7 +149,7 @@ export interface CanvasProps {
   selection: Set<UID>;
   onRenameVariable: (oldName: string, newName: string) => void;
   onSetSelection: (selected: Set<UID>) => void;
-  onMoveSelection: (position: Point, arcPoint?: Point) => void;
+  onMoveSelection: (position: Point, arcPoint?: Point, segmentIndex?: number) => void;
   onMoveFlow: (
     flow: FlowViewElement,
     targetUid: number,
@@ -788,7 +788,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           // we do weird one off things in this codepath, so exit early
           return;
         } else if (!this.state.isMovingArrow) {
-          this.props.onMoveSelection(delta, arcPoint);
+          this.props.onMoveSelection(delta, arcPoint, this.state.draggingSegmentIndex);
         } else {
           const element = this.getElementByUid(defined(this.props.selection.first()));
           let foundInvalidTarget = false;
