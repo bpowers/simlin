@@ -500,6 +500,41 @@ describe('Flow routing', () => {
         expect(result.cy).toBe(150);
       });
 
+      it('should preserve horizontal orientation when stock moves beyond 45 degree threshold', () => {
+        // 4-point flow with horizontal first segment: stock -> corner1 (horizontal)
+        // This tests that the segment orientation is determined from the existing geometry,
+        // not from the direction to the adjacent point (which would flip at 45 degrees)
+        const stock = makeStock(stockUid, 100, 100);
+        const flow = makeFlow(flowUid, 150, 150, [
+          { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid }, // stock right edge at (122.5, 100)
+          { x: 150, y: 100 }, // corner1 at y=100 (horizontal segment)
+          { x: 150, y: 200 }, // corner2
+          { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
+        ]);
+
+        // Move stock way down - dy (100) > dx (27.5), which would flip to vertical
+        // if we used the naive Math.abs(dx) > Math.abs(dy) heuristic
+        const newStockY = 200;
+        const result = computeFlowRoute(flow, stock, 100, newStockY);
+
+        // First segment should STILL be horizontal (Y values match)
+        const stockPoint = result.points.get(0)!;
+        const corner1 = result.points.get(1)!;
+        expect(stockPoint.y).toBe(corner1.y);
+
+        // Corner2 should be unchanged (no diagonal created)
+        const corner2 = result.points.get(2)!;
+        expect(corner2.x).toBe(150);
+        expect(corner2.y).toBe(200);
+
+        // The first segment is horizontal, so corner1's X is preserved, Y is adjusted
+        expect(corner1.x).toBe(150);
+        expect(corner1.y).toBe(newStockY); // Adjusted to match stock
+
+        // Second segment (corner1 to corner2) should be vertical
+        expect(corner1.x).toBe(corner2.x);
+      });
+
       it('should keep first segment horizontal when stock moves vertically on 4+ point flow', () => {
         // 4-point flow with horizontal first segment: stock -> corner1 (horizontal)
         const stock = makeStock(stockUid, 100, 100);
@@ -550,6 +585,41 @@ describe('Flow routing', () => {
         expect(corner1.x).toBe(newStockX);
         // Same X values = vertical segment
         expect(stockPoint.x).toBe(corner1.x);
+      });
+
+      it('should preserve vertical orientation when stock moves beyond 45 degree threshold', () => {
+        // 4-point flow with vertical first segment: stock -> corner1 (vertical)
+        // This tests that the segment orientation is determined from the existing geometry,
+        // not from the direction to the adjacent point (which would flip at 45 degrees)
+        const stock = makeStock(stockUid, 100, 100);
+        const flow = makeFlow(flowUid, 150, 150, [
+          { x: 100, y: 100 + StockHeight / 2, attachedToUid: stockUid }, // stock bottom edge at (100, 117.5)
+          { x: 100, y: 150 }, // corner1 at x=100 (vertical segment)
+          { x: 200, y: 150 }, // corner2
+          { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
+        ]);
+
+        // Move stock way right - dx (100) > dy (32.5), which would flip to horizontal
+        // if we used the naive Math.abs(dx) > Math.abs(dy) heuristic
+        const newStockX = 200;
+        const result = computeFlowRoute(flow, stock, newStockX, 100);
+
+        // First segment should STILL be vertical (X values match)
+        const stockPoint = result.points.get(0)!;
+        const corner1 = result.points.get(1)!;
+        expect(stockPoint.x).toBe(corner1.x);
+
+        // Corner2 should be unchanged (no diagonal created)
+        const corner2 = result.points.get(2)!;
+        expect(corner2.x).toBe(200);
+        expect(corner2.y).toBe(150);
+
+        // The first segment is vertical, so corner1's Y is preserved, X is adjusted
+        expect(corner1.y).toBe(150);
+        expect(corner1.x).toBe(newStockX); // Adjusted to match stock
+
+        // Second segment (corner1 to corner2) should be horizontal
+        expect(corner1.y).toBe(corner2.y);
       });
     });
   });

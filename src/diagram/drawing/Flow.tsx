@@ -99,23 +99,23 @@ export function computeFlowRoute(
   // orthogonality. The endpoint stays on the stock edge, and the adjacent
   // corner is adjusted to maintain axis alignment.
   if (points.size >= 4) {
-    // Determine which side to attach based on the adjacent point's direction
     const adjacentPointIndex = stockIsFirst ? 1 : points.size - 2;
     const adjacentPoint = defined(points.get(adjacentPointIndex));
-    const dx = adjacentPoint.x - newStockCx;
-    const dy = adjacentPoint.y - newStockCy;
 
-    // Choose the side that best connects to the adjacent point
+    // Determine the ORIGINAL first segment's orientation from the existing geometry.
+    // We must preserve this orientation to avoid creating diagonal segments between
+    // corner1 and corner2 when the stock moves far perpendicular to the segment.
+    const currentStockPoint = stockIsFirst ? firstPoint : lastPoint;
+    const isHorizontalSegment = currentStockPoint.y === adjacentPoint.y;
+
+    // Choose the attachment side based on the preserved orientation
     let side: Side;
-    let isHorizontalSegment: boolean;
-    if (Math.abs(dx) > Math.abs(dy)) {
-      // Primarily horizontal direction to adjacent point
-      side = dx > 0 ? 'right' : 'left';
-      isHorizontalSegment = true;
+    if (isHorizontalSegment) {
+      // Horizontal segment: attach left or right based on adjacent point's X
+      side = adjacentPoint.x > newStockCx ? 'right' : 'left';
     } else {
-      // Primarily vertical direction to adjacent point
-      side = dy > 0 ? 'bottom' : 'top';
-      isHorizontalSegment = false;
+      // Vertical segment: attach top or bottom based on adjacent point's Y
+      side = adjacentPoint.y > newStockCy ? 'bottom' : 'top';
     }
 
     // Keep the endpoint on the stock's actual edge
