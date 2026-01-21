@@ -1012,7 +1012,9 @@ export function UpdateFlow(
   // Moving the valve along the flow path.
   // Note: Valve movement doesn't change any endpoint positions, so no cloud
   // positions need updating. We return an empty clouds list.
-  const closestSegment = findClosestSegment(currentValve, segments);
+  // Use proposedValve (not currentValve) to find the closest segment, so the
+  // valve can cross corners when dragged past them to another segment.
+  const closestSegment = findClosestSegment(proposedValve, segments);
   const clampedValve = clampToSegment(proposedValve, closestSegment);
 
   flowEl = flowEl.merge({

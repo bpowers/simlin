@@ -963,6 +963,27 @@ describe('Flow routing', () => {
       expect(newFlow.cx).toBe(180);
     });
 
+    it('should allow valve to cross corners when dragged past them on L-shaped flow', () => {
+      // L-shaped flow: horizontal segment then vertical segment
+      // Valve starts at (150, 100) on the horizontal segment
+      const flow = makeFlow(flowUid, 150, 100, [
+        { x: 100, y: 100, attachedToUid: cloudUid }, // anchor
+        { x: 200, y: 100 }, // corner
+        { x: 200, y: 200, attachedToUid: stockUid }, // stock
+      ]);
+      const stock = makeStock(stockUid, 200, 200);
+      const cloud = makeCloud(cloudUid, flowUid, 100, 100);
+
+      // Drag valve past the corner to (200, 150) on the vertical segment.
+      // In UpdateFlow, proposedValve = currentValve - moveDelta, so:
+      // moveDelta = { x: 150 - 200, y: 100 - 150 } = { x: -50, y: -50 }
+      const [newFlow] = UpdateFlow(flow, List([cloud, stock]), { x: -50, y: -50 });
+
+      // Valve should have crossed to the vertical segment at (200, 150)
+      expect(newFlow.cx).toBe(200);
+      expect(newFlow.cy).toBe(150);
+    });
+
     it('should allow perpendicular offset on straight horizontal flow with cloud', () => {
       // Straight horizontal flow: cloud to stock
       // This tests the ability to offset a straight flow to avoid overlap
