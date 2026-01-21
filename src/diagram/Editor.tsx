@@ -81,6 +81,7 @@ import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from '.
 import { Point, searchableName } from './drawing/common';
 import { takeoffθ } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
+import { detectUndoRedo } from './keyboard-shortcuts';
 
 import styles from './Editor.module.css';
 
@@ -215,7 +216,34 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           new Error("This is a read-only version. Any changes you make won't be saved."),
         ),
       });
+
+    document.addEventListener('keydown', this.handleKeyDown);
   }
+
+  componentWillUnmount() {
+    document.removeEventListener('keydown', this.handleKeyDown);
+  }
+
+  handleKeyDown = (e: KeyboardEvent) => {
+    if (this.props.embedded) {
+      return;
+    }
+
+    const action = detectUndoRedo(e);
+    if (!action) {
+      return;
+    }
+
+    const undoEnabled =
+      this.state.projectHistory.size > 1 && this.state.projectOffset < this.state.projectHistory.size - 1;
+    const redoEnabled = this.state.projectOffset > 0;
+
+    const isEnabled = action === 'undo' ? undoEnabled : redoEnabled;
+    if (isEnabled) {
+      e.preventDefault();
+      this.handleUndoRedo(action);
+    }
+  };
 
   project(): Project | undefined {
     return this.state.activeProject;
