@@ -37,9 +37,7 @@ describe('common', () => {
     });
 
     it('should return the bounds of a single element', () => {
-      const elements = List<Rect | undefined>([
-        { top: 100, left: 150, right: 200, bottom: 180 },
-      ]);
+      const elements = List<Rect | undefined>([{ top: 100, left: 150, right: 200, bottom: 180 }]);
       const result = calcViewBox(elements);
       expect(result).toEqual({ top: 100, left: 150, right: 200, bottom: 180 });
     });

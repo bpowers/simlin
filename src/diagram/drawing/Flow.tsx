@@ -28,81 +28,256 @@ import styles from './Flow.module.css';
 const atan2 = Math.atan2;
 const PI = Math.PI;
 
-// similar to Python's isclose, which is Apache 2 licensed
-function eq(a: number, b: number, relTol = 1e-9, absTol = 0.0): boolean {
-  if (relTol < 0 || absTol < 0) {
-    throw new Error(`relative and absolute tolerances must be non-negative.`);
-  }
-  if (a === b) {
-    return true;
-  }
+type Side = 'left' | 'right' | 'top' | 'bottom';
 
-  const diff = Math.abs(b - a);
-  return diff <= Math.abs(relTol * b) || diff <= Math.abs(relTol * a) || diff <= absTol;
+function getStockEdgePoint(stockCx: number, stockCy: number, side: Side): IPoint {
+  switch (side) {
+    case 'left':
+      return { x: stockCx - StockWidth / 2, y: stockCy };
+    case 'right':
+      return { x: stockCx + StockWidth / 2, y: stockCy };
+    case 'top':
+      return { x: stockCx, y: stockCy - StockHeight / 2 };
+    case 'bottom':
+      return { x: stockCx, y: stockCy + StockHeight / 2 };
+  }
 }
 
-function isAdjacent(
-  stockEl: StockViewElement,
-  flow: FlowViewElement,
-  side: 'left' | 'right' | 'top' | 'bottom',
+function canFlowBeStraight(
+  stockCx: number,
+  stockCy: number,
+  anchorX: number,
+  anchorY: number,
+  originalFlowIsHorizontal: boolean,
 ): boolean {
-  // want to look at first point and last point.
-  const point = defined(flow.points.filter((point) => point.attachedToUid === stockEl.uid).first());
-
-  if (side === 'left' && eq(point.x, stockEl.cx - StockWidth / 2)) {
-    return true;
-  } else if (side === 'right' && eq(point.x, stockEl.cx + StockWidth / 2)) {
-    return true;
-  } else if (side === 'top' && eq(point.y, stockEl.cy - StockHeight / 2)) {
-    return true;
-  } else if (side === 'bottom' && eq(point.y, stockEl.cy + StockHeight / 2)) {
-    return true;
+  if (originalFlowIsHorizontal) {
+    return Math.abs(stockCy - anchorY) <= StockHeight / 2;
+  } else {
+    return Math.abs(stockCx - anchorX) <= StockWidth / 2;
   }
-
-  const compare = getComparePoint(flow, stockEl);
-  const d = {
-    x: stockEl.cx - compare.x,
-    y: stockEl.cy - compare.y,
-  };
-  const horizontal = isHorizontal(flow);
-  const vertical = isVertical(flow);
-  if (horizontal && vertical) {
-    // nothing we can do
-    return false;
-  }
-
-  if (horizontal && d.x < 0 && side === 'right') {
-    return true;
-  } else if (horizontal && d.x > 0 && side === 'left') {
-    return true;
-  } else if (!horizontal && d.y < 0 && side === 'bottom') {
-    return true;
-  } else if (!horizontal && d.y > 0 && side === 'top') {
-    return true;
-  }
-
-  return false;
 }
 
-function getComparePoint(flow: FlowViewElement, stock: ViewElement): IPoint {
-  if (flow.points.size !== 2) {
-    console.log(`TODO: multipoint flows for ${flow.ident}`);
+// Exported for testing
+export function computeFlowRoute(
+  flow: FlowViewElement,
+  stockEl: StockViewElement,
+  newStockCx: number,
+  newStockCy: number,
+): FlowViewElement {
+  const points = flow.points;
+  if (points.size < 2) {
+    return flow;
   }
 
-  let i = 0;
-  for (const point of flow.points) {
-    if (point.attachedToUid === stock.uid) {
-      if (i === 0) {
-        return defined(flow.points.last());
-      } else {
-        return defined(flow.points.first());
-      }
+  const firstPoint = defined(points.first());
+  const lastPoint = defined(points.last());
+
+  const stockIsFirst = firstPoint.attachedToUid === stockEl.uid;
+  const stockIsLast = lastPoint.attachedToUid === stockEl.uid;
+
+  if (!stockIsFirst && !stockIsLast) {
+    return flow;
+  }
+
+  const anchor = stockIsFirst ? lastPoint : firstPoint;
+
+  // Determine original flow direction by looking at the anchor-side segment.
+  // This works for both 2-point (straight) and 3+ point (L-shaped) flows.
+  // For L-shaped flows, the anchor-side segment preserves the original direction.
+  let anchorAdjacentPoint: Point;
+  if (stockIsFirst) {
+    // anchor is last, so look at second-to-last point
+    anchorAdjacentPoint = points.size >= 2 ? defined(points.get(points.size - 2)) : firstPoint;
+  } else {
+    // anchor is first, so look at second point
+    anchorAdjacentPoint = points.size >= 2 ? defined(points.get(1)) : lastPoint;
+  }
+  const originalFlowIsHorizontal = anchor.y === anchorAdjacentPoint.y;
+
+  // For flows with 4+ points (imported or manually-edited multi-segment flows),
+  // update both the attached endpoint and the adjacent corner to preserve
+  // orthogonality. The endpoint stays on the stock edge, and the adjacent
+  // corner is adjusted to maintain axis alignment.
+  if (points.size >= 4) {
+    const adjacentPointIndex = stockIsFirst ? 1 : points.size - 2;
+    const adjacentPoint = defined(points.get(adjacentPointIndex));
+
+    // Determine the ORIGINAL first segment's orientation from the existing geometry.
+    // We must preserve this orientation to avoid creating diagonal segments between
+    // corner1 and corner2 when the stock moves far perpendicular to the segment.
+    const currentStockPoint = stockIsFirst ? firstPoint : lastPoint;
+    const isHorizontalSegment = currentStockPoint.y === adjacentPoint.y;
+
+    // Choose the attachment side based on the preserved orientation
+    let side: Side;
+    if (isHorizontalSegment) {
+      // Horizontal segment: attach left or right based on adjacent point's X
+      side = adjacentPoint.x > newStockCx ? 'right' : 'left';
+    } else {
+      // Vertical segment: attach top or bottom based on adjacent point's Y
+      side = adjacentPoint.y > newStockCy ? 'bottom' : 'top';
     }
 
-    i++;
+    // Keep the endpoint on the stock's actual edge
+    const stockEdge = getStockEdgePoint(newStockCx, newStockCy, side);
+
+    const newStockPoint = new Point({
+      x: stockEdge.x,
+      y: stockEdge.y,
+      attachedToUid: stockEl.uid,
+    });
+
+    // Adjust the adjacent corner to preserve orthogonality
+    let newAdjacentPoint: Point;
+    if (isHorizontalSegment) {
+      // For horizontal segment, corner's Y must match endpoint's Y
+      newAdjacentPoint = new Point({
+        x: adjacentPoint.x,
+        y: stockEdge.y,
+        attachedToUid: adjacentPoint.attachedToUid,
+      });
+    } else {
+      // For vertical segment, corner's X must match endpoint's X
+      newAdjacentPoint = new Point({
+        x: stockEdge.x,
+        y: adjacentPoint.y,
+        attachedToUid: adjacentPoint.attachedToUid,
+      });
+    }
+
+    let newPoints: List<Point>;
+    if (stockIsFirst) {
+      newPoints = points.set(0, newStockPoint).set(1, newAdjacentPoint);
+    } else {
+      newPoints = points.set(points.size - 1, newStockPoint).set(points.size - 2, newAdjacentPoint);
+    }
+
+    // Preserve valve's fractional position on the stock-adjacent segment.
+    // When a stock moves along the flow axis, the segment gets longer or shorter.
+    // If the valve is on that segment, we should preserve its fractional position
+    // (similar to how straight flows are handled) rather than just clamping its
+    // absolute position, which would cause it to slide or jump.
+    const currentValve: IPoint = { x: flow.cx, y: flow.cy };
+    const oldSegments = getSegments(points);
+    const valveOldSegment = findClosestSegment(currentValve, oldSegments);
+    const stockAdjacentSegmentIndex = stockIsFirst ? 0 : oldSegments.length - 1;
+    const valveIsOnStockAdjacentSegment = valveOldSegment.index === stockAdjacentSegmentIndex;
+
+    // Normalize to remove any colinear or zero-length segments that may have
+    // been created by adjusting the adjacent corner.
+    newPoints = normalizeFlowPoints(newPoints);
+
+    const newSegments = getSegments(newPoints);
+
+    let newValve: IPoint;
+    if (valveIsOnStockAdjacentSegment && newSegments.length > 0) {
+      // Valve is on the stock-adjacent segment - preserve fractional position.
+      const newStockAdjacentSegmentIndex = stockIsFirst ? 0 : newSegments.length - 1;
+      const newStockAdjacentSegment = newSegments[newStockAdjacentSegmentIndex];
+      newValve = preserveValveFraction(currentValve, valveOldSegment, newStockAdjacentSegment);
+    } else {
+      // Valve is not on the stock-adjacent segment - clamp to closest segment.
+      const closestSegment = findClosestSegment(currentValve, newSegments);
+      newValve = clampToSegment(currentValve, closestSegment);
+    }
+
+    return flow.merge({
+      x: newValve.x,
+      y: newValve.y,
+      points: newPoints,
+    });
   }
 
-  throw new Error('unreachable');
+  if (canFlowBeStraight(newStockCx, newStockCy, anchor.x, anchor.y, originalFlowIsHorizontal)) {
+    let stockEdge: IPoint;
+    if (originalFlowIsHorizontal) {
+      const side: Side = anchor.x > newStockCx ? 'right' : 'left';
+      stockEdge = getStockEdgePoint(newStockCx, anchor.y, side);
+    } else {
+      const side: Side = anchor.y > newStockCy ? 'bottom' : 'top';
+      stockEdge = getStockEdgePoint(anchor.x, newStockCy, side);
+    }
+
+    const newStockPoint = new Point({
+      x: stockEdge.x,
+      y: stockEdge.y,
+      attachedToUid: stockEl.uid,
+    });
+
+    let newPoints: List<Point>;
+    if (stockIsFirst) {
+      newPoints = List([newStockPoint, anchor]);
+    } else {
+      newPoints = List([firstPoint, newStockPoint]);
+    }
+
+    // Preserve valve's fractional position along the segment.
+    // This prevents the valve from jumping when the stock moves past its position.
+    // Find which segment the valve was actually on (for L-shaped flows, the valve
+    // might be on either segment, so we can't just assume it was on segment 0).
+    const currentValve: IPoint = { x: flow.cx, y: flow.cy };
+    const oldSegments = getSegments(points);
+    const newSegments = getSegments(newPoints);
+    const valveSegment = findClosestSegment(currentValve, oldSegments);
+    const newValve = preserveValveFraction(currentValve, valveSegment, newSegments[0]);
+
+    return flow.merge({
+      x: newValve.x,
+      y: newValve.y,
+      points: newPoints,
+    });
+  }
+
+  // For L-shaped flow, attach perpendicular to the original flow direction
+  let attachmentSide: Side;
+  if (originalFlowIsHorizontal) {
+    // Original was horizontal, so the new segment from stock should be vertical
+    attachmentSide = anchor.y < newStockCy ? 'top' : 'bottom';
+  } else {
+    // Original was vertical, so the new segment from stock should be horizontal
+    attachmentSide = anchor.x < newStockCx ? 'left' : 'right';
+  }
+  const stockEdge = getStockEdgePoint(newStockCx, newStockCy, attachmentSide);
+
+  // Corner connects the stock's perpendicular segment to the original flow direction
+  let corner: IPoint;
+  if (originalFlowIsHorizontal) {
+    // Vertical segment from stock, then horizontal to anchor
+    corner = { x: stockEdge.x, y: anchor.y };
+  } else {
+    // Horizontal segment from stock, then vertical to anchor
+    corner = { x: anchor.x, y: stockEdge.y };
+  }
+
+  const newStockPoint = new Point({
+    x: stockEdge.x,
+    y: stockEdge.y,
+    attachedToUid: stockEl.uid,
+  });
+  const cornerPoint = new Point({
+    x: corner.x,
+    y: corner.y,
+    attachedToUid: undefined,
+  });
+
+  let newPoints: List<Point>;
+  if (stockIsFirst) {
+    newPoints = List([newStockPoint, cornerPoint, anchor]);
+  } else {
+    newPoints = List([firstPoint, cornerPoint, newStockPoint]);
+  }
+
+  // Preserve valve position by clamping to the closest segment of the new L-shape
+  const currentValve: IPoint = { x: flow.cx, y: flow.cy };
+  const newSegments = getSegments(newPoints);
+  const closestSegment = findClosestSegment(currentValve, newSegments);
+  const clampedValve = clampToSegment(currentValve, closestSegment);
+
+  return flow.merge({
+    x: clampedValve.x,
+    y: clampedValve.y,
+    points: newPoints,
+  });
 }
 
 function adjustFlows(
@@ -217,41 +392,15 @@ export function UpdateStockAndFlows(
   flows: List<FlowViewElement>,
   moveDelta: IPoint,
 ): [StockViewElement, List<FlowViewElement>] {
-  const left = flows.filter((e) => isAdjacent(stockEl, e, 'left'));
-  const right = flows.filter((e) => isAdjacent(stockEl, e, 'right'));
-  const top = flows.filter((e) => isAdjacent(stockEl, e, 'top'));
-  const bottom = flows.filter((e) => isAdjacent(stockEl, e, 'bottom'));
-  if (flows.size !== left.size + right.size + top.size + bottom.size) {
-    console.log(`isAdjacent is acting up ${flows.size} !== ${left.size + right.size + top.size + bottom.size}`);
-  }
+  const newStockCx = stockEl.cx - moveDelta.x;
+  const newStockCy = stockEl.cy - moveDelta.y;
 
-  let proposed = new Point({
-    x: stockEl.cx - moveDelta.x,
-    y: stockEl.cy - moveDelta.y,
-    attachedToUid: undefined,
-  });
-
-  proposed = left.concat(right).reduce((p, flowEl: FlowViewElement) => {
-    let y = p.y;
-    y = Math.max(y, flowEl.cy - StockHeight / 2 + 3);
-    y = Math.min(y, flowEl.cy + StockHeight / 2 - 3);
-    return p.set('y', y);
-  }, proposed);
-
-  proposed = top.concat(bottom).reduce((p, flowEl: FlowViewElement) => {
-    let x = p.x;
-    x = Math.max(x, flowEl.cx - StockWidth / 2 + 3);
-    x = Math.min(x, flowEl.cx + StockWidth / 2 - 3);
-    return p.set('x', x);
-  }, proposed);
-
-  const origStockEl = stockEl;
   stockEl = stockEl.merge({
-    x: proposed.x,
-    y: proposed.y,
+    x: newStockCx,
+    y: newStockCy,
   });
 
-  flows = adjustFlows(origStockEl, stockEl, flows);
+  flows = flows.map((flow) => computeFlowRoute(flow, stockEl, newStockCx, newStockCy));
 
   return [stockEl, flows];
 }
@@ -312,90 +461,586 @@ export function UpdateCloudAndFlow(
   return [cloud, flow];
 }
 
+interface Segment {
+  index: number;
+  p1: IPoint;
+  p2: IPoint;
+  isHorizontal: boolean;
+  isVertical: boolean;
+  isDiagonal: boolean;
+}
+
+// Exported for testing
+export function getSegments(points: List<Point>): Segment[] {
+  const segments: Segment[] = [];
+  for (let i = 0; i < points.size - 1; i++) {
+    const p1 = defined(points.get(i));
+    const p2 = defined(points.get(i + 1));
+    const isHorizontal = p1.y === p2.y;
+    const isVertical = p1.x === p2.x;
+    const isDiagonal = !isHorizontal && !isVertical;
+    segments.push({
+      index: i,
+      p1: { x: p1.x, y: p1.y },
+      p2: { x: p2.x, y: p2.y },
+      isHorizontal,
+      isVertical,
+      isDiagonal,
+    });
+  }
+  return segments;
+}
+
+/**
+ * Normalizes flow points to ensure valid geometry:
+ *
+ * 1. Segments must alternate between horizontal and vertical - no two adjacent
+ *    segments should have the same orientation (colinear segments).
+ * 2. No zero-length segments - adjacent points at the same position are redundant.
+ *
+ * This function removes interior points that violate these rules. The first and
+ * last points are always preserved since they're attached to stocks/clouds.
+ *
+ * Examples of normalization:
+ * - [A, B, C] where A-B and B-C are both horizontal → [A, C] (B is redundant)
+ * - [A, B, C] where B is at the same position as A → [A, C] (B is redundant)
+ *
+ * This should be called after any operation that modifies flow points (stock moves,
+ * segment drags) to maintain clean geometry.
+ */
+export function normalizeFlowPoints(points: List<Point>): List<Point> {
+  // Need at least 2 points for a valid flow
+  if (points.size <= 2) {
+    return points;
+  }
+
+  // First and last points are attached to stocks/clouds - always preserve them
+  const firstPoint = defined(points.first());
+  const lastPoint = defined(points.last());
+
+  let result = List<Point>([firstPoint]);
+
+  for (let i = 1; i < points.size - 1; i++) {
+    const prev = defined(result.last());
+    const curr = defined(points.get(i));
+    const next = defined(points.get(i + 1));
+
+    // Skip if this point creates a zero-length segment with prev
+    if (prev.x === curr.x && prev.y === curr.y) {
+      continue;
+    }
+
+    // Skip if this point creates a zero-length segment with next
+    if (curr.x === next.x && curr.y === next.y) {
+      continue;
+    }
+
+    // Check if prev-curr and curr-next are colinear (same orientation)
+    const prevToCurrIsHorizontal = prev.y === curr.y;
+    const prevToCurrIsVertical = prev.x === curr.x;
+    const currToNextIsHorizontal = curr.y === next.y;
+    const currToNextIsVertical = curr.x === next.x;
+
+    // Skip if both segments are horizontal or both are vertical (colinear)
+    if ((prevToCurrIsHorizontal && currToNextIsHorizontal) ||
+        (prevToCurrIsVertical && currToNextIsVertical)) {
+      continue;
+    }
+
+    result = result.push(curr);
+  }
+
+  // Always add the last point
+  result = result.push(lastPoint);
+
+  return result;
+}
+
+// General point-to-line-segment distance using vector projection
+function distanceToSegmentGeneral(point: IPoint, p1: IPoint, p2: IPoint): number {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const lenSq = dx * dx + dy * dy;
+
+  // Degenerate segment (single point)
+  if (lenSq === 0) {
+    return Math.hypot(point.x - p1.x, point.y - p1.y);
+  }
+
+  // Parameter t of the closest point on the infinite line
+  let t = ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / lenSq;
+  // Clamp t to [0, 1] to stay on the segment
+  t = Math.max(0, Math.min(1, t));
+
+  // Closest point on segment
+  const closestX = p1.x + t * dx;
+  const closestY = p1.y + t * dy;
+
+  return Math.hypot(point.x - closestX, point.y - closestY);
+}
+
+function distanceToSegment(point: IPoint, seg: Segment): number {
+  const { p1, p2 } = seg;
+
+  // For diagonal segments, use the general formula
+  if (seg.isDiagonal) {
+    return distanceToSegmentGeneral(point, p1, p2);
+  }
+
+  if (seg.isHorizontal) {
+    const minX = Math.min(p1.x, p2.x);
+    const maxX = Math.max(p1.x, p2.x);
+    if (point.x >= minX && point.x <= maxX) {
+      return Math.abs(point.y - p1.y);
+    }
+    const distToP1 = Math.hypot(point.x - p1.x, point.y - p1.y);
+    const distToP2 = Math.hypot(point.x - p2.x, point.y - p2.y);
+    return Math.min(distToP1, distToP2);
+  } else {
+    // Vertical segment
+    const minY = Math.min(p1.y, p2.y);
+    const maxY = Math.max(p1.y, p2.y);
+    if (point.y >= minY && point.y <= maxY) {
+      return Math.abs(point.x - p1.x);
+    }
+    const distToP1 = Math.hypot(point.x - p1.x, point.y - p1.y);
+    const distToP2 = Math.hypot(point.x - p2.x, point.y - p2.y);
+    return Math.min(distToP1, distToP2);
+  }
+}
+
+function findClosestSegment(point: IPoint, segments: Segment[]): Segment {
+  if (segments.length === 0) {
+    throw new Error('findClosestSegment called with empty segments array');
+  }
+  let closest = segments[0];
+  let minDist = distanceToSegment(point, closest);
+  for (let i = 1; i < segments.length; i++) {
+    const dist = distanceToSegment(point, segments[i]);
+    if (dist < minDist) {
+      minDist = dist;
+      closest = segments[i];
+    }
+  }
+  return closest;
+}
+
+function clampToSegment(point: IPoint, seg: Segment, margin: number = VALVE_CLAMP_MARGIN): IPoint {
+  const { p1, p2 } = seg;
+
+  // For diagonal segments, project onto the line and apply margin
+  if (seg.isDiagonal) {
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const len = Math.hypot(dx, dy);
+
+    if (len === 0) {
+      return { x: p1.x, y: p1.y };
+    }
+
+    // If segment is shorter than 2 * margin, use the midpoint
+    if (len < 2 * margin) {
+      return {
+        x: (p1.x + p2.x) / 2,
+        y: (p1.y + p2.y) / 2,
+      };
+    }
+
+    // Parameter t of the closest point on the infinite line
+    let t = ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / (len * len);
+
+    // Clamp t to [margin/len, 1 - margin/len] to apply margin from endpoints
+    const marginT = margin / len;
+    t = Math.max(marginT, Math.min(1 - marginT, t));
+
+    return {
+      x: p1.x + t * dx,
+      y: p1.y + t * dy,
+    };
+  }
+
+  if (seg.isHorizontal) {
+    const segLen = Math.abs(p2.x - p1.x);
+    // If segment is shorter than 2 * margin, use the midpoint
+    if (segLen < 2 * margin) {
+      return {
+        x: (p1.x + p2.x) / 2,
+        y: p1.y,
+      };
+    }
+    const minX = Math.min(p1.x, p2.x) + margin;
+    const maxX = Math.max(p1.x, p2.x) - margin;
+    return {
+      x: Math.max(minX, Math.min(maxX, point.x)),
+      y: p1.y,
+    };
+  } else {
+    // Vertical segment
+    const segLen = Math.abs(p2.y - p1.y);
+    // If segment is shorter than 2 * margin, use the midpoint
+    if (segLen < 2 * margin) {
+      return {
+        x: p1.x,
+        y: (p1.y + p2.y) / 2,
+      };
+    }
+    const minY = Math.min(p1.y, p2.y) + margin;
+    const maxY = Math.max(p1.y, p2.y) - margin;
+    return {
+      x: p1.x,
+      y: Math.max(minY, Math.min(maxY, point.y)),
+    };
+  }
+}
+
+const VALVE_RADIUS = 6;
+const VALVE_HIT_TOLERANCE = 5;
+// Margin from segment endpoints when clamping valve position
+const VALVE_CLAMP_MARGIN = 10;
+
+/**
+ * Preserves the valve's fractional position when a segment changes.
+ *
+ * When a stock moves along the flow axis, the segment gets longer or shorter.
+ * Instead of just clamping the valve to the new segment bounds (which causes it
+ * to jump to an endpoint when the stock moves past the valve), we preserve
+ * the valve's proportional position along the segment.
+ *
+ * For example, if the valve was at 65% from the anchor toward the stock on the
+ * old segment, it will be placed at 65% from the anchor toward the stock on the
+ * new segment.
+ *
+ * @param valve The current valve position
+ * @param oldSeg The segment before the stock moved
+ * @param newSeg The segment after the stock moved
+ * @param margin Minimum distance from segment endpoints
+ * @returns The new valve position preserving fractional placement
+ */
+function preserveValveFraction(
+  valve: IPoint,
+  oldSeg: Segment,
+  newSeg: Segment,
+): IPoint {
+  if (oldSeg.isHorizontal && newSeg.isHorizontal) {
+    const oldLen = oldSeg.p2.x - oldSeg.p1.x;
+    const newLen = newSeg.p2.x - newSeg.p1.x;
+
+    // Calculate valve's fraction along old segment (0 = at p1, 1 = at p2)
+    // Don't apply margin constraints - preserve the exact fractional position
+    // as the adjustFlows logic does. This prevents the valve from jumping
+    // when the stock moves past it.
+    let fraction = oldLen !== 0 ? (valve.x - oldSeg.p1.x) / oldLen : 0.5;
+
+    // Only clamp to [0, 1] to ensure the valve stays on the segment
+    fraction = Math.max(0, Math.min(1, fraction));
+
+    return {
+      x: newSeg.p1.x + fraction * newLen,
+      y: newSeg.p1.y,
+    };
+  } else if (oldSeg.isVertical && newSeg.isVertical) {
+    const oldLen = oldSeg.p2.y - oldSeg.p1.y;
+    const newLen = newSeg.p2.y - newSeg.p1.y;
+
+    // Calculate valve's fraction along old segment
+    let fraction = oldLen !== 0 ? (valve.y - oldSeg.p1.y) / oldLen : 0.5;
+
+    // Only clamp to [0, 1] to ensure the valve stays on the segment
+    fraction = Math.max(0, Math.min(1, fraction));
+
+    return {
+      x: newSeg.p1.x,
+      y: newSeg.p1.y + fraction * newLen,
+    };
+  }
+
+  // For mixed orientation or diagonal segments, fall back to clamping
+  return clampToSegment(valve, newSeg);
+}
+
+// Check if a segment has an attached endpoint that would prevent dragging.
+// Dragging a segment with an attached endpoint would create a diagonal segment,
+// which breaks the axis-alignment assumptions used by hit-testing and valve clamping.
+function segmentHasAttachedEndpoint(points: List<Point>, segmentIndex: number): boolean {
+  const numSegments = points.size - 1;
+  if (segmentIndex < 0 || segmentIndex >= numSegments) {
+    return true;
+  }
+
+  // Check both endpoints of the segment
+  const p1 = points.get(segmentIndex);
+  const p2 = points.get(segmentIndex + 1);
+
+  return p1?.attachedToUid !== undefined || p2?.attachedToUid !== undefined;
+}
+
+// Determine which segment was clicked, or undefined if clicking on the valve
+export function findClickedSegment(
+  clickX: number,
+  clickY: number,
+  valveCx: number,
+  valveCy: number,
+  points: List<Point>,
+): number | undefined {
+  // If click is on/near the valve, return undefined (valve drag, not segment)
+  const distToValve = Math.hypot(clickX - valveCx, clickY - valveCy);
+  if (distToValve <= VALVE_RADIUS + VALVE_HIT_TOLERANCE) {
+    return undefined;
+  }
+
+  const segments = getSegments(points);
+  if (segments.length === 0) {
+    return undefined;
+  }
+
+  // For single-segment flows (straight lines), clicking anywhere drags the valve
+  if (segments.length === 1) {
+    return undefined;
+  }
+
+  // For multi-segment flows, find closest segment
+  const clickPoint: IPoint = { x: clickX, y: clickY };
+  const closest = findClosestSegment(clickPoint, segments);
+
+  // Don't allow dragging diagonal segments - they shouldn't exist in valid
+  // flow geometry, but could appear in imported models. moveSegment assumes
+  // all segments are axis-aligned, so dragging a diagonal would be incorrect.
+  if (closest.isDiagonal) {
+    return undefined;
+  }
+
+  // Don't allow dragging segments that have an attached endpoint
+  // (would create diagonal segments which break axis-alignment assumptions)
+  if (segmentHasAttachedEndpoint(points, closest.index)) {
+    return undefined;
+  }
+
+  return closest.index;
+}
+
+// Move a segment perpendicular to its direction, adjusting adjacent segments
+export function moveSegment(points: List<Point>, segmentIndex: number, delta: IPoint): List<Point> {
+  const segments = getSegments(points);
+  if (segmentIndex < 0 || segmentIndex >= segments.length) {
+    return points;
+  }
+
+  const seg = segments[segmentIndex];
+  const isFirst = segmentIndex === 0;
+  const isLast = segmentIndex === segments.length - 1;
+
+  return points.map((p, i) => {
+    if (seg.isHorizontal) {
+      // Horizontal segment: move up/down (change Y)
+      // Both endpoints of this segment move
+      if (i === segmentIndex || i === segmentIndex + 1) {
+        // Don't move attached endpoints (first and last points)
+        if ((i === 0 && isFirst) || (i === points.size - 1 && isLast)) {
+          return p;
+        }
+        return p.set('y', p.y - delta.y);
+      }
+    } else {
+      // Vertical segment: move left/right (change X)
+      if (i === segmentIndex || i === segmentIndex + 1) {
+        if ((i === 0 && isFirst) || (i === points.size - 1 && isLast)) {
+          return p;
+        }
+        return p.set('x', p.x - delta.x);
+      }
+    }
+    return p;
+  });
+}
+
 export function UpdateFlow(
   flowEl: FlowViewElement,
   ends: List<StockViewElement | CloudViewElement>,
   moveDelta: IPoint,
+  segmentIndex?: number,
 ): [FlowViewElement, List<CloudViewElement>] {
-  const stocks = ends.filter((e) => e instanceof StockViewElement);
   const clouds = ends.filter((e) => e instanceof CloudViewElement);
 
-  const center = new Point({
-    x: flowEl.cx,
-    y: flowEl.cy,
-    attachedToUid: undefined,
-  });
-
   let points = flowEl.points;
-  const origPoints = points;
-  const start = defined(points.get(0));
-  const end = defined(points.get(points.size - 1));
 
-  let proposed = new Point({
-    x: center.x - moveDelta.x,
-    y: center.y - moveDelta.y,
-    attachedToUid: undefined,
-  });
+  const currentValve: IPoint = { x: flowEl.cx, y: flowEl.cy };
+  const proposedValve: IPoint = {
+    x: currentValve.x - moveDelta.x,
+    y: currentValve.y - moveDelta.y,
+  };
 
-  // if we don't have any stocks, its a flow from cloud to cloud and as such
-  // doesn't need to be constrained.
-
-  // vertical line
-  if (center.x === start.x && center.x === end.x && stocks.size > 0) {
-    proposed = stocks.reduce((p, stock: ViewElement) => {
-      let x = p.x;
-      x = Math.max(x, stock.cx - StockWidth / 2 + 3);
-      x = Math.min(x, stock.cx + StockWidth / 2 - 3);
-      return p.set('x', x);
-    }, proposed);
-
-    const minY = points.reduce((m, p) => (p.y < m ? p.y : m), Infinity) + 20;
-    const maxY = points.reduce((m, p) => (p.y > m ? p.y : m), -Infinity) - 20;
-    const y = Math.max(minY, Math.min(maxY, proposed.y));
-    proposed = proposed.set('y', y);
-
-    points = points.map((p) => p.set('x', proposed.x));
-  } else if (center.y === start.y && center.y === end.y && stocks.size > 0) {
-    proposed = stocks.reduce((p, stock: ViewElement) => {
-      let y = p.y;
-      y = Math.max(y, stock.cy - StockHeight / 2 + 3);
-      y = Math.min(y, stock.cy + StockHeight / 2 - 3);
-      return p.set('y', y);
-    }, proposed);
-
-    const minX = points.reduce((m, p) => (p.x < m ? p.x : m), Infinity) + 20;
-    const maxX = points.reduce((m, p) => (p.x > m ? p.x : m), -Infinity) - 20;
-    const x = Math.max(minX, Math.min(maxX, proposed.x));
-    proposed = proposed.set('x', x);
-
-    points = points.map((p) => p.set('y', proposed.y));
-  } else if (stocks.size === 0) {
-    // if it is a cloud -> cloud flow, move all points uniformly
+  // For cloud-to-cloud flows, move everything uniformly
+  const hasStock = ends.some((e) => e instanceof StockViewElement);
+  if (!hasStock) {
     points = points.map((p) => p.merge({ x: p.x - moveDelta.x, y: p.y - moveDelta.y }));
-  } else {
-    console.log('TODO: unknown constraint?');
+    flowEl = flowEl.merge({
+      x: proposedValve.x,
+      y: proposedValve.y,
+      points,
+    });
+
+    const updatedClouds = clouds.map((cloud) => {
+      return cloud.merge({
+        x: cloud.cx - moveDelta.x,
+        y: cloud.cy - moveDelta.y,
+      }) as CloudViewElement;
+    });
+
+    return [flowEl, updatedClouds];
   }
 
-  const updatedClouds = clouds.map((cloud) => {
-    const origPoint = defined(origPoints.find((pt) => pt.attachedToUid === cloud.uid));
-    const updatedPoint = defined(points.find((pt) => pt.attachedToUid === cloud.uid));
-    const delta = {
-      x: updatedPoint.x - origPoint.x,
-      y: updatedPoint.y - origPoint.y,
-    };
+  const segments = getSegments(points);
 
-    return cloud.merge({
-      x: cloud.cx + delta.x,
-      y: cloud.cy + delta.y,
-    }) as CloudViewElement;
-  });
+  // If a specific segment is being moved, move that segment.
+  // Note: We return an empty clouds list because segment movement only affects
+  // interior points (corners), not attached endpoints. Attached endpoints stay
+  // fixed at their stock/cloud positions. Only draggable segments are interior
+  // segments (between two corners), so no cloud positions need updating.
+  if (segmentIndex !== undefined) {
+    points = moveSegment(points, segmentIndex, moveDelta);
+
+    // Normalize to remove any colinear or zero-length segments that may have
+    // been created by the segment movement.
+    points = normalizeFlowPoints(points);
+
+    // Always re-clamp the valve to the closest segment after any segment drag.
+    // Dragging any segment can affect adjacent segments via shared corners,
+    // so the valve's segment may have changed shape even if it wasn't the
+    // segment being dragged.
+    const newSegments = getSegments(points);
+    const closestSeg = findClosestSegment(currentValve, newSegments);
+    const newValve = clampToSegment(currentValve, closestSeg);
+    flowEl = flowEl.merge({
+      x: newValve.x,
+      y: newValve.y,
+      points,
+    });
+
+    return [flowEl, List<CloudViewElement>()];
+  }
+
+  // For 2-point (straight) flows with at least one cloud, allow perpendicular offset.
+  // This converts the flow to an L-shape, letting users offset flows to avoid overlap
+  // without moving the stocks themselves.
+  if (segments.length === 1 && clouds.size > 0) {
+    const seg = segments[0];
+    const perpDelta = seg.isHorizontal ? moveDelta.y : moveDelta.x;
+    const parDelta = seg.isHorizontal ? moveDelta.x : moveDelta.y;
+
+    // Require a significant and dominant perpendicular component to trigger reroute.
+    // This prevents accidental L-shape conversion during normal valve dragging,
+    // since pointer movement often has small perpendicular noise.
+    const PERP_THRESHOLD = 5;
+    const perpAbs = Math.abs(perpDelta);
+    const parAbs = Math.abs(parDelta);
+    const shouldReroute = perpAbs >= PERP_THRESHOLD && perpAbs > parAbs;
+
+    if (shouldReroute) {
+      const firstPoint = defined(points.first());
+      const lastPoint = defined(points.last());
+
+      // Find which endpoint is the cloud vs stock
+      const firstIsCloud = clouds.some((c) => c.uid === firstPoint.attachedToUid);
+      const lastIsCloud = clouds.some((c) => c.uid === lastPoint.attachedToUid);
+
+      // Calculate new cloud position(s)
+      let newFirstPoint = firstPoint;
+      let newLastPoint = lastPoint;
+
+      if (seg.isHorizontal) {
+        // Horizontal segment: perpendicular movement is vertical (Y changes)
+        if (firstIsCloud) {
+          newFirstPoint = firstPoint.merge({ y: firstPoint.y - moveDelta.y });
+        }
+        if (lastIsCloud) {
+          newLastPoint = lastPoint.merge({ y: lastPoint.y - moveDelta.y });
+        }
+
+        // Create corner point to maintain orthogonality
+        // Corner connects the moved cloud to the fixed stock
+        let corner: Point;
+        if (firstIsCloud && !lastIsCloud) {
+          // Cloud is first, stock is last: corner at (stock.x, newCloud.y)
+          corner = new Point({ x: lastPoint.x, y: newFirstPoint.y, attachedToUid: undefined });
+          points = List([newFirstPoint, corner, lastPoint]);
+        } else if (!firstIsCloud && lastIsCloud) {
+          // Stock is first, cloud is last: corner at (stock.x, newCloud.y)
+          corner = new Point({ x: firstPoint.x, y: newLastPoint.y, attachedToUid: undefined });
+          points = List([firstPoint, corner, newLastPoint]);
+        } else {
+          // Both are clouds - move both endpoints uniformly
+          points = List([newFirstPoint, newLastPoint]);
+        }
+      } else {
+        // Vertical segment: perpendicular movement is horizontal (X changes)
+        if (firstIsCloud) {
+          newFirstPoint = firstPoint.merge({ x: firstPoint.x - moveDelta.x });
+        }
+        if (lastIsCloud) {
+          newLastPoint = lastPoint.merge({ x: lastPoint.x - moveDelta.x });
+        }
+
+        // Create corner point
+        let corner: Point;
+        if (firstIsCloud && !lastIsCloud) {
+          // Cloud is first, stock is last: corner at (newCloud.x, stock.y)
+          corner = new Point({ x: newFirstPoint.x, y: lastPoint.y, attachedToUid: undefined });
+          points = List([newFirstPoint, corner, lastPoint]);
+        } else if (!firstIsCloud && lastIsCloud) {
+          // Stock is first, cloud is last: corner at (newCloud.x, stock.y)
+          corner = new Point({ x: newLastPoint.x, y: firstPoint.y, attachedToUid: undefined });
+          points = List([firstPoint, corner, newLastPoint]);
+        } else {
+          // Both are clouds - move both endpoints uniformly
+          points = List([newFirstPoint, newLastPoint]);
+        }
+      }
+
+      // Update cloud positions
+      const updatedClouds = clouds.map((cloud) => {
+        if (cloud.uid === firstPoint.attachedToUid && firstIsCloud) {
+          return cloud.merge({
+            x: newFirstPoint.x,
+            y: newFirstPoint.y,
+          }) as CloudViewElement;
+        } else if (cloud.uid === lastPoint.attachedToUid && lastIsCloud) {
+          return cloud.merge({
+            x: newLastPoint.x,
+            y: newLastPoint.y,
+          }) as CloudViewElement;
+        }
+        return cloud;
+      });
+
+      // Clamp valve to the closest segment of the new shape
+      const newSegments = getSegments(points);
+      const closestSeg = findClosestSegment(currentValve, newSegments);
+      const newValve = clampToSegment(currentValve, closestSeg);
+
+      flowEl = flowEl.merge({
+        x: newValve.x,
+        y: newValve.y,
+        points,
+      });
+
+      return [flowEl, updatedClouds];
+    }
+  }
+
+  // Moving the valve along the flow path.
+  // Note: Valve movement doesn't change any endpoint positions, so no cloud
+  // positions need updating. We return an empty clouds list.
+  // Use proposedValve (not currentValve) to find the closest segment, so the
+  // valve can cross corners when dragged past them to another segment.
+  const closestSegment = findClosestSegment(proposedValve, segments);
+  const clampedValve = clampToSegment(proposedValve, closestSegment);
 
   flowEl = flowEl.merge({
-    x: proposed.x,
-    y: proposed.y,
-    points,
+    x: clampedValve.x,
+    y: clampedValve.y,
   });
-  return [flowEl, updatedClouds];
+
+  return [flowEl, List<CloudViewElement>()];
 }
 
 export function flowBounds(element: FlowViewElement): Rect {
@@ -448,7 +1093,13 @@ export interface FlowProps {
   isMovingArrow: boolean;
   hasWarning?: boolean;
   series: Readonly<Array<Series>> | undefined;
-  onSelection: (el: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean, isArrowhead?: boolean) => void;
+  onSelection: (
+    el: ViewElement,
+    e: React.PointerEvent<SVGElement>,
+    isText?: boolean,
+    isArrowhead?: boolean,
+    segmentIndex?: number,
+  ) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   source: StockViewElement | CloudViewElement;
   element: FlowViewElement;
@@ -464,7 +1115,34 @@ export class Flow extends React.PureComponent<FlowProps> {
   handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    this.props.onSelection(this.props.element, e);
+
+    // Convert screen coordinates to model coordinates using the element's CTM.
+    // We must use the clicked element's CTM (not the SVG root's CTM) because
+    // Canvas applies zoom/pan via a parent <g transform="matrix(...)"> group.
+    // The element's CTM includes this transform, so inverting it correctly
+    // converts screen coordinates to model coordinates regardless of zoom/pan.
+    const target = e.currentTarget as SVGGraphicsElement;
+    const svg = target.ownerSVGElement;
+    let segmentIndex: number | undefined;
+
+    if (svg) {
+      const pt = svg.createSVGPoint();
+      pt.x = e.clientX;
+      pt.y = e.clientY;
+      const ctm = target.getScreenCTM();
+      if (ctm) {
+        const modelPt = pt.matrixTransform(ctm.inverse());
+        segmentIndex = findClickedSegment(
+          modelPt.x,
+          modelPt.y,
+          this.props.element.cx,
+          this.props.element.cy,
+          this.props.element.points,
+        );
+      }
+    }
+
+    this.props.onSelection(this.props.element, e, false, false, segmentIndex);
   };
 
   handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {

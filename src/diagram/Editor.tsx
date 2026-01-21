@@ -990,7 +990,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   };
 
-  handleSelectionMove = (delta: Point, arcPoint?: Point) => {
+  handleSelectionMove = (delta: Point, arcPoint?: Point, segmentIndex?: number) => {
     const view = defined(this.getView());
     const selection = this.state.selection;
 
@@ -1027,7 +1027,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         const sink = getUid(sinkId) as StockViewElement | CloudViewElement;
 
         const ends = List<StockViewElement | CloudViewElement>([source, sink]);
-        const [newElement, newUpdatedClouds] = UpdateFlow(element, ends, delta);
+        const [newElement, newUpdatedClouds] = UpdateFlow(element, ends, delta, segmentIndex);
         element = newElement;
         updatedElements = updatedElements.concat(newUpdatedClouds);
       } else if (selection.size === 1 && element instanceof CloudViewElement) {

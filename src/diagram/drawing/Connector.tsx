@@ -198,7 +198,11 @@ export class Connector extends React.PureComponent<ConnectorProps> {
 
     return (
       <g key={this.props.element.uid}>
-        <path d={path} className={`${styles.connectorBg} simlin-connector-bg`} onPointerDown={this.handlePointerDownArc} />
+        <path
+          d={path}
+          className={`${styles.connectorBg} simlin-connector-bg`}
+          onPointerDown={this.handlePointerDownArc}
+        />
         <path d={path} className={connectorClass} onPointerDown={this.handlePointerDownArc} />
         <Arrowhead
           point={end}
@@ -334,7 +338,11 @@ export class Connector extends React.PureComponent<ConnectorProps> {
 
     return (
       <g key={this.props.element.uid}>
-        <path d={path} className={`${styles.connectorBg} simlin-connector-bg`} onPointerDown={this.handlePointerDownArc} />
+        <path
+          d={path}
+          className={`${styles.connectorBg} simlin-connector-bg`}
+          onPointerDown={this.handlePointerDownArc}
+        />
         <path d={path} className={connectorClass} onPointerDown={this.handlePointerDownArc} />
         <Arrowhead
           point={end}
