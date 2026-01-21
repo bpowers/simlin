@@ -68,6 +68,11 @@ describe('keyboard-shortcuts', () => {
         const event = { key: 'y', metaKey: false, ctrlKey: true, shiftKey: false, altKey: true };
         expect(detectUndoRedo(event)).toBeNull();
       });
+
+      it('should not detect Cmd+Ctrl+Y as redo', () => {
+        const event = { key: 'y', metaKey: true, ctrlKey: true, shiftKey: false, altKey: false };
+        expect(detectUndoRedo(event)).toBeNull();
+      });
     });
 
     describe('non-matching inputs', () => {

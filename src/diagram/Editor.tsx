@@ -225,12 +225,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   }
 
   handleKeyDown = (e: KeyboardEvent) => {
-    if (this.props.embedded) {
-      return;
-    }
-
-    // Let editable fields (inputs, textareas, contentEditable) handle their own undo/redo
-    if (isEditableElement(e.target)) {
+    // Don't handle shortcuts in embedded mode or editable fields
+    if (this.props.embedded || isEditableElement(e.target)) {
       return;
     }
 
@@ -239,16 +235,20 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return;
     }
 
-    const undoEnabled =
-      this.state.projectHistory.size > 1 && this.state.projectOffset < this.state.projectHistory.size - 1;
-    const redoEnabled = this.state.projectOffset > 0;
-
-    const isEnabled = action === 'undo' ? undoEnabled : redoEnabled;
+    const isEnabled = action === 'undo' ? this.isUndoEnabled() : this.isRedoEnabled();
     if (isEnabled) {
       e.preventDefault();
       this.handleUndoRedo(action);
     }
   };
+
+  private isUndoEnabled(): boolean {
+    return this.state.projectHistory.size > 1 && this.state.projectOffset < this.state.projectHistory.size - 1;
+  }
+
+  private isRedoEnabled(): boolean {
+    return this.state.projectOffset > 0;
+  }
 
   project(): Project | undefined {
     return this.state.activeProject;
@@ -2121,13 +2121,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     const zoom = this.getView()?.zoom || 1;
 
-    const undoEnabled =
-      this.state.projectHistory.size > 1 && this.state.projectOffset < this.state.projectHistory.size - 1;
-    const redoEnabled = this.state.projectOffset > 0;
-
     return (
       <div className={styles.undoRedoBar}>
-        <UndoRedoBar undoEnabled={undoEnabled} redoEnabled={redoEnabled} onUndoRedo={this.handleUndoRedo} />
+        <UndoRedoBar
+          undoEnabled={this.isUndoEnabled()}
+          redoEnabled={this.isRedoEnabled()}
+          onUndoRedo={this.handleUndoRedo}
+        />
         {/*<Snapshotter onSnapshot={this.handleSnapshot} />*/}
         <ZoomBar zoom={zoom} onChangeZoom={this.handleZoomChange} />
       </div>

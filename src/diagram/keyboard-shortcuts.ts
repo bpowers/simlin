@@ -43,8 +43,8 @@ export function detectUndoRedo(e: {
   const isYKey = e.key === 'y' || e.key === 'Y';
 
   // Ctrl+Y is the standard redo shortcut on Windows/Linux
-  // (Cmd+Y on Mac is typically not redo, so we only check ctrlKey)
-  if (e.ctrlKey && !e.shiftKey && isYKey) {
+  // (Cmd+Y on Mac is typically not redo, so we only check ctrlKey without metaKey)
+  if (e.ctrlKey && !e.metaKey && !e.shiftKey && isYKey) {
     return 'redo';
   }
 
