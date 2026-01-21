@@ -152,20 +152,38 @@ export function computeFlowRoute(
       newPoints = points.set(points.size - 1, newStockPoint).set(points.size - 2, newAdjacentPoint);
     }
 
+    // Preserve valve's fractional position on the stock-adjacent segment.
+    // When a stock moves along the flow axis, the segment gets longer or shorter.
+    // If the valve is on that segment, we should preserve its fractional position
+    // (similar to how straight flows are handled) rather than just clamping its
+    // absolute position, which would cause it to slide or jump.
+    const currentValve: IPoint = { x: flow.cx, y: flow.cy };
+    const oldSegments = getSegments(points);
+    const valveOldSegment = findClosestSegment(currentValve, oldSegments);
+    const stockAdjacentSegmentIndex = stockIsFirst ? 0 : oldSegments.length - 1;
+    const valveIsOnStockAdjacentSegment = valveOldSegment.index === stockAdjacentSegmentIndex;
+
     // Normalize to remove any colinear or zero-length segments that may have
     // been created by adjusting the adjacent corner.
     newPoints = normalizeFlowPoints(newPoints);
 
-    // Update valve position by clamping to the nearest segment.
-    // This ensures the valve stays on the flow path after the endpoint moves.
     const newSegments = getSegments(newPoints);
-    const currentValve: IPoint = { x: flow.cx, y: flow.cy };
-    const closestSegment = findClosestSegment(currentValve, newSegments);
-    const clampedValve = clampToSegment(currentValve, closestSegment);
+
+    let newValve: IPoint;
+    if (valveIsOnStockAdjacentSegment && newSegments.length > 0) {
+      // Valve is on the stock-adjacent segment - preserve fractional position.
+      const newStockAdjacentSegmentIndex = stockIsFirst ? 0 : newSegments.length - 1;
+      const newStockAdjacentSegment = newSegments[newStockAdjacentSegmentIndex];
+      newValve = preserveValveFraction(currentValve, valveOldSegment, newStockAdjacentSegment);
+    } else {
+      // Valve is not on the stock-adjacent segment - clamp to closest segment.
+      const closestSegment = findClosestSegment(currentValve, newSegments);
+      newValve = clampToSegment(currentValve, closestSegment);
+    }
 
     return flow.merge({
-      x: clampedValve.x,
-      y: clampedValve.y,
+      x: newValve.x,
+      y: newValve.y,
       points: newPoints,
     });
   }

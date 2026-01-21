@@ -748,6 +748,37 @@ describe('Flow routing', () => {
         expect(stockPoint.y).toBe(corner1.y);
       });
 
+      it('should preserve valve fraction when stock moves along first segment on 4+ point flow', () => {
+        // 4-point flow with horizontal first segment
+        // Valve is on the first segment with a specific fractional position
+        const stock = makeStock(stockUid, 100, 100);
+        const stockEdgeX = 100 + StockWidth / 2; // 122.5
+        const corner1X = 150;
+        // Valve at x=140 is at fraction (140-122.5)/(150-122.5) = 17.5/27.5 = 0.636 along segment
+        const valveX = 140;
+        const flow = makeFlow(flowUid, valveX, 100, [
+          { x: stockEdgeX, y: 100, attachedToUid: stockUid }, // stock right edge
+          { x: corner1X, y: 100 }, // corner1 (horizontal segment)
+          { x: corner1X, y: 200 }, // corner2
+          { x: 200, y: 200, attachedToUid: cloudUid }, // cloud
+        ]);
+
+        // Calculate original valve fraction along first segment
+        const originalFraction = (valveX - stockEdgeX) / (corner1X - stockEdgeX);
+
+        // Move stock left - this makes the first segment longer
+        const newStockX = 70;
+        const newStockEdgeX = newStockX + StockWidth / 2; // 92.5
+        const result = computeFlowRoute(flow, stock, newStockX, 100);
+
+        // New segment goes from 92.5 to 150 (longer than before)
+        // Expected valve X = newStockEdgeX + fraction * (corner1X - newStockEdgeX)
+        // = 92.5 + 0.636 * (150 - 92.5) = 92.5 + 36.6 = 129.1
+        const expectedValveX = newStockEdgeX + originalFraction * (corner1X - newStockEdgeX);
+        expect(result.cx).toBeCloseTo(expectedValveX, 1);
+        expect(result.cy).toBe(100);
+      });
+
       it('should keep first segment vertical when stock moves horizontally on 4+ point flow', () => {
         // 4-point flow with vertical first segment: stock -> corner1 (vertical)
         const stock = makeStock(stockUid, 100, 100);
