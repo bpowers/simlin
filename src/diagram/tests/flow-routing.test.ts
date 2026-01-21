@@ -6,7 +6,14 @@ import { List } from 'immutable';
 
 import { Point, FlowViewElement, StockViewElement } from '@system-dynamics/core/datamodel';
 
-import { computeFlowRoute, UpdateStockAndFlows, UpdateFlow, moveSegment, findClickedSegment } from '../drawing/Flow';
+import {
+  computeFlowRoute,
+  UpdateStockAndFlows,
+  UpdateFlow,
+  moveSegment,
+  findClickedSegment,
+  getSegments,
+} from '../drawing/Flow';
 import { StockWidth, StockHeight } from '../drawing/Stock';
 
 function makeStock(
@@ -701,6 +708,78 @@ describe('Flow routing', () => {
       const points = List<Point>();
       const result = findClickedSegment(100, 100, 100, 100, points);
       expect(result).toBeUndefined();
+    });
+  });
+
+  describe('getSegments', () => {
+    it('should identify horizontal segments', () => {
+      const points = List([
+        new Point({ x: 100, y: 100, attachedToUid: undefined }),
+        new Point({ x: 200, y: 100, attachedToUid: undefined }),
+      ]);
+      const segments = getSegments(points);
+
+      expect(segments.length).toBe(1);
+      expect(segments[0].isHorizontal).toBe(true);
+      expect(segments[0].isVertical).toBe(false);
+      expect(segments[0].isDiagonal).toBe(false);
+    });
+
+    it('should identify vertical segments', () => {
+      const points = List([
+        new Point({ x: 100, y: 100, attachedToUid: undefined }),
+        new Point({ x: 100, y: 200, attachedToUid: undefined }),
+      ]);
+      const segments = getSegments(points);
+
+      expect(segments.length).toBe(1);
+      expect(segments[0].isHorizontal).toBe(false);
+      expect(segments[0].isVertical).toBe(true);
+      expect(segments[0].isDiagonal).toBe(false);
+    });
+
+    it('should identify diagonal segments', () => {
+      const points = List([
+        new Point({ x: 100, y: 100, attachedToUid: undefined }),
+        new Point({ x: 200, y: 200, attachedToUid: undefined }),
+      ]);
+      const segments = getSegments(points);
+
+      expect(segments.length).toBe(1);
+      expect(segments[0].isHorizontal).toBe(false);
+      expect(segments[0].isVertical).toBe(false);
+      expect(segments[0].isDiagonal).toBe(true);
+    });
+
+    it('should handle mixed segment types', () => {
+      // Path: horizontal -> diagonal -> vertical
+      const points = List([
+        new Point({ x: 100, y: 100, attachedToUid: undefined }),
+        new Point({ x: 200, y: 100, attachedToUid: undefined }),
+        new Point({ x: 250, y: 150, attachedToUid: undefined }),
+        new Point({ x: 250, y: 250, attachedToUid: undefined }),
+      ]);
+      const segments = getSegments(points);
+
+      expect(segments.length).toBe(3);
+      expect(segments[0].isHorizontal).toBe(true);
+      expect(segments[0].isDiagonal).toBe(false);
+      expect(segments[1].isHorizontal).toBe(false);
+      expect(segments[1].isDiagonal).toBe(true);
+      expect(segments[2].isVertical).toBe(true);
+      expect(segments[2].isDiagonal).toBe(false);
+    });
+
+    it('should return empty array for single point', () => {
+      const points = List([new Point({ x: 100, y: 100, attachedToUid: undefined })]);
+      const segments = getSegments(points);
+      expect(segments.length).toBe(0);
+    });
+
+    it('should return empty array for empty points list', () => {
+      const points = List<Point>();
+      const segments = getSegments(points);
+      expect(segments.length).toBe(0);
     });
   });
 });

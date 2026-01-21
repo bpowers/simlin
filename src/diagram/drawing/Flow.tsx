@@ -409,25 +409,62 @@ interface Segment {
   p1: IPoint;
   p2: IPoint;
   isHorizontal: boolean;
+  isVertical: boolean;
+  isDiagonal: boolean;
 }
 
-function getSegments(points: List<Point>): Segment[] {
+// Exported for testing
+export function getSegments(points: List<Point>): Segment[] {
   const segments: Segment[] = [];
   for (let i = 0; i < points.size - 1; i++) {
     const p1 = defined(points.get(i));
     const p2 = defined(points.get(i + 1));
+    const isHorizontal = p1.y === p2.y;
+    const isVertical = p1.x === p2.x;
+    const isDiagonal = !isHorizontal && !isVertical;
     segments.push({
       index: i,
       p1: { x: p1.x, y: p1.y },
       p2: { x: p2.x, y: p2.y },
-      isHorizontal: p1.y === p2.y,
+      isHorizontal,
+      isVertical,
+      isDiagonal,
     });
   }
   return segments;
 }
 
+// General point-to-line-segment distance using vector projection
+function distanceToSegmentGeneral(point: IPoint, p1: IPoint, p2: IPoint): number {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const lenSq = dx * dx + dy * dy;
+
+  // Degenerate segment (single point)
+  if (lenSq === 0) {
+    return Math.hypot(point.x - p1.x, point.y - p1.y);
+  }
+
+  // Parameter t of the closest point on the infinite line
+  let t = ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / lenSq;
+  // Clamp t to [0, 1] to stay on the segment
+  t = Math.max(0, Math.min(1, t));
+
+  // Closest point on segment
+  const closestX = p1.x + t * dx;
+  const closestY = p1.y + t * dy;
+
+  return Math.hypot(point.x - closestX, point.y - closestY);
+}
+
 function distanceToSegment(point: IPoint, seg: Segment): number {
   const { p1, p2 } = seg;
+
+  // For diagonal segments, use the general formula
+  if (seg.isDiagonal) {
+    return distanceToSegmentGeneral(point, p1, p2);
+  }
+
   if (seg.isHorizontal) {
     const minX = Math.min(p1.x, p2.x);
     const maxX = Math.max(p1.x, p2.x);
@@ -438,6 +475,7 @@ function distanceToSegment(point: IPoint, seg: Segment): number {
     const distToP2 = Math.hypot(point.x - p2.x, point.y - p2.y);
     return Math.min(distToP1, distToP2);
   } else {
+    // Vertical segment
     const minY = Math.min(p1.y, p2.y);
     const maxY = Math.max(p1.y, p2.y);
     if (point.y >= minY && point.y <= maxY) {
@@ -466,18 +504,44 @@ function findClosestSegment(point: IPoint, segments: Segment[]): Segment {
 }
 
 function clampToSegment(point: IPoint, seg: Segment, margin: number = VALVE_CLAMP_MARGIN): IPoint {
+  const { p1, p2 } = seg;
+
+  // For diagonal segments, project onto the line and apply margin
+  if (seg.isDiagonal) {
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const len = Math.hypot(dx, dy);
+
+    if (len === 0) {
+      return { x: p1.x, y: p1.y };
+    }
+
+    // Parameter t of the closest point on the infinite line
+    let t = ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / (len * len);
+
+    // Clamp t to [margin/len, 1 - margin/len] to apply margin from endpoints
+    const marginT = margin / len;
+    t = Math.max(marginT, Math.min(1 - marginT, t));
+
+    return {
+      x: p1.x + t * dx,
+      y: p1.y + t * dy,
+    };
+  }
+
   if (seg.isHorizontal) {
-    const minX = Math.min(seg.p1.x, seg.p2.x) + margin;
-    const maxX = Math.max(seg.p1.x, seg.p2.x) - margin;
+    const minX = Math.min(p1.x, p2.x) + margin;
+    const maxX = Math.max(p1.x, p2.x) - margin;
     return {
       x: Math.max(minX, Math.min(maxX, point.x)),
-      y: seg.p1.y,
+      y: p1.y,
     };
   } else {
-    const minY = Math.min(seg.p1.y, seg.p2.y) + margin;
-    const maxY = Math.max(seg.p1.y, seg.p2.y) - margin;
+    // Vertical segment
+    const minY = Math.min(p1.y, p2.y) + margin;
+    const maxY = Math.max(p1.y, p2.y) - margin;
     return {
-      x: seg.p1.x,
+      x: p1.x,
       y: Math.max(minY, Math.min(maxY, point.y)),
     };
   }
