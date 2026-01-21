@@ -81,6 +81,7 @@ import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from '.
 import { Point, searchableName } from './drawing/common';
 import { takeoffθ } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
+import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 
 import styles from './Editor.module.css';
 
@@ -215,6 +216,38 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           new Error("This is a read-only version. Any changes you make won't be saved."),
         ),
       });
+
+    document.addEventListener('keydown', this.handleKeyDown);
+  }
+
+  componentWillUnmount() {
+    document.removeEventListener('keydown', this.handleKeyDown);
+  }
+
+  handleKeyDown = (e: KeyboardEvent) => {
+    // Don't handle shortcuts in embedded mode or editable fields
+    if (this.props.embedded || isEditableElement(e.target)) {
+      return;
+    }
+
+    const action = detectUndoRedo(e);
+    if (!action) {
+      return;
+    }
+
+    const isEnabled = action === 'undo' ? this.isUndoEnabled() : this.isRedoEnabled();
+    if (isEnabled) {
+      e.preventDefault();
+      this.handleUndoRedo(action);
+    }
+  };
+
+  private isUndoEnabled(): boolean {
+    return this.state.projectHistory.size > 1 && this.state.projectOffset < this.state.projectHistory.size - 1;
+  }
+
+  private isRedoEnabled(): boolean {
+    return this.state.projectOffset > 0;
   }
 
   project(): Project | undefined {
@@ -2088,13 +2121,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     const zoom = this.getView()?.zoom || 1;
 
-    const undoEnabled =
-      this.state.projectHistory.size > 1 && this.state.projectOffset < this.state.projectHistory.size - 1;
-    const redoEnabled = this.state.projectOffset > 0;
-
     return (
       <div className={styles.undoRedoBar}>
-        <UndoRedoBar undoEnabled={undoEnabled} redoEnabled={redoEnabled} onUndoRedo={this.handleUndoRedo} />
+        <UndoRedoBar
+          undoEnabled={this.isUndoEnabled()}
+          redoEnabled={this.isRedoEnabled()}
+          onUndoRedo={this.handleUndoRedo}
+        />
         {/*<Snapshotter onSnapshot={this.handleSnapshot} />*/}
         <ZoomBar zoom={zoom} onChangeZoom={this.handleZoomChange} />
       </div>
