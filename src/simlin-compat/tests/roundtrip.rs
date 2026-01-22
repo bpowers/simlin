@@ -68,8 +68,8 @@ fn roundtrips_model() {
             }
         }
 
-        assert!(project.models.contains_key(&simlin_engine::common::Ident::<
-            simlin_engine::common::Canonical,
+        assert!(project.models.contains_key(&simlin_core::common::Ident::<
+            simlin_core::common::Canonical,
         >::from_raw("main")));
     }
 }

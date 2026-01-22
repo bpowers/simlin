@@ -10,7 +10,7 @@ use std::rc::Rc;
 use float_cmp::approx_eq;
 
 use simlin_compat::{load_csv, load_dat, xmile};
-use simlin_engine::common::{Canonical, Ident};
+use simlin_core::common::{Canonical, Ident};
 use simlin_engine::interpreter::Simulation;
 use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{Project, Results, Vm, project_io};

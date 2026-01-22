@@ -38,7 +38,7 @@ pub fn to_xmile(project: &Project) -> Result<String> {
 
 #[cfg(feature = "vensim")]
 pub fn open_vensim(reader: &mut dyn BufRead) -> Result<Project> {
-    use simlin_engine::common::{Error, ErrorCode, ErrorKind};
+    use simlin_core::common::{Error, ErrorCode, ErrorKind};
     use xmutil::convert_vensim_mdl;
 
     let mut contents_buf: Vec<u8> = vec![];
