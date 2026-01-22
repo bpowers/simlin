@@ -1220,10 +1220,19 @@ pub mod view_element {
     use simlin_core::datamodel::StockFlow;
     use simlin_core::datamodel::view_element::LinkShape;
 
-    // converts an angle associated with a connector (in degrees) into an
-    // angle in the coordinate system of SVG canvases where the origin is
-    // in the upper-left of the screen and Y grows down, and the domain is
-    // -180 to 180.
+    /// Normalize an angle to the range [0, 360).
+    /// Use this to sanitize angles read from XMILE files before conversion.
+    fn normalize_angle(degrees: f64) -> f64 {
+        let normalized = degrees % 360.0;
+        if normalized < 0.0 {
+            normalized + 360.0
+        } else {
+            normalized
+        }
+    }
+
+    /// Convert an angle from XMILE format [0, 360) to canvas format [-180, 180].
+    /// XMILE uses counter-clockwise with Y-up; canvas uses Y-down.
     fn convert_angle_from_xmile_to_canvas(in_degrees: f64) -> f64 {
         let out_degrees = (360.0 - in_degrees) % 360.0;
         if out_degrees > 180.0 {
@@ -1233,10 +1242,7 @@ pub mod view_element {
         }
     }
 
-    // converts an angle associated with a connector (in degrees) into an
-    // angle in the coordinate system of SVG canvases where the origin is
-    // in the upper-left of the screen and Y grows down, and the domain is
-    // -180 to 180.
+    /// Convert an angle from canvas format [-180, 180] to XMILE format [0, 360).
     fn convert_angle_from_canvas_to_xmile(in_degrees: f64) -> f64 {
         let out_degrees = if in_degrees < 0.0 {
             in_degrees + 360.0
@@ -1263,7 +1269,7 @@ pub mod view_element {
     }
 
     /// Calculate the straight-line angle (in canvas coordinates, degrees) between two points.
-    /// Returns the angle from (from_x, from_y) to (to_x, to_y).
+    /// Returns the angle from (from_x, from_y) to (to_x, to_y) in [-180, 180] range.
     fn calculate_straight_line_angle(from_x: f64, from_y: f64, to_x: f64, to_y: f64) -> f64 {
         let dx = to_x - from_x;
         let dy = to_y - from_y;
@@ -1291,12 +1297,34 @@ pub mod view_element {
     }
 
     #[test]
+    fn test_normalize_angle() {
+        // Already in range
+        assert_eq!(0.0, normalize_angle(0.0));
+        assert_eq!(45.0, normalize_angle(45.0));
+        assert_eq!(359.0, normalize_angle(359.0));
+
+        // Negative angles
+        assert_eq!(315.0, normalize_angle(-45.0));
+        assert_eq!(270.0, normalize_angle(-90.0));
+        assert_eq!(180.0, normalize_angle(-180.0));
+        assert_eq!(1.0, normalize_angle(-359.0));
+
+        // Angles >= 360
+        assert_eq!(0.0, normalize_angle(360.0));
+        assert_eq!(45.0, normalize_angle(405.0));
+        assert_eq!(90.0, normalize_angle(450.0));
+
+        // Large negative
+        assert_eq!(320.0, normalize_angle(-400.0));
+    }
+
+    #[test]
     fn test_convert_angles() {
         let cases: &[(f64, f64)] = &[(0.0, 0.0), (45.0, -45.0), (270.0, 90.0)];
 
-        for (input, output) in cases {
-            assert_eq!(*output, convert_angle_from_xmile_to_canvas(*input));
-            assert_eq!(*input, convert_angle_from_canvas_to_xmile(*output));
+        for (xmile, canvas) in cases {
+            assert_eq!(*canvas, convert_angle_from_xmile_to_canvas(*xmile));
+            assert_eq!(*xmile, convert_angle_from_canvas_to_xmile(*canvas));
         }
     }
 
@@ -1958,8 +1986,10 @@ pub mod view_element {
                         .collect(),
                 )
             } else {
-                datamodel::view_element::LinkShape::Arc(convert_angle_from_canvas_to_xmile(
-                    v.angle.unwrap_or(0.0),
+                // Normalize XMILE angle to [0, 360), then convert to canvas format for internal use
+                let xmile_angle = normalize_angle(v.angle.unwrap_or(0.0));
+                datamodel::view_element::LinkShape::Arc(convert_angle_from_xmile_to_canvas(
+                    xmile_angle,
                 ))
             };
             datamodel::view_element::Link {
@@ -1993,24 +2023,25 @@ pub mod view_element {
                     .collect(),
             )
         } else if let Some(angle) = v.angle {
-            // Check if this angle represents a straight line
+            // Normalize XMILE angle to [0, 360), then convert to canvas format
+            let xmile_angle = normalize_angle(angle);
+            let canvas_angle = convert_angle_from_xmile_to_canvas(xmile_angle);
+            // Check if this angle represents a straight line (comparison in canvas coords)
             if let (Some(&(from_x, from_y)), Some(&(to_x, to_y))) =
                 (positions.get(&from_uid), positions.get(&to_uid))
             {
-                if is_straight_line_angle(angle, from_x, from_y, to_x, to_y) {
+                if is_straight_line_angle(canvas_angle, from_x, from_y, to_x, to_y) {
                     datamodel::view_element::LinkShape::Straight
                 } else {
-                    datamodel::view_element::LinkShape::Arc(convert_angle_from_canvas_to_xmile(
-                        angle,
-                    ))
+                    datamodel::view_element::LinkShape::Arc(canvas_angle)
                 }
             } else {
                 // Can't look up positions, treat as arc
-                datamodel::view_element::LinkShape::Arc(convert_angle_from_canvas_to_xmile(angle))
+                datamodel::view_element::LinkShape::Arc(canvas_angle)
             }
         } else {
-            // No angle specified, default to arc at 0
-            datamodel::view_element::LinkShape::Arc(convert_angle_from_canvas_to_xmile(0.0))
+            // No angle specified, default to arc at 0 (canvas format)
+            datamodel::view_element::LinkShape::Arc(0.0)
         };
 
         datamodel::view_element::Link {
@@ -2049,15 +2080,22 @@ pub mod view_element {
                         get_element_position(view, v.from_uid),
                         get_element_position(view, v.to_uid),
                     ) {
-                        let angle = calculate_straight_line_angle(from_x, from_y, to_x, to_y);
-                        (None, Some(angle), None)
+                        // Calculate in canvas coords, convert to XMILE format
+                        let canvas_angle =
+                            calculate_straight_line_angle(from_x, from_y, to_x, to_y);
+                        let xmile_angle =
+                            normalize_angle(convert_angle_from_canvas_to_xmile(canvas_angle));
+                        (None, Some(xmile_angle), None)
                     } else {
                         // Fallback if positions aren't found
                         (Some(true), None, None)
                     }
                 }
-                LinkShape::Arc(angle) => {
-                    (None, Some(convert_angle_from_xmile_to_canvas(angle)), None)
+                LinkShape::Arc(canvas_angle) => {
+                    // Convert from internal canvas format to XMILE format, normalized to [0, 360)
+                    let xmile_angle =
+                        normalize_angle(convert_angle_from_canvas_to_xmile(canvas_angle));
+                    (None, Some(xmile_angle), None)
                 }
                 LinkShape::MultiPoint(points) => (
                     None,
@@ -2092,6 +2130,7 @@ pub mod view_element {
 
     #[test]
     fn test_link_roundtrip() {
+        // Internal angles are in canvas format [-180, 180]
         let cases: &[_] = &[
             datamodel::view_element::Link {
                 uid: 33,
@@ -2103,7 +2142,7 @@ pub mod view_element {
                 uid: 33,
                 from_uid: 45,
                 to_uid: 67,
-                shape: LinkShape::Arc(351.3),
+                shape: LinkShape::Arc(-45.0), // canvas format
             },
             datamodel::view_element::Link {
                 uid: 33,
@@ -2181,7 +2220,7 @@ pub mod view_element {
 
     #[test]
     fn test_straight_link_export_diagonal() {
-        // Test a diagonal link (down and to the right)
+        // Test a diagonal link (down and to the right in screen coords)
         let view = StockFlow {
             elements: vec![
                 datamodel::ViewElement::Aux(datamodel::view_element::Aux {
@@ -2195,7 +2234,7 @@ pub mod view_element {
                     name: "to_var".to_string(),
                     uid: 2,
                     x: 100.0,
-                    y: 100.0, // down and to the right (45 degrees in canvas coords)
+                    y: 100.0, // down and to the right (45 degrees in canvas coords, Y-down)
                     label_side: datamodel::view_element::LabelSide::Top,
                 }),
             ],
@@ -2212,13 +2251,12 @@ pub mod view_element {
 
         let xmile_link = Link::from(link, &view);
 
-        // For a 45-degree diagonal link (down-right in canvas coords),
-        // the canvas angle is 45 degrees
+        // Canvas angle is 45° (down-right, Y-down), which converts to XMILE 315° (Y-up)
         assert!(xmile_link.angle.is_some());
         let angle = xmile_link.angle.unwrap();
         assert!(
-            (angle - 45.0).abs() < 0.001,
-            "diagonal down-right link should have angle ~45, got {}",
+            (angle - 315.0).abs() < 0.001,
+            "diagonal down-right link should have XMILE angle ~315, got {}",
             angle
         );
     }
@@ -2312,11 +2350,10 @@ pub mod view_element {
         // Should stay as Arc, not Straight
         match dm_link.shape {
             LinkShape::Arc(angle) => {
-                // The angle should be converted to XMILE format (0-360)
-                // canvas 45 -> xmile: convert_angle_from_canvas_to_xmile(45) = 315
+                // XMILE 45° converts to canvas -45° (Y-axis flip)
                 assert!(
-                    (angle - 315.0).abs() < 0.001,
-                    "expected arc angle ~315, got {}",
+                    (angle - (-45.0)).abs() < 0.001,
+                    "expected arc angle ~-45 (canvas), got {}",
                     angle
                 );
             }
