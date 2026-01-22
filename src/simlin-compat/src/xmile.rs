@@ -1246,6 +1246,50 @@ pub mod view_element {
         (360.0 - out_degrees) % 360.0
     }
 
+    /// Get the position (x, y) of a view element by its uid.
+    fn get_element_position(view: &datamodel::StockFlow, uid: i32) -> Option<(f64, f64)> {
+        for element in &view.elements {
+            match element {
+                datamodel::ViewElement::Aux(e) if e.uid == uid => return Some((e.x, e.y)),
+                datamodel::ViewElement::Stock(e) if e.uid == uid => return Some((e.x, e.y)),
+                datamodel::ViewElement::Flow(e) if e.uid == uid => return Some((e.x, e.y)),
+                datamodel::ViewElement::Module(e) if e.uid == uid => return Some((e.x, e.y)),
+                datamodel::ViewElement::Alias(e) if e.uid == uid => return Some((e.x, e.y)),
+                datamodel::ViewElement::Cloud(e) if e.uid == uid => return Some((e.x, e.y)),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Calculate the straight-line angle (in canvas coordinates, degrees) between two points.
+    /// Returns the angle from (from_x, from_y) to (to_x, to_y).
+    fn calculate_straight_line_angle(from_x: f64, from_y: f64, to_x: f64, to_y: f64) -> f64 {
+        let dx = to_x - from_x;
+        let dy = to_y - from_y;
+        dy.atan2(dx).to_degrees()
+    }
+
+    /// Epsilon for comparing angles - angles within this threshold are considered equal.
+    /// This is tight to ensure roundtrip fidelity (original angles are preserved).
+    const ANGLE_EPSILON_DEGREES: f64 = 0.01;
+
+    /// Check if an angle (in canvas coordinates) is effectively equal to the straight-line
+    /// angle between two points. Uses a tight epsilon to ensure roundtrip fidelity.
+    fn is_straight_line_angle(
+        angle_degrees: f64,
+        from_x: f64,
+        from_y: f64,
+        to_x: f64,
+        to_y: f64,
+    ) -> bool {
+        let straight_angle = calculate_straight_line_angle(from_x, from_y, to_x, to_y);
+        let diff = (angle_degrees - straight_angle).abs();
+        // Handle wraparound (e.g., -179 vs 179 should be close)
+        let diff = if diff > 180.0 { 360.0 - diff } else { diff };
+        diff < ANGLE_EPSILON_DEGREES
+    }
+
     #[test]
     fn test_convert_angles() {
         let cases: &[(f64, f64)] = &[(0.0, 0.0), (45.0, -45.0), (270.0, 90.0)];
@@ -1927,10 +1971,91 @@ pub mod view_element {
         }
     }
 
+    /// Convert from an XMILE Link with access to a position map for lookup.
+    /// This detects straight lines by comparing the angle to the direct from->to angle.
+    pub(super) fn link_from_xmile_with_positions(
+        v: Link,
+        positions: &std::collections::HashMap<i32, (f64, f64)>,
+    ) -> datamodel::view_element::Link {
+        let from_uid = v.from_uid.unwrap_or(-1);
+        let to_uid = v.to_uid.unwrap_or(-1);
+
+        let shape = if v.is_straight.unwrap_or(false) {
+            // Explicit is_straight flag
+            datamodel::view_element::LinkShape::Straight
+        } else if v.points.is_some() {
+            datamodel::view_element::LinkShape::MultiPoint(
+                v.points
+                    .unwrap()
+                    .points
+                    .into_iter()
+                    .map(datamodel::view_element::FlowPoint::from)
+                    .collect(),
+            )
+        } else if let Some(angle) = v.angle {
+            // Check if this angle represents a straight line
+            if let (Some(&(from_x, from_y)), Some(&(to_x, to_y))) =
+                (positions.get(&from_uid), positions.get(&to_uid))
+            {
+                if is_straight_line_angle(angle, from_x, from_y, to_x, to_y) {
+                    datamodel::view_element::LinkShape::Straight
+                } else {
+                    datamodel::view_element::LinkShape::Arc(convert_angle_from_canvas_to_xmile(
+                        angle,
+                    ))
+                }
+            } else {
+                // Can't look up positions, treat as arc
+                datamodel::view_element::LinkShape::Arc(convert_angle_from_canvas_to_xmile(angle))
+            }
+        } else {
+            // No angle specified, default to arc at 0
+            datamodel::view_element::LinkShape::Arc(convert_angle_from_canvas_to_xmile(0.0))
+        };
+
+        datamodel::view_element::Link {
+            uid: v.uid.unwrap_or(-1),
+            from_uid,
+            to_uid,
+            shape,
+        }
+    }
+
+    /// Convert from an XMILE Link with access to the view for position lookup.
+    /// This is a convenience wrapper around link_from_xmile_with_positions for tests.
+    #[cfg(test)]
+    fn link_from_xmile_with_view(
+        v: Link,
+        view: &datamodel::StockFlow,
+    ) -> datamodel::view_element::Link {
+        let positions: std::collections::HashMap<i32, (f64, f64)> = view
+            .elements
+            .iter()
+            .filter_map(|e| {
+                let uid = e.get_uid();
+                get_element_position(view, uid).map(|pos| (uid, pos))
+            })
+            .collect();
+        link_from_xmile_with_positions(v, &positions)
+    }
+
     impl Link {
         pub fn from(v: datamodel::view_element::Link, view: &datamodel::StockFlow) -> Self {
             let (is_straight, angle, points) = match v.shape {
-                LinkShape::Straight => (Some(true), None, None),
+                LinkShape::Straight => {
+                    // Calculate the straight-line angle from element positions so other
+                    // SD software (like Stella) can read the XMILE file correctly.
+                    if let (Some((from_x, from_y)), Some((to_x, to_y))) = (
+                        get_element_position(view, v.from_uid),
+                        get_element_position(view, v.to_uid),
+                    ) {
+                        let angle = calculate_straight_line_angle(from_x, from_y, to_x, to_y);
+                        (None, Some(angle), None)
+                    } else {
+                        // Fallback if positions aren't found
+                        (Some(true), None, None)
+                    }
+                }
                 LinkShape::Arc(angle) => {
                     (None, Some(convert_angle_from_xmile_to_canvas(angle)), None)
                 }
@@ -2000,6 +2125,267 @@ pub mod view_element {
             let expected = expected.clone();
             let actual = datamodel::view_element::Link::from(Link::from(expected.clone(), &view));
             assert_eq!(expected, actual);
+        }
+    }
+
+    #[test]
+    fn test_straight_link_export_calculates_angle() {
+        // When exporting a LinkShape::Straight, we should calculate the angle
+        // based on the from/to element positions so other software can read it.
+        let view = StockFlow {
+            elements: vec![
+                datamodel::ViewElement::Aux(datamodel::view_element::Aux {
+                    name: "from_var".to_string(),
+                    uid: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: datamodel::view_element::LabelSide::Top,
+                }),
+                datamodel::ViewElement::Aux(datamodel::view_element::Aux {
+                    name: "to_var".to_string(),
+                    uid: 2,
+                    x: 100.0,
+                    y: 0.0, // directly to the right
+                    label_side: datamodel::view_element::LabelSide::Top,
+                }),
+            ],
+            view_box: Default::default(),
+            zoom: 1.0,
+        };
+
+        let link = datamodel::view_element::Link {
+            uid: 10,
+            from_uid: 1,
+            to_uid: 2,
+            shape: LinkShape::Straight,
+        };
+
+        let xmile_link = Link::from(link, &view);
+
+        // For a horizontal right-pointing link, the angle should be 0 degrees
+        // in canvas coordinates (the format used in xmile::Link)
+        assert!(
+            xmile_link.angle.is_some(),
+            "straight link should export with an angle"
+        );
+        assert!(
+            (xmile_link.angle.unwrap() - 0.0).abs() < 0.001,
+            "horizontal right link should have angle ~0, got {}",
+            xmile_link.angle.unwrap()
+        );
+        assert!(
+            xmile_link.is_straight.is_none(),
+            "should not set is_straight when exporting (for compatibility)"
+        );
+    }
+
+    #[test]
+    fn test_straight_link_export_diagonal() {
+        // Test a diagonal link (down and to the right)
+        let view = StockFlow {
+            elements: vec![
+                datamodel::ViewElement::Aux(datamodel::view_element::Aux {
+                    name: "from_var".to_string(),
+                    uid: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: datamodel::view_element::LabelSide::Top,
+                }),
+                datamodel::ViewElement::Aux(datamodel::view_element::Aux {
+                    name: "to_var".to_string(),
+                    uid: 2,
+                    x: 100.0,
+                    y: 100.0, // down and to the right (45 degrees in canvas coords)
+                    label_side: datamodel::view_element::LabelSide::Top,
+                }),
+            ],
+            view_box: Default::default(),
+            zoom: 1.0,
+        };
+
+        let link = datamodel::view_element::Link {
+            uid: 10,
+            from_uid: 1,
+            to_uid: 2,
+            shape: LinkShape::Straight,
+        };
+
+        let xmile_link = Link::from(link, &view);
+
+        // For a 45-degree diagonal link (down-right in canvas coords),
+        // the canvas angle is 45 degrees
+        assert!(xmile_link.angle.is_some());
+        let angle = xmile_link.angle.unwrap();
+        assert!(
+            (angle - 45.0).abs() < 0.001,
+            "diagonal down-right link should have angle ~45, got {}",
+            angle
+        );
+    }
+
+    #[test]
+    fn test_straight_link_import_detects_straight() {
+        // When importing an XMILE link whose angle exactly matches the straight-line
+        // angle, we should convert to LinkShape::Straight
+        let view = StockFlow {
+            elements: vec![
+                datamodel::ViewElement::Aux(datamodel::view_element::Aux {
+                    name: "from_var".to_string(),
+                    uid: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: datamodel::view_element::LabelSide::Top,
+                }),
+                datamodel::ViewElement::Aux(datamodel::view_element::Aux {
+                    name: "to_var".to_string(),
+                    uid: 2,
+                    x: 100.0,
+                    y: 0.0, // directly to the right
+                    label_side: datamodel::view_element::LabelSide::Top,
+                }),
+            ],
+            view_box: Default::default(),
+            zoom: 1.0,
+        };
+
+        // Create an XMILE link with angle = 0 (straight horizontal right)
+        let xmile_link = Link {
+            uid: Some(10),
+            from: LinkEnd::Named("from_var".to_string()),
+            from_uid: Some(1),
+            to: LinkEnd::Named("to_var".to_string()),
+            to_uid: Some(2),
+            angle: Some(0.0), // canvas coords: 0 degrees = pointing right
+            is_straight: None,
+            points: None,
+        };
+
+        let dm_link = link_from_xmile_with_view(xmile_link, &view);
+
+        assert_eq!(
+            dm_link.shape,
+            LinkShape::Straight,
+            "angle 0 for horizontal link should become LinkShape::Straight"
+        );
+    }
+
+    #[test]
+    fn test_curved_link_import_stays_curved() {
+        // When importing an XMILE link whose angle differs significantly from
+        // the straight-line angle, it should stay as LinkShape::Arc
+        let view = StockFlow {
+            elements: vec![
+                datamodel::ViewElement::Aux(datamodel::view_element::Aux {
+                    name: "from_var".to_string(),
+                    uid: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: datamodel::view_element::LabelSide::Top,
+                }),
+                datamodel::ViewElement::Aux(datamodel::view_element::Aux {
+                    name: "to_var".to_string(),
+                    uid: 2,
+                    x: 100.0,
+                    y: 0.0, // directly to the right
+                    label_side: datamodel::view_element::LabelSide::Top,
+                }),
+            ],
+            view_box: Default::default(),
+            zoom: 1.0,
+        };
+
+        // Create an XMILE link with angle = 45 (curved, not straight)
+        // For a horizontal link, straight would be 0 degrees
+        let xmile_link = Link {
+            uid: Some(10),
+            from: LinkEnd::Named("from_var".to_string()),
+            from_uid: Some(1),
+            to: LinkEnd::Named("to_var".to_string()),
+            to_uid: Some(2),
+            angle: Some(45.0), // significantly different from straight (0 degrees)
+            is_straight: None,
+            points: None,
+        };
+
+        let dm_link = link_from_xmile_with_view(xmile_link, &view);
+
+        // Should stay as Arc, not Straight
+        match dm_link.shape {
+            LinkShape::Arc(angle) => {
+                // The angle should be converted to XMILE format (0-360)
+                // canvas 45 -> xmile: convert_angle_from_canvas_to_xmile(45) = 315
+                assert!(
+                    (angle - 315.0).abs() < 0.001,
+                    "expected arc angle ~315, got {}",
+                    angle
+                );
+            }
+            _ => panic!("expected LinkShape::Arc, got {:?}", dm_link.shape),
+        }
+    }
+
+    #[test]
+    fn test_straight_link_import_roundtrip_fidelity() {
+        // For roundtrip fidelity, only angles that (nearly) exactly match the
+        // calculated straight-line angle should become LinkShape::Straight.
+        // Angles that are "close enough" for visual straightness (within 6 degrees)
+        // but not exact should stay as Arc to preserve the original value.
+        let view = StockFlow {
+            elements: vec![
+                datamodel::ViewElement::Aux(datamodel::view_element::Aux {
+                    name: "from_var".to_string(),
+                    uid: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: datamodel::view_element::LabelSide::Top,
+                }),
+                datamodel::ViewElement::Aux(datamodel::view_element::Aux {
+                    name: "to_var".to_string(),
+                    uid: 2,
+                    x: 100.0,
+                    y: 0.0,
+                    label_side: datamodel::view_element::LabelSide::Top,
+                }),
+            ],
+            view_box: Default::default(),
+            zoom: 1.0,
+        };
+
+        // Angle very close to straight (within epsilon) should become Straight
+        let nearly_exact = Link {
+            uid: Some(10),
+            from: LinkEnd::Named("from_var".to_string()),
+            from_uid: Some(1),
+            to: LinkEnd::Named("to_var".to_string()),
+            to_uid: Some(2),
+            angle: Some(0.005), // very close to 0 (straight horizontal)
+            is_straight: None,
+            points: None,
+        };
+
+        let dm_link_exact = link_from_xmile_with_view(nearly_exact, &view);
+        assert_eq!(
+            dm_link_exact.shape,
+            LinkShape::Straight,
+            "angle nearly exactly matching straight-line should become Straight"
+        );
+
+        // Angle slightly off (e.g., 5 degrees) should stay as Arc for roundtrip fidelity
+        let slightly_off = Link {
+            uid: Some(10),
+            from: LinkEnd::Named("from_var".to_string()),
+            from_uid: Some(1),
+            to: LinkEnd::Named("to_var".to_string()),
+            to_uid: Some(2),
+            angle: Some(5.0), // 5 degrees from straight - visually straight but not exact
+            is_straight: None,
+            points: None,
+        };
+
+        let dm_link_off = link_from_xmile_with_view(slightly_off, &view);
+        match dm_link_off.shape {
+            LinkShape::Arc(_) => {} // expected - preserves original for roundtrip
+            _ => panic!("angle not exactly matching should stay as Arc for roundtrip fidelity"),
         }
     }
 
@@ -2287,6 +2673,21 @@ impl ViewObject {
             ViewObject::Module(module) => Some(canonicalize(&module.name).as_str().to_string()),
             ViewObject::Cloud(_cloud) => None,
             ViewObject::Alias(_alias) => None,
+            ViewObject::Unhandled => None,
+        }
+    }
+
+    /// Get the position (x, y) of this ViewObject, if it has one.
+    /// Links don't have their own position, so they return None.
+    pub fn position(&self) -> Option<(f64, f64)> {
+        match self {
+            ViewObject::Aux(aux) => Some((aux.x, aux.y)),
+            ViewObject::Stock(stock) => Some((stock.x, stock.y)),
+            ViewObject::Flow(flow) => Some((flow.x, flow.y)),
+            ViewObject::Link(_) => None,
+            ViewObject::Module(module) => Some((module.x, module.y)),
+            ViewObject::Cloud(cloud) => Some((cloud.x, cloud.y)),
+            ViewObject::Alias(alias) => Some((alias.x, alias.y)),
             ViewObject::Unhandled => None,
         }
     }
@@ -2623,6 +3024,33 @@ impl View {
     }
 }
 
+/// Convert a ViewObject to a datamodel::ViewElement, using the position map for Links.
+fn view_object_to_element(
+    obj: ViewObject,
+    positions: &std::collections::HashMap<i32, (f64, f64)>,
+) -> datamodel::ViewElement {
+    match obj {
+        ViewObject::Aux(v) => datamodel::ViewElement::Aux(datamodel::view_element::Aux::from(v)),
+        ViewObject::Stock(v) => {
+            datamodel::ViewElement::Stock(datamodel::view_element::Stock::from(v))
+        }
+        ViewObject::Flow(v) => datamodel::ViewElement::Flow(datamodel::view_element::Flow::from(v)),
+        ViewObject::Link(v) => {
+            datamodel::ViewElement::Link(view_element::link_from_xmile_with_positions(v, positions))
+        }
+        ViewObject::Module(v) => {
+            datamodel::ViewElement::Module(datamodel::view_element::Module::from(v))
+        }
+        ViewObject::Cloud(v) => {
+            datamodel::ViewElement::Cloud(datamodel::view_element::Cloud::from(v))
+        }
+        ViewObject::Alias(v) => {
+            datamodel::ViewElement::Alias(datamodel::view_element::Alias::from(v))
+        }
+        ViewObject::Unhandled => unreachable!("must filter out unhandled"),
+    }
+}
+
 impl From<View> for datamodel::View {
     fn from(v: View) -> Self {
         if v.kind.unwrap_or(ViewType::StockFlow) == ViewType::StockFlow {
@@ -2641,12 +3069,24 @@ impl From<View> for datamodel::View {
                 Default::default()
             };
 
+            // Build a position map from ViewObjects before conversion.
+            // This allows Link conversion to detect straight lines based on element positions.
+            let positions: std::collections::HashMap<i32, (f64, f64)> = v
+                .objects
+                .iter()
+                .filter_map(|obj| {
+                    let uid = obj.uid()?;
+                    let pos = obj.position()?;
+                    Some((uid, pos))
+                })
+                .collect();
+
             datamodel::View::StockFlow(datamodel::StockFlow {
                 elements: v
                     .objects
                     .into_iter()
                     .filter(|v| !matches!(v, ViewObject::Unhandled))
-                    .map(datamodel::ViewElement::from)
+                    .map(|obj| view_object_to_element(obj, &positions))
                     .collect(),
                 view_box,
                 zoom: match v.zoom {
