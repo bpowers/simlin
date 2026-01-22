@@ -457,39 +457,186 @@ export function UpdateCloudAndFlow(
   flow: FlowViewElement,
   moveDelta: IPoint,
 ): [StockViewElement | CloudViewElement, FlowViewElement] {
-  let proposed = new Point({
-    x: cloud.cx - moveDelta.x,
-    y: cloud.cy - moveDelta.y,
-    attachedToUid: undefined,
-  });
+  let points = flow.points;
+  const firstPoint = defined(points.first());
+  const lastPoint = defined(points.last());
 
-  const start = defined(flow.points.get(0));
+  // Determine if cloud is at first or last position
+  const cloudIsFirst = firstPoint.attachedToUid === cloud.uid;
+  const cloudIsLast = lastPoint.attachedToUid === cloud.uid;
 
-  if (isHorizontal(flow) && isVertical(flow)) {
-    const d = {
-      x: proposed.x - start.x,
-      y: proposed.y - start.y,
-    };
-    // we're creating a new flow
-    if (Math.abs(d.x) > Math.abs(d.y)) {
-      // horizontal then.
-      proposed = proposed.set('y', start.y);
-    } else {
-      proposed = proposed.set('x', start.x);
-    }
-  } else if (isHorizontal(flow)) {
-    proposed = proposed.set('y', start.y);
-  } else if (isVertical(flow)) {
-    proposed = proposed.set('x', start.x);
+  if (!cloudIsFirst && !cloudIsLast) {
+    return [cloud, flow];
   }
 
-  const origCloud = cloud;
-  cloud = cloud.merge({
-    x: proposed.x,
-    y: proposed.y,
+  const segments = getSegments(points);
+  const currentValve: IPoint = { x: flow.cx, y: flow.cy };
+
+  // For 2-point (straight) flows, check for perpendicular offset
+  if (segments.length === 1) {
+    const seg = segments[0];
+    const perpDelta = seg.isHorizontal ? moveDelta.y : moveDelta.x;
+    const parDelta = seg.isHorizontal ? moveDelta.x : moveDelta.y;
+
+    const PERP_THRESHOLD = 5;
+    const perpAbs = Math.abs(perpDelta);
+    const parAbs = Math.abs(parDelta);
+    const shouldReroute = perpAbs >= PERP_THRESHOLD && perpAbs > parAbs;
+
+    if (shouldReroute) {
+      // Create L-shape by adding a corner point
+      let newCloudPoint: Point;
+      let newOtherPoint: Point;
+      let corner: Point;
+
+      if (seg.isHorizontal) {
+        // Horizontal segment: perpendicular movement is vertical (Y changes)
+        if (cloudIsFirst) {
+          newCloudPoint = firstPoint.merge({ y: firstPoint.y - moveDelta.y });
+          newOtherPoint = lastPoint;
+          // Corner at (otherEnd.x, newCloud.y)
+          corner = new Point({ x: lastPoint.x, y: newCloudPoint.y, attachedToUid: undefined });
+          points = List([newCloudPoint, corner, newOtherPoint]);
+        } else {
+          newOtherPoint = firstPoint;
+          newCloudPoint = lastPoint.merge({ y: lastPoint.y - moveDelta.y });
+          // Corner at (otherEnd.x, newCloud.y)
+          corner = new Point({ x: firstPoint.x, y: newCloudPoint.y, attachedToUid: undefined });
+          points = List([newOtherPoint, corner, newCloudPoint]);
+        }
+      } else {
+        // Vertical segment: perpendicular movement is horizontal (X changes)
+        if (cloudIsFirst) {
+          newCloudPoint = firstPoint.merge({ x: firstPoint.x - moveDelta.x });
+          newOtherPoint = lastPoint;
+          // Corner at (newCloud.x, otherEnd.y)
+          corner = new Point({ x: newCloudPoint.x, y: lastPoint.y, attachedToUid: undefined });
+          points = List([newCloudPoint, corner, newOtherPoint]);
+        } else {
+          newOtherPoint = firstPoint;
+          newCloudPoint = lastPoint.merge({ x: lastPoint.x - moveDelta.x });
+          // Corner at (newCloud.x, otherEnd.y)
+          corner = new Point({ x: newCloudPoint.x, y: firstPoint.y, attachedToUid: undefined });
+          points = List([newOtherPoint, corner, newCloudPoint]);
+        }
+      }
+
+      // Update cloud position
+      cloud = cloud.merge({
+        x: newCloudPoint.x,
+        y: newCloudPoint.y,
+      });
+
+      // Clamp valve to closest segment of new shape
+      const newSegments = getSegments(points);
+      const closestSeg = findClosestSegment(currentValve, newSegments);
+      const newValve = clampToSegment(currentValve, closestSeg);
+
+      flow = flow.merge({
+        x: newValve.x,
+        y: newValve.y,
+        points,
+      });
+
+      return [cloud, flow];
+    }
+
+    // No perpendicular offset: constrain to flow axis
+    let proposed = new Point({
+      x: cloud.cx - moveDelta.x,
+      y: cloud.cy - moveDelta.y,
+      attachedToUid: cloud.uid,
+    });
+
+    if (seg.isHorizontal) {
+      proposed = proposed.set('y', firstPoint.y);
+    } else {
+      proposed = proposed.set('x', firstPoint.x);
+    }
+
+    const origCloud = cloud;
+    cloud = cloud.merge({
+      x: proposed.x,
+      y: proposed.y,
+    });
+
+    flow = defined(adjustFlows(origCloud, cloud, List([flow]), true).first());
+    return [cloud, flow];
+  }
+
+  // For multi-segment flows: update adjacent corner to maintain orthogonality
+  const cloudPointIndex = cloudIsFirst ? 0 : points.size - 1;
+  const adjacentPointIndex = cloudIsFirst ? 1 : points.size - 2;
+  const cloudPoint = defined(points.get(cloudPointIndex));
+  const adjacentPoint = defined(points.get(adjacentPointIndex));
+
+  // Determine segment orientation between cloud and adjacent point
+  const adjacentSegment = cloudIsFirst ? segments[0] : segments[segments.length - 1];
+
+  // Calculate new cloud position
+  let newCloudX = cloud.cx - moveDelta.x;
+  let newCloudY = cloud.cy - moveDelta.y;
+
+  // Update adjacent corner to maintain orthogonality
+  let newAdjacentX = adjacentPoint.x;
+  let newAdjacentY = adjacentPoint.y;
+
+  if (adjacentSegment.isHorizontal) {
+    // Horizontal segment: cloud Y change affects corner Y
+    newAdjacentY = newCloudY;
+  } else if (adjacentSegment.isVertical) {
+    // Vertical segment: cloud X change affects corner X
+    newAdjacentX = newCloudX;
+  }
+
+  const newCloudPoint = cloudPoint.merge({
+    x: newCloudX,
+    y: newCloudY,
   });
 
-  flow = defined(adjustFlows(origCloud, cloud, List([flow]), true).first());
+  const newAdjacentPoint = new Point({
+    x: newAdjacentX,
+    y: newAdjacentY,
+    attachedToUid: adjacentPoint.attachedToUid,
+  });
+
+  if (cloudIsFirst) {
+    points = points.set(0, newCloudPoint).set(1, newAdjacentPoint);
+  } else {
+    points = points.set(points.size - 1, newCloudPoint).set(points.size - 2, newAdjacentPoint);
+  }
+
+  // Update cloud position
+  cloud = cloud.merge({
+    x: newCloudX,
+    y: newCloudY,
+  });
+
+  // Preserve valve fractional position on the cloud-adjacent segment
+  const oldSegments = getSegments(flow.points);
+  const valveOldSegment = findClosestSegment(currentValve, oldSegments);
+  const cloudAdjacentSegmentIndex = cloudIsFirst ? 0 : oldSegments.length - 1;
+  const valveIsOnCloudAdjacentSegment = valveOldSegment.index === cloudAdjacentSegmentIndex;
+
+  // Normalize to remove any colinear or zero-length segments
+  points = normalizeFlowPoints(points);
+  const newSegments = getSegments(points);
+
+  let newValve: IPoint;
+  if (valveIsOnCloudAdjacentSegment && newSegments.length > 0) {
+    const newCloudAdjacentSegmentIndex = cloudIsFirst ? 0 : newSegments.length - 1;
+    const newCloudAdjacentSegment = newSegments[newCloudAdjacentSegmentIndex];
+    newValve = preserveValveFraction(currentValve, valveOldSegment, newCloudAdjacentSegment);
+  } else {
+    const closestSegment = findClosestSegment(currentValve, newSegments);
+    newValve = clampToSegment(currentValve, closestSegment);
+  }
+
+  flow = flow.merge({
+    x: newValve.x,
+    y: newValve.y,
+    points,
+  });
 
   return [cloud, flow];
 }
