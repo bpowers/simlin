@@ -10,6 +10,7 @@
 //!
 //! See `CLAUDE.md` in this directory for implementation context and goals.
 
+pub mod ast;
 mod builtins;
 mod lexer;
 mod normalizer;
