@@ -180,14 +180,16 @@ def apply_patch_json(
         out_collected_errors_ptr,
         err_ptr,
     )
-    check_out_error(err_ptr, "Apply JSON patch")
-
     errors: List[ErrorDetail] = []
-    if out_collected_errors_ptr[0] != ffi.NULL:
-        errors = extract_error_details(out_collected_errors_ptr[0])
-        lib.simlin_error_free(out_collected_errors_ptr[0])
-
-    return errors
+    errors_ptr = out_collected_errors_ptr[0]
+    try:
+        check_out_error(err_ptr, "Apply JSON patch")
+        if errors_ptr != ffi.NULL:
+            errors = extract_error_details(errors_ptr)
+        return errors
+    finally:
+        if errors_ptr != ffi.NULL:
+            lib.simlin_error_free(errors_ptr)
 
 
 def serialize_json(project_ptr: Any) -> bytes:

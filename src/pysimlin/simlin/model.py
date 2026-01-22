@@ -251,6 +251,9 @@ class Model:
 
         actual_count = int(out_written_ptr[0])
         if actual_count != count:
+            for i in range(count):
+                if c_deps[i] != ffi.NULL:
+                    free_c_string(c_deps[i])
             raise SimlinRuntimeError(
                 f"Failed to get incoming links for '{var_name}': count mismatch (expected {count}, got {actual_count})"
             )

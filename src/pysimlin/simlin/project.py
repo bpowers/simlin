@@ -135,6 +135,9 @@ class Project:
 
         written = int(out_written_ptr[0])
         if written != count:
+            for i in range(count):
+                if c_names[i] != ffi.NULL:
+                    free_c_string(c_names[i])
             raise SimlinImportError(f"Failed to get model names: got {written}, expected {count}")
 
         # Convert to Python strings and free C memory
