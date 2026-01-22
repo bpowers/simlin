@@ -77,26 +77,27 @@ All features implemented in xmutil must be supported. This checklist is organize
 ## Phase 1: Lexer (`lexer.rs`)
 
 ### Token Types
-- [ ] Numbers: integers, floats, scientific notation (e.g., `1e-6`, `1.5E+3`)
-- [ ] Strings/Symbols: variable names (can contain spaces, underscores)
-- [ ] Quoted strings with escape sequences (`\"` inside quotes)
-- [ ] Operators: `+ - * / ^ < > = ( ) [ ] , ; : |`
-- [ ] Compound operators: `:=` (data equals), `<=`, `>=`, `<>`
-- [ ] Keywords: `:AND:`, `:OR:`, `:NOT:`, `:NA:`
-- [ ] Special keywords: `:MACRO:`, `:END OF MACRO:`
-- [ ] Interpolation modes: `:INTERPOLATE:`, `:RAW:`, `:HOLD BACKWARD:`, `:LOOK FORWARD:`
-- [ ] Exception keyword: `:EXCEPT:`
-- [ ] Equivalence: `<->`
-- [ ] Map arrow: `->`
-- [ ] Comment terminators: `~` and `|`
-- [ ] Bang subscript modifier: `!`
-- [ ] End token: `\\\\\\---///` (end of equations section)
+- [x] Numbers: integers, floats, scientific notation (e.g., `1e-6`, `1.5E+3`)
+- [x] Strings/Symbols: variable names (can contain spaces, underscores)
+- [x] Quoted strings with escape sequences (`\"` inside quotes)
+- [x] Operators: `+ - * / ^ < > = ( ) [ ] , ; : |`
+- [x] Compound operators: `:=` (data equals), `<=`, `>=`, `<>`
+- [x] Keywords: `:AND:`, `:OR:`, `:NOT:`, `:NA:`
+- [x] Special keywords: `:MACRO:`, `:END OF MACRO:`
+- [x] Interpolation modes: `:INTERPOLATE:`, `:RAW:`, `:HOLD BACKWARD:`, `:LOOK FORWARD:`
+- [x] Exception keyword: `:EXCEPT:`
+- [x] Equivalence: `<->`
+- [x] Map arrow: `->`
+- [x] Comment terminators: `~` and `|`
+- [x] Bang subscript modifier: `!`
+- [x] End token: `\\\\\\---///` (end of equations section)
 - [ ] Group markers: `*NN name` (star followed by group number and name)
 
 ### Lexer State Management
-- [ ] Track line number and position for error messages
-- [ ] Handle multi-line tokens (equations can span lines)
-- [ ] Skip whitespace appropriately
+- [x] Track position for error messages
+- [x] Handle multi-line tokens (line continuation with `\` at EOL)
+- [x] Skip whitespace appropriately
+- [x] Handle nested comments (`{ { nested } }`)
 - [ ] Handle comment extraction (text between `~` delimiters)
 
 ---
@@ -515,7 +516,7 @@ Located after views, starting with `///---\\\` marker.
 ## Testing Strategy Updates
 
 ### Unit Test Coverage
-- [ ] Lexer: Each token type, edge cases, error recovery
+- [x] Lexer: Each token type, edge cases, error recovery (29 tests)
 - [ ] Parser: Each grammar rule, operator precedence, table formats
 - [ ] Builtins: Each function with typical and edge case inputs
 - [ ] Subscripts: All dimension/subscript patterns

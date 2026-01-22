@@ -10,12 +10,14 @@
 //!
 //! See `CLAUDE.md` in this directory for implementation context and goals.
 
-// TODO: Uncomment as modules are implemented
-// mod ast;
-// mod builtins;
-// mod convert;
-// mod lexer;
-// mod view;
+mod builtins;
+mod lexer;
+mod normalizer;
+
+// Public re-exports for the LALRPOP parser and future EquationReader.
+// These will be used when the parser is implemented in the next phase.
+pub use lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
+pub use normalizer::{NormalizerError, NormalizerErrorCode, Token, TokenNormalizer};
 
 // The parser will be generated from parser.lalrpop
 // use lalrpop_util::lalrpop_mod;
