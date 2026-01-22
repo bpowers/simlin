@@ -475,13 +475,26 @@ export function UpdateCloudAndFlow(
   // For 2-point (straight) flows, check for perpendicular offset
   if (segments.length === 1) {
     const seg = segments[0];
-    const perpDelta = seg.isHorizontal ? moveDelta.y : moveDelta.x;
-    const parDelta = seg.isHorizontal ? moveDelta.x : moveDelta.y;
+
+    // Degenerate segment: both points at same position (e.g., during flow creation).
+    // In this case, seg.isHorizontal and seg.isVertical are both true.
+    // Use the drag direction to determine the intended axis.
+    const isDegenerate = seg.isHorizontal && seg.isVertical;
+
+    // For degenerate segments, determine axis from drag direction.
+    // For non-degenerate segments, use the existing segment orientation.
+    const treatAsHorizontal = isDegenerate
+      ? Math.abs(moveDelta.x) > Math.abs(moveDelta.y)
+      : seg.isHorizontal;
+
+    const perpDelta = treatAsHorizontal ? moveDelta.y : moveDelta.x;
+    const parDelta = treatAsHorizontal ? moveDelta.x : moveDelta.y;
 
     const PERP_THRESHOLD = 5;
     const perpAbs = Math.abs(perpDelta);
     const parAbs = Math.abs(parDelta);
-    const shouldReroute = perpAbs >= PERP_THRESHOLD && perpAbs > parAbs;
+    // Don't reroute degenerate flows - they should stay straight
+    const shouldReroute = !isDegenerate && perpAbs >= PERP_THRESHOLD && perpAbs > parAbs;
 
     if (shouldReroute) {
       // Create L-shape by adding a corner point
@@ -489,7 +502,7 @@ export function UpdateCloudAndFlow(
       let newOtherPoint: Point;
       let corner: Point;
 
-      if (seg.isHorizontal) {
+      if (treatAsHorizontal) {
         // Horizontal segment: perpendicular movement is vertical (Y changes)
         if (cloudIsFirst) {
           newCloudPoint = firstPoint.merge({ y: firstPoint.y - moveDelta.y });
@@ -548,7 +561,7 @@ export function UpdateCloudAndFlow(
       attachedToUid: cloud.uid,
     });
 
-    if (seg.isHorizontal) {
+    if (treatAsHorizontal) {
       proposed = proposed.set('y', firstPoint.y);
     } else {
       proposed = proposed.set('x', firstPoint.x);

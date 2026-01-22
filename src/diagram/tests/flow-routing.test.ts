@@ -1933,4 +1933,125 @@ describe('Flow routing', () => {
       expect(corner.y).toBe(cornerY + 20);
     });
   });
+
+  describe('UpdateCloudAndFlow - degenerate flow creation', () => {
+    // When a flow is first created, both endpoints are at the same position.
+    // The segment is both horizontal AND vertical (zero length).
+    // The drag direction should determine the flow axis.
+
+    it('should create vertical flow when dragging mostly downward from degenerate start', () => {
+      const stockUid = 1;
+      const cloudUid = 3;
+      const startX = 100;
+      const startY = 100;
+
+      // Degenerate flow: both points at same position
+      const flow = makeFlow(flowUid, startX, startY, [
+        { x: startX, y: startY, attachedToUid: stockUid },
+        { x: startX, y: startY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, startX, startY);
+
+      // Drag mostly downward (negative moveDelta.y means moving down in screen coords)
+      // moveDelta is inverted: negative y means moving to higher Y
+      const moveDelta = { x: -5, y: -50 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should remain straight (2 points) and be vertical
+      expect(newFlow.points.size).toBe(2);
+
+      // Both points should have the same X (vertical flow)
+      const firstPt = newFlow.points.get(0)!;
+      const lastPt = newFlow.points.get(1)!;
+      expect(firstPt.x).toBe(lastPt.x);
+
+      // Cloud should have moved down (Y increased)
+      expect(newCloud.cy).toBe(startY + 50);
+    });
+
+    it('should create vertical flow when dragging mostly upward from degenerate start', () => {
+      const stockUid = 1;
+      const cloudUid = 3;
+      const startX = 100;
+      const startY = 100;
+
+      const flow = makeFlow(flowUid, startX, startY, [
+        { x: startX, y: startY, attachedToUid: stockUid },
+        { x: startX, y: startY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, startX, startY);
+
+      // Drag mostly upward (positive moveDelta.y means moving up)
+      const moveDelta = { x: 5, y: 50 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should remain straight and be vertical
+      expect(newFlow.points.size).toBe(2);
+
+      const firstPt = newFlow.points.get(0)!;
+      const lastPt = newFlow.points.get(1)!;
+      expect(firstPt.x).toBe(lastPt.x);
+
+      // Cloud should have moved up (Y decreased)
+      expect(newCloud.cy).toBe(startY - 50);
+    });
+
+    it('should create horizontal flow when dragging mostly rightward from degenerate start', () => {
+      const stockUid = 1;
+      const cloudUid = 3;
+      const startX = 100;
+      const startY = 100;
+
+      const flow = makeFlow(flowUid, startX, startY, [
+        { x: startX, y: startY, attachedToUid: stockUid },
+        { x: startX, y: startY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, startX, startY);
+
+      // Drag mostly rightward (negative moveDelta.x means moving right)
+      const moveDelta = { x: -50, y: -5 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should remain straight and be horizontal
+      expect(newFlow.points.size).toBe(2);
+
+      const firstPt = newFlow.points.get(0)!;
+      const lastPt = newFlow.points.get(1)!;
+      expect(firstPt.y).toBe(lastPt.y);
+
+      // Cloud should have moved right (X increased)
+      expect(newCloud.cx).toBe(startX + 50);
+    });
+
+    it('should create horizontal flow when dragging mostly leftward from degenerate start', () => {
+      const stockUid = 1;
+      const cloudUid = 3;
+      const startX = 100;
+      const startY = 100;
+
+      const flow = makeFlow(flowUid, startX, startY, [
+        { x: startX, y: startY, attachedToUid: stockUid },
+        { x: startX, y: startY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, startX, startY);
+
+      // Drag mostly leftward (positive moveDelta.x means moving left)
+      const moveDelta = { x: 50, y: 5 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should remain straight and be horizontal
+      expect(newFlow.points.size).toBe(2);
+
+      const firstPt = newFlow.points.get(0)!;
+      const lastPt = newFlow.points.get(1)!;
+      expect(firstPt.y).toBe(lastPt.y);
+
+      // Cloud should have moved left (X decreased)
+      expect(newCloud.cx).toBe(startX - 50);
+    });
+  });
 });
