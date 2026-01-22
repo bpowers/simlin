@@ -7,7 +7,7 @@ use crate::ast::UnaryOp::*;
 use crate::ast::BinaryOp::*;
 use crate::ast::Expr0::*;
 use crate::common::{RawIdent, EquationError};
-use crate::token::Token;
+use crate::lexer::Token;
 use crate::builtins::UntypedBuiltinFn;
 
 grammar<'input>(input: &'input str);

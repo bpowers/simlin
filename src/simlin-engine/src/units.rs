@@ -11,7 +11,7 @@ use float_cmp::approx_eq;
 use crate::ast::{BinaryOp, Expr0, UnaryOp};
 use crate::common::{EquationError, EquationResult, ErrorCode, UnitError};
 use crate::datamodel::{SimSpecs, Unit, UnitMap};
-use crate::token::LexerType;
+use crate::lexer::LexerType;
 use crate::{canonicalize, eqn_err};
 
 /// Units is used to distinguish between explicit units (and explicit

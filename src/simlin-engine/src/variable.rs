@@ -15,9 +15,9 @@ use crate::common::{
 };
 use crate::datamodel;
 use crate::dimensions::{Dimension, DimensionsContext};
+use crate::lexer::LexerType;
 #[cfg(test)]
 use crate::model::ScopeStage0;
-use crate::token::LexerType;
 use crate::units::parse_units;
 use crate::{ErrorCode, eqn_err, units};
 

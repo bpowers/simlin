@@ -24,9 +24,9 @@ pub mod builtins;
 mod builtins_visitor;
 mod compiler;
 mod dimensions;
+mod lexer;
 mod model;
 mod patch;
-mod token;
 mod variable;
 mod stdlib {
     include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));

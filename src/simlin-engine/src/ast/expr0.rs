@@ -4,7 +4,7 @@
 
 use crate::builtins::{Loc, UntypedBuiltinFn, is_0_arity_builtin_fn};
 use crate::common::{EquationError, RawIdent};
-use crate::token::LexerType;
+use crate::lexer::LexerType;
 use std::result::Result as StdResult;
 
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
@@ -111,7 +111,7 @@ impl Expr0 {
     pub fn new(eqn: &str, lexer_type: LexerType) -> StdResult<Option<Expr0>, Vec<EquationError>> {
         let mut errs = Vec::new();
 
-        let lexer = crate::token::Lexer::new(eqn, lexer_type);
+        let lexer = crate::lexer::Lexer::new(eqn, lexer_type);
         match crate::equation::EquationParser::new().parse(eqn, lexer) {
             Ok(ast) => Ok(Some(match lexer_type {
                 // in variable equations we want to treat `pi` or `time`

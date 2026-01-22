@@ -1378,7 +1378,7 @@ mod tests {
         use crate::ast::{Expr0, print_eqn};
         use crate::builtins::Loc;
         use crate::common::{RawIdent, canonicalize};
-        use crate::token::LexerType;
+        use crate::lexer::LexerType;
 
         println!("\n=== Testing $ variable parsing with double quotes ===");
 
