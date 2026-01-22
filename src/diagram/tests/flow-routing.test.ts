@@ -2054,4 +2054,145 @@ describe('Flow routing', () => {
       expect(newCloud.cx).toBe(startX - 50);
     });
   });
+
+  describe('UpdateCloudAndFlow - stock edge recomputation', () => {
+    it('should recompute stock edge when reattaching to stock on opposite side of corner', () => {
+      // Scenario: L-shaped flow with source on left, corner in middle, sink on right
+      // Original source stock is LEFT of corner (endpoint on stock's right edge)
+      // New source stock is RIGHT of corner (endpoint should be on stock's LEFT edge)
+      //
+      // Before:  [Stock1] ---> corner
+      //                          |
+      //                          v
+      //                        sink
+      //
+      // After:   corner <--- [Stock2]
+      //            |
+      //            v
+      //          sink
+      //
+      // The endpoint should be on the LEFT edge of Stock2, not preserve the
+      // "right edge" offset from Stock1.
+
+      const oldStockUid = 1;
+      const sinkUid = 3;
+
+      // Old stock at (100, 100), endpoint on right edge at (100 + StockWidth/2, 100)
+      const oldStockX = 100;
+      const oldStockY = 100;
+      const oldStockRightEdge = oldStockX + StockWidth / 2;
+
+      // Corner at (200, 100) - to the right of old stock
+      const cornerX = 200;
+      const cornerY = oldStockY;
+
+      // Sink at (200, 200) - below corner
+      const sinkX = cornerX;
+      const sinkY = 200;
+
+      // New stock at (300, 100) - to the RIGHT of the corner
+      // The flow should exit from its LEFT edge (toward the corner)
+      const newStockX = 300;
+      const newStockY = 100;
+      const newStockLeftEdge = newStockX - StockWidth / 2;
+
+      // Create the flow: source -> corner -> sink
+      const flow = makeFlow(flowUid, 150, 100, [
+        { x: oldStockRightEdge, y: oldStockY, attachedToUid: oldStockUid },
+        { x: cornerX, y: cornerY, attachedToUid: undefined },
+        { x: sinkX, y: sinkY, attachedToUid: sinkUid },
+      ]);
+
+      // Create the "new stock" as the cloud parameter
+      // In reality, this would be a StockViewElement when reattaching
+      const newStock = new StockViewElement({
+        uid: oldStockUid, // Same UID since we're simulating reattachment
+        name: 'NewStock',
+        ident: 'new_stock',
+        var: undefined,
+        x: newStockX,
+        y: newStockY,
+        labelSide: 'center',
+        isZeroRadius: false,
+        inflows: List([]),
+        outflows: List([flowUid]),
+      });
+
+      // moveDelta is from old stock center to new stock center
+      // old: (100, 100), new: (300, 100) -> moveDelta = (100 - 300, 100 - 100) = (-200, 0)
+      const moveDelta = { x: oldStockX - newStockX, y: oldStockY - newStockY };
+
+      const [, newFlow] = UpdateCloudAndFlow(newStock, flow, moveDelta);
+
+      // The endpoint should be on the LEFT edge of the new stock (facing the corner)
+      const firstPt = newFlow.points.get(0)!;
+      expect(firstPt.x).toBe(newStockLeftEdge);
+      expect(firstPt.y).toBe(newStockY);
+
+      // The corner should maintain orthogonality with the new endpoint
+      const secondPt = newFlow.points.get(1)!;
+      expect(secondPt.y).toBe(firstPt.y); // Same Y for horizontal segment
+    });
+
+    it('should recompute stock edge for vertical segments when reattaching', () => {
+      // Similar test but with a vertical first segment
+      // Source stock above corner, new stock below corner
+
+      const oldStockUid = 1;
+      const sinkUid = 3;
+
+      // Old stock at (100, 50), endpoint on bottom edge
+      const oldStockX = 100;
+      const oldStockY = 50;
+      const oldStockBottomEdge = oldStockY + StockHeight / 2;
+
+      // Corner at (100, 150) - below old stock
+      const cornerX = oldStockX;
+      const cornerY = 150;
+
+      // Sink at (200, 150) - to the right of corner
+      const sinkX = 200;
+      const sinkY = cornerY;
+
+      // New stock at (100, 250) - BELOW the corner
+      // The flow should exit from its TOP edge (toward the corner)
+      const newStockX = 100;
+      const newStockY = 250;
+      const newStockTopEdge = newStockY - StockHeight / 2;
+
+      // Create the flow: source -> corner -> sink
+      const flow = makeFlow(flowUid, 100, 100, [
+        { x: oldStockX, y: oldStockBottomEdge, attachedToUid: oldStockUid },
+        { x: cornerX, y: cornerY, attachedToUid: undefined },
+        { x: sinkX, y: sinkY, attachedToUid: sinkUid },
+      ]);
+
+      const newStock = new StockViewElement({
+        uid: oldStockUid,
+        name: 'NewStock',
+        ident: 'new_stock',
+        var: undefined,
+        x: newStockX,
+        y: newStockY,
+        labelSide: 'center',
+        isZeroRadius: false,
+        inflows: List([]),
+        outflows: List([flowUid]),
+      });
+
+      // moveDelta from old stock center to new stock center
+      const moveDelta = { x: oldStockX - newStockX, y: oldStockY - newStockY };
+
+      const [, newFlow] = UpdateCloudAndFlow(newStock, flow, moveDelta);
+
+      // The endpoint should be on the TOP edge of the new stock (facing the corner)
+      const firstPt = newFlow.points.get(0)!;
+      expect(firstPt.x).toBe(newStockX);
+      expect(firstPt.y).toBe(newStockTopEdge);
+
+      // The corner should maintain orthogonality with the new endpoint
+      const secondPt = newFlow.points.get(1)!;
+      expect(secondPt.x).toBe(firstPt.x); // Same X for vertical segment
+    });
+  });
 });

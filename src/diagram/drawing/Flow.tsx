@@ -586,11 +586,62 @@ export function UpdateCloudAndFlow(
   // Determine segment orientation between cloud and adjacent point
   const adjacentSegment = cloudIsFirst ? segments[0] : segments[segments.length - 1];
 
-  // Calculate new cloud position from the existing endpoint position (which is on the
-  // stock edge for stock-attached endpoints), not from cloud.cx/cy (stock center).
-  // This ensures that dragging a stock-attached endpoint keeps it on the edge.
-  let newCloudX = cloudPoint.x - moveDelta.x;
-  let newCloudY = cloudPoint.y - moveDelta.y;
+  let newCloudX: number;
+  let newCloudY: number;
+
+  // For stocks, we need to determine whether to:
+  // 1. Translate the endpoint (for normal movement where the edge stays correct), or
+  // 2. Recompute the edge (when reattaching to a stock on the opposite side of the corner)
+  //
+  // The key insight is: if translating the old endpoint would put it on the WRONG side
+  // of the stock center (opposite to where the corner is), we need to recompute the edge.
+  if (cloud instanceof StockViewElement) {
+    const isHorizontalSegment = adjacentSegment.isHorizontal;
+
+    // First, calculate what the translated position would be
+    const translatedX = cloudPoint.x - moveDelta.x;
+    const translatedY = cloudPoint.y - moveDelta.y;
+
+    // Determine which side the adjacent point is on relative to the stock center
+    // This tells us which edge the endpoint SHOULD be on
+    let expectedSide: Side;
+    if (isHorizontalSegment) {
+      expectedSide = adjacentPoint.x > cloud.cx ? 'right' : 'left';
+    } else {
+      expectedSide = adjacentPoint.y > cloud.cy ? 'bottom' : 'top';
+    }
+
+    // Check if the translated endpoint is on the correct side
+    let translatedIsCorrectSide: boolean;
+    if (isHorizontalSegment) {
+      const shouldBeRight = expectedSide === 'right';
+      const translatedIsRight = translatedX > cloud.cx;
+      translatedIsCorrectSide = shouldBeRight === translatedIsRight;
+    } else {
+      const shouldBeBottom = expectedSide === 'bottom';
+      const translatedIsBottom = translatedY > cloud.cy;
+      translatedIsCorrectSide = shouldBeBottom === translatedIsBottom;
+    }
+
+    if (translatedIsCorrectSide) {
+      // Translation keeps the endpoint on the correct side - use translated position
+      // This handles normal movement where the edge offset is preserved
+      newCloudX = translatedX;
+      newCloudY = translatedY;
+    } else {
+      // Translation would put endpoint on wrong side - recompute the edge
+      // This handles reattachment to a stock on the opposite side of the corner
+      const stockEdge = getStockEdgePoint(cloud.cx, cloud.cy, expectedSide);
+      newCloudX = stockEdge.x;
+      newCloudY = stockEdge.y;
+    }
+  } else {
+    // For clouds: calculate position from the existing endpoint position (which is on the
+    // stock edge for stock-attached endpoints), not from cloud.cx/cy (stock center).
+    // This ensures that dragging a stock-attached endpoint keeps it on the edge.
+    newCloudX = cloudPoint.x - moveDelta.x;
+    newCloudY = cloudPoint.y - moveDelta.y;
+  }
 
   // Update adjacent corner to maintain orthogonality
   let newAdjacentX = adjacentPoint.x;
