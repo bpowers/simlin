@@ -215,23 +215,17 @@ export function validateStructSizes(): void {
 
   // Validate pointer size - must be 4 for wasm32
   if (rustSizes.ptrSize !== PTR_SIZE) {
-    throw new Error(
-      `Pointer size mismatch: Rust reports ${rustSizes.ptrSize}, TypeScript expects ${PTR_SIZE}`,
-    );
+    throw new Error(`Pointer size mismatch: Rust reports ${rustSizes.ptrSize}, TypeScript expects ${PTR_SIZE}`);
   }
 
   // Validate SimlinLoop size
   if (rustSizes.loopSize !== LOOP_SIZE) {
-    throw new Error(
-      `SimlinLoop size mismatch: Rust reports ${rustSizes.loopSize}, TypeScript expects ${LOOP_SIZE}`,
-    );
+    throw new Error(`SimlinLoop size mismatch: Rust reports ${rustSizes.loopSize}, TypeScript expects ${LOOP_SIZE}`);
   }
 
   // Validate SimlinLink size
   if (rustSizes.linkSize !== LINK_SIZE) {
-    throw new Error(
-      `SimlinLink size mismatch: Rust reports ${rustSizes.linkSize}, TypeScript expects ${LINK_SIZE}`,
-    );
+    throw new Error(`SimlinLink size mismatch: Rust reports ${rustSizes.linkSize}, TypeScript expects ${LINK_SIZE}`);
   }
 }
 

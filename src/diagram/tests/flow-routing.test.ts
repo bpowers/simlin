@@ -9,6 +9,7 @@ import { Point, FlowViewElement, StockViewElement, CloudViewElement } from '@sys
 import {
   computeFlowRoute,
   UpdateStockAndFlows,
+  UpdateCloudAndFlow,
   UpdateFlow,
   moveSegment,
   findClickedSegment,
@@ -1424,6 +1425,837 @@ describe('Flow routing', () => {
       const points = List<Point>();
       const segments = getSegments(points);
       expect(segments.length).toBe(0);
+    });
+  });
+
+  describe('UpdateCloudAndFlow - multi-segment flows', () => {
+    it('should not move valve on interior segment when arrowhead moves vertically', () => {
+      // 3-point L-shaped flow: source -> corner -> arrowhead (cloud)
+      // Segment 0 is horizontal (source to corner), valve is on segment 0
+      // Segment 1 is vertical (corner to arrowhead)
+      // Moving the arrowhead vertically should NOT move the valve, since it's
+      // on segment 0 (the horizontal segment) which doesn't change.
+      const sourceUid = 1;
+      const cloudUid = 3;
+      const sourceX = 100;
+      const sourceEdgeX = sourceX + StockWidth / 2;
+      const cornerX = 200;
+      const cornerY = 100;
+      const arrowheadX = cornerX;
+      const arrowheadY = 200;
+
+      // Valve at (150, 100) on the horizontal segment
+      const valveX = 150;
+      const valveY = cornerY;
+
+      const flow = makeFlow(flowUid, valveX, valveY, [
+        { x: sourceEdgeX, y: cornerY, attachedToUid: sourceUid }, // source edge
+        { x: cornerX, y: cornerY }, // corner
+        { x: arrowheadX, y: arrowheadY, attachedToUid: cloudUid }, // arrowhead
+      ]);
+
+      // Cloud at arrowhead position
+      const cloud = makeCloud(cloudUid, flowUid, arrowheadX, arrowheadY);
+
+      // Move arrowhead down by 50 (moveDelta is inverted, so delta.y = 50 moves down)
+      // The original cloud position is (200, 200), new position will be (200, 250)
+      const moveDelta = { x: 0, y: -50 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Valve should NOT have moved vertically since it's on a horizontal segment
+      // that wasn't affected by the vertical arrowhead movement
+      expect(newFlow.cx).toBe(valveX);
+      expect(newFlow.cy).toBe(valveY);
+
+      // Cloud should have moved
+      expect(newCloud.cy).toBe(arrowheadY + 50);
+    });
+
+    it('should preserve valve position on segment 0 when arrowhead segment changes', () => {
+      // Same setup as above, but testing that valve fraction is preserved if
+      // the arrowhead movement affects segment 0
+      const sourceUid = 1;
+      const cloudUid = 3;
+      const sourceX = 100;
+      const sourceEdgeX = sourceX + StockWidth / 2;
+      const cornerX = 200;
+      const cornerY = 100;
+      const arrowheadX = cornerX;
+      const arrowheadY = 200;
+
+      // Valve at corner on the horizontal segment
+      const valveX = cornerX;
+      const valveY = cornerY;
+
+      const flow = makeFlow(flowUid, valveX, valveY, [
+        { x: sourceEdgeX, y: cornerY, attachedToUid: sourceUid },
+        { x: cornerX, y: cornerY },
+        { x: arrowheadX, y: arrowheadY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, arrowheadX, arrowheadY);
+
+      // Move arrowhead vertically
+      const moveDelta = { x: 0, y: -50 };
+      const [, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Valve on segment 0 should stay put
+      expect(newFlow.cy).toBe(valveY);
+    });
+
+    it('should update valve when it is on the segment adjacent to the moving arrowhead', () => {
+      // 3-point L-shaped flow with valve on segment 1 (adjacent to arrowhead)
+      const sourceUid = 1;
+      const cloudUid = 3;
+      const sourceX = 100;
+      const sourceEdgeX = sourceX + StockWidth / 2;
+      const cornerX = 200;
+      const cornerY = 100;
+      const arrowheadX = cornerX;
+      const arrowheadY = 200;
+
+      // Valve at (200, 150) on the vertical segment (segment 1)
+      const valveX = cornerX;
+      const valveY = 150;
+
+      const flow = makeFlow(flowUid, valveX, valveY, [
+        { x: sourceEdgeX, y: cornerY, attachedToUid: sourceUid },
+        { x: cornerX, y: cornerY },
+        { x: arrowheadX, y: arrowheadY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, arrowheadX, arrowheadY);
+
+      // Move arrowhead down by 50
+      const moveDelta = { x: 0, y: -50 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Valve is on segment 1 (the segment adjacent to arrowhead), so it should
+      // preserve its fractional position. Original segment: corner(200,100) to
+      // arrowhead(200,200), length=100. Valve at (200,150) is 50% along.
+      // New segment: corner(200,100) to arrowhead(200,250), length=150.
+      // New valve should be at 50% = (200, 100 + 0.5*150) = (200, 175)
+      expect(newFlow.cx).toBe(valveX);
+      expect(newFlow.cy).toBeCloseTo(175, 0);
+
+      // Cloud should have moved down
+      expect(newCloud.cy).toBe(250);
+    });
+  });
+
+  describe('UpdateCloudAndFlow - perpendicular offset', () => {
+    it('should create L-shape when cloud dragged perpendicular to horizontal 2-point flow', () => {
+      // 2-point horizontal flow: stock -> cloud
+      // Drag cloud upward (perpendicular) -> should create 3-point L-shape
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockX = 100;
+      const stockEdgeX = stockX + StockWidth / 2;
+      const cloudX = 200;
+      const flowY = 100;
+
+      const flow = makeFlow(flowUid, 150, flowY, [
+        { x: stockEdgeX, y: flowY, attachedToUid: stockUid },
+        { x: cloudX, y: flowY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, cloudX, flowY);
+
+      // Drag cloud up by 30 (perpendicular to horizontal flow)
+      // moveDelta is inverted, so positive y means moving up (to lower Y)
+      const moveDelta = { x: 0, y: 30 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should now be L-shaped (3 points)
+      expect(newFlow.points.size).toBe(3);
+
+      // Stock endpoint should stay fixed
+      const stockPoint = newFlow.points.get(0)!;
+      expect(stockPoint.x).toBe(stockEdgeX);
+      expect(stockPoint.y).toBe(flowY);
+      expect(stockPoint.attachedToUid).toBe(stockUid);
+
+      // Cloud endpoint should have moved up
+      const cloudPoint = newFlow.points.get(2)!;
+      expect(cloudPoint.y).toBe(flowY - 30);
+      expect(cloudPoint.attachedToUid).toBe(cloudUid);
+
+      // Corner should connect them orthogonally
+      const corner = newFlow.points.get(1)!;
+      expect(corner.y).toBe(cloudPoint.y); // same Y as cloud (horizontal to cloud)
+      expect(corner.x).toBe(stockEdgeX); // same X as stock (vertical from stock)
+
+      // Cloud position should be updated
+      expect(newCloud.cy).toBe(flowY - 30);
+    });
+
+    it('should create L-shape when cloud dragged perpendicular to vertical 2-point flow', () => {
+      // 2-point vertical flow: stock -> cloud
+      // Drag cloud leftward (perpendicular) -> should create 3-point L-shape
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockY = 100;
+      const stockEdgeY = stockY + StockHeight / 2;
+      const cloudY = 200;
+      const flowX = 100;
+
+      const flow = makeFlow(flowUid, flowX, 150, [
+        { x: flowX, y: stockEdgeY, attachedToUid: stockUid },
+        { x: flowX, y: cloudY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, flowX, cloudY);
+
+      // Drag cloud right by 30 (perpendicular to vertical flow)
+      // moveDelta is inverted, so negative x means moving right (to higher X)
+      const moveDelta = { x: -30, y: 0 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should now be L-shaped (3 points)
+      expect(newFlow.points.size).toBe(3);
+
+      // Stock endpoint should stay fixed
+      const stockPoint = newFlow.points.get(0)!;
+      expect(stockPoint.x).toBe(flowX);
+      expect(stockPoint.y).toBe(stockEdgeY);
+      expect(stockPoint.attachedToUid).toBe(stockUid);
+
+      // Cloud endpoint should have moved right
+      const cloudPoint = newFlow.points.get(2)!;
+      expect(cloudPoint.x).toBe(flowX + 30);
+      expect(cloudPoint.attachedToUid).toBe(cloudUid);
+
+      // Corner should connect them orthogonally
+      const corner = newFlow.points.get(1)!;
+      expect(corner.x).toBe(cloudPoint.x); // same X as cloud (vertical to cloud)
+      expect(corner.y).toBe(stockEdgeY); // same Y as stock (horizontal from stock)
+
+      // Cloud position should be updated
+      expect(newCloud.cx).toBe(flowX + 30);
+    });
+
+    it('should not create L-shape for small perpendicular movements (threshold)', () => {
+      // 2-point horizontal flow: stock -> cloud
+      // Small perpendicular movement < 5px should NOT trigger L-shape
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockX = 100;
+      const stockEdgeX = stockX + StockWidth / 2;
+      const cloudX = 200;
+      const flowY = 100;
+
+      const flow = makeFlow(flowUid, 150, flowY, [
+        { x: stockEdgeX, y: flowY, attachedToUid: stockUid },
+        { x: cloudX, y: flowY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, cloudX, flowY);
+
+      // Small perpendicular movement (3px, below threshold of 5px)
+      const moveDelta = { x: 0, y: 3 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should remain straight (2 points)
+      expect(newFlow.points.size).toBe(2);
+
+      // Cloud should still be at the same Y (constrained to flow axis)
+      expect(newCloud.cy).toBe(flowY);
+    });
+
+    it('should not create L-shape when parallel movement dominates', () => {
+      // 2-point horizontal flow: stock -> cloud
+      // If parallel movement > perpendicular, don't reroute
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockX = 100;
+      const stockEdgeX = stockX + StockWidth / 2;
+      const cloudX = 200;
+      const flowY = 100;
+
+      const flow = makeFlow(flowUid, 150, flowY, [
+        { x: stockEdgeX, y: flowY, attachedToUid: stockUid },
+        { x: cloudX, y: flowY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, cloudX, flowY);
+
+      // Parallel movement (30px) dominates perpendicular (10px)
+      const moveDelta = { x: -30, y: 10 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should remain straight (2 points) since parallel dominates
+      expect(newFlow.points.size).toBe(2);
+
+      // Cloud should have moved along the flow axis
+      expect(newCloud.cx).toBe(cloudX + 30);
+      expect(newCloud.cy).toBe(flowY); // constrained to horizontal
+    });
+
+    it('should handle source cloud perpendicular offset (cloud at first point)', () => {
+      // 2-point horizontal flow: cloud -> stock
+      // Drag cloud perpendicular -> should create L-shape with corner near stock
+      const stockUid = 1;
+      const cloudUid = 3;
+      const cloudX = 100;
+      const stockX = 200;
+      const stockEdgeX = stockX - StockWidth / 2;
+      const flowY = 100;
+
+      const flow = makeFlow(flowUid, 150, flowY, [
+        { x: cloudX, y: flowY, attachedToUid: cloudUid },
+        { x: stockEdgeX, y: flowY, attachedToUid: stockUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, cloudX, flowY);
+
+      // Drag cloud up by 30 (perpendicular to horizontal flow)
+      const moveDelta = { x: 0, y: 30 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should now be L-shaped (3 points)
+      expect(newFlow.points.size).toBe(3);
+
+      // Cloud endpoint should have moved up
+      const cloudPoint = newFlow.points.get(0)!;
+      expect(cloudPoint.y).toBe(flowY - 30);
+      expect(cloudPoint.attachedToUid).toBe(cloudUid);
+
+      // Stock endpoint should stay fixed
+      const stockPoint = newFlow.points.get(2)!;
+      expect(stockPoint.x).toBe(stockEdgeX);
+      expect(stockPoint.y).toBe(flowY);
+      expect(stockPoint.attachedToUid).toBe(stockUid);
+
+      // Corner should connect them orthogonally
+      const corner = newFlow.points.get(1)!;
+      expect(corner.y).toBe(cloudPoint.y); // same Y as cloud (horizontal from cloud)
+      expect(corner.x).toBe(stockEdgeX); // same X as stock (vertical to stock)
+
+      // Cloud position should be updated
+      expect(newCloud.cy).toBe(flowY - 30);
+    });
+
+    it('should update adjacent corner when dragging cloud on multi-segment flow', () => {
+      // 3-point L-shaped flow: stock -> corner -> cloud
+      // Dragging cloud should update the adjacent corner while preserving orthogonality
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockX = 100;
+      const stockEdgeX = stockX + StockWidth / 2;
+      const cornerX = 200;
+      const cornerY = 100;
+      const cloudX = cornerX;
+      const cloudY = 200;
+
+      const flow = makeFlow(flowUid, 150, cornerY, [
+        { x: stockEdgeX, y: cornerY, attachedToUid: stockUid },
+        { x: cornerX, y: cornerY },
+        { x: cloudX, y: cloudY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, cloudX, cloudY);
+
+      // Drag cloud horizontally (perpendicular to the vertical segment)
+      const moveDelta = { x: -30, y: 0 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should still be L-shaped (3 points)
+      expect(newFlow.points.size).toBe(3);
+
+      // Stock endpoint should stay fixed
+      const stockPoint = newFlow.points.get(0)!;
+      expect(stockPoint.x).toBe(stockEdgeX);
+      expect(stockPoint.y).toBe(cornerY);
+
+      // Cloud should have moved horizontally
+      const cloudPoint = newFlow.points.get(2)!;
+      expect(cloudPoint.x).toBe(cloudX + 30);
+      expect(cloudPoint.y).toBe(cloudY);
+
+      // Corner should be updated to maintain orthogonality
+      const corner = newFlow.points.get(1)!;
+      expect(corner.x).toBe(cloudX + 30); // X updated to match cloud
+      expect(corner.y).toBe(cornerY); // Y preserved to maintain horizontal first segment
+
+      // Cloud position should be updated
+      expect(newCloud.cx).toBe(cloudX + 30);
+    });
+
+    it('should preserve valve fractional position on multi-segment flow when cloud moves', () => {
+      // 3-point L-shaped flow with valve on the vertical segment (segment 1)
+      // When cloud moves, valve's fractional position along its segment should be preserved
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockX = 100;
+      const stockEdgeX = stockX + StockWidth / 2;
+      const cornerX = 200;
+      const cornerY = 100;
+      const cloudX = cornerX;
+      const cloudY = 200;
+
+      // Valve at (200, 150) - 50% along the vertical segment from corner (200,100) to cloud (200,200)
+      const valveX = cornerX;
+      const valveY = 150;
+
+      const flow = makeFlow(flowUid, valveX, valveY, [
+        { x: stockEdgeX, y: cornerY, attachedToUid: stockUid },
+        { x: cornerX, y: cornerY },
+        { x: cloudX, y: cloudY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, cloudX, cloudY);
+
+      // Move cloud down by 50 (extending the vertical segment)
+      const moveDelta = { x: 0, y: -50 };
+      const [, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Valve was at 50% of segment 1 (corner to cloud)
+      // Original segment: (200, 100) to (200, 200), length 100, valve at y=150 (50%)
+      // New segment: (200, 100) to (200, 250), length 150, valve should be at 50% = y=175
+      expect(newFlow.cx).toBe(valveX);
+      expect(newFlow.cy).toBeCloseTo(175, 0);
+    });
+
+    it('should keep multi-segment endpoints on stock edge when dragging stock-attached source', () => {
+      // 3-point L-shaped flow: stock -> corner -> cloud
+      // When dragging the source (attached to stock), the endpoint should stay on
+      // the stock's edge, not shift to the stock's center.
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockX = 100;
+      const stockY = 100;
+      const stockEdgeX = stockX + StockWidth / 2; // Right edge of stock
+      const cornerX = 200;
+      const cornerY = stockY; // Horizontal segment from stock edge to corner
+      const cloudX = cornerX;
+      const cloudY = 200;
+
+      // Flow starts at stock's right edge, goes horizontal to corner, then vertical to cloud
+      const flow = makeFlow(flowUid, 150, cornerY, [
+        { x: stockEdgeX, y: cornerY, attachedToUid: stockUid },
+        { x: cornerX, y: cornerY },
+        { x: cloudX, y: cloudY, attachedToUid: cloudUid },
+      ]);
+
+      // Create a stock (not a cloud) to simulate dragging the source end
+      const stock = makeStock(stockUid, stockX, stockY);
+
+      // Apply zero movement - this simulates "dropping back on the same stock"
+      // The endpoint should stay on the stock edge, not shift to stock center
+      const moveDelta = { x: 0, y: 0 };
+      const [, newFlow] = UpdateCloudAndFlow(stock, flow, moveDelta);
+
+      // The source endpoint should still be on the stock's right edge
+      const sourcePoint = newFlow.points.get(0)!;
+      expect(sourcePoint.x).toBe(stockEdgeX); // Should be on edge, not stockX (center)
+      expect(sourcePoint.y).toBe(cornerY);
+
+      // Corner should be unchanged
+      const corner = newFlow.points.get(1)!;
+      expect(corner.x).toBe(cornerX);
+      expect(corner.y).toBe(cornerY);
+    });
+
+    it('should keep multi-segment endpoints on stock edge when dragging stock-attached sink', () => {
+      // 3-point L-shaped flow: cloud -> corner -> stock
+      // When dragging the sink (attached to stock), the endpoint should stay on
+      // the stock's edge, not shift to the stock's center.
+      const stockUid = 1;
+      const cloudUid = 3;
+      const cloudX = 100;
+      const cloudY = 100;
+      const cornerX = 200;
+      const cornerY = cloudY; // Horizontal segment from cloud to corner
+      const stockX = 200;
+      const stockY = 200;
+      const stockEdgeY = stockY - StockHeight / 2; // Top edge of stock
+
+      // Flow starts at cloud, goes horizontal to corner, then vertical to stock's top edge
+      const flow = makeFlow(flowUid, 150, cornerY, [
+        { x: cloudX, y: cloudY, attachedToUid: cloudUid },
+        { x: cornerX, y: cornerY },
+        { x: cornerX, y: stockEdgeY, attachedToUid: stockUid },
+      ]);
+
+      // Create a stock (not a cloud) to simulate dragging the sink end
+      const stock = makeStock(stockUid, stockX, stockY);
+
+      // Apply zero movement - this simulates "dropping back on the same stock"
+      const moveDelta = { x: 0, y: 0 };
+      const [, newFlow] = UpdateCloudAndFlow(stock, flow, moveDelta);
+
+      // The sink endpoint should still be on the stock's top edge
+      const sinkPoint = newFlow.points.get(2)!;
+      expect(sinkPoint.x).toBe(cornerX);
+      expect(sinkPoint.y).toBe(stockEdgeY); // Should be on edge, not stockY (center)
+
+      // Corner should be unchanged
+      const corner = newFlow.points.get(1)!;
+      expect(corner.x).toBe(cornerX);
+      expect(corner.y).toBe(cornerY);
+    });
+
+    it('should apply movement delta to existing endpoint position, not stock center', () => {
+      // When dragging a stock-attached endpoint by some delta, the new position
+      // should be computed from the current endpoint position (on the edge),
+      // not from the stock's center.
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockX = 100;
+      const stockY = 100;
+      const stockEdgeX = stockX + StockWidth / 2;
+      const cornerX = 200;
+      const cornerY = stockY;
+      const cloudX = cornerX;
+      const cloudY = 200;
+
+      const flow = makeFlow(flowUid, 150, cornerY, [
+        { x: stockEdgeX, y: cornerY, attachedToUid: stockUid },
+        { x: cornerX, y: cornerY },
+        { x: cloudX, y: cloudY, attachedToUid: cloudUid },
+      ]);
+
+      const stock = makeStock(stockUid, stockX, stockY);
+
+      // Drag the source down by 20 pixels
+      const moveDelta = { x: 0, y: -20 };
+      const [, newFlow] = UpdateCloudAndFlow(stock, flow, moveDelta);
+
+      // The source endpoint should move from the edge position, not the center
+      // Original position: (stockEdgeX, cornerY) = (130, 100)
+      // With moveDelta.y = -20 (inverted, so +20 to Y): new Y should be 120
+      const sourcePoint = newFlow.points.get(0)!;
+      expect(sourcePoint.x).toBe(stockEdgeX); // X unchanged for vertical movement
+      expect(sourcePoint.y).toBe(cornerY + 20); // Y moved from edge position
+
+      // Corner Y should also update to maintain orthogonality (horizontal segment)
+      const corner = newFlow.points.get(1)!;
+      expect(corner.y).toBe(cornerY + 20);
+    });
+  });
+
+  describe('UpdateCloudAndFlow - degenerate flow creation', () => {
+    // When a flow is first created, both endpoints are at the same position.
+    // The segment is both horizontal AND vertical (zero length).
+    // The drag direction should determine the flow axis.
+
+    it('should create vertical flow when dragging mostly downward from degenerate start', () => {
+      const stockUid = 1;
+      const cloudUid = 3;
+      const startX = 100;
+      const startY = 100;
+
+      // Degenerate flow: both points at same position
+      const flow = makeFlow(flowUid, startX, startY, [
+        { x: startX, y: startY, attachedToUid: stockUid },
+        { x: startX, y: startY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, startX, startY);
+
+      // Drag mostly downward (negative moveDelta.y means moving down in screen coords)
+      // moveDelta is inverted: negative y means moving to higher Y
+      const moveDelta = { x: -5, y: -50 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should remain straight (2 points) and be vertical
+      expect(newFlow.points.size).toBe(2);
+
+      // Both points should have the same X (vertical flow)
+      const firstPt = newFlow.points.get(0)!;
+      const lastPt = newFlow.points.get(1)!;
+      expect(firstPt.x).toBe(lastPt.x);
+
+      // Cloud should have moved down (Y increased)
+      expect(newCloud.cy).toBe(startY + 50);
+    });
+
+    it('should create vertical flow when dragging mostly upward from degenerate start', () => {
+      const stockUid = 1;
+      const cloudUid = 3;
+      const startX = 100;
+      const startY = 100;
+
+      const flow = makeFlow(flowUid, startX, startY, [
+        { x: startX, y: startY, attachedToUid: stockUid },
+        { x: startX, y: startY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, startX, startY);
+
+      // Drag mostly upward (positive moveDelta.y means moving up)
+      const moveDelta = { x: 5, y: 50 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should remain straight and be vertical
+      expect(newFlow.points.size).toBe(2);
+
+      const firstPt = newFlow.points.get(0)!;
+      const lastPt = newFlow.points.get(1)!;
+      expect(firstPt.x).toBe(lastPt.x);
+
+      // Cloud should have moved up (Y decreased)
+      expect(newCloud.cy).toBe(startY - 50);
+    });
+
+    it('should create horizontal flow when dragging mostly rightward from degenerate start', () => {
+      const stockUid = 1;
+      const cloudUid = 3;
+      const startX = 100;
+      const startY = 100;
+
+      const flow = makeFlow(flowUid, startX, startY, [
+        { x: startX, y: startY, attachedToUid: stockUid },
+        { x: startX, y: startY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, startX, startY);
+
+      // Drag mostly rightward (negative moveDelta.x means moving right)
+      const moveDelta = { x: -50, y: -5 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should remain straight and be horizontal
+      expect(newFlow.points.size).toBe(2);
+
+      const firstPt = newFlow.points.get(0)!;
+      const lastPt = newFlow.points.get(1)!;
+      expect(firstPt.y).toBe(lastPt.y);
+
+      // Cloud should have moved right (X increased)
+      expect(newCloud.cx).toBe(startX + 50);
+    });
+
+    it('should create horizontal flow when dragging mostly leftward from degenerate start', () => {
+      const stockUid = 1;
+      const cloudUid = 3;
+      const startX = 100;
+      const startY = 100;
+
+      const flow = makeFlow(flowUid, startX, startY, [
+        { x: startX, y: startY, attachedToUid: stockUid },
+        { x: startX, y: startY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, startX, startY);
+
+      // Drag mostly leftward (positive moveDelta.x means moving left)
+      const moveDelta = { x: 50, y: 5 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Flow should remain straight and be horizontal
+      expect(newFlow.points.size).toBe(2);
+
+      const firstPt = newFlow.points.get(0)!;
+      const lastPt = newFlow.points.get(1)!;
+      expect(firstPt.y).toBe(lastPt.y);
+
+      // Cloud should have moved left (X decreased)
+      expect(newCloud.cx).toBe(startX - 50);
+    });
+  });
+
+  describe('UpdateCloudAndFlow - stock edge recomputation', () => {
+    it('should recompute stock edge when reattaching to stock on opposite side of corner', () => {
+      // Scenario: L-shaped flow with source on left, corner in middle, sink on right
+      // Original source stock is LEFT of corner (endpoint on stock's right edge)
+      // New source stock is RIGHT of corner (endpoint should be on stock's LEFT edge)
+      //
+      // Before:  [Stock1] ---> corner
+      //                          |
+      //                          v
+      //                        sink
+      //
+      // After:   corner <--- [Stock2]
+      //            |
+      //            v
+      //          sink
+      //
+      // The endpoint should be on the LEFT edge of Stock2, not preserve the
+      // "right edge" offset from Stock1.
+
+      const oldStockUid = 1;
+      const sinkUid = 3;
+
+      // Old stock at (100, 100), endpoint on right edge at (100 + StockWidth/2, 100)
+      const oldStockX = 100;
+      const oldStockY = 100;
+      const oldStockRightEdge = oldStockX + StockWidth / 2;
+
+      // Corner at (200, 100) - to the right of old stock
+      const cornerX = 200;
+      const cornerY = oldStockY;
+
+      // Sink at (200, 200) - below corner
+      const sinkX = cornerX;
+      const sinkY = 200;
+
+      // New stock at (300, 100) - to the RIGHT of the corner
+      // The flow should exit from its LEFT edge (toward the corner)
+      const newStockX = 300;
+      const newStockY = 100;
+      const newStockLeftEdge = newStockX - StockWidth / 2;
+
+      // Create the flow: source -> corner -> sink
+      const flow = makeFlow(flowUid, 150, 100, [
+        { x: oldStockRightEdge, y: oldStockY, attachedToUid: oldStockUid },
+        { x: cornerX, y: cornerY, attachedToUid: undefined },
+        { x: sinkX, y: sinkY, attachedToUid: sinkUid },
+      ]);
+
+      // Create the stock at OLD coordinates, as Editor.tsx does when calling UpdateCloudAndFlow.
+      // Editor.tsx resets the stock back to old coordinates before calling the function.
+      const stock = new StockViewElement({
+        uid: oldStockUid, // Same UID since we're simulating reattachment
+        name: 'Stock',
+        ident: 'stock',
+        var: undefined,
+        x: oldStockX, // Passed with OLD coordinates
+        y: oldStockY,
+        labelSide: 'center',
+        isZeroRadius: false,
+        inflows: List([]),
+        outflows: List([flowUid]),
+      });
+
+      // moveDelta = oldCenter - newCenter (as computed in Editor.tsx)
+      // old: (100, 100), new: (300, 100) -> moveDelta = (100 - 300, 100 - 100) = (-200, 0)
+      // So newCenter = cloud.cx - moveDelta.x = 100 - (-200) = 300
+      const moveDelta = { x: oldStockX - newStockX, y: oldStockY - newStockY };
+
+      const [, newFlow] = UpdateCloudAndFlow(stock, flow, moveDelta);
+
+      // The endpoint should be on the LEFT edge of the new stock (facing the corner)
+      const firstPt = newFlow.points.get(0)!;
+      expect(firstPt.x).toBe(newStockLeftEdge);
+      expect(firstPt.y).toBe(newStockY);
+
+      // The corner should maintain orthogonality with the new endpoint
+      const secondPt = newFlow.points.get(1)!;
+      expect(secondPt.y).toBe(firstPt.y); // Same Y for horizontal segment
+    });
+
+    it('should recompute stock edge for vertical segments when reattaching', () => {
+      // Similar test but with a vertical first segment
+      // Source stock above corner, new stock below corner
+
+      const oldStockUid = 1;
+      const sinkUid = 3;
+
+      // Old stock at (100, 50), endpoint on bottom edge
+      const oldStockX = 100;
+      const oldStockY = 50;
+      const oldStockBottomEdge = oldStockY + StockHeight / 2;
+
+      // Corner at (100, 150) - below old stock
+      const cornerX = oldStockX;
+      const cornerY = 150;
+
+      // Sink at (200, 150) - to the right of corner
+      const sinkX = 200;
+      const sinkY = cornerY;
+
+      // New stock at (100, 250) - BELOW the corner
+      // The flow should exit from its TOP edge (toward the corner)
+      const newStockX = 100;
+      const newStockY = 250;
+      const newStockTopEdge = newStockY - StockHeight / 2;
+
+      // Create the flow: source -> corner -> sink
+      const flow = makeFlow(flowUid, 100, 100, [
+        { x: oldStockX, y: oldStockBottomEdge, attachedToUid: oldStockUid },
+        { x: cornerX, y: cornerY, attachedToUid: undefined },
+        { x: sinkX, y: sinkY, attachedToUid: sinkUid },
+      ]);
+
+      // Create the stock at OLD coordinates, as Editor.tsx does when calling UpdateCloudAndFlow.
+      const stock = new StockViewElement({
+        uid: oldStockUid,
+        name: 'Stock',
+        ident: 'stock',
+        var: undefined,
+        x: oldStockX, // Passed with OLD coordinates
+        y: oldStockY,
+        labelSide: 'center',
+        isZeroRadius: false,
+        inflows: List([]),
+        outflows: List([flowUid]),
+      });
+
+      // moveDelta = oldCenter - newCenter (as computed in Editor.tsx)
+      // old: (100, 50), new: (100, 250) -> moveDelta = (0, -200)
+      // So newCenterY = cloud.cy - moveDelta.y = 50 - (-200) = 250
+      const moveDelta = { x: oldStockX - newStockX, y: oldStockY - newStockY };
+
+      const [, newFlow] = UpdateCloudAndFlow(stock, flow, moveDelta);
+
+      // The endpoint should be on the TOP edge of the new stock (facing the corner)
+      const firstPt = newFlow.points.get(0)!;
+      expect(firstPt.x).toBe(newStockX);
+      expect(firstPt.y).toBe(newStockTopEdge);
+
+      // The corner should maintain orthogonality with the new endpoint
+      const secondPt = newFlow.points.get(1)!;
+      expect(secondPt.x).toBe(firstPt.x); // Same X for vertical segment
+    });
+
+    it('should treat isZeroRadius stocks as clouds (simple translation)', () => {
+      // When detaching a flow from a stock, Canvas creates a temporary placeholder
+      // with isZeroRadius: true. This should be treated as a cloud, not go through
+      // stock-edge logic, so the endpoint tracks the drag position directly.
+
+      const stockUid = 1;
+      const sinkUid = 3;
+
+      // Stock at (100, 100), endpoint on right edge
+      const stockX = 100;
+      const stockY = 100;
+      const stockRightEdge = stockX + StockWidth / 2;
+
+      // Corner at (200, 100)
+      const cornerX = 200;
+      const cornerY = stockY;
+
+      // Sink at (200, 200)
+      const sinkX = cornerX;
+      const sinkY = 200;
+
+      // Create the flow: source -> corner -> sink
+      const flow = makeFlow(flowUid, 150, 100, [
+        { x: stockRightEdge, y: stockY, attachedToUid: stockUid },
+        { x: cornerX, y: cornerY, attachedToUid: undefined },
+        { x: sinkX, y: sinkY, attachedToUid: sinkUid },
+      ]);
+
+      // Create a zero-radius placeholder (simulating drag detachment)
+      // Position at (150, 80) - somewhere the user is dragging to
+      const dragX = 150;
+      const dragY = 80;
+      const zeroRadiusPlaceholder = new StockViewElement({
+        uid: stockUid,
+        name: 'DragPlaceholder',
+        ident: 'drag_placeholder',
+        var: undefined,
+        x: stockX, // OLD position (as passed by Editor.tsx)
+        y: stockY,
+        labelSide: 'center',
+        isZeroRadius: true, // Key: this makes it a drag placeholder
+        inflows: List([]),
+        outflows: List([flowUid]),
+      });
+
+      // moveDelta = oldCenter - newCenter
+      // Dragging from (100, 100) to (150, 80) -> moveDelta = (100-150, 100-80) = (-50, 20)
+      const moveDelta = { x: stockX - dragX, y: stockY - dragY };
+
+      const [, newFlow] = UpdateCloudAndFlow(zeroRadiusPlaceholder, flow, moveDelta);
+
+      // For isZeroRadius, endpoint should simply translate (like a cloud)
+      // newX = stockRightEdge - moveDelta.x = 122.5 - (-50) = 172.5
+      // newY = stockY - moveDelta.y = 100 - 20 = 80
+      const firstPt = newFlow.points.get(0)!;
+      expect(firstPt.x).toBe(stockRightEdge - moveDelta.x);
+      expect(firstPt.y).toBe(stockY - moveDelta.y);
     });
   });
 });

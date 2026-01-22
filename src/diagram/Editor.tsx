@@ -574,6 +574,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     cursorMoveDelta: Point,
     fauxTargetCenter: Point | undefined,
     inCreation: boolean,
+    isSourceAttach?: boolean,
   ) => {
     let { selection } = this.state;
     const view = defined(this.getView());
@@ -582,6 +583,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     let stockDetachingIdent: string | undefined;
     let stockAttachingIdent: string | undefined;
     let sourceStockIdent: string | undefined;
+    let sourceStockDetachingIdent: string | undefined;
+    let sourceStockAttachingIdent: string | undefined;
     let uidToDelete: number | undefined;
     let updatedCloud: ViewElement | undefined;
     let newClouds = List<ViewElement>();
@@ -604,6 +607,78 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         return element;
       }
 
+      if (isSourceAttach) {
+        // Handle source attachment (first point)
+        const oldFrom = getUid(defined(defined(element.points.first()).attachedToUid));
+        let newCloud = false;
+        let updateCloud = false;
+        let from: StockViewElement | CloudViewElement;
+
+        if (targetUid) {
+          if (oldFrom instanceof CloudViewElement) {
+            uidToDelete = oldFrom.uid;
+          }
+          const newTarget = getUid(targetUid);
+          if (!(newTarget instanceof StockViewElement || newTarget instanceof CloudViewElement)) {
+            throw new Error(`new target isn't a stock or cloud (uid ${newTarget.uid})`);
+          }
+          from = newTarget;
+        } else if (oldFrom instanceof CloudViewElement) {
+          updateCloud = true;
+          from = oldFrom.merge({
+            x: oldFrom.cx - cursorMoveDelta.x,
+            y: oldFrom.cy - cursorMoveDelta.y,
+          });
+        } else {
+          // Detaching from a stock - create a new cloud at the release position.
+          // Use the same approach as the sink path: oldFrom.cx - cursorMoveDelta.x/y
+          // This ensures the cloud appears where the user released, not where they started.
+          newCloud = true;
+          from = new CloudViewElement({
+            uid: nextUid++,
+            x: oldFrom.cx - cursorMoveDelta.x,
+            y: oldFrom.cy - cursorMoveDelta.y,
+            flowUid: flow.uid,
+            isZeroRadius: false,
+          });
+        }
+
+        if (oldFrom.uid !== from.uid) {
+          if (oldFrom instanceof StockViewElement) {
+            sourceStockDetachingIdent = oldFrom.ident;
+          }
+          if (from instanceof StockViewElement) {
+            sourceStockAttachingIdent = from.ident;
+          }
+        }
+
+        const moveDelta = {
+          x: oldFrom.cx - from.cx,
+          y: oldFrom.cy - from.cy,
+        };
+        const points = element.points.map((point) => {
+          if (point.attachedToUid !== oldFrom.uid) {
+            return point;
+          }
+          return point.set('attachedToUid', from.uid);
+        });
+        from = (from as StockViewElement).merge({
+          x: oldFrom.cx,
+          y: oldFrom.cy,
+        });
+        element = element.set('points', points);
+
+        [from, element] = UpdateCloudAndFlow(from, element as FlowViewElement, moveDelta);
+        if (newCloud) {
+          newClouds = newClouds.push(from);
+        } else if (updateCloud) {
+          updatedCloud = from;
+        }
+
+        return element;
+      }
+
+      // Handle sink attachment (last point) - original behavior
       const oldTo = getUid(defined(defined(element.points.last()).attachedToUid));
       let newCloud = false;
       let updateCloud = false;
@@ -782,6 +857,43 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       }
     }
 
+    // Handle source stock attaching (outflows)
+    if (sourceStockAttachingIdent) {
+      const model = defined(this.getModel());
+      const stockVar = model.variables.get(sourceStockAttachingIdent);
+      if (stockVar instanceof StockVar) {
+        ops.push({
+          type: 'upsertStock',
+          payload: {
+            stock: {
+              name: stockVar.ident,
+              inflows: stockVar.inflows.toArray(),
+              outflows: stockVar.outflows.push(flow.ident).toArray(),
+            },
+          },
+        });
+      }
+    }
+
+    // Handle source stock detaching (outflows)
+    if (sourceStockDetachingIdent) {
+      const model = defined(this.getModel());
+      const stockVar = model.variables.get(sourceStockDetachingIdent);
+      if (stockVar instanceof StockVar) {
+        ops.push({
+          type: 'upsertStock',
+          payload: {
+            stock: {
+              name: stockVar.ident,
+              inflows: stockVar.inflows.toArray(),
+              outflows: stockVar.outflows.filter((f) => f !== flow.ident).toArray(),
+            },
+          },
+        });
+      }
+    }
+
+    // Handle sink stock attaching (inflows)
     if (stockAttachingIdent) {
       const model = defined(this.getModel());
       const stockVar = model.variables.get(stockAttachingIdent);
@@ -799,6 +911,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       }
     }
 
+    // Handle sink stock detaching (inflows)
     if (stockDetachingIdent) {
       const model = defined(this.getModel());
       const stockVar = model.variables.get(stockDetachingIdent);
