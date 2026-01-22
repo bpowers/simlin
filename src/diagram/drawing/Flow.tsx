@@ -598,7 +598,10 @@ export function UpdateCloudAndFlow(
   //
   // IMPORTANT: Callers pass the stock with OLD coordinates and moveDelta = oldCenter - newCenter.
   // So the NEW stock center is: cloud.cx - moveDelta.x, cloud.cy - moveDelta.y
-  if (cloud instanceof StockViewElement) {
+  //
+  // Skip this branch for isZeroRadius stocks - these are temporary drag placeholders that
+  // Canvas creates when detaching a flow from a stock. They should be treated as clouds.
+  if (cloud instanceof StockViewElement && !cloud.isZeroRadius) {
     const isHorizontalSegment = adjacentSegment.isHorizontal;
 
     // Compute the NEW stock center (where it's being moved/reattached to)

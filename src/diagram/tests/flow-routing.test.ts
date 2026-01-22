@@ -2198,5 +2198,64 @@ describe('Flow routing', () => {
       const secondPt = newFlow.points.get(1)!;
       expect(secondPt.x).toBe(firstPt.x); // Same X for vertical segment
     });
+
+    it('should treat isZeroRadius stocks as clouds (simple translation)', () => {
+      // When detaching a flow from a stock, Canvas creates a temporary placeholder
+      // with isZeroRadius: true. This should be treated as a cloud, not go through
+      // stock-edge logic, so the endpoint tracks the drag position directly.
+
+      const stockUid = 1;
+      const sinkUid = 3;
+
+      // Stock at (100, 100), endpoint on right edge
+      const stockX = 100;
+      const stockY = 100;
+      const stockRightEdge = stockX + StockWidth / 2;
+
+      // Corner at (200, 100)
+      const cornerX = 200;
+      const cornerY = stockY;
+
+      // Sink at (200, 200)
+      const sinkX = cornerX;
+      const sinkY = 200;
+
+      // Create the flow: source -> corner -> sink
+      const flow = makeFlow(flowUid, 150, 100, [
+        { x: stockRightEdge, y: stockY, attachedToUid: stockUid },
+        { x: cornerX, y: cornerY, attachedToUid: undefined },
+        { x: sinkX, y: sinkY, attachedToUid: sinkUid },
+      ]);
+
+      // Create a zero-radius placeholder (simulating drag detachment)
+      // Position at (150, 80) - somewhere the user is dragging to
+      const dragX = 150;
+      const dragY = 80;
+      const zeroRadiusPlaceholder = new StockViewElement({
+        uid: stockUid,
+        name: 'DragPlaceholder',
+        ident: 'drag_placeholder',
+        var: undefined,
+        x: stockX, // OLD position (as passed by Editor.tsx)
+        y: stockY,
+        labelSide: 'center',
+        isZeroRadius: true, // Key: this makes it a drag placeholder
+        inflows: List([]),
+        outflows: List([flowUid]),
+      });
+
+      // moveDelta = oldCenter - newCenter
+      // Dragging from (100, 100) to (150, 80) -> moveDelta = (100-150, 100-80) = (-50, 20)
+      const moveDelta = { x: stockX - dragX, y: stockY - dragY };
+
+      const [, newFlow] = UpdateCloudAndFlow(zeroRadiusPlaceholder, flow, moveDelta);
+
+      // For isZeroRadius, endpoint should simply translate (like a cloud)
+      // newX = stockRightEdge - moveDelta.x = 122.5 - (-50) = 172.5
+      // newY = stockY - moveDelta.y = 100 - 20 = 80
+      const firstPt = newFlow.points.get(0)!;
+      expect(firstPt.x).toBe(stockRightEdge - moveDelta.x);
+      expect(firstPt.y).toBe(stockY - moveDelta.y);
+    });
   });
 });
