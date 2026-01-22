@@ -722,8 +722,7 @@ export function normalizeFlowPoints(points: List<Point>): List<Point> {
     const currToNextIsVertical = curr.x === next.x;
 
     // Skip if both segments are horizontal or both are vertical (colinear)
-    if ((prevToCurrIsHorizontal && currToNextIsHorizontal) ||
-        (prevToCurrIsVertical && currToNextIsVertical)) {
+    if ((prevToCurrIsHorizontal && currToNextIsHorizontal) || (prevToCurrIsVertical && currToNextIsVertical)) {
       continue;
     }
 
@@ -896,11 +895,7 @@ const VALVE_CLAMP_MARGIN = 10;
  * @param margin Minimum distance from segment endpoints
  * @returns The new valve position preserving fractional placement
  */
-function preserveValveFraction(
-  valve: IPoint,
-  oldSeg: Segment,
-  newSeg: Segment,
-): IPoint {
+function preserveValveFraction(valve: IPoint, oldSeg: Segment, newSeg: Segment): IPoint {
   if (oldSeg.isHorizontal && newSeg.isHorizontal) {
     const oldLen = oldSeg.p2.x - oldSeg.p1.x;
     const newLen = newSeg.p2.x - newSeg.p1.x;
@@ -1271,6 +1266,7 @@ export interface FlowProps {
   isEditingName: boolean;
   isValidTarget?: boolean;
   isMovingArrow: boolean;
+  isMovingSource: boolean;
   hasWarning?: boolean;
   series: Readonly<Array<Series>> | undefined;
   onSelection: (
@@ -1279,6 +1275,7 @@ export interface FlowProps {
     isText?: boolean,
     isArrowhead?: boolean,
     segmentIndex?: number,
+    isSource?: boolean,
   ) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   source: StockViewElement | CloudViewElement;
@@ -1337,6 +1334,12 @@ export class Flow extends React.PureComponent<FlowProps> {
     this.props.onSelection(this.props.element, e, false, true);
   };
 
+  handlePointerDownSource = (e: React.PointerEvent<SVGElement>): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    this.props.onSelection(this.props.element, e, false, false, undefined, true);
+  };
+
   radius(): number {
     return AuxRadius;
   }
@@ -1375,7 +1378,8 @@ export class Flow extends React.PureComponent<FlowProps> {
   }
 
   render() {
-    const { element, isEditingName, isMovingArrow, isSelected, isValidTarget, series, sink } = this.props;
+    const { element, isEditingName, isMovingArrow, isMovingSource, isSelected, isValidTarget, series, sink } =
+      this.props;
 
     const isArrayed = element.var?.isArrayed || false;
     const arrayedOffset = isArrayed ? 3 : 0;
@@ -1477,6 +1481,39 @@ export class Flow extends React.PureComponent<FlowProps> {
       ? clsx(styles.outerSelected, 'simlin-outer-selected')
       : clsx(styles.outer, 'simlin-outer');
 
+    // Invisible hit area at the source end for grabbing the source
+    // Position it slightly into the first segment from the source point
+    const firstPt = defined(pts.get(0));
+    const secondPt = defined(pts.get(1));
+    const sourceHitSize = 20;
+
+    // Calculate position along the first segment, offset from the source
+    let sourceHitX = firstPt.x;
+    let sourceHitY = firstPt.y;
+
+    // Move hit area slightly into the segment for better UX
+    const segDx = secondPt.x - firstPt.x;
+    const segDy = secondPt.y - firstPt.y;
+    const segLen = Math.hypot(segDx, segDy);
+    if (segLen > sourceHitSize) {
+      const offsetRatio = sourceHitSize / 2 / segLen;
+      sourceHitX = firstPt.x + segDx * offsetRatio;
+      sourceHitY = firstPt.y + segDy * offsetRatio;
+    }
+
+    // Only show the source hit area when not already moving the source
+    const sourceHitArea = !isMovingSource ? (
+      <rect
+        x={sourceHitX - sourceHitSize / 2}
+        y={sourceHitY - sourceHitSize / 2}
+        width={sourceHitSize}
+        height={sourceHitSize}
+        fill="transparent"
+        style={{ cursor: 'grab' }}
+        onPointerDown={this.handlePointerDownSource}
+      />
+    ) : null;
+
     return (
       <g className={groupClassName}>
         <path
@@ -1485,6 +1522,7 @@ export class Flow extends React.PureComponent<FlowProps> {
           onPointerDown={this.handlePointerDown}
           onPointerUp={this.handlePointerUp}
         />
+        {sourceHitArea}
         <Arrowhead
           point={lastPt}
           angle={arrowθ}

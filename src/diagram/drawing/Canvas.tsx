@@ -116,6 +116,7 @@ interface CanvasState {
   isDragSelecting: boolean;
   isEditingName: boolean;
   isMovingArrow: boolean;
+  isMovingSource: boolean;
   isMovingLabel: boolean;
   labelSide: 'right' | 'bottom' | 'left' | 'top' | undefined;
   editingName: Array<Descendant>;
@@ -156,6 +157,7 @@ export interface CanvasProps {
     moveDelta: Point,
     fauxTargetCenter: Point | undefined,
     inCreation: boolean,
+    isSourceAttach?: boolean,
   ) => void;
   onMoveLabel: (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => void;
   onAttachLink: (link: LinkViewElement, newTarget: string) => void;
@@ -204,6 +206,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
     this.state = {
       isMovingArrow: false,
+      isMovingSource: false,
       isMovingCanvas: false,
       isDragSelecting: false,
       isEditingName: false,
@@ -318,7 +321,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   }
 
   isValidTarget(element: ViewElement): boolean | undefined {
-    if (!this.state.isMovingArrow || !this.selectionCenterOffset) {
+    const { isMovingArrow, isMovingSource } = this.state;
+
+    if ((!isMovingArrow && !isMovingSource) || !this.selectionCenterOffset) {
       return undefined;
     }
 
@@ -371,19 +376,38 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       if (!(element instanceof StockViewElement)) {
         return false;
       }
-      const first = defined(arrow.points.first());
-      // make sure we don't point a flow back at its source
-      if (first.attachedToUid === element.uid) {
-        return false;
+
+      if (isMovingSource) {
+        // For source movement: check if target stock is valid source
+        const last = defined(arrow.points.last());
+        // Don't allow connecting source and sink to the same stock
+        if (last.attachedToUid === element.uid) {
+          return false;
+        }
+        // For multi-segment flows (3+ points), the source needs to align with
+        // the adjacent point (second), not the sink point. For 2-point flows,
+        // points.get(1) gives us the last point, which is correct.
+        const adjacentToSource = defined(arrow.points.get(1));
+        return (
+          Math.abs(adjacentToSource.x - element.cx) < StockWidth / 2 ||
+          Math.abs(adjacentToSource.y - element.cy) < StockHeight / 2
+        );
+      } else {
+        // For arrowhead movement: check if target stock is valid sink
+        const first = defined(arrow.points.first());
+        // make sure we don't point a flow back at its source
+        if (first.attachedToUid === element.uid) {
+          return false;
+        }
+        // For multi-segment flows (3+ points), the arrowhead needs to align with
+        // the adjacent point (second-to-last), not the source point. For 2-point
+        // flows, points.size - 2 = 0 gives us the first point, which is correct.
+        const adjacentToArrowhead = defined(arrow.points.get(arrow.points.size - 2));
+        return (
+          Math.abs(adjacentToArrowhead.x - element.cx) < StockWidth / 2 ||
+          Math.abs(adjacentToArrowhead.y - element.cy) < StockHeight / 2
+        );
       }
-      // For multi-segment flows (3+ points), the arrowhead needs to align with
-      // the adjacent point (second-to-last), not the source point. For 2-point
-      // flows, points.size - 2 = 0 gives us the first point, which is correct.
-      const adjacentToArrowhead = defined(arrow.points.get(arrow.points.size - 2));
-      return (
-        Math.abs(adjacentToArrowhead.x - element.cx) < StockWidth / 2 ||
-        Math.abs(adjacentToArrowhead.y - element.cy) < StockHeight / 2
-      );
     }
 
     return element instanceof FlowViewElement || element instanceof AuxViewElement;
@@ -557,6 +581,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         isSelected={isSelected}
         hasWarning={hasWarning}
         isMovingArrow={isSelected && isMovingArrow}
+        isMovingSource={isSelected && this.state.isMovingSource}
         isEditingName={isSelected && this.state.isEditingName}
         isValidTarget={this.isValidTarget(element)}
         onSelection={this.handleSetSelection}
@@ -570,7 +595,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     moveDelta: Point,
   ): [FlowViewElement, List<StockViewElement | CloudViewElement>] {
     const sourceId = defined(defined(flow.points.first()).attachedToUid);
-    const source = this.getElementByUid(sourceId) as StockViewElement | CloudViewElement;
+    let source = this.getElementByUid(sourceId) as StockViewElement | CloudViewElement;
     if (!(source instanceof StockViewElement || source instanceof CloudViewElement)) {
       throw new Error('invariant broken');
     }
@@ -581,7 +606,43 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       throw new Error('invariant broken');
     }
 
-    const { isMovingArrow } = this.state;
+    const { isMovingArrow, isMovingSource } = this.state;
+
+    if (isMovingSource && this.selectionCenterOffset) {
+      // Source movement: find valid target for source end
+      const validTarget = this.cachedElements.find((e: ViewElement) => {
+        // Don't connect to the sink stock
+        if (!(e instanceof StockViewElement) || e.uid === sinkId) {
+          return false;
+        }
+        return this.isValidTarget(e) || false;
+      }) as StockViewElement;
+
+      if (validTarget) {
+        moveDelta = {
+          x: source.cx - validTarget.cx,
+          y: source.cy - validTarget.cy,
+        };
+        source = validTarget.merge({
+          uid: sourceId,
+          x: source.cx,
+          y: source.cy,
+        });
+      } else {
+        const off = this.selectionCenterOffset;
+        const canvasOffset = this.getCanvasOffset();
+
+        source = (source as unknown as any).merge({
+          x: off.x - canvasOffset.x,
+          y: off.y - canvasOffset.y,
+          isZeroRadius: true,
+        });
+      }
+
+      [source, flow] = UpdateCloudAndFlow(source, flow, moveDelta);
+      return [flow, List([])];
+    }
+
     if (isMovingArrow && this.selectionCenterOffset) {
       const validTarget = this.cachedElements.find((e: ViewElement) => {
         // connecting both the inflow + outflow of a stock to itself wouldn't make sense.
@@ -708,6 +769,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     this.setState({
       isMovingCanvas: false,
       isMovingArrow: false,
+      isMovingSource: false,
       isEditingName: false,
       isDragSelecting: false,
       isMovingLabel: false,
@@ -794,7 +856,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           this.selectionCenterOffset = undefined;
           // we do weird one off things in this codepath, so exit early
           return;
-        } else if (!this.state.isMovingArrow) {
+        } else if (!this.state.isMovingArrow && !this.state.isMovingSource) {
           this.props.onMoveSelection(delta, arcPoint, this.state.draggingSegmentIndex);
         } else {
           const element = this.getElementByUid(defined(this.props.selection.first()));
@@ -813,6 +875,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
               return;
             }
             const inCreation = !!this.state.inCreation;
+            const isSourceAttach = this.state.isMovingSource;
             let fauxTargetCenter: Point | undefined;
             if (element.points.get(1)?.attachedToUid === fauxCloudTargetUid) {
               const canvasOffset = this.getCanvasOffset();
@@ -821,7 +884,22 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
                 y: this.selectionCenterOffset.y - canvasOffset.y,
               };
             }
-            this.props.onMoveFlow(element, validTarget ? validTarget.uid : 0, delta, fauxTargetCenter, inCreation);
+            // For source movement when not snapped to a valid target, compute the faux source center
+            if (isSourceAttach && !validTarget) {
+              const canvasOffset = this.getCanvasOffset();
+              fauxTargetCenter = {
+                x: this.selectionCenterOffset.x - canvasOffset.x,
+                y: this.selectionCenterOffset.y - canvasOffset.y,
+              };
+            }
+            this.props.onMoveFlow(
+              element,
+              validTarget ? validTarget.uid : 0,
+              delta,
+              fauxTargetCenter,
+              inCreation,
+              isSourceAttach,
+            );
             if (inCreation) {
               this.setState({
                 isEditingName: true,
@@ -839,6 +917,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           inCreation: undefined,
           inCreationCloud: undefined,
           isMovingArrow: false,
+          isMovingSource: false,
           draggingSegmentIndex: undefined,
         });
       }
@@ -1670,6 +1749,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     isText?: boolean,
     isArrowhead?: boolean,
     segmentIndex?: number,
+    isSource?: boolean,
   ): void => {
     if (this.props.embedded) {
       return;
@@ -1678,6 +1758,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     let isEditingName = !!isText;
     let editingName: Array<CustomElement> = [];
     let isMovingArrow = !!isArrowhead;
+    let isMovingSource = !!isSource;
 
     this.pointerId = e.pointerId;
 
@@ -1766,6 +1847,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       isEditingName,
       editingName,
       isMovingArrow,
+      isMovingSource,
       inCreation,
       moveDelta: {
         x: 0,
