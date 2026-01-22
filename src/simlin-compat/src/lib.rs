@@ -24,6 +24,7 @@ use simlin_core::common::{Canonical, Ident};
 #[cfg(feature = "file_io")]
 use simlin_core::{Method, Specs, canonicalize};
 
+pub mod mdl;
 pub mod xmile;
 
 #[cfg(test)]
