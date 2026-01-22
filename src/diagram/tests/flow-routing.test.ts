@@ -2103,26 +2103,27 @@ describe('Flow routing', () => {
         { x: sinkX, y: sinkY, attachedToUid: sinkUid },
       ]);
 
-      // Create the "new stock" as the cloud parameter
-      // In reality, this would be a StockViewElement when reattaching
-      const newStock = new StockViewElement({
+      // Create the stock at OLD coordinates, as Editor.tsx does when calling UpdateCloudAndFlow.
+      // Editor.tsx resets the stock back to old coordinates before calling the function.
+      const stock = new StockViewElement({
         uid: oldStockUid, // Same UID since we're simulating reattachment
-        name: 'NewStock',
-        ident: 'new_stock',
+        name: 'Stock',
+        ident: 'stock',
         var: undefined,
-        x: newStockX,
-        y: newStockY,
+        x: oldStockX, // Passed with OLD coordinates
+        y: oldStockY,
         labelSide: 'center',
         isZeroRadius: false,
         inflows: List([]),
         outflows: List([flowUid]),
       });
 
-      // moveDelta is from old stock center to new stock center
+      // moveDelta = oldCenter - newCenter (as computed in Editor.tsx)
       // old: (100, 100), new: (300, 100) -> moveDelta = (100 - 300, 100 - 100) = (-200, 0)
+      // So newCenter = cloud.cx - moveDelta.x = 100 - (-200) = 300
       const moveDelta = { x: oldStockX - newStockX, y: oldStockY - newStockY };
 
-      const [, newFlow] = UpdateCloudAndFlow(newStock, flow, moveDelta);
+      const [, newFlow] = UpdateCloudAndFlow(stock, flow, moveDelta);
 
       // The endpoint should be on the LEFT edge of the new stock (facing the corner)
       const firstPt = newFlow.points.get(0)!;
@@ -2167,23 +2168,26 @@ describe('Flow routing', () => {
         { x: sinkX, y: sinkY, attachedToUid: sinkUid },
       ]);
 
-      const newStock = new StockViewElement({
+      // Create the stock at OLD coordinates, as Editor.tsx does when calling UpdateCloudAndFlow.
+      const stock = new StockViewElement({
         uid: oldStockUid,
-        name: 'NewStock',
-        ident: 'new_stock',
+        name: 'Stock',
+        ident: 'stock',
         var: undefined,
-        x: newStockX,
-        y: newStockY,
+        x: oldStockX, // Passed with OLD coordinates
+        y: oldStockY,
         labelSide: 'center',
         isZeroRadius: false,
         inflows: List([]),
         outflows: List([flowUid]),
       });
 
-      // moveDelta from old stock center to new stock center
+      // moveDelta = oldCenter - newCenter (as computed in Editor.tsx)
+      // old: (100, 50), new: (100, 250) -> moveDelta = (0, -200)
+      // So newCenterY = cloud.cy - moveDelta.y = 50 - (-200) = 250
       const moveDelta = { x: oldStockX - newStockX, y: oldStockY - newStockY };
 
-      const [, newFlow] = UpdateCloudAndFlow(newStock, flow, moveDelta);
+      const [, newFlow] = UpdateCloudAndFlow(stock, flow, moveDelta);
 
       // The endpoint should be on the TOP edge of the new stock (facing the corner)
       const firstPt = newFlow.points.get(0)!;
