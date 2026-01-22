@@ -630,12 +630,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
             y: oldFrom.cy - cursorMoveDelta.y,
           });
         } else {
-          // Detaching from a stock - create a new cloud
+          // Detaching from a stock - create a new cloud at the release position.
+          // Use the same approach as the sink path: oldFrom.cx - cursorMoveDelta.x/y
+          // This ensures the cloud appears where the user released, not where they started.
           newCloud = true;
           from = new CloudViewElement({
             uid: nextUid++,
-            x: defined(fauxTargetCenter).x,
-            y: defined(fauxTargetCenter).y,
+            x: oldFrom.cx - cursorMoveDelta.x,
+            y: oldFrom.cy - cursorMoveDelta.y,
             flowUid: flow.uid,
             isZeroRadius: false,
           });

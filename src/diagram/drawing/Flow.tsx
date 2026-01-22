@@ -573,9 +573,11 @@ export function UpdateCloudAndFlow(
   // Determine segment orientation between cloud and adjacent point
   const adjacentSegment = cloudIsFirst ? segments[0] : segments[segments.length - 1];
 
-  // Calculate new cloud position
-  let newCloudX = cloud.cx - moveDelta.x;
-  let newCloudY = cloud.cy - moveDelta.y;
+  // Calculate new cloud position from the existing endpoint position (which is on the
+  // stock edge for stock-attached endpoints), not from cloud.cx/cy (stock center).
+  // This ensures that dragging a stock-attached endpoint keeps it on the edge.
+  let newCloudX = cloudPoint.x - moveDelta.x;
+  let newCloudY = cloudPoint.y - moveDelta.y;
 
   // Update adjacent corner to maintain orthogonality
   let newAdjacentX = adjacentPoint.x;

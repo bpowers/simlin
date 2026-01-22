@@ -1815,5 +1815,122 @@ describe('Flow routing', () => {
       expect(newFlow.cx).toBe(valveX);
       expect(newFlow.cy).toBeCloseTo(175, 0);
     });
+
+    it('should keep multi-segment endpoints on stock edge when dragging stock-attached source', () => {
+      // 3-point L-shaped flow: stock -> corner -> cloud
+      // When dragging the source (attached to stock), the endpoint should stay on
+      // the stock's edge, not shift to the stock's center.
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockX = 100;
+      const stockY = 100;
+      const stockEdgeX = stockX + StockWidth / 2; // Right edge of stock
+      const cornerX = 200;
+      const cornerY = stockY; // Horizontal segment from stock edge to corner
+      const cloudX = cornerX;
+      const cloudY = 200;
+
+      // Flow starts at stock's right edge, goes horizontal to corner, then vertical to cloud
+      const flow = makeFlow(flowUid, 150, cornerY, [
+        { x: stockEdgeX, y: cornerY, attachedToUid: stockUid },
+        { x: cornerX, y: cornerY },
+        { x: cloudX, y: cloudY, attachedToUid: cloudUid },
+      ]);
+
+      // Create a stock (not a cloud) to simulate dragging the source end
+      const stock = makeStock(stockUid, stockX, stockY);
+
+      // Apply zero movement - this simulates "dropping back on the same stock"
+      // The endpoint should stay on the stock edge, not shift to stock center
+      const moveDelta = { x: 0, y: 0 };
+      const [, newFlow] = UpdateCloudAndFlow(stock, flow, moveDelta);
+
+      // The source endpoint should still be on the stock's right edge
+      const sourcePoint = newFlow.points.get(0)!;
+      expect(sourcePoint.x).toBe(stockEdgeX); // Should be on edge, not stockX (center)
+      expect(sourcePoint.y).toBe(cornerY);
+
+      // Corner should be unchanged
+      const corner = newFlow.points.get(1)!;
+      expect(corner.x).toBe(cornerX);
+      expect(corner.y).toBe(cornerY);
+    });
+
+    it('should keep multi-segment endpoints on stock edge when dragging stock-attached sink', () => {
+      // 3-point L-shaped flow: cloud -> corner -> stock
+      // When dragging the sink (attached to stock), the endpoint should stay on
+      // the stock's edge, not shift to the stock's center.
+      const stockUid = 1;
+      const cloudUid = 3;
+      const cloudX = 100;
+      const cloudY = 100;
+      const cornerX = 200;
+      const cornerY = cloudY; // Horizontal segment from cloud to corner
+      const stockX = 200;
+      const stockY = 200;
+      const stockEdgeY = stockY - StockHeight / 2; // Top edge of stock
+
+      // Flow starts at cloud, goes horizontal to corner, then vertical to stock's top edge
+      const flow = makeFlow(flowUid, 150, cornerY, [
+        { x: cloudX, y: cloudY, attachedToUid: cloudUid },
+        { x: cornerX, y: cornerY },
+        { x: cornerX, y: stockEdgeY, attachedToUid: stockUid },
+      ]);
+
+      // Create a stock (not a cloud) to simulate dragging the sink end
+      const stock = makeStock(stockUid, stockX, stockY);
+
+      // Apply zero movement - this simulates "dropping back on the same stock"
+      const moveDelta = { x: 0, y: 0 };
+      const [, newFlow] = UpdateCloudAndFlow(stock, flow, moveDelta);
+
+      // The sink endpoint should still be on the stock's top edge
+      const sinkPoint = newFlow.points.get(2)!;
+      expect(sinkPoint.x).toBe(cornerX);
+      expect(sinkPoint.y).toBe(stockEdgeY); // Should be on edge, not stockY (center)
+
+      // Corner should be unchanged
+      const corner = newFlow.points.get(1)!;
+      expect(corner.x).toBe(cornerX);
+      expect(corner.y).toBe(cornerY);
+    });
+
+    it('should apply movement delta to existing endpoint position, not stock center', () => {
+      // When dragging a stock-attached endpoint by some delta, the new position
+      // should be computed from the current endpoint position (on the edge),
+      // not from the stock's center.
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockX = 100;
+      const stockY = 100;
+      const stockEdgeX = stockX + StockWidth / 2;
+      const cornerX = 200;
+      const cornerY = stockY;
+      const cloudX = cornerX;
+      const cloudY = 200;
+
+      const flow = makeFlow(flowUid, 150, cornerY, [
+        { x: stockEdgeX, y: cornerY, attachedToUid: stockUid },
+        { x: cornerX, y: cornerY },
+        { x: cloudX, y: cloudY, attachedToUid: cloudUid },
+      ]);
+
+      const stock = makeStock(stockUid, stockX, stockY);
+
+      // Drag the source down by 20 pixels
+      const moveDelta = { x: 0, y: -20 };
+      const [, newFlow] = UpdateCloudAndFlow(stock, flow, moveDelta);
+
+      // The source endpoint should move from the edge position, not the center
+      // Original position: (stockEdgeX, cornerY) = (130, 100)
+      // With moveDelta.y = -20 (inverted, so +20 to Y): new Y should be 120
+      const sourcePoint = newFlow.points.get(0)!;
+      expect(sourcePoint.x).toBe(stockEdgeX); // X unchanged for vertical movement
+      expect(sourcePoint.y).toBe(cornerY + 20); // Y moved from edge position
+
+      // Corner Y should also update to maintain orthogonality (horizontal segment)
+      const corner = newFlow.points.get(1)!;
+      expect(corner.y).toBe(cornerY + 20);
+    });
   });
 });
