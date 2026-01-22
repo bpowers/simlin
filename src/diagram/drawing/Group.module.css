@@ -1,0 +1,21 @@
+.group rect {
+  stroke-width: 1px;
+  stroke: #999999;
+  fill: #f5f5f5;
+  fill-opacity: 0.5;
+}
+
+.group .label {
+  font-size: 12px;
+  font-weight: 500;
+  fill: #666666;
+}
+
+.group.selected rect {
+  stroke: var(--color-selected);
+  stroke-width: 2px;
+}
+
+.group.selected .label {
+  fill: var(--color-selected);
+}

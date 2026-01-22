@@ -242,6 +242,19 @@ export interface JsonAliasViewElement {
 }
 
 /**
+ * Visual element for a group/sector.
+ */
+export interface JsonGroupViewElement {
+  type: 'group';
+  uid: number;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
  * Union type for view elements.
  */
 export type JsonViewElement =
@@ -251,7 +264,8 @@ export type JsonViewElement =
   | JsonCloudViewElement
   | JsonLinkViewElement
   | JsonModuleViewElement
-  | JsonAliasViewElement;
+  | JsonAliasViewElement
+  | JsonGroupViewElement;
 
 /**
  * A view/diagram in the model.
