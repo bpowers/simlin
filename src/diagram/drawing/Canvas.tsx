@@ -376,7 +376,14 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       if (first.attachedToUid === element.uid) {
         return false;
       }
-      return Math.abs(first.x - element.cx) < StockWidth / 2 || Math.abs(first.y - element.cy) < StockHeight / 2;
+      // For multi-segment flows (3+ points), the arrowhead needs to align with
+      // the adjacent point (second-to-last), not the source point. For 2-point
+      // flows, points.size - 2 = 0 gives us the first point, which is correct.
+      const adjacentToArrowhead = defined(arrow.points.get(arrow.points.size - 2));
+      return (
+        Math.abs(adjacentToArrowhead.x - element.cx) < StockWidth / 2 ||
+        Math.abs(adjacentToArrowhead.y - element.cy) < StockHeight / 2
+      );
     }
 
     return element instanceof FlowViewElement || element instanceof AuxViewElement;

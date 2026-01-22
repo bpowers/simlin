@@ -350,6 +350,39 @@ function adjustFlows(
 
     otherEnd = defined(otherEnd);
 
+    // For multi-segment flows (3+ points), use segment-based valve positioning.
+    // When moving an endpoint (like the arrowhead), the valve should only be
+    // affected if it's on the segment adjacent to that endpoint. If it's on
+    // an interior segment, it should stay put.
+    if (points.size >= 3) {
+      const currentValve: IPoint = { x: flow.cx, y: flow.cy };
+      const oldSegments = getSegments(flow.points);
+      const newSegments = getSegments(points);
+      const valveOldSegment = findClosestSegment(currentValve, oldSegments);
+
+      // Determine which endpoint is being moved (attached to stock)
+      const stockIsFirst = defined(flow.points.first()).attachedToUid === stock.uid;
+      const movedEndpointSegmentIndex = stockIsFirst ? 0 : oldSegments.length - 1;
+
+      let newValve: IPoint;
+      if (valveOldSegment.index === movedEndpointSegmentIndex && newSegments.length > 0) {
+        // Valve is on the segment adjacent to the moved endpoint - preserve
+        // fractional position on that segment (similar to computeFlowRoute)
+        const newSegment = newSegments[stockIsFirst ? 0 : newSegments.length - 1];
+        newValve = preserveValveFraction(currentValve, valveOldSegment, newSegment);
+      } else {
+        // Valve is on an interior segment that wasn't affected by the endpoint
+        // move - keep it in place
+        newValve = currentValve;
+      }
+
+      return flow.merge({
+        x: newValve.x,
+        y: newValve.y,
+        points,
+      });
+    }
+
     // FIXME: reduce this duplication
     if (isCloud) {
       const fraction = {

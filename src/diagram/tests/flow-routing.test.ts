@@ -9,6 +9,7 @@ import { Point, FlowViewElement, StockViewElement, CloudViewElement } from '@sys
 import {
   computeFlowRoute,
   UpdateStockAndFlows,
+  UpdateCloudAndFlow,
   UpdateFlow,
   moveSegment,
   findClickedSegment,
@@ -1424,6 +1425,121 @@ describe('Flow routing', () => {
       const points = List<Point>();
       const segments = getSegments(points);
       expect(segments.length).toBe(0);
+    });
+  });
+
+  describe('UpdateCloudAndFlow - multi-segment flows', () => {
+    it('should not move valve on interior segment when arrowhead moves vertically', () => {
+      // 3-point L-shaped flow: source -> corner -> arrowhead (cloud)
+      // Segment 0 is horizontal (source to corner), valve is on segment 0
+      // Segment 1 is vertical (corner to arrowhead)
+      // Moving the arrowhead vertically should NOT move the valve, since it's
+      // on segment 0 (the horizontal segment) which doesn't change.
+      const sourceUid = 1;
+      const cloudUid = 3;
+      const sourceX = 100;
+      const sourceEdgeX = sourceX + StockWidth / 2;
+      const cornerX = 200;
+      const cornerY = 100;
+      const arrowheadX = cornerX;
+      const arrowheadY = 200;
+
+      // Valve at (150, 100) on the horizontal segment
+      const valveX = 150;
+      const valveY = cornerY;
+
+      const flow = makeFlow(flowUid, valveX, valveY, [
+        { x: sourceEdgeX, y: cornerY, attachedToUid: sourceUid }, // source edge
+        { x: cornerX, y: cornerY }, // corner
+        { x: arrowheadX, y: arrowheadY, attachedToUid: cloudUid }, // arrowhead
+      ]);
+
+      // Cloud at arrowhead position
+      const cloud = makeCloud(cloudUid, flowUid, arrowheadX, arrowheadY);
+
+      // Move arrowhead down by 50 (moveDelta is inverted, so delta.y = 50 moves down)
+      // The original cloud position is (200, 200), new position will be (200, 250)
+      const moveDelta = { x: 0, y: -50 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Valve should NOT have moved vertically since it's on a horizontal segment
+      // that wasn't affected by the vertical arrowhead movement
+      expect(newFlow.cx).toBe(valveX);
+      expect(newFlow.cy).toBe(valveY);
+
+      // Cloud should have moved
+      expect(newCloud.cy).toBe(arrowheadY + 50);
+    });
+
+    it('should preserve valve position on segment 0 when arrowhead segment changes', () => {
+      // Same setup as above, but testing that valve fraction is preserved if
+      // the arrowhead movement affects segment 0
+      const sourceUid = 1;
+      const cloudUid = 3;
+      const sourceX = 100;
+      const sourceEdgeX = sourceX + StockWidth / 2;
+      const cornerX = 200;
+      const cornerY = 100;
+      const arrowheadX = cornerX;
+      const arrowheadY = 200;
+
+      // Valve at corner on the horizontal segment
+      const valveX = cornerX;
+      const valveY = cornerY;
+
+      const flow = makeFlow(flowUid, valveX, valveY, [
+        { x: sourceEdgeX, y: cornerY, attachedToUid: sourceUid },
+        { x: cornerX, y: cornerY },
+        { x: arrowheadX, y: arrowheadY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, arrowheadX, arrowheadY);
+
+      // Move arrowhead vertically
+      const moveDelta = { x: 0, y: -50 };
+      const [, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Valve on segment 0 should stay put
+      expect(newFlow.cy).toBe(valveY);
+    });
+
+    it('should update valve when it is on the segment adjacent to the moving arrowhead', () => {
+      // 3-point L-shaped flow with valve on segment 1 (adjacent to arrowhead)
+      const sourceUid = 1;
+      const cloudUid = 3;
+      const sourceX = 100;
+      const sourceEdgeX = sourceX + StockWidth / 2;
+      const cornerX = 200;
+      const cornerY = 100;
+      const arrowheadX = cornerX;
+      const arrowheadY = 200;
+
+      // Valve at (200, 150) on the vertical segment (segment 1)
+      const valveX = cornerX;
+      const valveY = 150;
+
+      const flow = makeFlow(flowUid, valveX, valveY, [
+        { x: sourceEdgeX, y: cornerY, attachedToUid: sourceUid },
+        { x: cornerX, y: cornerY },
+        { x: arrowheadX, y: arrowheadY, attachedToUid: cloudUid },
+      ]);
+
+      const cloud = makeCloud(cloudUid, flowUid, arrowheadX, arrowheadY);
+
+      // Move arrowhead down by 50
+      const moveDelta = { x: 0, y: -50 };
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, moveDelta);
+
+      // Valve is on segment 1 (the segment adjacent to arrowhead), so it should
+      // preserve its fractional position. Original segment: corner(200,100) to
+      // arrowhead(200,200), length=100. Valve at (200,150) is 50% along.
+      // New segment: corner(200,100) to arrowhead(200,250), length=150.
+      // New valve should be at 50% = (200, 100 + 0.5*150) = (200, 175)
+      expect(newFlow.cx).toBe(valveX);
+      expect(newFlow.cy).toBeCloseTo(175, 0);
+
+      // Cloud should have moved down
+      expect(newCloud.cy).toBe(250);
     });
   });
 });
