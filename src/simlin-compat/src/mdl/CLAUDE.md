@@ -9,10 +9,22 @@ This directory contains the pure Rust implementation of a Vensim MDL file parser
 - All equation types, expressions, subscripts, and macros parse correctly
 - Comprehensive test coverage (221 tests)
 
-**Phases 6-7 and 9-10 (Conversion): NOT STARTED**
-- `parse_mdl()` is a stub - AST to datamodel conversion not implemented
+**Phase 6 (Core Conversion): COMPLETE**
+- `convert.rs`: Multi-pass AST to datamodel conversion fully implemented
+- `xmile_compat.rs`: XMILE-compatible expression formatter with function renames,
+  argument reordering, and name formatting
+- Variable type detection (stocks via INTEG, flows, auxiliaries)
+- Flow linking via is_all_plus_minus algorithm with synthetic net flow generation
+- Sim specs extraction from control variables
+- PurgeAFOEq logic for A FUNCTION OF placeholder handling
+- Dimension building with range expansion and equivalence handling
+- Number list / tabbed array conversion for arrayed equations
+- Element-specific equation handling (single elements, apply-to-all with overrides, mixed subscripts)
+
+**Phases 7, 9-10 (Views, Post-processing, Settings): NOT STARTED**
 - View/diagram parsing not implemented
-- Settings section parsing not implemented
+- Model post-processing (name deduplication, view composition) not implemented
+- Settings section parsing not implemented (integration type, unit equivalences)
 
 ## Motivation
 
@@ -64,7 +76,8 @@ src/simlin-compat/src/mdl/
 ├── parser_helpers.rs  # Helper functions for parser (number parsing, equation creation)
 ├── reader.rs          # EquationReader: drives parser, captures comments, handles macros
 ├── builtins.rs        # Vensim built-in function recognition via to_lower_space()
-├── convert.rs         # AST → datamodel conversion (NOT YET IMPLEMENTED)
+├── convert.rs         # AST → datamodel conversion (IMPLEMENTED)
+├── xmile_compat.rs    # XMILE-compatible expression formatter (IMPLEMENTED)
 └── view.rs            # View/diagram parsing and conversion (NOT YET IMPLEMENTED)
 ```
 
@@ -242,9 +255,10 @@ All functions below are recognized and emit `Token::Function` during normalizati
 - [x] `WITH LOOKUP(input, table)` - special `Token::WithLookup` via `is_with_lookup()`
 - [x] `LOOKUP INVERT(lookup_var, value)`
 - [x] `LOOKUP AREA(lookup_var, x1, x2)`
-- [x] `LOOKUP EXTRAPOLATE(lookup_var, x)`
+- [x] `LOOKUP EXTRAPOLATE(lookup_var, x)` - extrapolates at call time (does NOT mark table)
 - [x] `LOOKUP FORWARD(lookup_var, x)`
 - [x] `LOOKUP BACKWARD(lookup_var, x)`
+- [x] `TABXL(lookup_var, x)` - marks table as extrapolating
 - [x] `GET DATA AT TIME(data_var, time)`
 - [x] `GET DATA LAST TIME(data_var)`
 
@@ -311,9 +325,9 @@ All functions below are recognized and emit `Token::Function` during normalizati
 - [x] Multi-dimensional: `Var[DimA, DimB] = expr` - multiple subscripts
 - [x] Mixed indexing: `Var[elem1, DimB]` - parsed correctly
 
-### Conversion-Phase Requirements (Not Yet Implemented)
-- [ ] **Subscript range expansion**: `(A1-A10)` ranges must be expanded to individual elements during conversion. The parser stores these as `SubscriptElement::Range(start, end, loc)` which needs to be validated (numeric suffix extraction) and expanded.
-- [ ] **Implicit TIME lookup**: Bare LHS equations (`exogenous data ~ ~ |`) are parsed as `Equation::Implicit`. During conversion, these should become lookup tables over TIME if they represent data variables.
+### Conversion-Phase Requirements (Implemented in convert.rs)
+- [x] **Subscript range expansion**: `(A1-A10)` ranges expanded to individual elements via `expand_range()` function which validates prefix matching and numeric suffix extraction.
+- [x] **Implicit TIME lookup**: Bare LHS equations (`exogenous data ~ ~ |`) parsed as `Equation::Implicit` are converted to lookup tables over TIME with default `(0,1),(1,1)` table via `make_default_lookup()`.
 - [ ] **Range-only units normalization**: When units have only a range like `[0, 100]` without an explicit unit expression, the `Units.expr` is `None`. During conversion, this should be treated as dimensionless ("1") rather than truly having no units.
 
 ### Bang Notation
@@ -325,33 +339,57 @@ All functions below are recognized and emit `Token::Function` during normalizati
 ## Phase 6: Core Conversion (`convert.rs`)
 
 ### Variable Type Detection
-- [ ] Stock detection: has INTEG() in equation
-- [ ] Flow detection: appears in INTEG() rate expression of a stock
-- [ ] Auxiliary: everything else (non-stock, non-flow)
-- [ ] Mark inflows/outflows on stocks
+- [x] Stock detection: has top-level INTEG() in equation via `is_top_level_integ()`
+- [x] Flow detection: identified from INTEG() rate expressions via `collect_flows()`
+- [x] Auxiliary: everything else (non-stock, non-flow)
+- [x] Mark inflows/outflows on stocks in `link_stocks_and_flows()`
 
 ### Equation Processing
-- [ ] `MarkTypes()` - auto-detect variable types from equations
-- [ ] `MarkStockFlows()` - identify and link flows to stocks
-- [ ] `PurgeAFOEq()` - remove "A FUNCTION OF" placeholder equations
+- [x] `mark_variable_types()` - auto-detect variable types from equations
+- [x] `link_stocks_and_flows()` - identify and link flows to stocks using is_all_plus_minus algorithm
+  - Collects flow lists from ALL valid stock equations (not just first)
+  - Synthesizes net flow only when flow lists differ or decomposition fails
+- [x] `select_equation()` - PurgeAFOEq logic: remove "A FUNCTION OF" placeholders and empty RHS equations
 
 ### Special Variable Handling
-- [ ] `INITIAL TIME` → sim_specs.start
-- [ ] `FINAL TIME` → sim_specs.stop
-- [ ] `TIME STEP` → sim_specs.dt
-- [ ] `SAVEPER` → sim_specs.save_interval
-- [ ] Mark these as "unwanted" (don't emit as regular variables)
-- [ ] Extract time units from these variables
+- [x] `INITIAL TIME` → sim_specs.start
+- [x] `FINAL TIME` → sim_specs.stop
+- [x] `TIME STEP` → sim_specs.dt
+- [x] `SAVEPER` → sim_specs.save_step
+- [x] Mark these as "unwanted" (don't emit as regular variables)
+- [x] Extract time units from TIME STEP or FINAL TIME
 
-### Integration Type
+### Synthetic Flow Generation
+- [x] Generate net flow variables for stocks with non-decomposable rates (constants, expressions)
+- [x] Collision avoidance via suffix numbering
+
+### XMILE-Compatible Expression Formatting (`xmile_compat.rs`)
+- [x] Function renames: IF THEN ELSE, LOG→LOG10/LN, ELMCOUNT→SIZE, ZIDZ/XIDZ→SAFEDIV
+- [x] Argument reordering: DELAY N, SMOOTH N, RANDOM NORMAL
+- [x] Name formatting: spaces to underscores, TIME→STARTTIME mappings
+- [x] Special transformations: PULSE, PULSE TRAIN, QUANTUM, SAMPLE IF TRUE, ALLOCATE BY PRIORITY
+- [x] Lookup invocation: Symbol calls become LOOKUP(table, input)
+
+### Dimension Building
+- [x] Build dimensions from subscript definitions
+- [x] Handle range elements via `expand_range()`
+- [x] Element ownership tracking (larger dimension owns elements)
+- [x] Dimension equivalences (`<->`) create alias dimensions with maps_to
+- [x] Cartesian product for multi-dimensional number lists
+
+### TABXL Detection
+- [x] Scan expressions for TABXL usage (LOOKUP EXTRAPOLATE does NOT mark tables)
+- [x] Set GraphicalFunctionKind::Extrapolate for lookups referenced by TABXL
+
+### Integration Type (Phase 10 - NOT STARTED)
 - [ ] Parse from settings section (type code 15)
 - [ ] Map: 0,2 → Euler, 1,5 → RK4, 3,4 → RK2
 
-### Unit Equivalences
+### Unit Equivalences (Phase 10 - NOT STARTED)
 - [ ] Parse from settings section (type code 22)
 - [ ] Format: `Dollar,$,Dollars,$s`
 
-### Groups
+### Groups (NOT STARTED)
 - [ ] Parse group markers `*NN name` during equation parsing
 - [ ] Maintain group hierarchy (nested groups)
 - [ ] `AdjustGroupNames()` - ensure unique group names
@@ -555,7 +593,13 @@ Located after views, starting with `///---\\\` marker.
 - [x] Builtins: Canonicalization, function recognition (15+ tests in `builtins.rs`)
 - [x] Parser helpers: Number parsing, equation creation (15+ tests in `parser_helpers.rs`)
 - [x] Reader: Full equation parsing, comments, macros, all equation types (60+ tests in `reader.rs`)
+- [x] Convert: Stock/flow detection, PurgeAFOEq, synthetic flows, arrayed equations (40+ tests in `convert.rs`)
+- [x] XMILE compat: Function renames, argument reordering, name formatting (30+ tests in `xmile_compat.rs`)
 - [ ] Views: Each element type, coordinate transforms (Phase 7 not started)
+
+### Integration Test Coverage (`test_equivalence.rs`)
+- [x] SIR.mdl: Verifies stock/flow linking, sim specs extraction
+- [x] Simple inline models: Basic variable types, control var filtering
 
 ### Integration Test Approach
 ```rust
@@ -594,26 +638,26 @@ Implementation proceeds through the phases detailed above. Here's a summary with
 4. **Parser** (`parser.lalrpop`) - DONE: Full grammar with all equation types
 5. **Reader** (`reader.rs`) - DONE: EquationReader for comment capture and macro assembly
 
-### Semantic Processing (Phases 4-6)
+### Semantic Processing (Phases 4-6) - COMPLETE
 4. **Built-ins** (`builtins.rs`) - DONE: Function recognition via to_lower_space()
-5. **Subscripts** - DONE (parsing): Integrated into parser
-6. **Conversion** (`convert.rs`) - NOT STARTED: AST → datamodel transformation
+5. **Subscripts** - DONE: Parsing integrated into parser, range expansion in convert.rs
+6. **Conversion** (`convert.rs`) - DONE: Multi-pass AST → datamodel transformation
+7. **XMILE Formatting** (`xmile_compat.rs`) - DONE: Expression formatting with function transformations
 
 ### Visual Layer (Phase 7)
 7. **Views** (`view.rs`) - NOT STARTED: View/diagram parsing and conversion
 
 ### Advanced Features (Phases 8-10)
-8. **Macros** - DONE (parsing): MacroDef captured, conversion not started
+8. **Macros** - DONE (parsing): MacroDef captured, output not implemented
 9. **Model post-processing** - NOT STARTED: Name normalization, view composition
 10. **Settings parsing** - NOT STARTED: Integration type, unit equivalences
 
 ### Next Steps
-1. Implement `convert.rs` to transform AST → datamodel for simple equations
-2. Test against simple models to verify roundtrip
-3. Add subscript expansion during conversion
-4. Add view parsing (`view.rs`)
-5. Add settings section parsing
-6. Test against full model corpus
+1. Add view parsing (`view.rs`) for diagram support
+2. Add settings section parsing for integration type and unit equivalences
+3. Implement macro output in XMILE format
+4. Add model post-processing (name deduplication, view composition)
+5. Test against full model corpus for equivalence with xmutil
 
 ## Extending the Datamodel
 
@@ -632,7 +676,7 @@ Any extensions should be discussed and designed carefully to maintain clean abst
 This is a multi-session project. When resuming work:
 1. Check the "Current Status" section at the top for high-level progress
 2. Run existing tests to verify nothing regressed: `cargo test -p simlin-compat mdl::`
-3. The next major milestone is implementing `convert.rs` (Phase 6)
+3. The next major milestone is implementing view parsing (Phase 7)
 4. Update the checklist as features are completed
 
 ## Commands

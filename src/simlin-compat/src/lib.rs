@@ -33,6 +33,9 @@ mod test_sir_xmile;
 #[cfg(all(test, feature = "vensim"))]
 mod test_open_vensim;
 
+#[cfg(all(test, feature = "vensim"))]
+mod test_equivalence;
+
 pub fn to_xmile(project: &Project) -> Result<String> {
     xmile::project_to_xmile(project)
 }
@@ -64,6 +67,13 @@ pub fn open_vensim(reader: &mut dyn BufRead) -> Result<Project> {
     let xmile_src = xmile_src.unwrap();
     let mut f = BufReader::new(xmile_src.as_bytes());
     xmile::project_from_reader(&mut f)
+}
+
+/// Parse a Vensim MDL file directly using the native Rust parser.
+///
+/// This bypasses the xmutil C++ dependency and converts MDL directly to datamodel.
+pub fn open_vensim_native(reader: &mut dyn BufRead) -> Result<Project> {
+    mdl::parse_mdl(reader)
 }
 
 pub fn open_xmile(reader: &mut dyn BufRead) -> Result<Project> {
