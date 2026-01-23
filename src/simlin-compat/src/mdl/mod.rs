@@ -14,15 +14,22 @@ pub mod ast;
 mod builtins;
 mod lexer;
 mod normalizer;
+mod parser_helpers;
+mod reader;
 
-// Public re-exports for the LALRPOP parser and future EquationReader.
-// These will be used when the parser is implemented in the next phase.
+// LALRPOP-generated parser module
+use lalrpop_util::lalrpop_mod;
+lalrpop_mod!(
+    #[allow(clippy::all)]
+    #[allow(unused)]
+    parser,
+    "/mdl/parser.rs"
+);
+
+// Public re-exports
 pub use lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
 pub use normalizer::{NormalizerError, NormalizerErrorCode, Token, TokenNormalizer};
-
-// The parser will be generated from parser.lalrpop
-// use lalrpop_util::lalrpop_mod;
-// lalrpop_mod!(pub parser);
+pub use reader::{EquationReader, ReaderError};
 
 use std::io::BufRead;
 

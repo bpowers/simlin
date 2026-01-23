@@ -66,6 +66,7 @@ pub enum Token<'input> {
     TheCondition,
     EqEnd,
     GroupStar(Cow<'input, str>),
+    Question, // ? for unit ranges
 
     // Context-dependent normalized variants
     /// Symbol in units section (may start with $)
@@ -91,6 +92,8 @@ pub enum NormalizerErrorCode {
     UnclosedGetXls,
     /// Lexer error passed through
     LexError(LexErrorCode),
+    /// Semantic error during parsing (e.g., mixed expression list)
+    SemanticError(String),
 }
 
 /// Error from the normalizer.
@@ -136,15 +139,27 @@ pub struct TokenNormalizer<'input> {
     in_units_mode: bool,
     /// Original source text for span-based parsing
     source: &'input str,
+    /// Byte offset to add to all positions (for substring normalization)
+    offset: usize,
 }
 
 impl<'input> TokenNormalizer<'input> {
     pub fn new(input: &'input str) -> Self {
+        Self::with_offset(input, 0)
+    }
+
+    /// Create a normalizer that starts at a given byte offset in the original source.
+    ///
+    /// This is used when parsing subsequent equations after comments - we create
+    /// a fresh normalizer for the remaining source, but positions need to be
+    /// adjusted by the offset so error messages reference the correct locations.
+    pub fn with_offset(input: &'input str, offset: usize) -> Self {
         TokenNormalizer {
             inner: RawLexer::new(input).peekable(),
             section: Section::Equation,
             in_units_mode: false,
             source: input,
+            offset,
         }
     }
 
@@ -471,6 +486,7 @@ impl<'input> TokenNormalizer<'input> {
             RawToken::Tilde => Token::Tilde,
             RawToken::Dot => Token::Dot,
             RawToken::Bang => Token::Bang,
+            RawToken::Question => Token::Question,
             RawToken::DataEquals => Token::DataEquals,
             RawToken::Equiv => Token::Equiv,
             RawToken::MapArrow => Token::MapArrow,
@@ -506,11 +522,26 @@ impl<'input> Iterator for TokenNormalizer<'input> {
             let raw = self.inner.next()?;
             match raw {
                 Ok(spanned) => match self.transform(spanned) {
-                    Ok(Some(token)) => return Some(Ok(token)),
+                    Ok(Some((start, tok, end))) => {
+                        // Adjust positions by offset
+                        return Some(Ok((start + self.offset, tok, end + self.offset)));
+                    }
                     Ok(None) => continue, // Token was consumed (e.g., Newline)
-                    Err(e) => return Some(Err(e)),
+                    Err(mut e) => {
+                        // Adjust error positions by offset
+                        e.start += self.offset;
+                        e.end += self.offset;
+                        return Some(Err(e));
+                    }
                 },
-                Err(e) => return Some(Err(e.into())),
+                Err(e) => {
+                    // Adjust lexer error positions by offset
+                    return Some(Err(NormalizerError {
+                        start: e.start + self.offset,
+                        end: e.end + self.offset,
+                        code: NormalizerErrorCode::LexError(e.code),
+                    }));
+                }
             }
         }
     }

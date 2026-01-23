@@ -282,6 +282,19 @@ pub struct Lhs<'input> {
     pub loc: Loc,
 }
 
+impl<'input> Lhs<'input> {
+    /// Create an empty LHS (used for synthetic entries like EqEnd or GroupStar).
+    pub fn empty(loc: Loc) -> Self {
+        Lhs {
+            name: Cow::Borrowed(""),
+            subscripts: vec![],
+            except: None,
+            interp_mode: None,
+            loc,
+        }
+    }
+}
+
 /// Subscript/dimension definition element.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SubscriptElement<'input> {
@@ -464,6 +477,57 @@ pub enum MdlItem<'input> {
     ///
     /// Loc is needed for error ranges and view-section boundary tracking.
     EqEnd(Loc),
+}
+
+/// Terminal type indicating what follows an equation section.
+///
+/// This is returned by the parser to indicate what terminal was seen,
+/// allowing the reader to determine whether to capture a comment.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SectionEnd<'input> {
+    /// Second `~` seen - comment section follows
+    Tilde,
+    /// `|` seen - no comment, next equation
+    Pipe,
+    /// End of equations marker
+    EqEnd(Loc),
+    /// Group marker with name
+    GroupStar(Cow<'input, str>, Loc),
+    /// Macro definition start with name and arguments
+    MacroStart(Cow<'input, str>, Vec<Expr<'input>>, Loc),
+    /// Macro definition end
+    MacroEnd(Loc),
+}
+
+/// Expression list result - tracks whether we have a single expr or multiple.
+///
+/// Used by the parser to determine whether to create a Regular equation
+/// (single expression) or NumberList equation (multiple numeric literals).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExprListResult<'input> {
+    Single(Expr<'input>),
+    Multiple(Vec<Expr<'input>>),
+}
+
+impl<'input> ExprListResult<'input> {
+    /// Append an expression to the list.
+    pub fn append(self, e: Expr<'input>) -> Self {
+        match self {
+            ExprListResult::Single(first) => ExprListResult::Multiple(vec![first, e]),
+            ExprListResult::Multiple(mut v) => {
+                v.push(e);
+                ExprListResult::Multiple(v)
+            }
+        }
+    }
+
+    /// Convert to a vector of expressions.
+    pub fn into_exprs(self) -> Vec<Expr<'input>> {
+        match self {
+            ExprListResult::Single(e) => vec![e],
+            ExprListResult::Multiple(v) => v,
+        }
+    }
 }
 
 #[cfg(test)]

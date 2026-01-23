@@ -47,6 +47,7 @@ pub enum RawToken<'input> {
 
     // Special
     Bang,
+    Question, // ? for unit ranges
 
     // Compound operators
     DataEquals, // :=
@@ -768,6 +769,7 @@ impl<'input> Iterator for RawLexer<'input> {
                 Some((i, '|')) => self.consume(i, Pipe, 1),
                 Some((i, '~')) => self.consume(i, Tilde, 1),
                 Some((i, '!')) => self.consume(i, Bang, 1),
+                Some((i, '?')) => self.consume(i, Question, 1),
                 Some((i, '=')) => {
                     self.bump_raw();
                     // == is the same as = in Vensim (invariant check), consume second =
