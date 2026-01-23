@@ -1,8 +1,21 @@
 """Pytest configuration and shared fixtures."""
 
+import os
 import pytest
 from pathlib import Path
 from typing import Generator
+
+
+def get_repo_root() -> Path:
+    """Get the simlin repo root directory.
+
+    Uses SIMLIN_REPO_ROOT env var if set (for CI), otherwise walks up from
+    this file to find the repo root.
+    """
+    if env_root := os.environ.get("SIMLIN_REPO_ROOT"):
+        return Path(env_root)
+    # Path from tests/conftest.py to simlin repo root is 4 levels up
+    return Path(__file__).parent.parent.parent.parent
 
 
 @pytest.fixture
@@ -69,5 +82,4 @@ def logistic_growth_json_path() -> Path:
 def subscripted_model_path() -> Path:
     """Return path to a model with subscripted (arrayed) variables."""
     # This model has flows with apply-to-all equations
-    # Path from tests/conftest.py to simlin repo root is 4 levels up
-    return Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "tests" / "subscript_multiples" / "test_multiple_subscripts.stmx"
+    return get_repo_root() / "test" / "test-models" / "tests" / "subscript_multiples" / "test_multiple_subscripts.stmx"

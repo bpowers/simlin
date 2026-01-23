@@ -164,10 +164,12 @@ jobs:
           # not the source code
           mkdir -p /tmp/test_run
           cd /tmp/test_run
-          # Copy only the test files, not the source code
+          # Copy test files and pysimlin README (needed by test_readme_examples.py)
           cp -r ${{ github.workspace }}/src/pysimlin/tests .
+          cp ${{ github.workspace }}/src/pysimlin/README.md .
           # Run tests against installed package
-          RUST_BACKTRACE=1 pytest -q tests/
+          # SIMLIN_REPO_ROOT tells tests where to find model files from the main repo
+          SIMLIN_REPO_ROOT=${{ github.workspace }} RUST_BACKTRACE=1 pytest -q tests/
 
   publish:
     name: Publish to PyPI
