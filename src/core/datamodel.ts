@@ -33,6 +33,7 @@ import {
   type JsonLinkViewElement,
   type JsonModuleViewElement,
   type JsonAliasViewElement,
+  type JsonGroupViewElement,
   type JsonRect,
   type JsonFlowPoint,
   type JsonLinkPoint,
@@ -1061,6 +1062,60 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
   }
 }
 
+const groupViewElementDefaults = {
+  uid: -1,
+  name: '',
+  x: -1,
+  y: -1,
+  width: 100,
+  height: 80,
+  isZeroRadius: false,
+};
+export class GroupViewElement extends Record(groupViewElementDefaults) implements ViewElement {
+  constructor(props: typeof groupViewElementDefaults) {
+    super(props);
+  }
+  // XMILE stores groups with top-left x/y, but we normalize to center-based
+  // coordinates internally to match all other ViewElements.
+  static fromJson(json: JsonGroupViewElement): GroupViewElement {
+    return new GroupViewElement({
+      uid: json.uid,
+      name: json.name,
+      x: json.x + json.width / 2,
+      y: json.y + json.height / 2,
+      width: json.width,
+      height: json.height,
+      isZeroRadius: false,
+    });
+  }
+  // Convert back to XMILE's top-left convention for serialization
+  toJson(): JsonGroupViewElement {
+    return {
+      type: 'group',
+      uid: this.uid,
+      name: this.name,
+      x: this.x - this.width / 2,
+      y: this.y - this.height / 2,
+      width: this.width,
+      height: this.height,
+    };
+  }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  // Groups are organizational containers, not model variables.
+  // They shouldn't participate in variable-oriented lookups or autocomplete.
+  isNamed(): boolean {
+    return false;
+  }
+  get ident(): undefined {
+    return undefined;
+  }
+}
+
 export type NamedViewElement = StockViewElement | AuxViewElement | ModuleViewElement | FlowViewElement;
 
 const rectDefaults = {
@@ -1150,6 +1205,9 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
           case 'cloud':
             e = CloudViewElement.fromJson(element as JsonCloudViewElement);
             break;
+          case 'group':
+            e = GroupViewElement.fromJson(element as JsonGroupViewElement);
+            break;
           default:
             throw new Error(`unknown view element type: ${(element as JsonViewElement).type}`);
         }
@@ -1204,6 +1262,8 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
           return element.toJson();
         } else if (element instanceof CloudViewElement) {
           return element.toJson();
+        } else if (element instanceof GroupViewElement) {
+          return element.toJson();
         } else {
           throw new Error('unknown view element variant');
         }
@@ -1228,7 +1288,7 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
 
 export function viewElementType(
   element: ViewElement,
-): 'aux' | 'stock' | 'flow' | 'link' | 'module' | 'alias' | 'cloud' {
+): 'aux' | 'stock' | 'flow' | 'link' | 'module' | 'alias' | 'cloud' | 'group' {
   if (element instanceof AuxViewElement) {
     return 'aux';
   } else if (element instanceof StockViewElement) {
@@ -1243,6 +1303,8 @@ export function viewElementType(
     return 'alias';
   } else if (element instanceof CloudViewElement) {
     return 'cloud';
+  } else if (element instanceof GroupViewElement) {
+    return 'group';
   } else {
     throw new Error('unknown view element variant');
   }

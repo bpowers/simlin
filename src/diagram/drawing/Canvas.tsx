@@ -17,6 +17,7 @@ import {
   AuxViewElement,
   CloudViewElement,
   FlowViewElement,
+  GroupViewElement,
   LinkViewElement,
   ModuleViewElement,
   StockViewElement,
@@ -39,6 +40,7 @@ import { Connector, ConnectorProps } from './Connector';
 import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
 import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
+import { Group, groupBounds, GroupProps } from './Group';
 import { Module, moduleBounds, ModuleProps } from './Module';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
@@ -469,6 +471,19 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       this.elementBounds = this.elementBounds.push(moduleBounds(props));
     }
     return <Module key={element.uid} {...props} />;
+  }
+
+  group(element: GroupViewElement) {
+    const isSelected = this.isSelected(element);
+    const props: GroupProps = {
+      element,
+      isSelected,
+    };
+
+    if (this.computeBounds) {
+      this.elementBounds = this.elementBounds.push(groupBounds(element));
+    }
+    return <Group key={element.uid} {...props} />;
   }
 
   connector(element: LinkViewElement) {
@@ -1966,6 +1981,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       } else if (element instanceof ModuleViewElement) {
         component = this.module(element);
         zOrder = 4;
+      } else if (element instanceof GroupViewElement) {
+        component = this.group(element);
+        zOrder = 0; // Groups render behind everything else
       }
 
       if (!component) {
