@@ -1097,11 +1097,15 @@ export class GroupViewElement extends Record(groupViewElementDefaults) implement
       height: this.height,
     };
   }
+  // Return x/y directly (not the center) because selection move logic
+  // computes new positions as element.cx - delta. Since groups store x/y
+  // as the top-left corner (per XMILE spec), returning the center would
+  // cause groups to jump by half their dimensions when dragged.
   get cx(): number {
-    return this.x + this.width / 2;
+    return this.x;
   }
   get cy(): number {
-    return this.y + this.height / 2;
+    return this.y;
   }
   isNamed(): boolean {
     return true;
