@@ -483,9 +483,7 @@ export function UpdateCloudAndFlow(
 
     // For degenerate segments, determine axis from drag direction.
     // For non-degenerate segments, use the existing segment orientation.
-    const treatAsHorizontal = isDegenerate
-      ? Math.abs(moveDelta.x) > Math.abs(moveDelta.y)
-      : seg.isHorizontal;
+    const treatAsHorizontal = isDegenerate ? Math.abs(moveDelta.x) > Math.abs(moveDelta.y) : seg.isHorizontal;
 
     const perpDelta = treatAsHorizontal ? moveDelta.y : moveDelta.x;
     const parDelta = treatAsHorizontal ? moveDelta.x : moveDelta.y;

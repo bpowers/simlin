@@ -47,20 +47,8 @@ export class Group extends React.PureComponent<GroupProps> {
 
     return (
       <g className={`${className} simlin-group`}>
-        <rect
-          x={left}
-          y={top}
-          width={width}
-          height={height}
-          rx={GroupRadius}
-          ry={GroupRadius}
-        />
-        <text
-          x={left + LabelPadding}
-          y={top + LabelPadding}
-          dominantBaseline="hanging"
-          className={styles.label}
-        >
+        <rect x={left} y={top} width={width} height={height} rx={GroupRadius} ry={GroupRadius} />
+        <text x={left + LabelPadding} y={top + LabelPadding} dominantBaseline="hanging" className={styles.label}>
           {displayName(name)}
         </text>
       </g>
