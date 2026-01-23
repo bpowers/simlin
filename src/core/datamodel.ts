@@ -1075,33 +1075,36 @@ export class GroupViewElement extends Record(groupViewElementDefaults) implement
   constructor(props: typeof groupViewElementDefaults) {
     super(props);
   }
+  // XMILE stores groups with top-left x/y, but we normalize to center-based
+  // coordinates internally to match all other ViewElements.
   static fromJson(json: JsonGroupViewElement): GroupViewElement {
     return new GroupViewElement({
       uid: json.uid,
       name: json.name,
-      x: json.x,
-      y: json.y,
+      x: json.x + json.width / 2,
+      y: json.y + json.height / 2,
       width: json.width,
       height: json.height,
       isZeroRadius: false,
     });
   }
+  // Convert back to XMILE's top-left convention for serialization
   toJson(): JsonGroupViewElement {
     return {
       type: 'group',
       uid: this.uid,
       name: this.name,
-      x: this.x,
-      y: this.y,
+      x: this.x - this.width / 2,
+      y: this.y - this.height / 2,
       width: this.width,
       height: this.height,
     };
   }
   get cx(): number {
-    return this.x + this.width / 2;
+    return this.x;
   }
   get cy(): number {
-    return this.y + this.height / 2;
+    return this.y;
   }
   // Groups are organizational containers, not model variables.
   // They shouldn't participate in variable-oriented lookups or autocomplete.
