@@ -62,11 +62,17 @@ typedef enum {
   SIMLIN_ERROR_KIND_SIMULATION = 4,
 } SimlinErrorKind;
 
-// JSON format specifier for C API
+// Unit error kind for distinguishing types of unit-related errors.
 typedef enum {
-  SIMLIN_JSON_FORMAT_NATIVE = 0,
-  SIMLIN_JSON_FORMAT_SDAI = 1,
-} SimlinJsonFormat;
+  // Not a unit error
+  SIMLIN_UNIT_ERROR_KIND_NOT_APPLICABLE = 0,
+  // Syntax error in unit string definition
+  SIMLIN_UNIT_ERROR_KIND_DEFINITION = 1,
+  // Dimensional analysis mismatch
+  SIMLIN_UNIT_ERROR_KIND_CONSISTENCY = 2,
+  // Inference error spanning multiple variables
+  SIMLIN_UNIT_ERROR_KIND_INFERENCE = 3,
+} SimlinUnitErrorKind;
 
 // Link polarity for C API
 typedef enum {
@@ -79,19 +85,14 @@ typedef enum {
 typedef enum {
   SIMLIN_LOOP_POLARITY_REINFORCING = 0,
   SIMLIN_LOOP_POLARITY_BALANCING = 1,
+  SIMLIN_LOOP_POLARITY_UNDETERMINED = 2,
 } SimlinLoopPolarity;
 
-// Unit error kind for distinguishing types of unit-related errors.
+// JSON format specifier for C API
 typedef enum {
-  // Not a unit error
-  SIMLIN_UNIT_ERROR_KIND_NOT_APPLICABLE = 0,
-  // Syntax error in unit string definition
-  SIMLIN_UNIT_ERROR_KIND_DEFINITION = 1,
-  // Dimensional analysis mismatch
-  SIMLIN_UNIT_ERROR_KIND_CONSISTENCY = 2,
-  // Inference error spanning multiple variables
-  SIMLIN_UNIT_ERROR_KIND_INFERENCE = 3,
-} SimlinUnitErrorKind;
+  SIMLIN_JSON_FORMAT_NATIVE = 0,
+  SIMLIN_JSON_FORMAT_SDAI = 1,
+} SimlinJsonFormat;
 
 // Opaque error structure returned by the API
 typedef struct {
@@ -160,7 +161,30 @@ extern "C" {
 
 // simlin_error_str returns a string representation of an error code.
 // The returned string must not be freed or modified.
-const char *simlin_error_str(SimlinErrorCode err);
+//
+// Accepts a u32 discriminant rather than an enum to safely handle invalid values
+// from C/WASM callers. Returns "unknown_error" for invalid discriminants.
+const char *simlin_error_str(uint32_t err);
+
+// Returns the size of the SimlinLoop struct in bytes.
+//
+// Use this to validate ABI compatibility between Rust and JS/WASM consumers.
+uintptr_t simlin_sizeof_loop(void);
+
+// Returns the size of the SimlinLink struct in bytes.
+//
+// Use this to validate ABI compatibility between Rust and JS/WASM consumers.
+uintptr_t simlin_sizeof_link(void);
+
+// Returns the size of the SimlinErrorDetail struct in bytes.
+//
+// Use this to validate ABI compatibility between Rust and JS/WASM consumers.
+uintptr_t simlin_sizeof_error_detail(void);
+
+// Returns the size of a pointer on the current platform.
+//
+// Use this to validate ABI compatibility (expected 4 for wasm32).
+uintptr_t simlin_sizeof_ptr(void);
 
 // # Safety
 //
@@ -215,8 +239,8 @@ SimlinProject *simlin_project_open_protobuf(const uint8_t *data,
 // Open a project from JSON data
 //
 // Deserializes a project from JSON format. Supports two formats:
-// - `SimlinJsonFormat::Native`: Simlin's native JSON representation
-// - `SimlinJsonFormat::Sdai`: System Dynamics AI (SDAI) interchange format
+// - `SimlinJsonFormat::Native` (0): Simlin's native JSON representation
+// - `SimlinJsonFormat::Sdai` (1): System Dynamics AI (SDAI) interchange format
 //
 // Returns NULL and populates `out_error` on failure.
 //
@@ -224,9 +248,10 @@ SimlinProject *simlin_project_open_protobuf(const uint8_t *data,
 // - `data` must be a valid pointer to at least `len` bytes of UTF-8 JSON
 // - `out_error` may be null
 // - The returned project must be freed with `simlin_project_unref`
+// - `format` must be a valid discriminant (0 or 1), otherwise an error is returned
 SimlinProject *simlin_project_open_json(const uint8_t *data,
                                         uintptr_t len,
-                                        SimlinJsonFormat format,
+                                        uint32_t format,
                                         SimlinError **out_error);
 
 // Increment the reference count of a project
@@ -630,7 +655,7 @@ void simlin_project_serialize_protobuf(SimlinProject *project,
 // - Multiple serializations can be performed concurrently (separate buffers are independent).
 // - It is safe to serialize the same project multiple times.
 void simlin_project_serialize_json(SimlinProject *project,
-                                   SimlinJsonFormat format,
+                                   uint32_t format,
                                    uint8_t **out_buffer,
                                    uintptr_t *out_len,
                                    SimlinError **out_error);

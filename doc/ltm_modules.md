@@ -11,6 +11,11 @@ The LTM method calculates:
 - **Loop scores**: Products of all link scores in a feedback loop
 - **Relative loop scores**: Normalized loop scores for dominance analysis
 
+Loop score sign indicates structural polarity:
+- **Positive → Reinforcing (R)**: Loop amplifies changes
+- **Negative → Balancing (B)**: Loop counteracts changes
+- **Changes sign → Undetermined (U)**: Loop polarity varies during simulation
+
 The 2023 improvement (Schoenberg et al.) updated flow-to-stock link scores to use second-order changes, making the method insensitive to flow aggregation. This provides a foundation for thinking about module boundaries as another form of aggregation.
 
 ## Three Candidate Approaches

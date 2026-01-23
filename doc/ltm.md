@@ -47,6 +47,19 @@ A loop score is the product of all link scores in a feedback loop:
 LoopScore(L) = ∏ LinkScore(link_i) for all links in L
 ```
 
+The sign of a loop score indicates its structural polarity:
+- **Positive loop score → Reinforcing (R) loop**: An even number of negative links yields a positive product, indicating the loop amplifies changes
+- **Negative loop score → Balancing (B) loop**: An odd number of negative links yields a negative product, indicating the loop counteracts changes
+
+### Loop Polarity Classification
+
+When analyzing loops over an entire simulation run, a loop's polarity is classified as:
+- **R (Reinforcing)**: Loop score is positive throughout the simulation
+- **B (Balancing)**: Loop score is negative throughout the simulation
+- **U (Undetermined)**: Loop score changes sign during the simulation (has both positive and negative values at different time points)
+
+This can occur in nonlinear models where link polarities change based on variable values. For example, in the yeast alcohol model, the births loop can change from reinforcing to effectively balancing when alcohol levels become high enough to reverse the birth rate.
+
 ### Relative Loop Score
 For analysis, we normalize loop scores:
 

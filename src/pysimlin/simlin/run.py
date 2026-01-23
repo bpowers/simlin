@@ -244,6 +244,11 @@ class Run:
         """
         Populate structural loops with behavioral time series data.
 
+        Also reclassifies loop polarity based on actual runtime scores:
+        - If loop scores are all positive -> Reinforcing
+        - If loop scores are all negative -> Balancing
+        - If loop scores change sign -> Undetermined
+
         Returns:
             Tuple of Loop objects with behavior_time_series populated
         """
@@ -254,10 +259,23 @@ class Run:
         for structural_loop in self._loops_structural:
             try:
                 behavior_ts = self._sim.get_relative_loop_score(structural_loop.id)
+
+                # Get absolute loop score to determine runtime polarity
+                # The absolute score determines the sign (positive/negative)
+                abs_score_var = f"$\u205Altm\u205Aabs_loop_score\u205A{structural_loop.id}"
+                try:
+                    abs_scores = self._sim.get_series(abs_score_var)
+                    runtime_polarity = LoopPolarity.from_runtime_scores(abs_scores)
+                    # Use runtime polarity if it could be determined, otherwise keep structural
+                    polarity = runtime_polarity if runtime_polarity is not None else structural_loop.polarity
+                except SimlinRuntimeError:
+                    # If we can't get absolute scores, use structural polarity
+                    polarity = structural_loop.polarity
+
                 loop_with_behavior = Loop(
                     id=structural_loop.id,
                     variables=structural_loop.variables,
-                    polarity=structural_loop.polarity,
+                    polarity=polarity,
                     behavior_time_series=behavior_ts,
                 )
                 loops_with_behavior.append(loop_with_behavior)
@@ -307,12 +325,21 @@ class Run:
 
             loop_scores.sort(key=lambda x: abs(x[2]), reverse=True)
 
-            reinforcing_loops = [
-                (lid, score) for lid, pol, score in loop_scores if pol == LoopPolarity.REINFORCING
-            ]
-            balancing_loops = [
-                (lid, score) for lid, pol, score in loop_scores if pol == LoopPolarity.BALANCING
-            ]
+            # Group loops by effective polarity at this timestep.
+            # For UNDETERMINED loops, derive polarity from the score sign.
+            reinforcing_loops = []
+            balancing_loops = []
+            for lid, pol, score in loop_scores:
+                if pol == LoopPolarity.REINFORCING:
+                    reinforcing_loops.append((lid, score))
+                elif pol == LoopPolarity.BALANCING:
+                    balancing_loops.append((lid, score))
+                elif pol == LoopPolarity.UNDETERMINED:
+                    # Derive polarity from score sign at this timestep
+                    if score > 0:
+                        reinforcing_loops.append((lid, score))
+                    elif score < 0:
+                        balancing_loops.append((lid, score))
 
             def try_polarity_group(loops_with_scores):
                 selected = []

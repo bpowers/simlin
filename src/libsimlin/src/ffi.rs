@@ -44,6 +44,7 @@ pub struct SimlinError {
 pub enum SimlinLoopPolarity {
     Reinforcing = 0,
     Balancing = 1,
+    Undetermined = 2,
 }
 
 /// Link polarity for C API

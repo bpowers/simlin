@@ -163,6 +163,7 @@ fn ensure_ltm_results(
                     match loop_obj.polarity {
                         ltm::LoopPolarity::Reinforcing => "Reinforcing (R)",
                         ltm::LoopPolarity::Balancing => "Balancing (B)",
+                        ltm::LoopPolarity::Undetermined => "Undetermined (U)",
                     }
                 );
                 eprintln!("  Path: {}", loop_obj.format_path());

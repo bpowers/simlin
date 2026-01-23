@@ -24,16 +24,60 @@ class LinkPolarity(IntEnum):
 
 
 class LoopPolarity(IntEnum):
-    """Polarity of a feedback loop."""
-    
+    """Polarity of a feedback loop.
+
+    The polarity indicates how the loop affects the system:
+    - REINFORCING (R): Loop amplifies changes (positive loop score)
+    - BALANCING (B): Loop counteracts changes (negative loop score)
+    - UNDETERMINED (U): Loop polarity changes during simulation
+    """
+
     REINFORCING = 0
     BALANCING = 1
-    
+    UNDETERMINED = 2
+
     def __str__(self) -> str:
         if self == LoopPolarity.REINFORCING:
             return "R"
-        else:
+        elif self == LoopPolarity.BALANCING:
             return "B"
+        else:
+            return "U"
+
+    @classmethod
+    def from_runtime_scores(cls, scores: "NDArray[np.float64]") -> Optional["LoopPolarity"]:
+        """Classify loop polarity based on actual runtime loop score values.
+
+        This function examines the loop score values from a simulation run
+        and determines the appropriate polarity:
+        - All valid (non-NaN, non-zero) scores positive -> Reinforcing
+        - All valid scores negative -> Balancing
+        - Mix of positive and negative -> Undetermined
+        - No valid scores -> returns None
+
+        Args:
+            scores: Array of loop score values from simulation
+
+        Returns:
+            The runtime polarity classification, or None if no valid scores
+        """
+        # Filter out NaN and zero values
+        valid_scores = scores[~np.isnan(scores) & (scores != 0.0)]
+
+        if len(valid_scores) == 0:
+            return None
+
+        has_positive = np.any(valid_scores > 0)
+        has_negative = np.any(valid_scores < 0)
+
+        if has_positive and not has_negative:
+            return cls.REINFORCING
+        elif has_negative and not has_positive:
+            return cls.BALANCING
+        elif has_positive and has_negative:
+            return cls.UNDETERMINED
+        else:
+            return None  # All zeros after filtering
 
 
 @dataclass

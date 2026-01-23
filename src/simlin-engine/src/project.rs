@@ -498,4 +498,126 @@ mod tests {
             assert!(e.details.as_ref().unwrap().contains("array_var"));
         }
     }
+
+    #[test]
+    fn test_ltm_balancing_loop_score_polarity() {
+        use crate::test_common::TestProject;
+        use std::sync::Arc;
+
+        // Create a model with a BALANCING loop: stock → gap → inflow → stock
+        // This is a goal-seeking structure where inflow decreases as stock approaches goal
+        let project = TestProject::new("test_ltm_polarity")
+            .with_sim_time(0.0, 5.0, 0.25)
+            .aux("goal", "100", None)
+            .stock("level", "50", &["adjustment"], &[], None)
+            .aux("gap", "goal - level", None)
+            .aux("adjustment_time", "5", None)
+            .flow("adjustment", "gap / adjustment_time", None)
+            .compile()
+            .expect("Project should compile");
+
+        // Apply LTM augmentation
+        let ltm_project = project.with_ltm().expect("Should augment with LTM");
+
+        // Build and run the simulation
+        let project_rc = Arc::new(ltm_project);
+        let sim = crate::interpreter::Simulation::new(&project_rc, "main")
+            .expect("Should create simulation");
+
+        let results = sim
+            .run_to_end()
+            .expect("Simulation should run successfully");
+
+        // Find the loop score variable (should be b1 for balancing)
+        let loop_score_var = results
+            .offsets
+            .keys()
+            .find(|k| k.as_str().starts_with("$⁚ltm⁚abs_loop_score⁚"))
+            .expect("Should have a loop score variable");
+
+        // Get the offset for this variable
+        let offset = results.offsets[loop_score_var];
+        let num_timesteps = results.data.len() / results.offsets.len();
+        let num_vars = results.offsets.len();
+
+        // Check values after the initial NaN timesteps, filtering out 0 (equilibrium)
+        let valid_scores: Vec<f64> = (1..num_timesteps)
+            .map(|step| results.data[step * num_vars + offset])
+            .filter(|v| !v.is_nan() && *v != 0.0)
+            .collect();
+
+        // For a balancing loop, all valid scores should be NEGATIVE
+        // (The loop counteracts changes)
+        assert!(
+            !valid_scores.is_empty(),
+            "Should have some valid loop score values"
+        );
+
+        for score in &valid_scores {
+            assert!(
+                *score < 0.0,
+                "Balancing loop score should be negative, got {score}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ltm_reinforcing_loop_score_polarity() {
+        use crate::test_common::TestProject;
+        use std::sync::Arc;
+
+        // Create a model with a REINFORCING loop: population → births → population
+        // This is exponential growth
+        let project = TestProject::new("test_ltm_reinforcing")
+            .with_sim_time(0.0, 5.0, 0.25)
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * birth_rate", None)
+            .aux("birth_rate", "0.1", None)
+            .compile()
+            .expect("Project should compile");
+
+        // Apply LTM augmentation
+        let ltm_project = project.with_ltm().expect("Should augment with LTM");
+
+        // Build and run the simulation
+        let project_rc = Arc::new(ltm_project);
+        let sim = crate::interpreter::Simulation::new(&project_rc, "main")
+            .expect("Should create simulation");
+
+        let results = sim
+            .run_to_end()
+            .expect("Simulation should run successfully");
+
+        // Find the loop score variable (should be r1 for reinforcing)
+        let loop_score_var = results
+            .offsets
+            .keys()
+            .find(|k| k.as_str().starts_with("$⁚ltm⁚abs_loop_score⁚"))
+            .expect("Should have a loop score variable");
+
+        // Get the offset for this variable
+        let offset = results.offsets[loop_score_var];
+        let num_timesteps = results.data.len() / results.offsets.len();
+        let num_vars = results.offsets.len();
+
+        // Check values after the initial NaN timesteps
+        let valid_scores: Vec<f64> = (1..num_timesteps)
+            .map(|step| results.data[step * num_vars + offset])
+            .filter(|v| !v.is_nan() && *v != 0.0)
+            .collect();
+
+        // For a reinforcing loop, all valid scores should be POSITIVE
+        // (The loop amplifies changes)
+        assert!(
+            !valid_scores.is_empty(),
+            "Should have some valid loop score values"
+        );
+
+        for score in &valid_scores {
+            assert!(
+                *score > 0.0,
+                "Reinforcing loop score should be positive, got {score}"
+            );
+        }
+    }
 }

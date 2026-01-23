@@ -2118,6 +2118,7 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
         let polarity = match loop_item.polarity {
             LoopPolarity::Reinforcing => SimlinLoopPolarity::Reinforcing,
             LoopPolarity::Balancing => SimlinLoopPolarity::Balancing,
+            LoopPolarity::Undetermined => SimlinLoopPolarity::Undetermined,
         };
         c_loops.push(SimlinLoop {
             id,

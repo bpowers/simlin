@@ -62,6 +62,7 @@ typedef enum {
 typedef enum {
   SIMLIN_LOOP_POLARITY_REINFORCING = 0,
   SIMLIN_LOOP_POLARITY_BALANCING = 1,
+  SIMLIN_LOOP_POLARITY_UNDETERMINED = 2,
 } SimlinLoopPolarity;
 
 typedef enum {

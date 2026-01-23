@@ -57,11 +57,67 @@ impl Loop {
     }
 }
 
-/// Loop polarity (Reinforcing or Balancing)
+/// Loop polarity classification
+///
+/// The structural polarity is determined by counting negative links:
+/// - Even number of negative links → Reinforcing
+/// - Odd number of negative links → Balancing
+///
+/// However, in nonlinear models, link polarities can change during simulation,
+/// causing the loop score to change sign. When a loop's score is positive at
+/// some timesteps and negative at others, its runtime polarity is Undetermined.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopPolarity {
-    Reinforcing, // R loop - even number of negative links
-    Balancing,   // B loop - odd number of negative links
+    /// R loop - amplifies changes (positive loop score)
+    /// Structurally: even number of negative links
+    Reinforcing,
+    /// B loop - counteracts changes (negative loop score)
+    /// Structurally: odd number of negative links
+    Balancing,
+    /// U loop - polarity changes during simulation
+    /// The loop score has both positive and negative values at different timesteps
+    Undetermined,
+}
+
+impl LoopPolarity {
+    /// Classify loop polarity based on actual runtime loop score values.
+    ///
+    /// This function examines the loop score values from a simulation run
+    /// and determines the appropriate polarity:
+    /// - All valid (non-NaN, non-zero) scores positive → Reinforcing
+    /// - All valid scores negative → Balancing
+    /// - Mix of positive and negative → Undetermined
+    /// - No valid scores → returns None
+    pub fn from_runtime_scores(scores: &[f64]) -> Option<Self> {
+        let valid_scores: Vec<f64> = scores
+            .iter()
+            .copied()
+            .filter(|v| !v.is_nan() && *v != 0.0)
+            .collect();
+
+        if valid_scores.is_empty() {
+            return None;
+        }
+
+        let has_positive = valid_scores.iter().any(|v| *v > 0.0);
+        let has_negative = valid_scores.iter().any(|v| *v < 0.0);
+
+        match (has_positive, has_negative) {
+            (true, false) => Some(LoopPolarity::Reinforcing),
+            (false, true) => Some(LoopPolarity::Balancing),
+            (true, true) => Some(LoopPolarity::Undetermined),
+            (false, false) => None, // All zeros after filtering
+        }
+    }
+
+    /// Returns the conventional single-letter abbreviation for this polarity
+    pub fn abbreviation(&self) -> &'static str {
+        match self {
+            LoopPolarity::Reinforcing => "R",
+            LoopPolarity::Balancing => "B",
+            LoopPolarity::Undetermined => "U",
+        }
+    }
 }
 
 /// Get direct dependencies from a Variable
@@ -2066,5 +2122,60 @@ mod tests {
         } else {
             panic!("Could not find the carrying capacity loop in the model");
         }
+    }
+
+    #[test]
+    fn test_loop_polarity_from_runtime_scores_reinforcing() {
+        // All positive scores -> Reinforcing
+        let scores = vec![f64::NAN, 1.0, 2.0, 3.0, 0.5];
+        let polarity = LoopPolarity::from_runtime_scores(&scores);
+        assert_eq!(polarity, Some(LoopPolarity::Reinforcing));
+    }
+
+    #[test]
+    fn test_loop_polarity_from_runtime_scores_balancing() {
+        // All negative scores -> Balancing
+        let scores = vec![f64::NAN, -1.0, -2.0, -3.0, -0.5];
+        let polarity = LoopPolarity::from_runtime_scores(&scores);
+        assert_eq!(polarity, Some(LoopPolarity::Balancing));
+    }
+
+    #[test]
+    fn test_loop_polarity_from_runtime_scores_undetermined() {
+        // Mix of positive and negative scores -> Undetermined
+        let scores = vec![f64::NAN, 1.0, -2.0, 3.0, -0.5];
+        let polarity = LoopPolarity::from_runtime_scores(&scores);
+        assert_eq!(polarity, Some(LoopPolarity::Undetermined));
+    }
+
+    #[test]
+    fn test_loop_polarity_from_runtime_scores_empty() {
+        // Empty scores -> None
+        let scores: Vec<f64> = vec![];
+        let polarity = LoopPolarity::from_runtime_scores(&scores);
+        assert_eq!(polarity, None);
+    }
+
+    #[test]
+    fn test_loop_polarity_from_runtime_scores_all_nan() {
+        // All NaN scores -> None
+        let scores = vec![f64::NAN, f64::NAN, f64::NAN];
+        let polarity = LoopPolarity::from_runtime_scores(&scores);
+        assert_eq!(polarity, None);
+    }
+
+    #[test]
+    fn test_loop_polarity_from_runtime_scores_all_zero() {
+        // All zero scores (after filtering NaN) -> None
+        let scores = vec![f64::NAN, 0.0, 0.0, 0.0];
+        let polarity = LoopPolarity::from_runtime_scores(&scores);
+        assert_eq!(polarity, None);
+    }
+
+    #[test]
+    fn test_loop_polarity_abbreviation() {
+        assert_eq!(LoopPolarity::Reinforcing.abbreviation(), "R");
+        assert_eq!(LoopPolarity::Balancing.abbreviation(), "B");
+        assert_eq!(LoopPolarity::Undetermined.abbreviation(), "U");
     }
 }
