@@ -198,6 +198,15 @@ pub fn is_tabbed_array(name: &str) -> bool {
     to_lower_space(name) == "tabbed array"
 }
 
+/// Check if a name is "WITH LOOKUP" (any spacing variant).
+///
+/// Uses `to_lower_space` canonicalization so "WITH LOOKUP", "WITH_LOOKUP",
+/// "WITH  LOOKUP", etc. all match. This is needed because WITH LOOKUP has
+/// special syntax (inline table as second argument) that the parser must handle.
+pub fn is_with_lookup(name: &str) -> bool {
+    to_lower_space(name) == "with lookup"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +316,20 @@ mod tests {
         assert!(is_tabbed_array("Tabbed_Array"));
         assert!(!is_tabbed_array("TABBED"));
         assert!(!is_tabbed_array("ARRAY"));
+    }
+
+    #[test]
+    fn test_with_lookup_keyword() {
+        // All spacing variants should match
+        assert!(is_with_lookup("WITH LOOKUP"));
+        assert!(is_with_lookup("with lookup"));
+        assert!(is_with_lookup("WITH_LOOKUP"));
+        assert!(is_with_lookup("with_lookup"));
+        assert!(is_with_lookup("WITH  LOOKUP"));
+        assert!(is_with_lookup("WITH\tLOOKUP"));
+        // Non-matches
+        assert!(!is_with_lookup("WITH"));
+        assert!(!is_with_lookup("LOOKUP"));
+        assert!(!is_with_lookup("WITHLOOKUP"));
     }
 }

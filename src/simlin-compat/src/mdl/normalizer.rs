@@ -13,7 +13,7 @@
 use std::borrow::Cow;
 use std::iter::Peekable;
 
-use crate::mdl::builtins::{is_builtin, is_tabbed_array, to_lower_space};
+use crate::mdl::builtins::{is_builtin, is_tabbed_array, is_with_lookup, to_lower_space};
 use crate::mdl::lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
 
 /// Normalized tokens ready for parsing.
@@ -146,20 +146,6 @@ impl<'input> TokenNormalizer<'input> {
             in_units_mode: false,
             source: input,
         }
-    }
-
-    /// Check if a symbol exactly matches "WITH LOOKUP" (case-insensitive, single space).
-    fn is_with_lookup(s: &str) -> bool {
-        // Must be exactly 11 characters with single space at position 4
-        if s.len() != 11 {
-            return false;
-        }
-        let bytes = s.as_bytes();
-        // Check for single space at position 4
-        if bytes[4] != b' ' {
-            return false;
-        }
-        s.eq_ignore_ascii_case("WITH LOOKUP")
     }
 
     /// Check if a symbol is a GET XLS/VDF function and return the prefix if so.
@@ -434,8 +420,8 @@ impl<'input> TokenNormalizer<'input> {
                     // In units mode, symbols become UnitsSymbol
                     Token::UnitsSymbol(name)
                 } else if self.section == Section::Equation {
-                    // Check for WITH LOOKUP exact match
-                    if Self::is_with_lookup(&name) {
+                    // Check for WITH LOOKUP (any spacing variant)
+                    if is_with_lookup(&name) {
                         Token::WithLookup
                     }
                     // Check for GET XLS/VDF
@@ -668,19 +654,17 @@ mod tests {
     }
 
     #[test]
-    fn test_with_lookup_underscore_rejected() {
-        // WITH_LOOKUP should NOT match (underscore instead of space)
+    fn test_with_lookup_underscore() {
+        // WITH_LOOKUP should match via canonicalization
         let toks = token_types("WITH_LOOKUP(x,y)");
-        // Should be a Function (since to_lower_space canonicalizes it)
-        assert!(matches!(&toks[0], Token::Function(s) if s.as_ref() == "WITH_LOOKUP"));
+        assert_eq!(toks[0], Token::WithLookup);
     }
 
     #[test]
-    fn test_with_lookup_multi_space_rejected() {
-        // "WITH  LOOKUP" with two spaces should NOT match WithLookup exactly
+    fn test_with_lookup_multi_space() {
+        // "WITH  LOOKUP" with two spaces should also match via canonicalization
         let toks = token_types("WITH  LOOKUP(x,y)");
-        // Should be a Function (since to_lower_space canonicalizes it to "with lookup")
-        assert!(matches!(&toks[0], Token::Function(s) if s.as_ref() == "WITH  LOOKUP"));
+        assert_eq!(toks[0], Token::WithLookup);
     }
 
     // ========== Phase 6: TABBED ARRAY Tests ==========
