@@ -13,6 +13,7 @@ import {
   LinkViewElement,
   ModuleViewElement,
   AliasViewElement,
+  GroupViewElement,
   StockFlowView,
   Rect,
   Point,
@@ -125,6 +126,19 @@ function elementToJson(element: ViewElement): JsonViewElement | null {
       x: element.x,
       y: element.y,
       labelSide: element.labelSide,
+    };
+  }
+
+  if (element instanceof GroupViewElement) {
+    // GroupViewElement stores center-based x/y internally, convert to top-left for JSON
+    return {
+      type: 'group',
+      uid: element.uid,
+      name: element.name,
+      x: element.x - element.width / 2,
+      y: element.y - element.height / 2,
+      width: element.width,
+      height: element.height,
     };
   }
 
