@@ -135,6 +135,10 @@ pub enum Expr<'input> {
     /// Retained for accurate roundtripping even though semantically equivalent to inner.
     Paren(Box<Expr<'input>>, Loc),
     /// Literal string: `'A FUNCTION OF'` (single-quoted)
+    ///
+    /// Also used for the `?` placeholder produced by trailing-comma function
+    /// calls. For example, `FUNC(a, b,)` produces args `[a, b, Literal("?")]`.
+    /// This matches xmutil's `vpyy_literal_expression("?")` behavior.
     Literal(Cow<'input, str>, Loc),
     /// `:NA:` constant (-1e38)
     Na(Loc),
@@ -144,18 +148,22 @@ pub enum Expr<'input> {
 ///
 /// Vensim supports two table formats that require different handling:
 /// - Modern pairs format: `(x1,y1), (x2,y2), ...`
-/// - Legacy XY vector format: `xmin, xmax, y1, y2, y3, ...` (evenly spaced X)
+/// - Legacy XY vector format: `x1, x2, ..., xN, y1, y2, ..., yN` (flat vector split in half)
 ///
-/// The legacy format must be transformed during conversion via `TransformLegacy`.
+/// The legacy format must be transformed during conversion via `transform_legacy()`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TableFormat {
     /// Modern pairs format: `(x1,y1), (x2,y2), ...`
     #[default]
     Pairs,
-    /// Legacy XY vector format: `xmin, xmax, y1, y2, y3, ...`
+    /// Legacy XY vector format: `x1, x2, ..., xN, y1, y2, ..., yN`
     ///
-    /// X values are evenly spaced between xmin and xmax.
-    /// During conversion, this must be transformed to pairs format.
+    /// The raw values form a flat vector that must be split in half during
+    /// conversion: the first half becomes X values, the second half becomes
+    /// Y values. This matches xmutil's `TransformLegacy()` behavior.
+    ///
+    /// Note: The raw values are stored in `x_vals` during parsing. During
+    /// conversion, call `transform_legacy()` to split them into x/y pairs.
     LegacyXY,
 }
 
@@ -168,6 +176,12 @@ pub struct LookupTable {
     pub y_range: Option<(f64, f64)>,
     /// Format of the table data (pairs vs legacy XY vector)
     pub format: TableFormat,
+    /// Whether this table should extrapolate beyond its bounds.
+    ///
+    /// This is set during conversion when `LOOKUP EXTRAPOLATE` or `TABXL`
+    /// functions reference this table. It affects XMILE output (emits
+    /// `type="extrapolate"` on the `<gf>` element).
+    pub extrapolate: bool,
     pub loc: Loc,
 }
 
@@ -180,6 +194,7 @@ impl LookupTable {
             x_range: None,
             y_range: None,
             format: TableFormat::Pairs,
+            extrapolate: false,
             loc,
         }
     }
@@ -192,6 +207,7 @@ impl LookupTable {
             x_range: None,
             y_range: None,
             format: TableFormat::LegacyXY,
+            extrapolate: false,
             loc,
         }
     }
@@ -202,10 +218,37 @@ impl LookupTable {
         self.y_vals.push(y);
     }
 
+    /// Add a raw value to x_vals (used for legacy format during parsing).
+    pub fn add_raw(&mut self, val: f64) {
+        self.x_vals.push(val);
+    }
+
     /// Set the x/y range bounds from a `[(xmin,ymin)-(xmax,ymax)]` clause.
     pub fn set_range(&mut self, x_min: f64, y_min: f64, x_max: f64, y_max: f64) {
         self.x_range = Some((x_min, x_max));
         self.y_range = Some((y_min, y_max));
+    }
+
+    /// Transform a legacy XY format table to pairs format.
+    ///
+    /// Legacy format stores values as a flat vector `x1, x2, ..., xN, y1, y2, ..., yN`.
+    /// This method splits the vector in half: first half becomes x_vals, second half
+    /// becomes y_vals. This matches xmutil's `TransformLegacy()` behavior.
+    ///
+    /// Returns `Err` if the format is not LegacyXY or if the count is odd.
+    pub fn transform_legacy(&mut self) -> Result<(), &'static str> {
+        if self.format != TableFormat::LegacyXY {
+            return Err("transform_legacy called on non-legacy table");
+        }
+        if !self.x_vals.len().is_multiple_of(2) {
+            return Err("legacy table must have even number of values");
+        }
+
+        let n = self.x_vals.len() / 2;
+        // Split: first half stays as x_vals, second half becomes y_vals
+        self.y_vals = self.x_vals.split_off(n);
+        self.format = TableFormat::Pairs;
+        Ok(())
     }
 }
 
@@ -306,7 +349,20 @@ pub enum Equation<'input> {
     EmptyRhs(Lhs<'input>, Loc),
     /// Implicit lookup: `lhs` alone with no `=` or table data.
     ///
-    /// Vensim treats this as lookup on Time (no data values).
+    /// This is an exogenous data entry. During conversion, this must be
+    /// transformed to a lookup on TIME with a default table of `(0,1),(1,1)`.
+    /// This matches xmutil's `AddTable()` behavior when `tbl` is NULL.
+    ///
+    /// Example conversion pseudocode:
+    /// ```text
+    /// // Create default table
+    /// let mut table = LookupTable::new(loc);
+    /// table.add_pair(0.0, 1.0);
+    /// table.add_pair(1.0, 1.0);
+    /// // Create TIME reference as input
+    /// let input = Expr::Var("TIME", ...);
+    /// // Result is: lhs = LOOKUP(TIME, table)
+    /// ```
     Implicit(Lhs<'input>),
     /// Lookup definition: `lhs(table_pairs)`
     Lookup(Lhs<'input>, LookupTable),
@@ -316,8 +372,9 @@ pub enum Equation<'input> {
     Data(Lhs<'input>, Option<Expr<'input>>),
     /// Tabbed array: `lhs = TABBED ARRAY(values)`
     ///
-    /// Values are stored as rows (Vec of columns).
-    TabbedArray(Lhs<'input>, Vec<Vec<f64>>),
+    /// Values are stored as a flat vector, matching xmutil behavior which
+    /// discards row boundaries. The parser flattens the 2D input.
+    TabbedArray(Lhs<'input>, Vec<f64>),
     /// Number list: `lhs = num1, num2, num3`
     ///
     /// When the RHS is a comma-separated list of numbers (exprlist with
@@ -454,6 +511,7 @@ mod tests {
         assert!(table.x_range.is_none());
         assert!(table.y_range.is_none());
         assert_eq!(table.format, TableFormat::Pairs);
+        assert!(!table.extrapolate);
     }
 
     #[test]
@@ -461,6 +519,7 @@ mod tests {
         let loc = Loc::new(0, 10);
         let table = LookupTable::new_legacy(loc);
         assert_eq!(table.format, TableFormat::LegacyXY);
+        assert!(!table.extrapolate);
     }
 
     #[test]
@@ -478,6 +537,47 @@ mod tests {
         table.set_range(0.0, 0.0, 100.0, 50.0);
         assert_eq!(table.x_range, Some((0.0, 100.0)));
         assert_eq!(table.y_range, Some((0.0, 50.0)));
+    }
+
+    #[test]
+    fn test_lookup_table_add_raw() {
+        let mut table = LookupTable::new_legacy(Loc::default());
+        table.add_raw(1.0);
+        table.add_raw(2.0);
+        table.add_raw(10.0);
+        table.add_raw(20.0);
+        assert_eq!(table.x_vals, vec![1.0, 2.0, 10.0, 20.0]);
+        assert!(table.y_vals.is_empty());
+    }
+
+    #[test]
+    fn test_lookup_table_transform_legacy() {
+        let mut table = LookupTable::new_legacy(Loc::default());
+        // Legacy format: x1, x2, y1, y2 (first half = x, second half = y)
+        table.add_raw(1.0);
+        table.add_raw(2.0);
+        table.add_raw(10.0);
+        table.add_raw(20.0);
+        assert!(table.transform_legacy().is_ok());
+        assert_eq!(table.x_vals, vec![1.0, 2.0]);
+        assert_eq!(table.y_vals, vec![10.0, 20.0]);
+        assert_eq!(table.format, TableFormat::Pairs);
+    }
+
+    #[test]
+    fn test_lookup_table_transform_legacy_odd_count() {
+        let mut table = LookupTable::new_legacy(Loc::default());
+        table.add_raw(1.0);
+        table.add_raw(2.0);
+        table.add_raw(3.0); // Odd count - should fail
+        assert!(table.transform_legacy().is_err());
+    }
+
+    #[test]
+    fn test_lookup_table_transform_legacy_wrong_format() {
+        let mut table = LookupTable::new(Loc::default()); // Pairs format
+        table.add_pair(1.0, 10.0);
+        assert!(table.transform_legacy().is_err());
     }
 
     #[test]

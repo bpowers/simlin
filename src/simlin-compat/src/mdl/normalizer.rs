@@ -72,10 +72,10 @@ pub enum Token<'input> {
     UnitsSymbol(Cow<'input, str>),
     /// Known builtin function
     Function(Cow<'input, str>),
-    /// "WITH LOOKUP" keyword (exact match with single space)
+    /// "WITH LOOKUP" keyword (any spacing variant via canonicalization)
     WithLookup,
-    /// Parsed TABBED ARRAY data
-    TabbedArray(Vec<Vec<f64>>),
+    /// Parsed TABBED ARRAY data (flattened to match xmutil behavior)
+    TabbedArray(Vec<f64>),
 }
 
 /// Normalizer error codes for context-sensitive validation.
@@ -175,6 +175,11 @@ impl<'input> TokenNormalizer<'input> {
     /// Read a TABBED ARRAY construct.
     /// Called after we've seen a Symbol that canonicalizes to "tabbed array".
     /// `keyword_start` is the start position of the "TABBED ARRAY" keyword.
+    /// Read a TABBED ARRAY construct.
+    ///
+    /// Returns a flat vector of values, matching xmutil behavior which discards
+    /// row boundaries (see `ExpressionNumberTable::AddValue()` - the `row`
+    /// parameter is ignored).
     fn read_tabbed_array(
         &mut self,
         keyword_start: usize,
@@ -203,35 +208,27 @@ impl<'input> TokenNormalizer<'input> {
             }
         }
 
-        let mut rows: Vec<Vec<f64>> = vec![vec![]];
-        let mut current_row = 0;
+        // Collect all values into a flat vector (xmutil ignores row boundaries)
+        let mut values: Vec<f64> = Vec::new();
 
         loop {
             match self.inner.next() {
                 Some(Ok((_, RawToken::RParen, end))) => {
-                    // Finished - remove trailing empty row if present
-                    if rows.last().is_some_and(|r| r.is_empty()) && rows.len() > 1 {
-                        rows.pop();
-                    }
-                    return Ok((keyword_start, Token::TabbedArray(rows), end));
+                    return Ok((keyword_start, Token::TabbedArray(values), end));
                 }
                 Some(Ok((_, RawToken::Newline, _))) => {
-                    // Start a new row
-                    if !rows[current_row].is_empty() {
-                        current_row += 1;
-                        rows.push(vec![]);
-                    }
+                    // Newlines are ignored (just whitespace between values)
                 }
                 Some(Ok((_, RawToken::Number(n), _))) => {
                     // RawLexer only emits valid Number tokens, so parse should never fail
                     let val: f64 = n.parse().unwrap();
-                    rows[current_row].push(val);
+                    values.push(val);
                 }
                 Some(Ok((sign_pos, RawToken::Plus, sign_end))) => {
                     // C++ treats newline as whitespace after a sign, so skip Newlines
                     // until we find the number
                     match self.skip_newlines_and_get_number()? {
-                        Some(val) => rows[current_row].push(val),
+                        Some(val) => values.push(val),
                         None => {
                             return Err(NormalizerError {
                                 start: sign_pos,
@@ -245,7 +242,7 @@ impl<'input> TokenNormalizer<'input> {
                     // C++ treats newline as whitespace after a sign, so skip Newlines
                     // until we find the number
                     match self.skip_newlines_and_get_number()? {
-                        Some(val) => rows[current_row].push(-val),
+                        Some(val) => values.push(-val),
                         None => {
                             return Err(NormalizerError {
                                 start: sign_pos,
@@ -670,23 +667,22 @@ mod tests {
     // ========== Phase 6: TABBED ARRAY Tests ==========
 
     #[test]
-    fn test_tabbed_array_single_row() {
+    fn test_tabbed_array_simple() {
+        // Values are flattened into a single vector (xmutil ignores row boundaries)
         let toks = token_types("TABBED ARRAY(1 2 3)");
-        if let Token::TabbedArray(rows) = &toks[0] {
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0], vec![1.0, 2.0, 3.0]);
+        if let Token::TabbedArray(values) = &toks[0] {
+            assert_eq!(values, &vec![1.0, 2.0, 3.0]);
         } else {
             panic!("Expected TabbedArray, got {:?}", toks[0]);
         }
     }
 
     #[test]
-    fn test_tabbed_array_multiple_rows_via_newlines() {
+    fn test_tabbed_array_with_newlines() {
+        // Newlines are just whitespace - values are flattened
         let toks = token_types("TABBED ARRAY(\n1 2\n3 4\n)");
-        if let Token::TabbedArray(rows) = &toks[0] {
-            assert_eq!(rows.len(), 2);
-            assert_eq!(rows[0], vec![1.0, 2.0]);
-            assert_eq!(rows[1], vec![3.0, 4.0]);
+        if let Token::TabbedArray(values) = &toks[0] {
+            assert_eq!(values, &vec![1.0, 2.0, 3.0, 4.0]);
         } else {
             panic!("Expected TabbedArray, got {:?}", toks[0]);
         }
@@ -695,8 +691,8 @@ mod tests {
     #[test]
     fn test_tabbed_array_with_signs() {
         let toks = token_types("TABBED ARRAY(-1 +2 -3)");
-        if let Token::TabbedArray(rows) = &toks[0] {
-            assert_eq!(rows[0], vec![-1.0, 2.0, -3.0]);
+        if let Token::TabbedArray(values) = &toks[0] {
+            assert_eq!(values, &vec![-1.0, 2.0, -3.0]);
         } else {
             panic!("Expected TabbedArray, got {:?}", toks[0]);
         }
@@ -874,10 +870,9 @@ mod tests {
     #[test]
     fn test_tabbed_array_sign_followed_by_newline_then_number() {
         // C++ treats newline as whitespace after a sign - the number can be on the next line
-        // This is important for tabbed arrays where rows are separated by newlines
         let toks = token_types("TABBED ARRAY(-\n1 +\n2)");
-        if let Token::TabbedArray(rows) = &toks[0] {
-            assert_eq!(rows[0], vec![-1.0, 2.0]);
+        if let Token::TabbedArray(values) = &toks[0] {
+            assert_eq!(values, &vec![-1.0, 2.0]);
         } else {
             panic!("Expected TabbedArray, got {:?}", toks[0]);
         }
@@ -887,8 +882,8 @@ mod tests {
     fn test_tabbed_array_sign_followed_by_crlf_then_number() {
         // Same test but with CRLF line endings
         let toks = token_types("TABBED ARRAY(-\r\n1)");
-        if let Token::TabbedArray(rows) = &toks[0] {
-            assert_eq!(rows[0], vec![-1.0]);
+        if let Token::TabbedArray(values) = &toks[0] {
+            assert_eq!(values, &vec![-1.0]);
         } else {
             panic!("Expected TabbedArray, got {:?}", toks[0]);
         }
