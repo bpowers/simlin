@@ -759,6 +759,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           const [cloud, updatedFlow] = this.constrainCloudMovement(initialEl, defined(this.state.moveDelta));
           otherUpdates = otherUpdates.push(updatedFlow);
           return cloud;
+        } else if (initialEl instanceof GroupViewElement) {
+          // Groups store x/y as top-left corner (per XMILE spec), not center
+          return initialEl.merge({
+            x: initialEl.x - x,
+            y: initialEl.y - y,
+          });
         } else if (!(initialEl instanceof LinkViewElement)) {
           return (initialEl as AuxViewElement).merge({
             x: initialEl.cx - x,

@@ -1097,21 +1097,19 @@ export class GroupViewElement extends Record(groupViewElementDefaults) implement
       height: this.height,
     };
   }
-  // Return x/y directly (not the center) because selection move logic
-  // computes new positions as element.cx - delta. Since groups store x/y
-  // as the top-left corner (per XMILE spec), returning the center would
-  // cause groups to jump by half their dimensions when dragged.
   get cx(): number {
-    return this.x;
+    return this.x + this.width / 2;
   }
   get cy(): number {
-    return this.y;
+    return this.y + this.height / 2;
   }
+  // Groups are organizational containers, not model variables.
+  // They shouldn't participate in variable-oriented lookups or autocomplete.
   isNamed(): boolean {
-    return true;
+    return false;
   }
-  get ident(): string {
-    return this.name;
+  get ident(): undefined {
+    return undefined;
   }
 }
 
