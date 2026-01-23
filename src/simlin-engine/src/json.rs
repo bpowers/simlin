@@ -340,6 +340,20 @@ pub struct AliasViewElement {
     pub label_side: String,
 }
 
+/// Visual container for grouping related model elements.
+/// In JSON (matching XMILE spec), x/y are top-left coordinates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct GroupViewElement {
+    pub uid: i32,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -352,6 +366,7 @@ pub enum ViewElement {
     Link(LinkViewElement),
     Module(ModuleViewElement),
     Alias(AliasViewElement),
+    Group(GroupViewElement),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -864,6 +879,17 @@ impl From<ViewElement> for datamodel::ViewElement {
                     label_side: label_side_from_string(&a.label_side),
                 })
             }
+            ViewElement::Group(g) => {
+                // JSON uses top-left coordinates, datamodel uses center
+                datamodel::ViewElement::Group(datamodel::view_element::Group {
+                    uid: g.uid,
+                    name: g.name,
+                    x: g.x + g.width / 2.0,
+                    y: g.y + g.height / 2.0,
+                    width: g.width,
+                    height: g.height,
+                })
+            }
         }
     }
 }
@@ -1358,6 +1384,17 @@ impl From<datamodel::ViewElement> for ViewElement {
                 y: a.y,
                 label_side: label_side_to_string(a.label_side),
             }),
+            datamodel::ViewElement::Group(g) => {
+                // Datamodel uses center coordinates, JSON uses top-left
+                ViewElement::Group(GroupViewElement {
+                    uid: g.uid,
+                    name: g.name,
+                    x: g.x - g.width / 2.0,
+                    y: g.y - g.height / 2.0,
+                    width: g.width,
+                    height: g.height,
+                })
+            }
         }
     }
 }
@@ -2054,6 +2091,17 @@ mod tests {
                     multi_points: vec![],
                 }),
             ),
+            (
+                "group",
+                ViewElement::Group(GroupViewElement {
+                    uid: 5,
+                    name: "Sector".to_string(),
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 80.0,
+                }),
+            ),
         ];
 
         for (name, json_ve) in cases {
@@ -2086,8 +2134,77 @@ mod tests {
                 (ViewElement::Link(l1), ViewElement::Link(l2)) => {
                     assert_eq!(l1.from_uid, l2.from_uid, "Failed for: {}", name);
                 }
+                (ViewElement::Group(g1), ViewElement::Group(g2)) => {
+                    assert_eq!(g1.name, g2.name, "Failed for: {}", name);
+                    assert_eq!(g1.width, g2.width, "Failed for: {}", name);
+                    assert_eq!(g1.height, g2.height, "Failed for: {}", name);
+                }
                 _ => panic!("Type mismatch for: {}", name),
             }
+        }
+    }
+
+    #[test]
+    fn test_group_view_element_roundtrip() {
+        // Test Group view element - groups are organizational containers for other elements.
+        // In JSON (matching XMILE spec), x/y are top-left coordinates.
+        // Internally in datamodel, x/y are center coordinates for consistency with other elements.
+        let json_group = ViewElement::Group(GroupViewElement {
+            uid: 100,
+            name: "Economic Sector".to_string(),
+            x: 50.0,  // top-left x
+            y: 100.0, // top-left y
+            width: 200.0,
+            height: 150.0,
+        });
+
+        // Roundtrip through datamodel and back
+        let dm_ve: datamodel::ViewElement = json_group.clone().into();
+        let json_ve2: ViewElement = dm_ve.clone().into();
+
+        // Verify datamodel stores center coordinates
+        if let datamodel::ViewElement::Group(g) = &dm_ve {
+            // Center should be top-left + half dimensions
+            assert_eq!(g.x, 50.0 + 100.0, "x should be center");
+            assert_eq!(g.y, 100.0 + 75.0, "y should be center");
+            assert_eq!(g.width, 200.0);
+            assert_eq!(g.height, 150.0);
+            assert_eq!(g.name, "Economic Sector");
+        } else {
+            panic!("Expected Group variant");
+        }
+
+        // Verify JSON serialization uses top-left coordinates
+        if let ViewElement::Group(g) = &json_ve2 {
+            assert_eq!(g.x, 50.0, "x should be top-left in JSON");
+            assert_eq!(g.y, 100.0, "y should be top-left in JSON");
+            assert_eq!(g.width, 200.0);
+            assert_eq!(g.height, 150.0);
+        } else {
+            panic!("Expected Group variant");
+        }
+
+        // Serialize and deserialize
+        let json_str = serde_json::to_string(&json_ve2).unwrap();
+        let json_ve3: ViewElement = serde_json::from_str(&json_str).unwrap();
+
+        // Verify type field is "group"
+        assert!(
+            json_str.contains("\"type\":\"group\""),
+            "Missing or incorrect type field: {}",
+            json_str
+        );
+
+        // Verify all fields are preserved after JSON roundtrip
+        if let ViewElement::Group(g) = json_ve3 {
+            assert_eq!(g.uid, 100);
+            assert_eq!(g.name, "Economic Sector");
+            assert_eq!(g.x, 50.0);
+            assert_eq!(g.y, 100.0);
+            assert_eq!(g.width, 200.0);
+            assert_eq!(g.height, 150.0);
+        } else {
+            panic!("Expected Group variant after JSON roundtrip");
         }
     }
 

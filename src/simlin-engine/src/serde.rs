@@ -1326,6 +1326,32 @@ impl From<view_element::Cloud> for project_io::view_element::Cloud {
     }
 }
 
+impl From<project_io::view_element::Group> for view_element::Group {
+    fn from(v: project_io::view_element::Group) -> Self {
+        view_element::Group {
+            uid: v.uid,
+            name: v.name,
+            x: v.x,
+            y: v.y,
+            width: v.width,
+            height: v.height,
+        }
+    }
+}
+
+impl From<view_element::Group> for project_io::view_element::Group {
+    fn from(v: view_element::Group) -> Self {
+        project_io::view_element::Group {
+            uid: v.uid,
+            name: v.name,
+            x: v.x,
+            y: v.y,
+            width: v.width,
+            height: v.height,
+        }
+    }
+}
+
 #[test]
 fn test_view_element_cloud_roundtrip() {
     let cases: &[_] = &[view_element::Cloud {
@@ -1366,6 +1392,9 @@ impl From<project_io::ViewElement> for ViewElement {
             project_io::view_element::Element::Cloud(v) => {
                 ViewElement::Cloud(view_element::Cloud::from(v))
             }
+            project_io::view_element::Element::Group(v) => {
+                ViewElement::Group(view_element::Group::from(v))
+            }
         }
     }
 }
@@ -1395,6 +1424,9 @@ impl From<ViewElement> for project_io::ViewElement {
                 ViewElement::Cloud(v) => project_io::view_element::Element::Cloud(
                     project_io::view_element::Cloud::from(v),
                 ),
+                ViewElement::Group(v) => project_io::view_element::Element::Group(
+                    project_io::view_element::Group::from(v),
+                ),
             }),
         }
     }
@@ -1402,12 +1434,22 @@ impl From<ViewElement> for project_io::ViewElement {
 
 #[test]
 fn test_view_element_roundtrip() {
-    let cases: &[_] = &[ViewElement::Cloud(view_element::Cloud {
-        uid: 123,
-        flow_uid: 124,
-        x: 2.0,
-        y: 3.0,
-    })];
+    let cases: &[_] = &[
+        ViewElement::Cloud(view_element::Cloud {
+            uid: 123,
+            flow_uid: 124,
+            x: 2.0,
+            y: 3.0,
+        }),
+        ViewElement::Group(view_element::Group {
+            uid: 200,
+            name: "Economic Sector".to_string(),
+            x: 150.0,
+            y: 175.0,
+            width: 200.0,
+            height: 150.0,
+        }),
+    ];
     for expected in cases {
         let expected = expected.clone();
         let actual = ViewElement::from(project_io::ViewElement::from(expected.clone()));

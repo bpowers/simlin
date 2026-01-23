@@ -200,6 +200,17 @@ message ViewElement {
     double y = 4;
   };
 
+  // Visual container for grouping related model elements.
+  // x/y are center coordinates (matching the internal convention).
+  message Group {
+    int32 uid = 1;
+    string name = 2;
+    double x = 3;
+    double y = 4;
+    double width = 5;
+    double height = 6;
+  };
+
   oneof element {
     Aux aux = 1;
     Stock stock = 2;
@@ -208,6 +219,7 @@ message ViewElement {
     Module module = 5;
     Alias alias = 6;
     Cloud cloud = 7;
+    Group group = 8;
   }
 }
 

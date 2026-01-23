@@ -2632,6 +2632,87 @@ pub mod view_element {
             assert_eq!(expected, actual);
         }
     }
+
+    /// Visual container for grouping related model elements.
+    /// In XMILE, x/y are top-left coordinates.
+    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    pub struct Group {
+        #[serde(rename = "@name")]
+        pub name: String,
+        #[serde(rename = "@uid")]
+        pub uid: Option<i32>,
+        #[serde(rename = "@x")]
+        pub x: f64,
+        #[serde(rename = "@y")]
+        pub y: f64,
+        #[serde(rename = "@width")]
+        pub width: f64,
+        #[serde(rename = "@height")]
+        pub height: f64,
+    }
+
+    impl ToXml<XmlWriter> for Group {
+        fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
+            let x = format!("{}", self.x);
+            let y = format!("{}", self.y);
+            let width = format!("{}", self.width);
+            let height = format!("{}", self.height);
+
+            let attrs = vec![
+                ("name", self.name.as_str()),
+                ("x", x.as_str()),
+                ("y", y.as_str()),
+                ("width", width.as_str()),
+                ("height", height.as_str()),
+            ];
+            write_tag_with_attrs(writer, "group", "", &attrs)
+        }
+    }
+
+    impl From<Group> for datamodel::view_element::Group {
+        fn from(v: Group) -> Self {
+            // XMILE uses top-left coordinates, datamodel uses center
+            datamodel::view_element::Group {
+                uid: v.uid.unwrap_or(-1),
+                name: v.name,
+                x: v.x + v.width / 2.0,
+                y: v.y + v.height / 2.0,
+                width: v.width,
+                height: v.height,
+            }
+        }
+    }
+
+    impl From<datamodel::view_element::Group> for Group {
+        fn from(v: datamodel::view_element::Group) -> Self {
+            // Datamodel uses center coordinates, XMILE uses top-left
+            Group {
+                name: v.name,
+                uid: Some(v.uid),
+                x: v.x - v.width / 2.0,
+                y: v.y - v.height / 2.0,
+                width: v.width,
+                height: v.height,
+            }
+        }
+    }
+
+    #[test]
+    fn test_group_roundtrip() {
+        let cases: &[_] = &[datamodel::view_element::Group {
+            uid: 100,
+            name: "Economic Sector".to_string(),
+            x: 150.0,
+            y: 175.0,
+            width: 200.0,
+            height: 150.0,
+        }];
+        for expected in cases {
+            let expected = expected.clone();
+            let actual = datamodel::view_element::Group::from(Group::from(expected.clone()));
+            assert_eq!(expected, actual);
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
@@ -2645,6 +2726,7 @@ pub enum ViewObject {
     Module(view_element::Module),
     Cloud(view_element::Cloud),
     Alias(view_element::Alias),
+    Group(view_element::Group),
     // Style(Style),
     #[serde(other)]
     Unhandled,
@@ -2663,6 +2745,7 @@ impl ToXml<XmlWriter> for ViewObject {
                 Ok(())
             }
             ViewObject::Alias(alias) => alias.write_xml(writer),
+            ViewObject::Group(group) => group.write_xml(writer),
             ViewObject::Unhandled => {
                 // explicitly ignore unhandled things
                 Ok(())
@@ -2681,6 +2764,7 @@ impl ViewObject {
             ViewObject::Module(module) => module.uid = Some(uid),
             ViewObject::Cloud(cloud) => cloud.uid = uid,
             ViewObject::Alias(alias) => alias.uid = Some(uid),
+            ViewObject::Group(group) => group.uid = Some(uid),
             ViewObject::Unhandled => {
                 return false;
             }
@@ -2697,6 +2781,7 @@ impl ViewObject {
             ViewObject::Module(module) => module.uid,
             ViewObject::Cloud(cloud) => Some(cloud.uid),
             ViewObject::Alias(alias) => alias.uid,
+            ViewObject::Group(group) => group.uid,
             ViewObject::Unhandled => None,
         }
     }
@@ -2710,6 +2795,8 @@ impl ViewObject {
             ViewObject::Module(module) => Some(canonicalize(&module.name).as_str().to_string()),
             ViewObject::Cloud(_cloud) => None,
             ViewObject::Alias(_alias) => None,
+            // Groups are organizational containers, not model variables
+            ViewObject::Group(_group) => None,
             ViewObject::Unhandled => None,
         }
     }
@@ -2725,6 +2812,7 @@ impl ViewObject {
             ViewObject::Module(module) => Some((module.x, module.y)),
             ViewObject::Cloud(cloud) => Some((cloud.x, cloud.y)),
             ViewObject::Alias(alias) => Some((alias.x, alias.y)),
+            ViewObject::Group(group) => Some((group.x, group.y)),
             ViewObject::Unhandled => None,
         }
     }
@@ -2754,6 +2842,9 @@ impl From<ViewObject> for datamodel::ViewElement {
             ViewObject::Alias(v) => {
                 datamodel::ViewElement::Alias(datamodel::view_element::Alias::from(v))
             }
+            ViewObject::Group(v) => {
+                datamodel::ViewElement::Group(datamodel::view_element::Group::from(v))
+            }
             ViewObject::Unhandled => unreachable!("must filter out unhandled"),
         }
     }
@@ -2770,6 +2861,7 @@ impl ViewObject {
             ViewElement::Module(v) => ViewObject::Module(view_element::Module::from(v)),
             ViewElement::Alias(v) => ViewObject::Alias(view_element::Alias::from(v, view)),
             ViewElement::Cloud(_v) => ViewObject::Unhandled,
+            ViewElement::Group(v) => ViewObject::Group(view_element::Group::from(v)),
         }
     }
 }
@@ -3083,6 +3175,9 @@ fn view_object_to_element(
         }
         ViewObject::Alias(v) => {
             datamodel::ViewElement::Alias(datamodel::view_element::Alias::from(v))
+        }
+        ViewObject::Group(v) => {
+            datamodel::ViewElement::Group(datamodel::view_element::Group::from(v))
         }
         ViewObject::Unhandled => unreachable!("must filter out unhandled"),
     }

@@ -599,6 +599,19 @@
           "required": [
             "type"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "group"
+            }
+          },
+          "$ref": "#/$defs/GroupViewElement",
+          "required": [
+            "type"
+          ]
         }
       ]
     },
@@ -853,6 +866,43 @@
         "aliasOfUid",
         "x",
         "y"
+      ]
+    },
+    "GroupViewElement": {
+      "description": "Visual container for grouping related model elements.\nIn JSON (matching XMILE spec), x/y are top-left coordinates.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "name": {
+          "type": "string"
+        },
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        },
+        "width": {
+          "type": "number",
+          "format": "double"
+        },
+        "height": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "uid",
+        "name",
+        "x",
+        "y",
+        "width",
+        "height"
       ]
     },
     "Rect": {

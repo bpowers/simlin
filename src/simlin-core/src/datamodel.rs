@@ -490,6 +490,21 @@ pub mod view_element {
         pub x: f64,
         pub y: f64,
     }
+
+    /// Visual container for grouping related model elements.
+    /// In XMILE these are called "groups" and in Vensim "sectors".
+    /// Unlike other view elements, x/y represent the center of the group
+    /// (matching the internal convention) rather than the XMILE top-left.
+    /// Conversion to/from JSON handles the coordinate transformation.
+    #[derive(Clone, PartialEq, Debug)]
+    pub struct Group {
+        pub uid: i32,
+        pub name: String,
+        pub x: f64,
+        pub y: f64,
+        pub width: f64,
+        pub height: f64,
+    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -501,6 +516,7 @@ pub enum ViewElement {
     Module(view_element::Module),
     Alias(view_element::Alias),
     Cloud(view_element::Cloud),
+    Group(view_element::Group),
 }
 
 impl ViewElement {
@@ -513,6 +529,7 @@ impl ViewElement {
             ViewElement::Module(var) => var.uid,
             ViewElement::Alias(var) => var.uid,
             ViewElement::Cloud(var) => var.uid,
+            ViewElement::Group(var) => var.uid,
         }
     }
 
@@ -525,6 +542,8 @@ impl ViewElement {
             ViewElement::Module(var) => Some(var.name.as_str()),
             ViewElement::Alias(_var) => None,
             ViewElement::Cloud(_var) => None,
+            // Groups have names for display but are not model variables
+            ViewElement::Group(_var) => None,
         }
     }
 }
