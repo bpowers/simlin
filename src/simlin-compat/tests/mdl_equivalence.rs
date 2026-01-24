@@ -171,38 +171,14 @@ fn normalize_project(mut project: Project) -> Project {
     // Sort dimensions by name for consistent comparison
     project.dimensions.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // Flatten models: xmutil creates submodels for Vensim groups while native
-    // puts everything in the main model. Collect all non-stdlib variables into
-    // a single main model for comparison.
-    let mut all_variables: Vec<Variable> = Vec::new();
-    for model in &project.models {
-        if is_stdlib_model(&model.name) {
-            continue;
-        }
-        for var in &model.variables {
-            // Skip module references to submodels (these are artifacts of xmutil's
-            // group-to-module conversion)
-            if let Variable::Module(_) = var {
-                continue;
-            }
-            all_variables.push(var.clone());
-        }
+    // Filter out stdlib models and normalize the rest
+    project.models.retain(|m| !is_stdlib_model(&m.name));
+    for model in &mut project.models {
+        normalize_model(model);
     }
 
-    // Create a single normalized main model
-    // TODO: Native parser doesn't extract model-level sim_specs yet (only project-level).
-    // TODO: Native parser doesn't extract views yet (diagram information).
-    // TODO: Native parser doesn't extract loop_metadata yet.
-    let mut main_model = Model {
-        name: "main".to_string(),
-        sim_specs: None,
-        variables: all_variables,
-        views: Vec::new(),
-        loop_metadata: Vec::new(),
-    };
-    normalize_model(&mut main_model);
-
-    project.models = vec![main_model];
+    // Sort models by name for consistent comparison
+    project.models.sort_by(|a, b| a.name.cmp(&b.name));
 
     project
 }
@@ -216,10 +192,6 @@ fn normalize_model(model: &mut Model) {
     // TODO: Loop metadata is diagram-related; native parser doesn't extract it yet.
     // When implemented, compare loop_metadata instead of clearing.
     model.loop_metadata.clear();
-
-    // TODO: Model-level sim_specs not extracted by native parser.
-    // When implemented, normalize and compare instead of clearing.
-    model.sim_specs = None;
 
     // Normalize each variable first (before sorting, so identifiers are canonical)
     for var in &mut model.variables {

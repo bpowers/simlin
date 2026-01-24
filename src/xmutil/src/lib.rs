@@ -44,7 +44,7 @@ pub fn convert_vensim_mdl(mdl_source: &str, is_compact: bool) -> (Option<String>
             std::ptr::null(),
             is_compact,
             false,
-            false,
+            true,
         );
 
         let log_buf = xmutil_get_log();
