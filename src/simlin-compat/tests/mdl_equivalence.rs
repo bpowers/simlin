@@ -23,8 +23,8 @@ use std::io::BufReader;
 use simlin_compat::{open_vensim, open_vensim_native};
 use simlin_core::canonicalize;
 use simlin_core::datamodel::{
-    Aux, Dimension, DimensionElements, Dt, Equation, Flow, GraphicalFunction,
-    GraphicalFunctionScale, Model, Module, Project, SimSpecs, Stock, Unit, Variable,
+    Aux, Dimension, DimensionElements, Dt, Equation, Flow, Model, Module, Project, SimSpecs, Stock,
+    Variable,
 };
 
 /// Models that should produce equivalent output from both parsers.
@@ -158,12 +158,7 @@ fn normalize_project(mut project: Project) -> Project {
     // Normalize sim_specs
     normalize_sim_specs(&mut project.sim_specs);
 
-    // Normalize unit equivalences
-    for unit in &mut project.units {
-        normalize_unit(unit);
-    }
-    // Sort units by name for consistent comparison
-    project.units.sort_by(|a, b| a.name.cmp(&b.name));
+    // Unit equivalences match without normalization
 
     // Normalize dimensions (lowercase names for case-insensitive comparison)
     for dim in &mut project.dimensions {
@@ -178,23 +173,9 @@ fn normalize_project(mut project: Project) -> Project {
     for model in &mut project.models {
         normalize_model(model);
     }
-
-    // Sort models by name for consistent comparison
-    project.models.sort_by(|a, b| a.name.cmp(&b.name));
+    // Model ordering matches without sorting
 
     project
-}
-
-/// Normalize a unit equivalence for comparison.
-fn normalize_unit(unit: &mut Unit) {
-    // Lowercase the name for case-insensitive comparison
-    unit.name = unit.name.to_lowercase();
-    // Lowercase aliases
-    for alias in &mut unit.aliases {
-        *alias = alias.to_lowercase();
-    }
-    // Sort aliases for consistent comparison
-    unit.aliases.sort();
 }
 
 /// Normalize a model for comparison.
@@ -207,18 +188,11 @@ fn normalize_model(model: &mut Model) {
     // When implemented, compare loop_metadata instead of clearing.
     model.loop_metadata.clear();
 
-    // Normalize each variable first (before sorting, so identifiers are canonical)
+    // Normalize each variable
     for var in &mut model.variables {
         normalize_variable(var);
     }
-
-    // Sort variables by canonical identifier for consistent comparison.
-    // Using canonicalize() properly handles quoted names and module separators.
-    model.variables.sort_by(|a, b| {
-        let a_canonical = canonicalize(a.get_ident());
-        let b_canonical = canonicalize(b.get_ident());
-        a_canonical.cmp(&b_canonical)
-    });
+    // Variable ordering matches without sorting
 }
 
 /// Clear view-related and AI-related fields from a variable.
@@ -236,39 +210,23 @@ fn canonical_ident(ident: &str) -> String {
     canonicalize(ident).to_string()
 }
 
-/// Normalize documentation by:
-/// - Removing line continuation sequences (\ followed by newlines and tabs)
-/// - Collapsing whitespace
-/// - Trimming
-/// - Clearing Vensim control comments like "~ :SUPPLEMENTARY"
+/// Normalize documentation by removing line continuations and collapsing whitespace.
 fn normalize_doc(doc: &str) -> String {
     // Remove Vensim line continuations: backslash followed by CR/LF and tabs
     let doc = doc.replace("\\\r\n", " ");
     let doc = doc.replace("\\\n", " ");
     // Collapse multiple whitespace (tabs, spaces) into single space
     let doc: String = doc.split_whitespace().collect::<Vec<_>>().join(" ");
-    let doc = doc.trim();
-    // Clear Vensim control comments (these are metadata, not actual documentation)
-    if doc.starts_with("~ :") || doc == "~" {
-        return String::new();
-    }
-    doc.to_string()
+    doc
 }
 
-/// Normalize units by removing spaces around operators and standardizing format.
-/// Handles differences like "widgets/(Month*Month)" vs "widgets/Month/Month".
+/// Normalize units by removing spaces/underscores, normalizing parentheses, and simplifying.
 fn normalize_units(units: Option<&String>) -> Option<String> {
     units.map(|u| {
-        // Replace spaces in unit names with underscores
-        // (handles "Degrees Fahrenheit" vs "Degrees_Fahrenheit")
-        let u = u.replace(' ', "_");
-        // Remove spaces around / and * operators
-        let u = u.replace("_/_", "/");
-        let u = u.replace("_*_", "*");
+        // Remove all spaces and underscores (parsers handle these differently)
+        let u = u.replace([' ', '_'], "");
         // Normalize "/(A*B)" to "/A/B" pattern
-        // This handles cases like "widgets/(Month*Month)" -> "widgets/Month/Month"
-        let mut result = u.trim().to_string();
-        // Repeatedly apply the transformation until no more changes
+        let mut result = u;
         loop {
             let new_result = normalize_unit_parens(&result);
             if new_result == result {
@@ -277,9 +235,7 @@ fn normalize_units(units: Option<&String>) -> Option<String> {
             result = new_result;
         }
         // Simplify X/X patterns to 1 (dimensionless)
-        // This handles "Persons/Persons/Day" -> "1/Day"
-        result = simplify_units(&result);
-        result
+        simplify_units(&result)
     })
 }
 
@@ -436,24 +392,10 @@ fn normalize_equation(eq: &mut Equation) {
                 if let Some(c) = comment {
                     *c = normalize_doc(c);
                 }
-                // For elements with graphical functions, normalize the gf and expression
-                if let Some(gf) = gf {
-                    normalize_graphical_function(gf);
-                    // Normalize placeholder expressions for lookups
-                    let normalized = expr.trim();
-                    if normalized.is_empty() || normalized == "0" || normalized == "0+0" {
-                        *expr = String::new();
-                    }
-                }
+                // Graphical functions match without normalization
+                let _ = gf;
             }
-            // Sort elements by subscript key to handle ordering differences
-            elements.sort_by(|a, b| a.0.cmp(&b.0));
-
-            // Clear comments from individual elements - they should be in documentation
-            // Different parsers place these differently
-            for (_, _, comment, _) in elements.iter_mut() {
-                *comment = None;
-            }
+            // Element ordering and comments match without normalization
 
             // Check if all elements have the same expression - if so, convert to ApplyToAll
             // This handles the case where native uses Arrayed with repeated equations
@@ -471,43 +413,6 @@ fn normalize_equation(eq: &mut Equation) {
     }
 }
 
-/// Normalize a graphical function (lookup table).
-/// The x_scale and y_scale may be computed differently by different parsers
-/// based on the actual data points.
-fn normalize_graphical_function(gf: &mut GraphicalFunction) {
-    // Compute scales from actual data points for consistent comparison
-    if let Some(x_points) = &gf.x_points {
-        let x_min = x_points.iter().cloned().fold(f64::INFINITY, f64::min);
-        let x_max = x_points.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        gf.x_scale = GraphicalFunctionScale {
-            min: x_min,
-            max: x_max,
-        };
-    }
-    let y_min = gf.y_points.iter().cloned().fold(f64::INFINITY, f64::min);
-    let y_max = gf
-        .y_points
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
-    gf.y_scale = GraphicalFunctionScale {
-        min: y_min,
-        max: y_max,
-    };
-}
-
-/// Normalize equations for pure lookup variables.
-/// Empty equations and placeholder equations like "0+0" are equivalent for lookups.
-fn normalize_lookup_equation(eq: &mut Equation) {
-    if let Equation::Scalar(expr, _) = eq {
-        // Normalize common placeholder expressions to empty
-        let normalized = expr.trim();
-        if normalized.is_empty() || normalized == "0" || normalized == "0+0" {
-            *expr = String::new();
-        }
-    }
-}
-
 fn normalize_stock(stock: &mut Stock) {
     // Canonicalize identifier
     stock.ident = canonical_ident(&stock.ident);
@@ -521,11 +426,9 @@ fn normalize_stock(stock: &mut Stock) {
     stock.uid = None;
     // AI state is not relevant to MDL parsing equivalence
     stock.ai_state = None;
-    // Canonicalize and sort inflows/outflows to handle insertion-order differences
+    // Canonicalize inflows/outflows (ordering matches without sorting)
     stock.inflows = stock.inflows.iter().map(|s| canonical_ident(s)).collect();
     stock.outflows = stock.outflows.iter().map(|s| canonical_ident(s)).collect();
-    stock.inflows.sort();
-    stock.outflows.sort();
 }
 
 fn normalize_flow(flow: &mut Flow) {
@@ -533,11 +436,7 @@ fn normalize_flow(flow: &mut Flow) {
     flow.documentation = normalize_doc(&flow.documentation);
     flow.units = normalize_units(flow.units.as_ref());
     normalize_equation(&mut flow.equation);
-    // For flows with graphical functions, normalize the gf and equation
-    if let Some(gf) = &mut flow.gf {
-        normalize_graphical_function(gf);
-        normalize_lookup_equation(&mut flow.equation);
-    }
+    // Graphical functions match without normalization
     flow.uid = None;
     flow.ai_state = None;
 }
@@ -547,12 +446,7 @@ fn normalize_aux(aux: &mut Aux) {
     aux.documentation = normalize_doc(&aux.documentation);
     aux.units = normalize_units(aux.units.as_ref());
     normalize_equation(&mut aux.equation);
-    // For lookup variables (with gf), normalize the equation and scale
-    if let Some(gf) = &mut aux.gf {
-        normalize_graphical_function(gf);
-        // For pure lookup definitions, normalize empty/placeholder equations
-        normalize_lookup_equation(&mut aux.equation);
-    }
+    // Graphical functions match without normalization
     aux.uid = None;
     aux.ai_state = None;
 }
