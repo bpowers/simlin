@@ -845,13 +845,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const stockVar = model.variables.get(sourceStockIdent);
       if (stockVar instanceof StockVar) {
         ops.push({
-          type: 'upsertStock',
+          type: 'updateStockFlows',
           payload: {
-            stock: {
-              name: stockVar.ident,
-              inflows: stockVar.inflows.toArray(),
-              outflows: stockVar.outflows.push(flow.ident).toArray(),
-            },
+            ident: stockVar.ident,
+            inflows: stockVar.inflows.toArray(),
+            outflows: stockVar.outflows.push(flow.ident).toArray(),
           },
         });
       }
@@ -863,13 +861,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const stockVar = model.variables.get(sourceStockAttachingIdent);
       if (stockVar instanceof StockVar) {
         ops.push({
-          type: 'upsertStock',
+          type: 'updateStockFlows',
           payload: {
-            stock: {
-              name: stockVar.ident,
-              inflows: stockVar.inflows.toArray(),
-              outflows: stockVar.outflows.push(flow.ident).toArray(),
-            },
+            ident: stockVar.ident,
+            inflows: stockVar.inflows.toArray(),
+            outflows: stockVar.outflows.push(flow.ident).toArray(),
           },
         });
       }
@@ -881,13 +877,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const stockVar = model.variables.get(sourceStockDetachingIdent);
       if (stockVar instanceof StockVar) {
         ops.push({
-          type: 'upsertStock',
+          type: 'updateStockFlows',
           payload: {
-            stock: {
-              name: stockVar.ident,
-              inflows: stockVar.inflows.toArray(),
-              outflows: stockVar.outflows.filter((f) => f !== flow.ident).toArray(),
-            },
+            ident: stockVar.ident,
+            inflows: stockVar.inflows.toArray(),
+            outflows: stockVar.outflows.filter((f) => f !== flow.ident).toArray(),
           },
         });
       }
@@ -899,13 +893,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const stockVar = model.variables.get(stockAttachingIdent);
       if (stockVar instanceof StockVar) {
         ops.push({
-          type: 'upsertStock',
+          type: 'updateStockFlows',
           payload: {
-            stock: {
-              name: stockVar.ident,
-              inflows: stockVar.inflows.push(flow.ident).toArray(),
-              outflows: stockVar.outflows.toArray(),
-            },
+            ident: stockVar.ident,
+            inflows: stockVar.inflows.push(flow.ident).toArray(),
+            outflows: stockVar.outflows.toArray(),
           },
         });
       }
@@ -917,13 +909,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const stockVar = model.variables.get(stockDetachingIdent);
       if (stockVar instanceof StockVar) {
         ops.push({
-          type: 'upsertStock',
+          type: 'updateStockFlows',
           payload: {
-            stock: {
-              name: stockVar.ident,
-              inflows: stockVar.inflows.filter((f) => f !== flow.ident).toArray(),
-              outflows: stockVar.outflows.toArray(),
-            },
+            ident: stockVar.ident,
+            inflows: stockVar.inflows.filter((f) => f !== flow.ident).toArray(),
+            outflows: stockVar.outflows.toArray(),
           },
         });
       }
@@ -937,6 +927,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         engine2.applyPatch(patch);
       } catch (e: any) {
         this.appendModelError(e?.message ?? 'Unknown error during flow attach');
+        this.setState({ selection, flowStillBeingCreated: inCreation });
+        return;
       }
     }
 

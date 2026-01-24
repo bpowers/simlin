@@ -76,6 +76,9 @@ pub fn apply_patch(
                         }
                         model_operation::Op::UpsertView(op) => apply_upsert_view(model, op)?,
                         model_operation::Op::DeleteView(op) => apply_delete_view(model, op)?,
+                        model_operation::Op::UpdateStockFlows(op) => {
+                            apply_update_stock_flows(model, op)?
+                        }
                         model_operation::Op::RenameVariable(_) => unreachable!(),
                     }
                 }
@@ -205,6 +208,47 @@ fn apply_upsert_module(
     let mut module = datamodel::Module::from(module_pb.clone());
     canonicalize_module(&mut module);
     upsert_variable(model, Variable::Module(module));
+    Ok(())
+}
+
+fn apply_update_stock_flows(
+    model: &mut datamodel::Model,
+    op: &project_io::UpdateStockFlowsOp,
+) -> Result<()> {
+    let ident = canonicalize(op.ident.as_str());
+
+    let stock = model
+        .variables
+        .iter_mut()
+        .find_map(|var| {
+            if let Variable::Stock(stock) = var
+                && canonicalize(stock.ident.as_str()) == ident
+            {
+                return Some(stock);
+            }
+            None
+        })
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::Model,
+                ErrorCode::DoesNotExist,
+                Some(format!("stock '{}' not found", op.ident)),
+            )
+        })?;
+
+    stock.inflows = op
+        .inflows
+        .iter()
+        .map(|s| canonicalize(s).as_str().to_string())
+        .collect();
+    stock.outflows = op
+        .outflows
+        .iter()
+        .map(|s| canonicalize(s).as_str().to_string())
+        .collect();
+    stock.inflows.sort_unstable();
+    stock.outflows.sort_unstable();
+
     Ok(())
 }
 
@@ -1702,5 +1746,160 @@ mod tests {
             Variable::Stock(actual) => assert_eq!(actual.equation, stock.equation),
             _ => panic!("expected stock"),
         }
+    }
+
+    #[test]
+    fn update_stock_flows_preserves_equation() {
+        let mut project = TestProject::new("test")
+            .flow("inflow", "10", None)
+            .stock("inventory", "100", &["inflow"], &[], None)
+            .build_datamodel();
+
+        // Verify initial state
+        let model = project.get_model("main").unwrap();
+        match model.get_variable("inventory").unwrap() {
+            Variable::Stock(stock) => {
+                assert_eq!(stock.inflows, vec!["inflow".to_string()]);
+                assert_eq!(stock.equation, Equation::Scalar("100".to_string(), None));
+            }
+            _ => panic!("expected stock"),
+        }
+
+        // Apply updateStockFlows to remove the inflow
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::UpdateStockFlows(
+                        project_io::UpdateStockFlowsOp {
+                            ident: "inventory".to_string(),
+                            inflows: vec![],
+                            outflows: vec![],
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+
+        let model = project.get_model("main").unwrap();
+        match model.get_variable("inventory").unwrap() {
+            Variable::Stock(stock) => {
+                // Flows should be updated
+                assert!(stock.inflows.is_empty());
+                assert!(stock.outflows.is_empty());
+                // Equation should be preserved
+                assert_eq!(stock.equation, Equation::Scalar("100".to_string(), None));
+            }
+            _ => panic!("expected stock"),
+        }
+    }
+
+    #[test]
+    fn update_stock_flows_preserves_all_fields() {
+        let mut project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Flow(datamodel::Flow {
+                        ident: "birth_rate".to_string(),
+                        equation: Equation::Scalar("10".to_string(), None),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Stock(datamodel::Stock {
+                        ident: "population".to_string(),
+                        equation: Equation::Scalar("1000".to_string(), None),
+                        documentation: "Total population".to_string(),
+                        units: Some("people".to_string()),
+                        inflows: vec!["birth_rate".to_string()],
+                        outflows: vec![],
+                        non_negative: true,
+                        can_be_module_input: true,
+                        visibility: Visibility::Public,
+                        ai_state: None,
+                        uid: Some(42),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        // Disconnect the flow
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::UpdateStockFlows(
+                        project_io::UpdateStockFlowsOp {
+                            ident: "population".to_string(),
+                            inflows: vec![],
+                            outflows: vec![],
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+
+        let model = project.get_model("main").unwrap();
+        match model.get_variable("population").unwrap() {
+            Variable::Stock(stock) => {
+                // Flows updated
+                assert!(stock.inflows.is_empty());
+                assert!(stock.outflows.is_empty());
+                // All other fields preserved
+                assert_eq!(stock.equation, Equation::Scalar("1000".to_string(), None));
+                assert_eq!(stock.documentation, "Total population");
+                assert_eq!(stock.units, Some("people".to_string()));
+                assert!(stock.non_negative);
+                assert!(stock.can_be_module_input);
+                assert_eq!(stock.visibility, Visibility::Public);
+                assert_eq!(stock.uid, Some(42));
+            }
+            _ => panic!("expected stock"),
+        }
+    }
+
+    #[test]
+    fn update_stock_flows_nonexistent_stock_returns_error() {
+        let mut project = TestProject::new("test").build_datamodel();
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::UpdateStockFlows(
+                        project_io::UpdateStockFlowsOp {
+                            ident: "nonexistent".to_string(),
+                            inflows: vec![],
+                            outflows: vec![],
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        let err = apply_patch(&mut project, &patch).unwrap_err();
+        assert_eq!(err.code, ErrorCode::DoesNotExist);
     }
 }

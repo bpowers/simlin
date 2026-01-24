@@ -418,6 +418,16 @@ export interface DeleteViewPayload {
 }
 
 /**
+ * Payload for update stock flows operation.
+ * Updates only the inflows/outflows of an existing stock, preserving all other fields.
+ */
+export interface UpdateStockFlowsPayload {
+  ident: string;
+  inflows: string[];
+  outflows: string[];
+}
+
+/**
  * Payload for set sim specs operation.
  */
 export interface SetSimSpecsPayload {
@@ -471,6 +481,11 @@ export interface SetSimSpecsOp {
   payload: SetSimSpecsPayload;
 }
 
+export interface UpdateStockFlowsOp {
+  type: 'updateStockFlows';
+  payload: UpdateStockFlowsPayload;
+}
+
 /**
  * Union type for model operations.
  */
@@ -482,7 +497,8 @@ export type JsonModelOperation =
   | DeleteVariableOp
   | RenameVariableOp
   | UpsertViewOp
-  | DeleteViewOp;
+  | DeleteViewOp
+  | UpdateStockFlowsOp;
 
 /**
  * Union type for project operations.
@@ -539,4 +555,8 @@ export function isUpsertView(op: JsonModelOperation): op is UpsertViewOp {
 
 export function isDeleteView(op: JsonModelOperation): op is DeleteViewOp {
   return op.type === 'deleteView';
+}
+
+export function isUpdateStockFlows(op: JsonModelOperation): op is UpdateStockFlowsOp {
+  return op.type === 'updateStockFlows';
 }

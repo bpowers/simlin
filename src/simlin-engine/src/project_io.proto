@@ -349,7 +349,16 @@ message ModelOperation {
     RenameVariableOp rename_variable = 6;
     UpsertViewOp upsert_view = 7;
     DeleteViewOp delete_view = 8;
+    UpdateStockFlowsOp update_stock_flows = 9;
   }
+};
+
+// Updates only the inflows/outflows of an existing stock, preserving all other fields.
+// Use this when connecting/disconnecting flows from stocks in the UI.
+message UpdateStockFlowsOp {
+  string ident = 1;
+  repeated string inflows = 2;
+  repeated string outflows = 3;
 };
 
 message SetSimSpecsOp {
