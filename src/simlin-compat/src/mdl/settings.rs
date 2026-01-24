@@ -49,8 +49,7 @@ impl<'input> PostEquationParser<'input> {
         };
 
         // Parse lines after the block marker
-        for line in block_start.lines() {
-            let line = line.trim_end_matches('\r'); // Handle CRLF
+        for line in split_lines(block_start) {
             if line.is_empty() {
                 continue;
             }
@@ -59,9 +58,7 @@ impl<'input> PostEquationParser<'input> {
             let Some((type_str, rest)) = line.split_once(':') else {
                 continue;
             };
-            let Ok(type_code) = type_str.parse::<i32>() else {
-                continue;
-            };
+            let type_code = parse_int_like_atoi(type_str);
 
             match type_code {
                 15 => Self::parse_integration_type(rest, &mut settings),
@@ -74,11 +71,31 @@ impl<'input> PostEquationParser<'input> {
     }
 
     /// Find the settings block marker `:L<%^E!@` and return the source after it.
+    ///
+    /// ## Marker Detection Strategy
+    ///
+    /// We are intentionally more permissive than xmutil:
+    /// - xmutil requires `///---\\\` settings section marker to appear first
+    /// - xmutil requires DEL character (`\x7F`) between `:L` and `<%^E!@`
+    /// - xmutil may require the marker at line start
+    ///
+    /// We accept:
+    /// - Marker anywhere in remaining source (handles files with non-standard view sections)
+    /// - With or without the DEL character (handles editor-mangled files)
+    /// - Not at line start (handles extra whitespace)
+    ///
+    /// This permissive approach handles more real-world MDL files while still correctly
+    /// identifying the settings block when present.
     fn find_settings_block(&self) -> Option<&'input str> {
         // Look for :L followed by <%^E!@ (with optional \x7F between)
         // Pattern: ":L" + optional_byte + "<%^E!@"
         let bytes = self.source.as_bytes();
-        for i in 0..bytes.len().saturating_sub(8) {
+        // Minimum marker length is 8 (`:L<%^E!@`), so skip if too short
+        if bytes.len() < 8 {
+            return None;
+        }
+        // Check all positions where marker could start (including near end)
+        for i in 0..=bytes.len() - 8 {
             if bytes[i] == b':' && bytes.get(i + 1) == Some(&b'L') {
                 // Check if followed by <%^E!@ (possibly with \x7F in between)
                 let check_pos = if i + 2 < bytes.len() && bytes[i + 2] == 0x7F {
@@ -101,12 +118,11 @@ impl<'input> PostEquationParser<'input> {
     /// Format: `15:0,0,0,METHOD,0,0` (COMMA-separated, 4th int is method)
     fn parse_integration_type(rest: &str, settings: &mut MdlSettings) {
         let parts: Vec<&str> = rest.split(',').collect();
-        if parts.len() >= 4
-            && let Ok(method_code) = parts[3].parse::<i32>()
-        {
+        if parts.len() >= 4 {
+            let method_code = parse_int_like_atoi(parts[3]);
             settings.integration_method = match method_code {
                 1 | 5 => SimMethod::RungeKutta4,
-                // 3 | 4 would be RK2, but SimMethod doesn't have it; map to Euler
+                3 | 4 => SimMethod::RungeKutta2,
                 _ => SimMethod::Euler,
             };
         }
@@ -150,11 +166,82 @@ impl<'input> PostEquationParser<'input> {
 }
 
 /// Skip to the start of the next line.
+///
+/// Handles all line ending styles: LF (`\n`), CRLF (`\r\n`), or CR-only (`\r`).
 fn skip_to_next_line(s: &str) -> &str {
-    match s.find('\n') {
-        Some(pos) => &s[pos + 1..],
+    // Find the first line ending character
+    let end_pos = s.find(['\n', '\r']);
+    match end_pos {
+        Some(pos) => {
+            // Skip past the line ending
+            if s[pos..].starts_with("\r\n") {
+                &s[pos + 2..]
+            } else {
+                &s[pos + 1..]
+            }
+        }
         None => "",
     }
+}
+
+/// Parse an integer like C's atoi:
+/// - Skip leading whitespace
+/// - Handle optional sign (+/-)
+/// - Stop at first non-digit character
+/// - Return 0 for no digits (empty, whitespace-only, or non-numeric)
+fn parse_int_like_atoi(s: &str) -> i32 {
+    let s = s.trim_start();
+    if s.is_empty() {
+        return 0;
+    }
+
+    let mut chars = s.chars().peekable();
+    let mut sign = 1;
+
+    // Handle optional sign
+    if chars.peek() == Some(&'-') {
+        sign = -1;
+        chars.next();
+    } else if chars.peek() == Some(&'+') {
+        chars.next();
+    }
+
+    // Collect digits
+    let mut result: i32 = 0;
+    let mut found_digit = false;
+    for c in chars {
+        if let Some(digit) = c.to_digit(10) {
+            found_digit = true;
+            result = result.saturating_mul(10).saturating_add(digit as i32);
+        } else {
+            break;
+        }
+    }
+
+    if found_digit { result * sign } else { 0 }
+}
+
+/// Split string on any line ending: `\n`, `\r\n`, or `\r`.
+fn split_lines(s: &str) -> impl Iterator<Item = &str> {
+    let mut remaining = s;
+    std::iter::from_fn(move || {
+        if remaining.is_empty() {
+            return None;
+        }
+        // Find next line ending
+        let end = remaining.find(['\n', '\r']).unwrap_or(remaining.len());
+        let line = &remaining[..end];
+
+        // Skip the line ending character(s)
+        remaining = &remaining[end..];
+        if remaining.starts_with("\r\n") {
+            remaining = &remaining[2..];
+        } else if remaining.starts_with('\n') || remaining.starts_with('\r') {
+            remaining = &remaining[1..];
+        }
+
+        Some(line)
+    })
 }
 
 #[cfg(test)]
@@ -303,10 +390,148 @@ mod tests {
     }
 
     #[test]
+    fn test_skip_to_next_line_cr_only() {
+        // Old Mac-style CR-only line endings
+        assert_eq!(skip_to_next_line("abc\rdef"), "def");
+        assert_eq!(skip_to_next_line("\rabc"), "abc");
+    }
+
+    #[test]
+    fn test_skip_to_next_line_crlf() {
+        // Windows-style CRLF
+        assert_eq!(skip_to_next_line("abc\r\ndef"), "def");
+        assert_eq!(skip_to_next_line("\r\nabc"), "abc");
+    }
+
+    #[test]
     fn test_remaining_starts_mid_line() {
         // Simulates what remaining() returns: starts mid-line after EqEnd marker
         // "\\\---/// Sketch information..." becomes the start point
         let source = " Sketch information - do not modify\nV300\n:L<%^E!@\n15:0,0,0,5,0,0\n";
+        let parser = PostEquationParser::new(source);
+        let settings = parser.parse_settings();
+        assert_eq!(settings.integration_method, SimMethod::RungeKutta4);
+    }
+
+    // RK2 integration method tests
+    #[test]
+    fn test_integration_type_rk2_code_3() {
+        // Type 15 with method code 3 (RK2)
+        let source = "\n:L<%^E!@\n15:0,0,0,3,0,0\n";
+        let parser = PostEquationParser::new(source);
+        let settings = parser.parse_settings();
+        assert_eq!(settings.integration_method, SimMethod::RungeKutta2);
+    }
+
+    #[test]
+    fn test_integration_type_rk2_code_4() {
+        // Type 15 with method code 4 (also RK2)
+        let source = "\n:L<%^E!@\n15:0,0,0,4,0,0\n";
+        let parser = PostEquationParser::new(source);
+        let settings = parser.parse_settings();
+        assert_eq!(settings.integration_method, SimMethod::RungeKutta2);
+    }
+
+    // atoi-like parsing tests
+    #[test]
+    fn test_parse_int_like_atoi_basic() {
+        assert_eq!(parse_int_like_atoi("15"), 15);
+        assert_eq!(parse_int_like_atoi("0"), 0);
+        assert_eq!(parse_int_like_atoi("123"), 123);
+    }
+
+    #[test]
+    fn test_parse_int_like_atoi_whitespace() {
+        // Leading whitespace should be skipped
+        assert_eq!(parse_int_like_atoi("  15"), 15);
+        assert_eq!(parse_int_like_atoi("\t22"), 22);
+        // Trailing non-digits cause parsing to stop
+        assert_eq!(parse_int_like_atoi("15 "), 15);
+        assert_eq!(parse_int_like_atoi("15abc"), 15);
+    }
+
+    #[test]
+    fn test_parse_int_like_atoi_signs() {
+        assert_eq!(parse_int_like_atoi("-5"), -5);
+        assert_eq!(parse_int_like_atoi("+5"), 5);
+        assert_eq!(parse_int_like_atoi("  -10"), -10);
+    }
+
+    #[test]
+    fn test_parse_int_like_atoi_no_digits() {
+        // Return 0 when no digits found
+        assert_eq!(parse_int_like_atoi(""), 0);
+        assert_eq!(parse_int_like_atoi("   "), 0);
+        assert_eq!(parse_int_like_atoi("abc"), 0);
+        assert_eq!(parse_int_like_atoi("-"), 0);
+        assert_eq!(parse_int_like_atoi("+"), 0);
+    }
+
+    // split_lines tests
+    #[test]
+    fn test_split_lines_lf() {
+        let lines: Vec<_> = split_lines("a\nb\nc").collect();
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_lines_crlf() {
+        let lines: Vec<_> = split_lines("a\r\nb\r\nc").collect();
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_lines_cr_only() {
+        // Old Mac-style CR-only line endings
+        let lines: Vec<_> = split_lines("a\rb\rc").collect();
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_lines_mixed() {
+        // Mixed line endings
+        let lines: Vec<_> = split_lines("a\nb\r\nc\rd").collect();
+        assert_eq!(lines, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_split_lines_empty() {
+        let lines: Vec<_> = split_lines("").collect();
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_split_lines_no_newline() {
+        let lines: Vec<_> = split_lines("single line").collect();
+        assert_eq!(lines, vec!["single line"]);
+    }
+
+    // CR-only line endings in settings parsing
+    #[test]
+    fn test_cr_only_line_endings() {
+        // Test with old Mac-style CR-only line endings
+        let source = "\r:L<%^E!@\r15:0,0,0,3,0,0\r22:Hour,Hours\r";
+        let parser = PostEquationParser::new(source);
+        let settings = parser.parse_settings();
+        assert_eq!(settings.integration_method, SimMethod::RungeKutta2);
+        assert_eq!(settings.unit_equivs.len(), 1);
+    }
+
+    // Marker at buffer end
+    #[test]
+    fn test_marker_near_buffer_end() {
+        // Settings marker close to the end of the buffer
+        let source = "\n:L<%^E!@";
+        let parser = PostEquationParser::new(source);
+        let settings = parser.parse_settings();
+        // Should parse without panic, even if no settings lines follow
+        assert_eq!(settings.integration_method, SimMethod::Euler);
+    }
+
+    #[test]
+    fn test_type_code_with_leading_whitespace() {
+        // Type code with leading whitespace should still parse
+        let source = "\n:L<%^E!@\n  15:0,0,0,1,0,0\n";
         let parser = PostEquationParser::new(source);
         let settings = parser.parse_settings();
         assert_eq!(settings.integration_method, SimMethod::RungeKutta4);

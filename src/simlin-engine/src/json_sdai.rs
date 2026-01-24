@@ -293,8 +293,9 @@ impl From<SimSpecs> for datamodel::SimSpecs {
 
         let save_step = specs.save_step.map(datamodel::Dt::Dt);
 
-        let sim_method = match specs.method.as_deref() {
-            Some("rk4") => datamodel::SimMethod::RungeKutta4,
+        let sim_method = match specs.method.as_deref().map(|s| s.to_lowercase()) {
+            Some(ref m) if m == "rk4" => datamodel::SimMethod::RungeKutta4,
+            Some(ref m) if m == "rk2" => datamodel::SimMethod::RungeKutta2,
             _ => datamodel::SimMethod::Euler,
         };
 
@@ -519,6 +520,7 @@ impl From<datamodel::SimSpecs> for SimSpecs {
 
         let method = match specs.sim_method {
             datamodel::SimMethod::RungeKutta4 => Some("rk4".to_string()),
+            datamodel::SimMethod::RungeKutta2 => Some("rk2".to_string()),
             datamodel::SimMethod::Euler => None,
         };
 

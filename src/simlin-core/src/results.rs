@@ -40,6 +40,10 @@ impl Specs {
 
         let method = match specs.sim_method {
             SimMethod::Euler => Method::Euler,
+            SimMethod::RungeKutta2 => {
+                eprintln!("warning, simulation requested 'rk2', but only support Euler");
+                Method::Euler
+            }
             SimMethod::RungeKutta4 => {
                 eprintln!("warning, simulation requested 'rk4', but only support Euler");
                 Method::Euler

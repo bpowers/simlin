@@ -51,6 +51,7 @@ impl From<SimMethod> for project_io::SimMethod {
     fn from(sim_method: SimMethod) -> Self {
         match sim_method {
             SimMethod::Euler => project_io::SimMethod::Euler,
+            SimMethod::RungeKutta2 => project_io::SimMethod::RungeKutta2,
             SimMethod::RungeKutta4 => project_io::SimMethod::RungeKutta4,
         }
     }
@@ -60,6 +61,7 @@ impl From<project_io::SimMethod> for SimMethod {
     fn from(sim_method: project_io::SimMethod) -> Self {
         match sim_method {
             project_io::SimMethod::Euler => SimMethod::Euler,
+            project_io::SimMethod::RungeKutta2 => SimMethod::RungeKutta2,
             project_io::SimMethod::RungeKutta4 => SimMethod::RungeKutta4,
         }
     }
@@ -67,10 +69,13 @@ impl From<project_io::SimMethod> for SimMethod {
 
 #[test]
 fn test_sim_method_roundtrip() {
-    let cases: &[SimMethod] = &[SimMethod::Euler, SimMethod::RungeKutta4];
-    for expected in cases {
-        let expected = expected.clone();
-        let actual = SimMethod::from(project_io::SimMethod::from(expected.clone()));
+    let cases: &[SimMethod] = &[
+        SimMethod::Euler,
+        SimMethod::RungeKutta2,
+        SimMethod::RungeKutta4,
+    ];
+    for &expected in cases {
+        let actual = SimMethod::from(project_io::SimMethod::from(expected));
         assert_eq!(expected, actual);
     }
 

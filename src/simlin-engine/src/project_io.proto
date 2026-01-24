@@ -264,6 +264,7 @@ message Model {
 enum SimMethod {
   EULER = 0;
   RUNGE_KUTTA_4 = 1;
+  RUNGE_KUTTA_2 = 3;
 }
 
 message Dt {

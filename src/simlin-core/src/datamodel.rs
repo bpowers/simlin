@@ -613,9 +613,10 @@ impl Model {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum SimMethod {
     Euler,
+    RungeKutta2,
     RungeKutta4,
 }
 

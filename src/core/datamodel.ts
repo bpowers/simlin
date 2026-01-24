@@ -1439,7 +1439,7 @@ export class Dt extends Record(dtDefaults) {
   }
 }
 
-export type SimMethod = 'euler' | 'rk4';
+export type SimMethod = 'euler' | 'rk2' | 'rk4';
 
 const simSpecsDefaults = {
   start: 0,

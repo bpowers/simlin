@@ -573,8 +573,9 @@ impl From<SimSpecs> for datamodel::SimSpecs {
             save_step: sim_specs.save_step.map(datamodel::Dt::Dt),
             // FIXME: the spec says method is technically a
             //   comma separated list of fallbacks
-            sim_method: match sim_method.as_str() {
+            sim_method: match sim_method.to_lowercase().as_str() {
                 "euler" => datamodel::SimMethod::Euler,
+                "rk2" => datamodel::SimMethod::RungeKutta2,
                 "rk4" => datamodel::SimMethod::RungeKutta4,
                 _ => datamodel::SimMethod::Euler,
             },
@@ -598,6 +599,7 @@ impl From<datamodel::SimSpecs> for SimSpecs {
             },
             method: Some(match sim_specs.sim_method {
                 datamodel::SimMethod::Euler => "euler".to_string(),
+                datamodel::SimMethod::RungeKutta2 => "rk2".to_string(),
                 datamodel::SimMethod::RungeKutta4 => "rk4".to_string(),
             }),
             time_units: sim_specs.time_units,

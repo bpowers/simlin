@@ -774,8 +774,9 @@ impl From<SimSpecs> for datamodel::SimSpecs {
             Some(datamodel::Dt::Dt(ss.save_step))
         };
 
-        let sim_method = match ss.method.as_str() {
+        let sim_method = match ss.method.to_lowercase().as_str() {
             "rk4" => datamodel::SimMethod::RungeKutta4,
+            "rk2" => datamodel::SimMethod::RungeKutta2,
             _ => datamodel::SimMethod::Euler,
         };
 
@@ -1293,6 +1294,7 @@ impl From<datamodel::SimSpecs> for SimSpecs {
 
         let method = match ss.sim_method {
             datamodel::SimMethod::RungeKutta4 => "rk4".to_string(),
+            datamodel::SimMethod::RungeKutta2 => "rk2".to_string(),
             datamodel::SimMethod::Euler => String::new(),
         };
 

@@ -78,7 +78,7 @@ impl<'input> ConversionContext<'input> {
             dimensions: Vec::new(),
             equivalences: HashMap::new(),
             sim_specs: SimSpecsBuilder {
-                sim_method: Some(settings.integration_method.clone()),
+                sim_method: Some(settings.integration_method),
                 ..SimSpecsBuilder::default()
             },
             integration_method: settings.integration_method,
