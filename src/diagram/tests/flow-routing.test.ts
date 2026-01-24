@@ -1217,6 +1217,78 @@ describe('Flow routing', () => {
         expect(flow2StockPt.x).toBeCloseTo(oneThird, 1); // left anchor -> left position
         expect(flow1StockPt.x).toBeCloseTo(twoThirds, 1); // right anchor -> right position
       });
+
+      it('should include straight flows in spacing to avoid overlap with L-shaped', () => {
+        // Scenario: 1 straight flow + 2 L-shaped flows on the left side
+        // Without including straight flow in count: L-shaped get 1/3 and 2/3
+        // With including straight flow: 3 flows total → slots at 1/4, 2/4, 3/4
+        // L-shaped flows get 1/4 and 3/4, avoiding the middle where straight might be
+        const straightUid = 2;
+        const lshape1Uid = 3;
+        const lshape2Uid = 4;
+        const stock = makeStock(stockUid, 100, 100, [], [straightUid, lshape1Uid, lshape2Uid]);
+
+        // Straight vertical flow: anchor at y=100 (within stock's extent, so stays straight)
+        // Will attach to left side at y = anchor.y = 100 (center of stock)
+        const straightFlow = makeFlow(straightUid, 75, 100, [
+          { x: 100 - StockWidth / 2, y: 100, attachedToUid: stockUid },
+          { x: 50, y: 100, attachedToUid: 5 },
+        ]);
+
+        // L-shaped flow 1: anchor at y=50 (above stock, so becomes L-shaped)
+        const lshape1 = makeFlow(lshape1Uid, 75, 75, [
+          { x: 100 - StockWidth / 2, y: 100, attachedToUid: stockUid },
+          { x: 50, y: 50, attachedToUid: 6 },
+        ]);
+
+        // L-shaped flow 2: anchor at y=150 (below stock, so becomes L-shaped)
+        const lshape2 = makeFlow(lshape2Uid, 75, 125, [
+          { x: 100 - StockWidth / 2, y: 100, attachedToUid: stockUid },
+          { x: 50, y: 150, attachedToUid: 7 },
+        ]);
+
+        // Move stock right so all flows attach to left side
+        const [newStock, newFlows] = UpdateStockAndFlows(stock, List([straightFlow, lshape1, lshape2]), {
+          x: -50,
+          y: 0,
+        });
+
+        expect(newStock.cx).toBe(150);
+
+        const newStraight = newFlows.get(0)!;
+        const newLshape1 = newFlows.get(1)!;
+        const newLshape2 = newFlows.get(2)!;
+
+        // Straight flow should remain 2-point
+        expect(newStraight.points.size).toBe(2);
+        // L-shaped flows should be 3-point
+        expect(newLshape1.points.size).toBe(3);
+        expect(newLshape2.points.size).toBe(3);
+
+        // Get the Y coordinates of stock attachment points
+        const straightY = newStraight.points.get(0)!.y;
+        const lshape1Y = newLshape1.points.get(0)!.y;
+        const lshape2Y = newLshape2.points.get(0)!.y;
+
+        // Straight flow stays at its anchor Y = 100
+        expect(straightY).toBe(100);
+
+        // L-shaped flows should be spread to 1/4 and 3/4, NOT 1/3 and 2/3
+        // (because straight flow is included in the count)
+        const topEdge = 100 - StockHeight / 2;
+        const quarter1 = topEdge + StockHeight / 4;
+        const quarter3 = topEdge + (3 * StockHeight) / 4;
+
+        // lshape1 (anchor y=50, topmost) should be at 1/4
+        // lshape2 (anchor y=150, bottommost) should be at 3/4
+        expect(lshape1Y).toBeCloseTo(quarter1, 1);
+        expect(lshape2Y).toBeCloseTo(quarter3, 1);
+
+        // Verify no overlap: all three Y coordinates should be distinct
+        expect(straightY).not.toBeCloseTo(lshape1Y, 0);
+        expect(straightY).not.toBeCloseTo(lshape2Y, 0);
+        expect(lshape1Y).not.toBeCloseTo(lshape2Y, 0);
+      });
     });
   });
 

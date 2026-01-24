@@ -185,13 +185,13 @@ function getFlowAttachmentInfo(
 /**
  * Groups flows by their attachment side and computes offset fractions for each flow.
  *
- * Straight flows always get offset 0.5 (centered) because they naturally separate
- * based on their anchor positions - each maintains its anchor's Y (horizontal flows)
- * or X (vertical flows) coordinate.
- *
- * L-shaped flows on the same side are ordered by their anchor's position:
+ * All flows on the same side are included in the spacing calculation to avoid overlap.
+ * Flows are ordered by their anchor's position:
  * - For top/bottom sides: ordered by anchor's X (left to right)
  * - For left/right sides: ordered by anchor's Y (top to bottom)
+ *
+ * Straight flows get offset 0.5 (their position is determined by anchor, not offset),
+ * but they're still included in the count so L-shaped flows spread around them.
  *
  * Using anchor position (not the stock-adjacent corner) ensures stable ordering
  * even for pre-existing L-shaped flows where corners may have the same coordinate.
@@ -213,36 +213,26 @@ function computeFlowOffsets(
     }
   }
 
+  // Group ALL flows by side (including straight flows for proper spacing)
+  const bySide: Map<Side, FlowAttachmentInfo[]> = new Map();
+  for (const info of attachmentInfos) {
+    const existing = bySide.get(info.side) || [];
+    existing.push(info);
+    bySide.set(info.side, existing);
+  }
+
   // Compute offsets for each flow
   const offsets: Map<number, number> = new Map();
 
-  // Straight flows always get centered - they naturally separate based on anchor position
-  for (const info of attachmentInfos) {
-    if (info.isStraight) {
-      offsets.set(info.flow.uid, 0.5);
-    }
-  }
-
-  // Group non-straight (L-shaped) flows by side for spreading
-  const bySide: Map<Side, FlowAttachmentInfo[]> = new Map();
-  for (const info of attachmentInfos) {
-    if (!info.isStraight) {
-      const existing = bySide.get(info.side) || [];
-      existing.push(info);
-      bySide.set(info.side, existing);
-    }
-  }
-
   for (const [side, infos] of bySide) {
     if (infos.length === 1) {
-      // Single L-shaped flow on this side - center it (offset = 0.5)
+      // Single flow on this side - center it (offset = 0.5)
       offsets.set(infos[0].flow.uid, 0.5);
     } else {
-      // Multiple L-shaped flows - sort and spread them by anchor position.
-      // Using anchor (not the stock-adjacent corner) avoids ties when multiple
-      // L-shaped flows have corners at the same position before spreading.
-      // For top/bottom: sort by anchor X (left to right)
-      // For left/right: sort by anchor Y (top to bottom)
+      // Multiple flows - sort all by anchor position and spread evenly.
+      // Including straight flows in the count ensures L-shaped flows spread
+      // around them, avoiding overlap even when straight flows' anchor positions
+      // happen to coincide with spread positions.
       if (side === 'top' || side === 'bottom') {
         infos.sort((a, b) => a.anchor.x - b.anchor.x);
       } else {
@@ -253,7 +243,13 @@ function computeFlowOffsets(
       const n = infos.length;
       for (let i = 0; i < n; i++) {
         const fraction = (i + 1) / (n + 1);
-        offsets.set(infos[i].flow.uid, fraction);
+        if (infos[i].isStraight) {
+          // Straight flows must use 0.5 - their position is determined by anchor,
+          // not by offset. But including them in the count reserves their "slot".
+          offsets.set(infos[i].flow.uid, 0.5);
+        } else {
+          offsets.set(infos[i].flow.uid, fraction);
+        }
       }
     }
   }
