@@ -399,5 +399,18 @@ describe('Connector routing', () => {
       expect(visual.cx).toBe(100);
       expect(visual.cy).toBe(100);
     });
+
+    it('should return logical center for zero-radius placeholder (even if arrayed)', () => {
+      // Create an arrayed aux but with isZeroRadius = true (used during drag operations)
+      const arrayedAux = makeAux(1, 100, 100, true);
+      const zeroRadiusPlaceholder = arrayedAux.set('isZeroRadius', true);
+
+      const visual = getVisualCenter(zeroRadiusPlaceholder);
+
+      // Zero-radius placeholders should stay at the cursor position,
+      // so they should not have the array offset applied
+      expect(visual.cx).toBe(100);
+      expect(visual.cy).toBe(100);
+    });
   });
 });

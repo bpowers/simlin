@@ -28,6 +28,11 @@ function isElementArrayed(element: ViewElement): boolean {
 }
 
 export function getVisualCenter(element: ViewElement): { cx: number; cy: number } {
+  // Zero-radius elements are temporary placeholders (used during drag operations)
+  // that should stay anchored to the cursor position
+  if (element.isZeroRadius) {
+    return { cx: element.cx, cy: element.cy };
+  }
   const offset = isElementArrayed(element) ? ArrayedOffset : 0;
   return {
     cx: element.cx - offset,
