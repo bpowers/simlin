@@ -940,6 +940,11 @@ impl Ident<Canonical> {
         &self.inner
     }
 
+    /// Consume self and return the underlying String
+    pub fn into_string(self) -> String {
+        self.inner
+    }
+
     /// Convert canonical identifier to source code representation.
     ///
     /// Replaces middle dots (·) used internally for module hierarchy separators

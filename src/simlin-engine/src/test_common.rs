@@ -175,6 +175,37 @@ impl TestProject {
         self
     }
 
+    /// Add a stock variable with all configurable options
+    #[allow(clippy::too_many_arguments)]
+    pub fn stock_with_options(
+        mut self,
+        name: &str,
+        initial: &str,
+        inflows: &[&str],
+        outflows: &[&str],
+        units: Option<&str>,
+        documentation: &str,
+        non_negative: bool,
+        can_be_module_input: bool,
+        visibility: datamodel::Visibility,
+        uid: Option<i32>,
+    ) -> Self {
+        self.variables.push(Variable::Stock(datamodel::Stock {
+            ident: name.to_string(),
+            equation: Equation::Scalar(initial.to_string(), None),
+            documentation: documentation.to_string(),
+            units: units.map(|s| s.to_string()),
+            inflows: inflows.iter().map(|s| s.to_string()).collect(),
+            outflows: outflows.iter().map(|s| s.to_string()).collect(),
+            non_negative,
+            can_be_module_input,
+            visibility,
+            ai_state: None,
+            uid,
+        }));
+        self
+    }
+
     // Array-specific convenience methods
 
     /// Add a scalar constant (convenience for aux with constant value)

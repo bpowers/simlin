@@ -239,12 +239,12 @@ fn apply_update_stock_flows(
     stock.inflows = op
         .inflows
         .iter()
-        .map(|s| canonicalize(s).as_str().to_string())
+        .map(|s| canonicalize(s).into_string())
         .collect();
     stock.outflows = op
         .outflows
         .iter()
-        .map(|s| canonicalize(s).as_str().to_string())
+        .map(|s| canonicalize(s).into_string())
         .collect();
     stock.inflows.sort_unstable();
     stock.outflows.sort_unstable();
@@ -1799,47 +1799,21 @@ mod tests {
 
     #[test]
     fn update_stock_flows_preserves_all_fields() {
-        let mut project = datamodel::Project {
-            name: "test".to_string(),
-            sim_specs: datamodel::SimSpecs::default(),
-            dimensions: vec![],
-            units: vec![],
-            models: vec![datamodel::Model {
-                name: "main".to_string(),
-                sim_specs: None,
-                variables: vec![
-                    datamodel::Variable::Flow(datamodel::Flow {
-                        ident: "birth_rate".to_string(),
-                        equation: Equation::Scalar("10".to_string(), None),
-                        documentation: String::new(),
-                        units: None,
-                        gf: None,
-                        non_negative: false,
-                        can_be_module_input: false,
-                        visibility: Visibility::Private,
-                        ai_state: None,
-                        uid: None,
-                    }),
-                    datamodel::Variable::Stock(datamodel::Stock {
-                        ident: "population".to_string(),
-                        equation: Equation::Scalar("1000".to_string(), None),
-                        documentation: "Total population".to_string(),
-                        units: Some("people".to_string()),
-                        inflows: vec!["birth_rate".to_string()],
-                        outflows: vec![],
-                        non_negative: true,
-                        can_be_module_input: true,
-                        visibility: Visibility::Public,
-                        ai_state: None,
-                        uid: Some(42),
-                    }),
-                ],
-                views: vec![],
-                loop_metadata: vec![],
-            }],
-            source: None,
-            ai_information: None,
-        };
+        let mut project = TestProject::new("test")
+            .flow("birth_rate", "10", None)
+            .stock_with_options(
+                "population",
+                "1000",
+                &["birth_rate"],
+                &[],
+                Some("people"),
+                "Total population",
+                true, // non_negative
+                true, // can_be_module_input
+                Visibility::Public,
+                Some(42),
+            )
+            .build_datamodel();
 
         // Disconnect the flow
         let patch = ProjectPatch {
