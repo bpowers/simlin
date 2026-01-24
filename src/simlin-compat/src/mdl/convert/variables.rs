@@ -241,21 +241,20 @@ impl<'input> ConversionContext<'input> {
             return None;
         }
 
-        // Build element map: key -> (equation_string, comment, gf)
+        // Build element map: key -> (equation_string, initial_equation, gf)
         // Later equations override earlier ones (element-specific overrides apply-to-all)
         let mut element_map: HashMap<String, (String, Option<String>, Option<GraphicalFunction>)> =
             HashMap::new();
 
         for exp_eq in expanded_eqs {
-            let (eq_str, gf) = self.build_equation_rhs(
+            let (eq_str, initial_eq, gf) = self.build_equation_rhs(
                 name,
                 &exp_eq.eq.equation,
                 info.var_type == VariableType::Stock,
             );
-            let comment = exp_eq.eq.comment.as_ref().map(|c| c.to_string());
 
             for key in exp_eq.element_keys {
-                element_map.insert(key, (eq_str.clone(), comment.clone(), gf.clone()));
+                element_map.insert(key, (eq_str.clone(), initial_eq.clone(), gf.clone()));
             }
         }
 
@@ -263,7 +262,7 @@ impl<'input> ConversionContext<'input> {
         let mut elements: Vec<(String, String, Option<String>, Option<GraphicalFunction>)> =
             element_map
                 .into_iter()
-                .map(|(key, (eq_str, comment, gf))| (key, eq_str, comment, gf))
+                .map(|(key, (eq_str, initial_eq, gf))| (key, eq_str, initial_eq, gf))
                 .collect();
         elements.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -331,33 +330,42 @@ impl<'input> ConversionContext<'input> {
         }
     }
 
-    /// Build the equation RHS string, handling stock initial values.
+    /// Build the equation RHS string, handling stock initial values and ACTIVE INITIAL.
     /// The var_name is used for extrapolation detection on lookups.
+    /// Returns (equation, initial_equation, graphical_function).
     fn build_equation_rhs(
         &self,
         var_name: &str,
         eq: &MdlEquation<'_>,
         is_stock: bool,
-    ) -> (String, Option<GraphicalFunction>) {
+    ) -> (String, Option<String>, Option<GraphicalFunction>) {
         match eq {
             MdlEquation::Regular(_, expr) => {
                 if is_stock && let Some(initial) = self.extract_integ_initial(expr) {
-                    return (self.formatter.format_expr(initial), None);
+                    return (self.formatter.format_expr(initial), None, None);
                 }
-                (self.formatter.format_expr(expr), None)
+                // Check for ACTIVE INITIAL and split into equation + initial_equation
+                if let Some((equation_expr, initial_expr)) = self.extract_active_initial(expr) {
+                    let eq_str = self.formatter.format_expr(equation_expr);
+                    let initial_str = self.formatter.format_expr(initial_expr);
+                    return (eq_str, Some(initial_str), None);
+                }
+                (self.formatter.format_expr(expr), None, None)
             }
             MdlEquation::Lookup(_, table) => {
                 // For lookups, return empty string - the GF will be attached
                 (
                     String::new(),
+                    None,
                     Some(self.build_graphical_function(var_name, table)),
                 )
             }
             MdlEquation::WithLookup(_, input, table) => (
                 self.formatter.format_expr(input),
+                None,
                 Some(self.build_graphical_function(var_name, table)),
             ),
-            _ => (String::new(), None),
+            _ => (String::new(), None, None),
         }
     }
 
@@ -431,6 +439,7 @@ impl<'input> ConversionContext<'input> {
 
     /// Build an Equation from an MDL equation.
     /// For stocks, extract the initial value from INTEG.
+    /// For ACTIVE INITIAL, split into equation and initial_equation fields.
     fn build_equation(
         &self,
         eq: &MdlEquation<'_>,
@@ -445,6 +454,17 @@ impl<'input> ConversionContext<'input> {
                         return (self.make_equation(lhs, &initial_str), None);
                     }
                 }
+
+                // Check for ACTIVE INITIAL and split into equation + initial_equation
+                if let Some((equation_expr, initial_expr)) = self.extract_active_initial(expr) {
+                    let eq_str = self.formatter.format_expr(equation_expr);
+                    let initial_str = self.formatter.format_expr(initial_expr);
+                    return (
+                        self.make_equation_with_initial(lhs, &eq_str, Some(initial_str)),
+                        None,
+                    );
+                }
+
                 let eq_str = self.formatter.format_expr(expr);
                 (self.make_equation(lhs, &eq_str), None)
             }
@@ -494,8 +514,18 @@ impl<'input> ConversionContext<'input> {
 
     /// Create an Equation from LHS and equation string, handling subscripts.
     fn make_equation(&self, lhs: &Lhs<'_>, eq_str: &str) -> Equation {
+        self.make_equation_with_initial(lhs, eq_str, None)
+    }
+
+    /// Create an Equation from LHS, equation string, and optional initial equation.
+    fn make_equation_with_initial(
+        &self,
+        lhs: &Lhs<'_>,
+        eq_str: &str,
+        initial_str: Option<String>,
+    ) -> Equation {
         if lhs.subscripts.is_empty() {
-            Equation::Scalar(eq_str.to_string(), None)
+            Equation::Scalar(eq_str.to_string(), initial_str)
         } else {
             // Subscripted equation becomes ApplyToAll
             let dims: Vec<String> = lhs
@@ -507,7 +537,7 @@ impl<'input> ConversionContext<'input> {
                     }
                 })
                 .collect();
-            Equation::ApplyToAll(dims, eq_str.to_string(), None)
+            Equation::ApplyToAll(dims, eq_str.to_string(), initial_str)
         }
     }
 
@@ -629,6 +659,26 @@ impl<'input> ConversionContext<'input> {
                 None
             }
             Expr::Paren(inner, _) => self.extract_integ_initial(inner),
+            _ => None,
+        }
+    }
+
+    /// Extract the equation and initial expressions from an ACTIVE INITIAL call.
+    /// ACTIVE INITIAL(equation, initial) -> (equation, initial)
+    fn extract_active_initial<'a>(
+        &self,
+        expr: &'a Expr<'input>,
+    ) -> Option<(&'a Expr<'input>, &'a Expr<'input>)> {
+        match expr {
+            Expr::App(name, _, args, CallKind::Builtin, _)
+                if to_lower_space(name) == "active initial" =>
+            {
+                if args.len() >= 2 {
+                    return Some((&args[0], &args[1]));
+                }
+                None
+            }
+            Expr::Paren(inner, _) => self.extract_active_initial(inner),
             _ => None,
         }
     }
@@ -1190,6 +1240,139 @@ x[a1, DimB] = 5
                     let keys: Vec<&str> = elements.iter().map(|(k, _, _, _)| k.as_str()).collect();
                     assert!(keys.contains(&"a1,b1"), "Should have a1,b1");
                     assert!(keys.contains(&"a1,b2"), "Should have a1,b2");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_active_initial_scalar() {
+        // Scalar ACTIVE INITIAL should have equation and initial_equation fields
+        let mdl = "x = ACTIVE INITIAL(y * 2, 100)
+~ Units
+~ Variable with active initial |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Scalar(eq, initial_eq) => {
+                    assert_eq!(eq, "y * 2", "Equation should be the first argument");
+                    assert_eq!(
+                        initial_eq.as_deref(),
+                        Some("100"),
+                        "Initial equation should be the second argument"
+                    );
+                }
+                other => panic!("Expected Scalar equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_active_initial_apply_to_all() {
+        // Apply-to-all ACTIVE INITIAL should have equation and initial_equation fields
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[DimA] = ACTIVE INITIAL(y[DimA] * 2, 100)
+~ Units
+~ Array with active initial |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 3);
+                    // All elements should have equation and initial_equation
+                    for (key, eq, initial_eq, _) in elements {
+                        assert!(
+                            ["a1", "a2", "a3"].contains(&key.as_str()),
+                            "Unexpected key: {}",
+                            key
+                        );
+                        assert_eq!(eq, "y[DimA] * 2", "Equation should be the first argument");
+                        assert_eq!(
+                            initial_eq.as_deref(),
+                            Some("100"),
+                            "Initial equation should be the second argument for {}",
+                            key
+                        );
+                    }
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_active_initial_element_specific() {
+        // Element-specific ACTIVE INITIAL equations
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[a1] = ACTIVE INITIAL(y, 10)
+~ Units
+~ Element specific with active initial |
+x[a2] = ACTIVE INITIAL(y * 2, 20)
+~ Units
+~ Another element |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 2, "Should have 2 elements");
+
+                    let a1_eq = elements.iter().find(|(k, _, _, _)| k == "a1");
+                    let a2_eq = elements.iter().find(|(k, _, _, _)| k == "a2");
+
+                    assert!(a1_eq.is_some(), "Should have a1");
+                    assert!(a2_eq.is_some(), "Should have a2");
+
+                    let (_, a1_expr, a1_init, _) = a1_eq.unwrap();
+                    assert_eq!(a1_expr, "y");
+                    assert_eq!(a1_init.as_deref(), Some("10"));
+
+                    let (_, a2_expr, a2_init, _) = a2_eq.unwrap();
+                    assert_eq!(a2_expr, "y * 2");
+                    assert_eq!(a2_init.as_deref(), Some("20"));
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
             }

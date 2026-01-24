@@ -34,6 +34,7 @@ static EQUIVALENT_MODELS: &[&str] = &[
     // SIR model - known to work
     "src/libsimlin/testdata/SIR.mdl",
     // SDEverywhere models
+    "test/sdeverywhere/models/active_initial/active_initial.mdl",
     "test/sdeverywhere/models/sir/sir.mdl",
     "test/sdeverywhere/models/comments/comments.mdl",
     "test/sdeverywhere/models/delay/delay.mdl",
@@ -53,10 +54,6 @@ static EQUIVALENT_MODELS: &[&str] = &[
 
 // ===== MODELS WITH KNOWN ISSUES =====
 // Track failures with comments explaining the issue.
-//
-// ACTIVE INITIAL representation differs (xmutil uses Scalar(expr, Some(init)),
-// native uses init() function call):
-// "test/sdeverywhere/models/active_initial/active_initial.mdl"
 //
 // Subscript handling in expressions differs (xmutil preserves "c[dima]",
 // native uses "c"):
