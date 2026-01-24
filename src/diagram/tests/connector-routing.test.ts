@@ -5,9 +5,12 @@
 import {
   AuxViewElement,
   StockViewElement,
+  FlowViewElement,
   LinkViewElement,
+  Point,
   Aux,
   Stock,
+  Flow,
   ApplyToAllEquation,
   ScalarEquation,
 } from '@system-dynamics/core/datamodel';
@@ -110,6 +113,52 @@ function makeLink(uid: number, fromUid: number, toUid: number): LinkViewElement 
     arc: undefined,
     isStraight: true,
     multiPoint: undefined,
+  });
+}
+
+function makeFlowElement(uid: number, x: number, y: number, isArrayed: boolean = false): FlowViewElement {
+  const flowVar = isArrayed
+    ? new Flow({
+        ident: 'test_flow',
+        equation: new ApplyToAllEquation({
+          dimensionNames: List(['dim1']),
+          equation: '1',
+        }),
+        documentation: '',
+        units: '',
+        gf: undefined,
+        nonNegative: false,
+        data: undefined,
+        errors: undefined,
+        unitErrors: undefined,
+        uid: undefined,
+      })
+    : new Flow({
+        ident: 'test_flow',
+        equation: new ScalarEquation({ equation: '1' }),
+        documentation: '',
+        units: '',
+        gf: undefined,
+        nonNegative: false,
+        data: undefined,
+        errors: undefined,
+        unitErrors: undefined,
+        uid: undefined,
+      });
+
+  return new FlowViewElement({
+    uid,
+    name: 'TestFlow',
+    ident: 'test_flow',
+    var: flowVar,
+    x,
+    y,
+    labelSide: 'center',
+    points: List([
+      new Point({ x: x - 50, y, attachedToUid: undefined }),
+      new Point({ x: x + 50, y, attachedToUid: undefined }),
+    ]),
+    isZeroRadius: false,
   });
 }
 
@@ -327,6 +376,25 @@ describe('Connector routing', () => {
       const stock = makeStock(1, 100, 100, false);
 
       const visual = getVisualCenter(stock);
+
+      expect(visual.cx).toBe(100);
+      expect(visual.cy).toBe(100);
+    });
+
+    it('should return offset center for arrayed flow', () => {
+      const arrayedFlow = makeFlowElement(1, 100, 100, true);
+
+      const visual = getVisualCenter(arrayedFlow);
+
+      // Visual center should be offset by ArrayedOffset (3)
+      expect(visual.cx).toBe(97);
+      expect(visual.cy).toBe(97);
+    });
+
+    it('should return logical center for non-arrayed flow', () => {
+      const flow = makeFlowElement(1, 100, 100, false);
+
+      const visual = getVisualCenter(flow);
 
       expect(visual.cx).toBe(100);
       expect(visual.cy).toBe(100);

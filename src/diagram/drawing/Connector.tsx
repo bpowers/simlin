@@ -16,10 +16,9 @@ import {
 import { Arrowhead } from './Arrowhead';
 import { Circle, isInf, isZero, Point, Rect, square } from './common';
 import { ArrowheadRadius, AuxRadius, StraightLineMax } from './default';
+import styles from './Connector.module.css';
 
 export const ArrayedOffset = 3;
-
-import styles from './Connector.module.css';
 
 function isElementArrayed(element: ViewElement): boolean {
   if (element instanceof AuxViewElement || element instanceof StockViewElement || element instanceof FlowViewElement) {
@@ -58,9 +57,9 @@ export function takeoffθ(props: Pick<ConnectorProps, 'element' | 'from' | 'to' 
   const fromVisual = getVisualCenter(from);
   const toVisual = getVisualCenter(to);
 
-  if (arcPoint && !(to.cx === arcPoint.x && to.cy === arcPoint.y)) {
+  if (arcPoint && !(toVisual.cx === arcPoint.x && toVisual.cy === arcPoint.y)) {
     // special case moving
-    // if (to.cx === arcPoint.x && to.cy === arcPoint.y) {
+    // if (toVisual.cx === arcPoint.x && toVisual.cy === arcPoint.y) {
     //   if (element.angle) {
     //     return degToRad(xmileToCanvasAngle(element.angle));
     //   } else {
@@ -257,7 +256,7 @@ export class Connector extends React.PureComponent<ConnectorProps> {
     const fromVisual = getVisualCenter(from);
     const toVisual = getVisualCenter(to);
 
-    if (arcPoint && !(to.cx === arcPoint.x && to.cy === arcPoint.y)) {
+    if (arcPoint && !(toVisual.cx === arcPoint.x && toVisual.cy === arcPoint.y)) {
       return circleFromPoints({ x: fromVisual.cx, y: fromVisual.cy }, { x: toVisual.cx, y: toVisual.cy }, arcPoint);
     }
 
