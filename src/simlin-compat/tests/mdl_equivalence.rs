@@ -14,7 +14,7 @@
 //! - TODO: Loop metadata extraction (Model.loop_metadata)
 //! - TODO: Model-level sim_specs (currently only project-level is extracted)
 
-#![cfg(feature = "vensim")]
+#![cfg(feature = "xmutil")]
 
 use std::collections::HashMap;
 use std::fs;

@@ -582,7 +582,7 @@ SimlinProject *simlin_project_open_xmile(const uint8_t *data,
 // Open a project from Vensim MDL format data
 //
 // Parses and imports a system dynamics model from Vensim's MDL format.
-// Requires the "vensim" feature to be enabled at compile time.
+// Requires the "xmutil" feature to be enabled at compile time.
 //
 // Returns NULL and populates `out_error` on failure.
 //

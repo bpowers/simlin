@@ -7,7 +7,7 @@ cd "$DIR"
 # Clean previous builds (including tsbuildinfo for incremental compilation)
 rm -rf lib lib.browser core *.tsbuildinfo
 
-# Build libsimlin as WASM (without vensim feature due to C++ xmutil dependency)
+# Build libsimlin as WASM (without xmutil feature due to C++ xmutil dependency)
 echo "Building libsimlin for wasm32-unknown-unknown..."
 cargo build -p simlin --lib --release --target wasm32-unknown-unknown --no-default-features
 

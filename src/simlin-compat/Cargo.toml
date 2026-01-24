@@ -10,7 +10,7 @@ crate-type = ["rlib"]
 
 [features]
 default = ["file_io"]
-vensim = ["xmutil"]
+xmutil = ["dep:xmutil"]
 file_io = ["dep:csv"]
 
 [dependencies]

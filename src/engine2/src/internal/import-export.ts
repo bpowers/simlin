@@ -57,7 +57,7 @@ export function hasVensimSupport(): boolean {
 
 /**
  * Open a project from Vensim MDL format.
- * Note: This function is only available when libsimlin is built with the 'vensim' feature.
+ * Note: This function is only available when libsimlin is built with the 'xmutil' feature.
  * The default WASM build (--no-default-features) does not include this function.
  * Use hasVensimSupport() to check availability before calling.
  * @param data MDL file data
@@ -68,11 +68,11 @@ export function simlin_project_open_vensim(data: Uint8Array): SimlinProjectPtr {
   const exports = getExports();
   const fn = exports.simlin_project_open_vensim;
 
-  // Guard against missing export when vensim feature is disabled
+  // Guard against missing export when xmutil feature is disabled
   if (typeof fn !== 'function') {
     throw new SimlinError(
       'simlin_project_open_vensim is not available: libsimlin was built without Vensim support. ' +
-        'Rebuild with the "vensim" feature enabled to import MDL files.',
+        'Rebuild with the "xmutil" feature enabled to import MDL files.',
       SimlinErrorCode.Generic,
     );
   }

@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::io::BufRead;
-#[cfg(any(feature = "file_io", feature = "vensim"))]
+#[cfg(any(feature = "file_io", feature = "xmutil"))]
 use std::io::BufReader;
 
 use simlin_core::datamodel::Project;
@@ -30,14 +30,14 @@ pub mod xmile;
 #[cfg(test)]
 mod test_sir_xmile;
 
-#[cfg(all(test, feature = "vensim"))]
+#[cfg(all(test, feature = "xmutil"))]
 mod test_open_vensim;
 
 pub fn to_xmile(project: &Project) -> Result<String> {
     xmile::project_to_xmile(project)
 }
 
-#[cfg(feature = "vensim")]
+#[cfg(feature = "xmutil")]
 pub fn open_vensim(reader: &mut dyn BufRead) -> Result<Project> {
     use simlin_core::common::{Error, ErrorCode, ErrorKind};
     use xmutil::convert_vensim_mdl;
