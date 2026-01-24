@@ -1122,6 +1122,51 @@ describe('Flow routing', () => {
         expect(outflowStockPt.x).toBe(100); // centered
         expect(outflowStockPt.y).toBe(50 - StockHeight / 2); // top
       });
+
+      it('should not apply spreading to straight flows - they separate by anchor position', () => {
+        // Two horizontal flows that both REMAIN STRAIGHT after stock moves
+        // Both go to the left side, but at different Y coordinates (based on their anchors)
+        const flow1Uid = 2;
+        const flow2Uid = 3;
+        const stock = makeStock(stockUid, 100, 100, [], [flow1Uid, flow2Uid]);
+
+        // Flow 1: horizontal flow to cloud at y=95 (within stock's vertical extent)
+        const flow1 = makeFlow(flow1Uid, 60, 95, [
+          { x: 100 - StockWidth / 2, y: 95, attachedToUid: stockUid },
+          { x: 20, y: 95, attachedToUid: 4 },
+        ]);
+
+        // Flow 2: horizontal flow to cloud at y=105 (also within stock's vertical extent)
+        const flow2 = makeFlow(flow2Uid, 60, 105, [
+          { x: 100 - StockWidth / 2, y: 105, attachedToUid: stockUid },
+          { x: 20, y: 105, attachedToUid: 5 },
+        ]);
+
+        // Move stock slightly - both flows should remain straight
+        const [newStock, newFlows] = UpdateStockAndFlows(stock, List([flow1, flow2]), { x: -10, y: 0 });
+
+        expect(newStock.cx).toBe(110);
+
+        const newFlow1 = newFlows.get(0)!;
+        const newFlow2 = newFlows.get(1)!;
+
+        // Both flows should remain 2-point (straight)
+        expect(newFlow1.points.size).toBe(2);
+        expect(newFlow2.points.size).toBe(2);
+
+        // Stock attachment points should maintain their anchor's Y coordinate
+        // (not shifted by spreading offset)
+        const flow1StockPt = newFlow1.points.get(0)!;
+        const flow2StockPt = newFlow2.points.get(0)!;
+
+        // Y coordinates should match the anchors' Y (not shifted)
+        expect(flow1StockPt.y).toBe(95);
+        expect(flow2StockPt.y).toBe(105);
+
+        // X should be at the left edge of the new stock position
+        expect(flow1StockPt.x).toBe(110 - StockWidth / 2);
+        expect(flow2StockPt.x).toBe(110 - StockWidth / 2);
+      });
     });
   });
 

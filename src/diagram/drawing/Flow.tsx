@@ -76,6 +76,37 @@ interface FlowAttachmentInfo {
   adjacentPoint: IPoint;
   // Whether the stock is at the start (first point) or end (last point) of the flow
   stockIsFirst: boolean;
+  // Whether the flow will be straight (vs L-shaped) - straight flows don't need spreading
+  isStraight: boolean;
+}
+
+/**
+ * Returns the point adjacent to the stock attachment (the point right next to where
+ * the flow attaches to the stock).
+ */
+function getStockAdjacentPoint(points: List<Point>, stockIsFirst: boolean): Point {
+  const firstPoint = defined(points.first());
+  const lastPoint = defined(points.last());
+  if (stockIsFirst) {
+    return points.size >= 2 ? defined(points.get(1)) : lastPoint;
+  } else {
+    return points.size >= 2 ? defined(points.get(points.size - 2)) : firstPoint;
+  }
+}
+
+/**
+ * Returns the point adjacent to the anchor (used to determine the original flow direction).
+ */
+function getAnchorAdjacentPoint(points: List<Point>, stockIsFirst: boolean): Point {
+  const firstPoint = defined(points.first());
+  const lastPoint = defined(points.last());
+  if (stockIsFirst) {
+    // anchor is last, so adjacent to anchor is second-to-last
+    return points.size >= 2 ? defined(points.get(points.size - 2)) : firstPoint;
+  } else {
+    // anchor is first, so adjacent to anchor is second
+    return points.size >= 2 ? defined(points.get(1)) : lastPoint;
+  }
 }
 
 /**
@@ -106,27 +137,12 @@ function getFlowAttachmentInfo(
   }
 
   const anchor = stockIsFirst ? lastPoint : firstPoint;
-
-  // Determine the adjacent point (the one right next to the stock attachment)
-  let adjacentPoint: Point;
-  if (stockIsFirst) {
-    // Stock is first, adjacent is the second point
-    adjacentPoint = points.size >= 2 ? defined(points.get(1)) : lastPoint;
-  } else {
-    // Stock is last, adjacent is second-to-last point
-    adjacentPoint = points.size >= 2 ? defined(points.get(points.size - 2)) : firstPoint;
-  }
-
-  // Determine original flow direction from the anchor-side segment
-  let anchorAdjacentPoint: Point;
-  if (stockIsFirst) {
-    anchorAdjacentPoint = points.size >= 2 ? defined(points.get(points.size - 2)) : firstPoint;
-  } else {
-    anchorAdjacentPoint = points.size >= 2 ? defined(points.get(1)) : lastPoint;
-  }
+  const adjacentPoint = getStockAdjacentPoint(points, stockIsFirst);
+  const anchorAdjacentPoint = getAnchorAdjacentPoint(points, stockIsFirst);
   const originalFlowIsHorizontal = anchor.y === anchorAdjacentPoint.y;
 
   let side: Side;
+  let isStraight = false;
 
   // For 4+ point flows, use the existing segment orientation
   if (points.size >= 4) {
@@ -139,7 +155,8 @@ function getFlowAttachmentInfo(
       side = adjacentPoint.y > newStockCy ? 'bottom' : 'top';
     }
   } else if (canFlowBeStraight(newStockCx, newStockCy, anchor.x, anchor.y, originalFlowIsHorizontal)) {
-    // Straight flow
+    // Straight flow - these naturally separate based on anchor position
+    isStraight = true;
     if (originalFlowIsHorizontal) {
       side = anchor.x > newStockCx ? 'right' : 'left';
     } else {
@@ -159,13 +176,18 @@ function getFlowAttachmentInfo(
     side,
     adjacentPoint: { x: adjacentPoint.x, y: adjacentPoint.y },
     stockIsFirst,
+    isStraight,
   };
 }
 
 /**
  * Groups flows by their attachment side and computes offset fractions for each flow.
  *
- * Flows on the same side are ordered by their adjacent point's position:
+ * Straight flows always get offset 0.5 (centered) because they naturally separate
+ * based on their anchor positions - each maintains its anchor's Y (horizontal flows)
+ * or X (vertical flows) coordinate.
+ *
+ * L-shaped flows on the same side are ordered by their adjacent point's position:
  * - For top/bottom sides: ordered by adjacent point's X (left to right)
  * - For left/right sides: ordered by adjacent point's Y (top to bottom)
  *
@@ -186,23 +208,32 @@ function computeFlowOffsets(
     }
   }
 
-  // Group by side
-  const bySide: Map<Side, FlowAttachmentInfo[]> = new Map();
-  for (const info of attachmentInfos) {
-    const existing = bySide.get(info.side) || [];
-    existing.push(info);
-    bySide.set(info.side, existing);
-  }
-
   // Compute offsets for each flow
   const offsets: Map<number, number> = new Map();
 
+  // Straight flows always get centered - they naturally separate based on anchor position
+  for (const info of attachmentInfos) {
+    if (info.isStraight) {
+      offsets.set(info.flow.uid, 0.5);
+    }
+  }
+
+  // Group non-straight (L-shaped) flows by side for spreading
+  const bySide: Map<Side, FlowAttachmentInfo[]> = new Map();
+  for (const info of attachmentInfos) {
+    if (!info.isStraight) {
+      const existing = bySide.get(info.side) || [];
+      existing.push(info);
+      bySide.set(info.side, existing);
+    }
+  }
+
   for (const [side, infos] of bySide) {
     if (infos.length === 1) {
-      // Single flow on this side - center it (offset = 0.5)
+      // Single L-shaped flow on this side - center it (offset = 0.5)
       offsets.set(infos[0].flow.uid, 0.5);
     } else {
-      // Multiple flows - sort and spread them
+      // Multiple L-shaped flows - sort and spread them
       // For top/bottom: sort by adjacent point X
       // For left/right: sort by adjacent point Y
       if (side === 'top' || side === 'bottom') {
@@ -265,14 +296,7 @@ export function computeFlowRoute(
   // Determine original flow direction by looking at the anchor-side segment.
   // This works for both 2-point (straight) and 3+ point (L-shaped) flows.
   // For L-shaped flows, the anchor-side segment preserves the original direction.
-  let anchorAdjacentPoint: Point;
-  if (stockIsFirst) {
-    // anchor is last, so look at second-to-last point
-    anchorAdjacentPoint = points.size >= 2 ? defined(points.get(points.size - 2)) : firstPoint;
-  } else {
-    // anchor is first, so look at second point
-    anchorAdjacentPoint = points.size >= 2 ? defined(points.get(1)) : lastPoint;
-  }
+  const anchorAdjacentPoint = getAnchorAdjacentPoint(points, stockIsFirst);
   const originalFlowIsHorizontal = anchor.y === anchorAdjacentPoint.y;
 
   // For flows with 4+ points (imported or manually-edited multi-segment flows),
