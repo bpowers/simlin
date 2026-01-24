@@ -463,23 +463,44 @@ print(comparison.tail())
 ### Feedback Loop Analysis
 
 ```python
-# Get structural feedback loops
-loops = model.loops
-for loop in loops:
-    print(f"Loop {loop.id} ({loop.polarity}): {' -> '.join(loop.variables)}")
+run = model.run()
 
-# Run with loop behavior analysis
-run = model.run(analyze_loops=True)
-
-# Access loops with behavioral importance
+# Access feedback loops with polarity and behavioral importance
 for loop in run.loops:
+    print(f"Loop {loop.id} ({loop.polarity}): {' -> '.join(loop.variables)}")
     if loop.behavior_time_series is not None:
         avg_importance = loop.average_importance()
-        print(f"Loop {loop.id}: avg importance = {avg_importance:.3f}")
+        print(f"  avg importance = {avg_importance:.3f}")
 
 # Analyze dominant periods
 for period in run.dominant_periods:
     print(f"t=[{period.start_time}, {period.end_time}]: {period.dominant_loops}")
+```
+
+#### Loop Polarity
+
+Loops are classified by polarity, which indicates how they affect the system:
+
+- **R (Reinforcing)**: Loop amplifies changes (positive loop scores)
+- **B (Balancing)**: Loop counteracts changes (negative loop scores)
+- **U (Undetermined)**: Loop polarity cannot be reliably determined
+
+Loop IDs use the polarity as a prefix (e.g., "R1", "B2", "U3").
+
+When you run a simulation, pysimlin computes actual loop scores at each timestep. The polarity is classified based on these runtime values:
+- If loop scores are consistently positive throughout: Reinforcing
+- If loop scores are consistently negative throughout: Balancing
+- If loop scores change sign during simulation: Undetermined (occurs in nonlinear models where link effects depend on variable values)
+
+```python
+from simlin import LoopPolarity
+
+run = model.run()
+
+# Filter by polarity
+reinforcing = [l for l in run.loops if l.polarity == LoopPolarity.REINFORCING]
+balancing = [l for l in run.loops if l.polarity == LoopPolarity.BALANCING]
+undetermined = [l for l in run.loops if l.polarity == LoopPolarity.UNDETERMINED]
 ```
 
 ### Loops That Matter (LTM)

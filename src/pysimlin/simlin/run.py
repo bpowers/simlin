@@ -26,7 +26,7 @@ class DominantPeriod:
     """
 
     dominant_loops: tuple[str, ...]
-    """Loop IDs that dominate during this period (e.g., ('R1', 'B2'))"""
+    """Loop IDs that dominate during this period (e.g., ('R1', 'B2', 'U3'))"""
 
     start_time: float
     """Period start time"""
@@ -48,7 +48,7 @@ class DominantPeriod:
         Check if a specific loop dominates during this period.
 
         Args:
-            loop_id: Loop identifier to check (e.g., 'R1', 'B2')
+            loop_id: Loop identifier to check (e.g., 'R1', 'B2', 'U3')
 
         Returns:
             True if the loop is in dominant_loops, False otherwise

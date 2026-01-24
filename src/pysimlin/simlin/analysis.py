@@ -124,13 +124,13 @@ class Loop:
     """
 
     id: str
-    """Loop identifier (e.g., 'R1', 'B2')"""
+    """Loop identifier (e.g., 'R1', 'B2', 'U3')"""
 
     variables: tuple[str, ...]
     """Variables in this loop"""
 
     polarity: LoopPolarity
-    """Loop polarity (reinforcing or balancing)"""
+    """Loop polarity: REINFORCING (R), BALANCING (B), or UNDETERMINED (U)"""
 
     behavior_time_series: Optional[NDArray[np.float64]] = None
     """
