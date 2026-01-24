@@ -58,6 +58,7 @@ describe('Types', () => {
     it('should have correct values', () => {
       expect(SimlinLoopPolarity.Reinforcing).toBe(0);
       expect(SimlinLoopPolarity.Balancing).toBe(1);
+      expect(SimlinLoopPolarity.Undetermined).toBe(2);
     });
   });
 });

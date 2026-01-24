@@ -29,7 +29,7 @@ class LoopPolarity(IntEnum):
     The polarity indicates how the loop affects the system:
     - REINFORCING (R): Loop amplifies changes (positive loop score)
     - BALANCING (B): Loop counteracts changes (negative loop score)
-    - UNDETERMINED (U): Loop polarity changes during simulation
+    - UNDETERMINED (U): Loop polarity cannot be determined or changes during simulation
     """
 
     REINFORCING = 0

@@ -62,10 +62,10 @@ impl Loop {
 /// The structural polarity is determined by counting negative links:
 /// - Even number of negative links → Reinforcing
 /// - Odd number of negative links → Balancing
+/// - ANY link with unknown polarity → Undetermined
 ///
-/// However, in nonlinear models, link polarities can change during simulation,
-/// causing the loop score to change sign. When a loop's score is positive at
-/// some timesteps and negative at others, its runtime polarity is Undetermined.
+/// At runtime, if the loop score changes sign during simulation, the polarity
+/// is also classified as Undetermined.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopPolarity {
     /// R loop - amplifies changes (positive loop score)
@@ -74,8 +74,9 @@ pub enum LoopPolarity {
     /// B loop - counteracts changes (negative loop score)
     /// Structurally: odd number of negative links
     Balancing,
-    /// U loop - polarity changes during simulation
-    /// The loop score has both positive and negative values at different timesteps
+    /// U loop - polarity cannot be determined or changes during simulation
+    /// Structurally: any link has unknown polarity
+    /// At runtime: loop score has both positive and negative values
     Undetermined,
 }
 
@@ -602,7 +603,16 @@ impl CausalGraph {
 
     /// Calculate loop polarity based on link polarities
     fn calculate_polarity(&self, links: &[Link]) -> LoopPolarity {
-        // Count negative links
+        // If ANY link has unknown polarity, the loop is Undetermined
+        let has_unknown_polarity = links
+            .iter()
+            .any(|link| link.polarity == LinkPolarity::Unknown);
+
+        if has_unknown_polarity {
+            return LoopPolarity::Undetermined;
+        }
+
+        // All links have known polarity - count negative links
         let negative_count = links
             .iter()
             .filter(|link| link.polarity == LinkPolarity::Negative)
@@ -635,16 +645,25 @@ impl CausalGraph {
         // Now assign IDs based on polarity and position in sorted order
         let mut r_counter = 1;
         let mut b_counter = 1;
+        let mut u_counter = 1;
 
         for loop_item in loops.iter_mut() {
-            loop_item.id = if loop_item.polarity == LoopPolarity::Reinforcing {
-                let id = format!("r{r_counter}");
-                r_counter += 1;
-                id
-            } else {
-                let id = format!("b{b_counter}");
-                b_counter += 1;
-                id
+            loop_item.id = match loop_item.polarity {
+                LoopPolarity::Reinforcing => {
+                    let id = format!("r{r_counter}");
+                    r_counter += 1;
+                    id
+                }
+                LoopPolarity::Balancing => {
+                    let id = format!("b{b_counter}");
+                    b_counter += 1;
+                    id
+                }
+                LoopPolarity::Undetermined => {
+                    let id = format!("u{u_counter}");
+                    u_counter += 1;
+                    id
+                }
             };
         }
     }
@@ -2025,11 +2044,13 @@ mod tests {
             "harvest_rate -> fish_stock should have negative polarity (outflow decreases stock)"
         );
 
-        // The r1 loop should be balancing (odd number of negative links)
+        // The loop containing harvest_rate -> fish_stock should be Undetermined
+        // because some links have unknown polarity (conservative classification:
+        // if ANY link is unknown, the loop is Undetermined)
         assert_eq!(
             r1_loop.polarity,
-            LoopPolarity::Balancing,
-            "Loop r1 should be balancing"
+            LoopPolarity::Undetermined,
+            "Loop containing harvest_rate should be Undetermined (has unknown-polarity links)"
         );
     }
 
@@ -2069,8 +2090,11 @@ mod tests {
         let loops = graph.find_loops();
 
         // Logistic growth should have exactly 2 loops:
-        // 1. One reinforcing loop (exponential growth)
-        // 2. One balancing loop (carrying capacity constraint)
+        // 1. One undetermined loop (simple growth - has unknown-polarity link
+        //    because population -> net_birth_rate multiplication involves
+        //    fractional_growth_rate which isn't a constant)
+        // 2. One balancing loop (carrying capacity constraint - all links
+        //    have known polarity)
         assert_eq!(
             loops.len(),
             2,
@@ -2078,26 +2102,26 @@ mod tests {
             loops.len()
         );
 
-        // Count reinforcing and balancing loops
-        let reinforcing_count = loops
-            .iter()
-            .filter(|l| l.polarity == LoopPolarity::Reinforcing)
-            .count();
+        // Count balancing and undetermined loops
         let balancing_count = loops
             .iter()
             .filter(|l| l.polarity == LoopPolarity::Balancing)
             .count();
-
-        assert_eq!(
-            reinforcing_count, 1,
-            "Logistic growth model should have exactly 1 reinforcing loop, found: {}",
-            reinforcing_count
-        );
+        let undetermined_count = loops
+            .iter()
+            .filter(|l| l.polarity == LoopPolarity::Undetermined)
+            .count();
 
         assert_eq!(
             balancing_count, 1,
             "Logistic growth model should have exactly 1 balancing loop, found: {}",
             balancing_count
+        );
+
+        assert_eq!(
+            undetermined_count, 1,
+            "Logistic growth model should have exactly 1 undetermined loop, found: {}",
+            undetermined_count
         );
 
         // Check if the carrying capacity loop is correctly identified as balancing
@@ -2177,5 +2201,242 @@ mod tests {
         assert_eq!(LoopPolarity::Reinforcing.abbreviation(), "R");
         assert_eq!(LoopPolarity::Balancing.abbreviation(), "B");
         assert_eq!(LoopPolarity::Undetermined.abbreviation(), "U");
+    }
+
+    #[test]
+    fn test_calculate_polarity_all_unknown_links() {
+        // When all links have Unknown polarity, the loop should be Undetermined
+        let graph = CausalGraph {
+            edges: HashMap::new(),
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+        };
+
+        let links = vec![
+            Link {
+                from: crate::common::canonicalize("a"),
+                to: crate::common::canonicalize("b"),
+                polarity: LinkPolarity::Unknown,
+            },
+            Link {
+                from: crate::common::canonicalize("b"),
+                to: crate::common::canonicalize("a"),
+                polarity: LinkPolarity::Unknown,
+            },
+        ];
+
+        let polarity = graph.calculate_polarity(&links);
+        assert_eq!(
+            polarity,
+            LoopPolarity::Undetermined,
+            "Loop with all Unknown link polarities should have Undetermined polarity"
+        );
+    }
+
+    #[test]
+    fn test_calculate_polarity_mixed_unknown_and_known() {
+        // Conservative approach: if ANY link is unknown, the loop is Undetermined
+        let graph = CausalGraph {
+            edges: HashMap::new(),
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+        };
+
+        // One negative link, one unknown -> should be Undetermined
+        let links_one_negative = vec![
+            Link {
+                from: crate::common::canonicalize("a"),
+                to: crate::common::canonicalize("b"),
+                polarity: LinkPolarity::Negative,
+            },
+            Link {
+                from: crate::common::canonicalize("b"),
+                to: crate::common::canonicalize("a"),
+                polarity: LinkPolarity::Unknown,
+            },
+        ];
+
+        let polarity = graph.calculate_polarity(&links_one_negative);
+        assert_eq!(
+            polarity,
+            LoopPolarity::Undetermined,
+            "Loop with any unknown link should be Undetermined"
+        );
+
+        // Two positive links, one unknown -> should also be Undetermined
+        let links_two_positive = vec![
+            Link {
+                from: crate::common::canonicalize("a"),
+                to: crate::common::canonicalize("b"),
+                polarity: LinkPolarity::Positive,
+            },
+            Link {
+                from: crate::common::canonicalize("b"),
+                to: crate::common::canonicalize("c"),
+                polarity: LinkPolarity::Positive,
+            },
+            Link {
+                from: crate::common::canonicalize("c"),
+                to: crate::common::canonicalize("a"),
+                polarity: LinkPolarity::Unknown,
+            },
+        ];
+
+        let polarity = graph.calculate_polarity(&links_two_positive);
+        assert_eq!(
+            polarity,
+            LoopPolarity::Undetermined,
+            "Loop with any unknown link should be Undetermined"
+        );
+    }
+
+    #[test]
+    fn test_calculate_polarity_all_known_links() {
+        // When all links have known polarity, count negative links
+        let graph = CausalGraph {
+            edges: HashMap::new(),
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+        };
+
+        // All positive links -> Reinforcing (even number of negatives: 0)
+        let links_all_positive = vec![
+            Link {
+                from: crate::common::canonicalize("a"),
+                to: crate::common::canonicalize("b"),
+                polarity: LinkPolarity::Positive,
+            },
+            Link {
+                from: crate::common::canonicalize("b"),
+                to: crate::common::canonicalize("a"),
+                polarity: LinkPolarity::Positive,
+            },
+        ];
+
+        let polarity = graph.calculate_polarity(&links_all_positive);
+        assert_eq!(
+            polarity,
+            LoopPolarity::Reinforcing,
+            "Loop with all positive links should be Reinforcing"
+        );
+
+        // One negative, one positive -> Balancing (odd number of negatives: 1)
+        let links_one_negative = vec![
+            Link {
+                from: crate::common::canonicalize("a"),
+                to: crate::common::canonicalize("b"),
+                polarity: LinkPolarity::Negative,
+            },
+            Link {
+                from: crate::common::canonicalize("b"),
+                to: crate::common::canonicalize("a"),
+                polarity: LinkPolarity::Positive,
+            },
+        ];
+
+        let polarity = graph.calculate_polarity(&links_one_negative);
+        assert_eq!(
+            polarity,
+            LoopPolarity::Balancing,
+            "Loop with one negative link should be Balancing"
+        );
+
+        // Two negative links -> Reinforcing (even number of negatives: 2)
+        let links_two_negatives = vec![
+            Link {
+                from: crate::common::canonicalize("a"),
+                to: crate::common::canonicalize("b"),
+                polarity: LinkPolarity::Negative,
+            },
+            Link {
+                from: crate::common::canonicalize("b"),
+                to: crate::common::canonicalize("a"),
+                polarity: LinkPolarity::Negative,
+            },
+        ];
+
+        let polarity = graph.calculate_polarity(&links_two_negatives);
+        assert_eq!(
+            polarity,
+            LoopPolarity::Reinforcing,
+            "Loop with two negative links should be Reinforcing"
+        );
+    }
+
+    #[test]
+    fn test_loop_id_assignment_undetermined_polarity() {
+        // Loops with Undetermined structural polarity should get "u" prefix
+        let graph = CausalGraph {
+            edges: HashMap::new(),
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+        };
+
+        let mut loops = vec![
+            Loop {
+                id: String::new(),
+                links: vec![
+                    Link {
+                        from: crate::common::canonicalize("a"),
+                        to: crate::common::canonicalize("b"),
+                        polarity: LinkPolarity::Unknown,
+                    },
+                    Link {
+                        from: crate::common::canonicalize("b"),
+                        to: crate::common::canonicalize("a"),
+                        polarity: LinkPolarity::Unknown,
+                    },
+                ],
+                stocks: vec![],
+                polarity: LoopPolarity::Undetermined,
+            },
+            Loop {
+                id: String::new(),
+                links: vec![
+                    Link {
+                        from: crate::common::canonicalize("x"),
+                        to: crate::common::canonicalize("y"),
+                        polarity: LinkPolarity::Positive,
+                    },
+                    Link {
+                        from: crate::common::canonicalize("y"),
+                        to: crate::common::canonicalize("x"),
+                        polarity: LinkPolarity::Positive,
+                    },
+                ],
+                stocks: vec![],
+                polarity: LoopPolarity::Reinforcing,
+            },
+        ];
+
+        graph.assign_deterministic_loop_ids(&mut loops);
+
+        // Find the undetermined loop (contains "a" and "b")
+        let undetermined_loop = loops
+            .iter()
+            .find(|l| l.links.iter().any(|link| link.from.as_str() == "a"))
+            .expect("Should find undetermined loop");
+
+        assert!(
+            undetermined_loop.id.starts_with("u"),
+            "Undetermined polarity loop should have 'u' prefix, got: {}",
+            undetermined_loop.id
+        );
+
+        // Find the reinforcing loop (contains "x" and "y")
+        let reinforcing_loop = loops
+            .iter()
+            .find(|l| l.links.iter().any(|link| link.from.as_str() == "x"))
+            .expect("Should find reinforcing loop");
+
+        assert!(
+            reinforcing_loop.id.starts_with("r"),
+            "Reinforcing polarity loop should have 'r' prefix, got: {}",
+            reinforcing_loop.id
+        );
     }
 }

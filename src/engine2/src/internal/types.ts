@@ -86,6 +86,7 @@ export enum SimlinLinkPolarity {
 export enum SimlinLoopPolarity {
   Reinforcing = 0,
   Balancing = 1,
+  Undetermined = 2,
 }
 
 // Error detail structure - matches SimlinErrorDetail in simlin.h

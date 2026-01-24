@@ -230,3 +230,116 @@ class TestLoopPolarityEnum:
         assert LoopPolarity.REINFORCING == 0
         assert LoopPolarity.BALANCING == 1
         assert LoopPolarity.UNDETERMINED == 2
+
+
+class TestStructuralPolarityClassification:
+    """Test structural polarity classification via the engine.
+
+    These tests verify that the conservative polarity classification works:
+    all links must have known polarity for the loop to be classified as
+    Reinforcing or Balancing.
+    """
+
+    def test_all_known_polarities_reinforcing(self) -> None:
+        """Test that a loop with all known positive polarities is Reinforcing.
+
+        Model: population -> births -> population (reinforcing)
+        All links have known positive polarity.
+        """
+        project = Project.new(
+            name="test_all_known_reinforcing",
+            sim_start=0.0,
+            sim_stop=5.0,
+            dt=0.25,
+        )
+
+        model = project.main_model
+
+        with model.edit() as (current, patch):
+            from simlin.json_types import Stock, Flow, Auxiliary
+
+            patch.upsert_stock(
+                Stock(
+                    name="population",
+                    initial_equation="100",
+                    inflows=["births"],
+                    outflows=[],
+                )
+            )
+            patch.upsert_flow(
+                Flow(
+                    name="births",
+                    equation="population * birth_rate",
+                )
+            )
+            patch.upsert_aux(
+                Auxiliary(
+                    name="birth_rate",
+                    equation="0.1",
+                )
+            )
+
+        run = model.run(analyze_loops=True)
+        loops = run.loops
+
+        assert len(loops) >= 1, "Should have at least one loop"
+        r_loops = [l for l in loops if l.polarity == LoopPolarity.REINFORCING]
+        assert len(r_loops) >= 1, "Simple exponential growth should have a Reinforcing loop"
+
+    def test_all_known_polarities_balancing(self) -> None:
+        """Test that a goal-seeking model has a Balancing loop.
+
+        Model: level -> gap -> adjustment -> level (balancing)
+        The gap equation (goal - level) introduces negative polarity.
+        """
+        project = Project.new(
+            name="test_all_known_balancing",
+            sim_start=0.0,
+            sim_stop=5.0,
+            dt=0.25,
+        )
+
+        model = project.main_model
+
+        with model.edit() as (current, patch):
+            from simlin.json_types import Stock, Flow, Auxiliary
+
+            patch.upsert_aux(
+                Auxiliary(
+                    name="goal",
+                    equation="100",
+                )
+            )
+            patch.upsert_stock(
+                Stock(
+                    name="level",
+                    initial_equation="50",
+                    inflows=["adjustment"],
+                    outflows=[],
+                )
+            )
+            patch.upsert_aux(
+                Auxiliary(
+                    name="gap",
+                    equation="goal - level",
+                )
+            )
+            patch.upsert_aux(
+                Auxiliary(
+                    name="adjustment_time",
+                    equation="5",
+                )
+            )
+            patch.upsert_flow(
+                Flow(
+                    name="adjustment",
+                    equation="gap / adjustment_time",
+                )
+            )
+
+        run = model.run(analyze_loops=True)
+        loops = run.loops
+
+        assert len(loops) >= 1, "Should have at least one loop"
+        b_loops = [l for l in loops if l.polarity == LoopPolarity.BALANCING]
+        assert len(b_loops) >= 1, "Goal-seeking model should have a Balancing loop"

@@ -53,12 +53,19 @@ The sign of a loop score indicates its structural polarity:
 
 ### Loop Polarity Classification
 
-When analyzing loops over an entire simulation run, a loop's polarity is classified as:
+Loops are classified by their polarity, which can be determined either structurally (before simulation) or at runtime (based on actual loop scores):
+
+**Structural classification** (before simulation):
+- **R (Reinforcing)**: All links have known polarity, with an even number of negative links
+- **B (Balancing)**: All links have known polarity, with an odd number of negative links
+- **U (Undetermined)**: Any link has unknown polarity (conservative: known × known × unknown = unknown)
+
+**Runtime classification** (after simulation):
 - **R (Reinforcing)**: Loop score is positive throughout the simulation
 - **B (Balancing)**: Loop score is negative throughout the simulation
 - **U (Undetermined)**: Loop score changes sign during the simulation (has both positive and negative values at different time points)
 
-This can occur in nonlinear models where link polarities change based on variable values. For example, in the yeast alcohol model, the births loop can change from reinforcing to effectively balancing when alcohol levels become high enough to reverse the birth rate.
+Undetermined polarity at runtime can occur in nonlinear models where link polarities change based on variable values. For example, in the yeast alcohol model, the births loop can change from reinforcing to effectively balancing when alcohol levels become high enough to reverse the birth rate.
 
 ### Relative Loop Score
 For analysis, we normalize loop scores:

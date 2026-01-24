@@ -548,6 +548,8 @@ export enum LoopPolarity {
   Reinforcing = 0,
   /** Balancing: counteracts changes (negative feedback) */
   Balancing = 1,
+  /** Undetermined: polarity cannot be determined or changes during simulation */
+  Undetermined = 2,
 }
 
 /**
