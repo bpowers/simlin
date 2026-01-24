@@ -36,7 +36,7 @@ import { Alias, AliasProps } from './Alias';
 import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
 import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect, screenToCanvasPoint } from './common';
-import { Connector, ConnectorProps } from './Connector';
+import { Connector, ConnectorProps, getVisualCenter } from './Connector';
 import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
 import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
@@ -519,8 +519,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     if (isMovingArrow || this.isSelected(from) || this.isSelected(to)) {
       const oldTo = defined(this.elements.get(toUid));
       const oldFrom = defined(this.elements.get(from.uid));
-      const oldθ = Math.atan2(oldTo.cy - oldFrom.cy, oldTo.cx - oldFrom.cx);
-      const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
+      const oldToVisual = getVisualCenter(oldTo);
+      const oldFromVisual = getVisualCenter(oldFrom);
+      const toVisual = getVisualCenter(to);
+      const fromVisual = getVisualCenter(from);
+      const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
+      const newθ = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
       const diffθ = oldθ - newθ;
       element = element.set('arc', updateArcAngle(element.arc, radToDeg(diffθ)));
     }

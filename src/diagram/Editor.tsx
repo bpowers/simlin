@@ -79,7 +79,7 @@ import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point, searchableName } from './drawing/common';
-import { takeoffθ } from './drawing/Connector';
+import { takeoffθ, getVisualCenter } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 
@@ -983,8 +983,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const oldTo = getUid(element.toUid);
       const to = getName(defined(newTarget));
 
-      const oldθ = Math.atan2(oldTo.cy - from.cy, oldTo.cx - from.cx);
-      const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
+      const fromVisual = getVisualCenter(from);
+      const oldToVisual = getVisualCenter(oldTo);
+      const toVisual = getVisualCenter(to);
+      const oldθ = Math.atan2(oldToVisual.cy - fromVisual.cy, oldToVisual.cx - fromVisual.cx);
+      const newθ = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
       const diffθ = oldθ - newθ;
       const angle = updateArcAngle(element.arc, radToDeg(diffθ));
 
@@ -998,8 +1001,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const from = getUid(link.fromUid);
       const to = getName(newTarget);
 
-      const oldθ = Math.atan2(0 - from.cy, 0 - from.cx);
-      const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
+      const fromVisual = getVisualCenter(from);
+      const toVisual = getVisualCenter(to);
+      const oldθ = Math.atan2(0 - fromVisual.cy, 0 - fromVisual.cx);
+      const newθ = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
       const diffθ = oldθ - newθ;
       const angle = updateArcAngle(link.arc, radToDeg(diffθ));
 
@@ -1219,8 +1224,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const atan2 = Math.atan2;
       const oldTo = defined(getUid(element.toUid));
       const oldFrom = defined(getUid(element.fromUid));
-      const oldθ = atan2(oldTo.cy - oldFrom.cy, oldTo.cx - oldFrom.cx);
-      const newθ = atan2(to.cy - from.cy, to.cx - from.cx);
+      const oldToVisual = getVisualCenter(oldTo);
+      const oldFromVisual = getVisualCenter(oldFrom);
+      const toVisual = getVisualCenter(to);
+      const fromVisual = getVisualCenter(from);
+      const oldθ = atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
+      const newθ = atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
       const diffθ = oldθ - newθ;
 
       return element.update('arc', (angle) => updateArcAngle(angle, radToDeg(diffθ)));
