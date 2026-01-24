@@ -82,6 +82,7 @@ pub(super) struct SimSpecsBuilder {
     pub dt: Option<f64>,
     pub save_step: Option<f64>,
     pub time_units: Option<String>,
+    pub sim_method: Option<SimMethod>,
 }
 
 impl SimSpecsBuilder {
@@ -92,7 +93,7 @@ impl SimSpecsBuilder {
             dt: self.dt.map(Dt::Dt).unwrap_or_default(),
             // Saveper defaults to dt if not specified (per xmutil behavior)
             save_step: self.save_step.or(self.dt).map(Dt::Dt),
-            sim_method: SimMethod::Euler,
+            sim_method: self.sim_method.unwrap_or(SimMethod::Euler),
             // Default to "Months" to match xmutil
             time_units: self.time_units.or_else(|| Some("Months".to_string())),
         }

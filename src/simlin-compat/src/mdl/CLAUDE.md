@@ -21,10 +21,14 @@ This directory contains the pure Rust implementation of a Vensim MDL file parser
 - Number list / tabbed array conversion for arrayed equations
 - Element-specific equation handling (single elements, apply-to-all with overrides, mixed subscripts)
 
-**Phases 7, 9-10 (Views, Post-processing, Settings): NOT STARTED**
+**Phase 10 (Settings): COMPLETE**
+- `settings.rs`: Post-equation parser for settings section
+- Integration type parsing (type 15): Euler/RK4 method detection
+- Unit equivalence parsing (type 22): name, equation, aliases
+
+**Phases 7, 9 (Views, Post-processing): NOT STARTED**
 - View/diagram parsing not implemented
 - Model post-processing (name deduplication, view composition) not implemented
-- Settings section parsing not implemented (integration type, unit equivalences)
 
 ## Motivation
 
@@ -381,13 +385,13 @@ All functions below are recognized and emit `Token::Function` during normalizati
 - [x] Scan expressions for TABXL usage (LOOKUP EXTRAPOLATE does NOT mark tables)
 - [x] Set GraphicalFunctionKind::Extrapolate for lookups referenced by TABXL
 
-### Integration Type (Phase 10 - NOT STARTED)
-- [ ] Parse from settings section (type code 15)
-- [ ] Map: 0,2 → Euler, 1,5 → RK4, 3,4 → RK2
+### Integration Type (Phase 10 - COMPLETE)
+- [x] Parse from settings section (type code 15)
+- [x] Map: 0,2 → Euler, 1,5 → RK4, 3,4 → RK2 (RK2 maps to Euler since SimMethod doesn't have RK2)
 
-### Unit Equivalences (Phase 10 - NOT STARTED)
-- [ ] Parse from settings section (type code 22)
-- [ ] Format: `Dollar,$,Dollars,$s`
+### Unit Equivalences (Phase 10 - COMPLETE)
+- [x] Parse from settings section (type code 22)
+- [x] Format: `Dollar,$,Dollars,$s`
 
 ### Groups (NOT STARTED)
 - [ ] Parse group markers `*NN name` during equation parsing
@@ -571,17 +575,17 @@ The sketch section follows the equation section, starting with `\\\\\\---///`.
 
 ---
 
-## Phase 10: Settings Section Parsing
+## Phase 10: Settings Section Parsing - COMPLETE
 
 Located after views, starting with `///---\\\` marker.
 
 ### Settings Marker
-- [ ] Parse `///---\\\` section start
-- [ ] Parse `:L\177<%^E!@` settings block marker
+- [x] Parse `///---\\\` section start (handled by finding `:L<%^E!@` block marker)
+- [x] Parse `:L\177<%^E!@` settings block marker (supports optional \x7F character)
 
 ### Setting Types (first integer in colon-delimited line)
-- [ ] Type 15: Integration type (4th integer: 0/2=Euler, 1/5=RK4, 3/4=RK2)
-- [ ] Type 22: Unit equivalence strings
+- [x] Type 15: Integration type (4th comma-separated value: 0,2=Euler, 1,5=RK4, 3,4=RK2)
+- [x] Type 22: Unit equivalence strings (comma-separated: name, aliases, $ for equation)
 
 ---
 

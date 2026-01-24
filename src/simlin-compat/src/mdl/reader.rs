@@ -85,6 +85,15 @@ impl<'input> EquationReader<'input> {
         }
     }
 
+    /// Returns remaining unparsed source after the equations section.
+    ///
+    /// This is useful for parsing post-equation content like views and settings.
+    /// The returned slice starts immediately after the last parsed position
+    /// (typically after an EqEnd marker).
+    pub fn remaining(&self) -> &'input str {
+        &self.source[self.position..]
+    }
+
     /// Scan for comment terminator: `|` or EqEnd marker.
     ///
     /// xmutil treats comments as raw text and stops on either `|` or the EqEnd marker.
@@ -1585,5 +1594,63 @@ mod tests {
             }
             other => panic!("Expected equation, got {:?}", other),
         }
+    }
+
+    // ========================================================================
+    // Remaining source tests
+    // ========================================================================
+
+    #[test]
+    fn test_remaining_after_eq_end() {
+        // After parsing, remaining() should return content after EqEnd marker
+        let input = "x = 5 ~ ~ |\n\\\\\\---/// Sketch info\nV300\n*View 1\n///---\\\\\\\n:L<%^E!@\n15:0,0,0,1,0,0";
+        let mut reader = EquationReader::new(input);
+
+        // Parse the equation
+        let item = reader.next_item();
+        assert!(matches!(item, Some(Ok(MdlItem::Equation(_)))));
+
+        // Parse EqEnd
+        let item = reader.next_item();
+        assert!(matches!(item, Some(Ok(MdlItem::EqEnd(_)))));
+
+        // Remaining should contain everything after the EqEnd marker
+        let remaining = reader.remaining();
+        assert!(
+            remaining.contains("V300"),
+            "remaining should contain V300, got: {}",
+            remaining
+        );
+        assert!(
+            remaining.contains(":L<%^E!@"),
+            "remaining should contain settings marker, got: {}",
+            remaining
+        );
+        assert!(
+            remaining.contains("15:0,0,0,1,0,0"),
+            "remaining should contain type 15 line, got: {}",
+            remaining
+        );
+    }
+
+    #[test]
+    fn test_remaining_exhausted_reader() {
+        let input = "x = 5 ~ ~ |";
+        let mut reader = EquationReader::new(input);
+
+        // Parse all items
+        let item = reader.next_item();
+        assert!(matches!(item, Some(Ok(MdlItem::Equation(_)))));
+
+        let item = reader.next_item();
+        assert!(item.is_none());
+
+        // Remaining should be empty after exhaustion
+        let remaining = reader.remaining();
+        assert!(
+            remaining.is_empty(),
+            "remaining should be empty, got: '{}'",
+            remaining
+        );
     }
 }

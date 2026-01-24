@@ -23,6 +23,7 @@ use simlin_core::datamodel::{Dimension, Project, SimMethod, Unit};
 
 use crate::mdl::ast::{MdlItem, SubscriptElement};
 use crate::mdl::reader::EquationReader;
+use crate::mdl::settings::PostEquationParser;
 use crate::mdl::xmile_compat::XmileFormatter;
 
 /// Context for MDL to datamodel conversion.
@@ -62,18 +63,26 @@ pub struct ConversionContext<'input> {
 impl<'input> ConversionContext<'input> {
     /// Create a new conversion context from MDL source.
     pub fn new(source: &'input str) -> Result<Self, ConvertError> {
-        let reader = EquationReader::new(source);
-        let items: Result<Vec<MdlItem<'input>>, _> = reader.collect();
+        let mut reader = EquationReader::new(source);
+        let items: Result<Vec<MdlItem<'input>>, _> = reader.by_ref().collect();
         let items = items?;
+
+        // Parse settings from remaining source (after equations/views)
+        let remaining = reader.remaining();
+        let settings_parser = PostEquationParser::new(remaining);
+        let settings = settings_parser.parse_settings();
 
         Ok(ConversionContext {
             items,
             symbols: HashMap::new(),
             dimensions: Vec::new(),
             equivalences: HashMap::new(),
-            sim_specs: SimSpecsBuilder::default(),
-            integration_method: SimMethod::Euler,
-            unit_equivs: Vec::new(),
+            sim_specs: SimSpecsBuilder {
+                sim_method: Some(settings.integration_method.clone()),
+                ..SimSpecsBuilder::default()
+            },
+            integration_method: settings.integration_method,
+            unit_equivs: settings.unit_equivs,
             formatter: XmileFormatter::new(),
             synthetic_flows: Vec::new(),
             element_owners: HashMap::new(),
@@ -210,5 +219,110 @@ x = 1
             Some(Dt::Dt(1.0)),
             "save_step should use explicit SAVEPER value"
         );
+    }
+
+    #[test]
+    fn test_integration_method_from_settings() {
+        // MDL with settings section containing type 15 (integration method)
+        let mdl = "x = 1
+~ ~|
+\\\\\\---///
+V300
+*View 1
+///---\\\\\\
+:L<%^E!@
+15:0,0,0,1,0,0
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        assert_eq!(
+            project.sim_specs.sim_method,
+            SimMethod::RungeKutta4,
+            "sim_method should be RK4 from type 15 settings"
+        );
+    }
+
+    #[test]
+    fn test_integration_method_default_euler() {
+        // MDL without settings section should default to Euler
+        let mdl = "x = 1
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        assert_eq!(
+            project.sim_specs.sim_method,
+            SimMethod::Euler,
+            "sim_method should default to Euler"
+        );
+    }
+
+    #[test]
+    fn test_unit_equivalences_from_settings() {
+        // MDL with settings section containing type 22 (unit equivalence)
+        let mdl = "x = 1
+~ Dollar ~|
+\\\\\\---///
+V300
+///---\\\\\\
+:L<%^E!@
+22:$,Dollar,Dollars,$s
+22:Hour,Hours,Hr
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        assert_eq!(project.units.len(), 2);
+
+        let dollar = &project.units[0];
+        assert_eq!(dollar.name, "Dollar");
+        assert_eq!(dollar.equation, Some("$".to_string()));
+        assert_eq!(dollar.aliases, vec!["Dollars", "$s"]);
+        assert!(!dollar.disabled);
+
+        let hour = &project.units[1];
+        assert_eq!(hour.name, "Hour");
+        assert_eq!(hour.equation, None);
+        assert_eq!(hour.aliases, vec!["Hours", "Hr"]);
+    }
+
+    #[test]
+    fn test_full_mdl_with_settings() {
+        // Full MDL file similar to test_control_vars.mdl
+        let mdl = r#"x = 5
+~ Units
+~ A constant |
+INITIAL TIME = 0
+~ Month ~|
+FINAL TIME = 100
+~ Month ~|
+TIME STEP = 0.25
+~ Month ~|
+\\\---/// Sketch information
+V300
+*View 1
+$192-192-192,0,Times
+10,1,x,100,100,12,11,8,3,0,0,0,0,0,0
+///---\\\
+:L<%^E!@
+1:Current.vdf
+15:0,0,0,5,0,0
+22:$,Dollar,Dollars
+"#;
+        let project = convert_mdl(mdl).unwrap();
+
+        // Verify sim_specs
+        assert_eq!(project.sim_specs.start, 0.0);
+        assert_eq!(project.sim_specs.stop, 100.0);
+        assert_eq!(project.sim_specs.dt, Dt::Dt(0.25));
+        assert_eq!(
+            project.sim_specs.sim_method,
+            SimMethod::RungeKutta4,
+            "Method code 5 should map to RK4"
+        );
+
+        // Verify unit equivalences
+        assert_eq!(project.units.len(), 1);
+        assert_eq!(project.units[0].name, "Dollar");
     }
 }

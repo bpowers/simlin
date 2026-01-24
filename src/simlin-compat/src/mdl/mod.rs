@@ -17,6 +17,7 @@ mod lexer;
 mod normalizer;
 mod parser_helpers;
 mod reader;
+mod settings;
 mod xmile_compat;
 
 // LALRPOP-generated parser module

@@ -10,7 +10,6 @@
 //! ## Known Feature Gaps in Native Parser
 //!
 //! The following features are not yet implemented in the native MDL parser:
-//! - TODO: Unit definitions extraction (Project.units)
 //! - TODO: View/diagram parsing (Model.views)
 //! - TODO: Loop metadata extraction (Model.loop_metadata)
 //! - TODO: Model-level sim_specs (currently only project-level is extracted)
@@ -25,7 +24,7 @@ use simlin_compat::{open_vensim, open_vensim_native};
 use simlin_core::canonicalize;
 use simlin_core::datamodel::{
     Aux, Dimension, DimensionElements, Dt, Equation, Flow, GraphicalFunction,
-    GraphicalFunctionScale, Model, Module, Project, SimSpecs, Stock, Variable,
+    GraphicalFunctionScale, Model, Module, Project, SimSpecs, Stock, Unit, Variable,
 };
 
 /// Models that should produce equivalent output from both parsers.
@@ -156,12 +155,15 @@ fn normalize_project(mut project: Project) -> Project {
     // AI information is not relevant to MDL parsing
     project.ai_information = None;
 
-    // TODO: Native parser doesn't extract unit definitions yet.
-    // When implemented, remove this line and compare units properly.
-    project.units.clear();
-
     // Normalize sim_specs
     normalize_sim_specs(&mut project.sim_specs);
+
+    // Normalize unit equivalences
+    for unit in &mut project.units {
+        normalize_unit(unit);
+    }
+    // Sort units by name for consistent comparison
+    project.units.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Normalize dimensions (lowercase names for case-insensitive comparison)
     for dim in &mut project.dimensions {
@@ -181,6 +183,18 @@ fn normalize_project(mut project: Project) -> Project {
     project.models.sort_by(|a, b| a.name.cmp(&b.name));
 
     project
+}
+
+/// Normalize a unit equivalence for comparison.
+fn normalize_unit(unit: &mut Unit) {
+    // Lowercase the name for case-insensitive comparison
+    unit.name = unit.name.to_lowercase();
+    // Lowercase aliases
+    for alias in &mut unit.aliases {
+        *alias = alias.to_lowercase();
+    }
+    // Sort aliases for consistent comparison
+    unit.aliases.sort();
 }
 
 /// Normalize a model for comparison.
@@ -587,12 +601,19 @@ fn assert_projects_equivalent(xmutil: &Project, native: &Project, path: &str) {
         assert_eq!(xd, nd, "{path}: dimension {i} differs");
     }
 
-    // Compare units count (both should be empty after normalization due to TODO above)
+    // Compare unit equivalences
     assert_eq!(
         xmutil.units.len(),
         native.units.len(),
-        "{path}: units count differs"
+        "{path}: units count differs\n  xmutil ({} units): {:?}\n  native ({} units): {:?}",
+        xmutil.units.len(),
+        xmutil.units.iter().map(|u| &u.name).collect::<Vec<_>>(),
+        native.units.len(),
+        native.units.iter().map(|u| &u.name).collect::<Vec<_>>()
     );
+    for (i, (xu, nu)) in xmutil.units.iter().zip(native.units.iter()).enumerate() {
+        assert_eq!(xu, nu, "{path}: unit {i} ('{}') differs", xu.name);
+    }
 
     // Compare models - use name-based matching instead of positional zip
     assert_eq!(
