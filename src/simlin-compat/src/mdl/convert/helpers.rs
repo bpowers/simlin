@@ -4,9 +4,9 @@
 
 //! Helper functions for MDL to datamodel conversion.
 
-use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, Lhs};
+use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, FullEquation, Lhs};
 use crate::mdl::builtins::to_lower_space;
-use crate::mdl::xmile_compat::space_to_underbar;
+use crate::mdl::xmile_compat::{format_unit_expr, space_to_underbar};
 
 use super::types::ConvertError;
 
@@ -179,6 +179,18 @@ pub(super) fn expand_range(start: &str, end: &str) -> Result<Vec<String>, Conver
     Ok((low..=high)
         .map(|n| format!("{}{}", space_to_underbar(start_prefix), n))
         .collect())
+}
+
+/// Extract units string from a FullEquation.
+/// When units have only a range (no expr), returns "1" (dimensionless).
+/// This matches xmutil's UnitsRange() behavior.
+pub(super) fn extract_units(eq: &FullEquation<'_>) -> Option<String> {
+    let units = eq.units.as_ref()?;
+    match &units.expr {
+        Some(expr) => Some(format_unit_expr(expr)),
+        None if units.range.is_some() => Some("1".to_string()),
+        None => None,
+    }
 }
 
 #[cfg(test)]

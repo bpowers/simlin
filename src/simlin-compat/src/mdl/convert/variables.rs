@@ -13,10 +13,10 @@ use simlin_core::datamodel::{
 
 use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, FullEquation, Lhs, Subscript};
 use crate::mdl::builtins::to_lower_space;
-use crate::mdl::xmile_compat::{format_unit_expr, space_to_underbar};
+use crate::mdl::xmile_compat::space_to_underbar;
 
 use super::ConversionContext;
-use super::helpers::{canonical_name, cartesian_product, format_number, get_lhs};
+use super::helpers::{canonical_name, cartesian_product, extract_units, format_number, get_lhs};
 use super::types::{ConvertError, SymbolInfo, VariableType};
 
 impl<'input> ConversionContext<'input> {
@@ -284,11 +284,7 @@ impl<'input> ConversionContext<'input> {
             .as_ref()
             .map(|c| c.to_string())
             .unwrap_or_default();
-        let units = first_eq
-            .units
-            .as_ref()
-            .and_then(|u| u.expr.as_ref())
-            .map(format_unit_expr);
+        let units = extract_units(first_eq);
 
         match info.var_type {
             VariableType::Stock => Some(Variable::Stock(datamodel::Stock {
@@ -382,11 +378,7 @@ impl<'input> ConversionContext<'input> {
             .as_ref()
             .map(|c| c.to_string())
             .unwrap_or_default();
-        let units = eq
-            .units
-            .as_ref()
-            .and_then(|u| u.expr.as_ref())
-            .map(format_unit_expr);
+        let units = extract_units(eq);
 
         match info.var_type {
             VariableType::Stock => {
@@ -1378,6 +1370,112 @@ x[a2] = ACTIVE INITIAL(y * 2, 20)
             }
         } else {
             panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_range_only_units_produces_dimensionless() {
+        let mdl = "x = 5\n~ [0, 100]\n~ Variable with range-only units |\n\\\\\\---///\n";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        if let Some(Variable::Aux(a)) = x {
+            assert_eq!(a.units.as_deref(), Some("1"));
+        } else {
+            panic!("Expected Aux");
+        }
+    }
+
+    #[test]
+    fn test_units_with_expr_and_range_keeps_expr() {
+        let mdl = "x = 5\n~ Widgets [0, 100]\n~ Variable with units and range |\n\\\\\\---///\n";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        if let Some(Variable::Aux(a)) = x {
+            assert_eq!(a.units.as_deref(), Some("Widgets"));
+        } else {
+            panic!("Expected Aux");
+        }
+    }
+
+    #[test]
+    fn test_arrayed_variable_range_only_units() {
+        let mdl = "DimA: A1, A2 ~~|
+x[DimA] = 5
+~ [0, 100]
+~ Arrayed variable with range-only units |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        if let Some(Variable::Aux(a)) = x {
+            assert_eq!(a.units.as_deref(), Some("1"));
+        } else {
+            panic!("Expected Aux");
+        }
+    }
+
+    #[test]
+    fn test_units_from_real_equation_not_afo_placeholder() {
+        // When first equation is A FUNCTION OF (no units) and second has units,
+        // units should come from the second equation.
+        let mdl = "x = A FUNCTION OF(y)
+~ ~|
+x = y * 2
+~ Widgets
+~ Real equation with units |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        if let Some(Variable::Aux(a)) = x {
+            // Units should come from the real equation, not the AFO placeholder
+            assert_eq!(a.units.as_deref(), Some("Widgets"));
+            // Verify we also got the correct equation
+            assert!(matches!(&a.equation, Equation::Scalar(eq, _) if eq == "y * 2"));
+        } else {
+            panic!("Expected Aux");
+        }
+    }
+
+    #[test]
+    fn test_units_from_real_equation_when_afo_has_units() {
+        // When first equation is A FUNCTION OF WITH units and second also has units,
+        // units should come from the second (real) equation since that's what's selected.
+        let mdl = "x = A FUNCTION OF(y)
+~ OtherUnits
+~ AFO with units |
+x = y * 2
+~ Widgets
+~ Real equation with units |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        if let Some(Variable::Aux(a)) = x {
+            // Units come from the selected equation (the real one, not AFO)
+            assert_eq!(a.units.as_deref(), Some("Widgets"));
+        } else {
+            panic!("Expected Aux");
         }
     }
 }

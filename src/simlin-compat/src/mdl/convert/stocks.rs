@@ -10,11 +10,12 @@ use simlin_core::datamodel::{Equation, GraphicalFunction};
 
 use crate::mdl::ast::{BinaryOp, CallKind, Equation as MdlEquation, Expr, FullEquation, Subscript};
 use crate::mdl::builtins::to_lower_space;
-use crate::mdl::xmile_compat::{format_unit_expr, space_to_underbar};
+use crate::mdl::xmile_compat::space_to_underbar;
 
 use super::ConversionContext;
 use super::helpers::{
-    canonical_name, cartesian_product, equation_is_stock, extract_constant_value, get_lhs,
+    canonical_name, cartesian_product, equation_is_stock, extract_constant_value, extract_units,
+    get_lhs,
 };
 use super::types::{SyntheticFlow, VariableType};
 
@@ -44,13 +45,20 @@ impl<'input> ConversionContext<'input> {
                     }
                 }
 
-                // Extract time units from TIME STEP or FINAL TIME
+                // Extract time units from TIME STEP or FINAL TIME.
+                // Prefer explicit units over range-only (dimensionless "1").
                 if (*name == "time step" || *name == "final time")
-                    && self.sim_specs.time_units.is_none()
-                    && let Some(units) = &eq.units
-                    && let Some(expr) = &units.expr
+                    && let Some(new_units) = extract_units(eq)
                 {
-                    self.sim_specs.time_units = Some(format_unit_expr(expr));
+                    let should_set = match &self.sim_specs.time_units {
+                        None => true,
+                        // Upgrade from range-only "1" to explicit units
+                        Some(current) if current == "1" && new_units != "1" => true,
+                        _ => false,
+                    };
+                    if should_set {
+                        self.sim_specs.time_units = Some(new_units);
+                    }
                 }
             }
         }
@@ -1202,5 +1210,134 @@ rate = 5
         } else {
             panic!("Expected Flow variable");
         }
+    }
+
+    #[test]
+    fn test_time_units_from_range_only() {
+        let mdl = "INITIAL TIME = 0
+~ [0, 100]
+~ |
+FINAL TIME = 100
+~ [0, 100]
+~ |
+TIME STEP = 1
+~ [0, 10]
+~ |
+SAVEPER = 1
+~ [0, 10]
+~ |
+x = 5
+~ widgets
+~ |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        // Range-only units on control vars should produce "1" for time_units
+        assert_eq!(project.sim_specs.time_units.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn test_time_units_prefers_explicit_over_range_only() {
+        // FINAL TIME has range-only, but TIME STEP has explicit units
+        // Should prefer the explicit "Months" over dimensionless "1"
+        let mdl = "INITIAL TIME = 0
+~ [0, 100]
+~ |
+FINAL TIME = 100
+~ [0, 100]
+~ |
+TIME STEP = 1
+~ Months
+~ |
+SAVEPER = 1
+~ [0, 10]
+~ |
+x = 5
+~ widgets
+~ |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        // Explicit units from TIME STEP should be preferred over range-only from FINAL TIME
+        assert_eq!(project.sim_specs.time_units.as_deref(), Some("Months"));
+    }
+
+    #[test]
+    fn test_time_units_final_time_first_with_explicit_units() {
+        // When FINAL TIME has explicit units and TIME STEP also has explicit units,
+        // FINAL TIME's units are used (processed first in control_vars order).
+        let mdl = "INITIAL TIME = 0
+~ [0, 100]
+~ |
+FINAL TIME = 100
+~ Years
+~ |
+TIME STEP = 1
+~ Months
+~ |
+SAVEPER = 1
+~ [0, 10]
+~ |
+x = 5
+~ widgets
+~ |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        // FINAL TIME is processed first, so its explicit units are used
+        assert_eq!(project.sim_specs.time_units.as_deref(), Some("Years"));
+    }
+
+    #[test]
+    fn test_time_units_time_step_only_has_units() {
+        // When only TIME STEP has explicit units
+        let mdl = "INITIAL TIME = 0
+~ [0, 100]
+~ |
+FINAL TIME = 100
+~ ~|
+TIME STEP = 1
+~ Months
+~ |
+SAVEPER = 1
+~ [0, 10]
+~ |
+x = 5
+~ widgets
+~ |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        // TIME STEP's explicit units are used (FINAL TIME has no units at all)
+        assert_eq!(project.sim_specs.time_units.as_deref(), Some("Months"));
+    }
+
+    #[test]
+    fn test_time_units_final_time_only_has_units() {
+        // When only FINAL TIME has explicit units
+        let mdl = "INITIAL TIME = 0
+~ [0, 100]
+~ |
+FINAL TIME = 100
+~ Years
+~ |
+TIME STEP = 1
+~ ~|
+SAVEPER = 1
+~ [0, 10]
+~ |
+x = 5
+~ widgets
+~ |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        // FINAL TIME's explicit units are used
+        assert_eq!(project.sim_specs.time_units.as_deref(), Some("Years"));
     }
 }
