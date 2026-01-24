@@ -893,6 +893,236 @@ describe('Flow routing', () => {
       expect(newFlows.get(0)!.points.size).toBe(3);
       expect(newFlows.get(1)!.points.size).toBe(3);
     });
+
+    describe('flow spreading - multiple flows on same side', () => {
+      it('should spread two flows on the bottom side at 1/3 and 2/3 positions', () => {
+        const inflowUid = 2;
+        const outflowUid = 3;
+        const stock = makeStock(stockUid, 100, 100, [inflowUid], [outflowUid]);
+
+        // Stock is at (100, 100), will move up to (100, 50)
+        // Inflow from left (cloud at x=0) - will attach to bottom
+        const inflow = makeFlow(inflowUid, 50, 100, [
+          { x: 0, y: 100, attachedToUid: 4 }, // cloud on left
+          { x: 100 - StockWidth / 2, y: 100, attachedToUid: stockUid },
+        ]);
+
+        // Outflow to right (cloud at x=200) - will also attach to bottom
+        const outflow = makeFlow(outflowUid, 150, 100, [
+          { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid },
+          { x: 200, y: 100, attachedToUid: 5 }, // cloud on right
+        ]);
+
+        // Move stock up by 50 so both flows become L-shaped and attach to bottom
+        const [newStock, newFlows] = UpdateStockAndFlows(stock, List([inflow, outflow]), { x: 0, y: 50 });
+
+        expect(newStock.cy).toBe(50);
+
+        // Both flows should be L-shaped and attach to bottom
+        const newInflow = newFlows.get(0)!;
+        const newOutflow = newFlows.get(1)!;
+
+        expect(newInflow.points.size).toBe(3);
+        expect(newOutflow.points.size).toBe(3);
+
+        // Get the stock attachment points
+        const inflowStockPt = newInflow.points.get(newInflow.points.size - 1)!;
+        const outflowStockPt = newOutflow.points.get(0)!;
+
+        // Both should be at the bottom of the stock (y = 50 + StockHeight/2)
+        const bottomY = 50 + StockHeight / 2;
+        expect(inflowStockPt.y).toBe(bottomY);
+        expect(outflowStockPt.y).toBe(bottomY);
+
+        // The inflow (adjacent point at x=0) should be on the left (1/3)
+        // The outflow (adjacent point at x=200) should be on the right (2/3)
+        // Stock X range: 100 - StockWidth/2 to 100 + StockWidth/2 = 77.5 to 122.5
+        const leftEdge = 100 - StockWidth / 2;
+        const oneThird = leftEdge + StockWidth / 3;
+        const twoThirds = leftEdge + (2 * StockWidth) / 3;
+
+        expect(inflowStockPt.x).toBeCloseTo(oneThird, 1);
+        expect(outflowStockPt.x).toBeCloseTo(twoThirds, 1);
+      });
+
+      it('should order flows on bottom side by adjacent point X coordinate', () => {
+        // Three flows that will all attach to the bottom
+        const flow1Uid = 2;
+        const flow2Uid = 3;
+        const flow3Uid = 4;
+        const stock = makeStock(stockUid, 100, 100, [], [flow1Uid, flow2Uid, flow3Uid]);
+
+        // Flow 1: adjacent point at x=150 (middle)
+        const flow1 = makeFlow(flow1Uid, 125, 100, [
+          { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid },
+          { x: 150, y: 100, attachedToUid: 5 },
+        ]);
+
+        // Flow 2: adjacent point at x=50 (leftmost)
+        const flow2 = makeFlow(flow2Uid, 75, 100, [
+          { x: 100 - StockWidth / 2, y: 100, attachedToUid: stockUid },
+          { x: 50, y: 100, attachedToUid: 6 },
+        ]);
+
+        // Flow 3: adjacent point at x=250 (rightmost)
+        const flow3 = makeFlow(flow3Uid, 175, 100, [
+          { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid },
+          { x: 250, y: 100, attachedToUid: 7 },
+        ]);
+
+        // Move stock up so all flows become L-shaped
+        const [newStock, newFlows] = UpdateStockAndFlows(stock, List([flow1, flow2, flow3]), { x: 0, y: 50 });
+
+        expect(newStock.cy).toBe(50);
+
+        // Get the stock attachment X coordinates for each flow
+        const getStockX = (flow: typeof newFlows extends List<infer T> ? T : never) => {
+          const stockIsFirst = flow.points.get(0)!.attachedToUid === stockUid;
+          return stockIsFirst ? flow.points.get(0)!.x : flow.points.get(flow.points.size - 1)!.x;
+        };
+
+        const flow1StockX = getStockX(newFlows.get(0)!);
+        const flow2StockX = getStockX(newFlows.get(1)!);
+        const flow3StockX = getStockX(newFlows.get(2)!);
+
+        // Order should be: flow2 (x=50) < flow1 (x=150) < flow3 (x=250)
+        // So: flow2 at 1/4, flow1 at 2/4 (1/2), flow3 at 3/4
+        const leftEdge = 100 - StockWidth / 2;
+        const quarter1 = leftEdge + StockWidth / 4;
+        const quarter2 = leftEdge + StockWidth / 2;
+        const quarter3 = leftEdge + (3 * StockWidth) / 4;
+
+        expect(flow2StockX).toBeCloseTo(quarter1, 1);
+        expect(flow1StockX).toBeCloseTo(quarter2, 1);
+        expect(flow3StockX).toBeCloseTo(quarter3, 1);
+      });
+
+      it('should spread two flows on the top side at 1/3 and 2/3 positions', () => {
+        const inflowUid = 2;
+        const outflowUid = 3;
+        const stock = makeStock(stockUid, 100, 100, [inflowUid], [outflowUid]);
+
+        // Stock at (100, 100), will move down to (100, 150)
+        // Inflow from left cloud - will attach to top
+        const inflow = makeFlow(inflowUid, 50, 100, [
+          { x: 0, y: 100, attachedToUid: 4 },
+          { x: 100 - StockWidth / 2, y: 100, attachedToUid: stockUid },
+        ]);
+
+        // Outflow to right cloud - will also attach to top
+        const outflow = makeFlow(outflowUid, 150, 100, [
+          { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockUid },
+          { x: 200, y: 100, attachedToUid: 5 },
+        ]);
+
+        // Move stock down
+        const [newStock, newFlows] = UpdateStockAndFlows(stock, List([inflow, outflow]), { x: 0, y: -50 });
+
+        expect(newStock.cy).toBe(150);
+
+        const newInflow = newFlows.get(0)!;
+        const newOutflow = newFlows.get(1)!;
+
+        // Get the stock attachment points
+        const inflowStockPt = newInflow.points.get(newInflow.points.size - 1)!;
+        const outflowStockPt = newOutflow.points.get(0)!;
+
+        // Both should be at the top of the stock
+        const topY = 150 - StockHeight / 2;
+        expect(inflowStockPt.y).toBe(topY);
+        expect(outflowStockPt.y).toBe(topY);
+
+        // Left flow should be at 1/3, right flow at 2/3
+        const leftEdge = 100 - StockWidth / 2;
+        const oneThird = leftEdge + StockWidth / 3;
+        const twoThirds = leftEdge + (2 * StockWidth) / 3;
+
+        expect(inflowStockPt.x).toBeCloseTo(oneThird, 1);
+        expect(outflowStockPt.x).toBeCloseTo(twoThirds, 1);
+      });
+
+      it('should spread two flows on the left side by Y coordinate', () => {
+        const flow1Uid = 2;
+        const flow2Uid = 3;
+        const stock = makeStock(stockUid, 100, 100, [flow1Uid], [flow2Uid]);
+
+        // Stock at (100, 100), will move right to (150, 100)
+        // Flow 1: vertical flow from above (cloud at y=50) - will attach to left, upper position
+        const flow1 = makeFlow(flow1Uid, 100, 75, [
+          { x: 100, y: 50, attachedToUid: 4 },
+          { x: 100, y: 100 - StockHeight / 2, attachedToUid: stockUid },
+        ]);
+
+        // Flow 2: vertical flow from below (cloud at y=150) - will attach to left, lower position
+        const flow2 = makeFlow(flow2Uid, 100, 125, [
+          { x: 100, y: 100 + StockHeight / 2, attachedToUid: stockUid },
+          { x: 100, y: 150, attachedToUid: 5 },
+        ]);
+
+        // Move stock right so both flows become L-shaped and attach to left
+        const [newStock, newFlows] = UpdateStockAndFlows(stock, List([flow1, flow2]), { x: -50, y: 0 });
+
+        expect(newStock.cx).toBe(150);
+
+        const newFlow1 = newFlows.get(0)!;
+        const newFlow2 = newFlows.get(1)!;
+
+        // Get the stock attachment points
+        const flow1StockPt = newFlow1.points.get(newFlow1.points.size - 1)!;
+        const flow2StockPt = newFlow2.points.get(0)!;
+
+        // Both should be at the left of the stock
+        const leftX = 150 - StockWidth / 2;
+        expect(flow1StockPt.x).toBe(leftX);
+        expect(flow2StockPt.x).toBe(leftX);
+
+        // Flow 1 (adjacent at y=50) should be at 1/3 (upper)
+        // Flow 2 (adjacent at y=150) should be at 2/3 (lower)
+        const topEdge = 100 - StockHeight / 2;
+        const oneThird = topEdge + StockHeight / 3;
+        const twoThirds = topEdge + (2 * StockHeight) / 3;
+
+        expect(flow1StockPt.y).toBeCloseTo(oneThird, 1);
+        expect(flow2StockPt.y).toBeCloseTo(twoThirds, 1);
+      });
+
+      it('should keep single flow centered when only one flow on a side', () => {
+        const inflowUid = 2;
+        const outflowUid = 3;
+        const stock = makeStock(stockUid, 100, 100, [inflowUid], [outflowUid]);
+
+        // Inflow from left - will attach to bottom
+        const inflow = makeFlow(inflowUid, 50, 100, [
+          { x: 0, y: 100, attachedToUid: 4 },
+          { x: 100 - StockWidth / 2, y: 100, attachedToUid: stockUid },
+        ]);
+
+        // Outflow to above - will attach to top (different side)
+        const outflow = makeFlow(outflowUid, 100, 75, [
+          { x: 100, y: 100 - StockHeight / 2, attachedToUid: stockUid },
+          { x: 100, y: 50, attachedToUid: 5 },
+        ]);
+
+        // Move stock up so inflow becomes L-shaped (attaches to bottom)
+        // Outflow remains vertical (attaches to top)
+        const [newStock, newFlows] = UpdateStockAndFlows(stock, List([inflow, outflow]), { x: 0, y: 50 });
+
+        expect(newStock.cy).toBe(50);
+
+        const newInflow = newFlows.get(0)!;
+        const newOutflow = newFlows.get(1)!;
+
+        // Inflow: should be centered on bottom (only one flow on bottom)
+        const inflowStockPt = newInflow.points.get(newInflow.points.size - 1)!;
+        expect(inflowStockPt.x).toBe(100); // centered
+        expect(inflowStockPt.y).toBe(50 + StockHeight / 2); // bottom
+
+        // Outflow: should be centered on top (only one flow on top)
+        const outflowStockPt = newOutflow.points.get(0)!;
+        expect(outflowStockPt.x).toBe(100); // centered
+        expect(outflowStockPt.y).toBe(50 - StockHeight / 2); // top
+      });
+    });
   });
 
   describe('UpdateFlow - valve movement', () => {

@@ -30,17 +30,197 @@ const PI = Math.PI;
 
 type Side = 'left' | 'right' | 'top' | 'bottom';
 
-function getStockEdgePoint(stockCx: number, stockCy: number, side: Side): IPoint {
+/**
+ * Returns a point on the edge of a stock.
+ *
+ * @param stockCx - X center of the stock
+ * @param stockCy - Y center of the stock
+ * @param side - Which side of the stock (left, right, top, bottom)
+ * @param offsetFraction - Position along the edge, 0.5 = center (default), 0 = one end, 1 = other end.
+ *                         For top/bottom: 0 = left, 1 = right.
+ *                         For left/right: 0 = top, 1 = bottom.
+ */
+function getStockEdgePoint(stockCx: number, stockCy: number, side: Side, offsetFraction: number = 0.5): IPoint {
   switch (side) {
     case 'left':
-      return { x: stockCx - StockWidth / 2, y: stockCy };
+      // Offset along Y axis: 0 = top, 1 = bottom
+      return {
+        x: stockCx - StockWidth / 2,
+        y: stockCy - StockHeight / 2 + StockHeight * offsetFraction,
+      };
     case 'right':
-      return { x: stockCx + StockWidth / 2, y: stockCy };
+      // Offset along Y axis: 0 = top, 1 = bottom
+      return {
+        x: stockCx + StockWidth / 2,
+        y: stockCy - StockHeight / 2 + StockHeight * offsetFraction,
+      };
     case 'top':
-      return { x: stockCx, y: stockCy - StockHeight / 2 };
+      // Offset along X axis: 0 = left, 1 = right
+      return {
+        x: stockCx - StockWidth / 2 + StockWidth * offsetFraction,
+        y: stockCy - StockHeight / 2,
+      };
     case 'bottom':
-      return { x: stockCx, y: stockCy + StockHeight / 2 };
+      // Offset along X axis: 0 = left, 1 = right
+      return {
+        x: stockCx - StockWidth / 2 + StockWidth * offsetFraction,
+        y: stockCy + StockHeight / 2,
+      };
   }
+}
+
+interface FlowAttachmentInfo {
+  flow: FlowViewElement;
+  side: Side;
+  // The point adjacent to the stock attachment point (used for ordering)
+  adjacentPoint: IPoint;
+  // Whether the stock is at the start (first point) or end (last point) of the flow
+  stockIsFirst: boolean;
+}
+
+/**
+ * Determines which side of the stock a flow will attach to after the stock moves,
+ * and returns the adjacent point for ordering purposes.
+ *
+ * This mirrors the logic in computeFlowRoute but extracts just the side determination.
+ */
+function getFlowAttachmentInfo(
+  flow: FlowViewElement,
+  stockUid: number,
+  newStockCx: number,
+  newStockCy: number,
+): FlowAttachmentInfo | undefined {
+  const points = flow.points;
+  if (points.size < 2) {
+    return undefined;
+  }
+
+  const firstPoint = defined(points.first());
+  const lastPoint = defined(points.last());
+
+  const stockIsFirst = firstPoint.attachedToUid === stockUid;
+  const stockIsLast = lastPoint.attachedToUid === stockUid;
+
+  if (!stockIsFirst && !stockIsLast) {
+    return undefined;
+  }
+
+  const anchor = stockIsFirst ? lastPoint : firstPoint;
+
+  // Determine the adjacent point (the one right next to the stock attachment)
+  let adjacentPoint: Point;
+  if (stockIsFirst) {
+    // Stock is first, adjacent is the second point
+    adjacentPoint = points.size >= 2 ? defined(points.get(1)) : lastPoint;
+  } else {
+    // Stock is last, adjacent is second-to-last point
+    adjacentPoint = points.size >= 2 ? defined(points.get(points.size - 2)) : firstPoint;
+  }
+
+  // Determine original flow direction from the anchor-side segment
+  let anchorAdjacentPoint: Point;
+  if (stockIsFirst) {
+    anchorAdjacentPoint = points.size >= 2 ? defined(points.get(points.size - 2)) : firstPoint;
+  } else {
+    anchorAdjacentPoint = points.size >= 2 ? defined(points.get(1)) : lastPoint;
+  }
+  const originalFlowIsHorizontal = anchor.y === anchorAdjacentPoint.y;
+
+  let side: Side;
+
+  // For 4+ point flows, use the existing segment orientation
+  if (points.size >= 4) {
+    const currentStockPoint = stockIsFirst ? firstPoint : lastPoint;
+    const isHorizontalSegment = currentStockPoint.y === adjacentPoint.y;
+
+    if (isHorizontalSegment) {
+      side = adjacentPoint.x > newStockCx ? 'right' : 'left';
+    } else {
+      side = adjacentPoint.y > newStockCy ? 'bottom' : 'top';
+    }
+  } else if (canFlowBeStraight(newStockCx, newStockCy, anchor.x, anchor.y, originalFlowIsHorizontal)) {
+    // Straight flow
+    if (originalFlowIsHorizontal) {
+      side = anchor.x > newStockCx ? 'right' : 'left';
+    } else {
+      side = anchor.y > newStockCy ? 'bottom' : 'top';
+    }
+  } else {
+    // L-shaped flow: attach perpendicular to the original flow direction
+    if (originalFlowIsHorizontal) {
+      side = anchor.y < newStockCy ? 'top' : 'bottom';
+    } else {
+      side = anchor.x < newStockCx ? 'left' : 'right';
+    }
+  }
+
+  return {
+    flow,
+    side,
+    adjacentPoint: { x: adjacentPoint.x, y: adjacentPoint.y },
+    stockIsFirst,
+  };
+}
+
+/**
+ * Groups flows by their attachment side and computes offset fractions for each flow.
+ *
+ * Flows on the same side are ordered by their adjacent point's position:
+ * - For top/bottom sides: ordered by adjacent point's X (left to right)
+ * - For left/right sides: ordered by adjacent point's Y (top to bottom)
+ *
+ * Returns a map from flow UID to its offset fraction (0 to 1).
+ */
+function computeFlowOffsets(
+  flows: List<FlowViewElement>,
+  stockUid: number,
+  newStockCx: number,
+  newStockCy: number,
+): Map<number, number> {
+  // Get attachment info for all flows
+  const attachmentInfos: FlowAttachmentInfo[] = [];
+  for (const flow of flows) {
+    const info = getFlowAttachmentInfo(flow, stockUid, newStockCx, newStockCy);
+    if (info) {
+      attachmentInfos.push(info);
+    }
+  }
+
+  // Group by side
+  const bySide: Map<Side, FlowAttachmentInfo[]> = new Map();
+  for (const info of attachmentInfos) {
+    const existing = bySide.get(info.side) || [];
+    existing.push(info);
+    bySide.set(info.side, existing);
+  }
+
+  // Compute offsets for each flow
+  const offsets: Map<number, number> = new Map();
+
+  for (const [side, infos] of bySide) {
+    if (infos.length === 1) {
+      // Single flow on this side - center it (offset = 0.5)
+      offsets.set(infos[0].flow.uid, 0.5);
+    } else {
+      // Multiple flows - sort and spread them
+      // For top/bottom: sort by adjacent point X
+      // For left/right: sort by adjacent point Y
+      if (side === 'top' || side === 'bottom') {
+        infos.sort((a, b) => a.adjacentPoint.x - b.adjacentPoint.x);
+      } else {
+        infos.sort((a, b) => a.adjacentPoint.y - b.adjacentPoint.y);
+      }
+
+      // Spread flows evenly: for n flows, positions are at 1/(n+1), 2/(n+1), ..., n/(n+1)
+      const n = infos.length;
+      for (let i = 0; i < n; i++) {
+        const fraction = (i + 1) / (n + 1);
+        offsets.set(infos[i].flow.uid, fraction);
+      }
+    }
+  }
+
+  return offsets;
 }
 
 function canFlowBeStraight(
@@ -63,6 +243,7 @@ export function computeFlowRoute(
   stockEl: StockViewElement,
   newStockCx: number,
   newStockCy: number,
+  offsetFraction: number = 0.5,
 ): FlowViewElement {
   const points = flow.points;
   if (points.size < 2) {
@@ -119,7 +300,7 @@ export function computeFlowRoute(
     }
 
     // Keep the endpoint on the stock's actual edge
-    const stockEdge = getStockEdgePoint(newStockCx, newStockCy, side);
+    const stockEdge = getStockEdgePoint(newStockCx, newStockCy, side, offsetFraction);
 
     const newStockPoint = new Point({
       x: stockEdge.x,
@@ -192,10 +373,10 @@ export function computeFlowRoute(
     let stockEdge: IPoint;
     if (originalFlowIsHorizontal) {
       const side: Side = anchor.x > newStockCx ? 'right' : 'left';
-      stockEdge = getStockEdgePoint(newStockCx, anchor.y, side);
+      stockEdge = getStockEdgePoint(newStockCx, anchor.y, side, offsetFraction);
     } else {
       const side: Side = anchor.y > newStockCy ? 'bottom' : 'top';
-      stockEdge = getStockEdgePoint(anchor.x, newStockCy, side);
+      stockEdge = getStockEdgePoint(anchor.x, newStockCy, side, offsetFraction);
     }
 
     const newStockPoint = new Point({
@@ -237,7 +418,7 @@ export function computeFlowRoute(
     // Original was vertical, so the new segment from stock should be horizontal
     attachmentSide = anchor.x < newStockCx ? 'left' : 'right';
   }
-  const stockEdge = getStockEdgePoint(newStockCx, newStockCy, attachmentSide);
+  const stockEdge = getStockEdgePoint(newStockCx, newStockCy, attachmentSide, offsetFraction);
 
   // Corner connects the stock's perpendicular segment to the original flow direction
   let corner: IPoint;
@@ -433,7 +614,13 @@ export function UpdateStockAndFlows(
     y: newStockCy,
   });
 
-  flows = flows.map((flow) => computeFlowRoute(flow, stockEl, newStockCx, newStockCy));
+  // Compute offset fractions to spread multiple flows on the same side
+  const offsets = computeFlowOffsets(flows, stockEl.uid, newStockCx, newStockCy);
+
+  flows = flows.map((flow) => {
+    const offset = offsets.get(flow.uid) ?? 0.5;
+    return computeFlowRoute(flow, stockEl, newStockCx, newStockCy, offset);
+  });
 
   return [stockEl, flows];
 }
