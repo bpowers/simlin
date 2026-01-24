@@ -254,6 +254,7 @@ fn canonical_ident(ident: &str) -> String {
 /// - Removing line continuation sequences (\ followed by newlines and tabs)
 /// - Collapsing whitespace
 /// - Trimming
+/// - Stripping Vensim supplementary flag (xmutil preserves it in doc, native parses it as field)
 /// - Clearing Vensim control comments like "~ :SUPPLEMENTARY"
 fn normalize_doc(doc: &str) -> String {
     // Remove Vensim line continuations: backslash followed by CR/LF and tabs
@@ -266,7 +267,25 @@ fn normalize_doc(doc: &str) -> String {
     if doc.starts_with("~ :") || doc == "~" {
         return String::new();
     }
+    // Strip supplementary flag suffix that xmutil may preserve in doc text.
+    // Native parser extracts this as a structured field instead.
+    // Pattern: "... ~ :SUP" or "... ~ :SUPPLEMENTARY" at end
+    let doc = strip_supplementary_suffix(doc);
     doc.to_string()
+}
+
+/// Strip the `:SUP` or `:SUPPLEMENTARY` suffix from documentation.
+/// xmutil preserves this in the doc text while native parser extracts it as a field.
+fn strip_supplementary_suffix(doc: &str) -> &str {
+    // Look for ~ followed by :SUP or :SUPPLEMENTARY at the end
+    if let Some(tilde_pos) = doc.rfind('~') {
+        let after_tilde = doc[tilde_pos + 1..].trim();
+        let upper = after_tilde.to_uppercase();
+        if upper == ":SUP" || upper == ":SUPPLEMENTARY" {
+            return doc[..tilde_pos].trim();
+        }
+    }
+    doc
 }
 
 /// Normalize units by removing spaces around operators and standardizing format.

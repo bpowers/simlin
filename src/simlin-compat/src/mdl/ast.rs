@@ -435,6 +435,9 @@ pub struct FullEquation<'input> {
     pub equation: Equation<'input>,
     pub units: Option<Units<'input>>,
     pub comment: Option<Cow<'input, str>>,
+    /// True if marked with `:SUP` or `:SUPPLEMENTARY` flag.
+    /// Indicates the variable is intentionally not connected to feedback loops.
+    pub supplementary: bool,
     pub loc: Loc,
 }
 
@@ -977,6 +980,7 @@ mod tests {
             equation: Equation::EmptyRhs(lhs, Loc::new(2, 3)),
             units: None,
             comment: Some(Cow::Borrowed("A placeholder")),
+            supplementary: false,
             loc: Loc::new(0, 20),
         };
         assert!(eq.units.is_none());

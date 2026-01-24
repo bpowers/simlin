@@ -247,13 +247,13 @@ impl<'input> EquationReader<'input> {
         match section_end {
             SectionEnd::Tilde => {
                 // Comment follows - capture it from raw source
-                let comment = self.capture_comment(last_pos);
-                let full_eq = self.make_full_equation(eq, units, comment);
+                let (comment, supplementary) = self.capture_comment(last_pos);
+                let full_eq = self.make_full_equation(eq, units, comment, supplementary);
                 self.handle_equation(full_eq)
             }
             SectionEnd::Pipe => {
                 // No comment
-                let full_eq = self.make_full_equation(eq, units, None);
+                let full_eq = self.make_full_equation(eq, units, None, false);
                 self.handle_equation(full_eq)
             }
             SectionEnd::EqEnd(loc) => {
@@ -323,12 +323,14 @@ impl<'input> EquationReader<'input> {
         eq: Equation<'input>,
         units: Option<Units<'input>>,
         comment: Option<Cow<'input, str>>,
+        supplementary: bool,
     ) -> FullEquation<'input> {
         let loc = self.equation_loc(&eq, &units);
         FullEquation {
             equation: eq,
             units,
             comment,
+            supplementary,
             loc,
         }
     }
@@ -360,7 +362,10 @@ impl<'input> EquationReader<'input> {
     /// This scans raw source text without tokenizing, so special characters like
     /// `$`, `@`, `#` in comments don't cause errors. Updates self.position to
     /// the appropriate location for the next parse.
-    fn capture_comment(&mut self, start_pos: usize) -> Option<Cow<'input, str>> {
+    ///
+    /// Returns (comment, supplementary) where supplementary is true if the
+    /// `:SUP` or `:SUPPLEMENTARY` flag was found.
+    fn capture_comment(&mut self, start_pos: usize) -> (Option<Cow<'input, str>>, bool) {
         let remaining = &self.source[start_pos..];
 
         let end_offset = match Self::find_comment_terminator(remaining) {
@@ -382,14 +387,39 @@ impl<'input> EquationReader<'input> {
             }
         };
 
-        // Extract and trim the comment text
-        let comment = remaining[..end_offset].trim();
+        // Extract the raw comment text
+        let raw_comment = remaining[..end_offset].trim();
 
-        if comment.is_empty() {
+        // Check for supplementary flag (third ~ followed by :SUP or :SUPPLEMENTARY)
+        let (comment, supplementary) = Self::extract_supplementary_flag(raw_comment);
+
+        let comment = if comment.is_empty() {
             None
         } else {
             Some(Cow::Borrowed(comment))
+        };
+
+        (comment, supplementary)
+    }
+
+    /// Extract the `:SUP` or `:SUPPLEMENTARY` flag from comment text.
+    ///
+    /// MDL format: `doc text ~ :SUP` or `doc text ~ :SUPPLEMENTARY`
+    /// The third tilde separates the documentation from the supplementary flag.
+    ///
+    /// Returns (remaining_comment, is_supplementary).
+    fn extract_supplementary_flag(text: &str) -> (&str, bool) {
+        // Look for a tilde that separates the comment from the supplementary flag
+        if let Some(tilde_pos) = text.rfind('~') {
+            let after_tilde = text[tilde_pos + 1..].trim();
+            // Check for :SUP or :SUPPLEMENTARY (case-insensitive)
+            let upper = after_tilde.to_uppercase();
+            if upper == ":SUP" || upper == ":SUPPLEMENTARY" {
+                let comment = text[..tilde_pos].trim();
+                return (comment, true);
+            }
         }
+        (text, false)
     }
 }
 
@@ -1459,5 +1489,101 @@ mod tests {
             "Expected parse error for odd-count legacy lookup, got {:?}",
             item
         );
+    }
+
+    // ========================================================================
+    // Supplementary flag tests
+    // ========================================================================
+
+    #[test]
+    fn test_supplementary_flag_full() {
+        // :SUPPLEMENTARY flag should be parsed and removed from comment
+        let input = "x = 1 ~ units ~ docs ~ :SUPPLEMENTARY |";
+        let mut reader = EquationReader::new(input);
+        let item = reader.next_item();
+        match item {
+            Some(Ok(MdlItem::Equation(eq))) => {
+                assert!(eq.supplementary, "Expected supplementary=true");
+                assert_eq!(eq.comment.as_deref(), Some("docs"));
+            }
+            other => panic!("Expected equation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_supplementary_flag_short() {
+        // :SUP short form should also work
+        let input = "x = 1 ~ ~ ~ :SUP |";
+        let mut reader = EquationReader::new(input);
+        let item = reader.next_item();
+        match item {
+            Some(Ok(MdlItem::Equation(eq))) => {
+                assert!(eq.supplementary, "Expected supplementary=true");
+                assert!(
+                    eq.comment.is_none(),
+                    "Expected no comment, got {:?}",
+                    eq.comment
+                );
+            }
+            other => panic!("Expected equation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_no_supplementary_flag() {
+        // Normal equations should have supplementary=false
+        let input = "x = 1 ~ units ~ docs |";
+        let mut reader = EquationReader::new(input);
+        let item = reader.next_item();
+        match item {
+            Some(Ok(MdlItem::Equation(eq))) => {
+                assert!(!eq.supplementary, "Expected supplementary=false");
+                assert_eq!(eq.comment.as_deref(), Some("docs"));
+            }
+            other => panic!("Expected equation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_supplementary_inline_compact() {
+        // Compact inline format: ~~~:SUP|
+        let input = "x = 1~~~:SUP|";
+        let mut reader = EquationReader::new(input);
+        let item = reader.next_item();
+        match item {
+            Some(Ok(MdlItem::Equation(eq))) => {
+                assert!(eq.supplementary, "Expected supplementary=true");
+            }
+            other => panic!("Expected equation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_supplementary_with_comment_text() {
+        // Real-world example: comment text followed by supplementary flag
+        let input = "profit = revenue - cost ~ $ ~ Companies Profits - not used ~ :SUP |";
+        let mut reader = EquationReader::new(input);
+        let item = reader.next_item();
+        match item {
+            Some(Ok(MdlItem::Equation(eq))) => {
+                assert!(eq.supplementary, "Expected supplementary=true");
+                assert_eq!(eq.comment.as_deref(), Some("Companies Profits - not used"));
+            }
+            other => panic!("Expected equation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_supplementary_case_insensitive() {
+        // :supplementary should work too (case insensitive)
+        let input = "x = 1 ~ ~ ~ :supplementary |";
+        let mut reader = EquationReader::new(input);
+        let item = reader.next_item();
+        match item {
+            Some(Ok(MdlItem::Equation(eq))) => {
+                assert!(eq.supplementary, "Expected supplementary=true");
+            }
+            other => panic!("Expected equation, got {:?}", other),
+        }
     }
 }
