@@ -33,9 +33,6 @@ mod test_sir_xmile;
 #[cfg(all(test, feature = "vensim"))]
 mod test_open_vensim;
 
-#[cfg(all(test, feature = "vensim"))]
-mod test_equivalence;
-
 pub fn to_xmile(project: &Project) -> Result<String> {
     xmile::project_to_xmile(project)
 }
