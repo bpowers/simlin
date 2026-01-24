@@ -523,18 +523,98 @@ pub fn quoted_space_to_underbar(name: &str) -> String {
     }
 }
 
-/// Format a unit expression to a string.
-pub fn format_unit_expr(expr: &crate::mdl::ast::UnitExpr<'_>) -> String {
-    use crate::mdl::ast::UnitExpr;
-    match expr {
-        UnitExpr::Unit(name, _) => space_to_underbar(name),
-        UnitExpr::Mul(left, right, _) => {
-            format!("{} * {}", format_unit_expr(left), format_unit_expr(right))
-        }
-        UnitExpr::Div(left, right, _) => {
-            format!("{} / {}", format_unit_expr(left), format_unit_expr(right))
+/// Simplified unit representation with separate numerator/denominator.
+/// This mirrors xmutil's UnitExpression with vNumerator/vDenominator vectors.
+struct SimplifiedUnit {
+    numerator: Vec<String>,
+    denominator: Vec<String>,
+}
+
+impl SimplifiedUnit {
+    fn new() -> Self {
+        SimplifiedUnit {
+            numerator: Vec::new(),
+            denominator: Vec::new(),
         }
     }
+
+    /// Simplify by canceling matching terms between numerator and denominator.
+    fn simplify(&mut self) {
+        let mut i = 0;
+        while i < self.numerator.len() {
+            if let Some(j) = self
+                .denominator
+                .iter()
+                .position(|d| d == &self.numerator[i])
+            {
+                self.numerator.remove(i);
+                self.denominator.remove(j);
+                // Don't increment i - next element shifted into position
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Format in xmutil-compatible canonical form.
+    fn format(&self) -> String {
+        let num = if self.numerator.is_empty() {
+            "1".to_string()
+        } else {
+            self.numerator.join("*")
+        };
+
+        if self.denominator.is_empty() {
+            num
+        } else if self.denominator.len() == 1 {
+            format!("{}/{}", num, self.denominator[0])
+        } else {
+            // Multiple denominators: use "/(A*B)" form like xmutil
+            format!("{}/({})", num, self.denominator.join("*"))
+        }
+    }
+}
+
+/// Flatten a UnitExpr tree into a SimplifiedUnit with numerator/denominator lists.
+fn flatten_unit_expr(
+    expr: &crate::mdl::ast::UnitExpr<'_>,
+    is_denominator: bool,
+    result: &mut SimplifiedUnit,
+) {
+    use crate::mdl::ast::UnitExpr;
+    match expr {
+        UnitExpr::Unit(name, _) => {
+            let name = space_to_underbar(name);
+            if is_denominator {
+                result.denominator.push(name);
+            } else {
+                result.numerator.push(name);
+            }
+        }
+        UnitExpr::Mul(left, right, _) => {
+            // Both sides go to same list (numerator or denominator)
+            flatten_unit_expr(left, is_denominator, result);
+            flatten_unit_expr(right, is_denominator, result);
+        }
+        UnitExpr::Div(left, right, _) => {
+            // Left goes to current list, right goes to opposite
+            flatten_unit_expr(left, is_denominator, result);
+            flatten_unit_expr(right, !is_denominator, result);
+        }
+    }
+}
+
+/// Format a unit expression to a simplified, canonical string.
+///
+/// This mirrors xmutil's UnitExpression::GetEquationString() behavior:
+/// - Flattens to numerator/denominator lists
+/// - Cancels matching terms (e.g., "A/A" -> "1")
+/// - Outputs canonical form with "/(X*Y)" for compound denominators
+pub fn format_unit_expr(expr: &crate::mdl::ast::UnitExpr<'_>) -> String {
+    let mut simplified = SimplifiedUnit::new();
+    flatten_unit_expr(expr, false, &mut simplified);
+    simplified.simplify();
+    simplified.format()
 }
 
 #[cfg(test)]
@@ -1254,5 +1334,143 @@ mod tests {
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "arr[DimA, SubA.*]");
+    }
+
+    // Unit expression simplification tests
+
+    #[test]
+    fn test_format_unit_expr_simple() {
+        use crate::mdl::ast::UnitExpr;
+        let unit = UnitExpr::Unit(Cow::Borrowed("Year"), loc());
+        assert_eq!(format_unit_expr(&unit), "Year");
+    }
+
+    #[test]
+    fn test_format_unit_expr_multiplication() {
+        use crate::mdl::ast::UnitExpr;
+        // A * B -> "A*B"
+        let unit = UnitExpr::Mul(
+            Box::new(UnitExpr::Unit(Cow::Borrowed("A"), loc())),
+            Box::new(UnitExpr::Unit(Cow::Borrowed("B"), loc())),
+            loc(),
+        );
+        assert_eq!(format_unit_expr(&unit), "A*B");
+    }
+
+    #[test]
+    fn test_format_unit_expr_division() {
+        use crate::mdl::ast::UnitExpr;
+        // A / B -> "A/B"
+        let unit = UnitExpr::Div(
+            Box::new(UnitExpr::Unit(Cow::Borrowed("A"), loc())),
+            Box::new(UnitExpr::Unit(Cow::Borrowed("B"), loc())),
+            loc(),
+        );
+        assert_eq!(format_unit_expr(&unit), "A/B");
+    }
+
+    #[test]
+    fn test_format_unit_expr_compound_denominator() {
+        use crate::mdl::ast::UnitExpr;
+        // A / (B * C) -> "A/(B*C)"
+        let unit = UnitExpr::Div(
+            Box::new(UnitExpr::Unit(Cow::Borrowed("A"), loc())),
+            Box::new(UnitExpr::Mul(
+                Box::new(UnitExpr::Unit(Cow::Borrowed("B"), loc())),
+                Box::new(UnitExpr::Unit(Cow::Borrowed("C"), loc())),
+                loc(),
+            )),
+            loc(),
+        );
+        assert_eq!(format_unit_expr(&unit), "A/(B*C)");
+    }
+
+    #[test]
+    fn test_format_unit_expr_simplifies_matching_terms() {
+        use crate::mdl::ast::UnitExpr;
+        // A * B / B -> "A" (B cancels)
+        let unit = UnitExpr::Div(
+            Box::new(UnitExpr::Mul(
+                Box::new(UnitExpr::Unit(Cow::Borrowed("A"), loc())),
+                Box::new(UnitExpr::Unit(Cow::Borrowed("B"), loc())),
+                loc(),
+            )),
+            Box::new(UnitExpr::Unit(Cow::Borrowed("B"), loc())),
+            loc(),
+        );
+        assert_eq!(format_unit_expr(&unit), "A");
+    }
+
+    #[test]
+    fn test_format_unit_expr_full_cancellation() {
+        use crate::mdl::ast::UnitExpr;
+        // A / A -> "1"
+        let unit = UnitExpr::Div(
+            Box::new(UnitExpr::Unit(Cow::Borrowed("A"), loc())),
+            Box::new(UnitExpr::Unit(Cow::Borrowed("A"), loc())),
+            loc(),
+        );
+        assert_eq!(format_unit_expr(&unit), "1");
+    }
+
+    #[test]
+    fn test_format_unit_expr_space_to_underbar() {
+        use crate::mdl::ast::UnitExpr;
+        // "My Unit" -> "My_Unit"
+        let unit = UnitExpr::Unit(Cow::Borrowed("My Unit"), loc());
+        assert_eq!(format_unit_expr(&unit), "My_Unit");
+    }
+
+    #[test]
+    fn test_format_unit_expr_chained_division() {
+        use crate::mdl::ast::UnitExpr;
+        // A / B / C -> "A/(B*C)"
+        // In the AST, this is: (A / B) / C
+        let unit = UnitExpr::Div(
+            Box::new(UnitExpr::Div(
+                Box::new(UnitExpr::Unit(Cow::Borrowed("A"), loc())),
+                Box::new(UnitExpr::Unit(Cow::Borrowed("B"), loc())),
+                loc(),
+            )),
+            Box::new(UnitExpr::Unit(Cow::Borrowed("C"), loc())),
+            loc(),
+        );
+        assert_eq!(format_unit_expr(&unit), "A/(B*C)");
+    }
+
+    #[test]
+    fn test_format_unit_expr_complex_simplification() {
+        use crate::mdl::ast::UnitExpr;
+        // (A * B * C) / (B * C) -> "A" (B and C cancel)
+        let unit = UnitExpr::Div(
+            Box::new(UnitExpr::Mul(
+                Box::new(UnitExpr::Mul(
+                    Box::new(UnitExpr::Unit(Cow::Borrowed("A"), loc())),
+                    Box::new(UnitExpr::Unit(Cow::Borrowed("B"), loc())),
+                    loc(),
+                )),
+                Box::new(UnitExpr::Unit(Cow::Borrowed("C"), loc())),
+                loc(),
+            )),
+            Box::new(UnitExpr::Mul(
+                Box::new(UnitExpr::Unit(Cow::Borrowed("B"), loc())),
+                Box::new(UnitExpr::Unit(Cow::Borrowed("C"), loc())),
+                loc(),
+            )),
+            loc(),
+        );
+        assert_eq!(format_unit_expr(&unit), "A");
+    }
+
+    #[test]
+    fn test_format_unit_expr_numerator_only() {
+        use crate::mdl::ast::UnitExpr;
+        // A * B (no denominator) -> "A*B"
+        let unit = UnitExpr::Mul(
+            Box::new(UnitExpr::Unit(Cow::Borrowed("A"), loc())),
+            Box::new(UnitExpr::Unit(Cow::Borrowed("B"), loc())),
+            loc(),
+        );
+        assert_eq!(format_unit_expr(&unit), "A*B");
     }
 }

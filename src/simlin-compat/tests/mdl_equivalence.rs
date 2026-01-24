@@ -220,123 +220,12 @@ fn normalize_doc(doc: &str) -> String {
     doc
 }
 
-/// Normalize units by removing spaces/underscores, normalizing parentheses, and simplifying.
+/// Normalize units by removing spaces and underscores.
+///
+/// The production code in `format_unit_expr` now handles simplification and
+/// canonical formatting, so this only needs to normalize whitespace differences.
 fn normalize_units(units: Option<&String>) -> Option<String> {
-    units.map(|u| {
-        // Remove all spaces and underscores (parsers handle these differently)
-        let u = u.replace([' ', '_'], "");
-        // Normalize "/(A*B)" to "/A/B" pattern
-        let mut result = u;
-        loop {
-            let new_result = normalize_unit_parens(&result);
-            if new_result == result {
-                break;
-            }
-            result = new_result;
-        }
-        // Simplify X/X patterns to 1 (dimensionless)
-        simplify_units(&result)
-    })
-}
-
-/// Simplify units by canceling identical terms in numerator/denominator.
-fn simplify_units(s: &str) -> String {
-    // Split into terms
-    let parts: Vec<&str> = s.split('/').collect();
-    if parts.len() < 2 {
-        return s.to_string();
-    }
-
-    let mut numerator: Vec<&str> = vec![parts[0]];
-    let mut denominator: Vec<&str> = parts[1..].to_vec();
-
-    // Cancel matching terms
-    let mut new_num: Vec<&str> = Vec::new();
-    for n in &numerator {
-        if let Some(pos) = denominator.iter().position(|d| d == n) {
-            denominator.remove(pos);
-        } else {
-            new_num.push(n);
-        }
-    }
-    numerator = new_num;
-
-    // Also handle A*B numerator forms
-    if let Some(num) = numerator.first() {
-        let num_parts: Vec<&str> = num.split('*').collect();
-        if num_parts.len() > 1 {
-            let mut new_num_parts: Vec<&str> = Vec::new();
-            for n in num_parts {
-                if let Some(pos) = denominator.iter().position(|d| *d == n) {
-                    denominator.remove(pos);
-                } else {
-                    new_num_parts.push(n);
-                }
-            }
-            if new_num_parts.is_empty() {
-                numerator = vec!["1"];
-            } else {
-                // Return early with joined form
-                let num_str = new_num_parts.join("*");
-                let result = if denominator.is_empty() {
-                    num_str
-                } else {
-                    format!("{}/{}", num_str, denominator.join("/"))
-                };
-                return result;
-            }
-        }
-    }
-
-    // Rebuild
-    let num_str = if numerator.is_empty() {
-        "1".to_string()
-    } else {
-        numerator.join("*")
-    };
-
-    if denominator.is_empty() {
-        num_str
-    } else {
-        format!("{}/{}", num_str, denominator.join("/"))
-    }
-}
-
-/// Normalize parenthesized unit expressions like "/(A*B)" to "/A/B".
-fn normalize_unit_parens(s: &str) -> String {
-    // Look for patterns like "/(X*Y)" and convert to "/X/Y"
-    let mut result = String::new();
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '/' && chars.peek() == Some(&'(') {
-            // Found "/(" - look for the matching ")"
-            chars.next(); // consume '('
-            let mut paren_content = String::new();
-            let mut depth = 1;
-            for pc in chars.by_ref() {
-                if pc == '(' {
-                    depth += 1;
-                    paren_content.push(pc);
-                } else if pc == ')' {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                    paren_content.push(pc);
-                } else {
-                    paren_content.push(pc);
-                }
-            }
-            // Replace * with / in the paren content and prefix with /
-            let normalized = paren_content.replace('*', "/");
-            result.push('/');
-            result.push_str(&normalized);
-        } else {
-            result.push(c);
-        }
-    }
-    result
+    units.map(|u| u.replace([' ', '_'], ""))
 }
 
 /// Normalize an equation expression by:
