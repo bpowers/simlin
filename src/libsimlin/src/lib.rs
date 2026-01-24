@@ -3146,6 +3146,11 @@ enum JsonModelOperation {
     DeleteView {
         index: u32,
     },
+    UpdateStockFlows {
+        ident: String,
+        inflows: Vec<String>,
+        outflows: Vec<String>,
+    },
 }
 
 fn convert_json_project_patch(
@@ -3267,6 +3272,15 @@ fn convert_json_model_operation(
         JsonModelOperation::DeleteView { index } => {
             model_operation::Op::DeleteView(project_io::DeleteViewOp { index })
         }
+        JsonModelOperation::UpdateStockFlows {
+            ident,
+            inflows,
+            outflows,
+        } => model_operation::Op::UpdateStockFlows(project_io::UpdateStockFlowsOp {
+            ident,
+            inflows,
+            outflows,
+        }),
     };
 
     Ok(result)
