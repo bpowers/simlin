@@ -1167,6 +1167,56 @@ describe('Flow routing', () => {
         expect(flow1StockPt.x).toBe(110 - StockWidth / 2);
         expect(flow2StockPt.x).toBe(110 - StockWidth / 2);
       });
+
+      it('should order pre-existing L-shaped flows by anchor position, not corner', () => {
+        // Two pre-existing L-shaped flows that both attach to the bottom.
+        // Their corners have the same X coordinate (at stock center), so ordering
+        // by corner would give undefined results. Ordering by anchor avoids this.
+        const flow1Uid = 2;
+        const flow2Uid = 3;
+        const stock = makeStock(stockUid, 100, 100, [], [flow1Uid, flow2Uid]);
+
+        // Flow 1: L-shaped, corner at (100, 150), anchor at x=200 (right side)
+        // Stock at bottom (100, 100 + StockHeight/2) -> corner (100, 150) -> anchor (200, 150)
+        const flow1 = makeFlow(flow1Uid, 100, 125, [
+          { x: 100, y: 100 + StockHeight / 2, attachedToUid: stockUid },
+          { x: 100, y: 150 }, // corner
+          { x: 200, y: 150, attachedToUid: 4 }, // anchor on RIGHT
+        ]);
+
+        // Flow 2: L-shaped, corner at (100, 160), anchor at x=0 (left side)
+        // Stock at bottom -> corner (100, 160) -> anchor (0, 160)
+        const flow2 = makeFlow(flow2Uid, 100, 130, [
+          { x: 100, y: 100 + StockHeight / 2, attachedToUid: stockUid },
+          { x: 100, y: 160 }, // corner - note both corners have x=100
+          { x: 0, y: 160, attachedToUid: 5 }, // anchor on LEFT
+        ]);
+
+        // Move stock slightly - both L-shaped flows stay L-shaped
+        const [newStock, newFlows] = UpdateStockAndFlows(stock, List([flow1, flow2]), { x: 0, y: -10 });
+
+        expect(newStock.cy).toBe(110);
+
+        const newFlow1 = newFlows.get(0)!;
+        const newFlow2 = newFlows.get(1)!;
+
+        // Get stock attachment X coordinates
+        const flow1StockPt = newFlow1.points.get(0)!;
+        const flow2StockPt = newFlow2.points.get(0)!;
+
+        // Flow 2 (anchor at x=0, left) should attach to the LEFT of the bottom edge
+        // Flow 1 (anchor at x=200, right) should attach to the RIGHT of the bottom edge
+        // So flow2StockPt.x < flow1StockPt.x
+        expect(flow2StockPt.x).toBeLessThan(flow1StockPt.x);
+
+        // More specifically, with 2 flows: 1/3 and 2/3 positions
+        const leftEdge = 100 - StockWidth / 2;
+        const oneThird = leftEdge + StockWidth / 3;
+        const twoThirds = leftEdge + (2 * StockWidth) / 3;
+
+        expect(flow2StockPt.x).toBeCloseTo(oneThird, 1); // left anchor -> left position
+        expect(flow1StockPt.x).toBeCloseTo(twoThirds, 1); // right anchor -> right position
+      });
     });
   });
 

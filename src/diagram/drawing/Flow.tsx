@@ -72,8 +72,10 @@ function getStockEdgePoint(stockCx: number, stockCy: number, side: Side, offsetF
 interface FlowAttachmentInfo {
   flow: FlowViewElement;
   side: Side;
-  // The point adjacent to the stock attachment point (used for ordering)
-  adjacentPoint: IPoint;
+  // The anchor point (cloud/other stock at the opposite end from this stock)
+  // Used for ordering flows on the same side - anchor position determines
+  // where the flow is "going to", which is stable across L-shape creation
+  anchor: IPoint;
   // Whether the stock is at the start (first point) or end (last point) of the flow
   stockIsFirst: boolean;
   // Whether the flow will be straight (vs L-shaped) - straight flows don't need spreading
@@ -174,7 +176,7 @@ function getFlowAttachmentInfo(
   return {
     flow,
     side,
-    adjacentPoint: { x: adjacentPoint.x, y: adjacentPoint.y },
+    anchor: { x: anchor.x, y: anchor.y },
     stockIsFirst,
     isStraight,
   };
@@ -187,9 +189,12 @@ function getFlowAttachmentInfo(
  * based on their anchor positions - each maintains its anchor's Y (horizontal flows)
  * or X (vertical flows) coordinate.
  *
- * L-shaped flows on the same side are ordered by their adjacent point's position:
- * - For top/bottom sides: ordered by adjacent point's X (left to right)
- * - For left/right sides: ordered by adjacent point's Y (top to bottom)
+ * L-shaped flows on the same side are ordered by their anchor's position:
+ * - For top/bottom sides: ordered by anchor's X (left to right)
+ * - For left/right sides: ordered by anchor's Y (top to bottom)
+ *
+ * Using anchor position (not the stock-adjacent corner) ensures stable ordering
+ * even for pre-existing L-shaped flows where corners may have the same coordinate.
  *
  * Returns a map from flow UID to its offset fraction (0 to 1).
  */
@@ -233,13 +238,15 @@ function computeFlowOffsets(
       // Single L-shaped flow on this side - center it (offset = 0.5)
       offsets.set(infos[0].flow.uid, 0.5);
     } else {
-      // Multiple L-shaped flows - sort and spread them
-      // For top/bottom: sort by adjacent point X
-      // For left/right: sort by adjacent point Y
+      // Multiple L-shaped flows - sort and spread them by anchor position.
+      // Using anchor (not the stock-adjacent corner) avoids ties when multiple
+      // L-shaped flows have corners at the same position before spreading.
+      // For top/bottom: sort by anchor X (left to right)
+      // For left/right: sort by anchor Y (top to bottom)
       if (side === 'top' || side === 'bottom') {
-        infos.sort((a, b) => a.adjacentPoint.x - b.adjacentPoint.x);
+        infos.sort((a, b) => a.anchor.x - b.anchor.x);
       } else {
-        infos.sort((a, b) => a.adjacentPoint.y - b.adjacentPoint.y);
+        infos.sort((a, b) => a.anchor.y - b.anchor.y);
       }
 
       // Spread flows evenly: for n flows, positions are at 1/(n+1), 2/(n+1), ..., n/(n+1)
