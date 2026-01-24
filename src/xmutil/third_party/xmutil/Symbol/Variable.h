@@ -233,6 +233,12 @@ public:
   void SetUnwanted(bool set) {
     _unwanted = set;
   }
+  bool Supplementary() const {
+    return _supplementary;
+  }
+  void SetSupplementary(bool set) {
+    _supplementary = set;
+  }
   const std::string &Comment() {
     return _comment;
   }
@@ -360,6 +366,7 @@ private:
   View *_view;   // view defined in
   ModelGroup *_group;
   bool _unwanted;
+  bool _supplementary;
   bool _hasUpstream;
   bool _hasDownstream;
   bool bAsFlow;
