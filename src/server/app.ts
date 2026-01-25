@@ -11,7 +11,6 @@ import * as bodyParser from 'body-parser';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express from 'express';
-import { NextFunction, Request, Response } from 'express';
 import helmet from 'helmet';
 import favicon from 'serve-favicon';
 import { seshcookie } from 'seshcookie';
@@ -25,7 +24,7 @@ import authz from './authz';
 import { createDatabase } from './models/db';
 import { redirectToHttps } from './redirect-to-https';
 import { requestLogger } from './request-logger';
-import { User as UserPb } from './schemas/user_pb';
+import { createProjectRouteHandler } from './route-handlers';
 
 // redefinition from Helmet, as they don't export it
 interface ContentSecurityPolicyDirectiveValueFunction {
@@ -218,51 +217,7 @@ class App {
       lastModified: false,
     });
 
-    this.app.get(
-      '/:username/:projectName',
-      async (req: Request, res: Response, next: NextFunction) => {
-        const project = await this.app.db.project.findOne(`${req.params.username}/${req.params.projectName}`);
-
-        if (!project) {
-          res.status(404).json({});
-          return;
-        } else if (project.getIsPublic()) return res.redirect(encodeURI(`/?project=${project.getId()}`));
-
-        const email = req.session.passport.user.email as string;
-        const user = req.user as any as UserPb | undefined;
-
-        if (!user) {
-          logger.warn(`user not found for '${email}', but passed authz?`);
-          res.status(500).json({});
-          return;
-        }
-        // TODO We may want to have a "This project is private" page?
-        if (user.getId() !== req.params.username) return res.redirect('/');
-
-        if (
-          req.path !== `/${req.params.username}/${req.params.projectName}` &&
-          req.path !== `/${req.params.username}/${req.params.projectName}/`
-        ) {
-          res.status(404).json({});
-          return;
-        }
-
-        const projectName = req.params.projectName as string;
-        const projectId = `${req.params.username}/${projectName}`;
-        const projectModel = await this.app.db.project.findOne(projectId);
-        if (!projectModel || !projectModel.getFileId()) {
-          res.status(404).json({});
-          return;
-        }
-
-        req.url = '/index.html';
-        res.set('Cache-Control', 'no-store');
-        res.set('Max-Age', '0');
-
-        next();
-      },
-      staticHandler,
-    );
+    this.app.get('/:username/:projectName', createProjectRouteHandler({ db: this.app.db }), staticHandler);
 
     // Configure a middleware for 404s and the error handler
     // this.app.use(express.notFound());
