@@ -9,7 +9,7 @@ import { fromUint8Array, toUint8Array } from 'js-base64';
 
 import { baseURL, defined } from '@system-dynamics/core/common';
 
-import { Editor } from './Editor';
+import { Editor, ProtobufProjectData } from './Editor';
 
 import styles from './HostedWebEditor.module.css';
 
@@ -60,12 +60,12 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
     return this.props.baseURL ?? baseURL;
   }
 
-  handleSave = async (project: Readonly<Uint8Array>, currVersion: number): Promise<number | undefined> => {
+  handleSave = async (project: ProtobufProjectData, currVersion: number): Promise<number | undefined> => {
     if (this.props.readOnlyMode) return;
 
     const bodyContents = {
       currVersion,
-      projectPB: fromUint8Array(project as Uint8Array),
+      projectPB: fromUint8Array(project.data as Uint8Array),
     };
 
     const base = this.getBaseURL();
@@ -132,6 +132,7 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
     return (
       <div className={classNames}>
         <Editor
+          inputFormat="protobuf"
           initialProjectBinary={this.state.projectBinary}
           initialProjectVersion={this.state.projectVersion}
           name={this.props.projectName}

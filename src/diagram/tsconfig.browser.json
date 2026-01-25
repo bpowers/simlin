@@ -17,7 +17,8 @@
   ],
   "exclude": [
     "lib",
-    "lib.browser"
+    "lib.browser",
+    "tests"
   ],
   "references": [
     { "path": "../core/tsconfig.browser.json" },
