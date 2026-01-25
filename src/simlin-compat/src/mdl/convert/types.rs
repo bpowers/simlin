@@ -14,6 +14,8 @@ use crate::mdl::ast::FullEquation;
 pub enum ConvertError {
     /// Reader error during parsing
     Reader(crate::mdl::reader::ReaderError),
+    /// View parsing error
+    View(crate::mdl::view::ViewError),
     /// Invalid subscript range specification
     InvalidRange(String),
     /// Cyclic dimension definition detected (e.g., DimA: DimB, DimB: DimA)
@@ -28,9 +30,15 @@ impl From<crate::mdl::reader::ReaderError> for ConvertError {
     }
 }
 
+impl From<crate::mdl::view::ViewError> for ConvertError {
+    fn from(e: crate::mdl::view::ViewError) -> Self {
+        ConvertError::View(e)
+    }
+}
+
 /// Type of variable determined during conversion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum VariableType {
+pub enum VariableType {
     Stock,
     Flow,
     Aux,
@@ -38,7 +46,7 @@ pub(super) enum VariableType {
 
 /// Information about a symbol collected during the first pass.
 #[derive(Debug)]
-pub(super) struct SymbolInfo<'input> {
+pub struct SymbolInfo<'input> {
     /// The parsed equation(s) for this symbol
     pub equations: Vec<FullEquation<'input>>,
     /// Detected variable type

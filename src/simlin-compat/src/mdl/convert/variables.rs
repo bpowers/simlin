@@ -8,8 +8,10 @@ use std::collections::HashMap;
 
 use simlin_core::datamodel::{
     self, DimensionElements, Equation, GraphicalFunction, GraphicalFunctionKind,
-    GraphicalFunctionScale, Model, ModelGroup, Project, Variable, Visibility,
+    GraphicalFunctionScale, Model, ModelGroup, Project, Variable, View, Visibility,
 };
+
+use crate::mdl::view;
 
 use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, FullEquation, Lhs, Subscript};
 use crate::mdl::builtins::to_lower_space;
@@ -80,11 +82,14 @@ impl<'input> ConversionContext<'input> {
         // Build groups with unique names
         let groups = self.build_groups();
 
+        // Build views from parsed sketch data
+        let views = self.build_views();
+
         let model = Model {
             name: "main".to_string(),
             sim_specs: None,
             variables,
-            views: vec![],
+            views,
             loop_metadata: vec![],
             groups,
         };
@@ -165,6 +170,16 @@ impl<'input> ConversionContext<'input> {
                 }
             })
             .collect()
+    }
+
+    /// Build views from parsed sketch data.
+    fn build_views(&self) -> Vec<View> {
+        if self.views.is_empty() {
+            return Vec::new();
+        }
+
+        // Convert to a HashMap reference for the view builder
+        view::build_views(self.views.clone(), &self.symbols)
     }
 
     /// Select the appropriate equation from a list, implementing PurgeAFOEq logic.

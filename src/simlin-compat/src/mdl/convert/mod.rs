@@ -15,7 +15,10 @@ mod variables;
 
 use helpers::{canonical_name, get_equation_name};
 pub use types::ConvertError;
-use types::{SimSpecsBuilder, SymbolInfo, SyntheticFlow};
+use types::{SimSpecsBuilder, SyntheticFlow};
+pub use types::{SymbolInfo, VariableType};
+
+use crate::mdl::view::{self, VensimView};
 
 use std::collections::{HashMap, HashSet};
 
@@ -72,6 +75,8 @@ pub struct ConversionContext<'input> {
     groups: Vec<GroupInfo>,
     /// Index of current group for variable assignment (None = no group yet)
     current_group_index: Option<usize>,
+    /// Parsed views from the sketch section
+    views: Vec<VensimView>,
 }
 
 impl<'input> ConversionContext<'input> {
@@ -81,8 +86,13 @@ impl<'input> ConversionContext<'input> {
         let items: Result<Vec<MdlItem<'input>>, _> = reader.by_ref().collect();
         let items = items?;
 
-        // Parse settings from remaining source (after equations/views)
+        // Parse views and settings from remaining source (after equations)
         let remaining = reader.remaining();
+
+        // Parse views from sketch section
+        let views = view::parse_views(remaining)?;
+
+        // Parse settings (after views end marker)
         let settings_parser = PostEquationParser::new(remaining);
         let settings = settings_parser.parse_settings();
 
@@ -105,6 +115,7 @@ impl<'input> ConversionContext<'input> {
             raw_subscript_defs: HashMap::new(),
             groups: Vec::new(),
             current_group_index: None,
+            views,
         })
     }
 
@@ -734,5 +745,74 @@ $192-192-192,0,Times
         // "2 Other" starts with '2', differs from '1', and is a digit
         // So it searches for existing group named "2 Other" (not found), then uses previous
         assert_eq!(model.groups[2].parent, Some("1-1 Sub".to_string()));
+    }
+
+    #[test]
+    fn test_mdl_views_parsed() {
+        // Test that views are parsed from the sketch section
+        let mdl = r#"x = 5
+~ Units
+~ A constant |
+\\\---/// Sketch information
+V300  Do not put anything below this section
+*View 1
+$192-192-192,0,Helvetica|10|B|0-0-0|0-0-0|0-0-0|-1--1--1|-1--1--1|96,96,100,0
+10,1,x,100,200,40,20,3,3,0,0,0,0,0,0
+///---\\\
+"#;
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        // Verify views are populated
+        assert_eq!(model.views.len(), 1);
+
+        // Verify the view contains elements
+        let simlin_core::datamodel::View::StockFlow(sf) = &model.views[0];
+        assert!(!sf.elements.is_empty(), "View should have elements");
+    }
+
+    #[test]
+    fn test_mdl_views_with_flow() {
+        // Test view parsing with stocks, flows, and connectors
+        let mdl = r#"Stock = INTEG(inflow, 100)
+~ Units
+~ Stock |
+inflow = 10
+~ Units/Time
+~ Flow |
+\\\---/// Sketch
+V300
+*Test
+$font
+10,1,Stock,100,100,40,20,3,3,0,0,0,0,0,0
+11,2,444,200,100,6,8,34,3,0,0,1,0,0,0
+10,3,inflow,200,120,40,20,40,3,0,0,-1,0,0,0
+1,4,2,1,4,0,0,22,0,0,0,-1--1--1,,1|(150,100)|
+///---\\\
+"#;
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.views.len(), 1);
+        let simlin_core::datamodel::View::StockFlow(sf) = &model.views[0];
+        // Should have at least stock, flow, and maybe link elements
+        assert!(
+            sf.elements.len() >= 2,
+            "View should have stock and flow elements"
+        );
+    }
+
+    #[test]
+    fn test_mdl_no_views_still_works() {
+        // Test that MDL files without views still parse correctly
+        let mdl = "x = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        // Views should be empty
+        assert!(model.views.is_empty());
+
+        // But the model should still have variables
+        assert!(!model.variables.is_empty());
     }
 }
