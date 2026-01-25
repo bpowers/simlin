@@ -7,10 +7,10 @@ This directory contains the pure Rust implementation of a Vensim MDL file parser
 **Phases 1-5 and 8 (Parsing): COMPLETE**
 - Lexer, normalizer, parser, and AST types are fully implemented
 - All equation types, expressions, subscripts, and macros parse correctly
-- Comprehensive test coverage (221 tests)
+- Comprehensive test coverage (430 tests)
 
 **Phase 6 (Core Conversion): COMPLETE**
-- `convert.rs`: Multi-pass AST to datamodel conversion fully implemented
+- `convert/`: Multi-pass AST to datamodel conversion fully implemented
 - `xmile_compat.rs`: XMILE-compatible expression formatter with function renames,
   argument reordering, and name formatting
 - Variable type detection (stocks via INTEG, flows, auxiliaries)
@@ -23,10 +23,16 @@ This directory contains the pure Rust implementation of a Vensim MDL file parser
 
 **Phase 10 (Settings): COMPLETE**
 - `settings.rs`: Post-equation parser for settings section
-- Integration type parsing (type 15): Euler/RK4 method detection
+- Integration type parsing (type 15): Euler/RK2/RK4 method detection
 - Unit equivalence parsing (type 22): name, equation, aliases
 
-**Phases 7, 9 (Views, Post-processing): NOT STARTED**
+**Phase 9 (Groups): COMPLETE**
+- Group marker parsing: `{**name**}` and `***\nname\n***|` formats
+- Group hierarchy via parent tracking
+- Variable assignment to groups (first equation only, not inside macros)
+- Group name conflict resolution with symbol/dimension names
+
+**Phase 7, 9 (Views, Post-processing): NOT STARTED**
 - View/diagram parsing not implemented
 - Model post-processing (name deduplication, view composition) not implemented
 
@@ -63,7 +69,7 @@ We deliberately skip the XMILE intermediate representation. By targeting `simlin
 
 Some Vensim concepts require intermediate representations before conversion to datamodel:
 
-1. **View/Diagram data**: Vensim's sketch format uses element indices, relative positioning, and multiple views that must be resolved before converting to absolute positions in a single view in the datamodel. These intermediate structures live in `mdl/view.rs`.
+1. **View/Diagram data**: Vensim's sketch format uses element indices, relative positioning, and multiple views that must be resolved before converting to absolute positions in a single view in the datamodel. These intermediate structures will live in `mdl/view.rs` (not yet implemented).
 
 2. **Symbol table**: During parsing, we need to track variable definitions, subscript ranges, and macros before final resolution.
 
@@ -80,9 +86,18 @@ src/simlin-compat/src/mdl/
 ├── parser_helpers.rs  # Helper functions for parser (number parsing, equation creation)
 ├── reader.rs          # EquationReader: drives parser, captures comments, handles macros
 ├── builtins.rs        # Vensim built-in function recognition via to_lower_space()
-├── convert.rs         # AST → datamodel conversion (IMPLEMENTED)
+├── convert/           # AST → datamodel conversion (IMPLEMENTED)
+│   ├── mod.rs         # Main conversion logic, group building
+│   ├── dimensions.rs  # Dimension/subscript building
+│   ├── helpers.rs     # Utility functions (units, expressions)
+│   ├── stocks.rs      # Stock/flow linking
+│   ├── types.rs       # Internal types (SymbolInfo, etc.)
+│   └── variables.rs   # Variable type detection and building
 ├── xmile_compat.rs    # XMILE-compatible expression formatter (IMPLEMENTED)
-└── view.rs            # View/diagram parsing and conversion (NOT YET IMPLEMENTED)
+└── settings.rs        # Settings section parser (integration type, unit equivalences)
+```
+
+Note: `view.rs` does not yet exist - it will be added when implementing Phase 7 (Views/Diagrams).
 ```
 
 ## Reference Implementation
@@ -332,7 +347,7 @@ All functions below are recognized and emit `Token::Function` during normalizati
 ### Conversion-Phase Requirements (Implemented in convert.rs)
 - [x] **Subscript range expansion**: `(A1-A10)` ranges expanded to individual elements via `expand_range()` function which validates prefix matching and numeric suffix extraction.
 - [x] **Implicit TIME lookup**: Bare LHS equations (`exogenous data ~ ~ |`) parsed as `Equation::Implicit` are converted to lookup tables over TIME with default `(0,1),(1,1)` table via `make_default_lookup()`.
-- [ ] **Range-only units normalization**: When units have only a range like `[0, 100]` without an explicit unit expression, the `Units.expr` is `None`. During conversion, this should be treated as dimensionless ("1") rather than truly having no units.
+- [x] **Range-only units normalization**: When units have only a range like `[0, 100]` without an explicit unit expression, the `Units.expr` is `None`. During conversion, this is treated as dimensionless ("1") rather than truly having no units.
 
 ### Bang Notation
 - [x] `[dim!]` parsed as `Subscript::BangElement`
@@ -340,7 +355,7 @@ All functions below are recognized and emit `Token::Function` during normalizati
 
 ---
 
-## Phase 6: Core Conversion (`convert.rs`)
+## Phase 6: Core Conversion (`convert/`)
 
 ### Variable Type Detection
 - [x] Stock detection: has top-level INTEG() in equation via `is_top_level_integ()`
@@ -560,14 +575,24 @@ The sketch section follows the equation section, starting with `\\\\\\---///`.
 
 ## Phase 9: Model Post-Processing
 
-### Name Processing
+### Groups/Sectors (COMPLETE)
+- [x] Parse group markers `{**name**}` and `***\nname\n***|` during equation parsing
+- [x] Maintain group hierarchy (nested groups via parent index)
+- [x] xmutil's numeric-leading owner logic (starts with digit + differs from previous)
+- [x] `AdjustGroupNames()` - ensure unique group names that don't conflict with symbols/dimensions
+- [x] Assign variables to groups (on first equation only, not inside macros)
+- [x] Exclude control variables (INITIAL TIME, FINAL TIME, TIME STEP, SAVEPER)
+- [x] Exclude subscript and equivalence definitions
+- [x] Groups persist through XMILE roundtrips
+
+### Name Processing (NOT STARTED)
 - [ ] `SpaceToUnderBar()`: replace spaces with underscores
 - [ ] `QuotedSpaceToUnderBar()`: add quotes if contains periods
 - [ ] `MakeViewNamesUnique()`: deduplicate view titles
 - [ ] Remove special chars from view names: `. - + , / * ^`
 - [ ] Long name mode: use compressed comment as variable name
 
-### Variable Filtering
+### Variable Filtering (NOT STARTED)
 - [ ] Skip "Time" variable in views (handled by XMILE runtime)
 - [ ] Skip ARRAY and ARRAY_ELM types in views
 - [ ] Skip UNKNOWN type variables
@@ -597,8 +622,9 @@ Located after views, starting with `///---\\\` marker.
 - [x] Builtins: Canonicalization, function recognition (15+ tests in `builtins.rs`)
 - [x] Parser helpers: Number parsing, equation creation (15+ tests in `parser_helpers.rs`)
 - [x] Reader: Full equation parsing, comments, macros, all equation types (60+ tests in `reader.rs`)
-- [x] Convert: Stock/flow detection, PurgeAFOEq, synthetic flows, arrayed equations (40+ tests in `convert.rs`)
+- [x] Convert: Stock/flow detection, PurgeAFOEq, synthetic flows, arrayed equations, groups (55+ tests in `convert/`)
 - [x] XMILE compat: Function renames, argument reordering, name formatting (30+ tests in `xmile_compat.rs`)
+- [x] Settings: Integration method, unit equivalences, line endings (44+ tests in `settings.rs`)
 - [ ] Views: Each element type, coordinate transforms (Phase 7 not started)
 
 ### Integration Test Coverage (`test_equivalence.rs`)
@@ -645,7 +671,7 @@ Implementation proceeds through the phases detailed above. Here's a summary with
 ### Semantic Processing (Phases 4-6) - COMPLETE
 4. **Built-ins** (`builtins.rs`) - DONE: Function recognition via to_lower_space()
 5. **Subscripts** - DONE: Parsing integrated into parser, range expansion in convert.rs
-6. **Conversion** (`convert.rs`) - DONE: Multi-pass AST → datamodel transformation
+6. **Conversion** (`convert/`) - DONE: Multi-pass AST → datamodel transformation
 7. **XMILE Formatting** (`xmile_compat.rs`) - DONE: Expression formatting with function transformations
 
 ### Visual Layer (Phase 7)
@@ -653,15 +679,15 @@ Implementation proceeds through the phases detailed above. Here's a summary with
 
 ### Advanced Features (Phases 8-10)
 8. **Macros** - DONE (parsing): MacroDef captured, output not implemented
-9. **Model post-processing** - NOT STARTED: Name normalization, view composition
-10. **Settings parsing** - NOT STARTED: Integration type, unit equivalences
+9. **Groups** - DONE: Group markers, hierarchy, variable assignment, conflict resolution
+10. **Settings parsing** - DONE: Integration type (Euler/RK2/RK4), unit equivalences
+11. **Model post-processing** - NOT STARTED: Name normalization, view composition
 
 ### Next Steps
 1. Add view parsing (`view.rs`) for diagram support
-2. Add settings section parsing for integration type and unit equivalences
-3. Implement macro output in XMILE format
-4. Add model post-processing (name deduplication, view composition)
-5. Test against full model corpus for equivalence with xmutil
+2. Implement macro output in XMILE format
+3. Add model post-processing (name deduplication, view composition)
+4. Test against full model corpus for equivalence with xmutil
 
 ## Extending the Datamodel
 
@@ -680,7 +706,7 @@ Any extensions should be discussed and designed carefully to maintain clean abst
 This is a multi-session project. When resuming work:
 1. Check the "Current Status" section at the top for high-level progress
 2. Run existing tests to verify nothing regressed: `cargo test -p simlin-compat mdl::`
-3. The next major milestone is implementing view parsing (Phase 7)
+3. The next major milestone is implementing view parsing (Phase 7) and macro output
 4. Update the checklist as features are completed
 
 ## Commands
