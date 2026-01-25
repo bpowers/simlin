@@ -1,5 +1,7 @@
 .card {
   width: 359px;
+  max-height: calc(100vh - 18px);
+  overflow-y: auto;
 }
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
