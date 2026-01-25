@@ -883,6 +883,7 @@ impl From<ViewElement> for datamodel::ViewElement {
                 } else {
                     datamodel::view_element::LinkShape::Straight
                 },
+                polarity: None,
             }),
             ViewElement::Module(m) => {
                 datamodel::ViewElement::Module(datamodel::view_element::Module {

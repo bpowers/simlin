@@ -164,6 +164,11 @@ message ViewElement {
   };
 
   message Link {
+    enum Polarity {
+      POLARITY_UNSPECIFIED = 0;
+      POLARITY_POSITIVE = 1;
+      POLARITY_NEGATIVE = 2;
+    }
     message LinkPoints {
       repeated FlowPoint points = 1;
     }
@@ -175,6 +180,7 @@ message ViewElement {
       bool is_straight = 5;
       LinkPoints multi_point = 6;
     }
+    Polarity polarity = 7;
   };
 
   message Module {

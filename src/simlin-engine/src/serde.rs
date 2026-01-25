@@ -1126,6 +1126,15 @@ fn test_view_element_flow_roundtrip() {
 
 impl From<project_io::view_element::Link> for view_element::Link {
     fn from(v: project_io::view_element::Link) -> Self {
+        let polarity = match v.polarity() {
+            project_io::view_element::link::Polarity::Positive => {
+                Some(view_element::LinkPolarity::Positive)
+            }
+            project_io::view_element::link::Polarity::Negative => {
+                Some(view_element::LinkPolarity::Negative)
+            }
+            project_io::view_element::link::Polarity::Unspecified => None,
+        };
         view_element::Link {
             uid: v.uid,
             from_uid: v.from_uid,
@@ -1150,12 +1159,22 @@ impl From<project_io::view_element::Link> for view_element::Link {
                     )
                 }
             },
+            polarity,
         }
     }
 }
 
 impl From<view_element::Link> for project_io::view_element::Link {
     fn from(v: view_element::Link) -> Self {
+        let polarity = match v.polarity {
+            Some(view_element::LinkPolarity::Positive) => {
+                project_io::view_element::link::Polarity::Positive as i32
+            }
+            Some(view_element::LinkPolarity::Negative) => {
+                project_io::view_element::link::Polarity::Negative as i32
+            }
+            None => project_io::view_element::link::Polarity::Unspecified as i32,
+        };
         project_io::view_element::Link {
             uid: v.uid,
             from_uid: v.from_uid,
@@ -1178,6 +1197,7 @@ impl From<view_element::Link> for project_io::view_element::Link {
                     ))
                 }
             },
+            polarity,
         }
     }
 }
@@ -1190,12 +1210,14 @@ fn test_view_element_link_roundtrip() {
             from_uid: 21,
             to_uid: 22,
             shape: view_element::LinkShape::Straight,
+            polarity: None,
         },
         view_element::Link {
             uid: 123,
             from_uid: 21,
             to_uid: 22,
             shape: view_element::LinkShape::Arc(351.0),
+            polarity: Some(view_element::LinkPolarity::Positive),
         },
         view_element::Link {
             uid: 123,
@@ -1213,6 +1235,7 @@ fn test_view_element_link_roundtrip() {
                     attached_to_uid: None,
                 },
             ]),
+            polarity: Some(view_element::LinkPolarity::Negative),
         },
     ];
     for expected in cases {

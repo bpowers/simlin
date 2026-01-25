@@ -178,8 +178,18 @@ impl<'input> ConversionContext<'input> {
             return Vec::new();
         }
 
-        // Convert to a HashMap reference for the view builder
-        view::build_views(self.views.clone(), &self.symbols)
+        // Build full namespace for view title deduplication:
+        // includes variable names, dimension names, and group names (xmutil behavior)
+        let mut all_names: std::collections::HashSet<String> =
+            self.symbols.keys().cloned().collect();
+        for dim in &self.dimensions {
+            all_names.insert(to_lower_space(&dim.name));
+        }
+        for group in &self.groups {
+            all_names.insert(to_lower_space(&group.name));
+        }
+
+        view::build_views(self.views.clone(), &self.symbols, &all_names)
     }
 
     /// Select the appropriate equation from a list, implementing PurgeAFOEq logic.

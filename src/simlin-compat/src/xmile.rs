@@ -2079,6 +2079,7 @@ pub mod view_element {
                 from_uid: v.from_uid.unwrap_or(-1),
                 to_uid: v.to_uid.unwrap_or(-1),
                 shape,
+                polarity: None,
             }
         }
     }
@@ -2131,6 +2132,7 @@ pub mod view_element {
             from_uid,
             to_uid,
             shape,
+            polarity: None,
         }
     }
 
@@ -2219,12 +2221,14 @@ pub mod view_element {
                 from_uid: 45,
                 to_uid: 67,
                 shape: LinkShape::Straight,
+                polarity: None,
             },
             datamodel::view_element::Link {
                 uid: 33,
                 from_uid: 45,
                 to_uid: 67,
                 shape: LinkShape::Arc(-45.0), // canvas format
+                polarity: None,
             },
             datamodel::view_element::Link {
                 uid: 33,
@@ -2235,6 +2239,7 @@ pub mod view_element {
                     y: 2.2,
                     attached_to_uid: None,
                 }]),
+                polarity: None,
             },
         ];
         let view = StockFlow {
@@ -2279,6 +2284,7 @@ pub mod view_element {
             from_uid: 1,
             to_uid: 2,
             shape: LinkShape::Straight,
+            polarity: None,
         };
 
         let xmile_link = Link::from(link, &view);
@@ -2329,6 +2335,7 @@ pub mod view_element {
             from_uid: 1,
             to_uid: 2,
             shape: LinkShape::Straight,
+            polarity: None,
         };
 
         let xmile_link = Link::from(link, &view);

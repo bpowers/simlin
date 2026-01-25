@@ -209,6 +209,17 @@ pub fn transform_view_coordinates(
 
     // Transform all elements
     for elem in view.elements.iter_mut().flatten() {
+        // Connectors have special handling: (0,0) control point is a sentinel
+        // for straight lines and must not be scaled (xmutil VensimView.cpp:154-160)
+        if let VensimElement::Connector(conn) = elem {
+            if conn.control_point.0 != 0 || conn.control_point.1 != 0 {
+                let new_x = (conn.control_point.0 as f64 * x_ratio + off_x).round() as i32;
+                let new_y = (conn.control_point.1 as f64 * y_ratio + off_y).round() as i32;
+                conn.control_point = (new_x, new_y);
+            }
+            continue;
+        }
+
         let new_x = (elem.x() as f64 * x_ratio + off_x).round() as i32;
         let new_y = (elem.y() as f64 * y_ratio + off_y).round() as i32;
         let new_w = (elem.width() as f64 * x_ratio).round() as i32;
@@ -263,8 +274,14 @@ pub struct FlowEndpoints {
 
 /// Compute flow points for a flow variable.
 ///
-/// This implements the XMILEGenerator.cpp algorithm for determining
+/// This implements the XMILEGenerator.cpp:987-1072 algorithm for determining
 /// flow pipe endpoints based on connected stocks and clouds.
+///
+/// Key behaviors matching xmutil:
+/// 1. Use connector control points for endpoint positions, NOT element centers
+/// 2. Apply anchor snapping: if vertical (xpt[0] == xpt[1]), snap Y to anchors;
+///    otherwise snap X to anchors
+/// 3. Output points in order: from endpoint first, then to endpoint
 ///
 /// `flow_name` is the canonical name of the flow variable.
 /// The function looks up connected stocks and checks if this flow appears
@@ -282,15 +299,19 @@ pub fn compute_flow_points(
 ) -> FlowEndpoints {
     use crate::mdl::builtins::to_lower_space;
 
-    // Collect endpoint information
+    // Collect endpoint information (xmutil: xpt, ypt, xanchor, yanchor)
     struct EndpointInfo {
         uid: i32,
-        x: i32,
-        y: i32,
-        is_to: bool, // true if flow goes TO this endpoint (it's an inflow)
+        // Control point from connector (xpt, ypt in xmutil)
+        ctrl_x: i32,
+        ctrl_y: i32,
+        // Target element center (xanchor, yanchor in xmutil)
+        anchor_x: i32,
+        anchor_y: i32,
     }
 
     let mut endpoints: Vec<EndpointInfo> = Vec::new();
+    let mut to_index: Option<usize> = None;
 
     // Find connectors from valve to stocks/clouds
     for elem in view.iter() {
@@ -298,7 +319,9 @@ pub fn compute_flow_points(
             && conn.from_uid == valve_uid
             && let Some(target) = view.get(conn.to_uid)
         {
-            let (is_valid, is_to) = match target {
+            // Determine if this is a valid endpoint and whether it's an inflow/outflow
+            // xmutil only sets to_index for Variable (stock) endpoints, not comments
+            let (is_valid, is_inflow) = match target {
                 VensimElement::Variable(v) => {
                     let target_canonical = to_lower_space(&v.name);
                     // Look up the stock's SymbolInfo
@@ -307,28 +330,45 @@ pub fn compute_flow_points(
                         let is_inflow = stock_info.inflows.contains(&flow_name.to_string());
                         let is_outflow = stock_info.outflows.contains(&flow_name.to_string());
                         if is_inflow || is_outflow {
-                            (true, is_inflow) // is_to=true if inflow
+                            (true, Some(is_inflow))
                         } else {
-                            (false, false)
+                            (false, None)
                         }
                     } else {
-                        (false, false)
+                        (false, None)
                     }
                 }
                 VensimElement::Comment(_) => {
-                    // Clouds are valid endpoints - default to "from" endpoint
-                    // unless we already have one
-                    (true, endpoints.iter().any(|e| !e.is_to))
+                    // Clouds are valid endpoints but DON'T affect to_index (xmutil behavior)
+                    (true, None)
                 }
-                _ => (false, false),
+                _ => (false, None),
             };
 
             if is_valid {
+                // xmutil uses connector control point for xpt/ypt
+                // and target element center for xanchor/yanchor
+                let count = endpoints.len();
+
+                // Only set to_index for Variable (stock) endpoints, not comments
+                // xmutil: inflows set toind = count, outflows set toind = count ? 0 : 1
+                // Inflows take precedence over outflows
+                if let Some(is_inflow_endpoint) = is_inflow {
+                    if is_inflow_endpoint {
+                        // Inflow: this endpoint is the "to" - inflows always override
+                        to_index = Some(count);
+                    } else if to_index.is_none() {
+                        // Outflow and no inflow found yet: the OTHER endpoint is the "to"
+                        to_index = Some(if count > 0 { 0 } else { 1 });
+                    }
+                }
+
                 endpoints.push(EndpointInfo {
                     uid: conn.to_uid,
-                    x: target.x(),
-                    y: target.y(),
-                    is_to,
+                    ctrl_x: conn.control_point.0,
+                    ctrl_y: conn.control_point.1,
+                    anchor_x: target.x(),
+                    anchor_y: target.y(),
                 });
 
                 if endpoints.len() >= 2 {
@@ -338,8 +378,9 @@ pub fn compute_flow_points(
         }
     }
 
-    // Fall back to default if not enough endpoints found
-    if endpoints.is_empty() {
+    // Fall back to default if not enough endpoints found (xmutil: count < 2 || toind < 0)
+    if endpoints.len() < 2 || to_index.is_none() {
+        // xmutil uses flow element coordinates for defaults
         return FlowEndpoints {
             from_x: flow_x - 150,
             from_y: flow_y,
@@ -350,46 +391,33 @@ pub fn compute_flow_points(
         };
     }
 
-    if endpoints.len() == 1 {
-        // Single endpoint - extend in the opposite direction
-        let ep = &endpoints[0];
-        if ep.is_to {
-            return FlowEndpoints {
-                from_x: flow_x - 150,
-                from_y: flow_y,
-                from_uid: None,
-                to_x: ep.x,
-                to_y: ep.y,
-                to_uid: Some(uid_offset + ep.uid),
-            };
-        } else {
-            return FlowEndpoints {
-                from_x: ep.x,
-                from_y: ep.y,
-                from_uid: Some(uid_offset + ep.uid),
-                to_x: flow_x + 25,
-                to_y: flow_y,
-                to_uid: None,
-            };
-        }
+    // Apply anchor snapping (xmutil XMILEGenerator.cpp:1052-1061)
+    let mut xpt = [endpoints[0].ctrl_x, endpoints[1].ctrl_x];
+    let mut ypt = [endpoints[0].ctrl_y, endpoints[1].ctrl_y];
+    let xanchor = [endpoints[0].anchor_x, endpoints[1].anchor_x];
+    let yanchor = [endpoints[0].anchor_y, endpoints[1].anchor_y];
+
+    if xpt[0] == xpt[1] {
+        // Vertical flow - snap Y coordinates to anchors
+        ypt[0] = yanchor[0];
+        ypt[1] = yanchor[1];
+    } else {
+        // Horizontal flow - snap X coordinates to anchors
+        xpt[0] = xanchor[0];
+        xpt[1] = xanchor[1];
     }
 
-    // Two endpoints - determine which is from/to
-    let (from_idx, to_idx) = if endpoints[0].is_to {
-        (1, 0)
-    } else if endpoints[1].is_to {
-        (0, 1)
-    } else {
-        // Neither is marked as "to", use order
-        (0, 1)
-    };
+    // Determine indices for from/to
+    // xmutil outputs [1-toind] first (from), then [toind] (to)
+    let to_idx = to_index.unwrap();
+    let from_idx = 1 - to_idx;
 
     FlowEndpoints {
-        from_x: endpoints[from_idx].x,
-        from_y: endpoints[from_idx].y,
+        from_x: xpt[from_idx],
+        from_y: ypt[from_idx],
         from_uid: Some(uid_offset + endpoints[from_idx].uid),
-        to_x: endpoints[to_idx].x,
-        to_y: endpoints[to_idx].y,
+        to_x: xpt[to_idx],
+        to_y: ypt[to_idx],
         to_uid: Some(uid_offset + endpoints[to_idx].uid),
     }
 }
@@ -416,28 +444,67 @@ pub fn is_cloud_endpoint(comment_uid: i32, view: &VensimView) -> Option<i32> {
 /// Track which view contains the primary definition of each variable.
 pub type PrimaryMap = HashMap<String, (usize, i32)>; // name -> (view_idx, uid)
 
+/// Set of effective ghosts: (view_idx, uid) pairs that should be treated as ghosts.
+pub type EffectiveGhosts = std::collections::HashSet<(usize, i32)>;
+
 /// Associate variables with views, determining ghost vs primary status.
 ///
-/// Returns a map of canonical variable names to (view_index, uid) for primary definitions.
-pub fn associate_variables(views: &[VensimView]) -> PrimaryMap {
+/// Returns:
+/// - A map of canonical variable names to (view_index, uid) for primary definitions
+/// - A set of (view_index, uid) pairs that are "effective ghosts" (duplicates even if
+///   not marked as ghost in the MDL file)
+///
+/// This implements xmutil's two-pass algorithm:
+/// 1. First pass: Find primaries, mark duplicates as effective ghosts
+/// 2. Second pass: Promote first occurrence to primary if variable has no primary
+pub fn associate_variables(views: &[VensimView]) -> (PrimaryMap, EffectiveGhosts) {
     use crate::mdl::builtins::to_lower_space;
 
     let mut primary_map = HashMap::new();
+    let mut effective_ghosts: EffectiveGhosts = std::collections::HashSet::new();
+    let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // First pass: find primaries, mark duplicates as effective ghosts
+    // This mirrors xmutil's VensimVariableElement constructor: if variable already
+    // has a view, it's forced to be a ghost.
     for (view_idx, view) in views.iter().enumerate() {
         for (uid, elem) in view.iter_with_uids() {
             if let VensimElement::Variable(var) = elem {
                 let canonical = to_lower_space(&var.name);
 
-                // First non-ghost appearance becomes primary
-                if !var.is_ghost && !primary_map.contains_key(&canonical) {
-                    primary_map.insert(canonical, (view_idx, uid));
+                if assigned.contains(&canonical) {
+                    // xmutil: if variable already has view, it's a ghost
+                    // Only add to effective_ghosts if not already marked as ghost in MDL
+                    if !var.is_ghost {
+                        effective_ghosts.insert((view_idx, uid));
+                    }
+                } else if !var.is_ghost {
+                    // First non-ghost appearance becomes primary
+                    primary_map.insert(canonical.clone(), (view_idx, uid));
+                    assigned.insert(canonical);
                 }
             }
         }
     }
 
-    primary_map
+    // Second pass: promote first occurrence to primary if variable has no primary
+    // This mirrors xmutil's CheckGhostOwners
+    for (view_idx, view) in views.iter().enumerate() {
+        for (uid, elem) in view.iter_with_uids() {
+            if let VensimElement::Variable(var) = elem {
+                let canonical = to_lower_space(&var.name);
+                if let std::collections::hash_map::Entry::Vacant(e) = primary_map.entry(canonical) {
+                    // Promote this (first encountered) to primary
+                    e.insert((view_idx, uid));
+                    // Remove from effective ghosts if it was there
+                    effective_ghosts.remove(&(view_idx, uid));
+                    // Don't break - continue to promote all missing primaries
+                }
+            }
+        }
+    }
+
+    (primary_map, effective_ghosts)
 }
 
 #[cfg(test)]
@@ -568,11 +635,13 @@ mod tests {
             }),
         );
 
-        let primary_map = associate_variables(&[view]);
+        let (primary_map, effective_ghosts) = associate_variables(&[view]);
 
         // to_lower_space canonicalizes to "test var" (underscores to spaces, lowercase)
         assert_eq!(primary_map.get("test var"), Some(&(0, 1)));
         assert!(!primary_map.contains_key("test var ghost"));
+        // The ghost at uid 2 is a true ghost (is_ghost=true), not an effective ghost
+        assert!(!effective_ghosts.contains(&(0, 2)));
     }
 
     // Helper to create test SymbolInfo
@@ -643,7 +712,9 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_flow_points_single_inflow_endpoint() {
+    fn test_compute_flow_points_single_endpoint_uses_defaults() {
+        // xmutil requires 2 endpoints with valid to_index to use collected endpoints.
+        // With only 1 endpoint, it falls back to defaults (XMILEGenerator.cpp:1047-1051)
         use super::super::types::{
             VensimConnector, VensimValve, VensimVariable, ViewHeader, ViewVersion,
         };
@@ -707,7 +778,7 @@ mod tests {
                 from_uid: 2,
                 to_uid: 1,
                 polarity: None,
-                control_point: (0, 0),
+                control_point: (150, 100),
             }),
         );
 
@@ -720,106 +791,22 @@ mod tests {
 
         let endpoints = compute_flow_points(2, 100, 100, &view, "flow rate", &symbols, 0);
 
-        // Single endpoint that is an inflow to Stock A (is_to=true)
-        // from should be default fallback, to should be the stock
-        assert_eq!(endpoints.from_x, 100 - 150);
-        assert_eq!(endpoints.from_y, 100);
+        // Single endpoint: xmutil uses defaults for BOTH endpoints when count < 2
+        assert_eq!(endpoints.from_x, 100 - 150); // flow_x - 150
+        assert_eq!(endpoints.from_y, 100); // flow_y
         assert!(endpoints.from_uid.is_none());
-        assert_eq!(endpoints.to_x, 200);
-        assert_eq!(endpoints.to_y, 100);
-        assert_eq!(endpoints.to_uid, Some(1)); // Stock A's uid
-    }
-
-    #[test]
-    fn test_compute_flow_points_single_outflow_endpoint() {
-        use super::super::types::{
-            VensimConnector, VensimValve, VensimVariable, ViewHeader, ViewVersion,
-        };
-        use crate::mdl::convert::VariableType;
-
-        let header = ViewHeader {
-            version: ViewVersion::V300,
-            title: "Test".to_string(),
-        };
-        let mut view = VensimView::new(header);
-
-        // Stock at uid 1
-        view.insert(
-            1,
-            VensimElement::Variable(VensimVariable {
-                uid: 1,
-                name: "Stock A".to_string(),
-                x: 50,
-                y: 100,
-                width: 40,
-                height: 20,
-                attached: false,
-                is_ghost: false,
-            }),
-        );
-
-        // Valve at uid 2
-        view.insert(
-            2,
-            VensimElement::Valve(VensimValve {
-                uid: 2,
-                name: "444".to_string(),
-                x: 100,
-                y: 100,
-                width: 6,
-                height: 8,
-                attached: true,
-            }),
-        );
-
-        // Flow at uid 3
-        view.insert(
-            3,
-            VensimElement::Variable(VensimVariable {
-                uid: 3,
-                name: "Flow Rate".to_string(),
-                x: 100,
-                y: 120,
-                width: 40,
-                height: 20,
-                attached: true,
-                is_ghost: false,
-            }),
-        );
-
-        // Connector from valve (2) to stock (1)
-        view.insert(
-            4,
-            VensimElement::Connector(VensimConnector {
-                uid: 4,
-                from_uid: 2,
-                to_uid: 1,
-                polarity: None,
-                control_point: (0, 0),
-            }),
-        );
-
-        // Stock A has "flow rate" as an outflow
-        let mut symbols = std::collections::HashMap::new();
-        symbols.insert(
-            "stock a".to_string(),
-            make_symbol_info(VariableType::Stock, vec![], vec!["flow rate".to_string()]),
-        );
-
-        let endpoints = compute_flow_points(2, 100, 100, &view, "flow rate", &symbols, 0);
-
-        // Single endpoint that is an outflow from Stock A (is_to=false)
-        // from should be the stock, to should be default fallback
-        assert_eq!(endpoints.from_x, 50);
-        assert_eq!(endpoints.from_y, 100);
-        assert_eq!(endpoints.from_uid, Some(1)); // Stock A's uid
-        assert_eq!(endpoints.to_x, 100 + 25);
-        assert_eq!(endpoints.to_y, 100);
+        assert_eq!(endpoints.to_x, 100 + 25); // flow_x + 25
+        assert_eq!(endpoints.to_y, 100); // flow_y
         assert!(endpoints.to_uid.is_none());
     }
 
+    // Note: test_compute_flow_points_single_outflow_endpoint removed - xmutil behavior
+    // requires 2 endpoints; single endpoint case covered by test_compute_flow_points_single_endpoint_uses_defaults
+
     #[test]
-    fn test_compute_flow_points_two_endpoints() {
+    fn test_compute_flow_points_two_endpoints_horizontal() {
+        // Test horizontal flow with anchor snapping
+        // xmutil: if xpt[0] != xpt[1] (different x), snap x coords to anchors
         use super::super::types::{
             VensimConnector, VensimValve, VensimVariable, ViewHeader, ViewVersion,
         };
@@ -831,7 +818,7 @@ mod tests {
         };
         let mut view = VensimView::new(header);
 
-        // Stock A (source) at uid 1
+        // Stock A (source) at uid 1, x=50
         view.insert(
             1,
             VensimElement::Variable(VensimVariable {
@@ -846,7 +833,7 @@ mod tests {
             }),
         );
 
-        // Stock B (destination) at uid 2
+        // Stock B (destination) at uid 2, x=250
         view.insert(
             2,
             VensimElement::Variable(VensimVariable {
@@ -861,7 +848,7 @@ mod tests {
             }),
         );
 
-        // Valve at uid 3
+        // Valve at uid 3, x=150 (between the stocks)
         view.insert(
             3,
             VensimElement::Valve(VensimValve {
@@ -890,7 +877,7 @@ mod tests {
             }),
         );
 
-        // Connector from valve to Stock A
+        // Connector from valve to Stock A - control point between valve and stock
         view.insert(
             5,
             VensimElement::Connector(VensimConnector {
@@ -898,11 +885,11 @@ mod tests {
                 from_uid: 3,
                 to_uid: 1,
                 polarity: None,
-                control_point: (0, 0),
+                control_point: (100, 100), // x=100, different from connector to Stock B
             }),
         );
 
-        // Connector from valve to Stock B
+        // Connector from valve to Stock B - control point between valve and stock
         view.insert(
             6,
             VensimElement::Connector(VensimConnector {
@@ -910,7 +897,7 @@ mod tests {
                 from_uid: 3,
                 to_uid: 2,
                 polarity: None,
-                control_point: (0, 0),
+                control_point: (200, 100), // x=200, different from connector to Stock A
             }),
         );
 
@@ -927,17 +914,144 @@ mod tests {
 
         let endpoints = compute_flow_points(3, 150, 100, &view, "flow rate", &symbols, 0);
 
-        // Two endpoints: Stock A is from (outflow), Stock B is to (inflow)
-        assert_eq!(endpoints.from_x, 50);
-        assert_eq!(endpoints.from_y, 100);
+        // xpt[0]=100, xpt[1]=200 → different x → horizontal → snap x to anchors
+        // xanchor[0]=50 (Stock A), xanchor[1]=250 (Stock B)
+        // Result: x snapped to anchors, y stays from control points
+        // Stock A is from (outflow), Stock B is to (inflow)
+        assert_eq!(endpoints.from_x, 50); // snapped to Stock A's x
+        assert_eq!(endpoints.from_y, 100); // control point y
         assert_eq!(endpoints.from_uid, Some(1)); // Stock A's uid
-        assert_eq!(endpoints.to_x, 250);
-        assert_eq!(endpoints.to_y, 100);
+        assert_eq!(endpoints.to_x, 250); // snapped to Stock B's x
+        assert_eq!(endpoints.to_y, 100); // control point y
+        assert_eq!(endpoints.to_uid, Some(2)); // Stock B's uid
+    }
+
+    #[test]
+    fn test_compute_flow_points_two_endpoints_vertical() {
+        // Test vertical flow with anchor snapping
+        // xmutil: if xpt[0] == xpt[1] (same x), snap y coords to anchors
+        use super::super::types::{
+            VensimConnector, VensimValve, VensimVariable, ViewHeader, ViewVersion,
+        };
+        use crate::mdl::convert::VariableType;
+
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        // Stock A (source) at uid 1, y=50
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Stock A".to_string(),
+                x: 100,
+                y: 50,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+
+        // Stock B (destination) at uid 2, y=250
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Stock B".to_string(),
+                x: 100,
+                y: 250,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+
+        // Valve at uid 3, y=150 (between the stocks)
+        view.insert(
+            3,
+            VensimElement::Valve(VensimValve {
+                uid: 3,
+                name: "444".to_string(),
+                x: 100,
+                y: 150,
+                width: 6,
+                height: 8,
+                attached: true,
+            }),
+        );
+
+        // Flow at uid 4
+        view.insert(
+            4,
+            VensimElement::Variable(VensimVariable {
+                uid: 4,
+                name: "Flow Rate".to_string(),
+                x: 120,
+                y: 150,
+                width: 40,
+                height: 20,
+                attached: true,
+                is_ghost: false,
+            }),
+        );
+
+        // Connector from valve to Stock A - same x as other connector (vertical)
+        view.insert(
+            5,
+            VensimElement::Connector(VensimConnector {
+                uid: 5,
+                from_uid: 3,
+                to_uid: 1,
+                polarity: None,
+                control_point: (100, 100), // same x=100 as connector to Stock B
+            }),
+        );
+
+        // Connector from valve to Stock B - same x as other connector (vertical)
+        view.insert(
+            6,
+            VensimElement::Connector(VensimConnector {
+                uid: 6,
+                from_uid: 3,
+                to_uid: 2,
+                polarity: None,
+                control_point: (100, 200), // same x=100 as connector to Stock A
+            }),
+        );
+
+        // Stock A has "flow rate" as outflow, Stock B has it as inflow
+        let mut symbols = std::collections::HashMap::new();
+        symbols.insert(
+            "stock a".to_string(),
+            make_symbol_info(VariableType::Stock, vec![], vec!["flow rate".to_string()]),
+        );
+        symbols.insert(
+            "stock b".to_string(),
+            make_symbol_info(VariableType::Stock, vec!["flow rate".to_string()], vec![]),
+        );
+
+        let endpoints = compute_flow_points(3, 100, 150, &view, "flow rate", &symbols, 0);
+
+        // xpt[0]=100, xpt[1]=100 → same x → vertical → snap y to anchors
+        // yanchor[0]=50 (Stock A), yanchor[1]=250 (Stock B)
+        // Result: x stays from control points, y snapped to anchors
+        // Stock A is from (outflow), Stock B is to (inflow)
+        assert_eq!(endpoints.from_x, 100); // control point x
+        assert_eq!(endpoints.from_y, 50); // snapped to Stock A's y
+        assert_eq!(endpoints.from_uid, Some(1)); // Stock A's uid
+        assert_eq!(endpoints.to_x, 100); // control point x
+        assert_eq!(endpoints.to_y, 250); // snapped to Stock B's y
         assert_eq!(endpoints.to_uid, Some(2)); // Stock B's uid
     }
 
     #[test]
     fn test_compute_flow_points_with_cloud() {
+        // Test flow between cloud and stock with anchor snapping
         use super::super::types::{
             VensimComment, VensimConnector, VensimValve, VensimVariable, ViewHeader, ViewVersion,
         };
@@ -949,7 +1063,7 @@ mod tests {
         };
         let mut view = VensimView::new(header);
 
-        // Cloud (comment) at uid 1
+        // Cloud (comment) at uid 1, x=50
         view.insert(
             1,
             VensimElement::Comment(VensimComment {
@@ -963,7 +1077,123 @@ mod tests {
             }),
         );
 
-        // Stock B at uid 2
+        // Stock B at uid 2, x=250
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Stock B".to_string(),
+                x: 250,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+
+        // Valve at uid 3, x=150 (between cloud and stock)
+        view.insert(
+            3,
+            VensimElement::Valve(VensimValve {
+                uid: 3,
+                name: "444".to_string(),
+                x: 150,
+                y: 100,
+                width: 6,
+                height: 8,
+                attached: true,
+            }),
+        );
+
+        // Flow at uid 4
+        view.insert(
+            4,
+            VensimElement::Variable(VensimVariable {
+                uid: 4,
+                name: "Flow Rate".to_string(),
+                x: 150,
+                y: 120,
+                width: 40,
+                height: 20,
+                attached: true,
+                is_ghost: false,
+            }),
+        );
+
+        // Connector from valve to cloud - control point between valve and cloud
+        view.insert(
+            5,
+            VensimElement::Connector(VensimConnector {
+                uid: 5,
+                from_uid: 3,
+                to_uid: 1,
+                polarity: None,
+                control_point: (100, 100), // x=100, different from other connector
+            }),
+        );
+
+        // Connector from valve to Stock B - control point between valve and stock
+        view.insert(
+            6,
+            VensimElement::Connector(VensimConnector {
+                uid: 6,
+                from_uid: 3,
+                to_uid: 2,
+                polarity: None,
+                control_point: (200, 100), // x=200, different from other connector
+            }),
+        );
+
+        // Stock B has "flow rate" as inflow
+        let mut symbols = std::collections::HashMap::new();
+        symbols.insert(
+            "stock b".to_string(),
+            make_symbol_info(VariableType::Stock, vec!["flow rate".to_string()], vec![]),
+        );
+
+        let endpoints = compute_flow_points(3, 150, 100, &view, "flow rate", &symbols, 0);
+
+        // xpt[0]=100, xpt[1]=200 → different x → horizontal → snap x to anchors
+        // Cloud at uid 1 should be from (since Stock B is to), Stock B is to
+        assert_eq!(endpoints.from_x, 50); // snapped to cloud's x
+        assert_eq!(endpoints.from_y, 100); // control point y
+        assert_eq!(endpoints.from_uid, Some(1)); // Cloud's uid
+        assert_eq!(endpoints.to_x, 250); // snapped to Stock B's x
+        assert_eq!(endpoints.to_y, 100); // control point y
+        assert_eq!(endpoints.to_uid, Some(2)); // Stock B's uid
+    }
+
+    #[test]
+    fn test_compute_flow_points_with_uid_offset() {
+        // Test that UID offset is properly applied to returned UIDs
+        use super::super::types::{
+            VensimConnector, VensimValve, VensimVariable, ViewHeader, ViewVersion,
+        };
+        use crate::mdl::convert::VariableType;
+
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        // Stock A (source) at uid 1, x=50
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Stock A".to_string(),
+                x: 50,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+
+        // Stock B (destination) at uid 2, x=250
         view.insert(
             2,
             VensimElement::Variable(VensimVariable {
@@ -1007,7 +1237,7 @@ mod tests {
             }),
         );
 
-        // Connector from valve to cloud
+        // Connector from valve (3) to Stock A (1)
         view.insert(
             5,
             VensimElement::Connector(VensimConnector {
@@ -1015,11 +1245,11 @@ mod tests {
                 from_uid: 3,
                 to_uid: 1,
                 polarity: None,
-                control_point: (0, 0),
+                control_point: (100, 100),
             }),
         );
 
-        // Connector from valve to Stock B
+        // Connector from valve (3) to Stock B (2)
         view.insert(
             6,
             VensimElement::Connector(VensimConnector {
@@ -1027,34 +1257,35 @@ mod tests {
                 from_uid: 3,
                 to_uid: 2,
                 polarity: None,
-                control_point: (0, 0),
+                control_point: (200, 100),
             }),
         );
 
-        // Stock B has "flow rate" as inflow
+        // Stock A has "flow rate" as outflow, Stock B has it as inflow
         let mut symbols = std::collections::HashMap::new();
+        symbols.insert(
+            "stock a".to_string(),
+            make_symbol_info(VariableType::Stock, vec![], vec!["flow rate".to_string()]),
+        );
         symbols.insert(
             "stock b".to_string(),
             make_symbol_info(VariableType::Stock, vec!["flow rate".to_string()], vec![]),
         );
 
-        let endpoints = compute_flow_points(3, 150, 100, &view, "flow rate", &symbols, 0);
+        // Use uid_offset of 100
+        let endpoints = compute_flow_points(3, 150, 100, &view, "flow rate", &symbols, 100);
 
-        // Cloud at uid 1 should be from (since Stock B is to), Stock B is to
-        assert_eq!(endpoints.from_x, 50);
-        assert_eq!(endpoints.from_y, 100);
-        assert_eq!(endpoints.from_uid, Some(1)); // Cloud's uid
-        assert_eq!(endpoints.to_x, 250);
-        assert_eq!(endpoints.to_y, 100);
-        assert_eq!(endpoints.to_uid, Some(2)); // Stock B's uid
+        // The returned UIDs should include the offset
+        assert_eq!(endpoints.from_uid, Some(101)); // Stock A's uid (1) + offset (100)
+        assert_eq!(endpoints.to_uid, Some(102)); // Stock B's uid (2) + offset (100)
     }
 
     #[test]
-    fn test_compute_flow_points_with_uid_offset() {
-        use super::super::types::{
-            VensimConnector, VensimValve, VensimVariable, ViewHeader, ViewVersion,
-        };
-        use crate::mdl::convert::VariableType;
+    fn test_multiple_all_ghost_variables_get_promoted() {
+        // Test that when multiple variables only appear as ghosts (all-ghost),
+        // all of them get promoted to primaries, not just the first one.
+        // This tests the Issue 3 fix (removed break statement).
+        use super::super::types::{VensimVariable, ViewHeader, ViewVersion};
 
         let header = ViewHeader {
             version: ViewVersion::V300,
@@ -1062,74 +1293,56 @@ mod tests {
         };
         let mut view = VensimView::new(header);
 
-        // Stock at uid 1
+        // Variable A - only appears as ghost
         view.insert(
             1,
             VensimElement::Variable(VensimVariable {
                 uid: 1,
-                name: "Stock A".to_string(),
+                name: "Var A".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: true, // ghost
+            }),
+        );
+
+        // Variable B - only appears as ghost (different variable)
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Var B".to_string(),
                 x: 200,
                 y: 100,
                 width: 40,
                 height: 20,
                 attached: false,
-                is_ghost: false,
+                is_ghost: true, // ghost
             }),
         );
 
-        // Valve at uid 2
-        view.insert(
-            2,
-            VensimElement::Valve(VensimValve {
-                uid: 2,
-                name: "444".to_string(),
-                x: 100,
-                y: 100,
-                width: 6,
-                height: 8,
-                attached: true,
-            }),
+        let (primary_map, effective_ghosts) = associate_variables(&[view]);
+
+        // Both should be promoted to primaries since they have no non-ghost appearances
+        assert!(
+            primary_map.contains_key("var a"),
+            "Var A should be promoted to primary"
+        );
+        assert!(
+            primary_map.contains_key("var b"),
+            "Var B should be promoted to primary"
         );
 
-        // Flow at uid 3
-        view.insert(
-            3,
-            VensimElement::Variable(VensimVariable {
-                uid: 3,
-                name: "Flow Rate".to_string(),
-                x: 100,
-                y: 120,
-                width: 40,
-                height: 20,
-                attached: true,
-                is_ghost: false,
-            }),
+        // Neither should be in effective_ghosts since they were promoted
+        assert!(
+            !effective_ghosts.contains(&(0, 1)),
+            "Var A should not be an effective ghost"
         );
-
-        // Connector from valve (2) to stock (1)
-        view.insert(
-            4,
-            VensimElement::Connector(VensimConnector {
-                uid: 4,
-                from_uid: 2,
-                to_uid: 1,
-                polarity: None,
-                control_point: (0, 0),
-            }),
+        assert!(
+            !effective_ghosts.contains(&(0, 2)),
+            "Var B should not be an effective ghost"
         );
-
-        // Stock A has "flow rate" as an inflow
-        let mut symbols = std::collections::HashMap::new();
-        symbols.insert(
-            "stock a".to_string(),
-            make_symbol_info(VariableType::Stock, vec!["flow rate".to_string()], vec![]),
-        );
-
-        // Use uid_offset of 100
-        let endpoints = compute_flow_points(2, 100, 100, &view, "flow rate", &symbols, 100);
-
-        // The returned UIDs should include the offset
-        assert!(endpoints.from_uid.is_none());
-        assert_eq!(endpoints.to_uid, Some(101)); // Stock A's uid (1) + offset (100)
     }
 }

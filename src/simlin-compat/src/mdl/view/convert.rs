@@ -8,9 +8,11 @@ use std::collections::HashMap;
 
 use simlin_core::datamodel::{self, Rect, View, ViewElement, view_element};
 
+use std::collections::HashSet;
+
 use super::processing::{
-    PrimaryMap, angle_from_points, associate_variables, compose_views, is_cloud_endpoint,
-    xmile_angle_to_canvas,
+    EffectiveGhosts, PrimaryMap, angle_from_points, associate_variables, compose_views,
+    is_cloud_endpoint, xmile_angle_to_canvas,
 };
 use super::types::{VensimComment, VensimElement, VensimVariable, VensimView};
 
@@ -23,41 +25,58 @@ use crate::mdl::convert::VariableType;
 /// 1. Transforms coordinates for multi-view composition
 /// 2. Associates variables with their primary views
 /// 3. Converts each element to datamodel format
+///
+/// `all_names` includes variable names, dimension names, and group names
+/// for collision-free view title deduplication (matching xmutil's full namespace).
 pub fn build_views(
     mut views: Vec<VensimView>,
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
+    all_names: &HashSet<String>,
 ) -> Vec<View> {
     if views.is_empty() {
         return Vec::new();
     }
 
+    // Normalize view titles and make them unique (xmutil MakeViewNamesUnique)
+    make_view_names_unique(&mut views, all_names);
+
     // Transform coordinates and get uid offsets
     let _offsets = compose_views(&mut views);
 
-    // Track primary variable definitions
-    let primary_map = associate_variables(&views);
+    // Track primary variable definitions and effective ghosts
+    let (primary_map, effective_ghosts) = associate_variables(&views);
 
     // Collect view UID offsets for cross-view alias resolution
     let view_offsets: Vec<i32> = views.iter().map(|v| v.uid_offset).collect();
 
     // Convert views
+    // Track start positions for group geometry (matches compose_views logic)
     let is_multi_view = views.len() > 1;
     let mut result = Vec::new();
+    let start_x = 100;
+    let mut start_y = 100;
 
     for (view_idx, view) in views.iter().enumerate() {
         if let Some(dm_view) = convert_view(
             view,
             symbols,
             &primary_map,
+            &effective_ghosts,
             view_idx,
             is_multi_view,
             &view_offsets,
+            start_x,
+            start_y,
         ) {
             result.push(dm_view);
         }
+        // Advance start_y for next view (same formula as compose_views)
+        let height = view.max_y(start_y + 80) - start_y;
+        start_y += height + 80;
     }
 
     // If multiple views, merge into one with group wrappers
+    // UIDs are preserved as uid_offset + local_uid (matching xmutil behavior)
     if result.len() > 1 {
         merge_views(result)
     } else {
@@ -115,9 +134,12 @@ fn convert_view(
     view: &VensimView,
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
     primary_map: &PrimaryMap,
+    effective_ghosts: &EffectiveGhosts,
     view_idx: usize,
     is_multi_view: bool,
     view_offsets: &[i32],
+    start_x: i32,
+    start_y: i32,
 ) -> Option<View> {
     let mut elements = Vec::new();
     let uid_offset = view.uid_offset;
@@ -132,11 +154,18 @@ fn convert_view(
 
     // If multi-view, add a group element for this view
     if is_multi_view {
-        let group = create_sector_group(view, uid_offset);
+        let group = create_sector_group(view, uid_offset, start_x, start_y);
         elements.push(group);
     }
 
-    // Convert elements
+    // Two-phase conversion to avoid dangling cloud references:
+    // Phase 1: Convert variables, track emitted flow UIDs
+    // Phase 2: Create clouds only for flows that were actually emitted
+    let mut emitted_flow_uids: HashSet<i32> = HashSet::new();
+
+    // Deferred clouds: (local_uid, uid, comment, flow_uid_with_offset)
+    let mut deferred_clouds: Vec<(&VensimComment, i32, i32)> = Vec::new();
+
     for (local_uid, elem) in view.iter_with_uids() {
         let uid = uid_offset + local_uid;
 
@@ -147,11 +176,15 @@ fn convert_view(
                     uid,
                     symbols,
                     primary_map,
+                    effective_ghosts,
                     view,
                     view_idx,
                     uid_offset,
                     view_offsets,
                 ) {
+                    if matches!(&view_elem, ViewElement::Flow(_)) {
+                        emitted_flow_uids.insert(uid);
+                    }
                     elements.push(view_elem);
                 }
             }
@@ -160,17 +193,23 @@ fn convert_view(
             }
             VensimElement::Comment(comment) => {
                 if let Some(&flow_uid) = cloud_comments.get(&local_uid) {
-                    // This comment is a cloud (flow endpoint)
-                    let cloud = convert_comment_as_cloud(comment, uid, flow_uid + uid_offset);
-                    elements.push(cloud);
+                    let flow_uid_with_offset = flow_uid + uid_offset;
+                    deferred_clouds.push((comment, uid, flow_uid_with_offset));
                 }
-                // Non-cloud comments are ignored (or could be converted to labels/groups)
+                // Non-cloud comments are ignored
             }
             VensimElement::Connector(conn) => {
                 if let Some(link) = convert_connector(conn, uid, view, uid_offset, symbols) {
                     elements.push(link);
                 }
             }
+        }
+    }
+
+    // Phase 2: Emit clouds only for flows that were actually emitted
+    for (comment, uid, flow_uid_with_offset) in deferred_clouds {
+        if emitted_flow_uids.contains(&flow_uid_with_offset) {
+            elements.push(convert_comment_as_cloud(comment, uid, flow_uid_with_offset));
         }
     }
 
@@ -184,10 +223,28 @@ fn convert_view(
     }))
 }
 
-/// Check if a variable name is a built-in system variable that should be filtered from views.
-/// These are handled automatically by the XMILE runtime.
-fn is_builtin_view_variable(canonical: &str) -> bool {
-    canonical == "time"
+/// Check if a variable should be filtered from views.
+///
+/// Variables are filtered if:
+/// 1. They are the "Time" built-in variable (handled automatically by XMILE runtime)
+/// 2. They are "unwanted" control variables (INITIAL TIME, FINAL TIME, TIME STEP, SAVEPER)
+fn should_filter_from_view(
+    canonical: &str,
+    symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
+) -> bool {
+    // Time variable (case-insensitive via canonical)
+    if canonical == "time" {
+        return true;
+    }
+
+    // Check if it's an unwanted variable (control variables like sim specs)
+    if let Some(info) = symbols.get(canonical)
+        && info.unwanted
+    {
+        return true;
+    }
+
+    false
 }
 
 /// Convert a variable element to the appropriate ViewElement type.
@@ -197,6 +254,7 @@ fn convert_variable(
     uid: i32,
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
     primary_map: &PrimaryMap,
+    effective_ghosts: &EffectiveGhosts,
     view: &VensimView,
     view_idx: usize,
     uid_offset: i32,
@@ -204,10 +262,14 @@ fn convert_variable(
 ) -> Option<ViewElement> {
     let canonical = to_lower_space(&var.name);
 
-    // Skip built-in system variables like "Time"
-    if is_builtin_view_variable(&canonical) {
+    // Skip Time and unwanted control variables
+    if should_filter_from_view(&canonical, symbols) {
         return None;
     }
+
+    // Skip variables not in symbol table (xmutil behavior) -- check early
+    // to avoid creating dangling alias references for unknown variables
+    let symbol_info = symbols.get(&canonical)?;
 
     let xmile_name = var.name.replace(' ', "_");
 
@@ -218,28 +280,37 @@ fn convert_variable(
         .map(|(idx, primary_uid)| *idx == view_idx && *primary_uid == var.uid)
         .unwrap_or(false);
 
-    if !is_primary && var.is_ghost {
+    // A variable is an effective ghost if:
+    // 1. It's marked as ghost in the MDL file (var.is_ghost), OR
+    // 2. It's a duplicate that was marked as effective ghost during association
+    let is_effective_ghost = var.is_ghost || effective_ghosts.contains(&(view_idx, var.uid));
+
+    if !is_primary && is_effective_ghost {
         // This is a ghost/alias - get the primary UID
         if let Some((primary_view_idx, primary_local_uid)) = primary_map.get(&canonical) {
             // Calculate the aliased UID with the primary's view offset
             let primary_offset = view_offsets.get(*primary_view_idx).copied().unwrap_or(0);
             let alias_of_uid = primary_offset + *primary_local_uid;
 
+            // For stock ghosts, apply xmutil offset: x - 22, y - 17
+            // (XMILEGenerator.cpp:921-929)
+            let (alias_x, alias_y) = if symbol_info.var_type == VariableType::Stock {
+                (var.x as f64 - 22.0, var.y as f64 - 17.0)
+            } else {
+                (var.x as f64, var.y as f64)
+            };
+
             return Some(ViewElement::Alias(view_element::Alias {
                 uid,
                 alias_of_uid,
-                x: var.x as f64,
-                y: var.y as f64,
-                label_side: default_label_side_for_variable(&canonical, symbols),
+                x: alias_x,
+                y: alias_y,
+                label_side: view_element::LabelSide::Bottom,
             }));
         }
     }
 
-    // Determine variable type from symbols
-    let var_type = symbols
-        .get(&canonical)
-        .map(|info| info.var_type)
-        .unwrap_or(VariableType::Aux);
+    let var_type = symbol_info.var_type;
 
     match var_type {
         VariableType::Stock => Some(ViewElement::Stock(view_element::Stock {
@@ -272,21 +343,6 @@ fn convert_variable(
     }
 }
 
-/// Get the default label side for a variable based on its type.
-fn default_label_side_for_variable(
-    canonical: &str,
-    symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
-) -> view_element::LabelSide {
-    if let Some(info) = symbols.get(canonical) {
-        match info.var_type {
-            VariableType::Stock => view_element::LabelSide::Top,
-            _ => view_element::LabelSide::Bottom,
-        }
-    } else {
-        view_element::LabelSide::Bottom
-    }
-}
-
 /// Compute flow data including position and flow points.
 ///
 /// Returns (flow_x, flow_y, flow_points) where:
@@ -303,14 +359,17 @@ fn compute_flow_data(
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
 ) -> (i32, i32, Vec<view_element::FlowPoint>) {
     // Look for valve at uid - 1 (typical Vensim layout)
+    // xmutil requires BOTH conditions:
+    // 1. Flow variable has attached=true (vele->Attached())
+    // 2. Preceding element is a valve (elements[local_uid - 1]->Type() == VALVE)
     let valve_uid = var.uid - 1;
-    let (flow_x, flow_y) = if let Some(VensimElement::Valve(valve)) = view.get(valve_uid) {
-        if valve.attached {
-            (valve.x, valve.y)
-        } else {
-            (var.x, var.y)
-        }
+    let (flow_x, flow_y) = if var.attached  // Flow must be attached
+        && let Some(VensimElement::Valve(_valve)) = view.get(valve_uid)
+    {
+        // Use valve coordinates for flow element position
+        (_valve.x, _valve.y)
     } else {
+        // Use flow variable coordinates
         (var.x, var.y)
     };
 
@@ -318,8 +377,9 @@ fn compute_flow_data(
     let canonical = to_lower_space(&var.name);
 
     // Compute flow points using the processing module's algorithm
+    // Pass the flow variable's coordinates for fallback (not valve's) per xmutil behavior
     let endpoints = super::processing::compute_flow_points(
-        valve_uid, flow_x, flow_y, view, &canonical, symbols, uid_offset,
+        valve_uid, var.x, var.y, view, &canonical, symbols, uid_offset,
     );
 
     let points = vec![
@@ -386,23 +446,33 @@ fn convert_connector(
         _ => (to_elem, to_uid),
     };
 
-    // Skip connectors involving clouds (flow endpoints handled as part of Flow element)
-    if matches!(actual_from, VensimElement::Comment(_))
-        || matches!(actual_to, VensimElement::Comment(_))
+    // After valve indirection, verify both endpoints are variables
+    if !matches!(actual_from, VensimElement::Variable(_))
+        || !matches!(actual_to, VensimElement::Variable(_))
     {
         return None;
     }
 
-    // Skip connectors involving built-in variables like "Time"
-    if let VensimElement::Variable(v) = actual_from
-        && is_builtin_view_variable(&to_lower_space(&v.name))
-    {
-        return None;
+    // Skip connectors involving Time or unwanted control variables
+    if let VensimElement::Variable(v) = actual_from {
+        let canonical = to_lower_space(&v.name);
+        if should_filter_from_view(&canonical, symbols) {
+            return None;
+        }
+        // Skip connectors involving unknown variables (consistent with variable skipping)
+        if !symbols.contains_key(&canonical) {
+            return None;
+        }
     }
-    if let VensimElement::Variable(v) = actual_to
-        && is_builtin_view_variable(&to_lower_space(&v.name))
-    {
-        return None;
+    if let VensimElement::Variable(v) = actual_to {
+        let canonical = to_lower_space(&v.name);
+        if should_filter_from_view(&canonical, symbols) {
+            return None;
+        }
+        // Skip connectors involving unknown variables (consistent with variable skipping)
+        if !symbols.contains_key(&canonical) {
+            return None;
+        }
     }
 
     // Skip connectors to stocks (flow connections handled differently)
@@ -418,13 +488,24 @@ fn convert_connector(
     // Calculate angle
     let shape = calculate_link_shape(actual_from, actual_to, conn);
 
+    let polarity = match conn.polarity {
+        Some('+') => Some(view_element::LinkPolarity::Positive),
+        Some('-') => Some(view_element::LinkPolarity::Negative),
+        _ => None,
+    };
+
     Some(ViewElement::Link(view_element::Link {
         uid,
         from_uid: actual_from_uid,
         to_uid: actual_to_uid,
         shape,
+        polarity,
     }))
 }
+
+/// Epsilon for comparing angles - angles within this threshold are considered equal.
+/// This is tight to ensure roundtrip fidelity (matching xmile.rs behavior).
+const ANGLE_EPSILON_DEGREES: f64 = 0.01;
 
 /// Calculate the link shape (straight or arc) based on element positions and control point.
 fn calculate_link_shape(
@@ -439,7 +520,7 @@ fn calculate_link_shape(
     let ctrl_x = conn.control_point.0 as f64;
     let ctrl_y = conn.control_point.1 as f64;
 
-    // If control point is (0, 0), it's a straight line
+    // If control point is (0, 0), it's a straight line sentinel
     if ctrl_x == 0.0 && ctrl_y == 0.0 {
         return view_element::LinkShape::Straight;
     }
@@ -453,7 +534,11 @@ fn calculate_link_shape(
     let dy = to_y - from_y;
     let straight_angle = dy.atan2(dx).to_degrees();
 
-    if (canvas_angle - straight_angle).abs() < 0.5 {
+    // Handle wrap-around (e.g., -179 vs 179 should be close)
+    let diff = (canvas_angle - straight_angle).abs();
+    let diff = if diff > 180.0 { 360.0 - diff } else { diff };
+
+    if diff < ANGLE_EPSILON_DEGREES {
         view_element::LinkShape::Straight
     } else {
         view_element::LinkShape::Arc(canvas_angle)
@@ -461,17 +546,40 @@ fn calculate_link_shape(
 }
 
 /// Create a sector/group element for multi-view composition.
-fn create_sector_group(view: &VensimView, uid_offset: i32) -> ViewElement {
-    let x = view.min_x().unwrap_or(100) as f64 - 40.0;
-    let y = view.min_y().unwrap_or(100) as f64;
-    let width = (view.max_x(200) - view.min_x().unwrap_or(100)) as f64 + 60.0;
-    let height = (view.max_y(200) - view.min_y().unwrap_or(100)) as f64 + 40.0;
+///
+/// Uses xmutil's exact formula (XMILEGenerator.cpp:886-892) for bounds,
+/// then converts to center coordinates for datamodel.
+///
+/// xmutil formula gives top-left:
+/// - top_left_x = start_x - 40
+/// - top_left_y = start_y (the y before +20 content offset)
+/// - width = max_x + 60 (absolute coordinate)
+/// - height = (max_y - start_y) + 40
+///
+/// datamodel::view_element::Group expects CENTER coordinates.
+fn create_sector_group(
+    view: &VensimView,
+    uid_offset: i32,
+    start_x: i32,
+    start_y: i32,
+) -> ViewElement {
+    // xmutil formula gives top-left coordinates
+    let top_left_x = (start_x - 40) as f64;
+    let top_left_y = start_y as f64;
 
+    // xmutil formula: width = GetViewMaxX(100) + 60
+    // After transformation, GetViewMaxX returns the absolute max_x
+    let width = (view.max_x(100) + 60) as f64;
+
+    // xmutil formula: height = GetViewMaxY(starty + 80) - starty + 40
+    let height = (view.max_y(start_y + 80) - start_y + 40) as f64;
+
+    // Convert to center coordinates for datamodel
     ViewElement::Group(view_element::Group {
         uid: uid_offset,
         name: view.title().to_string(),
-        x,
-        y,
+        x: top_left_x + width / 2.0,
+        y: top_left_y + height / 2.0,
         width,
         height,
     })
@@ -521,10 +629,78 @@ fn calculate_view_box(elements: &[ViewElement]) -> Rect {
     }
 }
 
+/// Normalize a view title by replacing special characters with spaces.
+///
+/// Implements xmutil's MakeViewNamesUnique normalization (Model.cpp:587-592):
+/// - Replace `.`, `-`, `+`, `,`, `/`, `*`, `^` with space
+/// - Collapse consecutive spaces
+fn normalize_view_title(title: &str) -> String {
+    let mut result = String::new();
+    for c in title.chars() {
+        let c = match c {
+            '.' | '-' | '+' | ',' | '/' | '*' | '^' => ' ',
+            _ => c,
+        };
+        // Collapse spaces: only add if non-space or prev not space
+        if c != ' ' || (!result.is_empty() && !result.ends_with(' ')) {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Make view names unique by normalizing titles and deduplicating.
+///
+/// Implements xmutil's MakeViewNamesUnique (Model.cpp:580-600):
+/// 1. Normalize title (replace special chars, collapse spaces)
+/// 2. If empty, use "Module " (note trailing space)
+/// 3. Append "1" until unique against symbol namespace AND already-used names
+fn make_view_names_unique(views: &mut [VensimView], symbol_names: &HashSet<String>) {
+    let mut used_names: HashSet<String> = HashSet::new();
+
+    for view in views.iter_mut() {
+        let mut name = normalize_view_title(view.title());
+
+        if name.is_empty() {
+            name = "Module ".to_string(); // Note trailing space per xmutil
+        }
+
+        // Deduplicate: append "1" until unique against symbols and used names
+        // xmutil uses ToLowerSpace for comparison (to_lower_space)
+        // Recompute canonical in the loop condition to avoid infinite loop
+        while symbol_names.contains(&to_lower_space(&name))
+            || used_names.contains(&to_lower_space(&name))
+        {
+            name.push('1');
+        }
+
+        used_names.insert(to_lower_space(&name));
+        view.set_title(name);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mdl::convert::SymbolInfo;
     use crate::mdl::view::types::{ViewHeader, ViewVersion};
+
+    fn make_symbol_info(var_type: VariableType) -> SymbolInfo<'static> {
+        SymbolInfo {
+            var_type,
+            equations: vec![],
+            inflows: vec![],
+            outflows: vec![],
+            unwanted: false,
+            alternate_name: None,
+        }
+    }
+
+    fn names_from_symbols(
+        symbols: &HashMap<String, SymbolInfo<'_>>,
+    ) -> std::collections::HashSet<String> {
+        symbols.keys().cloned().collect()
+    }
 
     fn create_test_view() -> VensimView {
         let header = ViewHeader {
@@ -554,15 +730,16 @@ mod tests {
     fn test_build_empty_views() {
         let views: Vec<VensimView> = Vec::new();
         let symbols = HashMap::new();
-        let result = build_views(views, &symbols);
+        let result = build_views(views, &symbols, &names_from_symbols(&symbols));
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_build_single_view() {
         let view = create_test_view();
-        let symbols = HashMap::new();
-        let result = build_views(vec![view], &symbols);
+        let mut symbols = HashMap::new();
+        symbols.insert("stock a".to_string(), make_symbol_info(VariableType::Stock));
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
 
         assert_eq!(result.len(), 1);
         let View::StockFlow(sf) = &result[0];
@@ -599,12 +776,18 @@ mod tests {
     #[test]
     fn test_create_sector_group() {
         let view = create_test_view();
-        let group = create_sector_group(&view, 0);
+        // Typical starting position: x=100, y=100
+        let group = create_sector_group(&view, 0, 100, 100);
 
         if let ViewElement::Group(g) = group {
             assert_eq!(g.name, "Test View");
             assert!(g.width > 0.0);
             assert!(g.height > 0.0);
+            // top_left_x = start_x - 40 = 60, x = top_left_x + width/2
+            // top_left_y = start_y = 100, y = top_left_y + height/2
+            // Group coordinates should be CENTER, not top-left
+            assert_eq!(g.x, 60.0 + g.width / 2.0);
+            assert_eq!(g.y, 100.0 + g.height / 2.0);
         } else {
             panic!("Expected Group element");
         }
@@ -662,8 +845,10 @@ mod tests {
             }),
         );
 
-        let symbols = HashMap::new();
-        let result = build_views(vec![view], &symbols);
+        // Add symbol info for x (but not Time - Time is filtered by should_filter_from_view)
+        let mut symbols = HashMap::new();
+        symbols.insert("x".to_string(), make_symbol_info(VariableType::Aux));
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
 
         assert_eq!(result.len(), 1);
         let View::StockFlow(sf) = &result[0];
@@ -738,8 +923,13 @@ mod tests {
             }),
         );
 
-        let symbols = HashMap::new();
-        let result = build_views(vec![view], &symbols);
+        // Add symbol info for the variable
+        let mut symbols = HashMap::new();
+        symbols.insert(
+            "contact rate".to_string(),
+            make_symbol_info(VariableType::Aux),
+        );
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
 
         assert_eq!(result.len(), 1);
         let View::StockFlow(sf) = &result[0];
@@ -760,6 +950,173 @@ mod tests {
         assert_eq!(
             alias_count, 1,
             "Expected 1 alias element for ghost variable"
+        );
+    }
+
+    #[test]
+    fn test_view_title_collision_with_symbol_terminates() {
+        // Test that view named "Population" with variable "population" terminates
+        // without infinite loop (Issue 1 fix)
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Population".to_string(), // Same as variable name after canonicalization
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Population".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert(
+            "population".to_string(),
+            make_symbol_info(VariableType::Stock),
+        );
+
+        // This should complete without infinite loop
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+
+        assert_eq!(result.len(), 1);
+        let View::StockFlow(sf) = &result[0];
+        assert!(!sf.elements.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_variable_skipped() {
+        // Test that a variable not in symbols is not emitted (Issue 6 fix)
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        // Known variable
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Known Var".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+
+        // Unknown variable (not in symbols)
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Unknown Var".to_string(),
+                x: 200,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+
+        // Only add Known Var to symbols
+        let mut symbols = HashMap::new();
+        symbols.insert("known var".to_string(), make_symbol_info(VariableType::Aux));
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+
+        assert_eq!(result.len(), 1);
+        let View::StockFlow(sf) = &result[0];
+
+        // Should only have 1 element (Known Var), not 2
+        let aux_count = sf
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Aux(_)))
+            .count();
+        assert_eq!(aux_count, 1, "Unknown variable should be skipped");
+    }
+
+    #[test]
+    fn test_connector_unknown_endpoint_skipped() {
+        // Test that a connector with unknown variable endpoint is not emitted (Issue 7 fix)
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        // Known variable
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Known Var".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+
+        // Unknown variable (not in symbols)
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Unknown Var".to_string(),
+                x: 200,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+
+        // Connector from Known to Unknown
+        view.insert(
+            3,
+            VensimElement::Connector(super::super::types::VensimConnector {
+                uid: 3,
+                from_uid: 1,
+                to_uid: 2,
+                polarity: None,
+                control_point: (0, 0),
+            }),
+        );
+
+        // Only add Known Var to symbols
+        let mut symbols = HashMap::new();
+        symbols.insert("known var".to_string(), make_symbol_info(VariableType::Aux));
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+
+        assert_eq!(result.len(), 1);
+        let View::StockFlow(sf) = &result[0];
+
+        // Should have 0 links (connector to unknown variable should be skipped)
+        let link_count = sf
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Link(_)))
+            .count();
+        assert_eq!(
+            link_count, 0,
+            "Connector with unknown endpoint should be skipped"
         );
     }
 }

@@ -208,6 +208,11 @@ impl VensimView {
         &self.header.title
     }
 
+    /// Set the title of this view.
+    pub fn set_title(&mut self, title: String) {
+        self.header.title = title;
+    }
+
     /// Get an element by UID.
     pub fn get(&self, uid: i32) -> Option<&VensimElement> {
         if uid < 0 {

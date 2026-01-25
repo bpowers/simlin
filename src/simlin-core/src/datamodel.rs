@@ -457,12 +457,19 @@ pub mod view_element {
         MultiPoint(Vec<FlowPoint>),
     }
 
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub enum LinkPolarity {
+        Positive,
+        Negative,
+    }
+
     #[derive(Clone, PartialEq, Debug)]
     pub struct Link {
         pub uid: i32,
         pub from_uid: i32,
         pub to_uid: i32,
         pub shape: LinkShape,
+        pub polarity: Option<LinkPolarity>,
     }
 
     #[derive(Clone, PartialEq, Debug)]
