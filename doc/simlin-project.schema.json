@@ -128,10 +128,7 @@
         }
       },
       "required": [
-        "name",
-        "stocks",
-        "flows",
-        "auxiliaries"
+        "name"
       ]
     },
     "Stock": {
