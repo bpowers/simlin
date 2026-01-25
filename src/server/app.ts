@@ -26,6 +26,7 @@ import { redirectToHttps } from './redirect-to-https';
 import { requestLogger } from './request-logger';
 import { createProjectRouteHandler } from './route-handlers';
 import { initializeServerDependencies } from './server-init';
+import { getStaticDirectory, validateStaticDirectory } from './static-config';
 
 // redefinition from Helmet, as they don't export it
 interface ContentSecurityPolicyDirectiveValueFunction {
@@ -137,7 +138,11 @@ class App {
     // the type of content that is really amenable to etags anyway.
     this.app.set('etag', false);
 
-    const indexHtml = fs.readFileSync('public/index.html').toString('utf-8');
+    // Determine static directory based on environment and available files
+    const staticDir = getStaticDirectory();
+    validateStaticDirectory(staticDir);
+
+    const indexHtml = fs.readFileSync(path.join(staticDir, 'index.html')).toString('utf-8');
     const metaTagContentsMatch = indexHtml.match(/http-equiv="Content-Security-Policy"[^>]+/g);
     const additionalScriptSrcs: string[] = [];
     if (metaTagContentsMatch && metaTagContentsMatch.length > 0) {
@@ -206,7 +211,7 @@ class App {
       }),
     );
 
-    this.app.use(favicon(path.join(this.app.get('public'), 'favicon.ico')));
+    this.app.use(favicon(path.join(staticDir, 'favicon.ico')));
 
     authn(this.app, this.authn);
 
@@ -215,7 +220,7 @@ class App {
     // all others should serve index.js if user is authorized
     this.app.use('/api', authz, apiRouter(this.app));
 
-    const staticHandler = express.static('build', {
+    const staticHandler = express.static(staticDir, {
       // this doesn't seem to work on Google App Engine - always says
       // Tue, 01 Jan 1980 00:00:01 GMT, so disable it
       lastModified: false,
