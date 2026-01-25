@@ -10,6 +10,7 @@ const config = {
   moduleFileExtensions: ['ts', 'tsx', 'js'],
   moduleNameMapper: {
     '\\.css$': '<rootDir>/tests/css-module-stub.ts',
+    '^@system-dynamics/engine2/internal/wasm$': '<rootDir>/../engine2/src/internal/wasm.node.ts',
   },
 };
 

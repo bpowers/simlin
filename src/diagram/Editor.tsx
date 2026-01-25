@@ -163,14 +163,41 @@ interface EditorState {
   variableDetailsActiveTab: number;
 }
 
-interface EditorProps {
+// Discriminated union types for project data formats
+export type ProtobufProjectData = {
+  format: 'protobuf';
+  data: Readonly<Uint8Array>;
+};
+
+export type JsonProjectData = {
+  format: 'json';
+  data: string;
+};
+
+export type ProjectData = ProtobufProjectData | JsonProjectData;
+
+type ProtobufInputProps = {
+  inputFormat: 'protobuf';
   initialProjectBinary: Readonly<Uint8Array>;
+  onSave: (project: ProtobufProjectData, currVersion: number) => Promise<number | undefined>;
+};
+
+type JsonInputProps = {
+  inputFormat: 'json';
+  initialProjectJson: string;
+  onSave: (project: JsonProjectData, currVersion: number) => Promise<number | undefined>;
+};
+
+type ProjectInputProps = ProtobufInputProps | JsonInputProps;
+
+interface EditorPropsBase {
   initialProjectVersion: number;
   name: string; // used when saving
   embedded?: boolean;
-  onSave: (project: Readonly<Uint8Array>, currVersion: number) => Promise<number | undefined>;
   readOnlyMode?: boolean;
 }
+
+export type EditorProps = EditorPropsBase & ProjectInputProps;
 
 export class Editor extends React.PureComponent<EditorProps, EditorState> {
   engine2Project?: Engine2Project;
@@ -178,14 +205,17 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   newEngineQueuedView?: StockFlowView;
 
   inSave = false;
-  queuedModelToSave?: Readonly<Uint8Array>;
+  saveQueued = false;
 
   constructor(props: EditorProps) {
     super(props);
 
     this.state = {
       activeProject: undefined,
-      projectHistory: Stack<Readonly<Uint8Array>>([props.initialProjectBinary]),
+      projectHistory:
+        props.inputFormat === 'protobuf'
+          ? Stack<Readonly<Uint8Array>>([props.initialProjectBinary])
+          : Stack<Readonly<Uint8Array>>(),
       projectOffset: 0,
       modelErrors: List<Error>(),
       modelName: 'main',
@@ -204,7 +234,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     setTimeout(async () => {
-      await this.openEngine2Project(props.initialProjectBinary);
+      await this.openInitialProject();
       this.scheduleSimRun();
     });
   }
@@ -328,21 +358,21 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       projectOffset: 0,
     });
     if (scheduleSave) {
-      this.scheduleSave(serializedProject);
+      this.scheduleSave();
     }
   }
 
-  scheduleSave(project: Readonly<Uint8Array>): void {
+  scheduleSave(): void {
     const { projectVersion } = this.state;
 
     setTimeout(async () => {
-      await this.save(project, toInt(projectVersion));
+      await this.save(toInt(projectVersion));
     });
   }
 
-  async save(project: Readonly<Uint8Array>, currVersion: number): Promise<void> {
+  async save(currVersion: number): Promise<void> {
     if (this.inSave) {
-      this.queuedModelToSave = project;
+      this.saveQueued = true;
       return;
     }
 
@@ -350,7 +380,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     let version: number | undefined;
     try {
-      version = await this.props.onSave(project, currVersion);
+      const engine2 = defined(this.engine2Project);
+      if (this.props.inputFormat === 'json') {
+        version = await this.props.onSave({ format: 'json', data: engine2.serializeJson() }, currVersion);
+      } else {
+        version = await this.props.onSave({ format: 'protobuf', data: engine2.serializeProtobuf() }, currVersion);
+      }
       if (version) {
         this.setState({ projectVersion: version });
       }
@@ -363,11 +398,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     this.inSave = false;
 
-    if (this.queuedModelToSave) {
-      const project = this.queuedModelToSave;
-      this.queuedModelToSave = undefined;
+    if (this.saveQueued) {
+      this.saveQueued = false;
       if (version) {
-        await this.save(project, version);
+        await this.save(version);
       } else {
         this.setState({
           modelErrors: this.state.modelErrors.push(new Error('last save failed, please reload')),
@@ -2093,6 +2127,32 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     return project;
   }
 
+  async openInitialProject(): Promise<void> {
+    let engine2: Engine2Project;
+    try {
+      if (this.props.inputFormat === 'json') {
+        engine2 = await Engine2Project.openJson(this.props.initialProjectJson);
+      } else {
+        engine2 = await Engine2Project.openProtobuf(this.props.initialProjectBinary as Uint8Array);
+      }
+    } catch (e: any) {
+      this.appendModelError(`opening the project in the engine failed: ${e?.message ?? 'Unknown error'}`);
+      return;
+    }
+
+    this.engine2Project = engine2;
+
+    const serializedProject = engine2.serializeProtobuf();
+
+    const json = JSON.parse(engine2.serializeJson()) as JsonProject;
+    const project = this.updateVariableErrors(Project.fromJson(json));
+
+    this.setState({
+      projectHistory: Stack<Readonly<Uint8Array>>([serializedProject]),
+      activeProject: project,
+    });
+  }
+
   async openEngine2Project(serializedProject: Readonly<Uint8Array>): Promise<Engine2Project | undefined> {
     this.engine2Project?.dispose();
     this.engine2Project = undefined;
@@ -2155,7 +2215,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     setTimeout(async () => {
       await this.openEngine2Project(serializedProject);
       this.scheduleSimRun();
-      this.scheduleSave(serializedProject);
+      this.scheduleSave();
     });
   };
 
