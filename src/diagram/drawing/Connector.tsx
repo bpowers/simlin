@@ -85,8 +85,12 @@ export function takeoffθ(props: Pick<ConnectorProps, 'element' | 'from' | 'to' 
     // check if the user's cursor and the center of the arc's circle are on the same
     // side of the straight line connecting the from and to elements.  If so, we need
     // to set the sweep flag.
-    const side1 = (circ.x - fromVisual.cx) * (toVisual.cy - fromVisual.cy) - (circ.y - fromVisual.cy) * (toVisual.cx - fromVisual.cx);
-    const side2 = (arcPoint.x - fromVisual.cx) * (toVisual.cy - fromVisual.cy) - (arcPoint.y - fromVisual.cy) * (toVisual.cx - fromVisual.cx);
+    const side1 =
+      (circ.x - fromVisual.cx) * (toVisual.cy - fromVisual.cy) -
+      (circ.y - fromVisual.cy) * (toVisual.cx - fromVisual.cx);
+    const side2 =
+      (arcPoint.x - fromVisual.cx) * (toVisual.cy - fromVisual.cy) -
+      (arcPoint.y - fromVisual.cy) * (toVisual.cx - fromVisual.cx);
 
     const sweep = side1 < 0 === side2 < 0;
 
@@ -349,14 +353,18 @@ export class Connector extends React.PureComponent<ConnectorProps> {
     // inverse flag
     let inv: boolean = spanθ > 0 || spanθ <= degToRad(-180);
 
-    const side1 = (circ.x - fromVisual.cx) * (toVisual.cy - fromVisual.cy) - (circ.y - fromVisual.cy) * (toVisual.cx - fromVisual.cx);
+    const side1 =
+      (circ.x - fromVisual.cx) * (toVisual.cy - fromVisual.cy) -
+      (circ.y - fromVisual.cy) * (toVisual.cx - fromVisual.cx);
     const startA = intersectElementArc(from, circ, inv);
     const startR = sqrt(square(startA.x - fromVisual.cx) + square(startA.y - fromVisual.cy));
     const takeoffPoint = {
       x: fromVisual.cx + startR * cos(takeoffAngle),
       y: fromVisual.cy + startR * sin(takeoffAngle),
     };
-    const side2 = (takeoffPoint.x - fromVisual.cx) * (toVisual.cy - fromVisual.cy) - (takeoffPoint.y - fromVisual.cy) * (toVisual.cx - fromVisual.cx);
+    const side2 =
+      (takeoffPoint.x - fromVisual.cx) * (toVisual.cy - fromVisual.cy) -
+      (takeoffPoint.y - fromVisual.cy) * (toVisual.cx - fromVisual.cx);
 
     const sweep = side1 < 0 === side2 < 0;
 
