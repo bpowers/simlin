@@ -35,6 +35,7 @@ import { canonicalize } from '@system-dynamics/core/canonicalize';
 import { Alias, AliasProps } from './Alias';
 import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
+import { isCloudOnSourceSide, isCloudOnSinkSide } from './cloud-utils';
 import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect, screenToCanvasPoint } from './common';
 import { Connector, ConnectorProps, getVisualCenter } from './Connector';
 import { AuxRadius } from './default';
@@ -303,15 +304,25 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       return;
     }
 
-    if (this.state.isMovingArrow && this.isSelected(flow)) {
-      if (defined(flow.points.last()).attachedToUid === element.uid) {
-        return undefined;
+    // When dragging a cloud to attach to a stock, we need to visually hide it
+    // but keep it in the DOM to maintain pointer capture.
+    let isHidden = false;
+    if (this.isSelected(flow)) {
+      try {
+        if (this.state.isMovingArrow && isCloudOnSinkSide(element, flow)) {
+          isHidden = true;
+        } else if (this.state.isMovingSource && isCloudOnSourceSide(element, flow)) {
+          isHidden = true;
+        }
+      } catch (e) {
+        console.error('Invalid flow state when checking cloud position:', e);
       }
     }
 
     const props: CloudProps = {
       element,
       isSelected,
+      isHidden,
       onSelection: this.handleSetSelection,
     };
 
@@ -938,6 +949,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           isMovingArrow: false,
           isMovingSource: false,
           draggingSegmentIndex: undefined,
+        });
+      } else if (this.state.isMovingArrow || this.state.isMovingSource) {
+        // User clicked on flow arrowhead/source (or cloud) but didn't move.
+        // Clear the movement flags so the cloud reappears.
+        this.setState({
+          isMovingArrow: false,
+          isMovingSource: false,
         });
       }
       this.selectionCenterOffset = undefined;
@@ -1830,6 +1848,27 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         isZeroRadius: false,
       });
       element = inCreation;
+    } else if (element instanceof CloudViewElement && element.flowUid !== undefined) {
+      // Handle cloud drag to attach flow to stock
+      let flow: FlowViewElement | undefined;
+      try {
+        const flowElement = this.getElementByUid(element.flowUid);
+        if (flowElement instanceof FlowViewElement) {
+          flow = flowElement;
+        }
+      } catch (e) {
+        console.warn(`Cloud ${element.uid} references invalid flow ${element.flowUid}:`, e);
+      }
+      if (flow) {
+        if (isCloudOnSourceSide(element, flow)) {
+          isMovingSource = true;
+          element = flow;
+        } else if (isCloudOnSinkSide(element, flow)) {
+          isMovingArrow = true;
+          element = flow;
+        }
+        // If cloud is attached to flow but not at source or sink, select the cloud normally
+      }
     } else {
       // not an action we recognize, deselect the tool and continue on
       this.props.onClearSelectedTool();
