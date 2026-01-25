@@ -25,6 +25,7 @@ import { createDatabase } from './models/db';
 import { redirectToHttps } from './redirect-to-https';
 import { requestLogger } from './request-logger';
 import { createProjectRouteHandler } from './route-handlers';
+import { initializeServerDependencies } from './server-init';
 
 // redefinition from Helmet, as they don't export it
 interface ContentSecurityPolicyDirectiveValueFunction {
@@ -118,6 +119,9 @@ class App {
     const oneYearInSeconds = 365 * 24 * 60 * 60;
 
     this.loadConfig();
+
+    // Initialize WASM module early to fail fast if it's missing
+    await initializeServerDependencies();
 
     this.app.db = await createDatabase({
       backend: 'firestore',
