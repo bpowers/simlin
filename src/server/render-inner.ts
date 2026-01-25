@@ -19,7 +19,8 @@ export async function renderToPNG(svgString: string, viewbox: Box): Promise<Uint
 
   const retina = 2; // double the pixels for the same unit of measurement
   const maxPreviewWidth = 400;
-  let scale = (maxPreviewWidth * retina) / viewbox.width;
+  const maxDimension = Math.max(viewbox.width, viewbox.height);
+  let scale = (maxPreviewWidth * retina) / maxDimension;
   if (scale > 1) {
     scale = Math.ceil(scale);
   }
