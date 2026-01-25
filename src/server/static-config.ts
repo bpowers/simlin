@@ -28,7 +28,8 @@ export class StaticConfigError extends Error {
  * @param env - Optional environment override (defaults to process.env.NODE_ENV)
  */
 export function getStaticDirectory(env?: string): string {
-  const isProduction = env === 'production' || process.env.NODE_ENV === 'production';
+  const effectiveEnv = env ?? process.env.NODE_ENV;
+  const isProduction = effectiveEnv === 'production';
 
   if (isProduction) {
     return 'public';
