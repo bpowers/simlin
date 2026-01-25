@@ -46,6 +46,7 @@ import { Module, moduleBounds, ModuleProps } from './Module';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
 import { updateArcAngle } from '../arc-utils';
+import { shouldShowVariableDetails } from './pointer-utils';
 
 import styles from './Canvas.module.css';
 
@@ -848,7 +849,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       return;
     }
 
-    this.props.onShowVariableDetails();
+    const showDetails = shouldShowVariableDetails(
+      this.selectionCenterOffset !== undefined,
+      this.state.moveDelta,
+      this.state.isMovingArrow,
+      this.state.isMovingSource,
+      this.state.isMovingLabel,
+    );
 
     this.pointerId = undefined;
 
@@ -959,6 +966,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         });
       }
       this.selectionCenterOffset = undefined;
+      if (showDetails) {
+        this.props.onShowVariableDetails();
+      }
       return;
     }
 
