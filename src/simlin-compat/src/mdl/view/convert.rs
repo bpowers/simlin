@@ -184,6 +184,12 @@ fn convert_view(
     }))
 }
 
+/// Check if a variable name is a built-in system variable that should be filtered from views.
+/// These are handled automatically by the XMILE runtime.
+fn is_builtin_view_variable(canonical: &str) -> bool {
+    canonical == "time"
+}
+
 /// Convert a variable element to the appropriate ViewElement type.
 #[allow(clippy::too_many_arguments)]
 fn convert_variable(
@@ -197,12 +203,19 @@ fn convert_variable(
     view_offsets: &[i32],
 ) -> Option<ViewElement> {
     let canonical = to_lower_space(&var.name);
+
+    // Skip built-in system variables like "Time"
+    if is_builtin_view_variable(&canonical) {
+        return None;
+    }
+
     let xmile_name = var.name.replace(' ', "_");
 
     // Check if this is the primary definition or a ghost
+    // Must match both view index AND uid within that view
     let is_primary = primary_map
         .get(&canonical)
-        .map(|(idx, _)| *idx == view_idx)
+        .map(|(idx, primary_uid)| *idx == view_idx && *primary_uid == var.uid)
         .unwrap_or(false);
 
     if !is_primary && var.is_ghost {
@@ -376,6 +389,18 @@ fn convert_connector(
     // Skip connectors involving clouds (flow endpoints handled as part of Flow element)
     if matches!(actual_from, VensimElement::Comment(_))
         || matches!(actual_to, VensimElement::Comment(_))
+    {
+        return None;
+    }
+
+    // Skip connectors involving built-in variables like "Time"
+    if let VensimElement::Variable(v) = actual_from
+        && is_builtin_view_variable(&to_lower_space(&v.name))
+    {
+        return None;
+    }
+    if let VensimElement::Variable(v) = actual_to
+        && is_builtin_view_variable(&to_lower_space(&v.name))
     {
         return None;
     }
@@ -583,5 +608,158 @@ mod tests {
         } else {
             panic!("Expected Group element");
         }
+    }
+
+    #[test]
+    fn test_time_variable_filtered_out() {
+        // Test that the special "Time" variable is filtered from views
+        // since it's a built-in system variable that XMILE handles automatically.
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        // Regular variable
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "x".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+
+        // Time variable (built-in, typically a ghost reference)
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Time".to_string(),
+                x: 200,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: true, // Usually marked as ghost
+            }),
+        );
+
+        // Connector from Time to x
+        view.insert(
+            3,
+            VensimElement::Connector(super::super::types::VensimConnector {
+                uid: 3,
+                from_uid: 2,
+                to_uid: 1,
+                polarity: None,
+                control_point: (0, 0),
+            }),
+        );
+
+        let symbols = HashMap::new();
+        let result = build_views(vec![view], &symbols);
+
+        assert_eq!(result.len(), 1);
+        let View::StockFlow(sf) = &result[0];
+
+        // Count element types
+        let mut aux_count = 0;
+        let mut link_count = 0;
+        for elem in &sf.elements {
+            match elem {
+                ViewElement::Aux(a) => {
+                    aux_count += 1;
+                    // Time should not appear
+                    assert_ne!(
+                        a.name.to_lowercase(),
+                        "time",
+                        "Time variable should be filtered out"
+                    );
+                }
+                ViewElement::Link(_) => link_count += 1,
+                _ => {}
+            }
+        }
+
+        // Should have 1 aux (x only, not Time) and 0 links (connector to Time filtered)
+        assert_eq!(
+            aux_count, 1,
+            "Expected 1 aux element (Time should be filtered)"
+        );
+        assert_eq!(
+            link_count, 0,
+            "Expected 0 links (connector involving Time should be filtered)"
+        );
+    }
+
+    #[test]
+    fn test_ghost_variable_becomes_alias() {
+        // Test that a ghost variable (is_ghost=true) becomes an Alias element
+        // when there's a primary definition of the same variable.
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        // Primary variable at uid 1
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Contact Rate".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false, // Primary definition
+            }),
+        );
+
+        // Ghost variable at uid 2 (same name, is_ghost=true)
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Contact Rate".to_string(),
+                x: 200,
+                y: 200,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: true, // Ghost/alias
+            }),
+        );
+
+        let symbols = HashMap::new();
+        let result = build_views(vec![view], &symbols);
+
+        assert_eq!(result.len(), 1);
+        let View::StockFlow(sf) = &result[0];
+
+        // Count element types
+        let mut aux_count = 0;
+        let mut alias_count = 0;
+        for elem in &sf.elements {
+            match elem {
+                ViewElement::Aux(_) => aux_count += 1,
+                ViewElement::Alias(_) => alias_count += 1,
+                _ => {}
+            }
+        }
+
+        // Should have 1 aux (primary) and 1 alias (ghost)
+        assert_eq!(aux_count, 1, "Expected 1 aux element for primary variable");
+        assert_eq!(
+            alias_count, 1,
+            "Expected 1 alias element for ghost variable"
+        );
     }
 }

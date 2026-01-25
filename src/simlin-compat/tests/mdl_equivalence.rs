@@ -24,7 +24,7 @@ use simlin_compat::{open_vensim, open_vensim_native};
 use simlin_core::canonicalize;
 use simlin_core::datamodel::{
     Aux, Dimension, DimensionElements, Dt, Equation, Flow, Model, Module, Project, SimSpecs, Stock,
-    Variable,
+    Variable, View, ViewElement,
 };
 
 /// Models that should produce equivalent output from both parsers.
@@ -178,11 +178,45 @@ fn normalize_project(mut project: Project) -> Project {
     project
 }
 
+/// Summarize view elements for debugging.
+fn summarize_view_elements(views: &[View]) -> String {
+    if views.is_empty() {
+        return "no views".to_string();
+    }
+    let View::StockFlow(sf) = &views[0];
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for elem in &sf.elements {
+        let kind = match elem {
+            ViewElement::Aux(_) => "aux",
+            ViewElement::Stock(_) => "stock",
+            ViewElement::Flow(_) => "flow",
+            ViewElement::Link(_) => "link",
+            ViewElement::Module(_) => "module",
+            ViewElement::Alias(_) => "alias",
+            ViewElement::Cloud(_) => "cloud",
+            ViewElement::Group(_) => "group",
+        };
+        *counts.entry(kind).or_insert(0) += 1;
+    }
+    let mut parts: Vec<_> = counts.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+    parts.sort();
+    format!("{} elements ({})", sf.elements.len(), parts.join(", "))
+}
+
+/// Normalize views for comparison.
+/// TODO: Full view comparison once all differences are understood.
+fn normalize_views(views: &mut Vec<View>) {
+    if !views.is_empty() {
+        eprintln!("  {}", summarize_view_elements(views));
+    }
+    // Clear for now - detailed comparison requires matching UIDs and coordinates
+    views.clear();
+}
+
 /// Normalize a model for comparison.
 fn normalize_model(model: &mut Model) {
-    // TODO: Views are diagram-related; native parser doesn't implement views yet.
-    // When implemented, compare views instead of clearing.
-    model.views.clear();
+    // Normalize views for comparison
+    normalize_views(&mut model.views);
 
     // TODO: Loop metadata is diagram-related; native parser doesn't extract it yet.
     // When implemented, compare loop_metadata instead of clearing.
