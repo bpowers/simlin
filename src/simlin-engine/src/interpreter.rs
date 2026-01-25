@@ -1887,6 +1887,7 @@ fn test_arrays() {
                 ],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             ai_information: None,
         }
@@ -2158,6 +2159,7 @@ fn simulation_uses_model_sim_specs_when_present() {
         })],
         views: vec![],
         loop_metadata: vec![],
+        groups: vec![],
     };
 
     let datamodel_project = datamodel::Project {
@@ -2208,6 +2210,7 @@ fn simulation_defaults_to_project_sim_specs_without_model_override() {
         })],
         views: vec![],
         loop_metadata: vec![],
+        groups: vec![],
     };
 
     let datamodel_project = datamodel::Project {

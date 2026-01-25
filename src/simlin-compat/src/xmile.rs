@@ -1067,13 +1067,31 @@ impl ToXml<XmlWriter> for Model {
 
         write_tag_start(writer, "views")?;
 
-        if let Some(Views {
-            view: Some(ref views),
-            ..
-        }) = self.views
-        {
-            for view in views.iter() {
-                view.write_xml(writer)?;
+        if let Some(ref views) = self.views {
+            if let Some(ref view_list) = views.view {
+                for view in view_list.iter() {
+                    view.write_xml(writer)?;
+                }
+            }
+
+            // Write semantic groups
+            if let Some(ref groups) = views.groups {
+                for group in groups.iter() {
+                    let mut attrs: Vec<(&str, &str)> = vec![("name", &group.name)];
+                    if let Some(ref owner) = group.owner {
+                        attrs.push(("owner", owner));
+                    }
+                    let run_str;
+                    if group.run == Some(true) {
+                        run_str = "true".to_string();
+                        attrs.push(("run", &run_str));
+                    }
+                    write_tag_start_with_attrs(writer, "group", &attrs)?;
+                    for var in &group.vars {
+                        write_tag(writer, "var", var)?;
+                    }
+                    write_tag_end(writer, "group")?;
+                }
             }
         }
 
@@ -1085,10 +1103,11 @@ impl ToXml<XmlWriter> for Model {
 
 impl From<Model> for datamodel::Model {
     fn from(model: Model) -> Self {
-        let views = model
-            .views
-            .clone()
-            .unwrap_or(Views { view: None })
+        let xmile_views = model.views.clone().unwrap_or(Views {
+            view: None,
+            groups: None,
+        });
+        let views = xmile_views
             .view
             .unwrap_or_default()
             .into_iter()
@@ -1099,6 +1118,23 @@ impl From<Model> for datamodel::Model {
                 datamodel::View::from(v)
             })
             .collect();
+        let groups: Vec<datamodel::ModelGroup> = model
+            .views
+            .as_ref()
+            .and_then(|v| v.groups.as_ref())
+            .map(|groups| {
+                groups
+                    .iter()
+                    .map(|g| datamodel::ModelGroup {
+                        name: g.name.clone(),
+                        doc: None,
+                        parent: g.owner.clone(),
+                        members: g.vars.clone(),
+                        run_enabled: g.run.unwrap_or(false),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         datamodel::Model {
             name: model.name.as_deref().unwrap_or("main").to_string(),
             sim_specs: model.sim_specs.map(datamodel::SimSpecs::from),
@@ -1122,6 +1158,7 @@ impl From<Model> for datamodel::Model {
             },
             views,
             loop_metadata: vec![],
+            groups,
         }
     }
 }
@@ -1133,8 +1170,27 @@ impl From<datamodel::Model> for Model {
             sim_specs,
             variables,
             views,
+            groups,
             ..
         } = model;
+
+        // Convert groups to semantic groups
+        let semantic_groups: Option<Vec<SemanticGroup>> = if groups.is_empty() {
+            None
+        } else {
+            Some(
+                groups
+                    .into_iter()
+                    .map(|g| SemanticGroup {
+                        name: g.name,
+                        owner: g.parent,
+                        run: if g.run_enabled { Some(true) } else { None },
+                        vars: g.members,
+                    })
+                    .collect(),
+            )
+        };
+
         Model {
             name: Some(name),
             namespaces: None,
@@ -1146,11 +1202,16 @@ impl From<datamodel::Model> for Model {
                 let variables = variables.into_iter().map(Var::from).collect();
                 Some(Variables { variables })
             },
-            views: if views.is_empty() {
+            views: if views.is_empty() && semantic_groups.is_none() {
                 None
             } else {
                 Some(Views {
-                    view: Some(views.into_iter().map(View::from).collect()),
+                    view: if views.is_empty() {
+                        None
+                    } else {
+                        Some(views.into_iter().map(View::from).collect())
+                    },
+                    groups: semantic_groups,
                 })
             },
         }
@@ -1163,9 +1224,28 @@ pub struct Variables {
     pub variables: Vec<Var>,
 }
 
+/// Semantic group in <views> section (no geometry, just membership).
+/// Used when there are no actual diagram views.
+/// In Vensim, these are called "sectors".
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+pub struct SemanticGroup {
+    #[serde(rename = "@name")]
+    pub name: String,
+    #[serde(rename = "@owner", skip_serializing_if = "Option::is_none", default)]
+    pub owner: Option<String>,
+    #[serde(rename = "@run", skip_serializing_if = "Option::is_none", default)]
+    pub run: Option<bool>,
+    /// Variable names as <var> children (xmutil format)
+    #[serde(rename = "var", default)]
+    pub vars: Vec<String>,
+}
+
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Views {
     pub view: Option<Vec<View>>,
+    /// Semantic groups appear in views section when there are no diagram views
+    #[serde(rename = "group", default)]
+    pub groups: Option<Vec<SemanticGroup>>,
 }
 
 impl Model {
@@ -4499,4 +4579,94 @@ fn test_dimension_with_maps_to_parsing() {
     use quick_xml::de;
     let actual: Dimension = de::from_reader(input.as_bytes()).unwrap();
     assert_eq!(expected, actual);
+}
+
+#[test]
+fn test_semantic_group_parsing() {
+    let input = r#"<views>
+        <group name="Control Panel">
+            <var>alpha</var>
+            <var>beta</var>
+        </group>
+        <group name="Financial Sector" owner="Control Panel">
+            <var>revenue</var>
+        </group>
+    </views>"#;
+
+    use quick_xml::de;
+    let views: Views = de::from_reader(input.as_bytes()).unwrap();
+
+    let groups = views.groups.expect("groups should exist");
+    assert_eq!(2, groups.len());
+
+    assert_eq!("Control Panel", groups[0].name);
+    assert_eq!(None, groups[0].owner);
+    assert_eq!(
+        vec!["alpha".to_string(), "beta".to_string()],
+        groups[0].vars
+    );
+
+    assert_eq!("Financial Sector", groups[1].name);
+    assert_eq!(Some("Control Panel".to_string()), groups[1].owner);
+    assert_eq!(vec!["revenue".to_string()], groups[1].vars);
+}
+
+#[test]
+fn test_semantic_group_roundtrip() {
+    let original_model = datamodel::Model {
+        name: "main".to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "test_var".to_string(),
+            equation: datamodel::Equation::Scalar("1".to_string(), None),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+            ai_state: None,
+            uid: None,
+        })],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![
+            datamodel::ModelGroup {
+                name: "Control Panel".to_string(),
+                doc: None,
+                parent: None,
+                members: vec!["test_var".to_string()],
+                run_enabled: false,
+            },
+            datamodel::ModelGroup {
+                name: "Financial Sector".to_string(),
+                doc: None,
+                parent: Some("Control Panel".to_string()),
+                members: vec![],
+                run_enabled: true,
+            },
+        ],
+    };
+
+    let xmile_model: Model = original_model.clone().into();
+    let roundtripped: datamodel::Model = xmile_model.into();
+
+    assert_eq!(original_model.groups.len(), roundtripped.groups.len());
+    assert_eq!(original_model.groups[0].name, roundtripped.groups[0].name);
+    assert_eq!(
+        original_model.groups[0].parent,
+        roundtripped.groups[0].parent
+    );
+    assert_eq!(
+        original_model.groups[0].members,
+        roundtripped.groups[0].members
+    );
+    assert_eq!(original_model.groups[1].name, roundtripped.groups[1].name);
+    assert_eq!(
+        original_model.groups[1].parent,
+        roundtripped.groups[1].parent
+    );
+    assert_eq!(
+        original_model.groups[1].run_enabled,
+        roundtripped.groups[1].run_enabled
+    );
 }

@@ -1307,6 +1307,7 @@ mod tests {
             })],
             views: vec![],
             loop_metadata: vec![],
+            groups: vec![],
         });
 
         let patch = ProjectPatch {
@@ -1396,6 +1397,7 @@ mod tests {
             })],
             views: vec![],
             loop_metadata: vec![],
+            groups: vec![],
         });
 
         let patch = ProjectPatch {
@@ -1528,6 +1530,7 @@ mod tests {
                 ],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             source: None,
             ai_information: None,
@@ -1620,6 +1623,7 @@ mod tests {
                 ],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             source: None,
             ai_information: None,
@@ -1705,6 +1709,7 @@ mod tests {
                 variables: vec![],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             source: None,
             ai_information: None,

@@ -393,11 +393,11 @@ All functions below are recognized and emit `Token::Function` during normalizati
 - [x] Parse from settings section (type code 22)
 - [x] Format: `Dollar,$,Dollars,$s`
 
-### Groups (NOT STARTED)
-- [ ] Parse group markers `*NN name` during equation parsing
-- [ ] Maintain group hierarchy (nested groups)
-- [ ] `AdjustGroupNames()` - ensure unique group names
-- [ ] Assign variables to groups
+### Groups (COMPLETE)
+- [x] Parse group markers `{**name**}` and `***\nname\n***|` during equation parsing
+- [x] Maintain group hierarchy (nested groups via parent index)
+- [x] `AdjustGroupNames()` - ensure unique group names that don't conflict with symbols
+- [x] Assign variables to groups (on first equation only, not inside macros)
 
 ---
 

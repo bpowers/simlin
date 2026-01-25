@@ -700,6 +700,7 @@ mod ast_tests {
             variables: vec![array_var],
             views: vec![],
             loop_metadata: vec![],
+            groups: vec![],
         };
 
         let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
@@ -792,6 +793,7 @@ mod ast_tests {
             variables: vec![array_var1, array_var2],
             views: vec![],
             loop_metadata: vec![],
+            groups: vec![],
         };
 
         let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();

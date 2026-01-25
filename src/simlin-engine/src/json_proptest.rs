@@ -680,6 +680,7 @@ fn model_strategy() -> BoxedStrategy<Model> {
                 sim_specs: None,
                 views,
                 loop_metadata,
+                groups: vec![],
             },
         )
         .boxed()
@@ -1181,6 +1182,7 @@ mod protobuf_roundtrip_tests {
                     name: "Growth Loop".to_string(),
                     description: "Population growth feedback loop".to_string(),
                 }],
+                groups: vec![],
             }],
             dimensions: vec![Dimension {
                 name: "regions".to_string(),
@@ -1277,6 +1279,7 @@ mod protobuf_roundtrip_tests {
                 sim_specs: None,
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![
                 Dimension {
@@ -1359,6 +1362,7 @@ mod protobuf_roundtrip_tests {
                 sim_specs: None,
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -1404,6 +1408,7 @@ mod protobuf_roundtrip_tests {
                 sim_specs: None,
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![
                 Dimension {
@@ -1458,6 +1463,7 @@ mod protobuf_roundtrip_tests {
                 sim_specs: None,
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![Dimension {
                 name: "items".to_string(),

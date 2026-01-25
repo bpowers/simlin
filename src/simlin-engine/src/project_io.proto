@@ -252,6 +252,17 @@ message LoopMetadata {
   string description = 4;
 }
 
+// Semantic/organizational group for categorizing model variables.
+// This is distinct from visual diagram groups (ViewElement.Group).
+// In Vensim, these are called "sectors".
+message ModelGroup {
+  string name = 1;
+  string doc = 2;
+  string parent = 3;
+  repeated string members = 4;
+  bool run_enabled = 5;
+}
+
 message Model {
   string name = 1;
   // namespaces
@@ -259,6 +270,7 @@ message Model {
   repeated Variable variables = 3;
   repeated View views = 4;
   repeated LoopMetadata loop_metadata = 5;
+  repeated ModelGroup groups = 6;
 }
 
 enum SimMethod {

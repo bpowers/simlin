@@ -579,6 +579,11 @@ export class ViewElement extends jspb.Message {
   getCloud(): ViewElement.Cloud | undefined;
   setCloud(value?: ViewElement.Cloud): void;
 
+  hasGroup(): boolean;
+  clearGroup(): void;
+  getGroup(): ViewElement.Group | undefined;
+  setGroup(value?: ViewElement.Group): void;
+
   getElementCase(): ViewElement.ElementCase;
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): ViewElement.AsObject;
@@ -599,6 +604,7 @@ export namespace ViewElement {
     module?: ViewElement.Module.AsObject,
     alias?: ViewElement.Alias.AsObject,
     cloud?: ViewElement.Cloud.AsObject,
+    group?: ViewElement.Group.AsObject,
   }
 
   export class Aux extends jspb.Message {
@@ -923,6 +929,46 @@ export namespace ViewElement {
     }
   }
 
+  export class Group extends jspb.Message {
+    getUid(): number;
+    setUid(value: number): void;
+
+    getName(): string;
+    setName(value: string): void;
+
+    getX(): number;
+    setX(value: number): void;
+
+    getY(): number;
+    setY(value: number): void;
+
+    getWidth(): number;
+    setWidth(value: number): void;
+
+    getHeight(): number;
+    setHeight(value: number): void;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): Group.AsObject;
+    static toObject(includeInstance: boolean, msg: Group): Group.AsObject;
+    static extensions: {[key: number]: jspb.ExtensionFieldInfo<jspb.Message>};
+    static extensionsBinary: {[key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message>};
+    static serializeBinaryToWriter(message: Group, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): Group;
+    static deserializeBinaryFromReader(message: Group, reader: jspb.BinaryReader): Group;
+  }
+
+  export namespace Group {
+    export type AsObject = {
+      uid: number,
+      name: string,
+      x: number,
+      y: number,
+      width: number,
+      height: number,
+    }
+  }
+
   export interface LabelSideMap {
     TOP: 0;
     LEFT: 1;
@@ -942,6 +988,7 @@ export namespace ViewElement {
     MODULE = 5,
     ALIAS = 6,
     CLOUD = 7,
+    GROUP = 8,
   }
 }
 
@@ -1053,6 +1100,44 @@ export namespace LoopMetadata {
   }
 }
 
+export class ModelGroup extends jspb.Message {
+  getName(): string;
+  setName(value: string): void;
+
+  getDoc(): string;
+  setDoc(value: string): void;
+
+  getParent(): string;
+  setParent(value: string): void;
+
+  clearMembersList(): void;
+  getMembersList(): Array<string>;
+  setMembersList(value: Array<string>): void;
+  addMembers(value: string, index?: number): string;
+
+  getRunEnabled(): boolean;
+  setRunEnabled(value: boolean): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): ModelGroup.AsObject;
+  static toObject(includeInstance: boolean, msg: ModelGroup): ModelGroup.AsObject;
+  static extensions: {[key: number]: jspb.ExtensionFieldInfo<jspb.Message>};
+  static extensionsBinary: {[key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message>};
+  static serializeBinaryToWriter(message: ModelGroup, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): ModelGroup;
+  static deserializeBinaryFromReader(message: ModelGroup, reader: jspb.BinaryReader): ModelGroup;
+}
+
+export namespace ModelGroup {
+  export type AsObject = {
+    name: string,
+    doc: string,
+    parent: string,
+    membersList: Array<string>,
+    runEnabled: boolean,
+  }
+}
+
 export class Model extends jspb.Message {
   getName(): string;
   setName(value: string): void;
@@ -1072,6 +1157,11 @@ export class Model extends jspb.Message {
   setLoopMetadataList(value: Array<LoopMetadata>): void;
   addLoopMetadata(value?: LoopMetadata, index?: number): LoopMetadata;
 
+  clearGroupsList(): void;
+  getGroupsList(): Array<ModelGroup>;
+  setGroupsList(value: Array<ModelGroup>): void;
+  addGroups(value?: ModelGroup, index?: number): ModelGroup;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): Model.AsObject;
   static toObject(includeInstance: boolean, msg: Model): Model.AsObject;
@@ -1088,6 +1178,7 @@ export namespace Model {
     variablesList: Array<Variable.AsObject>,
     viewsList: Array<View.AsObject>,
     loopMetadataList: Array<LoopMetadata.AsObject>,
+    groupsList: Array<ModelGroup.AsObject>,
   }
 }
 

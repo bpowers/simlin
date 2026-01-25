@@ -351,6 +351,7 @@ impl From<SdaiModel> for datamodel::Project {
             variables,
             views,
             loop_metadata: vec![],
+            groups: vec![],
         };
 
         datamodel::Project {
@@ -547,6 +548,7 @@ impl From<datamodel::Project> for SdaiModel {
                 variables: vec![],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             });
 
         let mut variables = Vec::new();

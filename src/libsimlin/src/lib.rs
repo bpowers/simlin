@@ -856,6 +856,7 @@ pub unsafe extern "C" fn simlin_project_add_model(
         variables: vec![],
         views: vec![],
         loop_metadata: vec![],
+        groups: vec![],
     };
 
     // Add to datamodel
@@ -4055,6 +4056,7 @@ mod tests {
             variables: vec![],
             views: vec![],
             loop_metadata: vec![],
+            groups: vec![],
         };
         datamodel.models.push(submodel);
 
@@ -4748,6 +4750,7 @@ mod tests {
             variables: vec![],
             views: vec![],
             loop_metadata: vec![],
+            groups: vec![],
         };
         datamodel.models.push(second_model);
 
@@ -5361,6 +5364,7 @@ mod tests {
                 variables: vec![],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -5910,6 +5914,7 @@ mod tests {
                 ],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -6052,6 +6057,7 @@ mod tests {
                 ],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -6142,6 +6148,7 @@ mod tests {
                 }],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -6224,6 +6231,7 @@ mod tests {
                 }],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -6307,6 +6315,7 @@ mod tests {
                 }],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -7014,6 +7023,7 @@ mod tests {
                     variables: vec![],
                     views: vec![],
                     loop_metadata: vec![],
+                    groups: vec![],
                 }],
                 dimensions: vec![],
                 units: vec![],
@@ -7118,6 +7128,7 @@ mod tests {
                     ],
                     views: vec![],
                     loop_metadata: vec![],
+                groups: vec![],
                 },
                 engine::project_io::Model {
                     name: "model2".to_string(),
@@ -7197,6 +7208,7 @@ mod tests {
                     ],
                     views: vec![],
                     loop_metadata: vec![],
+                groups: vec![],
                 },
             ],
             dimensions: vec![],
@@ -8078,6 +8090,7 @@ mod tests {
                 variables: vec![],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -9395,6 +9408,7 @@ mod tests {
                     })],
                     views: vec![],
                     loop_metadata: vec![],
+                    groups: vec![],
                 },
                 // Main model with a module variable
                 datamodel::Model {
@@ -9413,6 +9427,7 @@ mod tests {
                     })],
                     views: vec![],
                     loop_metadata: vec![],
+                    groups: vec![],
                 },
             ],
             source: Default::default(),

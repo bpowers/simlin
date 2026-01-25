@@ -125,6 +125,12 @@
           "items": {
             "$ref": "#/$defs/LoopMetadata"
           }
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelGroup"
+          }
         }
       },
       "required": [
@@ -951,6 +957,39 @@
       },
       "required": [
         "uids",
+        "name"
+      ]
+    },
+    "ModelGroup": {
+      "description": "Semantic/organizational group for categorizing model variables.\nThis is distinct from visual diagram groups (ViewElement::Group).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "doc": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "runEnabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
         "name"
       ]
     },

@@ -588,6 +588,23 @@ pub struct LoopMetadata {
     pub description: String,
 }
 
+/// Semantic/organizational group for categorizing model variables.
+/// This is distinct from visual diagram groups (ViewElement::Group).
+/// In Vensim, these are called "sectors".
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ModelGroup {
+    /// Group name (unique, normalized - dots become dashes)
+    pub name: String,
+    /// Optional documentation
+    pub doc: Option<String>,
+    /// Parent group name (xmutil calls this "owner")
+    pub parent: Option<String>,
+    /// Variable idents in this group (space_to_underbar format)
+    pub members: Vec<String>,
+    /// Whether this group can be run independently (XMILE run attribute)
+    pub run_enabled: bool,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Model {
     pub name: String,
@@ -595,6 +612,7 @@ pub struct Model {
     pub variables: Vec<Variable>,
     pub views: Vec<View>,
     pub loop_metadata: Vec<LoopMetadata>,
+    pub groups: Vec<ModelGroup>,
 }
 
 impl Model {

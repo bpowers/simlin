@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use simlin_core::datamodel::{
     self, DimensionElements, Equation, GraphicalFunction, GraphicalFunctionKind,
-    GraphicalFunctionScale, Model, Project, Variable, Visibility,
+    GraphicalFunctionScale, Model, ModelGroup, Project, Variable, Visibility,
 };
 
 use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, FullEquation, Lhs, Subscript};
@@ -21,7 +21,7 @@ use super::types::{ConvertError, SymbolInfo, VariableType};
 
 impl<'input> ConversionContext<'input> {
     /// Build the final Project from collected symbols.
-    pub(super) fn build_project(self) -> Result<Project, ConvertError> {
+    pub(super) fn build_project(mut self) -> Result<Project, ConvertError> {
         let mut variables: Vec<Variable> = Vec::new();
 
         for (name, info) in &self.symbols {
@@ -77,12 +77,16 @@ impl<'input> ConversionContext<'input> {
         // Sort variables by canonical name for deterministic output
         variables.sort_by_key(|a| canonical_name(a.get_ident()));
 
+        // Build groups with unique names
+        let groups = self.build_groups();
+
         let model = Model {
             name: "main".to_string(),
             sim_specs: None,
             variables,
             views: vec![],
             loop_metadata: vec![],
+            groups,
         };
 
         Ok(Project {
@@ -94,6 +98,73 @@ impl<'input> ConversionContext<'input> {
             source: None,
             ai_information: None,
         })
+    }
+
+    /// Build ModelGroup instances from collected group info.
+    /// Ensures unique group names that don't conflict with symbol namespace.
+    /// Matches xmutil's AdjustGroupNames algorithm (Model.cpp:479-503).
+    fn build_groups(&mut self) -> Vec<ModelGroup> {
+        if self.groups.is_empty() {
+            return vec![];
+        }
+
+        // Collect all names in symbol namespace for conflict checking:
+        // - Equation variable names
+        // - Dimension element names
+        let mut namespace: std::collections::HashSet<String> =
+            self.symbols.keys().cloned().collect();
+
+        // Add dimension element names to namespace
+        for dim in &self.dimensions {
+            if let simlin_core::datamodel::DimensionElements::Named(names) = &dim.elements {
+                for name in names {
+                    namespace.insert(canonical_name(name));
+                }
+            }
+        }
+
+        // First pass: make names unique (xmutil preserves spaces, uses " 1" suffix)
+        let mut final_names: Vec<String> = Vec::with_capacity(self.groups.len());
+        for group in &self.groups {
+            // Preserve the original name (don't convert spaces to underscores)
+            let mut name = group.name.clone();
+
+            // Make name unique: check against namespace and earlier groups
+            // xmutil uses case-insensitive comparison via ToLowerSpace
+            loop {
+                let canonical = canonical_name(&name);
+                let conflicts_namespace = namespace.contains(&canonical);
+                let conflicts_earlier_group =
+                    final_names.iter().any(|n| canonical_name(n) == canonical);
+
+                if !conflicts_namespace && !conflicts_earlier_group {
+                    break;
+                }
+                // xmutil appends " 1" (with space), not "_1"
+                name = format!("{} 1", name);
+            }
+
+            final_names.push(name);
+        }
+
+        // Second pass: build ModelGroup instances with parent names
+        self.groups
+            .iter()
+            .enumerate()
+            .map(|(i, group)| {
+                let parent = group.parent_index.map(|idx| final_names[idx].clone());
+                // Members are stored as canonical names, convert to space_to_underbar format
+                let members = group.members.iter().map(|m| space_to_underbar(m)).collect();
+
+                ModelGroup {
+                    name: final_names[i].clone(),
+                    doc: None,
+                    parent,
+                    members,
+                    run_enabled: false,
+                }
+            })
+            .collect()
     }
 
     /// Select the appropriate equation from a list, implementing PurgeAFOEq logic.

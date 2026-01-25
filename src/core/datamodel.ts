@@ -38,6 +38,7 @@ import {
   type JsonFlowPoint,
   type JsonLinkPoint,
   type JsonLoopMetadata,
+  type JsonModelGroup,
   type JsonSource,
 } from '@system-dynamics/engine2';
 
@@ -1343,11 +1344,55 @@ export class LoopMetadata extends Record(loopMetadataDefaults) {
   }
 }
 
+const modelGroupDefaults = {
+  name: '',
+  doc: undefined as string | undefined,
+  parent: undefined as string | undefined,
+  members: List<string>(),
+  runEnabled: false,
+};
+
+/**
+ * Semantic/organizational group for categorizing model variables.
+ * This is distinct from visual diagram groups (GroupViewElement).
+ */
+export class ModelGroup extends Record(modelGroupDefaults) {
+  constructor(props: typeof modelGroupDefaults) {
+    super(props);
+  }
+  static fromJson(json: JsonModelGroup): ModelGroup {
+    return new ModelGroup({
+      name: json.name,
+      doc: json.doc,
+      parent: json.parent,
+      members: List(json.members ?? []),
+      runEnabled: json.runEnabled ?? false,
+    });
+  }
+  toJson(): JsonModelGroup {
+    const result: JsonModelGroup = {
+      name: this.name,
+      members: this.members.toArray(),
+    };
+    if (this.doc) {
+      result.doc = this.doc;
+    }
+    if (this.parent) {
+      result.parent = this.parent;
+    }
+    if (this.runEnabled) {
+      result.runEnabled = this.runEnabled;
+    }
+    return result;
+  }
+}
+
 const modelDefaults = {
   name: '',
   variables: Map<string, Variable>(),
   views: List<StockFlowView>(),
   loopMetadata: List<LoopMetadata>(),
+  groups: List<ModelGroup>(),
 };
 export class Model extends Record(modelDefaults) {
   // this isn't useless, as it ensures we specify the full object
@@ -1370,6 +1415,7 @@ export class Model extends Record(modelDefaults) {
       variables,
       views: List((json.views ?? []).map((view: JsonView) => StockFlowView.fromJson(view, variables))),
       loopMetadata: List((json.loopMetadata ?? []).map((lm: JsonLoopMetadata) => LoopMetadata.fromJson(lm))),
+      groups: List((json.groups ?? []).map((g: JsonModelGroup) => ModelGroup.fromJson(g))),
     });
   }
   toJson(): JsonModel {
@@ -1405,6 +1451,9 @@ export class Model extends Record(modelDefaults) {
     }
     if (this.loopMetadata.size > 0) {
       result.loopMetadata = this.loopMetadata.map((lm: LoopMetadata) => lm.toJson()).toArray();
+    }
+    if (this.groups.size > 0) {
+      result.groups = this.groups.map((g: ModelGroup) => g.toJson()).toArray();
     }
 
     return result;

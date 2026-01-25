@@ -21,7 +21,17 @@ use std::collections::{HashMap, HashSet};
 
 use simlin_core::datamodel::{Dimension, Project, SimMethod, Unit};
 
-use crate::mdl::ast::{MdlItem, SubscriptElement};
+use crate::mdl::ast::{Equation as MdlEquation, MdlItem, SubscriptElement};
+
+/// Information about a group collected during parsing.
+struct GroupInfo {
+    /// Group name (raw, will be normalized later)
+    name: String,
+    /// Index of parent group in the groups vec, if any
+    parent_index: Option<usize>,
+    /// Canonical names of variables in this group
+    members: Vec<String>,
+}
 use crate::mdl::reader::EquationReader;
 use crate::mdl::settings::PostEquationParser;
 use crate::mdl::xmile_compat::XmileFormatter;
@@ -58,6 +68,10 @@ pub struct ConversionContext<'input> {
     /// Raw subscript definitions for recursive expansion during dimension building.
     /// Maps canonical dimension name to the raw SubscriptElement list.
     raw_subscript_defs: HashMap<String, Vec<SubscriptElement<'input>>>,
+    /// Collected groups during parsing
+    groups: Vec<GroupInfo>,
+    /// Index of current group for variable assignment (None = no group yet)
+    current_group_index: Option<usize>,
 }
 
 impl<'input> ConversionContext<'input> {
@@ -89,6 +103,8 @@ impl<'input> ConversionContext<'input> {
             dimension_elements: HashMap::new(),
             extrapolate_lookups: HashSet::new(),
             raw_subscript_defs: HashMap::new(),
+            groups: Vec::new(),
+            current_group_index: None,
         })
     }
 
@@ -125,11 +141,31 @@ impl<'input> ConversionContext<'input> {
 
     /// Pass 1: Collect all symbols from the parsed items.
     fn collect_symbols(&mut self) {
-        for item in &self.items {
+        // Clone items to avoid borrow issues
+        let items = std::mem::take(&mut self.items);
+
+        for item in &items {
             match item {
                 MdlItem::Equation(eq) => {
                     if let Some(name) = get_equation_name(&eq.equation) {
                         let canonical = canonical_name(&name);
+
+                        // Assign to group only if:
+                        // 1. There's a current group
+                        // 2. This is the variable's first equation
+                        // 3. This is NOT a subscript definition, equivalence, or control variable
+                        // Note: Macro equations are self-contained in MacroDef.equations
+                        // and never appear in the main items iteration, so we don't
+                        // need special handling for them.
+                        let is_first_equation = !self.symbols.contains_key(&canonical);
+                        let is_variable_equation = Self::is_variable_equation(&eq.equation);
+                        if let Some(group_idx) = self.current_group_index
+                            && is_first_equation
+                            && is_variable_equation
+                        {
+                            self.groups[group_idx].members.push(canonical.clone());
+                        }
+
                         let info = self
                             .symbols
                             .entry(canonical)
@@ -137,9 +173,83 @@ impl<'input> ConversionContext<'input> {
                         info.equations.push((**eq).clone());
                     }
                 }
-                MdlItem::Group(_) | MdlItem::Macro(_) | MdlItem::EqEnd(_) => {}
+                MdlItem::Group(group) => {
+                    // Determine parent using xmutil algorithm (VensimParse.cpp:259-275):
+                    // If groups empty OR (first char differs from last group AND new first char is digit):
+                    //   Search for existing group with same name as owner
+                    // Otherwise: owner is previous group
+                    let parent_index = self.determine_group_parent(&group.name);
+
+                    let group_info = GroupInfo {
+                        name: group.name.to_string(),
+                        parent_index,
+                        members: Vec::new(),
+                    };
+                    self.groups.push(group_info);
+                    self.current_group_index = Some(self.groups.len() - 1);
+                }
+                MdlItem::Macro(_) | MdlItem::EqEnd(_) => {}
             }
         }
+
+        // Restore items
+        self.items = items;
+    }
+
+    /// Check if an equation represents an actual variable (not a subscript def,
+    /// equivalence, or control variable like INITIAL TIME).
+    fn is_variable_equation(eq: &MdlEquation<'_>) -> bool {
+        // Skip subscript definitions and equivalences
+        if matches!(
+            eq,
+            MdlEquation::SubscriptDef(_, _) | MdlEquation::Equivalence(_, _, _)
+        ) {
+            return false;
+        }
+
+        // Skip control variables (canonical_name uses spaces, not underscores)
+        if let Some(name) = get_equation_name(eq) {
+            let canonical = canonical_name(&name);
+            if matches!(
+                canonical.as_str(),
+                "initial time" | "final time" | "time step" | "saveper"
+            ) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Determine the parent index for a new group using xmutil's algorithm.
+    /// (VensimParse.cpp:259-275)
+    fn determine_group_parent(&self, new_group_name: &str) -> Option<usize> {
+        if self.groups.is_empty() {
+            return None;
+        }
+
+        let new_first_char = new_group_name.chars().next();
+        let last_group_first_char = self.groups.last().and_then(|g| g.name.chars().next());
+
+        // If first char differs AND new first char is a digit:
+        // Try to find existing group with same name as owner
+        let try_find_owner = matches!(
+            (new_first_char, last_group_first_char),
+            (Some(c1), Some(c2)) if c1.is_ascii_digit() && c1 != c2
+        );
+
+        if try_find_owner {
+            // Search for existing group with this name as owner
+            // (This is what xmutil does, though it usually fails to find a match)
+            for (idx, g) in self.groups.iter().enumerate() {
+                if g.name == new_group_name {
+                    return Some(idx);
+                }
+            }
+        }
+
+        // Default: owner is the previous group
+        Some(self.groups.len() - 1)
     }
 }
 
@@ -324,5 +434,305 @@ $192-192-192,0,Times
         // Verify unit equivalences
         assert_eq!(project.units.len(), 1);
         assert_eq!(project.units[0].name, "Dollar");
+    }
+
+    #[test]
+    fn test_mdl_group_basic() {
+        // Single group with variables using curly brace format
+        let mdl = "{**Control**}\nx = 5\n~ Units\n~ Variable in Control group |\n\ny = 10\n~ Units\n~ Another variable |\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        assert_eq!(model.groups[0].name, "Control");
+        assert!(model.groups[0].parent.is_none());
+        // Both x and y should be members
+        assert!(model.groups[0].members.contains(&"x".to_string()));
+        assert!(model.groups[0].members.contains(&"y".to_string()));
+    }
+
+    #[test]
+    fn test_mdl_group_multiple() {
+        // Multiple groups using curly brace format
+        // Group names preserve spaces (xmutil behavior)
+        let mdl =
+            "{**First Group**}\nx = 5\n~ ~|\n\n{**Second Group**}\ny = 10\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 2);
+        assert_eq!(model.groups[0].name, "First Group");
+        assert_eq!(model.groups[1].name, "Second Group");
+        assert!(model.groups[0].members.contains(&"x".to_string()));
+        assert!(model.groups[1].members.contains(&"y".to_string()));
+    }
+
+    #[test]
+    fn test_mdl_group_hierarchy() {
+        // Groups with hierarchy: second group's parent is first
+        // Group names preserve spaces (xmutil behavior)
+        let mdl = "{**Top Level**}\na = 1\n~ ~|\n\n{**Sub Group**}\nb = 2\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 2);
+        // First group has no parent
+        assert!(model.groups[0].parent.is_none());
+        // Second group's parent is the first (with preserved spaces)
+        assert_eq!(model.groups[1].parent, Some("Top Level".to_string()));
+    }
+
+    #[test]
+    fn test_mdl_group_first_equation_only() {
+        // Variable should be assigned to group on first equation only
+        let mdl = "{**Group A**}\nx = A FUNCTION OF(y)\n~ ~|\n\n{**Group B**}\nx = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 2);
+        // x should be in Group A (first equation), not Group B
+        assert!(
+            model.groups[0].members.contains(&"x".to_string()),
+            "x should be in Group A"
+        );
+        assert!(
+            !model.groups[1].members.contains(&"x".to_string()),
+            "x should NOT be in Group B"
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_before_equations() {
+        // Variables before any group marker are not assigned to any group
+        let mdl = "x = 5\n~ ~|\n\n{**Group A**}\ny = 10\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        // x was defined before any group, should not be in any group
+        assert!(
+            !model.groups[0].members.contains(&"x".to_string()),
+            "x should NOT be in any group"
+        );
+        // y was defined after group marker
+        assert!(
+            model.groups[0].members.contains(&"y".to_string()),
+            "y should be in Group A"
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_star_format() {
+        // Test ***\nname\n***| format (name must not contain spaces in star format)
+        let mdl = "***\nMyGroup\n***|\nx = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        assert_eq!(model.groups[0].name, "MyGroup");
+        assert!(model.groups[0].members.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn test_mdl_group_name_uniqueness() {
+        // If a group name conflicts with a symbol, it should be made unique
+        // xmutil uses " 1" suffix (with space), not "_1"
+        let mdl = "x: a, b\n~ ~|\n\n{**x**}\ny = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        // Group name "x" conflicts with dimension "x", should be "x 1" (with space)
+        assert_eq!(model.groups[0].name, "x 1");
+    }
+
+    #[test]
+    fn test_mdl_group_variables_after_macro() {
+        // Variables defined after a macro should still be assigned to their group.
+        // This tests that macro handling doesn't break group membership.
+        let mdl = "{**Control**}\nx = 5\n~ ~|\n\n:MACRO: MYMACRO(input)\nmacro_var = input * 2\n~ ~|\n:END OF MACRO:\n\ny = 10\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        assert_eq!(model.groups[0].name, "Control");
+        // Both x and y should be in the Control group
+        assert!(
+            model.groups[0].members.contains(&"x".to_string()),
+            "x should be in Control group"
+        );
+        assert!(
+            model.groups[0].members.contains(&"y".to_string()),
+            "y should be in Control group (after macro)"
+        );
+        // macro_var should NOT be in the group (it's inside a macro)
+        assert!(
+            !model.groups[0].members.contains(&"macro_var".to_string()),
+            "macro_var should NOT be in any group (inside macro)"
+        );
+    }
+
+    #[test]
+    fn test_mdl_to_xmile_groups_roundtrip() {
+        // Test that MDL groups survive conversion through XMILE
+        use crate::xmile::{project_from_reader, project_to_xmile};
+        use std::io::Cursor;
+
+        let mdl = "{**Control**}\nx = 5\n~ ~|\n\n{**Settings**}\ny = 10\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        // Verify initial MDL conversion has groups
+        assert_eq!(model.groups.len(), 2);
+        assert_eq!(model.groups[0].name, "Control");
+        assert_eq!(model.groups[1].name, "Settings");
+        assert!(model.groups[0].members.contains(&"x".to_string()));
+        assert!(model.groups[1].members.contains(&"y".to_string()));
+
+        // Convert to XMILE and back
+        let xmile_str = project_to_xmile(&project).unwrap();
+        let mut cursor = Cursor::new(xmile_str.as_bytes());
+        let roundtripped = project_from_reader(&mut cursor).unwrap();
+        let roundtripped_model = &roundtripped.models[0];
+
+        // Verify groups survived the roundtrip
+        assert_eq!(roundtripped_model.groups.len(), 2);
+        assert_eq!(roundtripped_model.groups[0].name, "Control");
+        assert_eq!(roundtripped_model.groups[1].name, "Settings");
+        assert!(
+            roundtripped_model.groups[0]
+                .members
+                .contains(&"x".to_string())
+        );
+        assert!(
+            roundtripped_model.groups[1]
+                .members
+                .contains(&"y".to_string())
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_excludes_subscript_definitions() {
+        // P2: Subscript definitions should NOT be added to group members
+        let mdl = "{**Control**}\nDim: a, b, c\n~ ~|\nx = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        // x should be in the group
+        assert!(
+            model.groups[0].members.contains(&"x".to_string()),
+            "x should be in Control group"
+        );
+        // Dim (subscript definition) should NOT be in the group (check both cases)
+        assert!(
+            !model.groups[0].members.contains(&"Dim".to_string())
+                && !model.groups[0].members.contains(&"dim".to_string()),
+            "Subscript definition 'Dim' should NOT be in group members, got: {:?}",
+            model.groups[0].members
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_excludes_control_variables() {
+        // P2: Control variables (INITIAL TIME, FINAL TIME, etc.) should NOT be in group members
+        let mdl = "{**Control**}\nINITIAL TIME = 0\n~ ~|\nFINAL TIME = 100\n~ ~|\nTIME STEP = 1\n~ ~|\nx = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+
+        // Debug: print members
+        eprintln!("Group members: {:?}", model.groups[0].members);
+
+        // x should be in the group
+        assert!(
+            model.groups[0].members.contains(&"x".to_string()),
+            "x should be in Control group"
+        );
+        // Control variables should NOT be in the group
+        // Members are stored with space_to_underbar format
+        assert!(
+            !model.groups[0]
+                .members
+                .contains(&"INITIAL_TIME".to_string())
+                && !model.groups[0]
+                    .members
+                    .contains(&"initial_time".to_string()),
+            "INITIAL TIME should NOT be in group members"
+        );
+        assert!(
+            !model.groups[0].members.contains(&"FINAL_TIME".to_string())
+                && !model.groups[0].members.contains(&"final_time".to_string()),
+            "FINAL TIME should NOT be in group members"
+        );
+        assert!(
+            !model.groups[0].members.contains(&"TIME_STEP".to_string())
+                && !model.groups[0].members.contains(&"time_step".to_string()),
+            "TIME STEP should NOT be in group members"
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_name_preserves_spaces() {
+        // Group names should preserve spaces, not convert to underscores
+        let mdl = "{**Control Panel**}\nx = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        assert_eq!(
+            model.groups[0].name, "Control Panel",
+            "Group name should preserve spaces"
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_name_conflict_uses_space_suffix() {
+        // When group name conflicts, xmutil appends " 1" (with space), not "_1"
+        let mdl = "x = 1\n~ ~|\n{**x**}\ny = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        // Group name "x" conflicts with variable "x", should be "x 1" (with space)
+        assert_eq!(
+            model.groups[0].name, "x 1",
+            "Conflicting group name should use ' 1' suffix (with space)"
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_name_conflict_with_dimension_element() {
+        // Group name conflict detection should include dimension elements
+        let mdl = "Dim: elem1, elem2\n~ ~|\n{**elem1**}\nx = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        // Group name "elem1" conflicts with dimension element "elem1"
+        assert_eq!(
+            model.groups[0].name, "elem1 1",
+            "Group name conflicting with dimension element should use ' 1' suffix"
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_numeric_leading_owner_logic() {
+        // xmutil's numeric-leading owner logic:
+        // If new group starts with digit AND differs from previous group's first char,
+        // search for existing group with same name as owner
+        let mdl = "{**1 Main**}\na = 1\n~ ~|\n{**1.1 Sub**}\nb = 2\n~ ~|\n{**2 Other**}\nc = 3\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 3);
+        // "1 Main" has no parent (first group)
+        assert!(model.groups[0].parent.is_none());
+        // "1.1 Sub" starts with '1', same as previous, so parent is previous ("1 Main")
+        assert_eq!(model.groups[1].parent, Some("1 Main".to_string()));
+        // "2 Other" starts with '2', differs from '1', and is a digit
+        // So it searches for existing group named "2 Other" (not found), then uses previous
+        assert_eq!(model.groups[2].parent, Some("1-1 Sub".to_string()));
     }
 }
