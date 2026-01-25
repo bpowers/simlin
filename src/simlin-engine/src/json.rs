@@ -387,8 +387,11 @@ pub struct View {
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub name: String,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub stocks: Vec<Stock>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub flows: Vec<Flow>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub auxiliaries: Vec<Auxiliary>,
     #[serde(
         skip_serializing_if = "is_empty_vec",
