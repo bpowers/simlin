@@ -14,7 +14,7 @@ import {
 } from '@firebase/auth';
 
 import { useLocation, Route, RouteComponentProps, Switch, Redirect } from 'wouter';
-import { createTheme, ThemeProvider } from '@mui/material/styles';
+import { createTheme, ThemeProvider, StyledEngineProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 
 import { defined } from '@system-dynamics/core/common';
@@ -270,9 +270,11 @@ export class App extends React.PureComponent {
   render(): React.JSX.Element {
     return (
       <React.StrictMode>
-        <ThemeProvider theme={theme}>
-          <InnerApp />
-        </ThemeProvider>
+        <StyledEngineProvider injectFirst>
+          <ThemeProvider theme={theme}>
+            <InnerApp />
+          </ThemeProvider>
+        </StyledEngineProvider>
       </React.StrictMode>
     );
   }
