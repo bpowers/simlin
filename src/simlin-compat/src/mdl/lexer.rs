@@ -289,8 +289,28 @@ impl<'input> RawLexer<'input> {
         let mut buffer = String::new();
         let mut had_continuation = false;
 
-        while matches!(self.lookahead, Some((_, c)) if Self::is_symbol_char(c)) {
-            had_continuation |= self.consume_char(&mut buffer);
+        loop {
+            while matches!(self.lookahead, Some((_, c)) if Self::is_symbol_char(c)) {
+                had_continuation |= self.consume_char(&mut buffer);
+            }
+
+            // Check for escaped underscore: \_ is a literal part of the identifier
+            if let Some((_, '\\')) = self.lookahead {
+                let saved = self.lookahead;
+                self.bump_raw();
+                if let Some((_, '_')) = self.lookahead {
+                    buffer.push('\\');
+                    had_continuation = true;
+                    self.consume_char(&mut buffer);
+                    continue;
+                }
+                // Not \_ -- restore lookahead
+                if let Some(current) = self.lookahead {
+                    self.pushback.push(current);
+                }
+                self.lookahead = saved;
+            }
+            break;
         }
 
         let end = match self.lookahead {
@@ -298,8 +318,8 @@ impl<'input> RawLexer<'input> {
             None => self.text.len(),
         };
 
-        // Strip trailing spaces and underscores
-        while buffer.ends_with(' ') || buffer.ends_with('_') {
+        // Strip trailing spaces and underscores (but not escaped underscores like \_)
+        while buffer.ends_with(' ') || (buffer.ends_with('_') && !buffer.ends_with("\\_")) {
             buffer.pop();
         }
 
@@ -815,7 +835,7 @@ impl<'input> Iterator for RawLexer<'input> {
                     if let Some(result) = self.check_eq_end(i, "\\\\\\---///", "\\\\---///") {
                         return Some(Ok(result));
                     }
-                    // Otherwise, check for line continuation
+                    // Otherwise, check for line continuation or escaped underscore
                     self.bump_raw();
                     if let Some((_, c)) = self.lookahead
                         && (c == '\n' || c == '\r')
@@ -830,6 +850,15 @@ impl<'input> Iterator for RawLexer<'input> {
                             }
                         }
                         continue;
+                    }
+                    // Escaped underscore: \_ starts a symbol
+                    if let Some((_, '_')) = self.lookahead {
+                        // Push the _ back and set lookahead to \ so symbol() sees \_
+                        if let Some(underscore) = self.lookahead {
+                            self.pushback.push(underscore);
+                        }
+                        self.lookahead = Some((i, '\\'));
+                        return Some(Ok(self.symbol(i)));
                     }
                     Some(error(LexErrorCode::UnrecognizedToken, i, i + 1))
                 }
@@ -1489,5 +1518,64 @@ mod tests {
         let tokens: Vec<_> = RawLexer::new(input).collect();
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0], Ok((0, sym("$foo"), 4)));
+    }
+
+    // Escaped underscore tests
+    #[test]
+    fn escaped_underscore_in_symbol() {
+        // flow\_rate should tokenize as a single symbol
+        let input = "flow\\_rate";
+        let tokens: Vec<_> = RawLexer::new(input).collect();
+        assert_eq!(tokens.len(), 1);
+        if let Ok((start, Symbol(name), end)) = &tokens[0] {
+            assert_eq!(*start, 0);
+            assert_eq!(name.as_ref(), "flow\\_rate");
+            assert_eq!(*end, 10);
+        } else {
+            panic!("Expected Symbol token, got {:?}", tokens[0]);
+        }
+    }
+
+    #[test]
+    fn escaped_underscore_at_start() {
+        // \_start should tokenize as a single symbol starting with \_
+        let input = "\\_start";
+        let tokens: Vec<_> = RawLexer::new(input).collect();
+        assert_eq!(tokens.len(), 1);
+        if let Ok((start, Symbol(name), end)) = &tokens[0] {
+            assert_eq!(*start, 0);
+            assert_eq!(name.as_ref(), "\\_start");
+            assert_eq!(*end, 7);
+        } else {
+            panic!("Expected Symbol token, got {:?}", tokens[0]);
+        }
+    }
+
+    #[test]
+    fn escaped_underscore_multiple() {
+        // a\_b\_c should be a single symbol
+        let input = "a\\_b\\_c";
+        let tokens: Vec<_> = RawLexer::new(input).collect();
+        assert_eq!(tokens.len(), 1);
+        if let Ok((_, Symbol(name), _)) = &tokens[0] {
+            assert_eq!(name.as_ref(), "a\\_b\\_c");
+        } else {
+            panic!("Expected Symbol token, got {:?}", tokens[0]);
+        }
+    }
+
+    #[test]
+    fn escaped_underscore_in_expression() {
+        // flow\_rate + 1 should tokenize as symbol, plus, number
+        let input = "flow\\_rate + 1";
+        let tokens: Vec<_> = RawLexer::new(input).collect();
+        assert_eq!(tokens.len(), 3);
+        if let Ok((_, Symbol(name), _)) = &tokens[0] {
+            assert_eq!(name.as_ref(), "flow\\_rate");
+        } else {
+            panic!("Expected Symbol token, got {:?}", tokens[0]);
+        }
+        assert_eq!(tokens[1], Ok((11, Plus, 12)));
+        assert_eq!(tokens[2], Ok((13, num("1"), 14)));
     }
 }

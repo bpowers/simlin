@@ -396,7 +396,10 @@ impl<'input> EquationReader<'input> {
             }
         };
 
-        // Extract the raw comment text
+        // Extract the raw comment text.
+        // We trim both leading and trailing whitespace here. xmutil only trims
+        // trailing whitespace, but preserving leading whitespace in comments
+        // is not useful and likely an oversight in xmutil rather than intentional.
         let raw_comment = remaining[..end_offset].trim();
 
         // Check for supplementary flag (third ~ followed by :SUP or :SUPPLEMENTARY)
@@ -1652,5 +1655,26 @@ mod tests {
             "remaining should be empty, got: '{}'",
             remaining
         );
+    }
+
+    // ========================================================================
+    // Escaped underscore tests
+    // ========================================================================
+
+    #[test]
+    fn test_escaped_underscore_in_variable_name() {
+        let input = "flow\\_rate = 5 ~ Units ~ |";
+        let mut reader = EquationReader::new(input);
+        let item = reader.next_item();
+        match item {
+            Some(Ok(MdlItem::Equation(eq))) => {
+                if let Equation::Regular(lhs, _) = &eq.equation {
+                    assert_eq!(lhs.name.as_ref(), "flow\\_rate");
+                } else {
+                    panic!("Expected Regular equation, got {:?}", eq.equation);
+                }
+            }
+            other => panic!("Expected equation, got {:?}", other),
+        }
     }
 }
