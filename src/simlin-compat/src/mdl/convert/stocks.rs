@@ -14,8 +14,8 @@ use crate::mdl::xmile_compat::space_to_underbar;
 
 use super::ConversionContext;
 use super::helpers::{
-    canonical_name, cartesian_product, equation_is_stock, extract_constant_value, extract_units,
-    get_lhs,
+    canonical_name, cartesian_product, equation_is_stock, extract_constant_value,
+    extract_first_units, get_lhs,
 };
 use super::types::{SyntheticFlow, VariableType};
 
@@ -33,35 +33,37 @@ impl<'input> ConversionContext<'input> {
         // First pass: extract values from control vars (read-only)
         for (name, _alt_name) in &control_vars {
             if let Some(info) = self.symbols.get(*name)
-                && let Some(eq) = info.equations.first()
+                && let Some(eq) = self.select_equation(&info.equations)
+                && let Some(value) = extract_constant_value(&eq.equation)
             {
-                if let Some(value) = extract_constant_value(&eq.equation) {
-                    match *name {
-                        "initial time" => self.sim_specs.start = Some(value),
-                        "final time" => self.sim_specs.stop = Some(value),
-                        "time step" => self.sim_specs.dt = Some(value),
-                        "saveper" => self.sim_specs.save_step = Some(value),
-                        _ => {}
-                    }
-                }
-
-                // Extract time units from TIME STEP or FINAL TIME.
-                // Prefer explicit units over range-only (dimensionless "1").
-                if (*name == "time step" || *name == "final time")
-                    && let Some(new_units) = extract_units(eq)
-                {
-                    let should_set = match &self.sim_specs.time_units {
-                        None => true,
-                        // Upgrade from range-only "1" to explicit units
-                        Some(current) if current == "1" && new_units != "1" => true,
-                        _ => false,
-                    };
-                    if should_set {
-                        self.sim_specs.time_units = Some(new_units);
-                    }
+                match *name {
+                    "initial time" => self.sim_specs.start = Some(value),
+                    "final time" => self.sim_specs.stop = Some(value),
+                    "time step" => self.sim_specs.dt = Some(value),
+                    "saveper" => self.sim_specs.save_step = Some(value),
+                    _ => {}
                 }
             }
         }
+
+        // Extract time_units using xmutil's priority chain:
+        // TIME STEP > FINAL TIME > INITIAL TIME > "Months"
+        let time_units = self
+            .symbols
+            .get("time step")
+            .and_then(|info| extract_first_units(&info.equations))
+            .or_else(|| {
+                self.symbols
+                    .get("final time")
+                    .and_then(|info| extract_first_units(&info.equations))
+            })
+            .or_else(|| {
+                self.symbols
+                    .get("initial time")
+                    .and_then(|info| extract_first_units(&info.equations))
+            })
+            .unwrap_or_else(|| "Months".to_string());
+        self.sim_specs.time_units = Some(time_units);
 
         // Second pass: mark control vars as unwanted (mutably)
         for (name, alt_name) in control_vars {
@@ -1265,9 +1267,9 @@ x = 5
     }
 
     #[test]
-    fn test_time_units_final_time_first_with_explicit_units() {
-        // When FINAL TIME has explicit units and TIME STEP also has explicit units,
-        // FINAL TIME's units are used (processed first in control_vars order).
+    fn test_time_units_time_step_wins_over_final_time() {
+        // xmutil priority: TIME STEP > FINAL TIME > INITIAL TIME > "Months"
+        // When both TIME STEP and FINAL TIME have units, TIME STEP wins.
         let mdl = "INITIAL TIME = 0
 ~ [0, 100]
 ~ |
@@ -1287,8 +1289,8 @@ x = 5
 ";
         let result = convert_mdl(mdl);
         let project = result.unwrap();
-        // FINAL TIME is processed first, so its explicit units are used
-        assert_eq!(project.sim_specs.time_units.as_deref(), Some("Years"));
+        // TIME STEP has highest priority, so "Months" wins over "Years"
+        assert_eq!(project.sim_specs.time_units.as_deref(), Some("Months"));
     }
 
     #[test]
@@ -1339,5 +1341,72 @@ x = 5
         let project = result.unwrap();
         // FINAL TIME's explicit units are used
         assert_eq!(project.sim_specs.time_units.as_deref(), Some("Years"));
+    }
+
+    #[test]
+    fn test_time_units_range_only_time_step_wins() {
+        // TIME STEP has range-only "1", FINAL TIME has explicit "Years"
+        // TIME STEP still wins because it has higher priority (even with range-only)
+        let mdl = "INITIAL TIME = 0
+~ ~|
+FINAL TIME = 100
+~ Years
+~ |
+TIME STEP = 1
+~ [0, 10]
+~ |
+SAVEPER = 1
+~ ~|
+x = 5
+~ widgets
+~ |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        assert_eq!(project.sim_specs.time_units.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn test_time_units_no_units_anywhere_defaults_to_months() {
+        // No control variable has units at all -> falls back to "Months"
+        let mdl = "INITIAL TIME = 0
+~ ~|
+FINAL TIME = 100
+~ ~|
+TIME STEP = 1
+~ ~|
+SAVEPER = 1
+~ ~|
+x = 5
+~ widgets
+~ |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        assert_eq!(project.sim_specs.time_units.as_deref(), Some("Months"));
+    }
+
+    #[test]
+    fn test_time_units_initial_time_fallback() {
+        // Only INITIAL TIME has units -> used as last resort before "Months"
+        let mdl = "INITIAL TIME = 0
+~ Days
+~ |
+FINAL TIME = 100
+~ ~|
+TIME STEP = 1
+~ ~|
+SAVEPER = 1
+~ ~|
+x = 5
+~ widgets
+~ |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        assert_eq!(project.sim_specs.time_units.as_deref(), Some("Days"));
     }
 }

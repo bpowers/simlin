@@ -193,6 +193,13 @@ pub(super) fn extract_units(eq: &FullEquation<'_>) -> Option<String> {
     }
 }
 
+/// Extract units from the first equation in a list that has units.
+/// This iterates ALL equations (not just the first) to handle cases where
+/// the first equation is AFO or otherwise lacks units.
+pub(super) fn extract_first_units(equations: &[FullEquation<'_>]) -> Option<String> {
+    equations.iter().find_map(|eq| extract_units(eq))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

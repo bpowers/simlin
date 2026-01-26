@@ -198,7 +198,7 @@ impl<'input> ConversionContext<'input> {
     /// 1. First pass: drop all equations with no expression (EmptyRhs)
     /// 2. Second pass: if multiple equations remain and first is AFO, drop it
     /// 3. Return first remaining equation
-    fn select_equation<'a>(
+    pub(super) fn select_equation<'a>(
         &self,
         equations: &'a [FullEquation<'input>],
     ) -> Option<&'a FullEquation<'input>> {
