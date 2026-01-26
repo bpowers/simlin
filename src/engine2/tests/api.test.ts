@@ -1108,7 +1108,7 @@ describe('High-Level API', () => {
         // The teacup model should have the expected variables
         const model = project.mainModel;
         const varNames = model.variables.map((v) => v.name.toLowerCase());
-        expect(varNames).toContain('teacup temperature');
+        expect(varNames).toContain('teacup_temperature');
 
         project.dispose();
       }

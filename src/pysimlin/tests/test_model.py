@@ -184,7 +184,7 @@ class TestModelEditing:
         model = simlin.load(mdl_model_path)
 
         with model.edit(allow_errors=True) as (current, patch):
-            heat_loss = current["Heat Loss to Room"]
+            heat_loss = current["heat_loss_to_room"]
             heat_loss.equation = "0"
             patch.upsert_flow(heat_loss)
 
@@ -192,7 +192,7 @@ class TestModelEditing:
         project_json = json.loads(model.project.serialize_json().decode("utf-8"))
         flow_dict = next(
             f for f in project_json["models"][0]["flows"]
-            if f["name"] in {"Heat Loss to Room", "heat_loss_to_room"}
+            if f["name"] == "heat_loss_to_room"
         )
         assert flow_dict.get("equation", "") == "0"
 
@@ -204,12 +204,12 @@ class TestModelEditing:
         original_json = json.loads(model.project.serialize_json().decode("utf-8"))
         original_flow = next(
             f for f in original_json["models"][0]["flows"]
-            if f["name"] in {"Heat Loss to Room", "heat_loss_to_room"}
+            if f["name"] == "heat_loss_to_room"
         )
         original_equation = original_flow.get("equation", "")
 
         with model.edit(dry_run=True, allow_errors=True) as (current, patch):
-            flow = current["Heat Loss to Room"]
+            flow = current["heat_loss_to_room"]
             flow.equation = "0"
             patch.upsert_flow(flow)
 
@@ -217,7 +217,7 @@ class TestModelEditing:
         after_json = json.loads(model.project.serialize_json().decode("utf-8"))
         after_flow = next(
             f for f in after_json["models"][0]["flows"]
-            if f["name"] in {"Heat Loss to Room", "heat_loss_to_room"}
+            if f["name"] == "heat_loss_to_room"
         )
         assert after_flow.get("equation", "") == original_equation
 

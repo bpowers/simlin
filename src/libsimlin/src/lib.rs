@@ -2577,15 +2577,12 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
 /// Open a project from Vensim MDL format data
 ///
 /// Parses and imports a system dynamics model from Vensim's MDL format.
-/// Requires the "xmutil" feature to be enabled at compile time.
-///
 /// Returns NULL and populates `out_error` on failure.
 ///
 /// # Safety
 /// - `data` must be a valid pointer to at least `len` bytes
 /// - `out_error` may be null
 /// - The returned project must be freed with `simlin_project_unref`
-#[cfg(feature = "xmutil")]
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_open_vensim(
     data: *const u8,
@@ -2605,7 +2602,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
     let slice = std::slice::from_raw_parts(data, len);
     let mut reader = BufReader::new(slice);
 
-    match simlin_compat::open_vensim(&mut reader) {
+    match simlin_compat::open_vensim_native(&mut reader) {
         Ok(datamodel_project) => {
             let project: engine::Project = datamodel_project.into();
             let boxed = Box::new(SimlinProject {
@@ -5486,7 +5483,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "xmutil")]
     #[test]
     fn test_import_mdl() {
         // Load the SIR MDL model
@@ -5808,19 +5804,16 @@ mod tests {
             assert!(!err.is_null(), "Expected an error but got success");
             simlin_error_free(err);
 
-            // Test with invalid MDL (only when xmutil feature is enabled)
-            #[cfg(feature = "xmutil")]
-            {
-                err = ptr::null_mut();
-                let proj = simlin_project_open_vensim(
-                    bad_data.as_ptr(),
-                    bad_data.len(),
-                    &mut err as *mut *mut SimlinError,
-                );
-                assert!(proj.is_null());
-                assert!(!err.is_null(), "Expected an error but got success");
-                simlin_error_free(err);
-            }
+            // Test with invalid MDL
+            err = ptr::null_mut();
+            let proj = simlin_project_open_vensim(
+                bad_data.as_ptr(),
+                bad_data.len(),
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(proj.is_null());
+            assert!(!err.is_null(), "Expected an error but got success");
+            simlin_error_free(err);
         }
     }
 
