@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use simlin_core::datamodel::{self, Rect, View, ViewElement, view_element};
+use simlin_core::datamodel::{self, View, ViewElement, view_element};
 
 use std::collections::HashSet;
 
@@ -241,32 +241,17 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
     }
 
     let mut all_elements = Vec::new();
-    let mut min_x = f64::MAX;
-    let mut min_y = f64::MAX;
-    let mut max_x = f64::MIN;
-    let mut max_y = f64::MIN;
     let mut use_lettered_polarity = false;
 
     for view in views {
         let View::StockFlow(sf) = view;
-        // Extend view_box bounds
-        min_x = min_x.min(sf.view_box.x);
-        min_y = min_y.min(sf.view_box.y);
-        max_x = max_x.max(sf.view_box.x + sf.view_box.width);
-        max_y = max_y.max(sf.view_box.y + sf.view_box.height);
         use_lettered_polarity = use_lettered_polarity || sf.use_lettered_polarity;
-
         all_elements.extend(sf.elements);
     }
 
     let merged = View::StockFlow(datamodel::StockFlow {
         elements: all_elements,
-        view_box: Rect {
-            x: min_x,
-            y: min_y,
-            width: max_x - min_x,
-            height: max_y - min_y,
-        },
+        view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity,
     });
@@ -360,12 +345,9 @@ fn convert_view(
         }
     }
 
-    // Calculate view bounds
-    let view_box = calculate_view_box(&elements);
-
     Some(View::StockFlow(datamodel::StockFlow {
         elements,
-        view_box,
+        view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity,
     }))
@@ -739,50 +721,6 @@ fn create_sector_group(
     })
 }
 
-/// Calculate the view box (bounding rectangle) for a set of elements.
-fn calculate_view_box(elements: &[ViewElement]) -> Rect {
-    if elements.is_empty() {
-        return Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 800.0,
-            height: 600.0,
-        };
-    }
-
-    let mut min_x = f64::MAX;
-    let mut min_y = f64::MAX;
-    let mut max_x = f64::MIN;
-    let mut max_y = f64::MIN;
-
-    for elem in elements {
-        let (x, y) = match elem {
-            ViewElement::Aux(e) => (e.x, e.y),
-            ViewElement::Stock(e) => (e.x, e.y),
-            ViewElement::Flow(e) => (e.x, e.y),
-            ViewElement::Module(e) => (e.x, e.y),
-            ViewElement::Alias(e) => (e.x, e.y),
-            ViewElement::Cloud(e) => (e.x, e.y),
-            ViewElement::Group(e) => (e.x, e.y),
-            ViewElement::Link(_) => continue, // Skip links for bounds calculation
-        };
-
-        min_x = min_x.min(x);
-        min_y = min_y.min(y);
-        max_x = max_x.max(x);
-        max_y = max_y.max(y);
-    }
-
-    // Add some padding
-    let padding = 50.0;
-    Rect {
-        x: min_x - padding,
-        y: min_y - padding,
-        width: (max_x - min_x) + 2.0 * padding,
-        height: (max_y - min_y) + 2.0 * padding,
-    }
-}
-
 /// Normalize a view title by replacing special characters with spaces.
 ///
 /// Implements xmutil's MakeViewNamesUnique normalization (Model.cpp:587-592):
@@ -897,33 +835,6 @@ mod tests {
         assert_eq!(result.len(), 1);
         let View::StockFlow(sf) = &result[0];
         assert!(!sf.elements.is_empty());
-    }
-
-    #[test]
-    fn test_calculate_view_box() {
-        let elements = vec![
-            ViewElement::Aux(view_element::Aux {
-                name: "A".to_string(),
-                uid: 1,
-                x: 100.0,
-                y: 100.0,
-                label_side: view_element::LabelSide::Bottom,
-            }),
-            ViewElement::Aux(view_element::Aux {
-                name: "B".to_string(),
-                uid: 2,
-                x: 300.0,
-                y: 200.0,
-                label_side: view_element::LabelSide::Bottom,
-            }),
-        ];
-
-        let view_box = calculate_view_box(&elements);
-
-        assert!(view_box.x < 100.0); // Includes padding
-        assert!(view_box.y < 100.0);
-        assert!(view_box.width > 200.0);
-        assert!(view_box.height > 100.0);
     }
 
     #[test]
