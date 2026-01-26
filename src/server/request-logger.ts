@@ -16,7 +16,7 @@ function maybeGetUser(req: Request): string {
   if (!req.session || !req.session.passport || !req.session.passport.user) {
     return '';
   }
-  return ` user="${req.session.passport.user.email}"`;
+  return ` user="${req.session.passport.user.id}"`;
 }
 
 export function requestLogger(req: Request, res: Response, next: NextFunction): void {

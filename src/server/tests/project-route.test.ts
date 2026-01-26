@@ -82,11 +82,11 @@ function createMockResponse(): MockResponseResult {
   };
 }
 
-// Mock authenticated user for session
-function createAuthenticatedSession(email: string): Record<string, unknown> {
+// Mock authenticated session matching what passport.serializeUser stores: { id: userId }
+function createAuthenticatedSession(userId: string): Record<string, unknown> {
   return {
     passport: {
-      user: { email },
+      user: { id: userId },
     },
   };
 }
@@ -238,7 +238,7 @@ describe('createProjectRouteHandler', () => {
       const req = createMockRequest({
         username: 'testuser',
         projectName: 'private',
-        session: createAuthenticatedSession('test@example.com'),
+        session: createAuthenticatedSession('testuser'),
         user: undefined,
       });
       const { res, getRedirectUrl } = createMockResponse();
@@ -264,7 +264,7 @@ describe('createProjectRouteHandler', () => {
       const req = createMockRequest({
         username: 'testuser',
         projectName: 'private',
-        session: createAuthenticatedSession('other@example.com'),
+        session: createAuthenticatedSession('otheruser'),
         user: createMockUser('otheruser'),
       });
       const { res, getRedirectUrl } = createMockResponse();
@@ -293,7 +293,7 @@ describe('createProjectRouteHandler', () => {
       const req = createMockRequest({
         username: 'testuser',
         projectName: 'private',
-        session: createAuthenticatedSession('test@example.com'),
+        session: createAuthenticatedSession('testuser'),
         user: createMockUser('testuser'),
       });
       const { res, getRedirectUrl } = createMockResponse();
@@ -319,7 +319,7 @@ describe('createProjectRouteHandler', () => {
       const req = createMockRequest({
         username: 'testuser',
         projectName: 'private',
-        session: createAuthenticatedSession('test@example.com'),
+        session: createAuthenticatedSession('testuser'),
         user: createMockUser('testuser'),
       });
       const { res } = createMockResponse();
@@ -347,7 +347,7 @@ describe('createProjectRouteHandler', () => {
       const req = createMockRequest({
         username: 'testuser',
         projectName: 'private',
-        session: createAuthenticatedSession('test@example.com'),
+        session: createAuthenticatedSession('testuser'),
         user: createMockUser('testuser'),
       });
       const { res, getStatusCode } = createMockResponse();
@@ -375,7 +375,7 @@ describe('createProjectRouteHandler', () => {
         username: 'testuser',
         projectName: 'private',
         path: '/testuser/private/extra/path',
-        session: createAuthenticatedSession('test@example.com'),
+        session: createAuthenticatedSession('testuser'),
         user: createMockUser('testuser'),
       });
       const { res, getStatusCode } = createMockResponse();
@@ -401,7 +401,7 @@ describe('createProjectRouteHandler', () => {
         username: 'testuser',
         projectName: 'private',
         path: '/testuser/private/',
-        session: createAuthenticatedSession('test@example.com'),
+        session: createAuthenticatedSession('testuser'),
         user: createMockUser('testuser'),
       });
       const { res } = createMockResponse();
@@ -431,9 +431,9 @@ describe('getAuthenticatedUser', () => {
     expect(getAuthenticatedUser(req as Request)).toBeUndefined();
   });
 
-  it('should return undefined when email is not a string', () => {
+  it('should return undefined when session user has no id', () => {
     const req = {
-      session: { passport: { user: { email: 123 } } },
+      session: { passport: { user: { other: 'field' } } },
       user: { getId: () => 'testuser' },
     } as unknown as Request;
     expect(getAuthenticatedUser(req)).toBeUndefined();
@@ -441,7 +441,7 @@ describe('getAuthenticatedUser', () => {
 
   it('should return undefined when getId is not a function', () => {
     const req = {
-      session: { passport: { user: { email: 'test@example.com' } } },
+      session: { passport: { user: { id: 'testuser' } } },
       user: { getId: 'not-a-function' },
     } as unknown as Request;
     expect(getAuthenticatedUser(req)).toBeUndefined();
@@ -449,13 +449,12 @@ describe('getAuthenticatedUser', () => {
 
   it('should return user info for valid authenticated session', () => {
     const req = {
-      session: { passport: { user: { email: 'test@example.com' } } },
+      session: { passport: { user: { id: 'testuser' } } },
       user: { getId: () => 'testuser' },
     } as unknown as Request;
 
     const result = getAuthenticatedUser(req);
     expect(result).toEqual({
-      email: 'test@example.com',
       userId: 'testuser',
     });
   });
@@ -467,12 +466,12 @@ describe('isResourceOwner', () => {
   });
 
   it('should return false when userId does not match ownerId', () => {
-    const authUser: AuthenticatedUser = { email: 'test@example.com', userId: 'testuser' };
+    const authUser: AuthenticatedUser = { userId: 'testuser' };
     expect(isResourceOwner(authUser, 'otheruser')).toBe(false);
   });
 
   it('should return true when userId matches ownerId', () => {
-    const authUser: AuthenticatedUser = { email: 'test@example.com', userId: 'testuser' };
+    const authUser: AuthenticatedUser = { userId: 'testuser' };
     expect(isResourceOwner(authUser, 'testuser')).toBe(true);
   });
 });

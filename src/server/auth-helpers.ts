@@ -8,7 +8,6 @@ import { Request } from 'express';
  * Information about the authenticated user extracted from the session.
  */
 export interface AuthenticatedUser {
-  email: string;
   userId: string;
 }
 
@@ -29,6 +28,11 @@ function isUserRecord(obj: unknown): obj is UserRecord {
  *
  * This safely checks all levels of the session object to avoid TypeError
  * when accessing properties on undefined/null objects.
+ *
+ * passport.serializeUser stores { id: userId } in the session, so
+ * we check for that field to confirm the session is authenticated.
+ * The full user object (with getId(), getEmail(), etc.) is on req.user,
+ * populated by passport.deserializeUser.
  */
 export function getAuthenticatedUser(req: Request): AuthenticatedUser | undefined {
   if (!req.session) {
@@ -45,8 +49,8 @@ export function getAuthenticatedUser(req: Request): AuthenticatedUser | undefine
     return undefined;
   }
 
-  const email = (passportUser as Record<string, unknown>).email;
-  if (typeof email !== 'string') {
+  const sessionId = (passportUser as Record<string, unknown>).id;
+  if (typeof sessionId !== 'string') {
     return undefined;
   }
 
@@ -59,7 +63,7 @@ export function getAuthenticatedUser(req: Request): AuthenticatedUser | undefine
     return undefined;
   }
 
-  return { email, userId };
+  return { userId };
 }
 
 /**
