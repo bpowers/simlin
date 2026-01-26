@@ -26,7 +26,6 @@ import {
   simlin_project_open_xmile,
   simlin_project_open_vensim,
   simlin_project_serialize_xmile,
-  hasVensimSupport,
 } from './internal/import-export';
 import { simlin_analyze_get_loops, readLoops, simlin_free_loops } from './internal/analysis';
 import { SimlinProjectPtr, SimlinJsonFormat, ErrorDetail } from './internal/types';
@@ -102,10 +101,9 @@ export class Project {
 
   /**
    * Create a project from Vensim MDL data.
-   * Note: This requires libsimlin to be built with the 'xmutil' feature.
    * @param data MDL file data as Uint8Array
    * @returns New Project instance
-   * @throws SimlinError if the MDL data is invalid or xmutil support is not available
+   * @throws SimlinError if the MDL data is invalid
    */
   private static fromVensim(data: Uint8Array): Project {
     const ptr = simlin_project_open_vensim(data);
@@ -166,18 +164,6 @@ export class Project {
     await ensureInitialized(options.wasm);
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
     return Project.fromVensim(bytes);
-  }
-
-  /**
-   * Check if the WASM module was built with Vensim MDL support.
-   * Automatically initializes WASM if needed.
-   *
-   * @param options Optional WASM configuration
-   * @returns Promise resolving to true if Project.openVensim() is available
-   */
-  static async hasVensimSupport(options: ProjectOpenOptions = {}): Promise<boolean> {
-    await ensureInitialized(options.wasm);
-    return hasVensimSupport();
   }
 
   /**

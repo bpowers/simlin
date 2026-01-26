@@ -47,15 +47,6 @@ export function simlin_project_open_xmile(data: Uint8Array): SimlinProjectPtr {
 }
 
 /**
- * Check if the WASM module was built with Vensim MDL support.
- * @returns True if simlin_project_open_vensim is available
- */
-export function hasVensimSupport(): boolean {
-  const exports = getExports();
-  return typeof exports.simlin_project_open_vensim === 'function';
-}
-
-/**
  * Open a project from Vensim MDL format.
  * @param data MDL file data
  * @returns Project pointer

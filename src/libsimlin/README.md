@@ -50,7 +50,7 @@ Some major components are:
 - `simlin_project_open_protobuf`: Load a project from protobuf bytes
 - `simlin_project_open_json`: Load a project from JSON
 - `simlin_project_open_xmile`: Load a project from XMILE/STMX
-- `simlin_project_open_vensim`: Load a project from Vensim MDL (requires `xmutil` feature)
+- `simlin_project_open_vensim`: Load a project from Vensim MDL
 - `simlin_project_serialize_protobuf`: Serialize a project to protobuf bytes
 - `simlin_project_serialize_json`: Serialize a project to JSON
 - `simlin_project_serialize_xmile`: Serialize a project to XMILE/STMX
