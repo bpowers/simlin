@@ -860,13 +860,9 @@ const linkViewElementDefaults = {
   arc: undefined as number | undefined,
   isStraight: false,
   multiPoint: undefined as List<Point> | undefined,
+  polarity: undefined as string | undefined,
 };
 export class LinkViewElement extends Record(linkViewElementDefaults) implements ViewElement {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof linkViewElementDefaults) {
-    super(props);
-  }
   static fromJson(json: JsonLinkViewElement): LinkViewElement {
     let arc: number | undefined = undefined;
     let isStraight = false;
@@ -887,6 +883,7 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
       arc,
       isStraight,
       multiPoint,
+      polarity: json.polarity,
     });
   }
   toJson(): JsonLinkViewElement {
@@ -900,6 +897,9 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
       result.arc = this.arc;
     } else if (this.multiPoint) {
       result.multiPoints = this.multiPoint.map((p) => ({ x: p.x, y: p.y })).toArray();
+    }
+    if (this.polarity !== undefined) {
+      result.polarity = this.polarity;
     }
     return result;
   }
@@ -1163,13 +1163,9 @@ const stockFlowViewDefaults = {
   elements: List<ViewElement>(),
   viewBox: Rect.default(),
   zoom: -1,
+  useLetteredPolarity: false,
 };
 export class StockFlowView extends Record(stockFlowViewDefaults) {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof stockFlowViewDefaults) {
-    super(props);
-  }
   static fromJson(json: JsonView, variables: Map<string, Variable>): StockFlowView {
     let maxUid = -1;
     let namedElements = Map<string, UID>();
@@ -1244,6 +1240,7 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
       nextUid,
       viewBox,
       zoom: json.zoom ?? 1,
+      useLetteredPolarity: json.useLetteredPolarity ?? false,
     });
   }
   toJson(): JsonView {
@@ -1281,6 +1278,10 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
 
     if (this.zoom > 0) {
       result.zoom = this.zoom;
+    }
+
+    if (this.useLetteredPolarity) {
+      result.useLetteredPolarity = true;
     }
 
     return result;

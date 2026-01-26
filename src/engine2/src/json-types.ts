@@ -215,6 +215,7 @@ export interface JsonLinkViewElement {
   toUid: number;
   arc?: number;
   multiPoints?: JsonLinkPoint[];
+  polarity?: string;
 }
 
 /**
@@ -275,6 +276,7 @@ export interface JsonView {
   kind?: string;
   viewBox?: JsonRect;
   zoom?: number;
+  useLetteredPolarity?: boolean;
 }
 
 // Simulation specs

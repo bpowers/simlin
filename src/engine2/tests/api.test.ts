@@ -1075,6 +1075,49 @@ describe('High-Level API', () => {
 
       project.dispose();
     });
+
+    // Test for: Link view polarity and useLetteredPolarity should round-trip through JSON
+    it('should preserve link polarity and useLetteredPolarity on JSON round-trip', async () => {
+      const projectJson = {
+        name: 'test_project',
+        simSpecs: {
+          startTime: 0,
+          endTime: 10,
+          dt: '1',
+        },
+        models: [
+          {
+            name: 'main',
+            stocks: [],
+            flows: [],
+            auxiliaries: [{ name: 'a', equation: '1' }, { name: 'b', equation: 'a' }],
+            views: [
+              {
+                elements: [
+                  { type: 'aux', uid: 1, name: 'a', x: 100, y: 100 },
+                  { type: 'aux', uid: 2, name: 'b', x: 200, y: 100 },
+                  { type: 'link', uid: 3, fromUid: 1, toUid: 2, polarity: '+' },
+                ],
+                useLetteredPolarity: true,
+              },
+            ],
+          },
+        ],
+      };
+
+      const project = await Project.openJson(JSON.stringify(projectJson));
+      const json = project.serializeJson();
+      const parsed = JSON.parse(json);
+
+      const view = parsed.models[0].views[0];
+      expect(view.useLetteredPolarity).toBe(true);
+
+      const linkElem = view.elements.find((e: { type: string }) => e.type === 'link');
+      expect(linkElem).toBeDefined();
+      expect(linkElem.polarity).toBe('+');
+
+      project.dispose();
+    });
   });
 
   describe('Vensim MDL support', () => {
