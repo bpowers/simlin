@@ -24,7 +24,7 @@ use simlin_compat::{open_vensim, open_vensim_native};
 use simlin_core::canonicalize;
 use simlin_core::datamodel::{
     Aux, Dimension, DimensionElements, Dt, Equation, Flow, Model, Module, Project, SimSpecs, Stock,
-    Variable, View, ViewElement,
+    Variable, View, ViewElement, view_element,
 };
 
 /// Models that should produce equivalent output from both parsers.
@@ -205,12 +205,10 @@ fn summarize_view_elements(views: &[View]) -> String {
 
 /// Normalize views for comparison.
 /// TODO: Full view comparison once all differences are understood.
-fn normalize_views(views: &mut Vec<View>) {
+fn normalize_views(views: &mut [View]) {
     if !views.is_empty() {
         eprintln!("  {}", summarize_view_elements(views));
     }
-    // Clear for now - detailed comparison requires matching UIDs and coordinates
-    views.clear();
 }
 
 /// Normalize a model for comparison.
@@ -382,6 +380,66 @@ fn normalize_module(module: &mut Module) {
     module.ai_state = None;
 }
 
+/// Floating-point tolerance for arc angles.
+/// The xmutil path roundtrips angles through a string representation in XMILE XML
+/// (C++ float → string → Rust f64), while the native path computes directly.
+/// This causes ~1e-13 differences that are inherent to the different computation paths.
+const ANGLE_EPSILON: f64 = 1e-10;
+
+/// Compare two LinkShapes with floating-point tolerance for arc angles.
+fn link_shapes_equivalent(a: &view_element::LinkShape, b: &view_element::LinkShape) -> bool {
+    match (a, b) {
+        (view_element::LinkShape::Straight, view_element::LinkShape::Straight) => true,
+        (view_element::LinkShape::Arc(a), view_element::LinkShape::Arc(b)) => {
+            (a - b).abs() < ANGLE_EPSILON
+        }
+        (view_element::LinkShape::MultiPoint(a), view_element::LinkShape::MultiPoint(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Compare two ViewElements with tolerance for floating-point differences.
+fn assert_view_elements_equivalent(
+    xe: &ViewElement,
+    ne: &ViewElement,
+    path: &str,
+    view_idx: usize,
+    elem_idx: usize,
+) {
+    // For Link elements, use fuzzy comparison for arc angles
+    if let (ViewElement::Link(xl), ViewElement::Link(nl)) = (xe, ne) {
+        assert_eq!(
+            xl.uid, nl.uid,
+            "{path}: view {view_idx} element {elem_idx} link uid differs"
+        );
+        assert_eq!(
+            xl.from_uid, nl.from_uid,
+            "{path}: view {view_idx} element {elem_idx} link from_uid differs"
+        );
+        assert_eq!(
+            xl.to_uid, nl.to_uid,
+            "{path}: view {view_idx} element {elem_idx} link to_uid differs"
+        );
+        assert!(
+            link_shapes_equivalent(&xl.shape, &nl.shape),
+            "{path}: view {view_idx} element {elem_idx} link shape differs\n  xmutil: {:?}\n  native: {:?}",
+            xl.shape,
+            nl.shape
+        );
+        assert_eq!(
+            xl.polarity, nl.polarity,
+            "{path}: view {view_idx} element {elem_idx} link polarity differs"
+        );
+        return;
+    }
+    // For all other elements, exact equality
+    assert_eq!(
+        xe, ne,
+        "{path}: view {view_idx} element {elem_idx} differs\n  xmutil: {:#?}\n  native: {:#?}",
+        xe, ne
+    );
+}
+
 /// Compare two projects for equivalence with detailed error messages.
 fn assert_projects_equivalent(xmutil: &Project, native: &Project, path: &str) {
     // Compare sim_specs
@@ -509,6 +567,31 @@ fn assert_model_equivalent(xm: &Model, nm: &Model, path: &str) {
                 xv,
                 nv
             );
+        }
+    }
+
+    // Compare views
+    assert_eq!(
+        xm.views.len(),
+        nm.views.len(),
+        "{path}: view count differs ({} vs {})",
+        xm.views.len(),
+        nm.views.len()
+    );
+    for (i, (xv, nv)) in xm.views.iter().zip(nm.views.iter()).enumerate() {
+        let View::StockFlow(x_sf) = xv;
+        let View::StockFlow(n_sf) = nv;
+        assert_eq!(
+            x_sf.elements.len(),
+            n_sf.elements.len(),
+            "{path}: view {i} element count differs ({} vs {})\n  xmutil: {}\n  native: {}",
+            x_sf.elements.len(),
+            n_sf.elements.len(),
+            summarize_view_elements(&xm.views),
+            summarize_view_elements(&nm.views),
+        );
+        for (j, (xe, ne)) in x_sf.elements.iter().zip(n_sf.elements.iter()).enumerate() {
+            assert_view_elements_equivalent(xe, ne, path, i, j);
         }
     }
 }

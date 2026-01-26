@@ -1979,6 +1979,8 @@ pub mod view_element {
         pub to_uid: Option<i32>,
         #[serde(rename = "@angle")]
         pub angle: Option<f64>,
+        #[serde(rename = "@polarity")]
+        pub polarity: Option<String>,
         #[serde(rename = "@is_straight")]
         pub is_straight: Option<bool>,
         #[serde(rename = "pts")]
@@ -2007,9 +2009,12 @@ pub mod view_element {
         fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
             let angle = self.angle.map(|angle| format!("{angle}"));
 
-            let mut attrs = Vec::with_capacity(1);
+            let mut attrs = Vec::with_capacity(2);
             if let Some(ref angle) = angle {
                 attrs.push(("angle", angle.as_str()));
+            }
+            if let Some(ref polarity) = self.polarity {
+                attrs.push(("polarity", polarity.as_str()));
             }
             write_tag_start_with_attrs(writer, "connector", &attrs)?;
 
@@ -2054,6 +2059,21 @@ pub mod view_element {
         }
     }
 
+    fn parse_polarity(s: &str) -> Option<datamodel::view_element::LinkPolarity> {
+        match s {
+            "+" => Some(datamodel::view_element::LinkPolarity::Positive),
+            "-" => Some(datamodel::view_element::LinkPolarity::Negative),
+            _ => None,
+        }
+    }
+
+    fn polarity_to_string(p: &datamodel::view_element::LinkPolarity) -> String {
+        match p {
+            datamodel::view_element::LinkPolarity::Positive => "+".to_string(),
+            datamodel::view_element::LinkPolarity::Negative => "-".to_string(),
+        }
+    }
+
     impl From<Link> for datamodel::view_element::Link {
         fn from(v: Link) -> Self {
             let shape = if v.is_straight.unwrap_or(false) {
@@ -2079,7 +2099,7 @@ pub mod view_element {
                 from_uid: v.from_uid.unwrap_or(-1),
                 to_uid: v.to_uid.unwrap_or(-1),
                 shape,
-                polarity: None,
+                polarity: v.polarity.as_deref().and_then(parse_polarity),
             }
         }
     }
@@ -2132,7 +2152,7 @@ pub mod view_element {
             from_uid,
             to_uid,
             shape,
-            polarity: None,
+            polarity: v.polarity.as_deref().and_then(parse_polarity),
         }
     }
 
@@ -2206,6 +2226,7 @@ pub mod view_element {
                 },
                 to_uid: Some(v.to_uid),
                 angle,
+                polarity: v.polarity.as_ref().map(polarity_to_string),
                 is_straight,
                 points,
             }
@@ -2387,6 +2408,7 @@ pub mod view_element {
             to: LinkEnd::Named("to_var".to_string()),
             to_uid: Some(2),
             angle: Some(0.0), // canvas coords: 0 degrees = pointing right
+            polarity: None,
             is_straight: None,
             points: None,
         };
@@ -2435,6 +2457,7 @@ pub mod view_element {
             to: LinkEnd::Named("to_var".to_string()),
             to_uid: Some(2),
             angle: Some(45.0), // significantly different from straight (0 degrees)
+            polarity: None,
             is_straight: None,
             points: None,
         };
@@ -2491,6 +2514,7 @@ pub mod view_element {
             to: LinkEnd::Named("to_var".to_string()),
             to_uid: Some(2),
             angle: Some(0.005), // very close to 0 (straight horizontal)
+            polarity: None,
             is_straight: None,
             points: None,
         };
@@ -2510,6 +2534,7 @@ pub mod view_element {
             to: LinkEnd::Named("to_var".to_string()),
             to_uid: Some(2),
             angle: Some(5.0), // 5 degrees from straight - visually straight but not exact
+            polarity: None,
             is_straight: None,
             points: None,
         };
@@ -3079,6 +3104,9 @@ impl View {
         }
 
         // if there were links we couldn't resolve, dump them
+        let had_unresolvable = self.objects.iter().any(|o| {
+            matches!(o, ViewObject::Link(link) if link.from_uid.is_none() || link.to_uid.is_none())
+        });
         self.objects.retain(|o| {
             if let ViewObject::Link(link) = o {
                 link.from_uid.is_some() && link.to_uid.is_some()
@@ -3086,6 +3114,31 @@ impl View {
                 true
             }
         });
+
+        // Re-sequence UIDs to close gaps left by dropped links
+        if had_unresolvable {
+            uid_map.clear();
+            let mut resequence_map: HashMap<i32, i32> = HashMap::new();
+            next_uid = 1;
+            for o in self.objects.iter_mut() {
+                let old_uid = o.uid().unwrap_or(-1);
+                resequence_map.insert(old_uid, next_uid);
+                if let Some(ident) = o.ident() {
+                    uid_map.insert(ident, next_uid);
+                }
+                o.set_uid(next_uid);
+                next_uid += 1;
+            }
+            let remap = |uid: i32| -> i32 { resequence_map.get(&uid).copied().unwrap_or(uid) };
+            for o in self.objects.iter_mut() {
+                if let ViewObject::Link(link) = o {
+                    link.from_uid = link.from_uid.map(&remap);
+                    link.to_uid = link.to_uid.map(&remap);
+                } else if let ViewObject::Alias(alias) = o {
+                    alias.of_uid = alias.of_uid.map(&remap);
+                }
+            }
+        }
 
         self.next_uid = Some(next_uid);
         uid_map

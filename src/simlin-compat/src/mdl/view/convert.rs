@@ -88,11 +88,142 @@ pub fn build_views(
     }
 
     // If multiple views, merge into one with group wrappers
-    // UIDs are preserved as uid_offset + local_uid (matching xmutil behavior)
-    if result.len() > 1 {
+    let mut result = if result.len() > 1 {
         merge_views(result)
     } else {
         result
+    };
+
+    // Post-processing: adjust flow points to stock edges and reassign sequential UIDs.
+    // This matches the XMILE path's normalize() sequence:
+    //   1. assign_uids() — sequential UIDs
+    //   2. fixup_clouds() — sets pt.uid on flow points
+    //   3. fixup_flow_takeoffs() — adjusts flow point coords to stock edges
+    // We do steps 3 then 1 (flow points already have attached_to_uid from compute_flow_points).
+    for view in &mut result {
+        let View::StockFlow(sf) = view;
+        fixup_flow_takeoffs(&mut sf.elements);
+        reassign_uids_sequential(&mut sf.elements);
+    }
+
+    result
+}
+
+// Stock dimensions matching the XMILE constants in xmile.rs
+const STOCK_WIDTH: f64 = 45.0;
+const STOCK_HEIGHT: f64 = 35.0;
+
+/// Adjust flow point coordinates from stock centers to stock edges.
+///
+/// Matches the XMILE path's `fixup_flow_takeoffs()` in xmile.rs.
+/// When a flow point is attached to a stock, the coordinate is snapped
+/// to the nearest edge of the stock rectangle rather than its center.
+fn fixup_flow_takeoffs(elements: &mut [ViewElement]) {
+    // Collect stock positions by UID
+    let stocks: HashMap<i32, (f64, f64)> = elements
+        .iter()
+        .filter_map(|e| {
+            if let ViewElement::Stock(s) = e {
+                Some((s.uid, (s.x, s.y)))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for elem in elements.iter_mut() {
+        if let ViewElement::Flow(flow) = elem {
+            if flow.points.len() != 2 {
+                continue;
+            }
+            let source = flow.points[0].clone();
+            let sink = flow.points[1].clone();
+
+            // Adjust source point if attached to a stock
+            if let Some(stock_uid) = source.attached_to_uid
+                && let Some(&(sx, sy)) = stocks.get(&stock_uid)
+            {
+                adjust_takeoff_point(&mut flow.points[0], sx, sy, &sink);
+            }
+
+            // Adjust sink point if attached to a stock
+            if let Some(stock_uid) = sink.attached_to_uid
+                && let Some(&(sx, sy)) = stocks.get(&stock_uid)
+            {
+                adjust_takeoff_point(&mut flow.points[1], sx, sy, &source);
+            }
+        }
+    }
+}
+
+/// Snap a flow point to the nearest edge of its attached stock.
+///
+/// `sx, sy` is the stock center. `other` is the flow point at the other end.
+/// The point is moved to the stock edge facing the other endpoint.
+fn adjust_takeoff_point(
+    pt: &mut view_element::FlowPoint,
+    sx: f64,
+    sy: f64,
+    other: &view_element::FlowPoint,
+) {
+    if other.x > sx + STOCK_WIDTH / 2.0 && (other.y - sy).abs() < STOCK_HEIGHT / 2.0 {
+        // Other point is to the right
+        pt.x = sx + STOCK_WIDTH / 2.0;
+    } else if other.x < sx - STOCK_WIDTH / 2.0 && (other.y - sy).abs() < STOCK_HEIGHT / 2.0 {
+        // Other point is to the left
+        pt.x = sx - STOCK_WIDTH / 2.0;
+    } else if other.y < sy - STOCK_HEIGHT / 2.0 && (other.x - sx).abs() < STOCK_WIDTH / 2.0 {
+        // Other point is above
+        pt.y = sy - STOCK_HEIGHT / 2.0;
+    } else if other.y > sy + STOCK_HEIGHT / 2.0 && (other.x - sx).abs() < STOCK_WIDTH / 2.0 {
+        // Other point is below
+        pt.y = sy + STOCK_HEIGHT / 2.0;
+    }
+}
+
+/// Reassign UIDs sequentially starting from 1 and update all cross-references.
+///
+/// Matches the XMILE path's `assign_uids()` in xmile.rs, which assigns
+/// UIDs sequentially in element order starting from 1.
+fn reassign_uids_sequential(elements: &mut [ViewElement]) {
+    // Build old_uid -> new_uid mapping
+    let mut uid_map: HashMap<i32, i32> = HashMap::new();
+    let mut next_uid = 1;
+    for elem in elements.iter() {
+        let old_uid = elem.get_uid();
+        uid_map.insert(old_uid, next_uid);
+        next_uid += 1;
+    }
+
+    let remap = |uid: i32| -> i32 { uid_map.get(&uid).copied().unwrap_or(uid) };
+
+    // Apply new UIDs and update cross-references
+    for elem in elements.iter_mut() {
+        match elem {
+            ViewElement::Aux(a) => a.uid = remap(a.uid),
+            ViewElement::Stock(s) => s.uid = remap(s.uid),
+            ViewElement::Flow(f) => {
+                f.uid = remap(f.uid);
+                for pt in &mut f.points {
+                    pt.attached_to_uid = pt.attached_to_uid.map(&remap);
+                }
+            }
+            ViewElement::Link(l) => {
+                l.uid = remap(l.uid);
+                l.from_uid = remap(l.from_uid);
+                l.to_uid = remap(l.to_uid);
+            }
+            ViewElement::Module(m) => m.uid = remap(m.uid),
+            ViewElement::Alias(a) => {
+                a.uid = remap(a.uid);
+                a.alias_of_uid = remap(a.alias_of_uid);
+            }
+            ViewElement::Cloud(c) => {
+                c.uid = remap(c.uid);
+                c.flow_uid = remap(c.flow_uid);
+            }
+            ViewElement::Group(g) => g.uid = remap(g.uid),
+        }
     }
 }
 
