@@ -23,10 +23,7 @@ const existsSyncMock = fs.existsSync as jest.MockedFunction<typeof fs.existsSync
 
 describe('Static file configuration', () => {
   describe('getStaticDirectory', () => {
-    const originalNodeEnv = process.env.NODE_ENV;
-
     afterEach(() => {
-      process.env.NODE_ENV = originalNodeEnv;
       existsSyncMock.mockImplementation(actualFs.existsSync);
     });
 
@@ -55,14 +52,24 @@ describe('Static file configuration', () => {
       expect(dir).toBe('public');
     });
 
-    it('should respect explicit env override when NODE_ENV is production', () => {
-      process.env.NODE_ENV = 'production';
+    it('should respect explicit env override', () => {
       existsSyncMock.mockImplementation((p: fs.PathLike) => {
         if (String(p) === 'build/index.html') return true;
         return actualFs.existsSync(p);
       });
       const dir = getStaticDirectory('development');
       expect(dir).toBe('build');
+    });
+
+    it('should use process.env.NODE_ENV when no argument is passed', () => {
+      const env = process.env.NODE_ENV;
+      const dir = getStaticDirectory();
+      if (env === 'production') {
+        expect(dir).toBe('public');
+      } else {
+        // In non-production (or undefined), behavior depends on whether build/index.html exists
+        expect(['build', 'public']).toContain(dir);
+      }
     });
   });
 

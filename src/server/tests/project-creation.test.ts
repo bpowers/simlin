@@ -54,10 +54,12 @@ describe('emptyProject', () => {
     const json = JSON.parse(project.serializeJson()) as JsonProject;
     project.dispose();
 
+    // The engine's JSON serializer omits empty arrays, so these are undefined
+    // rather than []. Verify no variables are present either way.
     const mainModel = json.models[0];
-    expect(mainModel.stocks).toEqual([]);
-    expect(mainModel.flows).toEqual([]);
-    expect(mainModel.auxiliaries).toEqual([]);
+    expect(mainModel.stocks ?? []).toEqual([]);
+    expect(mainModel.flows ?? []).toEqual([]);
+    expect(mainModel.auxiliaries ?? []).toEqual([]);
   });
 
   it('creates a main model with a stock-flow view', async () => {

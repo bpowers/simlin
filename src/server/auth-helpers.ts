@@ -13,6 +13,17 @@ export interface AuthenticatedUser {
 }
 
 /**
+ * Interface for the deserialized user object set by passport on req.user.
+ */
+interface UserRecord {
+  getId(): string;
+}
+
+function isUserRecord(obj: unknown): obj is UserRecord {
+  return obj !== null && typeof obj === 'object' && typeof (obj as Record<string, unknown>).getId === 'function';
+}
+
+/**
  * Check if the request has a valid authenticated session.
  * Returns the authenticated user info if present, undefined otherwise.
  *
@@ -20,42 +31,30 @@ export interface AuthenticatedUser {
  * when accessing properties on undefined/null objects.
  */
 export function getAuthenticatedUser(req: Request): AuthenticatedUser | undefined {
-  // Check session exists
   if (!req.session) {
     return undefined;
   }
 
-  // Check passport exists in session
   const passport = (req.session as Record<string, unknown>).passport;
   if (!passport || typeof passport !== 'object') {
     return undefined;
   }
 
-  // Check user exists in passport
   const passportUser = (passport as Record<string, unknown>).user;
   if (!passportUser || typeof passportUser !== 'object') {
     return undefined;
   }
 
-  // Extract email and user ID
   const email = (passportUser as Record<string, unknown>).email;
   if (typeof email !== 'string') {
     return undefined;
   }
 
-  // Get user from req.user (set by passport deserialize)
-  const user = req.user as Record<string, unknown> | undefined;
-  if (!user) {
+  if (!isUserRecord(req.user)) {
     return undefined;
   }
 
-  // Get user ID from the deserialized user object
-  const getId = user.getId;
-  if (typeof getId !== 'function') {
-    return undefined;
-  }
-
-  const userId = getId.call(user);
+  const userId = req.user.getId();
   if (typeof userId !== 'string') {
     return undefined;
   }

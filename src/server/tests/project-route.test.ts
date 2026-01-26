@@ -8,11 +8,13 @@ import { createProjectRouteHandler, ProjectRecord, ProjectRouteHandlerDeps } fro
 import { getAuthenticatedUser, isResourceOwner, AuthenticatedUser } from '../auth-helpers';
 
 // Mock project factory
-function createMockProject(overrides: { id?: string; isPublic?: boolean; fileId?: string | undefined }): ProjectRecord {
+function createMockProject(opts: { id: string; isPublic: boolean; ownerId?: string; fileId?: string | undefined }): ProjectRecord {
+  const ownerId = opts.ownerId ?? opts.id.split('/')[0];
   return {
-    getId: () => overrides.id ?? 'testuser/testproject',
-    getIsPublic: () => overrides.isPublic ?? false,
-    getFileId: () => overrides.fileId,
+    getId: () => opts.id,
+    getOwnerId: () => ownerId,
+    getIsPublic: () => opts.isPublic,
+    getFileId: () => opts.fileId,
   };
 }
 
@@ -275,6 +277,35 @@ describe('createProjectRouteHandler', () => {
     });
   });
 
+  describe('private project - owner ID mismatch with URL', () => {
+    it('should redirect to / when project ownerId differs from URL username even if URL matches auth user', async () => {
+      // The project record says the owner is "realowner", but the URL says "testuser".
+      // The authenticated user is "testuser", matching the URL but NOT the project record.
+      const project = createMockProject({
+        id: 'testuser/private',
+        isPublic: false,
+        ownerId: 'realowner',
+        fileId: 'file123',
+      });
+      const db = createMockDb(project);
+      const handler = createProjectRouteHandler({ db });
+
+      const req = createMockRequest({
+        username: 'testuser',
+        projectName: 'private',
+        session: createAuthenticatedSession('test@example.com'),
+        user: createMockUser('testuser'),
+      });
+      const { res, getRedirectUrl } = createMockResponse();
+      const next = jest.fn();
+
+      await handler(req as Request, res as Response, next);
+
+      expect(getRedirectUrl()).toBe('/');
+      expect(next).not.toHaveBeenCalled();
+    });
+  });
+
   describe('private project - correct owner', () => {
     it('should serve index.html for authenticated owner', async () => {
       const project = createMockProject({
@@ -404,6 +435,14 @@ describe('getAuthenticatedUser', () => {
     const req = {
       session: { passport: { user: { email: 123 } } },
       user: { getId: () => 'testuser' },
+    } as unknown as Request;
+    expect(getAuthenticatedUser(req)).toBeUndefined();
+  });
+
+  it('should return undefined when getId is not a function', () => {
+    const req = {
+      session: { passport: { user: { email: 'test@example.com' } } },
+      user: { getId: 'not-a-function' },
     } as unknown as Request;
     expect(getAuthenticatedUser(req)).toBeUndefined();
   });

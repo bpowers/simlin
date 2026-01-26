@@ -106,17 +106,17 @@ else
         exit 1
     fi
 
-    echo -n "Running engine2 tests... "
-    ENGINE2_OUTPUT="$(mktemp)"
-    if yarn workspace @system-dynamics/engine2 test > "$ENGINE2_OUTPUT" 2>&1; then
+    echo -n "Running TypeScript tests... "
+    TS_TEST_OUTPUT="$(mktemp)"
+    if yarn test > "$TS_TEST_OUTPUT" 2>&1; then
         echo -e "${GREEN}✓${NC}"
-        rm -f "$ENGINE2_OUTPUT"
+        rm -f "$TS_TEST_OUTPUT"
     else
         echo -e "${RED}✗${NC}"
-        echo -e "${RED}engine2 tests failed:${NC}"
-        cat "$ENGINE2_OUTPUT"
-        rm -f "$ENGINE2_OUTPUT"
-        echo -e "${YELLOW}Run 'yarn workspace @system-dynamics/engine2 test' to see failures${NC}"
+        echo -e "${RED}TypeScript tests failed:${NC}"
+        cat "$TS_TEST_OUTPUT"
+        rm -f "$TS_TEST_OUTPUT"
+        echo -e "${YELLOW}Run 'yarn test' to see failures${NC}"
         exit 1
     fi
 fi

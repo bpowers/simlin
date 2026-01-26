@@ -19,6 +19,7 @@ export interface ProjectDb {
  */
 export interface ProjectRecord {
   getId(): string;
+  getOwnerId(): string;
   getIsPublic(): boolean;
   getFileId(): string | undefined;
 }
@@ -60,13 +61,13 @@ export function createProjectRouteHandler(deps: ProjectRouteHandlerDeps) {
     const authUser = getAuthenticatedUser(req);
 
     if (!authUser) {
-      // Unauthenticated user trying to access private project - redirect to home
+      logger.debug(`Unauthenticated access to private project ${projectId}, redirecting`);
       res.redirect('/');
       return;
     }
 
     // Check if authenticated user owns this project
-    if (!isResourceOwner(authUser, username)) {
+    if (!isResourceOwner(authUser, project.getOwnerId())) {
       // User doesn't own this private project - redirect to home
       res.redirect('/');
       return;
@@ -81,7 +82,7 @@ export function createProjectRouteHandler(deps: ProjectRouteHandlerDeps) {
 
     // Verify project has a file (shouldn't happen but defensive check)
     if (!project.getFileId()) {
-      logger.warn(`Project ${projectId} exists but has no file`);
+      logger.error(`Project ${projectId} exists but has no file`);
       res.status(404).json({});
       return;
     }
