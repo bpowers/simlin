@@ -11,7 +11,6 @@ import * as bodyParser from 'body-parser';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express from 'express';
-import { NextFunction, Request, Response } from 'express';
 import helmet from 'helmet';
 import favicon from 'serve-favicon';
 import { seshcookie } from 'seshcookie';
@@ -25,7 +24,9 @@ import authz from './authz';
 import { createDatabase } from './models/db';
 import { redirectToHttps } from './redirect-to-https';
 import { requestLogger } from './request-logger';
-import { User as UserPb } from './schemas/user_pb';
+import { createProjectRouteHandler } from './route-handlers';
+import { initializeServerDependencies } from './server-init';
+import { getStaticDirectory, validateStaticDirectory } from './static-config';
 
 // redefinition from Helmet, as they don't export it
 interface ContentSecurityPolicyDirectiveValueFunction {
@@ -120,6 +121,9 @@ class App {
 
     this.loadConfig();
 
+    // Initialize WASM module early to fail fast if it's missing
+    await initializeServerDependencies();
+
     this.app.db = await createDatabase({
       backend: 'firestore',
     });
@@ -134,7 +138,11 @@ class App {
     // the type of content that is really amenable to etags anyway.
     this.app.set('etag', false);
 
-    const indexHtml = fs.readFileSync('public/index.html').toString('utf-8');
+    // Determine static directory based on environment and available files
+    const staticDir = getStaticDirectory();
+    validateStaticDirectory(staticDir);
+
+    const indexHtml = fs.readFileSync(path.join(staticDir, 'index.html')).toString('utf-8');
     const metaTagContentsMatch = indexHtml.match(/http-equiv="Content-Security-Policy"[^>]+/g);
     const additionalScriptSrcs: string[] = [];
     if (metaTagContentsMatch && metaTagContentsMatch.length > 0) {
@@ -203,7 +211,7 @@ class App {
       }),
     );
 
-    this.app.use(favicon(path.join(this.app.get('public'), 'favicon.ico')));
+    this.app.use(favicon(path.join(staticDir, 'favicon.ico')));
 
     authn(this.app, this.authn);
 
@@ -212,57 +220,13 @@ class App {
     // all others should serve index.js if user is authorized
     this.app.use('/api', authz, apiRouter(this.app));
 
-    const staticHandler = express.static('build', {
+    const staticHandler = express.static(staticDir, {
       // this doesn't seem to work on Google App Engine - always says
       // Tue, 01 Jan 1980 00:00:01 GMT, so disable it
       lastModified: false,
     });
 
-    this.app.get(
-      '/:username/:projectName',
-      async (req: Request, res: Response, next: NextFunction) => {
-        const project = await this.app.db.project.findOne(`${req.params.username}/${req.params.projectName}`);
-
-        if (!project) {
-          res.status(404).json({});
-          return;
-        } else if (project.getIsPublic()) return res.redirect(encodeURI(`/?project=${project.getId()}`));
-
-        const email = req.session.passport.user.email as string;
-        const user = req.user as any as UserPb | undefined;
-
-        if (!user) {
-          logger.warn(`user not found for '${email}', but passed authz?`);
-          res.status(500).json({});
-          return;
-        }
-        // TODO We may want to have a "This project is private" page?
-        if (user.getId() !== req.params.username) return res.redirect('/');
-
-        if (
-          req.path !== `/${req.params.username}/${req.params.projectName}` &&
-          req.path !== `/${req.params.username}/${req.params.projectName}/`
-        ) {
-          res.status(404).json({});
-          return;
-        }
-
-        const projectName = req.params.projectName as string;
-        const projectId = `${req.params.username}/${projectName}`;
-        const projectModel = await this.app.db.project.findOne(projectId);
-        if (!projectModel || !projectModel.getFileId()) {
-          res.status(404).json({});
-          return;
-        }
-
-        req.url = '/index.html';
-        res.set('Cache-Control', 'no-store');
-        res.set('Max-Age', '0');
-
-        next();
-      },
-      staticHandler,
-    );
+    this.app.get('/:username/:projectName', createProjectRouteHandler({ db: this.app.db }), staticHandler);
 
     // Configure a middleware for 404s and the error handler
     // this.app.use(express.notFound());

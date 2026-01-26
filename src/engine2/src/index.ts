@@ -54,5 +54,6 @@ export {
   configureWasm,
   ensureInitialized as ready,
   isInitialized as isReady,
+  reset as resetWasm,
 } from '@system-dynamics/engine2/internal/wasm';
 export type { WasmConfig, WasmSource, WasmSourceProvider } from '@system-dynamics/engine2/internal/wasm';
