@@ -37,6 +37,17 @@ pub fn build_views(
         return Vec::new();
     }
 
+    // Compute model-level letter polarity flag: true if any connector
+    // in any view used S/O notation (matching xmutil's bLetterPolarity).
+    let use_lettered_polarity = views.iter().any(|view| {
+        view.iter().any(|elem| {
+            matches!(
+                elem,
+                VensimElement::Connector(conn) if conn.letter_polarity
+            )
+        })
+    });
+
     // Normalize view titles and make them unique (xmutil MakeViewNamesUnique)
     make_view_names_unique(&mut views, all_names);
 
@@ -67,6 +78,7 @@ pub fn build_views(
             &view_offsets,
             start_x,
             start_y,
+            use_lettered_polarity,
         ) {
             result.push(dm_view);
         }
@@ -102,6 +114,7 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
     let mut min_y = f64::MAX;
     let mut max_x = f64::MIN;
     let mut max_y = f64::MIN;
+    let mut use_lettered_polarity = false;
 
     for view in views {
         let View::StockFlow(sf) = view;
@@ -110,6 +123,7 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
         min_y = min_y.min(sf.view_box.y);
         max_x = max_x.max(sf.view_box.x + sf.view_box.width);
         max_y = max_y.max(sf.view_box.y + sf.view_box.height);
+        use_lettered_polarity = use_lettered_polarity || sf.use_lettered_polarity;
 
         all_elements.extend(sf.elements);
     }
@@ -123,6 +137,7 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
             height: max_y - min_y,
         },
         zoom: 1.0,
+        use_lettered_polarity,
     });
 
     vec![merged]
@@ -140,6 +155,7 @@ fn convert_view(
     view_offsets: &[i32],
     start_x: i32,
     start_y: i32,
+    use_lettered_polarity: bool,
 ) -> Option<View> {
     let mut elements = Vec::new();
     let uid_offset = view.uid_offset;
@@ -220,6 +236,7 @@ fn convert_view(
         elements,
         view_box,
         zoom: 1.0,
+        use_lettered_polarity,
     }))
 }
 
@@ -228,6 +245,12 @@ fn convert_view(
 /// Variables are filtered if:
 /// 1. They are the "Time" built-in variable (handled automatically by XMILE runtime)
 /// 2. They are "unwanted" control variables (INITIAL TIME, FINAL TIME, TIME STEP, SAVEPER)
+///
+/// Note: xmutil also filters XMILE_Type_ARRAY and XMILE_Type_ARRAY_ELM from views
+/// (XMILEGenerator.cpp:355-360, VensimView.cpp:375-376). In our code, these correspond
+/// to subscript definitions (Equation::SubscriptDef) which are stored in `dimensions`,
+/// not in `symbols`. So convert_variable's early `symbols.get(&canonical)?` already
+/// returns None for these, effectively filtering them without an explicit check here.
 fn should_filter_from_view(
     canonical: &str,
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
@@ -656,6 +679,10 @@ fn normalize_view_title(title: &str) -> String {
 /// 2. If empty, use "Module " (note trailing space)
 /// 3. Append "1" until unique against symbol namespace AND already-used names
 fn make_view_names_unique(views: &mut [VensimView], symbol_names: &HashSet<String>) {
+    // used_names uses raw (non-canonicalized) strings for case-sensitive comparison,
+    // matching xmutil's std::set<std::string> which does case-sensitive find().
+    // The symbol_names check remains case-insensitive (via to_lower_space),
+    // matching xmutil's GetNameSpace()->Find() which uses ToLowerSpace internally.
     let mut used_names: HashSet<String> = HashSet::new();
 
     for view in views.iter_mut() {
@@ -665,16 +692,11 @@ fn make_view_names_unique(views: &mut [VensimView], symbol_names: &HashSet<Strin
             name = "Module ".to_string(); // Note trailing space per xmutil
         }
 
-        // Deduplicate: append "1" until unique against symbols and used names
-        // xmutil uses ToLowerSpace for comparison (to_lower_space)
-        // Recompute canonical in the loop condition to avoid infinite loop
-        while symbol_names.contains(&to_lower_space(&name))
-            || used_names.contains(&to_lower_space(&name))
-        {
+        while symbol_names.contains(&to_lower_space(&name)) || used_names.contains(&name) {
             name.push('1');
         }
 
-        used_names.insert(to_lower_space(&name));
+        used_names.insert(name.clone());
         view.set_title(name);
     }
 }
@@ -841,6 +863,7 @@ mod tests {
                 from_uid: 2,
                 to_uid: 1,
                 polarity: None,
+                letter_polarity: false,
                 control_point: (0, 0),
             }),
         );
@@ -1095,6 +1118,7 @@ mod tests {
                 from_uid: 1,
                 to_uid: 2,
                 polarity: None,
+                letter_polarity: false,
                 control_point: (0, 0),
             }),
         );

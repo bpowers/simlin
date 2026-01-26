@@ -78,6 +78,10 @@ pub struct VensimConnector {
     pub to_uid: i32,
     /// Polarity: Some('+') for positive, Some('-') for negative, None if unspecified.
     pub polarity: Option<char>,
+    /// Whether the original polarity was specified using letter notation (S/O)
+    /// rather than symbol notation (+/-). Used to set the model-level
+    /// use_lettered_polarity flag (matching xmutil's bLetterPolarity).
+    pub letter_polarity: bool,
     /// Control point for curved connectors. (0, 0) indicates a straight line.
     pub control_point: (i32, i32),
 }
@@ -237,7 +241,7 @@ impl VensimView {
         }
         let idx = uid as usize;
         if idx >= self.elements.len() {
-            self.elements.resize(idx + 25, None);
+            self.elements.resize(idx + 26, None);
         }
         self.elements[idx] = Some(element);
     }

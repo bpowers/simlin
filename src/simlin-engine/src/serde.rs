@@ -1497,6 +1497,7 @@ impl From<View> for project_io::View {
                     .collect(),
                 view_box: Some(view.view_box.into()),
                 zoom: view.zoom,
+                use_lettered_polarity: view.use_lettered_polarity,
             },
         }
     }
@@ -1512,6 +1513,7 @@ impl From<project_io::View> for View {
             } else {
                 view.zoom
             },
+            use_lettered_polarity: view.use_lettered_polarity,
         })
     }
 }

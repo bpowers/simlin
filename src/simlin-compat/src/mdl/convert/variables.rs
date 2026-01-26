@@ -178,15 +178,15 @@ impl<'input> ConversionContext<'input> {
             return Vec::new();
         }
 
-        // Build full namespace for view title deduplication:
-        // includes variable names, dimension names, and group names (xmutil behavior)
+        // Build symbol namespace for view title deduplication:
+        // includes variable names and dimension names.
+        // Groups are NOT included: xmutil's MakeViewNamesUnique uses
+        // GetNameSpace()->Find() which only contains symbols/dimensions,
+        // not groups (groups are adjusted separately by AdjustGroupNames).
         let mut all_names: std::collections::HashSet<String> =
             self.symbols.keys().cloned().collect();
         for dim in &self.dimensions {
             all_names.insert(to_lower_space(&dim.name));
-        }
-        for group in &self.groups {
-            all_names.insert(to_lower_space(&group.name));
         }
 
         view::build_views(self.views.clone(), &self.symbols, &all_names)

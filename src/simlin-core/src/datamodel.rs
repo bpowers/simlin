@@ -568,6 +568,10 @@ pub struct StockFlow {
     pub elements: Vec<ViewElement>,
     pub view_box: Rect,
     pub zoom: f64,
+    /// When true, polarity labels on connectors should be displayed as
+    /// letters (S/O) rather than symbols (+/-). Corresponds to xmutil's
+    /// bLetterPolarity flag and XMILE's isee:use_lettered_polarity attribute.
+    pub use_lettered_polarity: bool,
 }
 
 impl StockFlow {

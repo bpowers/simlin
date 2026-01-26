@@ -1136,6 +1136,7 @@ mod tests {
             elements: vec![],
             view_box: None,
             zoom: 1.0,
+            use_lettered_polarity: false,
         };
         let patch = ProjectPatch {
             project_ops: vec![],

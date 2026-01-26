@@ -225,31 +225,33 @@ pub fn parse_connector(uid: i32, fields: &str) -> Result<VensimConnector, ViewEr
     // Parse control point from "npoints|(x,y)|" format
     let control_point = parse_points(rest);
 
-    let polarity = parse_polarity(polarity_ascii);
+    let (polarity, letter_polarity) = parse_polarity(polarity_ascii);
 
     Ok(VensimConnector {
         uid,
         from_uid,
         to_uid,
         polarity,
+        letter_polarity,
         control_point,
     })
 }
 
 /// Parse polarity from ASCII value.
 ///
-/// - 'S'/'s' (83/115) -> Some('+')
-/// - 'O'/'0' (79/48) -> Some('-')
-/// - '+' (43) -> Some('+')
-/// - '-' (45) -> Some('-')
-/// - other -> None
-fn parse_polarity(ascii_val: i32) -> Option<char> {
+/// Returns (normalized_polarity, is_letter_polarity):
+/// - 'S'/'s' (83/115) -> (Some('+'), true)
+/// - 'O'/'0' (79/48) -> (Some('-'), true)
+/// - '+' (43) -> (Some('+'), false)
+/// - '-' (45) -> (Some('-'), false)
+/// - other -> (None, false)
+fn parse_polarity(ascii_val: i32) -> (Option<char>, bool) {
     match ascii_val {
-        83 | 115 => Some('+'), // 'S' or 's'
-        79 | 48 => Some('-'),  // 'O' or '0'
-        43 => Some('+'),       // '+'
-        45 => Some('-'),       // '-'
-        _ => None,
+        83 | 115 => (Some('+'), true), // 'S' or 's'
+        79 | 48 => (Some('-'), true),  // 'O' or '0'
+        43 => (Some('+'), false),      // '+'
+        45 => (Some('-'), false),      // '-'
+        _ => (None, false),
     }
 }
 
@@ -475,29 +477,49 @@ mod tests {
 
     #[test]
     fn test_parse_connector_with_polarity_s() {
-        // Polarity 'S' (83) -> '+'
+        // Polarity 'S' (83) -> '+', letter polarity
         let line = "1,2,x,y,83,a,b,c,d,e,f,1|(100,200)|";
         let conn = parse_connector(1, line).unwrap();
 
         assert_eq!(conn.polarity, Some('+'));
+        assert!(conn.letter_polarity);
     }
 
     #[test]
     fn test_parse_connector_with_polarity_o() {
-        // Polarity 'O' (79) -> '-'
+        // Polarity 'O' (79) -> '-', letter polarity
         let line = "1,2,x,y,79,a,b,c,d,e,f,1|(100,200)|";
         let conn = parse_connector(1, line).unwrap();
 
         assert_eq!(conn.polarity, Some('-'));
+        assert!(conn.letter_polarity);
     }
 
     #[test]
     fn test_parse_connector_with_polarity_zero() {
-        // Polarity '0' (48) -> '-'
+        // Polarity '0' (48) -> '-', letter polarity
         let line = "1,2,x,y,48,a,b,c,d,e,f,1|(100,200)|";
         let conn = parse_connector(1, line).unwrap();
 
         assert_eq!(conn.polarity, Some('-'));
+        assert!(conn.letter_polarity);
+    }
+
+    #[test]
+    fn test_parse_connector_with_symbol_polarity() {
+        // Polarity '+' (43) -> '+', NOT letter polarity
+        let line = "1,2,x,y,43,a,b,c,d,e,f,1|(100,200)|";
+        let conn = parse_connector(1, line).unwrap();
+
+        assert_eq!(conn.polarity, Some('+'));
+        assert!(!conn.letter_polarity);
+
+        // Polarity '-' (45) -> '-', NOT letter polarity
+        let line = "1,2,x,y,45,a,b,c,d,e,f,1|(100,200)|";
+        let conn = parse_connector(1, line).unwrap();
+
+        assert_eq!(conn.polarity, Some('-'));
+        assert!(!conn.letter_polarity);
     }
 
     #[test]

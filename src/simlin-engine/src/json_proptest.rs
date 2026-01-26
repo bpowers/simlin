@@ -533,6 +533,7 @@ fn link_view_element_strategy() -> impl Strategy<Value = LinkViewElement> {
                 to_uid,
                 arc,
                 multi_points,
+                polarity: None,
             },
         )
 }
@@ -596,6 +597,7 @@ fn view_strategy() -> impl Strategy<Value = View> {
             elements,
             view_box,
             zoom,
+            use_lettered_polarity: false,
         })
 }
 
@@ -1175,6 +1177,7 @@ mod protobuf_roundtrip_tests {
                         height: 600.0,
                     }),
                     zoom: 1.0,
+                    use_lettered_polarity: false,
                 }],
                 loop_metadata: vec![LoopMetadata {
                     uids: vec![1, 2, 4, 1],

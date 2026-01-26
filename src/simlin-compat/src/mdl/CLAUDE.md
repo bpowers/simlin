@@ -614,6 +614,22 @@ Located after views, starting with `///---\\\` marker.
 
 ---
 
+## Future: Module-Style View Splitting
+
+The current `merge_views` approach combines all views into a single StockFlow view
+with group wrappers. This works for flat Vensim models but will need enhancement
+for module/level-structured models. Key considerations:
+
+- **Ghost(adds) parameter**: xmutil's `vele->Ghost(adds)` determines cross-level
+  references. The `adds` parameter tracks which variables are "added" to a view
+  from another module/level.
+- **Cross-level connector handling**: xmutil's XMILEGenerator.cpp:910-960 has
+  Ghost logic with `adds` set, which handles connectors that cross module boundaries.
+- This is relevant when Vensim models use module/level structure that maps to
+  XMILE submodels. Currently, all views are merged into a single flat view.
+
+---
+
 ## Testing Strategy Updates
 
 ### Unit Test Coverage

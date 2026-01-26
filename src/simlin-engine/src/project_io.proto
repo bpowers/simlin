@@ -249,6 +249,7 @@ message View {
   repeated ViewElement elements = 3;
   Rect viewBox = 4;
   double zoom = 5;
+  bool use_lettered_polarity = 6;
 };
 
 message LoopMetadata {

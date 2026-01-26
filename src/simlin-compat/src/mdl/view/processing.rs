@@ -778,6 +778,7 @@ mod tests {
                 from_uid: 2,
                 to_uid: 1,
                 polarity: None,
+                letter_polarity: false,
                 control_point: (150, 100),
             }),
         );
@@ -885,6 +886,7 @@ mod tests {
                 from_uid: 3,
                 to_uid: 1,
                 polarity: None,
+                letter_polarity: false,
                 control_point: (100, 100), // x=100, different from connector to Stock B
             }),
         );
@@ -897,6 +899,7 @@ mod tests {
                 from_uid: 3,
                 to_uid: 2,
                 polarity: None,
+                letter_polarity: false,
                 control_point: (200, 100), // x=200, different from connector to Stock A
             }),
         );
@@ -1008,6 +1011,7 @@ mod tests {
                 from_uid: 3,
                 to_uid: 1,
                 polarity: None,
+                letter_polarity: false,
                 control_point: (100, 100), // same x=100 as connector to Stock B
             }),
         );
@@ -1020,6 +1024,7 @@ mod tests {
                 from_uid: 3,
                 to_uid: 2,
                 polarity: None,
+                letter_polarity: false,
                 control_point: (100, 200), // same x=100 as connector to Stock A
             }),
         );
@@ -1129,6 +1134,7 @@ mod tests {
                 from_uid: 3,
                 to_uid: 1,
                 polarity: None,
+                letter_polarity: false,
                 control_point: (100, 100), // x=100, different from other connector
             }),
         );
@@ -1141,6 +1147,7 @@ mod tests {
                 from_uid: 3,
                 to_uid: 2,
                 polarity: None,
+                letter_polarity: false,
                 control_point: (200, 100), // x=200, different from other connector
             }),
         );
@@ -1245,6 +1252,7 @@ mod tests {
                 from_uid: 3,
                 to_uid: 1,
                 polarity: None,
+                letter_polarity: false,
                 control_point: (100, 100),
             }),
         );
@@ -1257,6 +1265,7 @@ mod tests {
                 from_uid: 3,
                 to_uid: 2,
                 polarity: None,
+                letter_polarity: false,
                 control_point: (200, 100),
             }),
         );

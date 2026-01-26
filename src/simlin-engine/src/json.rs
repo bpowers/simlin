@@ -314,6 +314,8 @@ pub struct LinkViewElement {
     pub arc: Option<f64>,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub multi_points: Vec<LinkPoint>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub polarity: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -380,6 +382,8 @@ pub struct View {
     pub view_box: Option<Rect>,
     #[serde(skip_serializing_if = "is_zero_f64", default)]
     pub zoom: f64,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub use_lettered_polarity: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -883,7 +887,11 @@ impl From<ViewElement> for datamodel::ViewElement {
                 } else {
                     datamodel::view_element::LinkShape::Straight
                 },
-                polarity: None,
+                polarity: match l.polarity.as_deref() {
+                    Some("+") => Some(datamodel::view_element::LinkPolarity::Positive),
+                    Some("-") => Some(datamodel::view_element::LinkPolarity::Negative),
+                    _ => None,
+                },
             }),
             ViewElement::Module(m) => {
                 datamodel::ViewElement::Module(datamodel::view_element::Module {
@@ -942,6 +950,7 @@ impl From<View> for datamodel::View {
                 })
                 .unwrap_or_default(),
             zoom: if view.zoom == 0.0 { 1.0 } else { view.zoom },
+            use_lettered_polarity: view.use_lettered_polarity,
         })
     }
 }
@@ -1396,8 +1405,8 @@ impl From<datamodel::ViewElement> for ViewElement {
                 uid: l.uid,
                 from_uid: l.from_uid,
                 to_uid: l.to_uid,
-                arc: match l.shape {
-                    datamodel::view_element::LinkShape::Arc(arc) => Some(arc),
+                arc: match &l.shape {
+                    datamodel::view_element::LinkShape::Arc(arc) => Some(*arc),
                     _ => None,
                 },
                 multi_points: match l.shape {
@@ -1406,6 +1415,11 @@ impl From<datamodel::ViewElement> for ViewElement {
                         .map(|p| LinkPoint { x: p.x, y: p.y })
                         .collect(),
                     _ => vec![],
+                },
+                polarity: match l.polarity {
+                    Some(datamodel::view_element::LinkPolarity::Positive) => Some("+".to_string()),
+                    Some(datamodel::view_element::LinkPolarity::Negative) => Some("-".to_string()),
+                    None => None,
                 },
             }),
             datamodel::ViewElement::Module(m) => ViewElement::Module(ModuleViewElement {
@@ -1450,6 +1464,7 @@ impl From<datamodel::View> for View {
                     height: sf.view_box.height,
                 }),
                 zoom: sf.zoom,
+                use_lettered_polarity: sf.use_lettered_polarity,
             },
         }
     }
@@ -2140,6 +2155,7 @@ mod tests {
                     to_uid: 2,
                     arc: Some(45.0),
                     multi_points: vec![],
+                    polarity: None,
                 }),
             ),
             (

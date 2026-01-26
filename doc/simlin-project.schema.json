@@ -504,6 +504,9 @@
         "zoom": {
           "type": "number",
           "format": "double"
+        },
+        "useLetteredPolarity": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -804,6 +807,12 @@
           "items": {
             "$ref": "#/$defs/LinkPoint"
           }
+        },
+        "polarity": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
