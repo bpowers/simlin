@@ -13,11 +13,5 @@ if [ ! -d "src/server/lib" ]; then
     exit 1
 fi
 
-# Check if core protobuf files exist
-if [ ! -f "src/core/lib/pb/project_io_pb.js" ]; then
-    echo "Error: Core protobuf files are missing. Please run 'yarn build' first."
-    exit 1
-fi
-
 echo "Starting backend server..."
 cd src/server && yarn start:backend
