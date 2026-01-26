@@ -20,6 +20,7 @@ Variable::Variable(SymbolNameSpace *sns, const std::string &name) : Symbol(sns, 
   mVariableType = XMILE_Type_UNKNOWN;  // till typed
   iNelm = 0;
   _unwanted = false;
+  _supplementary = false;
   _hasUpstream = _hasDownstream = false;
   bAsFlow = false;
   bUsesMemory = false;

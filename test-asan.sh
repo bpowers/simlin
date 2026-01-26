@@ -26,7 +26,7 @@ TARGET=$(rustc -vV | sed -n 's/^host: //p')
 echo "Using target: $TARGET"
 
 # Run tests with ASAN - testing xmutil directly and simlin-compat
-# Include vensim feature to ensure xmutil C/C++ code is exercised
+# Include xmutil feature to ensure xmutil C/C++ code is exercised
 # Use -Zbuild-std to rebuild std library with ASAN
 # Log to file for analysis
 echo "Testing xmutil package..."
@@ -35,10 +35,10 @@ ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:ve
 cargo +nightly test -Zbuild-std --target "$TARGET" -p xmutil 2>&1 | tee asan-test.log
 
 echo ""
-echo "Testing simlin-compat with vensim feature..."
+echo "Testing simlin-compat with xmutil feature..."
 RUST_BACKTRACE=1 \
 ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:verbosity=0:print_stats=1:halt_on_error=0" \
-cargo +nightly test -Zbuild-std --target "$TARGET" -p simlin-compat --features "vensim" 2>&1 | tee -a asan-test.log
+cargo +nightly test -Zbuild-std --target "$TARGET" -p simlin-compat --features "xmutil" 2>&1 | tee -a asan-test.log
 
 echo ""
 echo "=== ASAN Summary ==="

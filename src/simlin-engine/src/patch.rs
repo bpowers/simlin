@@ -280,6 +280,12 @@ fn apply_delete_variable(
         }
     }
 
+    for group in model.groups.iter_mut() {
+        group
+            .members
+            .retain(|name| canonicalize(name.as_str()) != ident);
+    }
+
     Ok(())
 }
 
@@ -334,6 +340,7 @@ fn apply_rename_variable(
     }
 
     rename_module_references(model, &old_ident, &new_ident);
+    rename_group_members(model, &old_ident, &new_ident);
 
     if let Some(var) = model.variables.get_mut(target_index) {
         var.set_ident(new_ident.as_str().to_string());
@@ -851,6 +858,21 @@ fn rename_module_reference_string(
     }
 }
 
+fn rename_group_members(
+    model: &mut datamodel::Model,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) {
+    for group in model.groups.iter_mut() {
+        for member in group.members.iter_mut() {
+            let canonical = canonicalize(member.as_str());
+            if canonical == *old_ident {
+                *member = new_ident.to_source_repr();
+            }
+        }
+    }
+}
+
 fn update_stock_flow_references(
     model: &mut datamodel::Model,
     old_ident: &Ident<Canonical>,
@@ -1136,6 +1158,7 @@ mod tests {
             elements: vec![],
             view_box: None,
             zoom: 1.0,
+            use_lettered_polarity: false,
         };
         let patch = ProjectPatch {
             project_ops: vec![],
@@ -1307,6 +1330,7 @@ mod tests {
             })],
             views: vec![],
             loop_metadata: vec![],
+            groups: vec![],
         });
 
         let patch = ProjectPatch {
@@ -1396,6 +1420,7 @@ mod tests {
             })],
             views: vec![],
             loop_metadata: vec![],
+            groups: vec![],
         });
 
         let patch = ProjectPatch {
@@ -1528,6 +1553,7 @@ mod tests {
                 ],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             source: None,
             ai_information: None,
@@ -1620,6 +1646,7 @@ mod tests {
                 ],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             source: None,
             ai_information: None,
@@ -1705,6 +1732,7 @@ mod tests {
                 variables: vec![],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             source: None,
             ai_information: None,
@@ -1875,5 +1903,90 @@ mod tests {
 
         let err = apply_patch(&mut project, &patch).unwrap_err();
         assert_eq!(err.code, ErrorCode::DoesNotExist);
+    }
+
+    #[test]
+    fn rename_updates_group_members() {
+        let mut project = TestProject::new("test")
+            .aux("alpha", "1", None)
+            .aux("beta", "2", None)
+            .build_datamodel();
+
+        let model = project
+            .models
+            .iter_mut()
+            .find(|m| m.name == "main")
+            .unwrap();
+
+        model.groups.push(datamodel::ModelGroup {
+            name: "my_group".to_string(),
+            doc: None,
+            parent: None,
+            members: vec!["alpha".to_string(), "beta".to_string()],
+            run_enabled: true,
+        });
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::RenameVariable(
+                        project_io::RenameVariableOp {
+                            from: "alpha".to_string(),
+                            to: "gamma".to_string(),
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        assert_eq!(model.groups.len(), 1);
+        assert_eq!(model.groups[0].members, vec!["gamma", "beta"]);
+    }
+
+    #[test]
+    fn delete_removes_from_group_members() {
+        let mut project = TestProject::new("test")
+            .aux("alpha", "1", None)
+            .aux("beta", "2", None)
+            .build_datamodel();
+
+        let model = project
+            .models
+            .iter_mut()
+            .find(|m| m.name == "main")
+            .unwrap();
+
+        model.groups.push(datamodel::ModelGroup {
+            name: "my_group".to_string(),
+            doc: None,
+            parent: None,
+            members: vec!["alpha".to_string(), "beta".to_string()],
+            run_enabled: true,
+        });
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::DeleteVariable(
+                        project_io::DeleteVariableOp {
+                            ident: "alpha".to_string(),
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        assert_eq!(model.groups.len(), 1);
+        assert_eq!(model.groups[0].members, vec!["beta"]);
     }
 }

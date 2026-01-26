@@ -457,12 +457,19 @@ pub mod view_element {
         MultiPoint(Vec<FlowPoint>),
     }
 
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub enum LinkPolarity {
+        Positive,
+        Negative,
+    }
+
     #[derive(Clone, PartialEq, Debug)]
     pub struct Link {
         pub uid: i32,
         pub from_uid: i32,
         pub to_uid: i32,
         pub shape: LinkShape,
+        pub polarity: Option<LinkPolarity>,
     }
 
     #[derive(Clone, PartialEq, Debug)]
@@ -561,6 +568,10 @@ pub struct StockFlow {
     pub elements: Vec<ViewElement>,
     pub view_box: Rect,
     pub zoom: f64,
+    /// When true, polarity labels on connectors should be displayed as
+    /// letters (S/O) rather than symbols (+/-). Corresponds to xmutil's
+    /// bLetterPolarity flag and XMILE's isee:use_lettered_polarity attribute.
+    pub use_lettered_polarity: bool,
 }
 
 impl StockFlow {
@@ -588,6 +599,23 @@ pub struct LoopMetadata {
     pub description: String,
 }
 
+/// Semantic/organizational group for categorizing model variables.
+/// This is distinct from visual diagram groups (ViewElement::Group).
+/// In Vensim, these are called "sectors".
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ModelGroup {
+    /// Group name (unique, normalized - dots become dashes)
+    pub name: String,
+    /// Optional documentation
+    pub doc: Option<String>,
+    /// Parent group name (xmutil calls this "owner")
+    pub parent: Option<String>,
+    /// Variable idents in this group (space_to_underbar format)
+    pub members: Vec<String>,
+    /// Whether this group can be run independently (XMILE run attribute)
+    pub run_enabled: bool,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Model {
     pub name: String,
@@ -595,6 +623,7 @@ pub struct Model {
     pub variables: Vec<Variable>,
     pub views: Vec<View>,
     pub loop_metadata: Vec<LoopMetadata>,
+    pub groups: Vec<ModelGroup>,
 }
 
 impl Model {
@@ -613,9 +642,10 @@ impl Model {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum SimMethod {
     Euler,
+    RungeKutta2,
     RungeKutta4,
 }
 

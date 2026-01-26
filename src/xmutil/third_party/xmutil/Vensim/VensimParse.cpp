@@ -495,6 +495,8 @@ bool VensimParse::FindNextEq(bool want_comment) {
     std::string comment = mVensimLex.GetComment("|");
     if (!comment.empty())  // multile appearances okay - take last non empty
       this->pActiveVar->SetComment(comment);
+    if (mVensimLex.LastCommentHadSupplementary())
+      this->pActiveVar->SetSupplementary(true);
   }
   // just zip through to the first | then whatever follows is it
   return mVensimLex.FindToken("|");

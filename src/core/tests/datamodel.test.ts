@@ -671,6 +671,7 @@ describe('Model', () => {
       ]),
       views: List(),
       loopMetadata: List(),
+      groups: List(),
     });
 
     const json = model.toJson();
@@ -736,6 +737,7 @@ describe('Project', () => {
       ]),
       views: List(),
       loopMetadata: List(),
+      groups: List(),
     });
 
     const simSpecs = new SimSpecs({
@@ -784,6 +786,7 @@ describe('Project', () => {
       variables: Map(),
       views: List(),
       loopMetadata: List(),
+      groups: List(),
     });
 
     const project = new Project({

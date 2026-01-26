@@ -856,6 +856,7 @@ pub unsafe extern "C" fn simlin_project_add_model(
         variables: vec![],
         views: vec![],
         loop_metadata: vec![],
+        groups: vec![],
     };
 
     // Add to datamodel
@@ -2576,15 +2577,12 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
 /// Open a project from Vensim MDL format data
 ///
 /// Parses and imports a system dynamics model from Vensim's MDL format.
-/// Requires the "vensim" feature to be enabled at compile time.
-///
 /// Returns NULL and populates `out_error` on failure.
 ///
 /// # Safety
 /// - `data` must be a valid pointer to at least `len` bytes
 /// - `out_error` may be null
 /// - The returned project must be freed with `simlin_project_unref`
-#[cfg(feature = "vensim")]
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_open_vensim(
     data: *const u8,
@@ -2604,7 +2602,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
     let slice = std::slice::from_raw_parts(data, len);
     let mut reader = BufReader::new(slice);
 
-    match simlin_compat::open_vensim(&mut reader) {
+    match simlin_compat::open_vensim_native(&mut reader) {
         Ok(datamodel_project) => {
             let project: engine::Project = datamodel_project.into();
             let boxed = Box::new(SimlinProject {
@@ -4055,6 +4053,7 @@ mod tests {
             variables: vec![],
             views: vec![],
             loop_metadata: vec![],
+            groups: vec![],
         };
         datamodel.models.push(submodel);
 
@@ -4748,6 +4747,7 @@ mod tests {
             variables: vec![],
             views: vec![],
             loop_metadata: vec![],
+            groups: vec![],
         };
         datamodel.models.push(second_model);
 
@@ -5361,6 +5361,7 @@ mod tests {
                 variables: vec![],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -5482,7 +5483,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "vensim")]
     #[test]
     fn test_import_mdl() {
         // Load the SIR MDL model
@@ -5804,19 +5804,16 @@ mod tests {
             assert!(!err.is_null(), "Expected an error but got success");
             simlin_error_free(err);
 
-            // Test with invalid MDL (only when vensim feature is enabled)
-            #[cfg(feature = "vensim")]
-            {
-                err = ptr::null_mut();
-                let proj = simlin_project_open_vensim(
-                    bad_data.as_ptr(),
-                    bad_data.len(),
-                    &mut err as *mut *mut SimlinError,
-                );
-                assert!(proj.is_null());
-                assert!(!err.is_null(), "Expected an error but got success");
-                simlin_error_free(err);
-            }
+            // Test with invalid MDL
+            err = ptr::null_mut();
+            let proj = simlin_project_open_vensim(
+                bad_data.as_ptr(),
+                bad_data.len(),
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(proj.is_null());
+            assert!(!err.is_null(), "Expected an error but got success");
+            simlin_error_free(err);
         }
     }
 
@@ -5910,6 +5907,7 @@ mod tests {
                 ],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -6052,6 +6050,7 @@ mod tests {
                 ],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -6142,6 +6141,7 @@ mod tests {
                 }],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -6224,6 +6224,7 @@ mod tests {
                 }],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -6307,6 +6308,7 @@ mod tests {
                 }],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -7014,6 +7016,7 @@ mod tests {
                     variables: vec![],
                     views: vec![],
                     loop_metadata: vec![],
+                    groups: vec![],
                 }],
                 dimensions: vec![],
                 units: vec![],
@@ -7118,6 +7121,7 @@ mod tests {
                     ],
                     views: vec![],
                     loop_metadata: vec![],
+                groups: vec![],
                 },
                 engine::project_io::Model {
                     name: "model2".to_string(),
@@ -7197,6 +7201,7 @@ mod tests {
                     ],
                     views: vec![],
                     loop_metadata: vec![],
+                groups: vec![],
                 },
             ],
             dimensions: vec![],
@@ -8078,6 +8083,7 @@ mod tests {
                 variables: vec![],
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![],
             units: vec![],
@@ -9395,6 +9401,7 @@ mod tests {
                     })],
                     views: vec![],
                     loop_metadata: vec![],
+                    groups: vec![],
                 },
                 // Main model with a module variable
                 datamodel::Model {
@@ -9413,6 +9420,7 @@ mod tests {
                     })],
                     views: vec![],
                     loop_metadata: vec![],
+                    groups: vec![],
                 },
             ],
             source: Default::default(),

@@ -332,6 +332,7 @@ impl TestProject {
                 variables: self.variables.clone(),
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             source: Default::default(),
             ai_information: None,

@@ -32,7 +32,6 @@
   "references": [
     { "path": "../core/tsconfig.browser.json" },
     { "path": "../diagram/tsconfig.browser.json" },
-    { "path": "../engine2/tsconfig.browser.json" },
-    { "path": "../xmutil-js/tsconfig.browser.json" }
+    { "path": "../engine2/tsconfig.browser.json" }
   ]
 }

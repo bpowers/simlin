@@ -95,6 +95,7 @@ pub(crate) fn x_model(ident: &str, variables: Vec<datamodel::Variable>) -> datam
         variables,
         views: vec![],
         loop_metadata: vec![],
+        groups: vec![],
     }
 }
 

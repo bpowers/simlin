@@ -25,6 +25,9 @@ public:
     return iCurPos - iLineStart;
   }
   std::string GetComment(const char *tok);
+  bool LastCommentHadSupplementary() const {
+    return _lastCommentHadSupplementary;
+  }
   bool FindToken(const char *tok);
   bool BufferReadLine(char *buf, size_t buflen);  // start with buffer then read the line
   bool ReadLine(char *buf, size_t buflen);        // read a line if enough room otherwise part of it
@@ -58,6 +61,7 @@ private:
   int ReadTabbedArray(void);
   bool bInUnits;
   bool sawExplicitEqEnd = false;
+  bool _lastCommentHadSupplementary = false;
 };
 
 #endif

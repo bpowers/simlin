@@ -6,9 +6,9 @@ use float_cmp::approx_eq;
 
 use crate::datamodel::{
     Aux, Dimension, DimensionElements, Dt, Equation, Extension, Flow, GraphicalFunction,
-    GraphicalFunctionKind, GraphicalFunctionScale, LoopMetadata, Model, Module, ModuleReference,
-    Project, Rect, SimMethod, SimSpecs, Source, Stock, StockFlow, Unit, Variable, View,
-    ViewElement, Visibility, view_element,
+    GraphicalFunctionKind, GraphicalFunctionScale, LoopMetadata, Model, ModelGroup, Module,
+    ModuleReference, Project, Rect, SimMethod, SimSpecs, Source, Stock, StockFlow, Unit, Variable,
+    View, ViewElement, Visibility, view_element,
 };
 use crate::project_io;
 
@@ -51,6 +51,7 @@ impl From<SimMethod> for project_io::SimMethod {
     fn from(sim_method: SimMethod) -> Self {
         match sim_method {
             SimMethod::Euler => project_io::SimMethod::Euler,
+            SimMethod::RungeKutta2 => project_io::SimMethod::RungeKutta2,
             SimMethod::RungeKutta4 => project_io::SimMethod::RungeKutta4,
         }
     }
@@ -60,6 +61,7 @@ impl From<project_io::SimMethod> for SimMethod {
     fn from(sim_method: project_io::SimMethod) -> Self {
         match sim_method {
             project_io::SimMethod::Euler => SimMethod::Euler,
+            project_io::SimMethod::RungeKutta2 => SimMethod::RungeKutta2,
             project_io::SimMethod::RungeKutta4 => SimMethod::RungeKutta4,
         }
     }
@@ -67,10 +69,13 @@ impl From<project_io::SimMethod> for SimMethod {
 
 #[test]
 fn test_sim_method_roundtrip() {
-    let cases: &[SimMethod] = &[SimMethod::Euler, SimMethod::RungeKutta4];
-    for expected in cases {
-        let expected = expected.clone();
-        let actual = SimMethod::from(project_io::SimMethod::from(expected.clone()));
+    let cases: &[SimMethod] = &[
+        SimMethod::Euler,
+        SimMethod::RungeKutta2,
+        SimMethod::RungeKutta4,
+    ];
+    for &expected in cases {
+        let actual = SimMethod::from(project_io::SimMethod::from(expected));
         assert_eq!(expected, actual);
     }
 
@@ -1121,6 +1126,15 @@ fn test_view_element_flow_roundtrip() {
 
 impl From<project_io::view_element::Link> for view_element::Link {
     fn from(v: project_io::view_element::Link) -> Self {
+        let polarity = match v.polarity() {
+            project_io::view_element::link::Polarity::Positive => {
+                Some(view_element::LinkPolarity::Positive)
+            }
+            project_io::view_element::link::Polarity::Negative => {
+                Some(view_element::LinkPolarity::Negative)
+            }
+            project_io::view_element::link::Polarity::Unspecified => None,
+        };
         view_element::Link {
             uid: v.uid,
             from_uid: v.from_uid,
@@ -1145,12 +1159,22 @@ impl From<project_io::view_element::Link> for view_element::Link {
                     )
                 }
             },
+            polarity,
         }
     }
 }
 
 impl From<view_element::Link> for project_io::view_element::Link {
     fn from(v: view_element::Link) -> Self {
+        let polarity = match v.polarity {
+            Some(view_element::LinkPolarity::Positive) => {
+                project_io::view_element::link::Polarity::Positive as i32
+            }
+            Some(view_element::LinkPolarity::Negative) => {
+                project_io::view_element::link::Polarity::Negative as i32
+            }
+            None => project_io::view_element::link::Polarity::Unspecified as i32,
+        };
         project_io::view_element::Link {
             uid: v.uid,
             from_uid: v.from_uid,
@@ -1173,6 +1197,7 @@ impl From<view_element::Link> for project_io::view_element::Link {
                     ))
                 }
             },
+            polarity,
         }
     }
 }
@@ -1185,12 +1210,14 @@ fn test_view_element_link_roundtrip() {
             from_uid: 21,
             to_uid: 22,
             shape: view_element::LinkShape::Straight,
+            polarity: None,
         },
         view_element::Link {
             uid: 123,
             from_uid: 21,
             to_uid: 22,
             shape: view_element::LinkShape::Arc(351.0),
+            polarity: Some(view_element::LinkPolarity::Positive),
         },
         view_element::Link {
             uid: 123,
@@ -1208,6 +1235,7 @@ fn test_view_element_link_roundtrip() {
                     attached_to_uid: None,
                 },
             ]),
+            polarity: Some(view_element::LinkPolarity::Negative),
         },
     ];
     for expected in cases {
@@ -1469,6 +1497,7 @@ impl From<View> for project_io::View {
                     .collect(),
                 view_box: Some(view.view_box.into()),
                 zoom: view.zoom,
+                use_lettered_polarity: view.use_lettered_polarity,
             },
         }
     }
@@ -1484,6 +1513,7 @@ impl From<project_io::View> for View {
             } else {
                 view.zoom
             },
+            use_lettered_polarity: view.use_lettered_polarity,
         })
     }
 }
@@ -1515,6 +1545,11 @@ impl From<Model> for project_io::Model {
                 .into_iter()
                 .map(project_io::LoopMetadata::from)
                 .collect(),
+            groups: model
+                .groups
+                .into_iter()
+                .map(project_io::ModelGroup::from)
+                .collect(),
         }
     }
 }
@@ -1541,6 +1576,64 @@ impl From<project_io::LoopMetadata> for LoopMetadata {
     }
 }
 
+impl From<ModelGroup> for project_io::ModelGroup {
+    fn from(group: ModelGroup) -> Self {
+        project_io::ModelGroup {
+            name: group.name,
+            doc: group.doc.unwrap_or_default(),
+            parent: group.parent.unwrap_or_default(),
+            members: group.members,
+            run_enabled: group.run_enabled,
+        }
+    }
+}
+
+impl From<project_io::ModelGroup> for ModelGroup {
+    fn from(group: project_io::ModelGroup) -> Self {
+        ModelGroup {
+            name: group.name,
+            doc: if group.doc.is_empty() {
+                None
+            } else {
+                Some(group.doc)
+            },
+            parent: if group.parent.is_empty() {
+                None
+            } else {
+                Some(group.parent)
+            },
+            members: group.members,
+            run_enabled: group.run_enabled,
+        }
+    }
+}
+
+#[test]
+fn test_model_group_roundtrip() {
+    let cases: &[ModelGroup] = &[
+        ModelGroup::default(),
+        ModelGroup {
+            name: "Control Panel".to_string(),
+            doc: None,
+            parent: None,
+            members: vec!["alpha".to_string(), "beta".to_string()],
+            run_enabled: false,
+        },
+        ModelGroup {
+            name: "Financial Sector".to_string(),
+            doc: Some("Economic variables".to_string()),
+            parent: Some("Control Panel".to_string()),
+            members: vec!["revenue".to_string(), "cost".to_string()],
+            run_enabled: true,
+        },
+    ];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = ModelGroup::from(project_io::ModelGroup::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
 impl From<project_io::Model> for Model {
     fn from(model: project_io::Model) -> Self {
         use crate::canonicalize;
@@ -1560,6 +1653,7 @@ impl From<project_io::Model> for Model {
                 .into_iter()
                 .map(LoopMetadata::from)
                 .collect(),
+            groups: model.groups.into_iter().map(ModelGroup::from).collect(),
         }
     }
 }
@@ -1595,6 +1689,51 @@ fn test_model_with_loop_metadata_roundtrip() {
                 deleted: true,
                 name: "Balancing Loop".to_string(),
                 description: "This is a balancing feedback loop".to_string(),
+            },
+        ],
+        groups: vec![],
+    }];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = Model::from(project_io::Model::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+#[test]
+fn test_model_with_groups_roundtrip() {
+    let cases: &[Model] = &[Model {
+        name: "test_model_with_groups".to_string(),
+        sim_specs: None,
+        variables: vec![Variable::Stock(Stock {
+            ident: "stock1".to_string(),
+            equation: Equation::Scalar("1".to_string(), None),
+            documentation: "".to_string(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            non_negative: false,
+            can_be_module_input: false,
+            visibility: Visibility::Private,
+            ai_state: None,
+            uid: Some(1),
+        })],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![
+            ModelGroup {
+                name: "Control Panel".to_string(),
+                doc: None,
+                parent: None,
+                members: vec!["stock1".to_string()],
+                run_enabled: false,
+            },
+            ModelGroup {
+                name: "Financial Sector".to_string(),
+                doc: Some("Economic variables".to_string()),
+                parent: Some("Control Panel".to_string()),
+                members: vec![],
+                run_enabled: true,
             },
         ],
     }];

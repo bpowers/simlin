@@ -314,6 +314,8 @@ pub struct LinkViewElement {
     pub arc: Option<f64>,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub multi_points: Vec<LinkPoint>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub polarity: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -380,6 +382,8 @@ pub struct View {
     pub view_box: Option<Rect>,
     #[serde(skip_serializing_if = "is_zero_f64", default)]
     pub zoom: f64,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub use_lettered_polarity: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -405,6 +409,8 @@ pub struct Model {
     pub views: Vec<View>,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub loop_metadata: Vec<LoopMetadata>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub groups: Vec<ModelGroup>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -446,6 +452,23 @@ pub struct LoopMetadata {
     pub name: String,
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub description: String,
+}
+
+/// Semantic/organizational group for categorizing model variables.
+/// This is distinct from visual diagram groups (ViewElement::Group).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ModelGroup {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub doc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parent: Option<String>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub members: Vec<String>,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub run_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -774,8 +797,9 @@ impl From<SimSpecs> for datamodel::SimSpecs {
             Some(datamodel::Dt::Dt(ss.save_step))
         };
 
-        let sim_method = match ss.method.as_str() {
+        let sim_method = match ss.method.to_lowercase().as_str() {
             "rk4" => datamodel::SimMethod::RungeKutta4,
+            "rk2" => datamodel::SimMethod::RungeKutta2,
             _ => datamodel::SimMethod::Euler,
         };
 
@@ -863,6 +887,11 @@ impl From<ViewElement> for datamodel::ViewElement {
                 } else {
                     datamodel::view_element::LinkShape::Straight
                 },
+                polarity: match l.polarity.as_deref() {
+                    Some("+") => Some(datamodel::view_element::LinkPolarity::Positive),
+                    Some("-") => Some(datamodel::view_element::LinkPolarity::Negative),
+                    _ => None,
+                },
             }),
             ViewElement::Module(m) => {
                 datamodel::ViewElement::Module(datamodel::view_element::Module {
@@ -921,6 +950,7 @@ impl From<View> for datamodel::View {
                 })
                 .unwrap_or_default(),
             zoom: if view.zoom == 0.0 { 1.0 } else { view.zoom },
+            use_lettered_polarity: view.use_lettered_polarity,
         })
     }
 }
@@ -952,6 +982,7 @@ impl From<Model> for datamodel::Model {
                 .into_iter()
                 .map(|lm| lm.into())
                 .collect(),
+            groups: model.groups.into_iter().map(|g| g.into()).collect(),
         }
     }
 }
@@ -992,6 +1023,18 @@ impl From<LoopMetadata> for datamodel::LoopMetadata {
             deleted: loop_metadata.deleted,
             name: loop_metadata.name,
             description: loop_metadata.description,
+        }
+    }
+}
+
+impl From<ModelGroup> for datamodel::ModelGroup {
+    fn from(group: ModelGroup) -> Self {
+        datamodel::ModelGroup {
+            name: group.name,
+            doc: group.doc,
+            parent: group.parent,
+            members: group.members,
+            run_enabled: group.run_enabled,
         }
     }
 }
@@ -1293,6 +1336,7 @@ impl From<datamodel::SimSpecs> for SimSpecs {
 
         let method = match ss.sim_method {
             datamodel::SimMethod::RungeKutta4 => "rk4".to_string(),
+            datamodel::SimMethod::RungeKutta2 => "rk2".to_string(),
             datamodel::SimMethod::Euler => String::new(),
         };
 
@@ -1361,8 +1405,8 @@ impl From<datamodel::ViewElement> for ViewElement {
                 uid: l.uid,
                 from_uid: l.from_uid,
                 to_uid: l.to_uid,
-                arc: match l.shape {
-                    datamodel::view_element::LinkShape::Arc(arc) => Some(arc),
+                arc: match &l.shape {
+                    datamodel::view_element::LinkShape::Arc(arc) => Some(*arc),
                     _ => None,
                 },
                 multi_points: match l.shape {
@@ -1371,6 +1415,11 @@ impl From<datamodel::ViewElement> for ViewElement {
                         .map(|p| LinkPoint { x: p.x, y: p.y })
                         .collect(),
                     _ => vec![],
+                },
+                polarity: match l.polarity {
+                    Some(datamodel::view_element::LinkPolarity::Positive) => Some("+".to_string()),
+                    Some(datamodel::view_element::LinkPolarity::Negative) => Some("-".to_string()),
+                    None => None,
                 },
             }),
             datamodel::ViewElement::Module(m) => ViewElement::Module(ModuleViewElement {
@@ -1415,6 +1464,7 @@ impl From<datamodel::View> for View {
                     height: sf.view_box.height,
                 }),
                 zoom: sf.zoom,
+                use_lettered_polarity: sf.use_lettered_polarity,
             },
         }
     }
@@ -1455,6 +1505,7 @@ impl From<datamodel::Model> for Model {
                 .into_iter()
                 .map(|lm| lm.into())
                 .collect(),
+            groups: model.groups.into_iter().map(|g| g.into()).collect(),
         }
     }
 }
@@ -1496,6 +1547,18 @@ impl From<datamodel::LoopMetadata> for LoopMetadata {
             deleted: loop_metadata.deleted,
             name: loop_metadata.name,
             description: loop_metadata.description,
+        }
+    }
+}
+
+impl From<datamodel::ModelGroup> for ModelGroup {
+    fn from(group: datamodel::ModelGroup) -> Self {
+        ModelGroup {
+            name: group.name,
+            doc: group.doc,
+            parent: group.parent,
+            members: group.members,
+            run_enabled: group.run_enabled,
         }
     }
 }
@@ -2092,6 +2155,7 @@ mod tests {
                     to_uid: 2,
                     arc: Some(45.0),
                     multi_points: vec![],
+                    polarity: None,
                 }),
             ),
             (
@@ -2263,6 +2327,7 @@ mod tests {
             }),
             views: vec![],
             loop_metadata: vec![],
+            groups: vec![],
         };
 
         // Roundtrip
@@ -2351,6 +2416,7 @@ mod tests {
                 }),
                 views: vec![],
                 loop_metadata: vec![],
+                groups: vec![],
             }],
             dimensions: vec![Dimension {
                 name: "cities".to_string(),

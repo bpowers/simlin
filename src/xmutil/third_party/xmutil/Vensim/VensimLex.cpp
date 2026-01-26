@@ -574,6 +574,8 @@ bool VensimLex::TestTokenMatch(const char *tok, bool storeonsuccess) {
 std::string VensimLex::GetComment(const char *tok) {
   char c;
   std::string rval;
+  _lastCommentHadSupplementary = false;
+
   while ((c = GetNextChar(false))) {
     if (c == *tok && TestTokenMatch(tok + 1, true)) {
       PushBack(c, false);  // next call to findToken will find this
@@ -584,6 +586,35 @@ std::string VensimLex::GetComment(const char *tok) {
           break;
         rval.pop_back();
       }
+
+      // Check for supplementary flag: ~ :SUP or ~ :SUPPLEMENTARY at end
+      size_t tildePos = rval.rfind('~');
+      if (tildePos != std::string::npos) {
+        std::string afterTilde = rval.substr(tildePos + 1);
+        // Trim leading whitespace
+        size_t start = afterTilde.find_first_not_of(" \t\r\n");
+        if (start != std::string::npos) {
+          afterTilde = afterTilde.substr(start);
+        }
+        // Convert to uppercase for case-insensitive comparison
+        std::string upper = afterTilde;
+        for (char &ch : upper) {
+          ch = toupper(ch);
+        }
+        if (upper == ":SUP" || upper == ":SUPPLEMENTARY") {
+          _lastCommentHadSupplementary = true;
+          // Strip the supplementary flag from the comment
+          rval = rval.substr(0, tildePos);
+          // Trim trailing whitespace from remaining comment
+          while (!rval.empty()) {
+            c = rval.back();
+            if (c != ' ' && c != '\t' && c != '\r' && c != '\n')
+              break;
+            rval.pop_back();
+          }
+        }
+      }
+
       return rval;
     } else if (c == '\\' && TestTokenMatch("\\\\---///", false)) {
       PushBack(c, false);

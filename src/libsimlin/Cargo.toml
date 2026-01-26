@@ -11,8 +11,8 @@ edition = "2021"
 crate-type = ["staticlib", "rlib", "cdylib"]
 
 [features]
-default = ["vensim"]
-vensim = ["simlin-compat/vensim"]
+default = ["xmutil"]
+xmutil = ["simlin-compat/xmutil"]
 
 [dependencies]
 simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }

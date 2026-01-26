@@ -215,6 +215,7 @@ export interface JsonLinkViewElement {
   toUid: number;
   arc?: number;
   multiPoints?: JsonLinkPoint[];
+  polarity?: string;
 }
 
 /**
@@ -275,6 +276,7 @@ export interface JsonView {
   kind?: string;
   viewBox?: JsonRect;
   zoom?: number;
+  useLetteredPolarity?: boolean;
 }
 
 // Simulation specs
@@ -324,6 +326,18 @@ export interface JsonLoopMetadata {
 }
 
 /**
+ * Semantic/organizational group for categorizing model variables.
+ * This is distinct from visual diagram groups (JsonGroupViewElement).
+ */
+export interface JsonModelGroup {
+  name: string;
+  doc?: string;
+  parent?: string;
+  members: string[];
+  runEnabled?: boolean;
+}
+
+/**
  * Source information for imported projects.
  */
 export interface JsonSource {
@@ -343,6 +357,7 @@ export interface JsonModel {
   simSpecs?: JsonSimSpecs;
   views?: JsonView[];
   loopMetadata?: JsonLoopMetadata[];
+  groups?: JsonModelGroup[];
 }
 
 /**
