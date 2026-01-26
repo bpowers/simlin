@@ -280,6 +280,12 @@ fn apply_delete_variable(
         }
     }
 
+    for group in model.groups.iter_mut() {
+        group
+            .members
+            .retain(|name| canonicalize(name.as_str()) != ident);
+    }
+
     Ok(())
 }
 
@@ -1940,5 +1946,47 @@ mod tests {
 
         assert_eq!(model.groups.len(), 1);
         assert_eq!(model.groups[0].members, vec!["gamma", "beta"]);
+    }
+
+    #[test]
+    fn delete_removes_from_group_members() {
+        let mut project = TestProject::new("test")
+            .aux("alpha", "1", None)
+            .aux("beta", "2", None)
+            .build_datamodel();
+
+        let model = project
+            .models
+            .iter_mut()
+            .find(|m| m.name == "main")
+            .unwrap();
+
+        model.groups.push(datamodel::ModelGroup {
+            name: "my_group".to_string(),
+            doc: None,
+            parent: None,
+            members: vec!["alpha".to_string(), "beta".to_string()],
+            run_enabled: true,
+        });
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::DeleteVariable(
+                        project_io::DeleteVariableOp {
+                            ident: "alpha".to_string(),
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        assert_eq!(model.groups.len(), 1);
+        assert_eq!(model.groups[0].members, vec!["beta"]);
     }
 }
