@@ -658,8 +658,8 @@ pub struct Dimension {
 impl ToXml<XmlWriter> for Dimension {
     fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let attrs = vec![("name", self.name.as_ref())];
-        if self.size.is_some() {
-            let size = format!("{}", self.size.unwrap());
+        if let Some(size) = self.size {
+            let size = format!("{}", size);
             let mut attrs = attrs.clone();
             attrs.push(("size", size.as_str()));
             write_tag_start_with_attrs(writer, "dim", &attrs)?;
@@ -1757,9 +1757,11 @@ pub mod view_element {
             }
             write_tag_start_with_attrs(writer, "flow", &attrs)?;
 
-            if self.points.is_some() && !self.points.as_ref().unwrap().points.is_empty() {
+            if let Some(points) = &self.points
+                && !points.points.is_empty()
+            {
                 write_tag_start(writer, "pts")?;
-                for point in self.points.as_ref().unwrap().points.iter() {
+                for point in &points.points {
                     let x = format!("{}", point.x);
                     let y = format!("{}", point.y);
                     let attrs = &[("x", x.as_str()), ("y", y.as_str())];
@@ -2044,9 +2046,11 @@ pub mod view_element {
             }
             write_tag_end(writer, "to")?;
 
-            if self.points.is_some() && !self.points.as_ref().unwrap().points.is_empty() {
+            if let Some(points) = &self.points
+                && !points.points.is_empty()
+            {
                 write_tag_start(writer, "pts")?;
-                for point in self.points.as_ref().unwrap().points.iter() {
+                for point in &points.points {
                     let x = format!("{}", point.x);
                     let y = format!("{}", point.y);
                     let attrs = &[("x", x.as_str()), ("y", y.as_str())];
@@ -3167,8 +3171,8 @@ impl View {
         for element in display_stocks {
             let ident = element.ident().unwrap();
             if let Some(Var::Stock(stock)) = model.get_var(&ident) {
-                if stock.outflows.is_some() {
-                    for outflow in stock.outflows.as_ref().unwrap() {
+                if let Some(outflows) = &stock.outflows {
+                    for outflow in outflows {
                         let outflow_ident = canonicalize(outflow).as_str().to_string();
                         if !uid_map.contains_key(&outflow_ident) {
                             continue;
@@ -3178,8 +3182,8 @@ impl View {
                         end.0 = Some(uid_map[&ident]);
                     }
                 }
-                if stock.inflows.is_some() {
-                    for inflow in stock.inflows.as_ref().unwrap() {
+                if let Some(inflows) = &stock.inflows {
+                    for inflow in inflows {
                         let inflow_ident = canonicalize(inflow).as_str().to_string();
                         if !uid_map.contains_key(&inflow_ident) {
                             continue;
@@ -3227,8 +3231,9 @@ impl View {
             });
 
             if let ViewObject::Flow(flow) = flow {
-                if flow.points.is_some() && !flow.points.as_ref().unwrap().points.is_empty() {
-                    let points = flow.points.as_mut().unwrap();
+                if let Some(points) = &mut flow.points
+                    && !points.points.is_empty()
+                {
                     let source_point = points.points.first_mut().unwrap();
                     source_point.uid = Some(source_uid);
                     let sink_point = points.points.last_mut().unwrap();
@@ -3335,16 +3340,14 @@ fn view_object_to_element(
 impl From<View> for datamodel::View {
     fn from(v: View) -> Self {
         if v.kind.unwrap_or(ViewType::StockFlow) == ViewType::StockFlow {
-            let view_box = if v.offset_x.is_some()
-                && v.offset_y.is_some()
-                && v.width.is_some()
-                && v.height.is_some()
+            let view_box = if let (Some(x), Some(y), Some(width), Some(height)) =
+                (v.offset_x, v.offset_y, v.width, v.height)
             {
                 Rect {
-                    x: v.offset_x.unwrap(),
-                    y: v.offset_y.unwrap(),
-                    width: v.width.unwrap(),
-                    height: v.height.unwrap(),
+                    x,
+                    y,
+                    width,
+                    height,
                 }
             } else {
                 Default::default()
