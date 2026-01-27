@@ -10,25 +10,6 @@ use crate::mdl::xmile_compat::{format_unit_expr, space_to_underbar};
 
 use super::types::ConvertError;
 
-/// Format a number for equation output.
-pub(super) fn format_number(value: f64) -> String {
-    if value == 0.0 {
-        return "0".to_string();
-    }
-
-    let abs = value.abs();
-    if (1e-4..1e6).contains(&abs) {
-        let s = format!("{}", value);
-        if s.contains('.') {
-            s.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            s
-        }
-    } else {
-        format!("{:e}", value)
-    }
-}
-
 /// Convert a name to canonical form (lowercase with spaces).
 pub(super) fn canonical_name(name: &str) -> String {
     to_lower_space(name)
@@ -200,6 +181,28 @@ pub(super) fn extract_first_units(equations: &[FullEquation<'_>]) -> Option<Stri
     equations.iter().find_map(|eq| extract_units(eq))
 }
 
+/// Extract documentation and units from the first equation that has either.
+/// In Vensim, element-specific equations use `~~|` for all but the last,
+/// which carries `~ units ~ docs |`. We search all equations (not just
+/// "valid" ones) because the metadata may be on an AFO or empty-RHS equation.
+pub(super) fn extract_metadata(equations: &[FullEquation<'_>]) -> (String, Option<String>) {
+    // Search from the end since Vensim convention puts metadata on the last equation
+    for eq in equations.iter().rev() {
+        let has_comment = eq.comment.is_some();
+        let has_units = extract_units(eq).is_some();
+        if has_comment || has_units {
+            let doc = eq
+                .comment
+                .as_ref()
+                .map(|c| c.to_string())
+                .unwrap_or_default();
+            let units = extract_units(eq);
+            return (doc, units);
+        }
+    }
+    (String::new(), None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +242,7 @@ mod tests {
 
     #[test]
     fn test_format_number() {
+        use crate::mdl::xmile_compat::format_number;
         assert_eq!(format_number(0.0), "0");
         assert_eq!(format_number(42.0), "42");
         assert_eq!(format_number(3.125), "3.125");

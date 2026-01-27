@@ -245,15 +245,45 @@ impl<'input> ConversionContext<'input> {
         space_to_underbar(canonical)
     }
 
-    /// Normalize a dimension name through equivalences to its canonical target.
+    /// Normalize a dimension name through equivalences and subrange resolution.
+    /// Used for consistency checks (comparing dimension names from different equations).
     /// For example, if DimA <-> DimB, normalize_dimension("dima") returns "dimb".
+    /// If "upper" is a subrange of "layers", normalize_dimension("upper") returns "layers".
     pub(super) fn normalize_dimension(&self, dim: &str) -> String {
         let canonical = canonical_name(dim);
         // Follow equivalence chain to target
-        self.equivalences
-            .get(&canonical)
-            .cloned()
-            .unwrap_or(canonical)
+        if let Some(equiv) = self.equivalences.get(&canonical) {
+            return equiv.clone();
+        }
+        self.resolve_subrange_to_parent(&canonical)
+    }
+
+    /// Resolve a subrange dimension to its parent dimension.
+    /// Does NOT follow equivalence aliases -- only resolves subranges.
+    /// Used for formatting dimension names in output (where alias dimensions
+    /// should keep their own name, but subranges should use the parent).
+    pub(super) fn resolve_subrange_to_parent(&self, canonical: &str) -> String {
+        // Skip equivalence aliases -- they should keep their own name
+        if self.equivalences.contains_key(canonical) {
+            return canonical.to_string();
+        }
+        if let Some(elements) = self.dimension_elements.get(canonical)
+            && let Some(first_element) = elements.first()
+            && let Some(owner) = self.element_owners.get(&canonical_name(first_element))
+            && *owner != canonical
+        {
+            // Verify ALL elements share the same owner
+            let all_same_owner = elements.iter().all(|e| {
+                self.element_owners
+                    .get(&canonical_name(e))
+                    .map(|o| o == owner)
+                    .unwrap_or(false)
+            });
+            if all_same_owner {
+                return owner.clone();
+            }
+        }
+        canonical.to_string()
     }
 }
 
@@ -550,5 +580,59 @@ x[b1] = 2
         } else {
             panic!("Expected Aux variable");
         }
+    }
+
+    #[test]
+    fn test_normalize_dimension_subrange_to_parent() {
+        // Subranges should normalize to their parent dimension
+        let mdl = "layers: layer1, layer2, layer3, layer4
+~ ~|
+upper: layer1, layer2, layer3
+~ ~|
+bottom: layer4
+~ ~|
+x = 1
+~ ~|
+\\\\\\---///
+";
+        let mut ctx = ConversionContext::new(mdl).unwrap();
+        ctx.collect_symbols();
+        ctx.build_dimensions().unwrap();
+
+        assert_eq!(
+            ctx.normalize_dimension("upper"),
+            "layers",
+            "Subrange 'upper' should normalize to parent 'layers'"
+        );
+        assert_eq!(
+            ctx.normalize_dimension("bottom"),
+            "layers",
+            "Subrange 'bottom' should normalize to parent 'layers'"
+        );
+        assert_eq!(
+            ctx.normalize_dimension("layers"),
+            "layers",
+            "Parent dimension should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn test_normalize_dimension_non_subrange_unchanged() {
+        // A top-level dimension that is not a subrange should remain unchanged
+        let mdl = "scenario: s1, s2
+~ ~|
+x = 1
+~ ~|
+\\\\\\---///
+";
+        let mut ctx = ConversionContext::new(mdl).unwrap();
+        ctx.collect_symbols();
+        ctx.build_dimensions().unwrap();
+
+        assert_eq!(
+            ctx.normalize_dimension("scenario"),
+            "scenario",
+            "Top-level dimension should remain unchanged"
+        );
     }
 }

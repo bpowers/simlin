@@ -318,8 +318,11 @@ impl<'input> RawLexer<'input> {
             None => self.text.len(),
         };
 
-        // Strip trailing spaces and underscores (but not escaped underscores like \_)
-        while buffer.ends_with(' ') || (buffer.ends_with('_') && !buffer.ends_with("\\_")) {
+        // Strip trailing spaces, tabs, and underscores (but not escaped underscores like \_)
+        while buffer.ends_with(' ')
+            || buffer.ends_with('\t')
+            || (buffer.ends_with('_') && !buffer.ends_with("\\_"))
+        {
             buffer.pop();
         }
 
@@ -1094,6 +1097,18 @@ mod tests {
         // Trailing spaces and underscores are stripped
         test("var  +", vec![("~~~  ", sym("var")), ("     ~", Plus)]);
         test("var__+", vec![("~~~  ", sym("var")), ("     ~", Plus)]);
+    }
+
+    #[test]
+    fn symbols_strip_trailing_tabs() {
+        // Trailing tabs are stripped (MDL files sometimes have tabs before commas)
+        test("var\t+", vec![("~~~  ", sym("var")), ("    ~", Plus)]);
+    }
+
+    #[test]
+    fn symbols_strip_mixed_trailing_whitespace() {
+        // Mixed trailing whitespace (spaces and tabs) are all stripped
+        test("var \t +", vec![("~~~    ", sym("var")), ("      ~", Plus)]);
     }
 
     #[test]

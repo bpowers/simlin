@@ -316,7 +316,10 @@ fn normalize_equation(eq: &mut Equation) {
                 // Graphical functions match without normalization
                 let _ = gf;
             }
-            // Element ordering and comments match without normalization
+            // Sort elements by canonicalized subscript key for order-independent
+            // comparison. The native parser and xmutil may produce different
+            // element orderings; this is not a semantic difference.
+            elements.sort_by(|a, b| a.0.cmp(&b.0));
 
             // Check if all elements have the same expression - if so, convert to ApplyToAll
             // This handles the case where native uses Arrayed with repeated equations
@@ -627,4 +630,425 @@ fn test_mdl_equivalence() {
     for &mdl_path in EQUIVALENT_MODELS {
         test_single_mdl(mdl_path);
     }
+}
+
+/// Standalone test for the C-LEARN model which causes a segfault in xmutil's C++ code.
+#[test]
+fn test_clearn_xmutil() {
+    let mdl_path = "test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+    let full_path = format!("../../{mdl_path}");
+
+    let content =
+        fs::read_to_string(&full_path).unwrap_or_else(|e| panic!("Failed to read {mdl_path}: {e}"));
+
+    // Parse via xmutil (MDL -> XMILE -> datamodel) -- this segfaults in xmutil's C++ code
+    let mut reader = BufReader::new(content.as_bytes());
+    let _project =
+        open_vensim(&mut reader).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
+}
+
+/// Verify the native Rust parser can handle the C-LEARN model (no xmutil dependency).
+#[test]
+fn test_clearn_native() {
+    let mdl_path = "test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+    let full_path = format!("../../{mdl_path}");
+
+    let content =
+        fs::read_to_string(&full_path).unwrap_or_else(|e| panic!("Failed to read {mdl_path}: {e}"));
+
+    // Parse via native (MDL -> datamodel directly)
+    let mut reader = BufReader::new(content.as_bytes());
+    let _project = open_vensim_native(&mut reader)
+        .unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
+}
+
+// ===== Non-panicking comparison infrastructure =====
+//
+// These functions collect all differences into a Vec<String> instead of
+// panicking on the first mismatch.  This lets a single test run surface
+// every class of problem at once.
+
+/// Describes one field-level difference between the xmutil and native output.
+struct Diff {
+    /// Dot-path to the differing field, e.g. "model[main].var[population].equation"
+    path: String,
+    detail: String,
+}
+
+impl std::fmt::Display for Diff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "  {}: {}", self.path, self.detail)
+    }
+}
+
+/// Collect all differences between two normalized projects.
+fn collect_project_diffs(xmutil: &Project, native: &Project, path: &str) -> Vec<Diff> {
+    let mut diffs = Vec::new();
+
+    // sim_specs
+    if xmutil.sim_specs != native.sim_specs {
+        diffs.push(Diff {
+            path: format!("{path}.sim_specs"),
+            detail: format!(
+                "xmutil: {:?}\nnative: {:?}",
+                xmutil.sim_specs, native.sim_specs
+            ),
+        });
+    }
+
+    // dimensions
+    collect_dimension_diffs(&mut diffs, xmutil, native, path);
+
+    // unit equivalences
+    collect_unit_diffs(&mut diffs, xmutil, native, path);
+
+    // models
+    collect_model_diffs(&mut diffs, xmutil, native, path);
+
+    diffs
+}
+
+fn collect_dimension_diffs(diffs: &mut Vec<Diff>, xmutil: &Project, native: &Project, path: &str) {
+    let x_by_name: HashMap<&str, &Dimension> = xmutil
+        .dimensions
+        .iter()
+        .map(|d| (d.name.as_str(), d))
+        .collect();
+    let n_by_name: HashMap<&str, &Dimension> = native
+        .dimensions
+        .iter()
+        .map(|d| (d.name.as_str(), d))
+        .collect();
+
+    for (name, xd) in &x_by_name {
+        match n_by_name.get(name) {
+            None => diffs.push(Diff {
+                path: format!("{path}.dim[{name}]"),
+                detail: "only in xmutil".into(),
+            }),
+            Some(nd) if *xd != *nd => diffs.push(Diff {
+                path: format!("{path}.dim[{name}]"),
+                detail: format!("xmutil: {:?}\nnative: {:?}", xd, nd),
+            }),
+            _ => {}
+        }
+    }
+    for name in n_by_name.keys() {
+        if !x_by_name.contains_key(name) {
+            diffs.push(Diff {
+                path: format!("{path}.dim[{name}]"),
+                detail: "only in native".into(),
+            });
+        }
+    }
+}
+
+fn collect_unit_diffs(diffs: &mut Vec<Diff>, xmutil: &Project, native: &Project, path: &str) {
+    let x_by_name: HashMap<&str, _> = xmutil.units.iter().map(|u| (u.name.as_str(), u)).collect();
+    let n_by_name: HashMap<&str, _> = native.units.iter().map(|u| (u.name.as_str(), u)).collect();
+
+    for (name, xu) in &x_by_name {
+        match n_by_name.get(name) {
+            None => diffs.push(Diff {
+                path: format!("{path}.unit[{name}]"),
+                detail: "only in xmutil".into(),
+            }),
+            Some(nu) if *xu != *nu => diffs.push(Diff {
+                path: format!("{path}.unit[{name}]"),
+                detail: format!("xmutil: {:?}\nnative: {:?}", xu, nu),
+            }),
+            _ => {}
+        }
+    }
+    for name in n_by_name.keys() {
+        if !x_by_name.contains_key(name) {
+            diffs.push(Diff {
+                path: format!("{path}.unit[{name}]"),
+                detail: "only in native".into(),
+            });
+        }
+    }
+}
+
+fn collect_model_diffs(diffs: &mut Vec<Diff>, xmutil: &Project, native: &Project, path: &str) {
+    let x_by_name: HashMap<&str, &Model> =
+        xmutil.models.iter().map(|m| (m.name.as_str(), m)).collect();
+    let n_by_name: HashMap<&str, &Model> =
+        native.models.iter().map(|m| (m.name.as_str(), m)).collect();
+
+    for (name, xm) in &x_by_name {
+        match n_by_name.get(name) {
+            None => diffs.push(Diff {
+                path: format!("{path}.model[{name}]"),
+                detail: "only in xmutil".into(),
+            }),
+            Some(nm) => collect_single_model_diffs(diffs, xm, nm, &format!("{path}.model[{name}]")),
+        }
+    }
+    for name in n_by_name.keys() {
+        if !x_by_name.contains_key(name) {
+            diffs.push(Diff {
+                path: format!("{path}.model[{name}]"),
+                detail: "only in native".into(),
+            });
+        }
+    }
+}
+
+fn collect_single_model_diffs(diffs: &mut Vec<Diff>, xm: &Model, nm: &Model, path: &str) {
+    let x_by_ident: HashMap<&str, &Variable> =
+        xm.variables.iter().map(|v| (v.get_ident(), v)).collect();
+    let n_by_ident: HashMap<&str, &Variable> =
+        nm.variables.iter().map(|v| (v.get_ident(), v)).collect();
+
+    // Variables only in xmutil
+    let mut only_xmutil: Vec<&str> = x_by_ident
+        .keys()
+        .filter(|k| !n_by_ident.contains_key(*k))
+        .copied()
+        .collect();
+    only_xmutil.sort();
+    for ident in &only_xmutil {
+        diffs.push(Diff {
+            path: format!("{path}.var[{ident}]"),
+            detail: "only in xmutil".into(),
+        });
+    }
+
+    // Variables only in native
+    let mut only_native: Vec<&str> = n_by_ident
+        .keys()
+        .filter(|k| !x_by_ident.contains_key(*k))
+        .copied()
+        .collect();
+    only_native.sort();
+    for ident in &only_native {
+        diffs.push(Diff {
+            path: format!("{path}.var[{ident}]"),
+            detail: "only in native".into(),
+        });
+    }
+
+    // Variables present in both but differing
+    let mut common: Vec<&str> = x_by_ident
+        .keys()
+        .filter(|k| n_by_ident.contains_key(*k))
+        .copied()
+        .collect();
+    common.sort();
+    for ident in common {
+        let xv = x_by_ident[ident];
+        let nv = n_by_ident[ident];
+        if xv != nv {
+            collect_variable_field_diffs(diffs, xv, nv, &format!("{path}.var[{ident}]"));
+        }
+    }
+}
+
+/// Compare individual fields of two variables to pinpoint exactly what differs.
+fn collect_variable_field_diffs(diffs: &mut Vec<Diff>, xv: &Variable, nv: &Variable, path: &str) {
+    // Type mismatch (Stock vs Flow vs Aux vs Module)
+    let xtype = match xv {
+        Variable::Stock(_) => "Stock",
+        Variable::Flow(_) => "Flow",
+        Variable::Aux(_) => "Aux",
+        Variable::Module(_) => "Module",
+    };
+    let ntype = match nv {
+        Variable::Stock(_) => "Stock",
+        Variable::Flow(_) => "Flow",
+        Variable::Aux(_) => "Aux",
+        Variable::Module(_) => "Module",
+    };
+    if xtype != ntype {
+        diffs.push(Diff {
+            path: format!("{path}.type"),
+            detail: format!("xmutil: {xtype}, native: {ntype}"),
+        });
+        return;
+    }
+
+    // Compare fields depending on type
+    match (xv, nv) {
+        (Variable::Stock(xs), Variable::Stock(ns)) => {
+            diff_field(diffs, path, "equation", &xs.equation, &ns.equation);
+            diff_field(
+                diffs,
+                path,
+                "documentation",
+                &xs.documentation,
+                &ns.documentation,
+            );
+            diff_field(diffs, path, "units", &xs.units, &ns.units);
+            diff_field(diffs, path, "inflows", &xs.inflows, &ns.inflows);
+            diff_field(diffs, path, "outflows", &xs.outflows, &ns.outflows);
+            diff_field(
+                diffs,
+                path,
+                "non_negative",
+                &xs.non_negative,
+                &ns.non_negative,
+            );
+        }
+        (Variable::Flow(xf), Variable::Flow(nf)) => {
+            diff_field(diffs, path, "equation", &xf.equation, &nf.equation);
+            diff_field(
+                diffs,
+                path,
+                "documentation",
+                &xf.documentation,
+                &nf.documentation,
+            );
+            diff_field(diffs, path, "units", &xf.units, &nf.units);
+            diff_field(diffs, path, "gf", &xf.gf, &nf.gf);
+            diff_field(
+                diffs,
+                path,
+                "non_negative",
+                &xf.non_negative,
+                &nf.non_negative,
+            );
+        }
+        (Variable::Aux(xa), Variable::Aux(na)) => {
+            diff_field(diffs, path, "equation", &xa.equation, &na.equation);
+            diff_field(
+                diffs,
+                path,
+                "documentation",
+                &xa.documentation,
+                &na.documentation,
+            );
+            diff_field(diffs, path, "units", &xa.units, &na.units);
+            diff_field(diffs, path, "gf", &xa.gf, &na.gf);
+        }
+        (Variable::Module(xmod), Variable::Module(nmod)) => {
+            diff_field(
+                diffs,
+                path,
+                "documentation",
+                &xmod.documentation,
+                &nmod.documentation,
+            );
+            diff_field(diffs, path, "units", &xmod.units, &nmod.units);
+            diff_field(
+                diffs,
+                path,
+                "references",
+                &xmod.references,
+                &nmod.references,
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn diff_field<T: std::fmt::Debug + PartialEq>(
+    diffs: &mut Vec<Diff>,
+    path: &str,
+    field: &str,
+    xval: &T,
+    nval: &T,
+) {
+    if xval != nval {
+        diffs.push(Diff {
+            path: format!("{path}.{field}"),
+            detail: format!("xmutil: {:?}\nnative: {:?}", xval, nval),
+        });
+    }
+}
+
+/// Compare the xmutil and native parser outputs for the C-LEARN model,
+/// collecting all differences rather than stopping at the first.
+#[test]
+#[ignore]
+fn test_clearn_equivalence() {
+    let mdl_path = "test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+    let full_path = format!("../../{mdl_path}");
+
+    let content =
+        fs::read_to_string(&full_path).unwrap_or_else(|e| panic!("Failed to read {mdl_path}: {e}"));
+
+    let mut r1 = BufReader::new(content.as_bytes());
+    let xmutil_project =
+        open_vensim(&mut r1).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
+
+    let mut r2 = BufReader::new(content.as_bytes());
+    let native_project =
+        open_vensim_native(&mut r2).unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
+
+    let xmutil_norm = normalize_project(xmutil_project);
+    let native_norm = normalize_project(native_project);
+
+    let diffs = collect_project_diffs(&xmutil_norm, &native_norm, mdl_path);
+
+    if !diffs.is_empty() {
+        let mut report = format!("\n{} equivalence differences found:\n", diffs.len());
+        for d in &diffs {
+            report.push_str(&format!("{d}\n"));
+        }
+        panic!("{report}");
+    }
+}
+
+#[test]
+fn test_normalize_equation_sorts_arrayed_elements() {
+    // Arrayed equations with identical elements in different orders should be
+    // equal after normalization. This verifies that the element sort in
+    // normalize_equation works correctly.
+    let mut eq_a = Equation::Arrayed(
+        vec!["dim".to_string()],
+        vec![
+            ("b".to_string(), "1".to_string(), None, None),
+            ("a".to_string(), "2".to_string(), None, None),
+            ("c".to_string(), "3".to_string(), None, None),
+        ],
+    );
+    let mut eq_b = Equation::Arrayed(
+        vec!["dim".to_string()],
+        vec![
+            ("a".to_string(), "2".to_string(), None, None),
+            ("c".to_string(), "3".to_string(), None, None),
+            ("b".to_string(), "1".to_string(), None, None),
+        ],
+    );
+
+    normalize_equation(&mut eq_a);
+    normalize_equation(&mut eq_b);
+
+    assert_eq!(
+        eq_a, eq_b,
+        "Arrayed equations with different element order should be equal after normalization"
+    );
+}
+
+#[test]
+fn test_normalize_equation_sorts_multidim_arrayed_elements() {
+    // Multi-dimensional arrayed equations with comma-separated subscript keys
+    // should also sort correctly.
+    let mut eq_a = Equation::Arrayed(
+        vec!["dima".to_string(), "dimb".to_string()],
+        vec![
+            ("b,y".to_string(), "3".to_string(), None, None),
+            ("a,x".to_string(), "1".to_string(), None, None),
+            ("a,y".to_string(), "2".to_string(), None, None),
+            ("b,x".to_string(), "4".to_string(), None, None),
+        ],
+    );
+    let mut eq_b = Equation::Arrayed(
+        vec!["dima".to_string(), "dimb".to_string()],
+        vec![
+            ("a,x".to_string(), "1".to_string(), None, None),
+            ("a,y".to_string(), "2".to_string(), None, None),
+            ("b,x".to_string(), "4".to_string(), None, None),
+            ("b,y".to_string(), "3".to_string(), None, None),
+        ],
+    );
+
+    normalize_equation(&mut eq_a);
+    normalize_equation(&mut eq_b);
+
+    assert_eq!(
+        eq_a, eq_b,
+        "Multi-dim arrayed equations should be equal after normalization"
+    );
 }

@@ -128,13 +128,38 @@ impl<'input> ConversionContext<'input> {
         self.build_dimensions()?;
 
         // Pass 2.5: Set subrange dimensions on formatter for bang-subscript formatting
-        // Subranges are dimensions with maps_to set (they map to a parent dimension)
-        let subrange_dims: HashSet<String> = self
+        // Subranges are dimensions with maps_to set (they map to a parent dimension).
+        // Use canonical form (to_lower_space) since the formatter lookup also uses
+        // to_lower_space for consistency.
+        let mut subrange_dims: HashSet<String> = self
             .dimensions
             .iter()
             .filter(|d| d.maps_to.is_some())
-            .map(|d| d.name.clone())
+            .map(|d| canonical_name(&d.name))
             .collect();
+
+        // Also detect implicit subranges: dimensions whose elements are all owned
+        // by a single different parent dimension. These are subranges for bang
+        // formatting purposes even without explicit `->` mapping syntax.
+        for (dim_canonical, elements) in &self.dimension_elements {
+            if subrange_dims.contains(dim_canonical) || elements.is_empty() {
+                continue;
+            }
+            if let Some(first_owner) = elements
+                .first()
+                .and_then(|e| self.element_owners.get(&canonical_name(e)))
+                && first_owner != dim_canonical
+                && elements.iter().all(|e| {
+                    self.element_owners
+                        .get(&canonical_name(e))
+                        .map(|o| o == first_owner)
+                        .unwrap_or(false)
+                })
+            {
+                subrange_dims.insert(dim_canonical.clone());
+            }
+        }
+
         self.formatter.set_subranges(subrange_dims);
 
         // Pass 3: Mark variable types (stock/flow/aux) and extract control vars
@@ -275,7 +300,7 @@ pub fn convert_mdl(source: &str) -> Result<Project, ConvertError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use simlin_core::datamodel::Dt;
+    use simlin_core::datamodel::{Dt, Equation, Variable};
 
     #[test]
     fn test_simple_conversion() {
@@ -726,6 +751,43 @@ $192-192-192,0,Times
             model.groups[0].name, "elem1 1",
             "Group name conflicting with dimension element should use ' 1' suffix"
         );
+    }
+
+    #[test]
+    fn test_implicit_subrange_bang_subscript_formatting() {
+        // When a dimension is an implicit subrange (its elements are a subset of
+        // a larger dimension, without explicit `->` mapping), BangElement on it
+        // should produce "dim.*" not just "*".
+        let mdl = "COP: OECD US, OECD EU, DevA, DevB
+~ ~|
+COP Developed: OECD US, OECD EU
+~ ~|
+x[COP] = 1
+~ ~|
+y = SUM(x[COP Developed!])
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+        let y = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "y")
+            .expect("Should have y variable");
+
+        if let Variable::Aux(a) = y {
+            let eq = match &a.equation {
+                Equation::Scalar(expr, _) => expr.clone(),
+                other => panic!("Expected Scalar equation, got {:?}", other),
+            };
+            assert!(
+                eq.contains("COP_Developed.*"),
+                "Bang subscript on implicit subrange should produce 'COP_Developed.*', got: {}",
+                eq
+            );
+        } else {
+            panic!("Expected Aux variable");
+        }
     }
 
     #[test]

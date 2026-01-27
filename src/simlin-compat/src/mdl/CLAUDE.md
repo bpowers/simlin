@@ -7,7 +7,7 @@ This directory contains the pure Rust implementation of a Vensim MDL file parser
 **Phases 1-5 and 8 (Parsing): COMPLETE**
 - Lexer, normalizer, parser, and AST types are fully implemented
 - All equation types, expressions, subscripts, and macros parse correctly
-- Comprehensive test coverage (453 tests)
+- Comprehensive test coverage (527 tests)
 
 **Phase 6 (Core Conversion): COMPLETE**
 - `convert/`: Multi-pass AST to datamodel conversion fully implemented
@@ -700,7 +700,7 @@ Implementation proceeds through the phases detailed above. Here's a summary with
 11. **Model post-processing** - PARTIAL: View composition done, name normalization not implemented
 
 ### Next Steps
-1. Enable full view comparison in mdl_equivalence tests (element counts now match)
+1. Fix remaining 26 C-LEARN equivalence differences (see "C-LEARN Equivalence Analysis" below)
 2. Implement macro output in datamodel format
 3. Test against full model corpus for equivalence with xmutil
 4. Consider removing xmutil C++ dependency once equivalence is verified
@@ -723,8 +723,9 @@ This is a multi-session project. When resuming work:
 1. Check the "Current Status" section at the top for high-level progress
 2. Run existing tests to verify nothing regressed: `cargo test -p simlin-compat mdl::`
 3. Run equivalence tests to verify view element counts match: `cargo test -p simlin-compat --features xmutil test_mdl_equivalence -- --nocapture`
-4. Next priority: Enable full view element comparison (not just counts) in equivalence tests
-5. Update the checklist as features are completed
+4. Run the C-LEARN equivalence test: `cargo test -p simlin-compat --features xmutil test_clearn_equivalence -- --ignored --nocapture`
+5. Next priority: Fix C-LEARN equivalence differences (see "C-LEARN Equivalence Analysis" below)
+6. Update the checklist and equivalence analysis as fixes are completed
 
 ## Commands
 
@@ -744,3 +745,161 @@ cargo fmt --check
 # Run clippy
 cargo clippy -p simlin-compat
 ```
+
+## Known Deficiencies
+
+- **Empty equation placeholder `0+0`**: When a Vensim equation has an empty RHS
+  (e.g., `x = ~ ~ |`), we emit `0+0` as the equation string. This is a
+  compatibility shim matching xmutil's behavior. We should eventually investigate
+  why these equations are empty in the source model and handle them more
+  meaningfully (e.g., treating them as data variables or flagging them as errors).
+
+---
+
+## C-LEARN Equivalence Analysis
+
+The C-LEARN model (`test/xmutil_test_models/C-LEARN v77 for Vensim.mdl`) is a
+large, real-world model that exercises subscripts, subranges, bang notation, and
+element-specific equations extensively. The equivalence test compares the native
+Rust parser output against the C++ xmutil path.
+
+**Test command:**
+```bash
+cargo test -p simlin-compat --features xmutil test_clearn_equivalence -- --ignored --nocapture
+```
+
+As of January 2026, there are **26 differences** between the two paths (reduced
+from an initial 233). These have been analyzed and grouped into 8 root causes,
+of which 5 have been fixed.
+
+### Difference Summary
+
+| # | Root Cause | Diffs | Status |
+|---|-----------|-------|--------|
+| 1 | Element ordering normalization | 0 | FIXED (test normalization) |
+| 2 | Per-element equation string substitution | 0 | FIXED |
+| 3 | Bang subscript formatting broken | 0 | FIXED |
+| 4 | Docs/units taken from wrong equation | 0 | FIXED |
+| 5 | Empty equation placeholder `""` vs `"0+0"` | 0 | FIXED |
+| 6 | Missing initial-value comment in ApplyToAll | ~4 | Open |
+| 7 | Trailing tab in dimension element names | ~8 | Open |
+| 8 | Miscellaneous (net flow, middle-dot, GF y-scale, dimension maps_to) | ~14 | Open |
+
+### Root Cause 1: Element Ordering (FIXED)
+
+**Status:** FIXED via test normalization. The native parser and xmutil may produce
+array elements in different orders; this is not a semantic difference. The
+equivalence test now sorts elements by canonicalized subscript key before
+comparison (`mdl_equivalence.rs:normalize_equation`).
+
+### Root Cause 2: Per-Element Equation String Substitution (FIXED)
+
+**Status:** FIXED. When there are multiple equations for the same variable
+(element-specific overrides or multi-subrange definitions), per-element
+substitution now replaces dimension references with the specific element being
+computed, matching xmutil's `GetLHSSpecific` behavior.
+
+**Implementation:** `ElementContext` struct in `xmile_compat.rs` carries
+per-element substitution mappings. `SubrangeMapping` handles positional
+resolution for sibling subranges. The formatter threads context through all
+expression formatting methods. Substitution is only applied when
+`expanded_eqs.len() > 1` (multiple equations) to avoid unnecessary expansion
+of true apply-to-all equations.
+
+### Root Cause 3: Bang Subscript Formatting (FIXED)
+
+**Status:** FIXED. Two sub-bugs resolved:
+
+1. **Canonicalization mismatch:** `subrange_dims` now uses canonical form via
+   `canonical_name()` (= `to_lower_space()`), matching the formatter's lookup
+   format. Previously used `space_to_underbar()` which never matched.
+
+2. **Implicit subrange detection:** After explicit subrange collection (from
+   `maps_to`), the code now scans `dimension_elements` for implicit subranges:
+   if all elements of a dimension are owned by a single different parent
+   dimension, it's detected as a subrange. This matches the C++ `SetOwner`
+   mechanism.
+
+### Root Cause 4: Documentation/Units Taken From Wrong Equation (FIXED)
+
+**Status:** FIXED. The `extract_metadata` helper now iterates all equations and
+uses the first one with non-empty documentation/units, rather than always using
+the first equation. This correctly handles Vensim's convention where only the
+last element-specific equation carries units and docs.
+
+### Root Cause 5: Empty Equation Placeholder (FIXED)
+
+**Status:** FIXED. Empty RHS equations and lookup-only variables now emit `"0+0"`
+to match xmutil.
+
+### Root Cause 6: Missing Initial-Value Comment in ApplyToAll (5 diffs)
+
+**Problem:** Some `ApplyToAll` equations include a third field that is an
+initial-value annotation comment. For example, `buffer_factor` has
+`Some("Ref_Buffer_Factor")` in xmutil but `None` in native. These comments appear
+to be the text of the initial value expression from the Vensim ACTIVE INITIAL or
+similar constructs.
+
+**Affected variables:** `buffer_factor`, `co2_ff_emissions`,
+`forestry_emissions_by_target`, `im_1_emissions`, `last_set_target_year`
+
+### Root Cause 7: Trailing Tab in Dimension Element Names (1 diff)
+
+**Location:** `lexer.rs:283` (`is_symbol_char` includes `'\t'`) and
+`lexer.rs:321-324` (trailing trim only strips spaces and underscores)
+
+**Problem:** The MDL file has tab characters between element names and commas
+(e.g., `HFC134a\t,`). The lexer treats `\t` as a valid symbol character but
+doesn't strip trailing tabs, producing element names like `"hfc134a\t"`.
+
+**Fix:** Add `'\t'` to the trailing-character trim logic at lines 321-324, or
+exclude `'\t'` from `is_symbol_char`.
+
+**Affected:** `hfc_type` dimension (8 of 9 elements have trailing tabs).
+
+### Root Cause 8: Miscellaneous (7 diffs)
+
+**Net flow synthesis (4 diffs):** The `c_in_atmosphere` stock uses a complex rate
+expression with many terms. xmutil creates a single synthetic
+`c_in_atmosphere_net_flow` variable combining all in/outflows; native correctly
+decomposes into individual flows. Related: `flux_c_from_permafrost_release` is
+typed as Aux in xmutil but Flow in native. This may be a case where native is
+arguably more correct than xmutil.
+
+**Middle-dot canonicalization (2 diffs):** `goal_1.5_for_temperature` vs
+`goal_1\u{00B7}5_for_temperature`. xmutil converts middle-dot `\u{00B7}` to
+period `.`; native preserves it.
+
+**Graphical function y-scale (2 diffs):** xmutil auto-computes y-scale from data
+points; native preserves Vensim's explicitly specified y-scale range.
+
+### Remaining Fix Order
+
+1. **Root Cause 7** (~8 diffs) -- Trivial: strip trailing tabs in lexer
+2. **Root Cause 6** (~4 diffs) -- Medium: extract initial-value comment from MDL
+3. **Root Cause 8** (~14 diffs) -- Various: net flow synthesis, middle-dot
+   canonicalization, GF y-scale, dimension maps_to, subrange normalization
+
+### Key C++ Reference Code for Subscript Handling
+
+When implementing fixes for Root Causes 1-3, these C++ files are essential
+references:
+
+- **`ContextInfo.cpp:7-60`** (`GetLHSSpecific`): Per-element dimension reference
+  substitution. Tracks current LHS element context and maps dimension references
+  to specific elements during expression output.
+
+- **`SymbolList.cpp:29-50`** (`SetOwner`): Ownership assignment. The largest
+  dimension containing all of a symbol's elements becomes its owner. Used to
+  determine subrange status for bang subscript formatting.
+
+- **`SymbolList.cpp:52-113`** (`OutputComputable`): Bang subscript output logic.
+  Checks `s->Owner() != s` to decide between `SubrangeName.*` and bare `*`.
+
+- **`XMILEGenerator.cpp:420-543`** (`generateEquation`): Multi-equation expansion.
+  Iterates all equations, calls `SubscriptExpand()` on each, generates
+  per-element entries. Determines parent dimension from the expanded element sets.
+
+- **`Variable.cpp:326-349`** (`OutputComputable`): Non-bang subscript resolution
+  for array-typed variables. Uses `GetLHSSpecific` to substitute dimension
+  references with specific elements.

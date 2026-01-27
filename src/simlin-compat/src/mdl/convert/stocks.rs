@@ -8,16 +8,14 @@ use std::collections::HashMap;
 
 use simlin_core::datamodel::{Equation, GraphicalFunction};
 
-use crate::mdl::ast::{BinaryOp, CallKind, Equation as MdlEquation, Expr, FullEquation, Subscript};
-use crate::mdl::builtins::to_lower_space;
-use crate::mdl::xmile_compat::space_to_underbar;
-
 use super::ConversionContext;
 use super::helpers::{
     canonical_name, cartesian_product, equation_is_stock, extract_constant_value,
     extract_first_units, get_lhs,
 };
 use super::types::{SyntheticFlow, VariableType};
+use crate::mdl::ast::{BinaryOp, CallKind, Equation as MdlEquation, Expr, FullEquation, Subscript};
+use crate::mdl::builtins::to_lower_space;
 
 impl<'input> ConversionContext<'input> {
     /// Pass 3: Mark variable types based on equation content.
@@ -443,7 +441,7 @@ impl<'input> ConversionContext<'input> {
             }
 
             // Check dimensions consistency
-            if let Some(ref existing_dims) = all_dims {
+            if let Some(ref mut existing_dims) = all_dims {
                 // Normalize for comparison
                 let normalized_existing: Vec<_> = existing_dims
                     .iter()
@@ -454,6 +452,16 @@ impl<'input> ConversionContext<'input> {
                 if normalized_existing != normalized_new {
                     // Inconsistent dimensions - skip
                     continue;
+                }
+                // If the raw dimension names differ but normalized names match,
+                // the equations span different subranges of the same parent.
+                // Promote to the parent dimensions (but not through
+                // equivalences -- alias dimensions should keep their own name).
+                if *existing_dims != dims {
+                    *existing_dims = existing_dims
+                        .iter()
+                        .map(|d| self.resolve_subrange_to_parent(d))
+                        .collect();
                 }
             } else {
                 all_dims = Some(dims);
@@ -471,8 +479,12 @@ impl<'input> ConversionContext<'input> {
             return None;
         }
 
-        // Format dimensions
-        let formatted_dims: Vec<String> = dims.iter().map(|d| space_to_underbar(d)).collect();
+        // Format dimension names -- dims are already normalized to
+        // parent dimensions when equations span different subranges
+        let formatted_dims: Vec<String> = dims
+            .iter()
+            .map(|d| self.get_formatted_dimension_name(d))
+            .collect();
 
         // Convert to elements vector for Arrayed equation
         let mut elements: Vec<(String, String, Option<String>, Option<GraphicalFunction>)> =

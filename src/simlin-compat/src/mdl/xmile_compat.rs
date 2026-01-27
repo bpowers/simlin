@@ -11,10 +11,33 @@
 //! - Number formatting using %g style
 //! - Operator formatting with proper spacing
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::mdl::ast::{BinaryOp, CallKind, Expr, LookupTable, Subscript, UnaryOp};
 use crate::mdl::builtins::to_lower_space;
+
+/// Context for per-element equation substitution.
+/// Maps generic LHS dimension names to specific element names for the
+/// current element being expanded. Equivalent to C++ ContextInfo's
+/// pLHSElmsGeneric/pLHSElmsSpecific pair.
+pub struct ElementContext {
+    /// dimension canonical name -> specific element (space_to_underbar format)
+    /// e.g. {"scenario" -> "deterministic", "upper" -> "layer1"}
+    pub substitutions: HashMap<String, String>,
+    /// For dimensions NOT directly on the LHS but reachable via subrange
+    /// relationships. Maps dim canonical name -> SubrangeMapping.
+    pub subrange_mappings: HashMap<String, SubrangeMapping>,
+}
+
+/// Mapping information for resolving subrange references positionally.
+pub struct SubrangeMapping {
+    /// The LHS dimension this subrange maps through
+    pub lhs_dim_canonical: String,
+    /// Elements of the LHS dimension (in definition order)
+    pub lhs_dim_elements: Vec<String>,
+    /// Elements of this subrange (in definition order)
+    pub own_elements: Vec<String>,
+}
 
 /// Formats MDL AST expressions as XMILE-compatible equation strings.
 pub struct XmileFormatter {
@@ -55,19 +78,24 @@ impl XmileFormatter {
 
     /// Format an expression to an XMILE-compatible string.
     pub fn format_expr(&self, expr: &Expr<'_>) -> String {
-        self.format_expr_inner(expr)
+        self.format_expr_ctx(expr, None)
     }
 
-    fn format_expr_inner(&self, expr: &Expr<'_>) -> String {
+    /// Format an expression with per-element substitution context.
+    pub fn format_expr_with_context(&self, expr: &Expr<'_>, ctx: &ElementContext) -> String {
+        self.format_expr_ctx(expr, Some(ctx))
+    }
+
+    fn format_expr_ctx(&self, expr: &Expr<'_>, ctx: Option<&ElementContext>) -> String {
         match expr {
             Expr::Const(value, _) => format_number(*value),
-            Expr::Var(name, subscripts, _) => self.format_var(name, subscripts),
+            Expr::Var(name, subscripts, _) => self.format_var_ctx(name, subscripts, ctx),
             Expr::App(name, subscripts, args, kind, _) => {
-                self.format_call(name, subscripts, args, *kind)
+                self.format_call_ctx(name, subscripts, args, *kind, ctx)
             }
-            Expr::Op1(op, inner, _) => self.format_unary(*op, inner),
-            Expr::Op2(op, left, right, _) => self.format_binary(*op, left, right),
-            Expr::Paren(inner, _) => format!("({})", self.format_expr_inner(inner)),
+            Expr::Op1(op, inner, _) => self.format_unary_ctx(*op, inner, ctx),
+            Expr::Op2(op, left, right, _) => self.format_binary_ctx(*op, left, right, ctx),
+            Expr::Paren(inner, _) => format!("({})", self.format_expr_ctx(inner, ctx)),
             Expr::Literal(lit, _) => {
                 // Literals are already quoted in the AST, output as-is for XMILE
                 // But xmutil strips quotes from literals in expression output
@@ -77,7 +105,12 @@ impl XmileFormatter {
         }
     }
 
-    fn format_var(&self, name: &str, subscripts: &[Subscript<'_>]) -> String {
+    fn format_var_ctx(
+        &self,
+        name: &str,
+        subscripts: &[Subscript<'_>],
+        ctx: Option<&ElementContext>,
+    ) -> String {
         let formatted_name = self.format_name(name);
         if subscripts.is_empty() {
             formatted_name
@@ -85,10 +118,26 @@ impl XmileFormatter {
             let subs: Vec<String> = subscripts
                 .iter()
                 .map(|s| match s {
-                    Subscript::Element(n, _) => space_to_underbar(n),
+                    Subscript::Element(n, _) => {
+                        if let Some(ctx) = ctx {
+                            let canonical = to_lower_space(n);
+                            // Direct substitution: dimension name -> specific element
+                            if let Some(specific) = ctx.substitutions.get(&canonical) {
+                                return specific.clone();
+                            }
+                            // Subrange resolution: positional mapping through parent
+                            if let Some(mapping) = ctx.subrange_mappings.get(&canonical)
+                                && let Some(resolved) = Self::resolve_subrange_element(ctx, mapping)
+                            {
+                                return resolved;
+                            }
+                        }
+                        space_to_underbar(n)
+                    }
                     // Bang subscript `dim!` means "iterate over all elements"
                     // For full dimensions -> `*`
                     // For subranges (have maps_to) -> `Dim.*`
+                    // Bang subscripts are never substituted.
                     Subscript::BangElement(n, _) => {
                         let canonical = to_lower_space(n);
                         if self.subrange_dims.contains(&canonical) {
@@ -101,6 +150,21 @@ impl XmileFormatter {
                 .collect();
             format!("{}[{}]", formatted_name, subs.join(", "))
         }
+    }
+
+    /// Resolve a subrange element positionally through a SubrangeMapping.
+    /// Given the current context's specific element for the LHS dimension,
+    /// find the corresponding element in the subrange by position.
+    fn resolve_subrange_element(ctx: &ElementContext, mapping: &SubrangeMapping) -> Option<String> {
+        // Get the specific element for the LHS dimension
+        let lhs_element = ctx.substitutions.get(&mapping.lhs_dim_canonical)?;
+        // Find its position in the LHS dimension's element list
+        let pos = mapping
+            .lhs_dim_elements
+            .iter()
+            .position(|e| e == lhs_element)?;
+        // Return the corresponding element from the subrange
+        mapping.own_elements.get(pos).cloned()
     }
 
     fn format_name(&self, name: &str) -> String {
@@ -122,12 +186,13 @@ impl XmileFormatter {
         quoted_space_to_underbar(name)
     }
 
-    fn format_call(
+    fn format_call_ctx(
         &self,
         name: &str,
         subscripts: &[Subscript<'_>],
         args: &[Expr<'_>],
         kind: CallKind,
+        ctx: Option<&ElementContext>,
     ) -> String {
         let canonical = to_lower_space(name);
 
@@ -141,27 +206,27 @@ impl XmileFormatter {
                 if args.len() >= 3 {
                     return format!(
                         "( IF {} THEN {} ELSE {} )",
-                        self.format_expr_inner(&args[0]),
-                        self.format_expr_inner(&args[1]),
-                        self.format_expr_inner(&args[2])
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx),
+                        self.format_expr_ctx(&args[2], ctx)
                     );
                 }
             }
             "log" => {
                 // LOG in Vensim: 1 arg = LOG10, 2 args = LOG(x, base) = LN(x)/LN(base)
                 if args.len() == 1 {
-                    return format!("LOG10({})", self.format_expr_inner(&args[0]));
+                    return format!("LOG10({})", self.format_expr_ctx(&args[0], ctx));
                 } else if args.len() == 2 {
                     return format!(
                         "(LN({}) / LN({}))",
-                        self.format_expr_inner(&args[0]),
-                        self.format_expr_inner(&args[1])
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx)
                     );
                 }
             }
             "elmcount" => {
                 if !args.is_empty() {
-                    return format!("SIZE({})", self.format_expr_inner(&args[0]));
+                    return format!("SIZE({})", self.format_expr_ctx(&args[0], ctx));
                 }
             }
             "delay n" => {
@@ -169,10 +234,10 @@ impl XmileFormatter {
                 if args.len() >= 4 {
                     return format!(
                         "DELAYN({}, {}, {}, {})",
-                        self.format_expr_inner(&args[0]),
-                        self.format_expr_inner(&args[1]),
-                        self.format_expr_inner(&args[3]),
-                        self.format_expr_inner(&args[2])
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx),
+                        self.format_expr_ctx(&args[3], ctx),
+                        self.format_expr_ctx(&args[2], ctx)
                     );
                 }
             }
@@ -181,10 +246,10 @@ impl XmileFormatter {
                 if args.len() >= 4 {
                     return format!(
                         "SMTHN({}, {}, {}, {})",
-                        self.format_expr_inner(&args[0]),
-                        self.format_expr_inner(&args[1]),
-                        self.format_expr_inner(&args[3]),
-                        self.format_expr_inner(&args[2])
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx),
+                        self.format_expr_ctx(&args[3], ctx),
+                        self.format_expr_ctx(&args[2], ctx)
                     );
                 }
             }
@@ -193,27 +258,27 @@ impl XmileFormatter {
                 if args.len() >= 5 {
                     return format!(
                         "NORMAL({}, {}, {}, {}, {})",
-                        self.format_expr_inner(&args[2]),
-                        self.format_expr_inner(&args[3]),
-                        self.format_expr_inner(&args[4]),
-                        self.format_expr_inner(&args[0]),
-                        self.format_expr_inner(&args[1])
+                        self.format_expr_ctx(&args[2], ctx),
+                        self.format_expr_ctx(&args[3], ctx),
+                        self.format_expr_ctx(&args[4], ctx),
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx)
                     );
                 }
             }
             "quantum" => {
                 // QUANTUM(x, q) -> (q)*INT((x)/(q))
                 if args.len() >= 2 {
-                    let x = self.format_expr_inner(&args[0]);
-                    let q = self.format_expr_inner(&args[1]);
+                    let x = self.format_expr_ctx(&args[0], ctx);
+                    let q = self.format_expr_ctx(&args[1], ctx);
                     return format!("({})*INT(({})/({}))", q, x, q);
                 }
             }
             "pulse" => {
                 // PULSE(start, width) -> IF TIME >= (start) AND TIME < ((start) + MAX(DT,width)) THEN 1 ELSE 0
                 if args.len() >= 2 {
-                    let start = self.format_expr_inner(&args[0]);
-                    let width = self.format_expr_inner(&args[1]);
+                    let start = self.format_expr_ctx(&args[0], ctx);
+                    let width = self.format_expr_ctx(&args[1], ctx);
                     return format!(
                         "( IF TIME >= ({}) AND TIME < (({}) + MAX(DT,{})) THEN 1 ELSE 0 )",
                         start, start, width
@@ -225,10 +290,10 @@ impl XmileFormatter {
                 // IF TIME >= start AND TIME <= end AND (TIME - start) MOD interval < width THEN 1 ELSE 0
                 // Note: Unlike PULSE which uses MAX(DT, width), PULSE TRAIN uses width directly (per xmutil)
                 if args.len() >= 4 {
-                    let start = self.format_expr_inner(&args[0]);
-                    let width = self.format_expr_inner(&args[1]);
-                    let interval = self.format_expr_inner(&args[2]);
-                    let end = self.format_expr_inner(&args[3]);
+                    let start = self.format_expr_ctx(&args[0], ctx);
+                    let width = self.format_expr_ctx(&args[1], ctx);
+                    let interval = self.format_expr_ctx(&args[2], ctx);
+                    let end = self.format_expr_ctx(&args[3], ctx);
                     return format!(
                         "( IF TIME >= ({}) AND TIME <= ({}) AND (TIME - ({})) MOD ({}) < ({}) THEN 1 ELSE 0 )",
                         start, end, start, interval, width
@@ -240,15 +305,15 @@ impl XmileFormatter {
                 if args.len() >= 3 {
                     return format!(
                         "( IF {} THEN {} ELSE PREVIOUS(SELF, {}) )",
-                        self.format_expr_inner(&args[0]),
-                        self.format_expr_inner(&args[1]),
-                        self.format_expr_inner(&args[2])
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx),
+                        self.format_expr_ctx(&args[2], ctx)
                     );
                 }
             }
             "allocate by priority" => {
                 // ALLOCATE BY PRIORITY with reordered args
-                return self.format_allocate_by_priority(args);
+                return self.format_allocate_by_priority_ctx(args, ctx);
             }
             "random 0 1" => {
                 // RANDOM 0 1() -> UNIFORM(0, 1)
@@ -262,20 +327,20 @@ impl XmileFormatter {
                 if args.len() >= 6 {
                     return format!(
                         "POISSON(({}) / DT, {}, {}, {}) * {} + {}",
-                        self.format_expr_inner(&args[2]),
-                        self.format_expr_inner(&args[5]),
-                        self.format_expr_inner(&args[0]),
-                        self.format_expr_inner(&args[1]),
-                        self.format_expr_inner(&args[4]),
-                        self.format_expr_inner(&args[3])
+                        self.format_expr_ctx(&args[2], ctx),
+                        self.format_expr_ctx(&args[5], ctx),
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx),
+                        self.format_expr_ctx(&args[4], ctx),
+                        self.format_expr_ctx(&args[3], ctx)
                     );
                 }
             }
             "time base" => {
                 // TIME BASE(t, dt) -> t + (dt) * TIME
                 if args.len() >= 2 {
-                    let t = self.format_expr_inner(&args[0]);
-                    let dt = self.format_expr_inner(&args[1]);
+                    let t = self.format_expr_ctx(&args[0], ctx);
+                    let dt = self.format_expr_ctx(&args[1], ctx);
                     return format!("{} + ({}) * TIME", t, dt);
                 }
             }
@@ -284,8 +349,8 @@ impl XmileFormatter {
                 if args.len() >= 2 {
                     return format!(
                         "SAFEDIV({}, {})",
-                        self.format_expr_inner(&args[0]),
-                        self.format_expr_inner(&args[1])
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx)
                     );
                 }
             }
@@ -294,9 +359,9 @@ impl XmileFormatter {
                 if args.len() >= 3 {
                     return format!(
                         "SAFEDIV({}, {}, {})",
-                        self.format_expr_inner(&args[0]),
-                        self.format_expr_inner(&args[1]),
-                        self.format_expr_inner(&args[2])
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx),
+                        self.format_expr_ctx(&args[2], ctx)
                     );
                 }
             }
@@ -305,35 +370,25 @@ impl XmileFormatter {
 
         // Check for lookup invocation (Symbol call with 1 arg)
         if kind == CallKind::Symbol && args.len() == 1 {
-            let table_name = self.format_name(name);
+            let table_name = self.format_var_ctx(name, subscripts, ctx);
             return format!(
                 "LOOKUP({}, {})",
                 table_name,
-                self.format_expr_inner(&args[0])
+                self.format_expr_ctx(&args[0], ctx)
             );
         }
 
         // Default function call formatting
         let func_name = self.format_function_name(&canonical);
-        let formatted_args: Vec<String> = args.iter().map(|a| self.format_expr_inner(a)).collect();
+        let formatted_args: Vec<String> =
+            args.iter().map(|a| self.format_expr_ctx(a, ctx)).collect();
 
         if subscripts.is_empty() {
             format!("{}({})", func_name, formatted_args.join(", "))
         } else {
             let subs: Vec<String> = subscripts
                 .iter()
-                .map(|s| match s {
-                    Subscript::Element(n, _) => space_to_underbar(n),
-                    // Bang subscript handling for function subscripts
-                    Subscript::BangElement(n, _) => {
-                        let canonical = to_lower_space(n);
-                        if self.subrange_dims.contains(&canonical) {
-                            format!("{}.*", space_to_underbar(n))
-                        } else {
-                            "*".to_string()
-                        }
-                    }
-                })
+                .map(|s| self.format_subscript(s, ctx))
                 .collect();
             format!(
                 "{}[{}]({})",
@@ -380,19 +435,24 @@ impl XmileFormatter {
         }
     }
 
-    fn format_allocate_by_priority(&self, args: &[Expr<'_>]) -> String {
+    fn format_allocate_by_priority_ctx(
+        &self,
+        args: &[Expr<'_>],
+        ctx: Option<&ElementContext>,
+    ) -> String {
         // ALLOCATE BY PRIORITY(demand, priority, ignore, width, supply)
         // -> ALLOCATE(supply, last_subscript, demand_with_star, priority, width)
         if args.len() != 5 {
             // Fallback: pass through as-is
-            let formatted: Vec<String> = args.iter().map(|a| self.format_expr_inner(a)).collect();
+            let formatted: Vec<String> =
+                args.iter().map(|a| self.format_expr_ctx(a, ctx)).collect();
             return format!("ALLOCATE_BY_PRIORITY({})", formatted.join(", "));
         }
 
-        let supply = self.format_expr_inner(&args[4]);
+        let supply = self.format_expr_ctx(&args[4], ctx);
         let demand = &args[0];
-        let priority = self.format_expr_inner(&args[1]);
-        let width = self.format_expr_inner(&args[3]);
+        let priority = self.format_expr_ctx(&args[1], ctx);
+        let width = self.format_expr_ctx(&args[3], ctx);
 
         // Extract last subscript from demand if it's a subscripted variable
         let (last_subscript, demand_str) = if let Expr::Var(name, subscripts, _) = demand {
@@ -415,7 +475,7 @@ impl XmileFormatter {
             }
         } else {
             // Demand is not a simple variable - format normally, empty subscript
-            (String::new(), self.format_expr_inner(demand))
+            (String::new(), self.format_expr_ctx(demand, ctx))
         };
 
         format!(
@@ -445,8 +505,41 @@ impl XmileFormatter {
         format!("{}[{}]", formatted_name, subs.join(", "))
     }
 
-    fn format_unary(&self, op: UnaryOp, inner: &Expr<'_>) -> String {
-        let inner_str = self.format_expr_inner(inner);
+    /// Format a single subscript with optional context for substitution.
+    fn format_subscript(&self, s: &Subscript<'_>, ctx: Option<&ElementContext>) -> String {
+        match s {
+            Subscript::Element(n, _) => {
+                if let Some(ctx) = ctx {
+                    let canonical = to_lower_space(n);
+                    if let Some(specific) = ctx.substitutions.get(&canonical) {
+                        return specific.clone();
+                    }
+                    if let Some(mapping) = ctx.subrange_mappings.get(&canonical)
+                        && let Some(resolved) = Self::resolve_subrange_element(ctx, mapping)
+                    {
+                        return resolved;
+                    }
+                }
+                space_to_underbar(n)
+            }
+            Subscript::BangElement(n, _) => {
+                let canonical = to_lower_space(n);
+                if self.subrange_dims.contains(&canonical) {
+                    format!("{}.*", space_to_underbar(n))
+                } else {
+                    "*".to_string()
+                }
+            }
+        }
+    }
+
+    fn format_unary_ctx(
+        &self,
+        op: UnaryOp,
+        inner: &Expr<'_>,
+        ctx: Option<&ElementContext>,
+    ) -> String {
+        let inner_str = self.format_expr_ctx(inner, ctx);
         match op {
             UnaryOp::Positive => format!("+{}", inner_str),
             UnaryOp::Negative => format!("-{}", inner_str),
@@ -454,9 +547,15 @@ impl XmileFormatter {
         }
     }
 
-    fn format_binary(&self, op: BinaryOp, left: &Expr<'_>, right: &Expr<'_>) -> String {
-        let left_str = self.format_expr_inner(left);
-        let right_str = self.format_expr_inner(right);
+    fn format_binary_ctx(
+        &self,
+        op: BinaryOp,
+        left: &Expr<'_>,
+        right: &Expr<'_>,
+        ctx: Option<&ElementContext>,
+    ) -> String {
+        let left_str = self.format_expr_ctx(left, ctx);
+        let right_str = self.format_expr_ctx(right, ctx);
 
         let op_str = match op {
             BinaryOp::Add => " + ",
@@ -484,27 +583,52 @@ impl XmileFormatter {
     }
 }
 
-/// Format a number using %g-style formatting (matches xmutil's StringFromDouble).
-fn format_number(value: f64) -> String {
+/// Format a number to match C++ std::to_chars shortest round-trip representation.
+///
+/// C++ std::to_chars picks whichever of decimal or scientific notation is
+/// shorter. When using scientific notation, it formats the exponent as
+/// `e[+-]dd` (explicit sign, at least 2 digits). Rust's `format!("{}", f64)`
+/// already gives the shortest decimal representation, so we compare that
+/// with our scientific notation format and pick the shorter one.
+pub fn format_number(value: f64) -> String {
     if value == 0.0 {
         return "0".to_string();
     }
 
-    // Use %g-style formatting
-    let abs = value.abs();
-    if (1e-4..1e6).contains(&abs) {
-        // Use decimal notation
-        let s = format!("{}", value);
-        // Strip trailing zeros after decimal point
-        if s.contains('.') {
-            let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-            trimmed.to_string()
+    // Rust's Display gives shortest round-trip decimal representation
+    let decimal = format!("{}", value);
+
+    // Build scientific notation in C++ to_chars style: e[+-]dd (min 2-digit exponent)
+    let scientific = format_scientific(value);
+
+    // Pick the shorter representation (C++ to_chars behavior)
+    if scientific.len() < decimal.len() {
+        scientific
+    } else {
+        decimal
+    }
+}
+
+/// Format a value in scientific notation matching C++ to_chars exponent style.
+/// Exponent is formatted as `e[+-]dd` with explicit sign and minimum 2 digits.
+fn format_scientific(value: f64) -> String {
+    // Use Rust's {:e} to get exact mantissa + exponent, then reformat the exponent
+    let s = format!("{:e}", value);
+    // s is like "3.1536e-15" or "1e6" or "-8e-5"
+    if let Some(e_pos) = s.find('e') {
+        let mantissa = &s[..e_pos];
+        let exp_str = &s[e_pos + 1..];
+        let exp: i32 = exp_str.parse().unwrap_or(0);
+
+        let exp_sign = if exp >= 0 { '+' } else { '-' };
+        let exp_abs = exp.unsigned_abs();
+        if exp_abs >= 100 {
+            format!("{}e{}{}", mantissa, exp_sign, exp_abs)
         } else {
-            s
+            format!("{}e{}{:02}", mantissa, exp_sign, exp_abs)
         }
     } else {
-        // Use scientific notation
-        format!("{:e}", value)
+        s
     }
 }
 
@@ -645,6 +769,35 @@ mod tests {
     #[test]
     fn test_format_number_trailing_zeros() {
         assert_eq!(format_number(1.50), "1.5");
+    }
+
+    #[test]
+    fn test_format_number_scientific_large() {
+        // C++ to_chars uses scientific with e+dd format for large values
+        assert_eq!(format_number(1e6), "1e+06");
+        assert_eq!(format_number(1e9), "1e+09");
+        assert_eq!(format_number(5.1e14), "5.1e+14");
+    }
+
+    #[test]
+    fn test_format_number_scientific_small() {
+        // C++ to_chars uses scientific with e-dd format for small values
+        assert_eq!(format_number(8e-5), "8e-05");
+        assert_eq!(format_number(2.01e-5), "2.01e-05");
+        assert_eq!(format_number(1.3264e-6), "1.3264e-06");
+        assert_eq!(format_number(5.68e-9), "5.68e-09");
+        assert_eq!(format_number(3.1536e-15), "3.1536e-15");
+    }
+
+    #[test]
+    fn test_format_number_boundary_decimal_vs_scientific() {
+        // Values that are shorter in decimal remain decimal
+        assert_eq!(format_number(100.0), "100");
+        assert_eq!(format_number(0.001), "0.001");
+        // 0.0001 is 6 chars, 1e-04 is 5 chars: scientific wins
+        assert_eq!(format_number(0.0001), "1e-04");
+        // Negative values
+        assert_eq!(format_number(-42.0), "-42");
     }
 
     #[test]
@@ -1472,5 +1625,232 @@ mod tests {
             loc(),
         );
         assert_eq!(format_unit_expr(&unit), "A*B");
+    }
+
+    #[test]
+    fn test_format_lookup_with_element_subscript() {
+        // LOOKUP(foo[cop], input) should preserve the subscript on the table name
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("my_table"),
+            vec![Subscript::Element(Cow::Borrowed("cop"), loc())],
+            vec![Expr::Var(Cow::Borrowed("input"), vec![], loc())],
+            CallKind::Symbol,
+            loc(),
+        );
+        assert_eq!(formatter.format_expr(&expr), "LOOKUP(my_table[cop], input)");
+    }
+
+    #[test]
+    fn test_format_lookup_with_bang_subscript() {
+        // LOOKUP(foo[*], input) should preserve the bang subscript on the table name
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("my_table"),
+            vec![Subscript::BangElement(Cow::Borrowed("DimA"), loc())],
+            vec![Expr::Var(Cow::Borrowed("input"), vec![], loc())],
+            CallKind::Symbol,
+            loc(),
+        );
+        assert_eq!(formatter.format_expr(&expr), "LOOKUP(my_table[*], input)");
+    }
+
+    #[test]
+    fn test_format_lookup_without_subscript() {
+        // LOOKUP(foo, input) without subscript should remain unchanged
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("my_table"),
+            vec![],
+            vec![Expr::Var(Cow::Borrowed("input"), vec![], loc())],
+            CallKind::Symbol,
+            loc(),
+        );
+        assert_eq!(formatter.format_expr(&expr), "LOOKUP(my_table, input)");
+    }
+
+    #[test]
+    fn test_bang_subscript_on_subrange_produces_qualified_wildcard() {
+        // BangElement on a subrange should produce "subrange_name.*" not "*"
+        let subranges: HashSet<String> =
+            HashSet::from(["cop developed".to_string(), "cop developing a".to_string()]);
+        let formatter = XmileFormatter::with_subranges(subranges);
+
+        let expr = Expr::Var(
+            Cow::Borrowed("co2_ff_emissions"),
+            vec![Subscript::BangElement(
+                Cow::Borrowed("COP Developed"),
+                loc(),
+            )],
+            loc(),
+        );
+        assert_eq!(
+            formatter.format_expr(&expr),
+            "co2_ff_emissions[COP_Developed.*]"
+        );
+    }
+
+    #[test]
+    fn test_bang_subscript_on_full_dimension_produces_bare_wildcard() {
+        // BangElement on a full dimension (not a subrange) should produce "*"
+        let subranges: HashSet<String> = HashSet::from(["cop developed".to_string()]);
+        let formatter = XmileFormatter::with_subranges(subranges);
+
+        let expr = Expr::Var(
+            Cow::Borrowed("co2_ff_emissions"),
+            vec![Subscript::BangElement(Cow::Borrowed("COP"), loc())],
+            loc(),
+        );
+        assert_eq!(formatter.format_expr(&expr), "co2_ff_emissions[*]");
+    }
+
+    #[test]
+    fn test_context_substitution_1d() {
+        // y[DimA] with context {dima -> a1} should produce y[a1]
+        let formatter = XmileFormatter::new();
+        let ctx = ElementContext {
+            substitutions: HashMap::from([("dima".to_string(), "a1".to_string())]),
+            subrange_mappings: HashMap::new(),
+        };
+
+        let expr = Expr::Var(
+            Cow::Borrowed("y"),
+            vec![Subscript::Element(Cow::Borrowed("DimA"), loc())],
+            loc(),
+        );
+        assert_eq!(formatter.format_expr_with_context(&expr, &ctx), "y[a1]");
+    }
+
+    #[test]
+    fn test_context_substitution_2d() {
+        // y[DimA, DimB] with context {dima -> a1, dimb -> b2} -> y[a1, b2]
+        let formatter = XmileFormatter::new();
+        let ctx = ElementContext {
+            substitutions: HashMap::from([
+                ("dima".to_string(), "a1".to_string()),
+                ("dimb".to_string(), "b2".to_string()),
+            ]),
+            subrange_mappings: HashMap::new(),
+        };
+
+        let expr = Expr::Var(
+            Cow::Borrowed("y"),
+            vec![
+                Subscript::Element(Cow::Borrowed("DimA"), loc()),
+                Subscript::Element(Cow::Borrowed("DimB"), loc()),
+            ],
+            loc(),
+        );
+        assert_eq!(formatter.format_expr_with_context(&expr, &ctx), "y[a1, b2]");
+    }
+
+    #[test]
+    fn test_context_no_false_substitution() {
+        // y[a1] with context {dima -> a1}: a1 is an element not a dimension,
+        // so it shouldn't be in substitutions and should stay as y[a1]
+        let formatter = XmileFormatter::new();
+        let ctx = ElementContext {
+            substitutions: HashMap::from([("dima".to_string(), "a1".to_string())]),
+            subrange_mappings: HashMap::new(),
+        };
+
+        let expr = Expr::Var(
+            Cow::Borrowed("y"),
+            vec![Subscript::Element(Cow::Borrowed("a1"), loc())],
+            loc(),
+        );
+        assert_eq!(formatter.format_expr_with_context(&expr, &ctx), "y[a1]");
+    }
+
+    #[test]
+    fn test_context_nested_expression() {
+        // IF x[DimA] > 0 THEN y[DimA] ELSE z[DimA] with context {dima -> a1}
+        let formatter = XmileFormatter::new();
+        let ctx = ElementContext {
+            substitutions: HashMap::from([("dima".to_string(), "a1".to_string())]),
+            subrange_mappings: HashMap::new(),
+        };
+
+        let expr = Expr::App(
+            Cow::Borrowed("IF THEN ELSE"),
+            vec![],
+            vec![
+                // x[DimA] > 0
+                Expr::Op2(
+                    BinaryOp::Gt,
+                    Box::new(Expr::Var(
+                        Cow::Borrowed("x"),
+                        vec![Subscript::Element(Cow::Borrowed("DimA"), loc())],
+                        loc(),
+                    )),
+                    Box::new(Expr::Const(0.0, loc())),
+                    loc(),
+                ),
+                // y[DimA]
+                Expr::Var(
+                    Cow::Borrowed("y"),
+                    vec![Subscript::Element(Cow::Borrowed("DimA"), loc())],
+                    loc(),
+                ),
+                // z[DimA]
+                Expr::Var(
+                    Cow::Borrowed("z"),
+                    vec![Subscript::Element(Cow::Borrowed("DimA"), loc())],
+                    loc(),
+                ),
+            ],
+            CallKind::Builtin,
+            loc(),
+        );
+        assert_eq!(
+            formatter.format_expr_with_context(&expr, &ctx),
+            "( IF x[a1] > 0 THEN y[a1] ELSE z[a1] )"
+        );
+    }
+
+    #[test]
+    fn test_no_context_unchanged() {
+        // Calling format_expr (without context) should work identically
+        let formatter = XmileFormatter::new();
+        let expr = Expr::Var(
+            Cow::Borrowed("y"),
+            vec![Subscript::Element(Cow::Borrowed("DimA"), loc())],
+            loc(),
+        );
+        assert_eq!(formatter.format_expr(&expr), "y[DimA]");
+    }
+
+    #[test]
+    fn test_context_subrange_resolution() {
+        // x[lower] with context {upper -> layer1} and subrange mapping
+        // for "lower" -> positional resolution through "upper"
+        let formatter = XmileFormatter::new();
+        let ctx = ElementContext {
+            substitutions: HashMap::from([("upper".to_string(), "layer1".to_string())]),
+            subrange_mappings: HashMap::from([(
+                "lower".to_string(),
+                SubrangeMapping {
+                    lhs_dim_canonical: "upper".to_string(),
+                    lhs_dim_elements: vec![
+                        "layer1".to_string(),
+                        "layer2".to_string(),
+                        "layer3".to_string(),
+                    ],
+                    own_elements: vec![
+                        "layer2".to_string(),
+                        "layer3".to_string(),
+                        "layer4".to_string(),
+                    ],
+                },
+            )]),
+        };
+
+        let expr = Expr::Var(
+            Cow::Borrowed("y"),
+            vec![Subscript::Element(Cow::Borrowed("lower"), loc())],
+            loc(),
+        );
+        // layer1 is at position 0 in upper, so lower[0] = layer2
+        assert_eq!(formatter.format_expr_with_context(&expr, &ctx), "y[layer2]");
     }
 }

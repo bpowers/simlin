@@ -1,0 +1,12 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Months">
+        <start>2000</start>
+        <stop>2010</stop>
+        <dt>0.25</dt>
+    </sim_specs>
+</xmile>

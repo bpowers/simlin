@@ -18,8 +18,9 @@ use crate::mdl::builtins::to_lower_space;
 use crate::mdl::xmile_compat::space_to_underbar;
 
 use super::ConversionContext;
-use super::helpers::{canonical_name, cartesian_product, extract_units, format_number, get_lhs};
+use super::helpers::{canonical_name, cartesian_product, extract_metadata, extract_units, get_lhs};
 use super::types::{ConvertError, SymbolInfo, VariableType};
+use crate::mdl::xmile_compat::format_number;
 
 impl<'input> ConversionContext<'input> {
     /// Build the final Project from collected symbols.
@@ -266,6 +267,7 @@ impl<'input> ConversionContext<'input> {
         struct ExpandedEquation<'a> {
             eq: &'a FullEquation<'a>,
             element_keys: Vec<String>, // Cartesian product of expanded subscripts
+            lhs_subscripts: Vec<String>, // LHS subscript names (raw, for context building)
         }
 
         let mut expanded_eqs: Vec<ExpandedEquation<'_>> = Vec::new();
@@ -303,7 +305,7 @@ impl<'input> ConversionContext<'input> {
                 }
 
                 // Verify all equations have the same parent dimensions (normalizing via equivalences)
-                if let Some(ref existing_dims) = parent_dims {
+                if let Some(ref mut existing_dims) = parent_dims {
                     // Normalize both sets of dimensions through equivalences for comparison
                     let normalized_existing: Vec<_> = existing_dims
                         .iter()
@@ -315,13 +317,36 @@ impl<'input> ConversionContext<'input> {
                         // Inconsistent dimensions - can't form a proper array
                         return None;
                     }
+                    // If the raw dimension names differ but normalized names match,
+                    // the equations span different subranges of the same parent.
+                    // Promote parent_dims to the parent dimensions (but not through
+                    // equivalences -- alias dimensions should keep their own name).
+                    if *existing_dims != dims {
+                        *existing_dims = existing_dims
+                            .iter()
+                            .map(|d| self.resolve_subrange_to_parent(d))
+                            .collect();
+                    }
                 } else {
                     parent_dims = Some(dims);
                 }
 
+                // Collect raw LHS subscript names for element context building
+                let lhs_subscripts: Vec<String> = lhs
+                    .subscripts
+                    .iter()
+                    .map(|s| match s {
+                        Subscript::Element(n, _) | Subscript::BangElement(n, _) => n.to_string(),
+                    })
+                    .collect();
+
                 // Compute Cartesian product of expanded elements
                 let element_keys = cartesian_product(&expanded_elements);
-                expanded_eqs.push(ExpandedEquation { eq, element_keys });
+                expanded_eqs.push(ExpandedEquation {
+                    eq,
+                    element_keys,
+                    lhs_subscripts,
+                });
             } else {
                 return None;
             }
@@ -342,15 +367,40 @@ impl<'input> ConversionContext<'input> {
         let mut element_map: HashMap<String, (String, Option<String>, Option<GraphicalFunction>)> =
             HashMap::new();
 
-        for exp_eq in expanded_eqs {
-            let (eq_str, initial_eq, gf) = self.build_equation_rhs(
-                name,
-                &exp_eq.eq.equation,
-                info.var_type == VariableType::Stock,
-            );
+        // Per-element substitution is only needed when there are multiple equations
+        // (element-specific, multi-subrange, or overrides). For a single apply-to-all
+        // equation, all elements get the same expression string with dimension names
+        // preserved, matching xmutil's ApplyToAll behavior.
+        let needs_substitution = expanded_eqs.len() > 1;
 
-            for key in exp_eq.element_keys {
-                element_map.insert(key, (eq_str.clone(), initial_eq.clone(), gf.clone()));
+        for exp_eq in expanded_eqs {
+            for key in &exp_eq.element_keys {
+                // Split element key to get per-dimension element names
+                let element_parts: Vec<&str> = key.split(',').collect();
+                debug_assert_eq!(
+                    element_parts.len(),
+                    exp_eq.lhs_subscripts.len(),
+                    "element key parts count must match LHS subscript count"
+                );
+
+                // Build per-element context for substitution (only when needed)
+                let ctx = if needs_substitution {
+                    self.build_element_context(&exp_eq.lhs_subscripts, &element_parts)
+                } else {
+                    crate::mdl::xmile_compat::ElementContext {
+                        substitutions: HashMap::new(),
+                        subrange_mappings: HashMap::new(),
+                    }
+                };
+
+                let (eq_str, initial_eq, gf) = self.build_equation_rhs_with_context(
+                    name,
+                    &exp_eq.eq.equation,
+                    info.var_type == VariableType::Stock,
+                    &ctx,
+                );
+
+                element_map.insert(key.clone(), (eq_str, initial_eq, gf));
             }
         }
 
@@ -366,21 +416,18 @@ impl<'input> ConversionContext<'input> {
             return None;
         }
 
-        // Use formatted dimension names (spaces to underscores)
-        let formatted_dims: Vec<String> =
-            parent_dims.iter().map(|d| space_to_underbar(d)).collect();
+        // Format dimension names -- parent_dims are already normalized to
+        // parent dimensions when equations span different subranges
+        let formatted_dims: Vec<String> = parent_dims
+            .iter()
+            .map(|d| self.get_formatted_dimension_name(d))
+            .collect();
 
         let equation = Equation::Arrayed(formatted_dims.clone(), elements);
 
         // Build the variable
         let ident = space_to_underbar(name);
-        let first_eq = valid_eqs.first()?;
-        let documentation = first_eq
-            .comment
-            .as_ref()
-            .map(|c| c.to_string())
-            .unwrap_or_default();
-        let units = extract_units(first_eq);
+        let (documentation, units) = extract_metadata(&info.equations);
 
         match info.var_type {
             VariableType::Stock => Some(Variable::Stock(datamodel::Stock {
@@ -422,43 +469,152 @@ impl<'input> ConversionContext<'input> {
         }
     }
 
-    /// Build the equation RHS string, handling stock initial values and ACTIVE INITIAL.
-    /// The var_name is used for extrapolation detection on lookups.
-    /// Returns (equation, initial_equation, graphical_function).
-    fn build_equation_rhs(
+    /// Build the equation RHS string with per-element substitution context.
+    /// Dimension references in the equation are substituted with specific element names.
+    fn build_equation_rhs_with_context(
         &self,
         var_name: &str,
         eq: &MdlEquation<'_>,
         is_stock: bool,
+        ctx: &crate::mdl::xmile_compat::ElementContext,
     ) -> (String, Option<String>, Option<GraphicalFunction>) {
         match eq {
             MdlEquation::Regular(_, expr) => {
                 if is_stock && let Some(initial) = self.extract_integ_initial(expr) {
-                    return (self.formatter.format_expr(initial), None, None);
+                    return (
+                        self.formatter.format_expr_with_context(initial, ctx),
+                        None,
+                        None,
+                    );
                 }
-                // Check for ACTIVE INITIAL and split into equation + initial_equation
                 if let Some((equation_expr, initial_expr)) = self.extract_active_initial(expr) {
-                    let eq_str = self.formatter.format_expr(equation_expr);
-                    let initial_str = self.formatter.format_expr(initial_expr);
+                    let eq_str = self.formatter.format_expr_with_context(equation_expr, ctx);
+                    let initial_str = self.formatter.format_expr_with_context(initial_expr, ctx);
                     return (eq_str, Some(initial_str), None);
                 }
-                (self.formatter.format_expr(expr), None, None)
-            }
-            MdlEquation::Lookup(_, table) => {
-                // For lookups, return empty string - the GF will be attached
                 (
-                    String::new(),
+                    self.formatter.format_expr_with_context(expr, ctx),
                     None,
-                    Some(self.build_graphical_function(var_name, table)),
+                    None,
                 )
             }
-            MdlEquation::WithLookup(_, input, table) => (
-                self.formatter.format_expr(input),
+            MdlEquation::Lookup(_, table) => (
+                "0+0".to_string(),
                 None,
                 Some(self.build_graphical_function(var_name, table)),
             ),
+            MdlEquation::WithLookup(_, input, table) => (
+                self.formatter.format_expr_with_context(input, ctx),
+                None,
+                Some(self.build_graphical_function(var_name, table)),
+            ),
+            MdlEquation::EmptyRhs(_, _) => ("0+0".to_string(), None, None),
             _ => (String::new(), None, None),
         }
+    }
+
+    /// Build an ElementContext for per-element equation substitution.
+    /// Maps each LHS dimension to the specific element being computed.
+    fn build_element_context(
+        &self,
+        lhs_subscripts: &[String],
+        element_parts: &[&str],
+    ) -> crate::mdl::xmile_compat::ElementContext {
+        use crate::mdl::xmile_compat::ElementContext;
+
+        debug_assert_eq!(
+            lhs_subscripts.len(),
+            element_parts.len(),
+            "LHS subscript count must match element parts count"
+        );
+
+        let mut substitutions = HashMap::new();
+
+        for (sub_name, elem_name) in lhs_subscripts.iter().zip(element_parts.iter()) {
+            let dim_canonical = canonical_name(sub_name);
+            // Only add substitution if the subscript is a dimension (not already a
+            // specific element). If it's already an element, the equation already
+            // references it by name and no substitution is needed.
+            if self.dimension_elements.contains_key(&dim_canonical) {
+                substitutions.insert(dim_canonical, space_to_underbar(elem_name));
+            }
+        }
+
+        // Build subrange mappings for dimensions not directly on the LHS
+        let subrange_mappings = self.build_subrange_mappings(&substitutions);
+
+        ElementContext {
+            substitutions,
+            subrange_mappings,
+        }
+    }
+
+    /// Build subrange mappings for dimensions that are not directly on the LHS
+    /// but can be resolved positionally through a parent or sibling subrange
+    /// that IS on the LHS.
+    fn build_subrange_mappings(
+        &self,
+        substitutions: &HashMap<String, String>,
+    ) -> HashMap<String, crate::mdl::xmile_compat::SubrangeMapping> {
+        use crate::mdl::xmile_compat::SubrangeMapping;
+
+        let mut mappings = HashMap::new();
+
+        for (dim_canonical, elements) in &self.dimension_elements {
+            // Skip dimensions already in substitutions (they're directly on the LHS)
+            if substitutions.contains_key(dim_canonical) {
+                continue;
+            }
+
+            // Skip empty dimensions
+            if elements.is_empty() {
+                continue;
+            }
+
+            // Check if this dimension is a subrange
+            let parent_canonical = self.resolve_subrange_to_parent(dim_canonical);
+            if parent_canonical == *dim_canonical {
+                // Not a subrange
+                continue;
+            }
+
+            // Case 1: the parent dimension is directly in substitutions
+            if substitutions.contains_key(&parent_canonical) {
+                if let Some(parent_elements) = self.dimension_elements.get(&parent_canonical) {
+                    mappings.insert(
+                        dim_canonical.clone(),
+                        SubrangeMapping {
+                            lhs_dim_canonical: parent_canonical,
+                            lhs_dim_elements: parent_elements.clone(),
+                            own_elements: elements.clone(),
+                        },
+                    );
+                }
+                continue;
+            }
+
+            // Case 2: a sibling subrange of the same parent is in substitutions.
+            // E.g., LHS is upper (subrange of layers), RHS references lower
+            // (also subrange of layers). Map through the sibling.
+            for sub_dim in substitutions.keys() {
+                let sub_parent = self.resolve_subrange_to_parent(sub_dim);
+                if sub_parent == parent_canonical
+                    && let Some(sibling_elements) = self.dimension_elements.get(sub_dim.as_str())
+                {
+                    mappings.insert(
+                        dim_canonical.clone(),
+                        SubrangeMapping {
+                            lhs_dim_canonical: sub_dim.clone(),
+                            lhs_dim_elements: sibling_elements.clone(),
+                            own_elements: elements.clone(),
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+
+        mappings
     }
 
     /// Build a Variable from symbol info.
@@ -558,14 +714,14 @@ impl<'input> ConversionContext<'input> {
             }
             MdlEquation::Lookup(lhs, table) => {
                 let gf = self.build_graphical_function(&lhs.name, table);
-                (self.make_equation(lhs, ""), Some(gf))
+                (self.make_equation(lhs, "0+0"), Some(gf))
             }
             MdlEquation::WithLookup(lhs, input, table) => {
                 let gf = self.build_graphical_function(&lhs.name, table);
                 let input_str = self.formatter.format_expr(input);
                 (self.make_equation(lhs, &input_str), Some(gf))
             }
-            MdlEquation::EmptyRhs(lhs, _) => (self.make_equation(lhs, ""), None),
+            MdlEquation::EmptyRhs(lhs, _) => (self.make_equation(lhs, "0+0"), None),
             MdlEquation::Implicit(lhs) => {
                 // Implicit equations become lookups on TIME with a default table
                 let gf = self.make_default_lookup();
@@ -1373,7 +1529,8 @@ x[a1, DimB] = 5
 
     #[test]
     fn test_active_initial_apply_to_all() {
-        // Apply-to-all ACTIVE INITIAL should have equation and initial_equation fields
+        // Apply-to-all ACTIVE INITIAL: single equation, no per-element substitution.
+        // All elements get the same expression with dimension names preserved.
         let mdl = "DimA: a1, a2, a3
 ~ ~|
 x[DimA] = ACTIVE INITIAL(y[DimA] * 2, 100)
@@ -1396,14 +1553,19 @@ x[DimA] = ACTIVE INITIAL(y[DimA] * 2, 100)
                 Equation::Arrayed(dims, elements) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
-                    // All elements should have equation and initial_equation
+                    // Single apply-to-all: all elements have the same expression
+                    // with dimension name preserved (no per-element substitution).
                     for (key, eq, initial_eq, _) in elements {
                         assert!(
                             ["a1", "a2", "a3"].contains(&key.as_str()),
                             "Unexpected key: {}",
                             key
                         );
-                        assert_eq!(eq, "y[DimA] * 2", "Equation should be the first argument");
+                        assert_eq!(
+                            eq, "y[DimA] * 2",
+                            "Apply-to-all should preserve dimension name for {}",
+                            key
+                        );
                         assert_eq!(
                             initial_eq.as_deref(),
                             Some("100"),
@@ -1550,6 +1712,69 @@ x = y * 2
     }
 
     #[test]
+    fn test_empty_rhs_scalar_emits_0_plus_0() {
+        // An empty RHS (no expression after =) should produce "0+0" to match xmutil
+        let mdl = "x =
+~ Units
+~ Empty equation |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Scalar(eq, _) => {
+                    assert_eq!(eq, "0+0", "Empty RHS should produce '0+0'");
+                }
+                other => panic!("Expected Scalar equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_empty_rhs_subscripted_emits_0_plus_0() {
+        // An empty RHS with subscripts should also produce "0+0"
+        let mdl = "DimA: a1, a2
+~ ~|
+x[DimA] =
+~ Units
+~ Empty subscripted equation |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::ApplyToAll(dims, eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(eq, "0+0", "Empty subscripted RHS should produce '0+0'");
+                }
+                other => panic!("Expected ApplyToAll equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
     fn test_units_from_real_equation_when_afo_has_units() {
         // When first equation is A FUNCTION OF WITH units and second also has units,
         // units should come from the second (real) equation since that's what's selected.
@@ -1572,6 +1797,375 @@ x = y * 2
             assert_eq!(a.units.as_deref(), Some("Widgets"));
         } else {
             panic!("Expected Aux");
+        }
+    }
+
+    #[test]
+    fn test_lookup_only_scalar_emits_0_plus_0() {
+        // A scalar variable defined only with a lookup table should have "0+0" as equation
+        let mdl = "x( (0,0),(1,1) )
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Scalar(eq, _) => {
+                    assert_eq!(eq, "0+0", "Lookup-only variable should have 0+0 equation");
+                }
+                other => panic!("Expected Scalar equation, got {:?}", other),
+            }
+            assert!(a.gf.is_some(), "Should have graphical function");
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_lookup_only_arrayed_emits_0_plus_0() {
+        // An arrayed variable with element-specific lookups should have "0+0" for each element
+        let mdl = "DimA: a1, a2
+~ ~|
+x[a1]( (0,0),(1,1) )
+~ ~|
+x[a2]( (0,0),(2,2) )
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 2);
+                    for (_, eq, _, _) in elements {
+                        assert_eq!(
+                            eq, "0+0",
+                            "Lookup-only arrayed element should have 0+0 equation"
+                        );
+                    }
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_element_specific_metadata_from_last_equation() {
+        // In Vensim, only the last element-specific equation carries units and docs.
+        // Earlier equations use ~~| (no units, no docs).
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[a1] = 1
+~ ~|
+x[a2] = 2
+~ ~|
+x[a3] = 3
+~ percent/year
+~ Annual reduction rate |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            assert_eq!(
+                a.documentation, "Annual reduction rate",
+                "Documentation should come from the last equation"
+            );
+            assert_eq!(
+                a.units.as_deref(),
+                Some("percent/year"),
+                "Units should come from the last equation"
+            );
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_apply_to_all_preserves_dimension_names() {
+        // A single apply-to-all equation should NOT substitute dimension names.
+        // All elements get the same expression with the dimension name preserved.
+        let mdl = "DimA: a1, a2
+~ ~|
+x[DimA] = y[DimA] * 2
+~ Units
+~ Apply-to-all |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 2);
+                    for (_, eq, _, _) in elements {
+                        assert_eq!(
+                            eq, "y[DimA] * 2",
+                            "Apply-to-all should preserve dimension names"
+                        );
+                    }
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_per_element_dimension_substitution() {
+        // When there are multiple equations (element-specific + apply-to-all),
+        // per-element substitution kicks in for the apply-to-all equation.
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[DimA] = y[DimA] * 2
+~ ~|
+x[a1] = 10
+~ Units
+~ Override for a1 |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 3);
+
+                    let find_eq = |key: &str| -> String {
+                        elements
+                            .iter()
+                            .find(|(k, _, _, _)| k == key)
+                            .map(|(_, eq, _, _)| eq.clone())
+                            .unwrap_or_else(|| panic!("Should have key {}", key))
+                    };
+
+                    // a1 is overridden
+                    assert_eq!(find_eq("a1"), "10");
+                    // a2 and a3 get substituted from the apply-to-all equation
+                    assert_eq!(find_eq("a2"), "y[a2] * 2");
+                    assert_eq!(find_eq("a3"), "y[a3] * 2");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_per_element_2d_substitution() {
+        // 2D per-element substitution: triggered by having multiple equations.
+        // Both dimension references are substituted when element-specific
+        // overrides are present.
+        let mdl = "DimA: a1, a2
+~ ~|
+DimB: b1, b2
+~ ~|
+x[DimA, DimB] = y[DimA, DimB] + z[DimA]
+~ ~|
+x[a1, b1] = 99
+~ Units
+~ Override |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements) => {
+                    assert_eq!(dims, &["DimA", "DimB"]);
+                    assert_eq!(elements.len(), 4);
+
+                    let find_eq = |key: &str| -> String {
+                        elements
+                            .iter()
+                            .find(|(k, _, _, _)| k == key)
+                            .map(|(_, eq, _, _)| eq.clone())
+                            .unwrap_or_else(|| panic!("Should have key {}", key))
+                    };
+
+                    // a1,b1 is overridden
+                    assert_eq!(find_eq("a1,b1"), "99");
+                    // Other elements get substituted
+                    assert_eq!(find_eq("a1,b2"), "y[a1, b2] + z[a1]");
+                    assert_eq!(find_eq("a2,b1"), "y[a2, b1] + z[a2]");
+                    assert_eq!(find_eq("a2,b2"), "y[a2, b2] + z[a2]");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_subrange_positional_resolution() {
+        // When equations span multiple subranges, per-element substitution is triggered.
+        // The RHS references to sibling subranges are resolved positionally.
+        // upper: layer1, layer2, layer3 (subrange of layers)
+        // lower: layer2, layer3, layer4 (subrange of layers)
+        // bottom: layer4 (subrange of layers)
+        // x[upper] = y[upper] - y[lower]  (3 elements)
+        // x[bottom] = 0                   (1 element, triggers multi-eq substitution)
+        let mdl = "layers: layer1, layer2, layer3, layer4
+~ ~|
+upper: layer1, layer2, layer3
+~ ~|
+lower: layer2, layer3, layer4
+~ ~|
+bottom: layer4
+~ ~|
+x[upper] = y[upper] - y[lower]
+~ ~|
+x[bottom] = 0
+~ Units
+~ Subrange resolution |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements) => {
+                    assert_eq!(dims, &["layers"]);
+                    assert_eq!(elements.len(), 4);
+
+                    let find_eq = |key: &str| -> String {
+                        elements
+                            .iter()
+                            .find(|(k, _, _, _)| k == key)
+                            .map(|(_, eq, _, _)| eq.clone())
+                            .unwrap_or_else(|| panic!("Should have key {}", key))
+                    };
+
+                    // upper[0]=layer1 -> lower[0]=layer2
+                    assert_eq!(find_eq("layer1"), "y[layer1] - y[layer2]");
+                    // upper[1]=layer2 -> lower[1]=layer3
+                    assert_eq!(find_eq("layer2"), "y[layer2] - y[layer3]");
+                    // upper[2]=layer3 -> lower[2]=layer4
+                    assert_eq!(find_eq("layer3"), "y[layer3] - y[layer4]");
+                    // bottom equation
+                    assert_eq!(find_eq("layer4"), "0");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_subrange_equations_produce_arrayed() {
+        // Variables with equations on different subranges of the same parent dimension
+        // should produce an Arrayed equation with the parent dimension name
+        let mdl = "layers: layer1, layer2, layer3, layer4
+~ ~|
+upper: layer1, layer2, layer3
+~ ~|
+bottom: layer4
+~ ~|
+x[upper] = 1
+~ ~|
+x[bottom] = 2
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements) => {
+                    assert_eq!(
+                        dims,
+                        &["layers"],
+                        "Dimension should be parent 'layers', not subrange names"
+                    );
+                    assert_eq!(elements.len(), 4, "Should have all 4 layer elements");
+                    // layer1, layer2, layer3 from upper (=1), layer4 from bottom (=2)
+                    for (key, eq, _, _) in elements {
+                        if key == "layer4" {
+                            assert_eq!(eq, "2");
+                        } else {
+                            assert_eq!(eq, "1");
+                        }
+                    }
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
         }
     }
 }
