@@ -139,38 +139,50 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
 
   private handlePointerMove = (e: React.PointerEvent<SVGRectElement>) => {
     const layout = this.getLayout();
-    const { margin, plotWidth, plotHeight, yInvert, xMin, xMax } = layout;
+    const { margin, plotWidth, plotHeight, xScale, yInvert, xMin, xMax } = layout;
 
     // Compute pointer position relative to the plot area.
-    // Use the overlay rect's bounding rect for reliable coordinate conversion.
     const overlayRect = e.currentTarget.getBoundingClientRect();
     const plotX = e.clientX - overlayRect.left;
     const plotY = e.clientY - overlayRect.top;
 
     const clampedX = Math.max(0, Math.min(plotWidth, plotX));
     const clampedY = Math.max(0, Math.min(plotHeight, plotY));
-    const invertX = invertLinearScale([xMin, xMax], [0, plotWidth]);
-    const dataX = invertX(clampedX);
 
-    // build tooltip values
+    // Convert pixel x to data x, then snap to the nearest data point.
+    // Use the first non-empty series for snapping; all series in the
+    // results use-case share the same time axis.
+    const rawDataX = xMin + (clampedX / (plotWidth || 1)) * (xMax - xMin);
+    let snappedDataX = rawDataX;
+    let snappedIdx = -1;
+    for (const s of this.props.series) {
+      if (s.points.length === 0) continue;
+      snappedIdx = findNearestPointIndex(s.points, rawDataX);
+      if (snappedIdx >= 0) {
+        snappedDataX = s.points[snappedIdx].x;
+      }
+      break;
+    }
+
+    // Build tooltip values at the snapped x.
     const seriesValues: TooltipState['seriesValues'] = [];
     for (const s of this.props.series) {
       if (s.points.length === 0) continue;
-      const idx = findNearestPointIndex(s.points, dataX);
+      const idx = findNearestPointIndex(s.points, snappedDataX);
       if (idx >= 0) {
         seriesValues.push({ name: s.name, color: s.color, value: s.points[idx].y });
       }
     }
 
-    // pixel x for crosshair (in SVG coords)
-    const crosshairX = margin.left + clampedX;
+    // Position the crosshair at the snapped data point's x, not the raw pointer x.
+    const crosshairX = margin.left + xScale(snappedDataX);
 
     this.setState({
       tooltip: {
         visible: true,
         x: crosshairX,
         y: margin.top + clampedY,
-        dataX,
+        dataX: snappedDataX,
         seriesValues,
       },
     });
@@ -178,14 +190,13 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     // handle drag
     if (this.dragging && this.props.onPointDrag) {
       let newY = yInvert(clampedY);
-      // clamp to yDomain
       const [yLo, yHi] = this.props.yDomain;
       newY = Math.max(yLo, Math.min(yHi, newY));
 
       for (let si = 0; si < this.props.series.length; si++) {
         const pts = this.props.series[si].points;
         if (pts.length === 0) continue;
-        const pi = findNearestPointIndex(pts, dataX);
+        const pi = findNearestPointIndex(pts, snappedDataX);
         if (pi >= 0) {
           this.props.onPointDrag(si, pi, newY);
         }
@@ -213,6 +224,12 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
   };
 
   private handlePointerUp = () => {
+    if (!this.dragging) return;
+    this.dragging = false;
+    this.props.onDragEnd?.();
+  };
+
+  private handlePointerCancel = () => {
     if (!this.dragging) return;
     this.dragging = false;
     this.props.onDragEnd?.();
@@ -383,6 +400,7 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
             onPointerLeave={this.handlePointerLeave}
             onPointerDown={this.handlePointerDown}
             onPointerUp={this.handlePointerUp}
+            onPointerCancel={this.handlePointerCancel}
           />
         </svg>
 

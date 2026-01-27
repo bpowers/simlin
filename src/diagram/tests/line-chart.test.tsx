@@ -213,6 +213,32 @@ describe('LineChart tooltip', () => {
     expect(crosshair?.getAttribute('visibility')).not.toBe('hidden');
   });
 
+  test('snaps crosshair and tooltip x to nearest data point', () => {
+    // simpleSeries has points at x = 0, 1, 2, 3.
+    // Layout: margin.left=40, plotWidth=340, xDomain=[0,3].
+    // In jsdom getBoundingClientRect returns {left:0,...} for all elements,
+    // so plotX = clientX directly.
+    //
+    // clientX=148 => rawDataX = (148/340)*3 = 1.306, nearest data x = 1
+    // Snapped crosshairX = margin.left + xScale(1) = 40 + (1/3)*340 = 153.333...
+    const { container } = render(<LineChart height={300} series={simpleSeries} yDomain={[0, 30]} />);
+    const overlay = container.querySelector('.overlay') as SVGRectElement;
+
+    fireEvent.pointerMove(overlay, { clientX: 148, clientY: 150 });
+
+    const crosshair = container.querySelector('.crosshair') as SVGLineElement;
+    expect(crosshair).not.toBeNull();
+
+    const crosshairX = parseFloat(crosshair.getAttribute('x1')!);
+    const expectedX = 40 + (1 / 3) * 340; // ~153.333
+    expect(crosshairX).toBeCloseTo(expectedX, 1);
+
+    // Tooltip header should show the snapped data x value (1), not 1.306
+    const tooltip = container.querySelector('[data-testid="chart-tooltip"]');
+    expect(tooltip).not.toBeNull();
+    expect(tooltip!.textContent).toMatch(/^1/);
+  });
+
   test('formats tooltip values using tooltipFormatter', () => {
     const formatter = (v: number) => `$${v.toFixed(2)}`;
     const { container } = render(
@@ -345,6 +371,33 @@ describe('LineChart drag interaction', () => {
     // move without clicking first
     fireEvent.pointerMove(overlay, { clientX: 200, clientY: 100, pointerId: 1 });
 
+    expect(onPointDrag).not.toHaveBeenCalled();
+  });
+
+  test('resets drag state on pointercancel', () => {
+    const onDragEnd = jest.fn();
+    const onPointDrag = jest.fn();
+
+    const { container } = render(
+      <LineChart
+        height={300}
+        series={simpleSeries}
+        yDomain={[0, 30]}
+        onPointDrag={onPointDrag}
+        onDragEnd={onDragEnd}
+      />,
+    );
+
+    const overlay = container.querySelector('.overlay') as SVGRectElement;
+    fireEvent.pointerDown(overlay, { clientX: 200, clientY: 150, pointerId: 1 });
+    // simulate browser cancelling the pointer (e.g. touch gesture interruption)
+    fireEvent.pointerCancel(overlay, { pointerId: 1 });
+
+    expect(onDragEnd).toHaveBeenCalledTimes(1);
+
+    // subsequent moves should not trigger drag
+    onPointDrag.mockClear();
+    fireEvent.pointerMove(overlay, { clientX: 200, clientY: 100, pointerId: 1 });
     expect(onPointDrag).not.toHaveBeenCalled();
   });
 });
