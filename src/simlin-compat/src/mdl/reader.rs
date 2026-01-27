@@ -30,6 +30,26 @@ pub enum ReaderError {
     EofInsideMacro,
 }
 
+impl std::fmt::Display for ReaderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReaderError::Parse(msg) => write!(f, "parse error: {}", msg),
+            ReaderError::Normalizer(e) => write!(f, "{}", e),
+            ReaderError::UnmatchedMacroEnd => write!(f, "macro end without matching start"),
+            ReaderError::EofInsideMacro => write!(f, "unexpected end of file inside macro"),
+        }
+    }
+}
+
+impl std::error::Error for ReaderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ReaderError::Normalizer(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 impl From<NormalizerError> for ReaderError {
     fn from(e: NormalizerError) -> Self {
         ReaderError::Normalizer(e)
@@ -1679,5 +1699,44 @@ mod tests {
             }
             other => panic!("Expected equation, got {:?}", other),
         }
+    }
+
+    // ========================================================================
+    // Display impl tests
+    // ========================================================================
+
+    #[test]
+    fn test_reader_error_display_parse() {
+        let err = ReaderError::Parse("unexpected token".to_string());
+        assert_eq!(format!("{}", err), "parse error: unexpected token");
+    }
+
+    #[test]
+    fn test_reader_error_display_unmatched_macro() {
+        let err = ReaderError::UnmatchedMacroEnd;
+        assert_eq!(format!("{}", err), "macro end without matching start");
+    }
+
+    #[test]
+    fn test_reader_error_display_eof_in_macro() {
+        let err = ReaderError::EofInsideMacro;
+        assert_eq!(format!("{}", err), "unexpected end of file inside macro");
+    }
+
+    #[test]
+    fn test_reader_error_source_chains() {
+        use crate::mdl::normalizer::{NormalizerError, NormalizerErrorCode};
+        use std::error::Error;
+
+        let norm_err = NormalizerError {
+            start: 0,
+            end: 5,
+            code: NormalizerErrorCode::MalformedTabbedArray,
+        };
+        let reader_err = ReaderError::Normalizer(norm_err);
+        assert!(reader_err.source().is_some());
+
+        let parse_err = ReaderError::Parse("test".to_string());
+        assert!(parse_err.source().is_none());
     }
 }

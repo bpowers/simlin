@@ -379,17 +379,20 @@ pub fn compute_flow_points(
     }
 
     // Fall back to default if not enough endpoints found (xmutil: count < 2 || toind < 0)
-    if endpoints.len() < 2 || to_index.is_none() {
-        // xmutil uses flow element coordinates for defaults
-        return FlowEndpoints {
-            from_x: flow_x - 150,
-            from_y: flow_y,
-            from_uid: None,
-            to_x: flow_x + 25,
-            to_y: flow_y,
-            to_uid: None,
-        };
-    }
+    let to_idx = match to_index {
+        Some(idx) if endpoints.len() >= 2 => idx,
+        _ => {
+            // xmutil uses flow element coordinates for defaults
+            return FlowEndpoints {
+                from_x: flow_x - 150,
+                from_y: flow_y,
+                from_uid: None,
+                to_x: flow_x + 25,
+                to_y: flow_y,
+                to_uid: None,
+            };
+        }
+    };
 
     // Apply anchor snapping (xmutil XMILEGenerator.cpp:1052-1061)
     let mut xpt = [endpoints[0].ctrl_x, endpoints[1].ctrl_x];
@@ -409,7 +412,6 @@ pub fn compute_flow_points(
 
     // Determine indices for from/to
     // xmutil outputs [1-toind] first (from), then [toind] (to)
-    let to_idx = to_index.unwrap();
     let from_idx = 1 - to_idx;
 
     FlowEndpoints {

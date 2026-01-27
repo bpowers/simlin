@@ -10,7 +10,6 @@ use crate::mdl::ast::FullEquation;
 
 /// Errors that can occur during MDL to datamodel conversion.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum ConvertError {
     /// Reader error during parsing
     Reader(crate::mdl::reader::ReaderError),
@@ -20,8 +19,29 @@ pub enum ConvertError {
     InvalidRange(String),
     /// Cyclic dimension definition detected (e.g., DimA: DimB, DimB: DimA)
     CyclicDimensionDefinition(String),
-    /// Other conversion error
-    Other(String),
+}
+
+impl std::fmt::Display for ConvertError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConvertError::Reader(e) => write!(f, "reader error: {}", e),
+            ConvertError::View(e) => write!(f, "view error: {}", e),
+            ConvertError::InvalidRange(s) => write!(f, "invalid subscript range: {}", s),
+            ConvertError::CyclicDimensionDefinition(s) => {
+                write!(f, "cyclic dimension definition: {}", s)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConvertError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ConvertError::Reader(e) => Some(e),
+            ConvertError::View(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 impl From<crate::mdl::reader::ReaderError> for ConvertError {
@@ -105,5 +125,49 @@ impl SimSpecsBuilder {
             // Default to "Months" to match xmutil
             time_units: self.time_units.or_else(|| Some("Months".to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mdl::view::ViewError;
+
+    #[test]
+    fn test_convert_error_display_invalid_range() {
+        let err = ConvertError::InvalidRange("bad range".to_string());
+        assert_eq!(format!("{}", err), "invalid subscript range: bad range");
+    }
+
+    #[test]
+    fn test_convert_error_display_cyclic_dimension() {
+        let err = ConvertError::CyclicDimensionDefinition("DimA".to_string());
+        assert_eq!(format!("{}", err), "cyclic dimension definition: DimA");
+    }
+
+    #[test]
+    fn test_convert_error_display_view() {
+        let err = ConvertError::View(ViewError::UnexpectedEndOfInput);
+        assert_eq!(format!("{}", err), "view error: Unexpected end of input");
+    }
+
+    #[test]
+    fn test_convert_error_display_reader() {
+        let err = ConvertError::Reader(crate::mdl::reader::ReaderError::EofInsideMacro);
+        assert_eq!(
+            format!("{}", err),
+            "reader error: unexpected end of file inside macro"
+        );
+    }
+
+    #[test]
+    fn test_convert_error_source_chains() {
+        use std::error::Error;
+
+        let view_err = ConvertError::View(ViewError::UnexpectedEndOfInput);
+        assert!(view_err.source().is_some());
+
+        let range_err = ConvertError::InvalidRange("x".to_string());
+        assert!(range_err.source().is_none());
     }
 }

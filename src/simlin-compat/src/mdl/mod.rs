@@ -49,7 +49,7 @@ pub fn parse_mdl(source: &str) -> Result<Project> {
         Error::new(
             ErrorKind::Import,
             ErrorCode::Generic,
-            Some(format!("Failed to parse MDL: {:?}", e)),
+            Some(format!("Failed to parse MDL: {}", e)),
         )
     })
 }

@@ -773,36 +773,28 @@ cargo clippy -p simlin-compat
 
 ## Panic/Unwrap Reduction: Findings (Jan 2026)
 
-These are the primary production-path panic/unwrap risks discovered in the MDL
-parser/converter. (Most unwraps in this package are in unit tests.)
+These were the primary production-path panic/unwrap risks discovered in the MDL
+parser/converter. All have been fixed. (Most unwraps in this package are in unit
+tests.)
 
-1. **Tabbed array parsing**: `n.parse().unwrap()` can panic on malformed
-   numeric tokens in tabbed arrays (`normalizer.rs`).
-2. **Number parsing helper**: `parse_number()` panics if a numeric token fails
-   to parse (`parser_helpers.rs`).
-3. **View parsing**: `read_line().unwrap()` can panic on truncated view sections
-   (`view/mod.rs`).
-4. **Normalizer invariant**: `unreachable!("handled above")` can panic if
-   newline handling changes or a bug slips through (`normalizer.rs`).
-5. **Invariant unwraps in conversion/view processing**: `unwrap()` on internal
-   maps/indices can panic if prior passes are inconsistent
-   (`convert/stocks.rs`, `convert/variables.rs`, `view/processing.rs`).
+1. **Tabbed array parsing** (`normalizer.rs`): FIXED -- `parse_number_token()`
+   returns `Result` instead of panicking.
+2. **Number parsing helper** (`parser_helpers.rs`): FIXED -- returns `Result`.
+3. **View parsing** (`view/mod.rs`): FIXED -- uses
+   `ok_or(ViewError::UnexpectedEndOfInput)` instead of `unwrap()`.
+4. **Normalizer invariant** (`normalizer.rs`): FIXED -- unreachable newline
+   case now returns `Ok(None)` instead of panicking.
+5. **Invariant unwraps in conversion/view processing**: FIXED --
+   - `lexer.rs`: KEYWORDS table stores first char explicitly (no `unwrap()`);
+     `bump_n` uses `debug_assert!` instead of `assert!`.
+   - `convert/stocks.rs`: uses `match`/`continue` instead of `unwrap()`.
+   - `convert/variables.rs`: returns `Option` directly (no `unwrap()`).
+   - `view/processing.rs`: uses `match` to extract `to_index` with early return.
 
-## Panic/Unwrap Reduction: Recommended Approaches
-
-1. **Unify error plumbing**: Introduce a single `MdlError` (or similar) enum
-   that wraps lexer/normalizer/parser/view/convert errors and bubble `Result`
-   all the way to `parse_mdl`, avoiding `panic!` in production code.
-2. **Parse numbers once**: Either store parsed `f64` in the lexer token, or make
-   `parse_number` return `Result<f64, NormalizerError>` and thread it through
-   LALRPOP via `ParseError::User`.
-3. **Encode invariants in types**: Use `NonZeroUsize`, `NonEmptyVec`, and small
-   helper types (e.g., `Endpoints2([EndpointInfo; 2])`) to avoid indexing/unwraps.
-4. **Typestate/validated references**: Use `ConversionContext<Phase>` or
-   validated handles (e.g., `SymbolRef`, `DimRef`) so invalid orderings are
-   impossible and lookups can return `Result` with context instead of `unwrap()`.
-5. **Replace `unwrap()` in view parsing**: Turn all `read_line().unwrap()` into
-   `ok_or(ViewError::UnexpectedEndOfInput)` and test truncated/sketch-edge cases.
+Production code is now free of input-reachable panics. The full error type
+hierarchy (`LexError -> NormalizerError -> ReaderError -> ConvertError`, plus
+`ViewError`) implements `Display` and `std::error::Error` with proper `source()`
+chaining.
 
 ## C-LEARN Equivalence Analysis
 

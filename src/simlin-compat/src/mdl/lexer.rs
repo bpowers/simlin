@@ -96,6 +96,29 @@ pub enum LexErrorCode {
     UnclosedLiteral,
 }
 
+impl std::fmt::Display for LexErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LexErrorCode::UnrecognizedToken => write!(f, "unrecognized token"),
+            LexErrorCode::UnclosedComment => write!(f, "unclosed comment"),
+            LexErrorCode::UnclosedQuotedSymbol => write!(f, "unclosed quoted symbol"),
+            LexErrorCode::UnclosedLiteral => write!(f, "unclosed literal"),
+        }
+    }
+}
+
+impl std::fmt::Display for LexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "lex error at {}..{}: {}",
+            self.start, self.end, self.code
+        )
+    }
+}
+
+impl std::error::Error for LexError {}
+
 pub type Spanned<T> = (usize, T, usize);
 
 fn error<T>(code: LexErrorCode, start: usize, end: usize) -> Result<T, LexError> {
@@ -227,7 +250,7 @@ impl<'input> RawLexer<'input> {
     }
 
     fn bump_n(&mut self, n: usize) -> Option<(usize, char)> {
-        assert!(n > 0);
+        debug_assert!(n > 0);
         for _ in 0..n {
             self.bump_raw();
         }
@@ -507,32 +530,34 @@ impl<'input> RawLexer<'input> {
             _ => return (idx0, Colon, idx0 + 1),
         };
 
-        // List of colon keywords and their tokens
-        // Note: keywords here have spaces replaced with _ for matching purposes
-        // The actual matching handles spaces, underscores, and tabs as equivalent
-        // C++ uses compact forms for TEST INPUT and THE CONDITION
-        static KEYWORDS: &[(&str, RawToken<'static>)] = &[
-            ("AND:", And),
-            ("END OF MACRO:", EndOfMacro),
-            ("EXCEPT:", Except),
-            ("HOLD BACKWARD:", HoldBackward),
-            ("IMPLIES:", Implies),
-            ("INTERPOLATE:", Interpolate),
-            ("LOOK FORWARD:", LookForward),
-            ("MACRO:", Macro),
-            ("OR:", Or),
-            ("NA:", Na),
-            ("NOT:", Not),
-            ("RAW:", Raw),
-            ("TEST INPUT:", TestInput),
-            ("TESTINPUT:", TestInput),
-            ("THE CONDITION:", TheCondition),
-            ("THECONDITION:", TheCondition),
+        // List of colon keywords and their tokens.
+        // Each tuple is (first_char, keyword_text, token).
+        // The first_char is stored explicitly to avoid a runtime unwrap on
+        // chars().next(). The actual matching handles spaces, underscores,
+        // and tabs as equivalent. C++ uses compact forms for TEST INPUT and
+        // THE CONDITION.
+        static KEYWORDS: &[(char, &str, RawToken<'static>)] = &[
+            ('A', "AND:", And),
+            ('E', "END OF MACRO:", EndOfMacro),
+            ('E', "EXCEPT:", Except),
+            ('H', "HOLD BACKWARD:", HoldBackward),
+            ('I', "IMPLIES:", Implies),
+            ('I', "INTERPOLATE:", Interpolate),
+            ('L', "LOOK FORWARD:", LookForward),
+            ('M', "MACRO:", Macro),
+            ('O', "OR:", Or),
+            ('N', "NA:", Na),
+            ('N', "NOT:", Not),
+            ('R', "RAW:", Raw),
+            ('T', "TEST INPUT:", TestInput),
+            ('T', "TESTINPUT:", TestInput),
+            ('T', "THE CONDITION:", TheCondition),
+            ('T', "THECONDITION:", TheCondition),
         ];
 
         // Try each keyword that starts with the same letter
-        for (keyword, token) in KEYWORDS.iter() {
-            if keyword.chars().next().unwrap() == first_char
+        for &(kw_first_char, keyword, ref token) in KEYWORDS.iter() {
+            if kw_first_char == first_char
                 && let Some(end) = self.try_keyword_match(keyword)
             {
                 return (idx0, token.clone(), end);
@@ -1643,5 +1668,38 @@ mod tests {
         }
         assert_eq!(tokens[1], Ok((11, Plus, 12)));
         assert_eq!(tokens[2], Ok((13, num("1"), 14)));
+    }
+
+    #[test]
+    fn test_lex_error_code_display() {
+        assert_eq!(
+            format!("{}", LexErrorCode::UnrecognizedToken),
+            "unrecognized token"
+        );
+        assert_eq!(
+            format!("{}", LexErrorCode::UnclosedComment),
+            "unclosed comment"
+        );
+        assert_eq!(
+            format!("{}", LexErrorCode::UnclosedQuotedSymbol),
+            "unclosed quoted symbol"
+        );
+        assert_eq!(
+            format!("{}", LexErrorCode::UnclosedLiteral),
+            "unclosed literal"
+        );
+    }
+
+    #[test]
+    fn test_lex_error_display() {
+        let err = LexError {
+            start: 10,
+            end: 15,
+            code: LexErrorCode::UnrecognizedToken,
+        };
+        assert_eq!(
+            format!("{}", err),
+            "lex error at 10..15: unrecognized token"
+        );
     }
 }

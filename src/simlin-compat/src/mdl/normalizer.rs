@@ -104,6 +104,43 @@ pub struct NormalizerError {
     pub code: NormalizerErrorCode,
 }
 
+impl std::fmt::Display for NormalizerErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NormalizerErrorCode::DollarSymbolOutsideUnits => {
+                write!(f, "$ symbol found outside units section")
+            }
+            NormalizerErrorCode::MalformedTabbedArray => {
+                write!(f, "malformed TABBED ARRAY")
+            }
+            NormalizerErrorCode::UnclosedTabbedArray => {
+                write!(f, "unclosed TABBED ARRAY")
+            }
+            NormalizerErrorCode::UnclosedGetXls => {
+                write!(f, "unclosed GET XLS/VDF construct")
+            }
+            NormalizerErrorCode::LexError(code) => {
+                write!(f, "{}", code)
+            }
+            NormalizerErrorCode::SemanticError(msg) => {
+                write!(f, "{}", msg)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for NormalizerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "normalizer error at {}..{}: {}",
+            self.start, self.end, self.code
+        )
+    }
+}
+
+impl std::error::Error for NormalizerError {}
+
 impl From<LexError> for NormalizerError {
     fn from(e: LexError) -> Self {
         NormalizerError {
@@ -904,5 +941,54 @@ mod tests {
         } else {
             panic!("Expected TabbedArray, got {:?}", toks[0]);
         }
+    }
+
+    // ========== Display impl tests ==========
+
+    #[test]
+    fn test_normalizer_error_code_display() {
+        assert_eq!(
+            format!("{}", NormalizerErrorCode::DollarSymbolOutsideUnits),
+            "$ symbol found outside units section"
+        );
+        assert_eq!(
+            format!("{}", NormalizerErrorCode::MalformedTabbedArray),
+            "malformed TABBED ARRAY"
+        );
+        assert_eq!(
+            format!("{}", NormalizerErrorCode::UnclosedTabbedArray),
+            "unclosed TABBED ARRAY"
+        );
+        assert_eq!(
+            format!("{}", NormalizerErrorCode::UnclosedGetXls),
+            "unclosed GET XLS/VDF construct"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                NormalizerErrorCode::LexError(LexErrorCode::UnrecognizedToken)
+            ),
+            "unrecognized token"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                NormalizerErrorCode::SemanticError("bad stuff".to_string())
+            ),
+            "bad stuff"
+        );
+    }
+
+    #[test]
+    fn test_normalizer_error_display() {
+        let err = NormalizerError {
+            start: 5,
+            end: 10,
+            code: NormalizerErrorCode::MalformedTabbedArray,
+        };
+        assert_eq!(
+            format!("{}", err),
+            "normalizer error at 5..10: malformed TABBED ARRAY"
+        );
     }
 }

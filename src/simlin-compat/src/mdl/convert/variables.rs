@@ -892,8 +892,9 @@ impl<'input> ConversionContext<'input> {
 
         // Compute Cartesian product in row-major order
         if dim_elements.len() == 1 {
-            // Single dimension: just return the elements
-            return Some(dim_elements.into_iter().next().unwrap());
+            // Single dimension: just return the elements.
+            // len() == 1 guarantees next() returns Some.
+            return dim_elements.into_iter().next();
         }
 
         // Multi-dimensional: compute Cartesian product

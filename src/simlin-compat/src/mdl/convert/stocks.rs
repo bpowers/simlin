@@ -201,7 +201,10 @@ impl<'input> ConversionContext<'input> {
         let mut flow_info: Vec<StockFlowInfo> = Vec::new();
 
         for stock_name in &stock_names {
-            let info = self.symbols.get(stock_name).unwrap();
+            let info = match self.symbols.get(stock_name) {
+                Some(info) => info,
+                None => continue,
+            };
 
             // Collect flow lists from ALL valid stock equations (skip EmptyRhs/AFO)
             let stock_equations: Vec<&FullEquation<'_>> = info
