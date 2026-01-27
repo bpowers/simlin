@@ -21,6 +21,9 @@ use crate::mdl::builtins::to_lower_space;
 /// current element being expanded. Equivalent to C++ ContextInfo's
 /// pLHSElmsGeneric/pLHSElmsSpecific pair.
 pub struct ElementContext {
+    /// Canonical name of the LHS variable being computed.
+    /// Used to detect self-references and emit "self" instead of the variable name.
+    pub lhs_var_canonical: String,
     /// dimension canonical name -> specific element (space_to_underbar format)
     /// e.g. {"scenario" -> "deterministic", "upper" -> "layer1"}
     pub substitutions: HashMap<String, String>,
@@ -111,7 +114,18 @@ impl XmileFormatter {
         subscripts: &[Subscript<'_>],
         ctx: Option<&ElementContext>,
     ) -> String {
-        let formatted_name = self.format_name(name);
+        // Detect self-references: if this variable is the LHS variable, emit "self"
+        // instead of the variable name, matching xmutil's Variable::OutputComputable behavior.
+        let formatted_name = if let Some(ctx) = ctx {
+            let canonical = to_lower_space(name);
+            if !ctx.lhs_var_canonical.is_empty() && canonical == ctx.lhs_var_canonical {
+                "self".to_string()
+            } else {
+                self.format_name(name)
+            }
+        } else {
+            self.format_name(name)
+        };
         if subscripts.is_empty() {
             formatted_name
         } else {
@@ -1709,6 +1723,7 @@ mod tests {
         // y[DimA] with context {dima -> a1} should produce y[a1]
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
+            lhs_var_canonical: String::new(),
             substitutions: HashMap::from([("dima".to_string(), "a1".to_string())]),
             subrange_mappings: HashMap::new(),
         };
@@ -1726,6 +1741,7 @@ mod tests {
         // y[DimA, DimB] with context {dima -> a1, dimb -> b2} -> y[a1, b2]
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
+            lhs_var_canonical: String::new(),
             substitutions: HashMap::from([
                 ("dima".to_string(), "a1".to_string()),
                 ("dimb".to_string(), "b2".to_string()),
@@ -1750,6 +1766,7 @@ mod tests {
         // so it shouldn't be in substitutions and should stay as y[a1]
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
+            lhs_var_canonical: String::new(),
             substitutions: HashMap::from([("dima".to_string(), "a1".to_string())]),
             subrange_mappings: HashMap::new(),
         };
@@ -1767,6 +1784,7 @@ mod tests {
         // IF x[DimA] > 0 THEN y[DimA] ELSE z[DimA] with context {dima -> a1}
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
+            lhs_var_canonical: String::new(),
             substitutions: HashMap::from([("dima".to_string(), "a1".to_string())]),
             subrange_mappings: HashMap::new(),
         };
@@ -1826,6 +1844,7 @@ mod tests {
         // for "lower" -> positional resolution through "upper"
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
+            lhs_var_canonical: String::new(),
             substitutions: HashMap::from([("upper".to_string(), "layer1".to_string())]),
             subrange_mappings: HashMap::from([(
                 "lower".to_string(),
@@ -1852,5 +1871,48 @@ mod tests {
         );
         // layer1 is at position 0 in upper, so lower[0] = layer2
         assert_eq!(formatter.format_expr_with_context(&expr, &ctx), "y[layer2]");
+    }
+
+    #[test]
+    fn test_format_self_reference() {
+        // When the variable references itself, emit "self" instead of the variable name.
+        // This matches xmutil's Variable::OutputComputable behavior (Variable.cpp:326-332).
+        let formatter = XmileFormatter::new();
+        let ctx = ElementContext {
+            lhs_var_canonical: "depth at bottom".to_string(),
+            substitutions: HashMap::new(),
+            subrange_mappings: HashMap::new(),
+        };
+
+        let expr = Expr::Var(
+            Cow::Borrowed("Depth at Bottom"),
+            vec![Subscript::Element(Cow::Borrowed("layer1"), loc())],
+            loc(),
+        );
+        assert_eq!(
+            formatter.format_expr_with_context(&expr, &ctx),
+            "self[layer1]"
+        );
+    }
+
+    #[test]
+    fn test_format_non_self_reference_unchanged() {
+        // A reference to a different variable should NOT be replaced with "self".
+        let formatter = XmileFormatter::new();
+        let ctx = ElementContext {
+            lhs_var_canonical: "depth at bottom".to_string(),
+            substitutions: HashMap::new(),
+            subrange_mappings: HashMap::new(),
+        };
+
+        let expr = Expr::Var(
+            Cow::Borrowed("Layer Depth"),
+            vec![Subscript::Element(Cow::Borrowed("layer2"), loc())],
+            loc(),
+        );
+        assert_eq!(
+            formatter.format_expr_with_context(&expr, &ctx),
+            "Layer_Depth[layer2]"
+        );
     }
 }

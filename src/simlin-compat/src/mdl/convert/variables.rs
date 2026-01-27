@@ -384,10 +384,16 @@ impl<'input> ConversionContext<'input> {
                 );
 
                 // Build per-element context for substitution (only when needed)
+                let var_canonical = canonical_name(name);
                 let ctx = if needs_substitution {
-                    self.build_element_context(&exp_eq.lhs_subscripts, &element_parts)
+                    self.build_element_context(
+                        &var_canonical,
+                        &exp_eq.lhs_subscripts,
+                        &element_parts,
+                    )
                 } else {
                     crate::mdl::xmile_compat::ElementContext {
+                        lhs_var_canonical: var_canonical,
                         substitutions: HashMap::new(),
                         subrange_mappings: HashMap::new(),
                     }
@@ -517,6 +523,7 @@ impl<'input> ConversionContext<'input> {
     /// Maps each LHS dimension to the specific element being computed.
     fn build_element_context(
         &self,
+        var_canonical: &str,
         lhs_subscripts: &[String],
         element_parts: &[&str],
     ) -> crate::mdl::xmile_compat::ElementContext {
@@ -544,6 +551,7 @@ impl<'input> ConversionContext<'input> {
         let subrange_mappings = self.build_subrange_mappings(&substitutions);
 
         ElementContext {
+            lhs_var_canonical: var_canonical.to_string(),
             substitutions,
             subrange_mappings,
         }
