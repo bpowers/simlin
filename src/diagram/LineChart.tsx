@@ -80,6 +80,7 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
 
   componentWillUnmount() {
     this.resizeObserver?.disconnect();
+    this.resizeObserver = undefined;
   }
 
   private getLayout() {
@@ -141,6 +142,8 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     const layout = this.getLayout();
     const { margin, plotWidth, plotHeight, xScale, yInvert, xMin, xMax } = layout;
 
+    if (plotWidth <= 0 || plotHeight <= 0) return;
+
     // Compute pointer position relative to the plot area.
     const overlayRect = e.currentTarget.getBoundingClientRect();
     const plotX = e.clientX - overlayRect.left;
@@ -152,7 +155,7 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     // Convert pixel x to data x, then snap to the nearest data point.
     // All series share the same time axis, so we search once and reuse
     // the index for tooltip values and drag callbacks.
-    const rawDataX = xMin + (clampedX / (plotWidth || 1)) * (xMax - xMin);
+    const rawDataX = xMin + (clampedX / plotWidth) * (xMax - xMin);
     let snappedDataX = rawDataX;
     let snappedIdx = -1;
     for (const s of this.props.series) {
@@ -219,14 +222,16 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     this.handlePointerMove(e);
   };
 
-  private handlePointerUp = () => {
+  private handlePointerUp = (e: React.PointerEvent<SVGRectElement>) => {
     if (!this.dragging) return;
+    e.currentTarget.releasePointerCapture(e.pointerId);
     this.dragging = false;
     this.props.onDragEnd?.();
   };
 
-  private handlePointerCancel = () => {
+  private handlePointerCancel = (e: React.PointerEvent<SVGRectElement>) => {
     if (!this.dragging) return;
+    e.currentTarget.releasePointerCapture(e.pointerId);
     this.dragging = false;
     this.props.onDragEnd?.();
   };

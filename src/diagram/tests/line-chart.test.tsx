@@ -337,6 +337,34 @@ describe('LineChart drag interaction', () => {
     }
   });
 
+  test('calls releasePointerCapture on pointerup', () => {
+    const onPointDrag = jest.fn();
+
+    const { container } = render(
+      <LineChart height={300} series={simpleSeries} yDomain={[0, 30]} onPointDrag={onPointDrag} />,
+    );
+
+    const overlay = container.querySelector('.overlay') as SVGRectElement;
+    fireEvent.pointerDown(overlay, { clientX: 200, clientY: 150, pointerId: 1 });
+    fireEvent.pointerUp(overlay, { clientX: 200, clientY: 150, pointerId: 1 });
+
+    expect(overlay.releasePointerCapture).toHaveBeenCalledWith(1);
+  });
+
+  test('calls releasePointerCapture on pointercancel', () => {
+    const onPointDrag = jest.fn();
+
+    const { container } = render(
+      <LineChart height={300} series={simpleSeries} yDomain={[0, 30]} onPointDrag={onPointDrag} />,
+    );
+
+    const overlay = container.querySelector('.overlay') as SVGRectElement;
+    fireEvent.pointerDown(overlay, { clientX: 200, clientY: 150, pointerId: 1 });
+    fireEvent.pointerCancel(overlay, { pointerId: 1 });
+
+    expect(overlay.releasePointerCapture).toHaveBeenCalledWith(1);
+  });
+
   test('calls onDragEnd on pointerup', () => {
     const onDragStart = jest.fn();
     const onDragEnd = jest.fn();
