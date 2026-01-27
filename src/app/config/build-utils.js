@@ -30,10 +30,11 @@ function canReadAsset(asset) {
 
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB'];
-  const i = Math.floor(Math.log(Math.abs(bytes)) / Math.log(1024));
-  const value = bytes / Math.pow(1024, i);
   const sign = bytes < 0 ? '-' : '';
+  const abs = Math.abs(bytes);
+  const units = ['B', 'KB', 'MB'];
+  const i = Math.floor(Math.log(abs) / Math.log(1024));
+  const value = abs / Math.pow(1024, i);
   return sign + value.toFixed(2) + ' ' + units[Math.min(i, units.length - 1)];
 }
 
@@ -66,7 +67,9 @@ function walkDir(dir) {
       }
     }
   } catch (err) {
-    // Directory doesn't exist yet
+    if (err.code !== 'ENOENT') {
+      throw err;
+    }
   }
   return results;
 }
