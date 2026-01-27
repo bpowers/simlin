@@ -1835,6 +1835,7 @@ name = "simlin-compat"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "criterion",
  "csv",
  "ed25519-dalek",
  "float-cmp",
