@@ -23,72 +23,63 @@ use std::sync::LazyLock;
 /// 5. Lowercase the result
 pub fn to_lower_space(s: &str) -> String {
     let bytes = s.as_bytes();
-    let n = bytes.len();
+    let len = bytes.len();
 
     // Step 1: Strip surrounding quotes if present
-    let s = if n > 1 && bytes[0] == b'"' && bytes[n - 1] == b'"' {
-        &s[1..s.len() - 1]
+    let s = if len > 1 && bytes[0] == b'"' && bytes[len - 1] == b'"' {
+        &s[1..len - 1]
     } else {
         s
     };
 
-    let chars: Vec<char> = s.chars().collect();
-    let n = chars.len();
-    let mut result = String::with_capacity(n);
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
 
     // Step 2: Skip leading whitespace
-    let mut i = 0;
-    while i < n {
-        let c = chars[i];
+    while let Some(&c) = chars.peek() {
         if c != ' ' && c != '_' && c != '\t' && c != '\n' && c != '\r' {
             break;
         }
-        i += 1;
+        chars.next();
     }
 
-    // Step 3: Process characters
-    while i < n {
-        let c = chars[i];
-
-        // Check for escaped underscore: \_
-        if c == '\\' && i + 1 < n && chars[i + 1] == '_' {
+    // Step 3: Process characters with inline lowercasing
+    while let Some(c) = chars.next() {
+        // Escaped underscore: \_
+        if c == '\\' && chars.peek() == Some(&'_') {
             result.push('\\');
             result.push('_');
-            i += 2;
+            chars.next();
             continue;
         }
 
-        // Whitespace handling: collapse consecutive whitespace to single space
+        // Whitespace collapse
         if c == '_' || c == ' ' || c == '\t' || c == '\n' || c == '\r' {
-            // Skip all consecutive whitespace characters
-            while i + 1 < n {
-                let next = chars[i + 1];
+            while let Some(&next) = chars.peek() {
                 if next != ' ' && next != '_' && next != '\t' && next != '\n' && next != '\r' {
                     break;
                 }
-                i += 1;
+                chars.next();
             }
             result.push(' ');
-            i += 1;
             continue;
         }
 
-        result.push(c);
-        i += 1;
+        // Lowercase inline
+        if c.is_ascii() {
+            result.push(c.to_ascii_lowercase());
+        } else {
+            for lc in c.to_lowercase() {
+                result.push(lc);
+            }
+        }
     }
 
-    // Step 4: Strip trailing whitespace
-    while result.ends_with(' ')
-        || result.ends_with('_')
-        || result.ends_with('\t')
-        || result.ends_with('\n')
-        || result.ends_with('\r')
-    {
-        result.pop();
-    }
+    // Step 4: Strip trailing whitespace in-place
+    let trimmed_len = result.trim_end_matches([' ', '_', '\t', '\n', '\r']).len();
+    result.truncate(trimmed_len);
 
-    // Step 5: Lowercase the result
-    result.to_lowercase()
+    result
 }
 
 /// Built-in function names in their canonicalized form (via `to_lower_space`).
@@ -186,26 +177,54 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     .collect()
 });
 
-/// Check if a name (after canonicalization) is a built-in function.
-pub fn is_builtin(name: &str) -> bool {
+/// Classification of a symbol token after canonicalization.
+///
+/// Used by the normalizer to classify a symbol in a single `to_lower_space`
+/// call rather than checking each category separately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymbolClass {
+    /// "WITH LOOKUP" keyword
+    WithLookup,
+    /// GET XLS/VDF/DATA/DIRECT/123 function, with the canonical prefix
+    GetXls(&'static str),
+    /// "TABBED ARRAY" keyword
+    TabbedArray,
+    /// Known builtin function
+    Builtin,
+    /// Regular symbol (not a builtin or keyword)
+    Regular,
+}
+
+/// Classify a symbol by canonicalizing once and checking all categories.
+pub fn classify_symbol(name: &str) -> SymbolClass {
     let canonical = to_lower_space(name);
-    BUILTINS.contains(canonical.as_str())
-}
-
-/// Check if a name is the "TABBED ARRAY" keyword function.
-///
-/// This is special because it requires different handling during parsing.
-pub fn is_tabbed_array(name: &str) -> bool {
-    to_lower_space(name) == "tabbed array"
-}
-
-/// Check if a name is "WITH LOOKUP" (any spacing variant).
-///
-/// Uses `to_lower_space` canonicalization so "WITH LOOKUP", "WITH_LOOKUP",
-/// "WITH  LOOKUP", etc. all match. This is needed because WITH LOOKUP has
-/// special syntax (inline table as second argument) that the parser must handle.
-pub fn is_with_lookup(name: &str) -> bool {
-    to_lower_space(name) == "with lookup"
+    if canonical == "with lookup" {
+        return SymbolClass::WithLookup;
+    }
+    if canonical == "tabbed array" {
+        return SymbolClass::TabbedArray;
+    }
+    if let Some(rest) = canonical.strip_prefix("get ") {
+        if rest.starts_with("123") {
+            return SymbolClass::GetXls("{GET 123");
+        }
+        if rest.starts_with("data") {
+            return SymbolClass::GetXls("{GET DATA");
+        }
+        if rest.starts_with("direct") {
+            return SymbolClass::GetXls("{GET DIRECT");
+        }
+        if rest.starts_with("vdf") {
+            return SymbolClass::GetXls("{GET VDF");
+        }
+        if rest.starts_with("xls") {
+            return SymbolClass::GetXls("{GET XLS");
+        }
+    }
+    if BUILTINS.contains(canonical.as_str()) {
+        return SymbolClass::Builtin;
+    }
+    SymbolClass::Regular
 }
 
 #[cfg(test)]
@@ -270,67 +289,179 @@ mod tests {
         assert_eq!(to_lower_space("\"\""), "");
     }
 
+    #[test]
+    fn test_to_lower_space_non_ascii() {
+        assert_eq!(to_lower_space("Foo\u{00B7}Bar"), "foo\u{00b7}bar");
+    }
+
+    #[test]
+    fn test_classify_symbol() {
+        assert!(matches!(
+            classify_symbol("WITH LOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("WITH_LOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("with lookup"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("TABBED ARRAY"),
+            SymbolClass::TabbedArray
+        ));
+        assert!(matches!(
+            classify_symbol("tabbed_array"),
+            SymbolClass::TabbedArray
+        ));
+        assert!(matches!(classify_symbol("GET XLS"), SymbolClass::GetXls(_)));
+        assert!(matches!(classify_symbol("GET_VDF"), SymbolClass::GetXls(_)));
+        assert!(matches!(
+            classify_symbol("GET DIRECT DATA"),
+            SymbolClass::GetXls(_)
+        ));
+        assert!(matches!(classify_symbol("MAX"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("integ"), SymbolClass::Builtin));
+        assert!(matches!(
+            classify_symbol("IF_THEN_ELSE"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("my_variable"),
+            SymbolClass::Regular
+        ));
+        assert!(matches!(classify_symbol("foo"), SymbolClass::Regular));
+    }
+
     // Phase 4: Function Classification Tests
 
     #[test]
     fn test_max_is_builtin() {
-        assert!(is_builtin("MAX"));
-        assert!(is_builtin("max"));
-        assert!(is_builtin("Max"));
+        assert!(matches!(classify_symbol("MAX"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("max"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("Max"), SymbolClass::Builtin));
     }
 
     #[test]
     fn test_function_case_insensitive() {
-        assert!(is_builtin("INTEG"));
-        assert!(is_builtin("integ"));
-        assert!(is_builtin("Integ"));
-        assert!(is_builtin("SMOOTH3"));
-        assert!(is_builtin("smooth3"));
+        assert!(matches!(classify_symbol("INTEG"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("integ"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("Integ"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("SMOOTH3"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("smooth3"), SymbolClass::Builtin));
     }
 
     #[test]
     fn test_function_with_underscores() {
-        assert!(is_builtin("IF_THEN_ELSE"));
-        assert!(is_builtin("if_then_else"));
-        assert!(is_builtin("PULSE_TRAIN"));
+        assert!(matches!(
+            classify_symbol("IF_THEN_ELSE"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("if_then_else"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("PULSE_TRAIN"),
+            SymbolClass::Builtin
+        ));
     }
 
     #[test]
     fn test_function_with_spaces() {
-        assert!(is_builtin("IF THEN ELSE"));
-        assert!(is_builtin("if then else"));
-        assert!(is_builtin("DELAY FIXED"));
-        assert!(is_builtin("RANDOM UNIFORM"));
+        assert!(matches!(
+            classify_symbol("IF THEN ELSE"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("if then else"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("DELAY FIXED"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("RANDOM UNIFORM"),
+            SymbolClass::Builtin
+        ));
     }
 
     #[test]
     fn test_non_function_stays_symbol() {
-        assert!(!is_builtin("my_variable"));
-        assert!(!is_builtin("NOT_A_FUNCTION"));
-        assert!(!is_builtin("foo"));
+        assert!(matches!(
+            classify_symbol("my_variable"),
+            SymbolClass::Regular
+        ));
+        assert!(matches!(
+            classify_symbol("NOT_A_FUNCTION"),
+            SymbolClass::Regular
+        ));
+        assert!(matches!(classify_symbol("foo"), SymbolClass::Regular));
     }
 
     #[test]
     fn test_tabbed_array_keyword() {
-        assert!(is_tabbed_array("TABBED ARRAY"));
-        assert!(is_tabbed_array("tabbed_array"));
-        assert!(is_tabbed_array("Tabbed_Array"));
-        assert!(!is_tabbed_array("TABBED"));
-        assert!(!is_tabbed_array("ARRAY"));
+        assert!(matches!(
+            classify_symbol("TABBED ARRAY"),
+            SymbolClass::TabbedArray
+        ));
+        assert!(matches!(
+            classify_symbol("tabbed_array"),
+            SymbolClass::TabbedArray
+        ));
+        assert!(matches!(
+            classify_symbol("Tabbed_Array"),
+            SymbolClass::TabbedArray
+        ));
+        assert!(!matches!(
+            classify_symbol("TABBED"),
+            SymbolClass::TabbedArray
+        ));
+        assert!(!matches!(
+            classify_symbol("ARRAY"),
+            SymbolClass::TabbedArray
+        ));
     }
 
     #[test]
     fn test_with_lookup_keyword() {
         // All spacing variants should match
-        assert!(is_with_lookup("WITH LOOKUP"));
-        assert!(is_with_lookup("with lookup"));
-        assert!(is_with_lookup("WITH_LOOKUP"));
-        assert!(is_with_lookup("with_lookup"));
-        assert!(is_with_lookup("WITH  LOOKUP"));
-        assert!(is_with_lookup("WITH\tLOOKUP"));
+        assert!(matches!(
+            classify_symbol("WITH LOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("with lookup"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("WITH_LOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("with_lookup"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("WITH  LOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("WITH\tLOOKUP"),
+            SymbolClass::WithLookup
+        ));
         // Non-matches
-        assert!(!is_with_lookup("WITH"));
-        assert!(!is_with_lookup("LOOKUP"));
-        assert!(!is_with_lookup("WITHLOOKUP"));
+        assert!(!matches!(classify_symbol("WITH"), SymbolClass::WithLookup));
+        assert!(!matches!(
+            classify_symbol("LOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        assert!(!matches!(
+            classify_symbol("WITHLOOKUP"),
+            SymbolClass::WithLookup
+        ));
     }
 }
