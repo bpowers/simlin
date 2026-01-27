@@ -132,7 +132,10 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     const parts: string[] = [];
     let started = false;
     for (const p of points) {
-      if (!isFinite(p.x) || !isFinite(p.y)) continue;
+      if (!isFinite(p.x) || !isFinite(p.y)) {
+        started = false;
+        continue;
+      }
       const px = xScale(p.x);
       const py = yScale(p.y);
       if (!started) {

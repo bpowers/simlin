@@ -182,6 +182,30 @@ describe('LineChart rendering', () => {
     expect(yPositions.size).toBeGreaterThan(1);
   });
 
+  test('breaks path at non-finite points instead of connecting across gaps', () => {
+    const gapSeries: ChartSeries[] = [
+      {
+        name: 'gappy',
+        color: '#ff0000',
+        points: [
+          { x: 0, y: 0 },
+          { x: 1, y: 10 },
+          { x: 2, y: NaN },
+          { x: 3, y: 20 },
+          { x: 4, y: 30 },
+        ],
+      },
+    ];
+    const { container } = render(<LineChart height={300} series={gapSeries} yDomain={[0, 30]} />);
+    const path = container.querySelector('.series-lines path');
+    expect(path).not.toBeNull();
+    const d = path!.getAttribute('d')!;
+    // The NaN at x=2 should break the path into two segments,
+    // producing two M (moveto) commands: one for points 0-1 and one for points 3-4.
+    const moveCount = (d.match(/M/g) || []).length;
+    expect(moveCount).toBe(2);
+  });
+
   test('applies clipPath to series lines group', () => {
     const { container } = render(<LineChart height={300} series={simpleSeries} yDomain={[0, 30]} />);
     const seriesGroup = container.querySelector('.series-lines');
