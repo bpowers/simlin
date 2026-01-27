@@ -325,15 +325,50 @@ fn normalize_equation(eq: &mut Equation) {
             // while xmutil uses ApplyToAll
             if !elements.is_empty() {
                 let first_expr = &elements[0].1;
-                let all_same = elements
-                    .iter()
-                    .all(|(_, e, _, gf)| e == first_expr && gf.is_none());
+                let first_initial = &elements[0].2;
+                let all_same = elements.iter().all(|(_, e, init, gf)| {
+                    e == first_expr && init == first_initial && gf.is_none()
+                });
                 if all_same {
-                    *eq = Equation::ApplyToAll(dims.clone(), first_expr.clone(), None);
+                    *eq = Equation::ApplyToAll(
+                        dims.clone(),
+                        first_expr.clone(),
+                        first_initial.clone(),
+                    );
                 }
             }
         }
     }
+}
+
+#[test]
+fn test_normalize_arrayed_to_apply_to_all_preserves_initial() {
+    let mut eq = Equation::Arrayed(
+        vec!["dim".to_string()],
+        vec![
+            (
+                "a".to_string(),
+                "x+1".to_string(),
+                Some("INIT_VAL".to_string()),
+                None,
+            ),
+            (
+                "b".to_string(),
+                "x+1".to_string(),
+                Some("INIT_VAL".to_string()),
+                None,
+            ),
+        ],
+    );
+    normalize_equation(&mut eq);
+    assert_eq!(
+        eq,
+        Equation::ApplyToAll(
+            vec!["dim".to_string()],
+            "x+1".to_string(),
+            Some("INIT_VAL".to_string())
+        )
+    );
 }
 
 fn normalize_stock(stock: &mut Stock) {
