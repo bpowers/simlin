@@ -158,6 +158,30 @@ describe('LineChart rendering', () => {
     expect(yAxisTexts.length).toBeGreaterThan(0);
   });
 
+  test('renders y-axis ticks at distinct positions when yDomain min equals max', () => {
+    const constSeries: ChartSeries[] = [
+      {
+        name: 'flat',
+        color: '#00ff00',
+        points: [
+          { x: 0, y: 5 },
+          { x: 1, y: 5 },
+          { x: 2, y: 5 },
+        ],
+      },
+    ];
+    const { container } = render(<LineChart height={300} series={constSeries} yDomain={[5, 5]} />);
+    const yAxisTicks = container.querySelectorAll('.y-axis text');
+    expect(yAxisTicks.length).toBeGreaterThan(1);
+
+    // ticks should occupy distinct y positions, not all stacked at the same pixel
+    const yPositions = new Set<string>();
+    yAxisTicks.forEach((tick) => {
+      yPositions.add(tick.getAttribute('y')!);
+    });
+    expect(yPositions.size).toBeGreaterThan(1);
+  });
+
   test('applies clipPath to series lines group', () => {
     const { container } = render(<LineChart height={300} series={simpleSeries} yDomain={[0, 30]} />);
     const seriesGroup = container.querySelector('.series-lines');

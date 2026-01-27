@@ -87,7 +87,14 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     const { height, yDomain, series } = this.props;
     const { containerWidth } = this.state;
 
-    const yTicks = niceAxisTicks(yDomain[0], yDomain[1]);
+    let yMin = yDomain[0];
+    let yMax = yDomain[1];
+    if (yMin === yMax) {
+      yMin -= 1;
+      yMax += 1;
+    }
+
+    const yTicks = niceAxisTicks(yMin, yMax);
     const yAxisWidth = computeYAxisWidth(yTicks);
 
     // compute x domain from data extent across all series
@@ -115,8 +122,8 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     const plotHeight = Math.max(0, height - margin.top - margin.bottom);
 
     const xScale = linearScale([xMin, xMax], [0, plotWidth]);
-    const yScale = linearScale([yDomain[0], yDomain[1]], [plotHeight, 0]);
-    const yInvert = invertLinearScale([yDomain[0], yDomain[1]], [plotHeight, 0]);
+    const yScale = linearScale([yMin, yMax], [plotHeight, 0]);
+    const yInvert = invertLinearScale([yMin, yMax], [plotHeight, 0]);
 
     return { margin, plotWidth, plotHeight, xScale, yScale, yInvert, xTicks, yTicks, xMin, xMax };
   }
