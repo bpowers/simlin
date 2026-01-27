@@ -281,21 +281,23 @@ fn normalize_expr(expr: &str) -> String {
 /// Also converts Arrayed equations where all elements have the same expression to ApplyToAll.
 fn normalize_equation(eq: &mut Equation) {
     match eq {
-        Equation::Scalar(expr, comment) => {
+        Equation::Scalar(expr, initial_comment) => {
             *expr = normalize_expr(expr);
-            if let Some(c) = comment {
-                *c = normalize_doc(c);
+            // The initial-value comment is an expression string (e.g. from ACTIVE INITIAL),
+            // not documentation, so normalize it as an expression.
+            if let Some(c) = initial_comment {
+                *c = normalize_expr(c);
             }
         }
-        Equation::ApplyToAll(dims, expr, comment) => {
+        Equation::ApplyToAll(dims, expr, initial_comment) => {
             // Lowercase and sort dimension names for consistent comparison
             for dim in dims.iter_mut() {
                 *dim = dim.to_lowercase();
             }
             dims.sort();
             *expr = normalize_expr(expr);
-            if let Some(c) = comment {
-                *c = normalize_doc(c);
+            if let Some(c) = initial_comment {
+                *c = normalize_expr(c);
             }
         }
         Equation::Arrayed(dims, elements) => {
@@ -305,12 +307,12 @@ fn normalize_equation(eq: &mut Equation) {
             }
             dims.sort();
             // Normalize each element
-            for (subscript, expr, comment, gf) in elements.iter_mut() {
+            for (subscript, expr, initial_comment, gf) in elements.iter_mut() {
                 // Canonicalize subscript names
                 *subscript = canonical_ident(subscript);
                 *expr = normalize_expr(expr);
-                if let Some(c) = comment {
-                    *c = normalize_doc(c);
+                if let Some(c) = initial_comment {
+                    *c = normalize_expr(c);
                 }
                 // Graphical functions match without normalization
                 let _ = gf;
@@ -361,12 +363,14 @@ fn test_normalize_arrayed_to_apply_to_all_preserves_initial() {
         ],
     );
     normalize_equation(&mut eq);
+    // After normalization, expressions (including initial-value comments) are lowercased
+    // and spaces around operators are removed.
     assert_eq!(
         eq,
         Equation::ApplyToAll(
             vec!["dim".to_string()],
             "x+1".to_string(),
-            Some("INIT_VAL".to_string())
+            Some("init_val".to_string())
         )
     );
 }
