@@ -150,8 +150,8 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     const clampedY = Math.max(0, Math.min(plotHeight, plotY));
 
     // Convert pixel x to data x, then snap to the nearest data point.
-    // Use the first non-empty series for snapping; all series in the
-    // results use-case share the same time axis.
+    // All series share the same time axis, so we search once and reuse
+    // the index for tooltip values and drag callbacks.
     const rawDataX = xMin + (clampedX / (plotWidth || 1)) * (xMax - xMin);
     let snappedDataX = rawDataX;
     let snappedIdx = -1;
@@ -164,17 +164,16 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
       break;
     }
 
-    // Build tooltip values at the snapped x.
+    // Build tooltip values using the cached index.
     const seriesValues: TooltipState['seriesValues'] = [];
-    for (const s of this.props.series) {
-      if (s.points.length === 0) continue;
-      const idx = findNearestPointIndex(s.points, snappedDataX);
-      if (idx >= 0) {
-        seriesValues.push({ name: s.name, color: s.color, value: s.points[idx].y });
+    if (snappedIdx >= 0) {
+      for (const s of this.props.series) {
+        if (snappedIdx < s.points.length) {
+          seriesValues.push({ name: s.name, color: s.color, value: s.points[snappedIdx].y });
+        }
       }
     }
 
-    // Position the crosshair at the snapped data point's x, not the raw pointer x.
     const crosshairX = margin.left + xScale(snappedDataX);
 
     this.setState({
@@ -188,17 +187,14 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     });
 
     // handle drag
-    if (this.dragging && this.props.onPointDrag) {
+    if (this.dragging && this.props.onPointDrag && snappedIdx >= 0) {
       let newY = yInvert(clampedY);
       const [yLo, yHi] = this.props.yDomain;
       newY = Math.max(yLo, Math.min(yHi, newY));
 
       for (let si = 0; si < this.props.series.length; si++) {
-        const pts = this.props.series[si].points;
-        if (pts.length === 0) continue;
-        const pi = findNearestPointIndex(pts, snappedDataX);
-        if (pi >= 0) {
-          this.props.onPointDrag(si, pi, newY);
+        if (snappedIdx < this.props.series[si].points.length) {
+          this.props.onPointDrag(si, snappedIdx, newY);
         }
       }
     }
