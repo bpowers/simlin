@@ -946,35 +946,36 @@ impl<'input> ConversionContext<'input> {
         } else {
             (table.x_vals.clone(), table.y_vals.clone())
         };
-        let (x_scale, y_scale) =
-            if let (Some(x_range), Some(y_range)) = (table.x_range, table.y_range) {
-                (
-                    GraphicalFunctionScale {
-                        min: x_range.0,
-                        max: x_range.1,
-                    },
-                    GraphicalFunctionScale {
-                        min: y_range.0,
-                        max: y_range.1,
-                    },
-                )
-            } else {
-                // Derive from data
-                let x_min = x_vals.iter().cloned().fold(f64::INFINITY, f64::min);
-                let x_max = x_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let y_min = y_vals.iter().cloned().fold(f64::INFINITY, f64::min);
-                let y_max = y_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                (
-                    GraphicalFunctionScale {
-                        min: x_min,
-                        max: x_max,
-                    },
-                    GraphicalFunctionScale {
-                        min: y_min,
-                        max: y_max,
-                    },
-                )
-            };
+        // x-scale: use file-specified range if available, otherwise compute from data
+        let x_scale = if let Some(x_range) = table.x_range {
+            GraphicalFunctionScale {
+                min: x_range.0,
+                max: x_range.1,
+            }
+        } else {
+            let x_min = x_vals.iter().cloned().fold(f64::INFINITY, f64::min);
+            let x_max = x_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            GraphicalFunctionScale {
+                min: x_min,
+                max: x_max,
+            }
+        };
+
+        // y-scale: ALWAYS compute from data points, matching xmutil behavior.
+        // xmutil ignores file-specified y-ranges and recomputes from actual data.
+        let y_min = y_vals.iter().cloned().fold(f64::INFINITY, f64::min);
+        let y_max = y_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        // When all y-values are identical (ymin == ymax), use ymin+1 as max
+        // to avoid degenerate range. Matches xmutil's fallback logic.
+        let y_max = if (y_min - y_max).abs() < f64::EPSILON {
+            y_min + 1.0
+        } else {
+            y_max
+        };
+        let y_scale = GraphicalFunctionScale {
+            min: y_min,
+            max: y_max,
+        };
 
         // Check if extrapolation should be enabled:
         // 1. table.extrapolate is set in the lookup definition itself
@@ -2164,6 +2165,66 @@ x[bottom] = 2
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
             }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_graphical_function_y_scale_computed_from_data() {
+        // y-scale should always be computed from data points, not from file-specified range.
+        // This matches xmutil behavior: XMILEGenerator.cpp:513-532 always recomputes y-scale.
+        // The file specifies y_range [0,5] but data max is 1.36, so y_scale.max should be 1.36.
+        let mdl = "lookup_var(\
+            [(0,0)-(2,5)],(0,0.5),(1,1.36),(2,0.8))
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let var = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "lookup_var");
+        assert!(var.is_some(), "Should have lookup_var");
+
+        if let Some(Variable::Aux(a)) = var {
+            let gf = a.gf.as_ref().expect("Should have graphical function");
+            // x-scale uses file range
+            assert_eq!(gf.x_scale.min, 0.0);
+            assert_eq!(gf.x_scale.max, 2.0);
+            // y-scale computed from data, not file range
+            assert_eq!(gf.y_scale.min, 0.5);
+            assert_eq!(gf.y_scale.max, 1.36);
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_graphical_function_y_scale_all_same_fallback() {
+        // When all y-values are identical, ymax should be ymin+1 (degenerate range fallback).
+        let mdl = "zero_lookup(\
+            [(0,0)-(2,0)],(0,0),(1,0),(2,0))
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let var = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "zero_lookup");
+        assert!(var.is_some(), "Should have zero_lookup");
+
+        if let Some(Variable::Aux(a)) = var {
+            let gf = a.gf.as_ref().expect("Should have graphical function");
+            assert_eq!(gf.y_scale.min, 0.0);
+            assert_eq!(gf.y_scale.max, 1.0); // 0 + 1 = 1
         } else {
             panic!("Expected Aux variable");
         }
