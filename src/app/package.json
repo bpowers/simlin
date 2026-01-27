@@ -32,7 +32,6 @@
     "@firebase/app": "^0.13.2",
     "@firebase/auth": "^1.10.8",
     "prettier": "^3.0.0",
-    "source-map-explorer": "^2.5.2",
     "typescript": "^5.7.2",
     "wouter": "^3.6.0"
   },
