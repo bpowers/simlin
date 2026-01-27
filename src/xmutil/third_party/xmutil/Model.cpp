@@ -33,8 +33,12 @@ Model::~Model(void) {
   }
   vGroups.clear();
 
-  // Clean up dynamically allocated macro functions
+  // Clean up dynamically allocated macro functions.  MacroFunctions
+  // are registered in mSymbolNameSpace by the Symbol constructor, so
+  // we must remove them before deleting to avoid a double-free when
+  // mSymbolNameSpace's destructor also tries to delete them.
   for (MacroFunction *func : mMacroFunctions) {
+    mSymbolNameSpace.Remove(func);
     delete func;
   }
   mMacroFunctions.clear();

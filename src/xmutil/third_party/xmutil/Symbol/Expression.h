@@ -6,6 +6,7 @@
 #include <math.h>
 
 #include "../ContextInfo.h"
+#include "../XMUtil.h"
 #include "../Function/Function.h"
 #include "../Function/State.h"
 #include "../Function/TableFunction.h"
@@ -194,7 +195,11 @@ public:
   virtual void CheckPlaceholderVars(Model *m, bool isfirst) {
   }
   virtual void OutputComputable(ContextInfo *info) {
-    *info << value;
+    if (value == -1e38) {
+      *info << ":na:";
+    } else {
+      *info << StringFromDouble(value);
+    }
   }
   virtual bool TestMarkFlows(SymbolNameSpace *sns, FlowList *fl, Equation *eq) {
     return false;

@@ -2,6 +2,7 @@
 //
 #include "XMUtil.h"
 
+#include <charconv>
 #include <cstring>
 
 #include "Dynamo/DynamoParse.h"
@@ -16,9 +17,9 @@
 #endif
 
 std::string StringFromDouble(double val) {
-  char buf[128];
-  snprintf(buf, sizeof(buf), "%g", val);
-  return std::string(buf);
+  char buf[32];
+  auto result = std::to_chars(buf, buf + sizeof(buf), val);
+  return std::string(buf, result.ptr);
 }
 
 std::string SpaceToUnderBar(const std::string &s) {

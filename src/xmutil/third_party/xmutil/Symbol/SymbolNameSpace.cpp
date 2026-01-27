@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include <stdexcept>
+#include <vector>
 
 #include "../Unicode.h"
 #include "Symbol.h"
@@ -13,11 +14,19 @@ SymbolNameSpace::SymbolNameSpace(void) {
 }
 
 SymbolNameSpace::~SymbolNameSpace(void) {
-  /* delete the symbols which will in turn delete equations etc */
+  // Collect all symbols first, then clear the hash table before
+  // deleting them.  Symbol::~Symbol() calls Remove() on unconfirmed
+  // symbols, which would erase from mHashTable and invalidate the
+  // iterator if we deleted during iteration.
+  std::vector<Symbol *> to_delete;
+  to_delete.reserve(mHashTable.size());
   for (auto &pair : mHashTable) {
-    delete pair.second;
+    to_delete.push_back(pair.second);
   }
   mHashTable.clear();
+  for (Symbol *sym : to_delete) {
+    delete sym;
+  }
 }
 
 Symbol *SymbolNameSpace::Find(const std::string &sin) {

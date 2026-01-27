@@ -17,7 +17,7 @@ fn main() {
         .cpp(true)
         .include("./third_party/tinyxml2")
         .include("./third_party")
-        .flag_if_supported("-std=c++14")
+        .flag_if_supported("-std=c++17")
         .flag_if_supported("-fno-omit-frame-pointer")
         .flag_if_supported("-Wunused-private-field")
         .flag_if_supported("-Wno-attributes")
