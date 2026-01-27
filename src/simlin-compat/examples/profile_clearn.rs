@@ -12,8 +12,6 @@
 //!   valgrind --tool=dhat ./target/release/examples/profile_clearn xmutil
 //!   valgrind --tool=dhat ./target/release/examples/profile_clearn native
 
-use std::io::BufReader;
-
 use simlin_compat::{open_vensim, open_vensim_native};
 
 const CLEARN_MDL: &str = concat!(
@@ -27,33 +25,29 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("both");
 
-    let mdl_contents = std::fs::read(CLEARN_MDL).expect("failed to read C-LEARN model");
+    let mdl_contents = std::fs::read_to_string(CLEARN_MDL).expect("failed to read C-LEARN model");
 
     match mode {
         "xmutil" => {
             for _ in 0..ITERATIONS {
-                let mut reader = BufReader::new(mdl_contents.as_slice());
-                let _project = open_vensim(&mut reader).expect("open_vensim should succeed");
+                let _project = open_vensim(&mdl_contents).expect("open_vensim should succeed");
             }
         }
         "native" => {
             for _ in 0..ITERATIONS {
-                let mut reader = BufReader::new(mdl_contents.as_slice());
                 let _project =
-                    open_vensim_native(&mut reader).expect("open_vensim_native should succeed");
+                    open_vensim_native(&mdl_contents).expect("open_vensim_native should succeed");
             }
         }
         "both" => {
             eprintln!("--- xmutil path ---");
             for _ in 0..ITERATIONS {
-                let mut reader = BufReader::new(mdl_contents.as_slice());
-                let _project = open_vensim(&mut reader).expect("open_vensim should succeed");
+                let _project = open_vensim(&mdl_contents).expect("open_vensim should succeed");
             }
             eprintln!("--- native path ---");
             for _ in 0..ITERATIONS {
-                let mut reader = BufReader::new(mdl_contents.as_slice());
                 let _project =
-                    open_vensim_native(&mut reader).expect("open_vensim_native should succeed");
+                    open_vensim_native(&mdl_contents).expect("open_vensim_native should succeed");
             }
         }
         _ => {

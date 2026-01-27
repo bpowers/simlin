@@ -2600,9 +2600,19 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
     }
 
     let slice = std::slice::from_raw_parts(data, len);
-    let mut reader = BufReader::new(slice);
+    let contents = match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("MDL data is not valid UTF-8"),
+            );
+            return ptr::null_mut();
+        }
+    };
 
-    match simlin_compat::open_vensim_native(&mut reader) {
+    match simlin_compat::open_vensim_native(contents) {
         Ok(datamodel_project) => {
             let project: engine::Project = datamodel_project.into();
             let boxed = Box::new(SimlinProject {

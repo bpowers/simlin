@@ -5,8 +5,6 @@
 //! Benchmarks comparing open_vensim (xmutil C++) vs open_vensim_native (pure Rust)
 //! for parsing the C-LEARN v77 model.
 
-use std::io::BufReader;
-
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use simlin_compat::{open_vensim, open_vensim_native};
@@ -17,24 +15,18 @@ const CLEARN_MDL: &str = concat!(
 );
 
 fn bench_open_vensim_xmutil(c: &mut Criterion) {
-    let mdl_contents = std::fs::read(CLEARN_MDL).expect("failed to read C-LEARN model");
+    let mdl_contents = std::fs::read_to_string(CLEARN_MDL).expect("failed to read C-LEARN model");
 
     c.bench_function("open_vensim_xmutil/clearn", |b| {
-        b.iter(|| {
-            let mut reader = BufReader::new(mdl_contents.as_slice());
-            open_vensim(&mut reader).expect("open_vensim should succeed")
-        });
+        b.iter(|| open_vensim(&mdl_contents).expect("open_vensim should succeed"));
     });
 }
 
 fn bench_open_vensim_native(c: &mut Criterion) {
-    let mdl_contents = std::fs::read(CLEARN_MDL).expect("failed to read C-LEARN model");
+    let mdl_contents = std::fs::read_to_string(CLEARN_MDL).expect("failed to read C-LEARN model");
 
     c.bench_function("open_vensim_native/clearn", |b| {
-        b.iter(|| {
-            let mut reader = BufReader::new(mdl_contents.as_slice());
-            open_vensim_native(&mut reader).expect("open_vensim_native should succeed")
-        });
+        b.iter(|| open_vensim_native(&mdl_contents).expect("open_vensim_native should succeed"));
     });
 }
 
