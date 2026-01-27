@@ -5,7 +5,7 @@
 import * as React from 'react';
 
 import { List } from 'immutable';
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { LineChart, ChartSeries } from './LineChart';
 import { createEditor, Descendant, Text, Transforms } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
@@ -190,11 +190,8 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     }
   };
 
-  formatValue = (value: number | string | Array<number | string> | undefined): string => {
-    if (value === undefined) {
-      return '';
-    }
-    return typeof value === 'number' ? value.toFixed(3) : value.toString();
+  formatValue = (value: number): string => {
+    return value.toFixed(3);
   };
 
   handleTabChange = (event: React.ChangeEvent<{}>, newValue: number) => {
@@ -232,61 +229,37 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
 
     const data: Readonly<Array<Series>> | undefined = this.props.variable.data;
 
-    const lines = [];
-
     let yMin = 0;
     let yMax = 0;
-    const series: Array<any> = [];
+    const chartSeries: ChartSeries[] = [];
     if (data) {
-      let i = 0;
       const colors = brewer.Dark2;
-      for (const dataset of data) {
+      for (let i = 0; i < data.length; i++) {
+        const dataset = data[i];
         const name = data.length === 1 ? 'y' : dataset.name;
-        for (let i = 0; data && i < dataset.time.length; i++) {
-          const x = dataset.time[i];
-          const y = dataset.values[i];
-          const point: any = { x };
-          point[name] = y;
-          series.push(point);
-          if (y < yMin) {
-            yMin = y;
-          }
-          if (y > yMax) {
-            yMax = y;
-          }
+        const points: Array<{ x: number; y: number }> = [];
+        for (let j = 0; j < dataset.time.length; j++) {
+          const y = dataset.values[j];
+          points.push({ x: dataset.time[j], y });
+          if (y < yMin) yMin = y;
+          if (y > yMax) yMax = y;
         }
-        const colorOff = i % colors.length;
-        lines.push(
-          <Line
-            key={name}
-            yAxisId="1"
-            type="linear"
-            dataKey={name}
-            stroke={colors[colorOff]}
-            animationDuration={300}
-            dot={false}
-          />,
-        );
-        i++;
+        chartSeries.push({
+          name,
+          color: colors[i % colors.length],
+          points,
+        });
       }
     }
 
     yMin = Math.floor(yMin);
     yMax = Math.ceil(yMax);
 
-    const charWidth = Math.max(yMin.toFixed(0).length, yMax.toFixed(0).length);
-    const yAxisWidth = Math.max(40, 20 + charWidth * 6);
-
     // enable saving and canceling if the equation has changed
     const equationActionsEnabled =
       initialEquation !== stringFromDescendants(equationContents) ||
       initialUnits !== stringFromDescendants(this.state.unitsContents) ||
       initialDocs !== stringFromDescendants(this.state.notesContents);
-
-    const { left, right } = {
-      left: 'dataMin',
-      right: 'dataMax',
-    };
 
     let chartOrErrors;
     const errors = this.props.variable.errors;
@@ -314,22 +287,12 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
       chartOrErrors = errorList;
     } else {
       chartOrErrors = (
-        <ResponsiveContainer width="100%" height={300}>
-          <LineChart data={series}>
-            <CartesianGrid horizontal={true} vertical={false} />
-            <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
-            <YAxis
-              width={yAxisWidth}
-              allowDataOverflow={true}
-              domain={[yMin, yMax]}
-              type="number"
-              dataKey="y"
-              yAxisId="1"
-            />
-            <Tooltip formatter={this.formatValue} />
-            {lines}
-          </LineChart>
-        </ResponsiveContainer>
+        <LineChart
+          height={300}
+          series={chartSeries}
+          yDomain={[yMin, yMax]}
+          tooltipFormatter={this.formatValue}
+        />
       );
     }
 
