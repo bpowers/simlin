@@ -756,6 +756,54 @@ cargo clippy -p simlin-compat
 
 ---
 
+## Error Handling & Compatibility Goals
+
+- **No panics across FFI/WASM boundaries**: Treat every invariant failure as a
+  `Result` error, never a `panic!`/`unwrap` in production paths. Add regression
+  tests for those failure cases so behavior is explicit and stable.
+- **Invalid MDL input**: Strive to collect and report *multiple* errors rather
+  than failing fast on the first one (within reason for parser architecture).
+- **Error detail**: We do **not** need rich line/column diagnostics beyond what
+  we already track; MDL files are generated and rarely hand-edited.
+- **Preserve xmutil permissive fallbacks**: Keep xmutil-compatible behavior
+  (atoi semantics, empty-equation shims, implicit defaults, etc.), and **document
+  each fallback** where it occurs. These are often xmutil shortcomings; the
+  long-term goal is full-fidelity translation that can eventually remove shims
+  like `0+0` for empty equations.
+
+## Panic/Unwrap Reduction: Findings (Jan 2026)
+
+These are the primary production-path panic/unwrap risks discovered in the MDL
+parser/converter. (Most unwraps in this package are in unit tests.)
+
+1. **Tabbed array parsing**: `n.parse().unwrap()` can panic on malformed
+   numeric tokens in tabbed arrays (`normalizer.rs`).
+2. **Number parsing helper**: `parse_number()` panics if a numeric token fails
+   to parse (`parser_helpers.rs`).
+3. **View parsing**: `read_line().unwrap()` can panic on truncated view sections
+   (`view/mod.rs`).
+4. **Normalizer invariant**: `unreachable!("handled above")` can panic if
+   newline handling changes or a bug slips through (`normalizer.rs`).
+5. **Invariant unwraps in conversion/view processing**: `unwrap()` on internal
+   maps/indices can panic if prior passes are inconsistent
+   (`convert/stocks.rs`, `convert/variables.rs`, `view/processing.rs`).
+
+## Panic/Unwrap Reduction: Recommended Approaches
+
+1. **Unify error plumbing**: Introduce a single `MdlError` (or similar) enum
+   that wraps lexer/normalizer/parser/view/convert errors and bubble `Result`
+   all the way to `parse_mdl`, avoiding `panic!` in production code.
+2. **Parse numbers once**: Either store parsed `f64` in the lexer token, or make
+   `parse_number` return `Result<f64, NormalizerError>` and thread it through
+   LALRPOP via `ParseError::User`.
+3. **Encode invariants in types**: Use `NonZeroUsize`, `NonEmptyVec`, and small
+   helper types (e.g., `Endpoints2([EndpointInfo; 2])`) to avoid indexing/unwraps.
+4. **Typestate/validated references**: Use `ConversionContext<Phase>` or
+   validated handles (e.g., `SymbolRef`, `DimRef`) so invalid orderings are
+   impossible and lookups can return `Result` with context instead of `unwrap()`.
+5. **Replace `unwrap()` in view parsing**: Turn all `read_line().unwrap()` into
+   `ok_or(ViewError::UnexpectedEndOfInput)` and test truncated/sketch-edge cases.
+
 ## C-LEARN Equivalence Analysis
 
 The C-LEARN model (`test/xmutil_test_models/C-LEARN v77 for Vensim.mdl`) is a
