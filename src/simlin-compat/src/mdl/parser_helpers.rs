@@ -12,11 +12,18 @@ use crate::mdl::normalizer::{NormalizerError, NormalizerErrorCode};
 
 /// Parse a number string to f64.
 ///
-/// Panics if the string is not a valid number. This should never happen
-/// since the lexer only emits valid number tokens.
-pub fn parse_number(s: &str) -> f64 {
-    s.parse()
-        .unwrap_or_else(|_| panic!("lexer emitted invalid number token: {:?}", s))
+/// Returns a NormalizerError if the string is not a valid number. This should
+/// never happen since the lexer only emits valid number tokens, but we avoid
+/// panicking in production paths.
+pub fn parse_number(s: &str, start: usize, end: usize) -> Result<f64, NormalizerError> {
+    s.parse().map_err(|_| NormalizerError {
+        start,
+        end,
+        code: NormalizerErrorCode::SemanticError(format!(
+            "lexer emitted invalid number token: {:?}",
+            s
+        )),
+    })
 }
 
 /// Create an equation from LHS and expression list.
@@ -108,24 +115,26 @@ mod tests {
 
     #[test]
     fn test_parse_number_integer() {
-        assert_eq!(parse_number("42"), 42.0);
+        assert_eq!(parse_number("42", 0, 2).unwrap(), 42.0);
     }
 
     #[test]
     fn test_parse_number_float() {
-        assert_eq!(parse_number("2.5"), 2.5);
+        assert_eq!(parse_number("2.5", 0, 3).unwrap(), 2.5);
     }
 
     #[test]
     fn test_parse_number_scientific() {
-        assert_eq!(parse_number("1e6"), 1_000_000.0);
-        assert_eq!(parse_number("1.5e-3"), 0.0015);
+        assert_eq!(parse_number("1e6", 0, 3).unwrap(), 1_000_000.0);
+        assert_eq!(parse_number("1.5e-3", 0, 6).unwrap(), 0.0015);
     }
 
     #[test]
-    #[should_panic(expected = "lexer emitted invalid number token")]
     fn test_parse_number_invalid() {
-        parse_number("not_a_number");
+        let err = parse_number("not_a_number", 10, 22).unwrap_err();
+        assert_eq!(err.start, 10);
+        assert_eq!(err.end, 22);
+        assert!(matches!(err.code, NormalizerErrorCode::SemanticError(_)));
     }
 
     // ========================================================================

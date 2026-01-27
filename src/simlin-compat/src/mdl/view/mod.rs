@@ -116,7 +116,10 @@ impl<'a> ViewSectionParser<'a> {
 
             // Parse title line - check if we have one
             let title = match self.peek_line() {
-                Some(line) if line.starts_with('*') => self.read_line().unwrap()[1..].to_string(),
+                Some(line) if line.starts_with('*') => {
+                    let title_line = self.read_line().ok_or(ViewError::UnexpectedEndOfInput)?;
+                    title_line[1..].to_string()
+                }
                 Some(line) if line.starts_with("///---\\\\\\") => {
                     // No title, hit end marker - empty view section
                     break;
@@ -211,7 +214,7 @@ impl<'a> ViewSectionParser<'a> {
             }
 
             // Consume and parse the line
-            let line = self.read_line().unwrap();
+            let line = self.read_line().ok_or(ViewError::UnexpectedEndOfInput)?;
 
             match parse_element_line(line) {
                 Ok(Some((element, scratch_name))) => {

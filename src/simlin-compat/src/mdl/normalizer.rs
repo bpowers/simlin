@@ -210,9 +210,8 @@ impl<'input> TokenNormalizer<'input> {
                 Some(Ok((_, RawToken::Newline, _))) => {
                     // Newlines are ignored (just whitespace between values)
                 }
-                Some(Ok((_, RawToken::Number(n), _))) => {
-                    // RawLexer only emits valid Number tokens, so parse should never fail
-                    let val: f64 = n.parse().unwrap();
+                Some(Ok((num_start, RawToken::Number(n), num_end))) => {
+                    let val = self.parse_number_token(&n, num_start, num_end)?;
                     values.push(val);
                 }
                 Some(Ok((sign_pos, RawToken::Plus, sign_end))) => {
@@ -262,6 +261,20 @@ impl<'input> TokenNormalizer<'input> {
         }
     }
 
+    /// Parse a numeric token into f64 without panicking.
+    fn parse_number_token(
+        &self,
+        n: &str,
+        start: usize,
+        end: usize,
+    ) -> Result<f64, NormalizerError> {
+        n.parse().map_err(|_| NormalizerError {
+            start,
+            end,
+            code: NormalizerErrorCode::MalformedTabbedArray,
+        })
+    }
+
     /// Skip any Newline tokens and return the next Number value.
     /// Used in tabbed array parsing where C++ treats newline as whitespace after a sign.
     fn skip_newlines_and_get_number(&mut self) -> Result<Option<f64>, NormalizerError> {
@@ -271,8 +284,8 @@ impl<'input> TokenNormalizer<'input> {
                     // Skip newlines after sign
                     continue;
                 }
-                Some(Ok((_, RawToken::Number(n), _))) => {
-                    let val: f64 = n.parse().unwrap();
+                Some(Ok((num_start, RawToken::Number(n), num_end))) => {
+                    let val = self.parse_number_token(&n, num_start, num_end)?;
                     return Ok(Some(val));
                 }
                 Some(Ok(_)) => {
@@ -477,7 +490,10 @@ impl<'input> TokenNormalizer<'input> {
             RawToken::TheCondition => Token::TheCondition,
             RawToken::EqEnd => Token::EqEnd,
             RawToken::GroupStar(g) => Token::GroupStar(g),
-            RawToken::Newline => unreachable!("handled above"),
+            RawToken::Newline => {
+                // Newlines are ignored in the normalizer; avoid panicking if one leaks through.
+                return Ok(None);
+            }
         };
 
         Ok(Some((start, token, end)))

@@ -396,7 +396,10 @@ Power: Expr<'input> = {
 
 Atom: Expr<'input> = {
     // Numeric literal
-    <l:@L> <n:"Number"> <r:@R> => Expr::Const(parse_number(&n), Loc::new(l, r)),
+    <l:@L> <n:"Number"> <r:@R> =>? {
+        let val = parse_number(&n, l, r)?;
+        Ok(Expr::Const(val, Loc::new(l, r)))
+    },
 
     // :NA: constant
     <l:@L> ":NA:" <r:@R> => Expr::Na(Loc::new(l, r)),
@@ -493,9 +496,18 @@ XYTableVec: LookupTable = {
 
 /// Number with optional sign (for lookup tables, NOT full expressions)
 Number: f64 = {
-    <n:"Number"> => parse_number(&n),
-    "-" <n:"Number"> => -parse_number(&n),
-    "+" <n:"Number"> => parse_number(&n),
+    <l:@L> <n:"Number"> <r:@R> =>? {
+        let val = parse_number(&n, l, r)?;
+        Ok(val)
+    },
+    <l:@L> "-" <n:"Number"> <r:@R> =>? {
+        let val = parse_number(&n, l, r)?;
+        Ok(-val)
+    },
+    <l:@L> "+" <n:"Number"> <r:@R> =>? {
+        let val = parse_number(&n, l, r)?;
+        Ok(val)
+    },
 };
 
 // ============================================================================
