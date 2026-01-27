@@ -6,7 +6,7 @@
 const config = {
   preset: 'ts-jest',
   testEnvironment: 'jsdom',
-  testMatch: ['<rootDir>/tests/**/*.test.ts'],
+  testMatch: ['<rootDir>/tests/**/*.test.ts', '<rootDir>/tests/**/*.test.tsx'],
   moduleFileExtensions: ['ts', 'tsx', 'js'],
   moduleNameMapper: {
     '\\.css$': '<rootDir>/tests/css-module-stub.ts',

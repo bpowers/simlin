@@ -1,0 +1,36 @@
+.container {
+  position: relative;
+  width: 100%;
+}
+
+.tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  z-index: 10;
+}
+
+.tooltipHeader {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.tooltipRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tooltipSwatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
+}

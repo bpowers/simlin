@@ -91,6 +91,7 @@ const jestConfig = {
     globals: {
       describe: 'readonly',
       it: 'readonly',
+      test: 'readonly',
       expect: 'readonly',
       beforeEach: 'readonly',
       afterEach: 'readonly',
