@@ -120,9 +120,14 @@ function printFileSizesAfterBuild(
     for (const asset of assetList) {
       if (!canReadAsset(asset.name)) continue;
       const filePath = path.join(buildFolder, asset.name);
-      if (!fs.existsSync(filePath)) continue;
 
-      const fileContents = fs.readFileSync(filePath);
+      let fileContents;
+      try {
+        fileContents = fs.readFileSync(filePath);
+      } catch (err) {
+        if (err.code === 'ENOENT') continue;
+        throw err;
+      }
       const size = gzipSize(fileContents);
       const previousSize = sizes[removeFileNameHash(asset.name)];
       let difference = '';
@@ -149,10 +154,12 @@ function printFileSizesAfterBuild(
 
   assets.sort((a, b) => b.size - a.size);
 
+  let hasOversizedAsset = false;
   for (const asset of assets) {
     const isMainBundle = asset.name.indexOf('main.') === 0;
     const maxRecommendedSize = isMainBundle ? maxBundleGzipSize : maxChunkGzipSize;
     const isLarge = maxRecommendedSize && asset.size > maxRecommendedSize;
+    if (isLarge) hasOversizedAsset = true;
 
     console.log(
       '  ' +
@@ -163,7 +170,7 @@ function printFileSizesAfterBuild(
     );
   }
 
-  if (assets.some(a => a.size > maxBundleGzipSize)) {
+  if (hasOversizedAsset) {
     console.log();
     console.log(pc.yellow('The bundle size is significantly larger than recommended.'));
   }
@@ -173,4 +180,9 @@ module.exports = {
   checkRequiredFiles,
   measureFileSizesBeforeBuild,
   printFileSizesAfterBuild,
+  // Exported for testing only:
+  _formatBytes: formatBytes,
+  _canReadAsset: canReadAsset,
+  _removeFileNameHash: removeFileNameHash,
+  _walkDir: walkDir,
 };

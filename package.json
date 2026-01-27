@@ -49,7 +49,7 @@
     "clean": "yarn workspaces run clean",
     "deploy": "export NODE_ENV=production && yarn clean && yarn build && yarn workspace @system-dynamics/app deploy && gcloud app deploy ./.app.prod.yaml && yarn workspace @system-dynamics/app deploy-clean",
     "start": "node src/server/lib",
-    "test": "yarn workspace @system-dynamics/core test && yarn workspace @system-dynamics/diagram test && yarn workspace @system-dynamics/engine2 test && yarn workspace @system-dynamics/server test",
+    "test": "yarn workspace @system-dynamics/core test && yarn workspace @system-dynamics/diagram test && yarn workspace @system-dynamics/engine2 test && yarn workspace @system-dynamics/app test && yarn workspace @system-dynamics/server test",
     "test:ui": "playwright test",
     "test:ui:ui": "playwright test --ui"
   },
