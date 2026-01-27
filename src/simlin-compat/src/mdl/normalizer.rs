@@ -13,7 +13,7 @@
 use std::borrow::Cow;
 use std::iter::Peekable;
 
-use crate::mdl::builtins::{is_builtin, is_tabbed_array, is_with_lookup, to_lower_space};
+use crate::mdl::builtins::{SymbolClass, classify_symbol};
 use crate::mdl::lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
 
 /// Normalized tokens ready for parsing.
@@ -161,30 +161,6 @@ impl<'input> TokenNormalizer<'input> {
             source: input,
             offset,
         }
-    }
-
-    /// Check if a symbol is a GET XLS/VDF function and return the prefix if so.
-    /// Uses to_lower_space canonicalization so "GET_XLS", "GET  XLS", etc. all match.
-    fn is_get_xls_or_vdf(name: &str) -> Option<&'static str> {
-        let canonical = to_lower_space(name);
-        if let Some(rest) = canonical.strip_prefix("get ") {
-            if rest.starts_with("123") {
-                return Some("{GET 123");
-            }
-            if rest.starts_with("data") {
-                return Some("{GET DATA");
-            }
-            if rest.starts_with("direct") {
-                return Some("{GET DIRECT");
-            }
-            if rest.starts_with("vdf") {
-                return Some("{GET VDF");
-            }
-            if rest.starts_with("xls") {
-                return Some("{GET XLS");
-            }
-        }
-        None
     }
 
     /// Read a TABBED ARRAY construct.
@@ -432,23 +408,17 @@ impl<'input> TokenNormalizer<'input> {
                     // In units mode, symbols become UnitsSymbol
                     Token::UnitsSymbol(name)
                 } else if self.section == Section::Equation {
-                    // Check for WITH LOOKUP (any spacing variant)
-                    if is_with_lookup(&name) {
-                        Token::WithLookup
-                    }
-                    // Check for GET XLS/VDF
-                    else if let Some(prefix) = Self::is_get_xls_or_vdf(&name) {
-                        return Ok(Some(self.read_get_xls(prefix, start)?));
-                    }
-                    // Check for TABBED ARRAY
-                    else if is_tabbed_array(&name) {
-                        return Ok(Some(self.read_tabbed_array(start)?));
-                    }
-                    // Check for builtin function
-                    else if is_builtin(&name) {
-                        Token::Function(name)
-                    } else {
-                        Token::Symbol(name)
+                    // Classify the symbol with a single canonicalization
+                    match classify_symbol(&name) {
+                        SymbolClass::WithLookup => Token::WithLookup,
+                        SymbolClass::GetXls(prefix) => {
+                            return Ok(Some(self.read_get_xls(prefix, start)?));
+                        }
+                        SymbolClass::TabbedArray => {
+                            return Ok(Some(self.read_tabbed_array(start)?));
+                        }
+                        SymbolClass::Builtin => Token::Function(name),
+                        SymbolClass::Regular => Token::Symbol(name),
                     }
                 } else {
                     // In comment section, just pass through

@@ -38,22 +38,11 @@ pub fn to_xmile(project: &Project) -> Result<String> {
 }
 
 #[cfg(feature = "xmutil")]
-pub fn open_vensim(reader: &mut dyn BufRead) -> Result<Project> {
+pub fn open_vensim(contents: &str) -> Result<Project> {
     use simlin_core::common::{Error, ErrorCode, ErrorKind};
     use xmutil::convert_vensim_mdl;
 
-    let mut contents_buf: Vec<u8> = vec![];
-    reader
-        .read_until(0, &mut contents_buf)
-        .map_err(|_err| Error::new(ErrorKind::Import, ErrorCode::VensimConversion, None))?;
-    let contents: String = String::from_utf8(contents_buf).map_err(|_err| {
-        Error::new(
-            ErrorKind::Import,
-            ErrorCode::VensimConversion,
-            Some("Invalid UTF-8 in MDL file".to_owned()),
-        )
-    })?;
-    let (xmile_src, logs) = convert_vensim_mdl(&contents, false);
+    let (xmile_src, logs) = convert_vensim_mdl(contents, false);
     if xmile_src.is_none() {
         return Err(Error::new(
             ErrorKind::Import,
@@ -69,8 +58,8 @@ pub fn open_vensim(reader: &mut dyn BufRead) -> Result<Project> {
 /// Parse a Vensim MDL file directly using the native Rust parser.
 ///
 /// This bypasses the xmutil C++ dependency and converts MDL directly to datamodel.
-pub fn open_vensim_native(reader: &mut dyn BufRead) -> Result<Project> {
-    mdl::parse_mdl(reader)
+pub fn open_vensim_native(contents: &str) -> Result<Project> {
+    mdl::parse_mdl(contents)
 }
 
 pub fn open_xmile(reader: &mut dyn BufRead) -> Result<Project> {

@@ -35,8 +35,6 @@ pub use lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
 pub use normalizer::{NormalizerError, NormalizerErrorCode, Token, TokenNormalizer};
 pub use reader::{EquationReader, ReaderError};
 
-use std::io::BufRead;
-
 use simlin_core::datamodel::Project;
 use simlin_core::{Error, ErrorCode, ErrorKind, Result};
 
@@ -44,21 +42,10 @@ use convert::convert_mdl;
 
 /// Parse a Vensim MDL file into a Project.
 ///
-/// This is the main entry point for MDL parsing. It reads the entire MDL file,
-/// parses it, and converts it to the internal datamodel representation.
-pub fn parse_mdl(reader: &mut dyn BufRead) -> Result<Project> {
-    // Read the entire source into a string
-    let mut source = String::new();
-    reader.read_to_string(&mut source).map_err(|e| {
-        Error::new(
-            ErrorKind::Import,
-            ErrorCode::Generic,
-            Some(format!("Failed to read MDL file: {}", e)),
-        )
-    })?;
-
-    // Convert using the new native parser
-    convert_mdl(&source).map_err(|e| {
+/// This is the main entry point for MDL parsing. It takes the MDL source as a
+/// string and converts it to the internal datamodel representation.
+pub fn parse_mdl(source: &str) -> Result<Project> {
+    convert_mdl(source).map_err(|e| {
         Error::new(
             ErrorKind::Import,
             ErrorCode::Generic,
@@ -70,17 +57,15 @@ pub fn parse_mdl(reader: &mut dyn BufRead) -> Result<Project> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::BufReader;
 
     #[test]
     fn test_parse_mdl_simple() {
-        let mdl = b"x = 5
+        let mdl = "x = 5
 ~ Units
 ~ A constant |
 \\\\\\---///
 ";
-        let mut reader = BufReader::new(&mdl[..]);
-        let result = parse_mdl(&mut reader);
+        let result = parse_mdl(mdl);
         assert!(result.is_ok(), "parse_mdl should succeed: {:?}", result);
         let project = result.unwrap();
         assert_eq!(project.models.len(), 1);
@@ -88,7 +73,7 @@ mod tests {
 
     #[test]
     fn test_parse_mdl_stock() {
-        let mdl = b"Stock = INTEG(inflow - outflow, 100)
+        let mdl = "Stock = INTEG(inflow - outflow, 100)
 ~ Units
 ~ A stock |
 inflow = 10
@@ -99,8 +84,7 @@ outflow = 5
 ~ Outflow rate |
 \\\\\\---///
 ";
-        let mut reader = BufReader::new(&mdl[..]);
-        let result = parse_mdl(&mut reader);
+        let result = parse_mdl(mdl);
         assert!(result.is_ok(), "parse_mdl should succeed: {:?}", result);
         let project = result.unwrap();
         assert_eq!(project.models.len(), 1);

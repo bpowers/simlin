@@ -124,6 +124,49 @@ fn is_mdl_whitespace(c: char) -> bool {
     c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }
 
+/// Build an owned String from a source slice, stripping line continuation
+/// sequences (backslash + newline + subsequent whitespace).
+/// This matches the behavior of `RawLexer::bump()` which skips `\` followed
+/// by `\n` or `\r` and then all subsequent whitespace characters.
+fn strip_continuations(source: &str) -> String {
+    let mut result = String::with_capacity(source.len());
+    let mut chars = source.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // Peek at next char for line continuation
+            let mut peek = chars.clone();
+            if let Some(next) = peek.next()
+                && (next == '\n' || next == '\r')
+            {
+                // Line continuation: skip newline and subsequent whitespace
+                chars = peek;
+                if next == '\r' {
+                    let mut peek2 = chars.clone();
+                    if let Some('\n') = peek2.next() {
+                        chars = peek2;
+                    }
+                }
+                // Skip whitespace after continuation
+                loop {
+                    let peek3 = chars.clone();
+                    let mut peek3_iter = peek3;
+                    match peek3_iter.next() {
+                        Some(ws) if ws == ' ' || ws == '\t' || ws == '\r' || ws == '\n' => {
+                            chars = peek3_iter;
+                        }
+                        _ => break,
+                    }
+                }
+                continue;
+            }
+            result.push(c);
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 impl<'input> RawLexer<'input> {
     pub fn new(input: &'input str) -> Self {
         let mut lexer = RawLexer {
@@ -214,12 +257,11 @@ impl<'input> RawLexer<'input> {
         Some(Ok((i, tok, i + len)))
     }
 
-    /// Consume the current character and add to buffer, returning true if there was a line continuation
-    fn consume_char(&mut self, buffer: &mut String) -> bool {
+    /// Advance past the current character without buffering, returning true if
+    /// a line continuation was crossed (position gap detected).
+    fn advance_char(&mut self) -> bool {
         if let Some((old_pos, c)) = self.lookahead {
-            buffer.push(c);
             self.bump();
-            // Check if we skipped over a continuation (position jump > 1)
             if let Some((new_pos, _)) = self.lookahead {
                 return new_pos > old_pos + c.len_utf8();
             }
@@ -228,36 +270,35 @@ impl<'input> RawLexer<'input> {
     }
 
     fn number(&mut self, idx0: usize) -> Spanned<RawToken<'input>> {
-        let mut buffer = String::new();
         let mut had_continuation = false;
 
         let starts_with_dot = matches!(self.lookahead, Some((_, '.')));
 
         if starts_with_dot {
-            had_continuation |= self.consume_char(&mut buffer);
+            had_continuation |= self.advance_char();
             while matches!(self.lookahead, Some((_, c)) if c.is_ascii_digit()) {
-                had_continuation |= self.consume_char(&mut buffer);
+                had_continuation |= self.advance_char();
             }
         } else {
             while matches!(self.lookahead, Some((_, c)) if c.is_ascii_digit()) {
-                had_continuation |= self.consume_char(&mut buffer);
+                had_continuation |= self.advance_char();
             }
             if matches!(self.lookahead, Some((_, '.'))) {
-                had_continuation |= self.consume_char(&mut buffer);
+                had_continuation |= self.advance_char();
                 while matches!(self.lookahead, Some((_, c)) if c.is_ascii_digit()) {
-                    had_continuation |= self.consume_char(&mut buffer);
+                    had_continuation |= self.advance_char();
                 }
             }
         }
 
         // Exponent
         if matches!(self.lookahead, Some((_, c)) if c == 'e' || c == 'E') {
-            had_continuation |= self.consume_char(&mut buffer);
+            had_continuation |= self.advance_char();
             if matches!(self.lookahead, Some((_, c)) if c == '+' || c == '-') {
-                had_continuation |= self.consume_char(&mut buffer);
+                had_continuation |= self.advance_char();
             }
             while matches!(self.lookahead, Some((_, c)) if c.is_ascii_digit()) {
-                had_continuation |= self.consume_char(&mut buffer);
+                had_continuation |= self.advance_char();
             }
         }
 
@@ -267,7 +308,7 @@ impl<'input> RawLexer<'input> {
         };
 
         let token_value = if had_continuation {
-            Cow::Owned(buffer)
+            Cow::Owned(strip_continuations(&self.text[idx0..end]))
         } else {
             Cow::Borrowed(&self.text[idx0..end])
         };
@@ -286,12 +327,11 @@ impl<'input> RawLexer<'input> {
     }
 
     fn symbol(&mut self, idx0: usize) -> Spanned<RawToken<'input>> {
-        let mut buffer = String::new();
         let mut had_continuation = false;
 
         loop {
             while matches!(self.lookahead, Some((_, c)) if Self::is_symbol_char(c)) {
-                had_continuation |= self.consume_char(&mut buffer);
+                had_continuation |= self.advance_char();
             }
 
             // Check for escaped underscore: \_ is a literal part of the identifier
@@ -299,9 +339,9 @@ impl<'input> RawLexer<'input> {
                 let saved = self.lookahead;
                 self.bump_raw();
                 if let Some((_, '_')) = self.lookahead {
-                    buffer.push('\\');
-                    had_continuation = true;
-                    self.consume_char(&mut buffer);
+                    // Escaped underscore: advance past _ and continue.
+                    // \_ is contiguous in source text, so no continuation flag needed.
+                    had_continuation |= self.advance_char();
                     continue;
                 }
                 // Not \_ -- restore lookahead
@@ -318,37 +358,49 @@ impl<'input> RawLexer<'input> {
             None => self.text.len(),
         };
 
-        // Strip trailing spaces, tabs, and underscores (but not escaped underscores like \_)
-        while buffer.ends_with(' ')
-            || buffer.ends_with('\t')
-            || (buffer.ends_with('_') && !buffer.ends_with("\\_"))
-        {
-            buffer.pop();
+        if had_continuation {
+            // Continuation path: strip continuations first, then trim trailing chars
+            let mut buffer = strip_continuations(&self.text[idx0..end]);
+            while buffer.ends_with(' ')
+                || buffer.ends_with('\t')
+                || (buffer.ends_with('_') && !buffer.ends_with("\\_"))
+            {
+                buffer.pop();
+            }
+            (idx0, Symbol(Cow::Owned(buffer)), end)
+        } else {
+            // Fast path: compute trimmed_end by scanning backward in source text
+            let mut trimmed_end = end;
+            loop {
+                if trimmed_end <= idx0 {
+                    break;
+                }
+                let last = self.text.as_bytes()[trimmed_end - 1];
+                if last == b' ' || last == b'\t' {
+                    trimmed_end -= 1;
+                } else if last == b'_' {
+                    // Check for escaped underscore: \_ should NOT be trimmed
+                    if trimmed_end >= idx0 + 2 && self.text.as_bytes()[trimmed_end - 2] == b'\\' {
+                        break;
+                    }
+                    trimmed_end -= 1;
+                } else {
+                    break;
+                }
+            }
+            (
+                idx0,
+                Symbol(Cow::Borrowed(&self.text[idx0..trimmed_end])),
+                trimmed_end,
+            )
         }
-
-        // Calculate trimmed_end for span
-        let trimmed_len = buffer.len();
-        let trimmed_end = if had_continuation {
-            end // When there's continuation, span extends to current position
-        } else {
-            idx0 + trimmed_len
-        };
-
-        let token_value = if had_continuation {
-            Cow::Owned(buffer)
-        } else {
-            Cow::Borrowed(&self.text[idx0..idx0 + trimmed_len])
-        };
-
-        (idx0, Symbol(token_value), trimmed_end)
     }
 
     fn quoted_symbol(&mut self, idx0: usize) -> Result<Spanned<RawToken<'input>>, LexError> {
-        let mut buffer = String::new();
         let mut had_continuation = false;
 
         // Consume opening quote
-        had_continuation |= self.consume_char(&mut buffer);
+        had_continuation |= self.advance_char();
 
         let mut len = 1;
         loop {
@@ -357,10 +409,10 @@ impl<'input> RawLexer<'input> {
                     return error(LexErrorCode::UnclosedQuotedSymbol, idx0, self.text.len());
                 }
                 Some((idx, '"')) => {
-                    had_continuation |= self.consume_char(&mut buffer);
+                    had_continuation |= self.advance_char();
                     let end = idx + 1;
                     let token_value = if had_continuation {
-                        Cow::Owned(buffer)
+                        Cow::Owned(strip_continuations(&self.text[idx0..end]))
                     } else {
                         Cow::Borrowed(&self.text[idx0..end])
                     };
@@ -368,14 +420,14 @@ impl<'input> RawLexer<'input> {
                 }
                 Some((_, '\\')) => {
                     // Escape sequence - consume backslash and following char
-                    had_continuation |= self.consume_char(&mut buffer);
+                    had_continuation |= self.advance_char();
                     if self.lookahead.is_some() {
-                        had_continuation |= self.consume_char(&mut buffer);
+                        had_continuation |= self.advance_char();
                     }
                     len += 2;
                 }
                 Some(_) => {
-                    had_continuation |= self.consume_char(&mut buffer);
+                    had_continuation |= self.advance_char();
                     len += 1;
                 }
             }
@@ -386,27 +438,26 @@ impl<'input> RawLexer<'input> {
     }
 
     fn literal(&mut self, idx0: usize) -> Result<Spanned<RawToken<'input>>, LexError> {
-        let mut buffer = String::new();
         let mut had_continuation = false;
 
         // Consume opening quote
-        had_continuation |= self.consume_char(&mut buffer);
+        had_continuation |= self.advance_char();
 
         loop {
             match self.lookahead {
                 None => return error(LexErrorCode::UnclosedLiteral, idx0, self.text.len()),
                 Some((idx, '\'')) => {
-                    had_continuation |= self.consume_char(&mut buffer);
+                    had_continuation |= self.advance_char();
                     let end = idx + 1;
                     let token_value = if had_continuation {
-                        Cow::Owned(buffer)
+                        Cow::Owned(strip_continuations(&self.text[idx0..end]))
                     } else {
                         Cow::Borrowed(&self.text[idx0..end])
                     };
                     return Ok((idx0, Literal(token_value), end));
                 }
                 Some(_) => {
-                    had_continuation |= self.consume_char(&mut buffer);
+                    had_continuation |= self.advance_char();
                 }
             }
         }

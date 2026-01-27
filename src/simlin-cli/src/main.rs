@@ -259,14 +259,17 @@ fn main() {
         }
     };
     let file_path = args.path.unwrap_or_else(|| "/dev/stdin".to_string());
-    let file = File::open(&file_path).unwrap();
-    let mut reader = BufReader::new(file);
 
     let project = if args.is_vensim {
-        open_vensim(&mut reader)
+        let contents = std::fs::read_to_string(&file_path).unwrap();
+        open_vensim(&contents)
     } else if args.is_pb_input {
+        let file = File::open(&file_path).unwrap();
+        let mut reader = BufReader::new(file);
         open_binary(&mut reader)
     } else {
+        let file = File::open(&file_path).unwrap();
+        let mut reader = BufReader::new(file);
         open_xmile(&mut reader)
     };
 

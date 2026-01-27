@@ -147,8 +147,11 @@ impl<'input> EquationReader<'input> {
         let remaining = &self.source[self.position..];
         let mut normalizer = TokenNormalizer::with_offset(remaining, self.position);
 
-        // Collect tokens into a buffer to check for EOF before parsing
-        let mut tokens: Vec<Result<(usize, Token<'input>, usize), NormalizerError>> = Vec::new();
+        // Collect tokens into a buffer to check for EOF before parsing.
+        // Pre-allocate capacity 32 to avoid repeated Vec doublings: most equations
+        // produce fewer than 32 tokens before the second tilde/pipe.
+        let mut tokens: Vec<Result<(usize, Token<'input>, usize), NormalizerError>> =
+            Vec::with_capacity(32);
         let mut tilde_count = 0;
         let mut last_end = self.position;
         // Track if we're collecting a :MACRO: header (need to read through closing paren)

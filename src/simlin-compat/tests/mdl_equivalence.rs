@@ -18,7 +18,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::BufReader;
 
 use simlin_compat::{open_vensim, open_vensim_native};
 use simlin_core::canonicalize;
@@ -608,14 +607,12 @@ fn test_single_mdl(mdl_path: &str) {
         fs::read_to_string(&full_path).unwrap_or_else(|e| panic!("Failed to read {mdl_path}: {e}"));
 
     // Parse via xmutil (MDL -> XMILE -> datamodel)
-    let mut r1 = BufReader::new(content.as_bytes());
     let xmutil_project =
-        open_vensim(&mut r1).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
+        open_vensim(&content).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
 
     // Parse via native (MDL -> datamodel directly)
-    let mut r2 = BufReader::new(content.as_bytes());
     let native_project =
-        open_vensim_native(&mut r2).unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
+        open_vensim_native(&content).unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
 
     // Normalize both projects
     let xmutil_norm = normalize_project(xmutil_project);
@@ -642,9 +639,8 @@ fn test_clearn_xmutil() {
         fs::read_to_string(&full_path).unwrap_or_else(|e| panic!("Failed to read {mdl_path}: {e}"));
 
     // Parse via xmutil (MDL -> XMILE -> datamodel) -- this segfaults in xmutil's C++ code
-    let mut reader = BufReader::new(content.as_bytes());
     let _project =
-        open_vensim(&mut reader).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
+        open_vensim(&content).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
 }
 
 /// Verify the native Rust parser can handle the C-LEARN model (no xmutil dependency).
@@ -657,9 +653,8 @@ fn test_clearn_native() {
         fs::read_to_string(&full_path).unwrap_or_else(|e| panic!("Failed to read {mdl_path}: {e}"));
 
     // Parse via native (MDL -> datamodel directly)
-    let mut reader = BufReader::new(content.as_bytes());
-    let _project = open_vensim_native(&mut reader)
-        .unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
+    let _project =
+        open_vensim_native(&content).unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
 }
 
 // ===== Non-panicking comparison infrastructure =====
@@ -968,13 +963,11 @@ fn test_clearn_equivalence() {
     let content =
         fs::read_to_string(&full_path).unwrap_or_else(|e| panic!("Failed to read {mdl_path}: {e}"));
 
-    let mut r1 = BufReader::new(content.as_bytes());
     let xmutil_project =
-        open_vensim(&mut r1).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
+        open_vensim(&content).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
 
-    let mut r2 = BufReader::new(content.as_bytes());
     let native_project =
-        open_vensim_native(&mut r2).unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
+        open_vensim_native(&content).unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
 
     let xmutil_norm = normalize_project(xmutil_project);
     let native_norm = normalize_project(native_project);
