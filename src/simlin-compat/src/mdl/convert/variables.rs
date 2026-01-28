@@ -14,7 +14,7 @@ use simlin_core::datamodel::{
 use crate::mdl::view;
 
 use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, FullEquation, Lhs, Subscript};
-use crate::mdl::builtins::to_lower_space;
+use crate::mdl::builtins::{eq_lower_space, to_lower_space};
 use crate::mdl::xmile_compat::space_to_underbar;
 
 use super::ConversionContext;
@@ -78,7 +78,7 @@ impl<'input> ConversionContext<'input> {
         }
 
         // Sort variables by canonical name for deterministic output
-        variables.sort_by_key(|a| canonical_name(a.get_ident()));
+        variables.sort_by_cached_key(|a| canonical_name(a.get_ident()));
 
         // Build groups with unique names
         let groups = self.build_groups();
@@ -877,7 +877,7 @@ impl<'input> ConversionContext<'input> {
             let mut found = false;
             for dim in &self.dimensions {
                 // Compare canonicalized names for case-insensitive matching
-                if canonical_name(&dim.name) == canonical_dim
+                if eq_lower_space(&dim.name, &canonical_dim)
                     && let DimensionElements::Named(elements) = &dim.elements
                 {
                     dim_elements.push(elements.clone());
@@ -904,7 +904,7 @@ impl<'input> ConversionContext<'input> {
     /// Extract the initial value expression from an INTEG call.
     fn extract_integ_initial<'a>(&self, expr: &'a Expr<'input>) -> Option<&'a Expr<'input>> {
         match expr {
-            Expr::App(name, _, args, CallKind::Builtin, _) if to_lower_space(name) == "integ" => {
+            Expr::App(name, _, args, CallKind::Builtin, _) if eq_lower_space(name, "integ") => {
                 // INTEG(rate, initial) - return the initial value
                 if args.len() >= 2 {
                     return Some(&args[1]);
@@ -924,7 +924,7 @@ impl<'input> ConversionContext<'input> {
     ) -> Option<(&'a Expr<'input>, &'a Expr<'input>)> {
         match expr {
             Expr::App(name, _, args, CallKind::Builtin, _)
-                if to_lower_space(name) == "active initial" =>
+                if eq_lower_space(name, "active initial") =>
             {
                 if args.len() >= 2 {
                     return Some((&args[0], &args[1]));

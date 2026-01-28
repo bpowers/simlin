@@ -15,7 +15,7 @@ use super::helpers::{
 };
 use super::types::{SyntheticFlow, VariableType};
 use crate::mdl::ast::{BinaryOp, CallKind, Equation as MdlEquation, Expr, FullEquation, Subscript};
-use crate::mdl::builtins::to_lower_space;
+use crate::mdl::builtins::eq_lower_space;
 
 impl<'input> ConversionContext<'input> {
     /// Pass 3: Mark variable types based on equation content.
@@ -114,11 +114,10 @@ impl<'input> ConversionContext<'input> {
     fn scan_expr_for_extrapolate(&mut self, expr: &Expr<'_>) {
         match expr {
             Expr::App(name, _, args, CallKind::Builtin, _) => {
-                let canonical = to_lower_space(name);
                 // Only TABXL marks the lookup table as extrapolating.
                 // LOOKUP EXTRAPOLATE performs extrapolation at call time without
                 // permanently marking the table (matching xmutil behavior).
-                if canonical == "tabxl" && !args.is_empty() {
+                if eq_lower_space(name, "tabxl") && !args.is_empty() {
                     // First arg must be a simple variable reference to a lookup
                     if let Expr::Var(lookup_name, _, _) = &args[0] {
                         self.extrapolate_lookups.insert(canonical_name(lookup_name));
@@ -514,7 +513,7 @@ impl<'input> ConversionContext<'input> {
 
     fn extract_integ_rate_expr<'a>(&self, expr: &'a Expr<'input>) -> Option<&'a Expr<'input>> {
         match expr {
-            Expr::App(name, _, args, CallKind::Builtin, _) if to_lower_space(name) == "integ" => {
+            Expr::App(name, _, args, CallKind::Builtin, _) if eq_lower_space(name, "integ") => {
                 if !args.is_empty() {
                     return Some(&args[0]);
                 }
@@ -540,7 +539,7 @@ impl<'input> ConversionContext<'input> {
     /// Extract flows from an INTEG expression's rate argument.
     fn extract_flows_from_integ(&self, expr: &Expr<'_>) -> Option<(Vec<String>, Vec<String>)> {
         match expr {
-            Expr::App(name, _, args, CallKind::Builtin, _) if to_lower_space(name) == "integ" => {
+            Expr::App(name, _, args, CallKind::Builtin, _) if eq_lower_space(name, "integ") => {
                 if !args.is_empty() {
                     return self.analyze_rate_expression(&args[0]);
                 }
@@ -660,7 +659,7 @@ impl<'input> ConversionContext<'input> {
     /// Check if an expression is A FUNCTION OF.
     fn is_afo_expr(&self, expr: &Expr<'_>) -> bool {
         match expr {
-            Expr::App(name, _, _, CallKind::Builtin, _) => to_lower_space(name) == "a function of",
+            Expr::App(name, _, _, CallKind::Builtin, _) => eq_lower_space(name, "a function of"),
             Expr::Paren(inner, _) => self.is_afo_expr(inner),
             _ => false,
         }

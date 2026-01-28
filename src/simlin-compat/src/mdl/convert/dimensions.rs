@@ -12,6 +12,7 @@ use crate::mdl::xmile_compat::space_to_underbar;
 use super::ConversionContext;
 use super::helpers::{canonical_name, expand_range};
 use super::types::ConvertError;
+use crate::mdl::builtins::eq_lower_space;
 
 impl<'input> ConversionContext<'input> {
     /// Pass 2: Build dimensions from subscript definitions.
@@ -91,7 +92,7 @@ impl<'input> ConversionContext<'input> {
             if let Some(target_dim) = self
                 .dimensions
                 .iter()
-                .find(|d| canonical_name(&d.name) == *dst)
+                .find(|d| eq_lower_space(&d.name, dst))
             {
                 let alias = Dimension {
                     name: space_to_underbar(src),
@@ -132,10 +133,11 @@ impl<'input> ConversionContext<'input> {
 
     /// Get the maps_to target for a dimension from its SubscriptDef.
     fn get_dimension_mapping(&self, name: &str) -> Option<String> {
+        let name_canonical = canonical_name(name);
         for item in &self.items {
             if let MdlItem::Equation(eq) = item
                 && let MdlEquation::SubscriptDef(def_name, def) = &eq.equation
-                && canonical_name(def_name) == canonical_name(name)
+                && eq_lower_space(def_name, &name_canonical)
             {
                 return def.mapping.as_ref().and_then(|m| {
                     if m.entries.len() != 1 {
@@ -237,7 +239,7 @@ impl<'input> ConversionContext<'input> {
     pub(super) fn get_formatted_dimension_name(&self, canonical: &str) -> String {
         // Find the original dimension name and format it
         for dim in &self.dimensions {
-            if canonical_name(&dim.name) == canonical {
+            if eq_lower_space(&dim.name, canonical) {
                 return space_to_underbar(&dim.name);
             }
         }

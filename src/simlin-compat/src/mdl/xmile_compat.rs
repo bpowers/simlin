@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::mdl::ast::{BinaryOp, CallKind, Expr, LookupTable, Subscript, UnaryOp};
-use crate::mdl::builtins::to_lower_space;
+use crate::mdl::builtins::{eq_lower_space, to_lower_space};
 
 /// Context for per-element equation substitution.
 /// Maps generic LHS dimension names to specific element names for the
@@ -117,8 +117,7 @@ impl XmileFormatter {
         // Detect self-references: if this variable is the LHS variable, emit "self"
         // instead of the variable name, matching xmutil's Variable::OutputComputable behavior.
         let formatted_name = if let Some(ctx) = ctx {
-            let canonical = to_lower_space(name);
-            if !ctx.lhs_var_canonical.is_empty() && canonical == ctx.lhs_var_canonical {
+            if !ctx.lhs_var_canonical.is_empty() && eq_lower_space(name, &ctx.lhs_var_canonical) {
                 "self".to_string()
             } else {
                 self.format_name(name)
@@ -182,17 +181,22 @@ impl XmileFormatter {
     }
 
     fn format_name(&self, name: &str) -> String {
-        let canonical = to_lower_space(name);
-
-        // Handle special TIME-related names
+        // Handle special TIME-related names without allocating
         if self.use_xmile_time_names {
-            match canonical.as_str() {
-                "time" => return "TIME".to_string(),
-                "initial time" => return "STARTTIME".to_string(),
-                "final time" => return "STOPTIME".to_string(),
-                "time step" => return "DT".to_string(),
-                "saveper" => return "SAVEPER".to_string(),
-                _ => {}
+            if eq_lower_space(name, "time") {
+                return "TIME".to_string();
+            }
+            if eq_lower_space(name, "initial time") {
+                return "STARTTIME".to_string();
+            }
+            if eq_lower_space(name, "final time") {
+                return "STOPTIME".to_string();
+            }
+            if eq_lower_space(name, "time step") {
+                return "DT".to_string();
+            }
+            if eq_lower_space(name, "saveper") {
+                return "SAVEPER".to_string();
             }
         }
 

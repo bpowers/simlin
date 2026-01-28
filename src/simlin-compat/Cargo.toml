@@ -30,10 +30,14 @@ ssh-key = "0.6"
 base64 = "0.22"
 serde_json = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
+dhat = "0.3.3"
 
 [[example]]
 name = "profile_clearn"
 required-features = ["xmutil"]
+
+[[example]]
+name = "dhat_profile"
 
 [[bench]]
 name = "clearn_parse"

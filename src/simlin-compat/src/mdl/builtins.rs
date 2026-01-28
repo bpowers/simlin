@@ -10,6 +10,24 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
+/// Returns true if `c` is a whitespace character for `to_lower_space` purposes.
+#[inline(always)]
+fn is_tls_whitespace(c: char) -> bool {
+    c == ' ' || c == '_' || c == '\t' || c == '\n' || c == '\r'
+}
+
+/// Strip surrounding quotes from a string if present, returning the inner slice.
+#[inline]
+fn strip_quotes(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    if len > 1 && bytes[0] == b'"' && bytes[len - 1] == b'"' {
+        &s[1..len - 1]
+    } else {
+        s
+    }
+}
+
 /// Canonicalize a name using XMUtil's ToLowerSpace algorithm.
 ///
 /// This follows the C++ implementation in `SymbolNameSpace.cpp:81-123`:
@@ -22,22 +40,14 @@ use std::sync::LazyLock;
 /// 4. Strip trailing whitespace
 /// 5. Lowercase the result
 pub fn to_lower_space(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-
-    // Step 1: Strip surrounding quotes if present
-    let s = if len > 1 && bytes[0] == b'"' && bytes[len - 1] == b'"' {
-        &s[1..len - 1]
-    } else {
-        s
-    };
+    let s = strip_quotes(s);
 
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
 
     // Step 2: Skip leading whitespace
     while let Some(&c) = chars.peek() {
-        if c != ' ' && c != '_' && c != '\t' && c != '\n' && c != '\r' {
+        if !is_tls_whitespace(c) {
             break;
         }
         chars.next();
@@ -54,9 +64,9 @@ pub fn to_lower_space(s: &str) -> String {
         }
 
         // Whitespace collapse
-        if c == '_' || c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+        if is_tls_whitespace(c) {
             while let Some(&next) = chars.peek() {
-                if next != ' ' && next != '_' && next != '\t' && next != '\n' && next != '\r' {
+                if !is_tls_whitespace(next) {
                     break;
                 }
                 chars.next();
@@ -80,6 +90,85 @@ pub fn to_lower_space(s: &str) -> String {
     result.truncate(trimmed_len);
 
     result
+}
+
+/// Compare a name against an already-canonicalized target without allocating.
+///
+/// Equivalent to `to_lower_space(s) == target` but avoids heap allocation.
+/// The `target` must already be in canonical form (lowercase, single spaces, no
+/// leading/trailing whitespace).
+pub fn eq_lower_space(s: &str, target: &str) -> bool {
+    let s = strip_quotes(s);
+
+    let mut chars = s.chars().peekable();
+    let mut target_chars = target.chars();
+    let mut pending_space = false;
+
+    // Skip leading whitespace
+    while let Some(&c) = chars.peek() {
+        if !is_tls_whitespace(c) {
+            break;
+        }
+        chars.next();
+    }
+
+    while let Some(c) = chars.next() {
+        // Escaped underscore: \_
+        if c == '\\' && chars.peek() == Some(&'_') {
+            if pending_space {
+                if target_chars.next() != Some(' ') {
+                    return false;
+                }
+                pending_space = false;
+            }
+            if target_chars.next() != Some('\\') {
+                return false;
+            }
+            if target_chars.next() != Some('_') {
+                return false;
+            }
+            chars.next();
+            continue;
+        }
+
+        // Whitespace: defer emission until we see a non-whitespace char
+        // (handles trailing whitespace by never emitting the space)
+        if is_tls_whitespace(c) {
+            while let Some(&next) = chars.peek() {
+                if !is_tls_whitespace(next) {
+                    break;
+                }
+                chars.next();
+            }
+            pending_space = true;
+            continue;
+        }
+
+        // Flush pending space before emitting a non-whitespace char
+        if pending_space {
+            if target_chars.next() != Some(' ') {
+                return false;
+            }
+            pending_space = false;
+        }
+
+        // Lowercase and compare
+        if c.is_ascii() {
+            if target_chars.next() != Some(c.to_ascii_lowercase()) {
+                return false;
+            }
+        } else {
+            for lc in c.to_lowercase() {
+                if target_chars.next() != Some(lc) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    // If pending_space remains, it's trailing whitespace -- ignore it.
+    // Target must also be exhausted.
+    target_chars.next().is_none()
 }
 
 /// Built-in function names in their canonicalized form (via `to_lower_space`).
@@ -197,13 +286,15 @@ pub enum SymbolClass {
 
 /// Classify a symbol by canonicalizing once and checking all categories.
 pub fn classify_symbol(name: &str) -> SymbolClass {
-    let canonical = to_lower_space(name);
-    if canonical == "with lookup" {
+    // Check known keywords first without allocating
+    if eq_lower_space(name, "with lookup") {
         return SymbolClass::WithLookup;
     }
-    if canonical == "tabbed array" {
+    if eq_lower_space(name, "tabbed array") {
         return SymbolClass::TabbedArray;
     }
+    // For prefix matching and HashSet lookup, we need the canonical string
+    let canonical = to_lower_space(name);
     if let Some(rest) = canonical.strip_prefix("get ") {
         if rest.starts_with("123") {
             return SymbolClass::GetXls("{GET 123");
@@ -230,6 +321,102 @@ pub fn classify_symbol(name: &str) -> SymbolClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Allocation-free comparison tests
+
+    #[test]
+    fn test_eq_lower_space_simple() {
+        assert!(eq_lower_space("ABC", "abc"));
+        assert!(eq_lower_space("foo", "foo"));
+        assert!(eq_lower_space("FooBar", "foobar"));
+        assert!(!eq_lower_space("ABC", "xyz"));
+        assert!(!eq_lower_space("foo", "foobar"));
+    }
+
+    #[test]
+    fn test_eq_lower_space_underscores() {
+        assert!(eq_lower_space("IF_THEN_ELSE", "if then else"));
+        assert!(eq_lower_space("my_variable", "my variable"));
+        assert!(!eq_lower_space("IF_THEN_ELSE", "if then"));
+    }
+
+    #[test]
+    fn test_eq_lower_space_whitespace() {
+        assert!(eq_lower_space("IF  THEN  ELSE", "if then else"));
+        assert!(eq_lower_space("IF\t_\nTHEN", "if then"));
+        assert!(eq_lower_space("  foo  ", "foo"));
+        assert!(eq_lower_space("__foo__", "foo"));
+        assert!(eq_lower_space("   ", ""));
+    }
+
+    #[test]
+    fn test_eq_lower_space_escaped_underscore() {
+        assert!(eq_lower_space("foo\\_bar", "foo\\_bar"));
+        assert!(!eq_lower_space("foo\\_bar", "foo bar"));
+    }
+
+    #[test]
+    fn test_eq_lower_space_quoted() {
+        assert!(eq_lower_space("\"foo\"", "foo"));
+        assert!(eq_lower_space("\"MY_VAR\"", "my var"));
+    }
+
+    #[test]
+    fn test_eq_lower_space_empty() {
+        assert!(eq_lower_space("", ""));
+        assert!(eq_lower_space("\"\"", ""));
+        assert!(!eq_lower_space("", "x"));
+        assert!(!eq_lower_space("x", ""));
+    }
+
+    #[test]
+    fn test_eq_lower_space_non_ascii() {
+        assert!(eq_lower_space("Foo\u{00B7}Bar", "foo\u{00b7}bar"));
+    }
+
+    #[test]
+    fn test_eq_lower_space_matches_to_lower_space() {
+        // Verify eq_lower_space agrees with to_lower_space for all test cases
+        let cases = [
+            "ABC",
+            "foo",
+            "FooBar",
+            "IF_THEN_ELSE",
+            "my_variable",
+            "IF  THEN  ELSE",
+            "IF\t_\nTHEN",
+            "  foo  ",
+            "__foo__",
+            "   ",
+            "foo\\_bar",
+            "\"foo\"",
+            "\"MY_VAR\"",
+            "",
+            "\"\"",
+            "WITH LOOKUP",
+            "TABBED_ARRAY",
+            "INTEG",
+            "MAX",
+            "if then else",
+        ];
+        for case in &cases {
+            let canonical = to_lower_space(case);
+            assert!(
+                eq_lower_space(case, &canonical),
+                "eq_lower_space({:?}, {:?}) should be true",
+                case,
+                canonical
+            );
+            // Also verify non-matching target returns false (unless empty)
+            if !canonical.is_empty() {
+                assert!(
+                    !eq_lower_space(case, "ZZZZ_NOT_A_MATCH"),
+                    "eq_lower_space({:?}, \"ZZZZ_NOT_A_MATCH\") should be false",
+                    case
+                );
+            }
+        }
+    }
 
     // Phase 1: ToLowerSpace Canonicalization Tests
 

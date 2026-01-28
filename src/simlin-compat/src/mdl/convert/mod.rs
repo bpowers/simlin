@@ -13,6 +13,7 @@ mod stocks;
 mod types;
 mod variables;
 
+use crate::mdl::builtins::eq_lower_space;
 use helpers::{canonical_name, get_equation_name};
 pub use types::ConvertError;
 use types::{SimSpecsBuilder, SyntheticFlow};
@@ -243,15 +244,14 @@ impl<'input> ConversionContext<'input> {
             return false;
         }
 
-        // Skip control variables (canonical_name uses spaces, not underscores)
-        if let Some(name) = get_equation_name(eq) {
-            let canonical = canonical_name(&name);
-            if matches!(
-                canonical.as_str(),
-                "initial time" | "final time" | "time step" | "saveper"
-            ) {
-                return false;
-            }
+        // Skip control variables
+        if let Some(name) = get_equation_name(eq)
+            && (eq_lower_space(&name, "initial time")
+                || eq_lower_space(&name, "final time")
+                || eq_lower_space(&name, "time step")
+                || eq_lower_space(&name, "saveper"))
+        {
+            return false;
         }
 
         true
