@@ -8,7 +8,10 @@ import clsx from 'clsx';
 
 import styles from './TextField.module.css';
 
+let textFieldIdCounter = 0;
+
 interface TextFieldProps {
+  id?: string;
   variant?: 'outlined' | 'standard';
   label?: string;
   value?: string | number;
@@ -28,10 +31,17 @@ interface TextFieldProps {
 
 interface TextFieldState {
   isFocused: boolean;
+  generatedId: string;
 }
 
 export default class TextField extends React.PureComponent<TextFieldProps, TextFieldState> {
-  state: TextFieldState = { isFocused: false };
+  constructor(props: TextFieldProps) {
+    super(props);
+    this.state = {
+      isFocused: false,
+      generatedId: `textfield-${++textFieldIdCounter}`,
+    };
+  }
 
   handleFocus = () => {
     this.setState({ isFocused: true });
@@ -43,6 +53,7 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
 
   render() {
     const {
+      id,
       variant = 'outlined',
       label,
       value,
@@ -57,8 +68,9 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
       inputProps,
       ...rest
     } = this.props;
-    const { isFocused } = this.state;
+    const { isFocused, generatedId } = this.state;
 
+    const inputId = id || generatedId;
     const hasValue = value !== undefined && value !== null && value !== '';
     const shouldShrink = isFocused || hasValue;
 
@@ -92,8 +104,13 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
       return (
         <div className={rootClasses}>
           <div className={wrapperClasses} ref={wrapperRef}>
-            {label && <label className={labelClasses}>{label}</label>}
+            {label && (
+              <label htmlFor={inputId} className={labelClasses}>
+                {label}
+              </label>
+            )}
             <input
+              id={inputId}
               className={styles.standardInput}
               value={value}
               onChange={onChange}
@@ -128,8 +145,13 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
     return (
       <div className={rootClasses}>
         <div className={wrapperClasses}>
-          {label && <label className={labelClasses}>{label}</label>}
+          {label && (
+            <label htmlFor={inputId} className={labelClasses}>
+              {label}
+            </label>
+          )}
           <input
+            id={inputId}
             className={styles.outlinedInput}
             value={value}
             onChange={onChange}

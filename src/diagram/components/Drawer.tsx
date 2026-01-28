@@ -17,8 +17,25 @@ interface DrawerProps {
 }
 
 export default class Drawer extends React.PureComponent<DrawerProps> {
+  private panelRef = React.createRef<HTMLDivElement>();
+  private previousActiveElement: Element | null = null;
+
   componentDidMount() {
     document.addEventListener('keydown', this.handleKeyDown);
+  }
+
+  componentDidUpdate(prevProps: DrawerProps) {
+    if (this.props.open && !prevProps.open) {
+      // Drawer just opened - save current focus and focus the panel
+      this.previousActiveElement = document.activeElement;
+      this.panelRef.current?.focus();
+    } else if (!this.props.open && prevProps.open) {
+      // Drawer just closed - restore focus
+      if (this.previousActiveElement instanceof HTMLElement) {
+        this.previousActiveElement.focus();
+      }
+      this.previousActiveElement = null;
+    }
   }
 
   componentWillUnmount() {
@@ -28,6 +45,30 @@ export default class Drawer extends React.PureComponent<DrawerProps> {
   handleKeyDown = (event: KeyboardEvent) => {
     if (event.key === 'Escape' && this.props.open) {
       this.props.onClose();
+    }
+
+    // Focus trap: when Tab is pressed and drawer is open, keep focus within the panel
+    if (event.key === 'Tab' && this.props.open && this.panelRef.current) {
+      const panel = this.panelRef.current;
+      const focusableElements = panel.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+
+      if (focusableElements.length === 0) {
+        event.preventDefault();
+        return;
+      }
+
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+
+      if (event.shiftKey && document.activeElement === firstElement) {
+        event.preventDefault();
+        lastElement.focus();
+      } else if (!event.shiftKey && document.activeElement === lastElement) {
+        event.preventDefault();
+        firstElement.focus();
+      }
     }
   };
 
@@ -43,8 +84,15 @@ export default class Drawer extends React.PureComponent<DrawerProps> {
         <div
           className={clsx(styles.backdrop, !open && styles.backdropHidden)}
           onClick={this.handleBackdropClick}
+          aria-hidden="true"
         />
-        <div className={clsx(styles.panel, !open && styles.panelHidden)}>
+        <div
+          ref={this.panelRef}
+          className={clsx(styles.panel, !open && styles.panelHidden)}
+          role="dialog"
+          aria-modal="true"
+          tabIndex={-1}
+        >
           {children}
         </div>
       </>

@@ -408,15 +408,20 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }));
   }
 
-  handleDialClick = (_event: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
+  handleDialClick = (_event: React.MouseEvent<HTMLButtonElement>) => {
     this.setState({
       dialOpen: !this.state.dialOpen,
       selectedTool: this.state.dialOpen ? undefined : this.state.selectedTool,
     });
   };
 
-  handleDialClose = (e: React.SyntheticEvent<{}>, reason: CloseReason) => {
+  handleDialClose = (e: React.SyntheticEvent, reason: CloseReason) => {
     if (reason === 'mouseLeave' || reason === 'blur') {
+      return;
+    }
+    // When an action is clicked, close the dial but keep the selected tool
+    if (reason === 'actionClick') {
+      this.setState({ dialOpen: false });
       return;
     }
     this.setState({
