@@ -4,8 +4,8 @@
 
 //! AST types for the Vensim MDL parser.
 //!
-//! These types are produced by the LALRPOP parser from normalized tokens and
-//! later converted to `simlin_core::datamodel` structures.
+//! These types are produced by the recursive descent parser from normalized
+//! tokens and later converted to `simlin_core::datamodel` structures.
 
 use std::borrow::Cow;
 

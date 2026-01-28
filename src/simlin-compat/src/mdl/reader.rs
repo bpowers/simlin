@@ -2,10 +2,10 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! EquationReader: Driver for the LALRPOP parser that handles comment capture
+//! EquationReader: Driver for the parser that handles comment capture
 //! and macro mode assembly.
 //!
-//! The LALRPOP parser returns when it sees the end of the equation+units section.
+//! The parser returns when it sees the end of the equation+units section.
 //! This reader then captures the comment text (raw text between second `~` and `|`)
 //! and assembles the final `FullEquation`.
 
@@ -79,9 +79,9 @@ enum CommentTerminator {
     Eof,
 }
 
-/// EquationReader wraps the LALRPOP parser to handle comment capture and macro assembly.
+/// EquationReader wraps the parser to handle comment capture and macro assembly.
 ///
-/// Comments in Vensim are raw text between the second `~` and `|`. The LALRPOP parser
+/// Comments in Vensim are raw text between the second `~` and `|`. The parser
 /// can't easily capture this (it's not tokenized), so this reader scans raw source text
 /// for comment content rather than tokenizing it.
 pub struct EquationReader<'input> {
@@ -258,13 +258,13 @@ impl<'input> EquationReader<'input> {
         self.position = last_end;
 
         // Parse the collected tokens
-        let result = parser::FullEqWithUnitsParser::new().parse(tokens);
+        let result = parser::parse(tokens);
 
         match result {
             Ok((eq, units, section_end)) => {
                 self.handle_parse_result(eq, units, section_end, last_end)
             }
-            Err(e) => Some(Err(ReaderError::Parse(format!("{:?}", e)))),
+            Err(e) => Some(Err(ReaderError::Parse(format!("{}", e)))),
         }
     }
 

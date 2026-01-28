@@ -4,11 +4,9 @@
 
 //! TokenNormalizer: Context-sensitive token transformations for Vensim MDL.
 //!
-//! This module sits between the context-free RawLexer and the LALRPOP parser,
-//! applying transformations that depend on tracking section state (equation/units/comment).
-
-// This module is staged for integration with the LALRPOP parser.
-// The types are public to allow use by the parser module.
+//! This module sits between the context-free RawLexer and the recursive descent
+//! parser, applying transformations that depend on tracking section state
+//! (equation/units/comment).
 
 use std::borrow::Cow;
 use std::iter::Peekable;

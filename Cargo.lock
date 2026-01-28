@@ -1839,8 +1839,6 @@ dependencies = [
  "csv",
  "ed25519-dalek",
  "float-cmp",
- "lalrpop",
- "lalrpop-util",
  "quick-xml",
  "serde",
  "serde_json",

@@ -15,20 +15,11 @@ mod builtins;
 mod convert;
 mod lexer;
 mod normalizer;
-mod parser_helpers;
+mod parser;
 mod reader;
 mod settings;
 pub mod view;
 mod xmile_compat;
-
-// LALRPOP-generated parser module
-use lalrpop_util::lalrpop_mod;
-lalrpop_mod!(
-    #[allow(clippy::all)]
-    #[allow(unused)]
-    parser,
-    "/mdl/parser.rs"
-);
 
 // Public re-exports
 pub use lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};

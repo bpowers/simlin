@@ -63,7 +63,7 @@ Vensim MDL file
     ↓
 Rust lexer (mdl/lexer.rs)
     ↓
-Rust parser using LALRPOP (mdl/parser.lalrpop)
+Hand-written recursive descent parser (mdl/parser.rs)
     ↓
 minimal internal representations private to this package (for e.g. vensim equation AST, vensim diagram)
     ↓
@@ -93,9 +93,8 @@ src/simlin-compat/src/mdl/
 ├── mod.rs             # Public exports: parse_mdl() function, re-exports
 ├── lexer.rs           # Hand-written RawLexer for MDL tokens (context-free)
 ├── normalizer.rs      # TokenNormalizer for context-sensitive transformations
-├── parser.lalrpop     # LALRPOP grammar (based on VYacc.y)
+├── parser.rs          # Hand-written recursive descent parser (replaced LALRPOP grammar)
 ├── ast.rs             # AST types produced by parser
-├── parser_helpers.rs  # Helper functions for parser (number parsing, equation creation)
 ├── reader.rs          # EquationReader: drives parser, captures comments, handles macros
 ├── builtins.rs        # Vensim built-in function recognition via to_lower_space()
 ├── convert/           # AST → datamodel conversion (IMPLEMENTED)
