@@ -12,9 +12,6 @@
     "format": "find . -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|importer/core|engine/core)/' | xargs prettier --write"
   },
   "devDependencies": {
-    "@emotion/react": "^11.14.0",
-    "@emotion/styled": "^11.14.0",
-    "@mui/material": "^7.1.2",
     "@types/react": "^19.0.0",
     "@types/react-helmet": "^6.1.0",
     "immutable": "^5.1.3",

@@ -5,19 +5,15 @@
 import * as React from 'react';
 
 import { Link } from 'wouter';
-import Button from '@mui/material/Button';
-import IconButton from '@mui/material/IconButton';
-import SwipeableDrawer from '@mui/material/SwipeableDrawer';
-import TextField from '@mui/material/TextField';
-import ArrowBackIcon from '@mui/icons-material/ArrowBack';
-import ClearIcon from '@mui/icons-material/Clear';
-import CloudDownloadIcon from '@mui/icons-material/CloudDownload';
+import Button from './components/Button';
+import IconButton from './components/IconButton';
+import Drawer from './components/Drawer';
+import TextField from './components/TextField';
+import { ArrowBackIcon, ClearIcon, CloudDownloadIcon } from './components/icons';
 
 import { ModelIcon } from './ModelIcon';
 
 import styles from './ModelPropertiesDrawer.module.css';
-
-const iOS = typeof navigator !== undefined && /iPad|iPhone|iPod/.test(navigator.userAgent);
 
 interface ModelPropertiesDrawerProps {
   modelName: string;
@@ -46,9 +42,7 @@ export class ModelPropertiesDrawer extends React.PureComponent<ModelPropertiesDr
   render() {
     const { modelName, open } = this.props;
     return (
-      <SwipeableDrawer
-        disableBackdropTransition={false}
-        disableDiscovery={iOS}
+      <Drawer
         open={open}
         onOpen={this.handleOpen}
         onClose={this.handleClose}
@@ -118,7 +112,7 @@ export class ModelPropertiesDrawer extends React.PureComponent<ModelPropertiesDr
             </Button>
           </div>
         </div>
-      </SwipeableDrawer>
+      </Drawer>
     );
   }
 }

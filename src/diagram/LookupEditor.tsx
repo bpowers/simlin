@@ -5,7 +5,8 @@
 import * as React from 'react';
 
 import { List } from 'immutable';
-import { Button, CardActions, CardContent, TextField } from '@mui/material';
+import Button from './components/Button';
+import TextField from './components/TextField';
 
 import { defined } from '@system-dynamics/core/common';
 import {
@@ -359,7 +360,7 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
 
     return (
       <div>
-        <CardContent>
+        <div className={styles.cardContent}>
           <TextField
             className={styles.yAxisMax}
             error={yScaleError}
@@ -415,8 +416,8 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
             type="number"
             margin="normal"
           />
-        </CardContent>
-        <CardActions>
+        </div>
+        <div className={styles.cardActions}>
           <Button size="small" color="secondary" onClick={this.handleLookupRemove} className={styles.buttonLeft}>
             Remove
           </Button>
@@ -428,7 +429,7 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
               Save
             </Button>
           </div>
-        </CardActions>
+        </div>
       </div>
     );
   }

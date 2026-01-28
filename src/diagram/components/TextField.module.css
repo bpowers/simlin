@@ -1,0 +1,141 @@
+.root {
+  display: inline-flex;
+  flex-direction: column;
+  position: relative;
+  vertical-align: top;
+  box-sizing: border-box;
+}
+
+.fullWidth {
+  width: 100%;
+}
+
+.marginNormal {
+  margin-top: 16px;
+  margin-bottom: 8px;
+}
+
+/* Outlined variant */
+.outlinedWrapper {
+  position: relative;
+  border: 1px solid rgba(0, 0, 0, 0.23);
+  border-radius: 4px;
+  transition: border-color 200ms cubic-bezier(0.0, 0, 0.2, 1);
+}
+
+.outlinedWrapper:hover {
+  border-color: rgba(0, 0, 0, 0.87);
+}
+
+.outlinedFocused {
+  border-color: var(--color-primary);
+  border-width: 2px;
+}
+
+.outlinedError {
+  border-color: var(--color-error);
+  border-width: 2px;
+}
+
+.outlinedInput {
+  font: inherit;
+  padding: 16.5px 14px;
+  border: none;
+  outline: none;
+  background: transparent;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.outlinedLabel {
+  position: absolute;
+  left: 14px;
+  top: 0;
+  transform: translate(0, 16px) scale(1);
+  transform-origin: top left;
+  transition: transform 200ms cubic-bezier(0.0, 0, 0.2, 1),
+              color 200ms cubic-bezier(0.0, 0, 0.2, 1);
+  color: rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  font: inherit;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.outlinedLabelShrunk {
+  transform: translate(0, -9px) scale(0.75);
+  background: #fff;
+  padding: 0 4px;
+}
+
+.outlinedLabelFocused {
+  color: var(--color-primary);
+}
+
+.outlinedLabelError {
+  color: var(--color-error);
+}
+
+/* Standard variant */
+.standardWrapper {
+  position: relative;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.42);
+  transition: border-color 200ms cubic-bezier(0.0, 0, 0.2, 1);
+}
+
+.standardWrapper:hover {
+  border-bottom: 2px solid rgba(0, 0, 0, 0.87);
+}
+
+.standardFocused {
+  border-bottom: 2px solid var(--color-primary);
+}
+
+.standardError {
+  border-bottom: 2px solid var(--color-error);
+}
+
+.standardNoUnderline {
+  border-bottom: none;
+}
+
+.standardNoUnderline:hover {
+  border-bottom: none;
+}
+
+.standardInput {
+  font: inherit;
+  padding: 4px 0 5px;
+  border: none;
+  outline: none;
+  background: transparent;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.standardLabel {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(0, 16px) scale(1);
+  transform-origin: top left;
+  transition: transform 200ms cubic-bezier(0.0, 0, 0.2, 1),
+              color 200ms cubic-bezier(0.0, 0, 0.2, 1);
+  color: rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  font: inherit;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.standardLabelShrunk {
+  transform: translate(0, -1.5px) scale(0.75);
+}
+
+.standardLabelFocused {
+  color: var(--color-primary);
+}
+
+.standardLabelError {
+  color: var(--color-error);
+}

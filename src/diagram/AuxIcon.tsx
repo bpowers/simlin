@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import SvgIcon from '@mui/material/SvgIcon';
+import SvgIcon from './components/SvgIcon';
 
 import styles from './AuxIcon.module.css';
 
@@ -19,5 +19,3 @@ export const AuxIcon: React.FunctionComponent = (props) => {
 };
 
 AuxIcon.displayName = 'Variable';
-
-(AuxIcon as any).muiName = 'AuxIcon';

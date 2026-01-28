@@ -5,13 +5,9 @@
 import * as React from 'react';
 
 import clsx from 'clsx';
-import IconButton from '@mui/material/IconButton';
-import SnackbarContent from '@mui/material/SnackbarContent';
-import CheckCircleIcon from '@mui/icons-material/CheckCircle';
-import CloseIcon from '@mui/icons-material/Close';
-import ErrorIcon from '@mui/icons-material/Error';
-import InfoIcon from '@mui/icons-material/Info';
-import WarningIcon from '@mui/icons-material/Warning';
+import IconButton from './components/IconButton';
+import { SnackbarContent } from './components/Snackbar';
+import { CheckCircleIcon, CloseIcon, ErrorIcon, InfoIcon, WarningIcon } from './components/icons';
 
 import styles from './ErrorToast.module.css';
 

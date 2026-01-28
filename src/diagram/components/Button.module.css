@@ -1,0 +1,106 @@
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  box-sizing: border-box;
+  outline: 0;
+  border: 0;
+  cursor: pointer;
+  user-select: none;
+  vertical-align: middle;
+  text-decoration: none;
+  font-family: "Roboto", "Helvetica", "Arial", sans-serif;
+  font-weight: 500;
+  line-height: 1.75;
+  letter-spacing: 0.02857em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  min-width: 64px;
+  transition: background-color 250ms cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 250ms cubic-bezier(0.4, 0, 0.2, 1),
+              border-color 250ms cubic-bezier(0.4, 0, 0.2, 1),
+              color 250ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.button:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Size variants */
+.sizeSmall {
+  padding: 4px 5px;
+  font-size: 0.8125rem;
+}
+
+.sizeMedium {
+  padding: 6px 8px;
+  font-size: 0.875rem;
+}
+
+.sizeLarge {
+  padding: 8px 22px;
+  font-size: 0.9375rem;
+}
+
+/* text + primary */
+.textPrimary {
+  color: var(--color-primary);
+  background: transparent;
+}
+
+.textPrimary:hover {
+  background-color: rgba(25, 118, 210, 0.04);
+}
+
+/* text + secondary */
+.textSecondary {
+  color: var(--color-secondary);
+  background: transparent;
+}
+
+.textSecondary:hover {
+  background-color: rgba(220, 0, 78, 0.04);
+}
+
+/* contained + primary */
+.containedPrimary {
+  color: #fff;
+  background-color: var(--color-primary);
+  box-shadow: 0px 3px 1px -2px rgba(0,0,0,0.2), 0px 2px 2px 0px rgba(0,0,0,0.14), 0px 1px 5px 0px rgba(0,0,0,0.12);
+}
+
+.containedPrimary:hover {
+  background-color: #1565c0;
+}
+
+/* contained + secondary */
+.containedSecondary {
+  color: #fff;
+  background-color: var(--color-secondary);
+  box-shadow: 0px 3px 1px -2px rgba(0,0,0,0.2), 0px 2px 2px 0px rgba(0,0,0,0.14), 0px 1px 5px 0px rgba(0,0,0,0.12);
+}
+
+.containedSecondary:hover {
+  background-color: #9a0036;
+}
+
+/* disabled states */
+.disabledText {
+  color: rgba(0, 0, 0, 0.26);
+  pointer-events: none;
+}
+
+.disabledContained {
+  color: rgba(0, 0, 0, 0.26);
+  background-color: rgba(0, 0, 0, 0.12);
+  box-shadow: none;
+  pointer-events: none;
+}
+
+.startIcon {
+  display: inherit;
+  margin-right: 8px;
+  margin-left: -4px;
+}
