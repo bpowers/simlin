@@ -9,6 +9,9 @@ import clsx from 'clsx';
 
 import styles from './Tabs.module.css';
 
+// Context for passing tab index from parent to child
+const TabIndexContext = React.createContext<string>('0');
+
 interface TabsProps {
   className?: string;
   variant?: 'fullWidth';
@@ -25,12 +28,14 @@ interface TabProps {
 }
 
 export class Tab extends React.PureComponent<TabProps> {
-  // value is injected by Tabs parent
+  static contextType = TabIndexContext;
+  declare context: React.ContextType<typeof TabIndexContext>;
+
   render() {
-    const { label, ...rest } = this.props;
-    const value = (rest as any)._tabValue as string;
+    const { label } = this.props;
+    const tabValue = this.context;
     return (
-      <RadixTabs.Trigger value={value} className={styles.tab}>
+      <RadixTabs.Trigger value={tabValue} className={styles.tab}>
         {label}
       </RadixTabs.Trigger>
     );
@@ -47,16 +52,15 @@ export class Tabs extends React.PureComponent<TabsProps> {
     const { className, value, children, ...rest } = this.props;
     const ariaLabel = rest['aria-label'];
 
-    // Count children (non-null) and inject _tabValue
+    // Count children (non-null) and wrap each with context provider
     const childArray = React.Children.toArray(children).filter(Boolean);
     const tabCount = childArray.length;
 
-    const enrichedChildren = childArray.map((child, index) => {
-      if (React.isValidElement(child)) {
-        return React.cloneElement(child as React.ReactElement<any>, { _tabValue: String(index) });
-      }
-      return child;
-    });
+    const enrichedChildren = childArray.map((child, index) => (
+      <TabIndexContext.Provider key={index} value={String(index)}>
+        {child}
+      </TabIndexContext.Provider>
+    ));
 
     const indicatorLeft = tabCount > 0 ? `${(value / tabCount) * 100}%` : '0%';
     const indicatorWidth = tabCount > 0 ? `${(1 / tabCount) * 100}%` : '0%';
@@ -65,10 +69,7 @@ export class Tabs extends React.PureComponent<TabsProps> {
       <RadixTabs.Root value={String(value)} onValueChange={this.handleValueChange}>
         <RadixTabs.List className={clsx(styles.tabsList, className)} aria-label={ariaLabel}>
           {enrichedChildren}
-          <div
-            className={styles.indicator}
-            style={{ left: indicatorLeft, width: indicatorWidth }}
-          />
+          <div className={styles.indicator} style={{ left: indicatorLeft, width: indicatorWidth }} />
         </RadixTabs.List>
       </RadixTabs.Root>
     );

@@ -8,15 +8,15 @@ import clsx from 'clsx';
 
 import styles from './SpeedDial.module.css';
 
-export type CloseReason = 'toggle' | 'blur' | 'mouseLeave' | 'escapeKeyDown';
+export type CloseReason = 'toggle' | 'blur' | 'mouseLeave' | 'escapeKeyDown' | 'actionClick';
 
 interface SpeedDialProps {
   ariaLabel: string;
   className?: string;
   hidden?: boolean;
   icon: React.ReactNode;
-  onClick?: (event: React.MouseEvent<HTMLDivElement, MouseEvent>) => void;
-  onClose?: (event: React.SyntheticEvent<{}>, reason: CloseReason) => void;
+  onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  onClose?: (event: React.SyntheticEvent, reason: CloseReason) => void;
   open: boolean;
   children?: React.ReactNode;
 }
@@ -36,12 +36,26 @@ export default class SpeedDial extends React.PureComponent<SpeedDialProps> {
     }
   };
 
+  handleActionClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    this.props.onClose?.(event, 'actionClick');
+  };
+
   render() {
     const { ariaLabel, className, hidden, icon, onClick, open, children } = this.props;
 
     const enrichedIcon = React.isValidElement(icon)
-      ? React.cloneElement(icon as React.ReactElement<any>, { open })
+      ? React.cloneElement(icon as React.ReactElement<SpeedDialIconProps>, { open })
       : icon;
+
+    // Inject onActionClick into children so they can close the dial
+    const enrichedChildren = React.Children.map(children, (child) => {
+      if (React.isValidElement(child)) {
+        return React.cloneElement(child as React.ReactElement<SpeedDialActionProps>, {
+          _onActionClick: this.handleActionClick,
+        });
+      }
+      return child;
+    });
 
     return (
       <div
@@ -53,15 +67,16 @@ export default class SpeedDial extends React.PureComponent<SpeedDialProps> {
         <button
           className={styles.fab}
           aria-label={ariaLabel}
-          onClick={onClick as any}
+          aria-expanded={open}
+          onClick={onClick}
           onBlur={this.handleBlur}
           type="button"
         >
           {enrichedIcon}
         </button>
         {open && (
-          <div className={styles.actions}>
-            {React.Children.map(children, (child) => child)}
+          <div className={styles.actions} role="menu">
+            {enrichedChildren}
           </div>
         )}
       </div>
@@ -72,18 +87,27 @@ export default class SpeedDial extends React.PureComponent<SpeedDialProps> {
 interface SpeedDialActionProps {
   icon: React.ReactNode;
   title: string;
-  onClick?: (event: React.MouseEvent<HTMLDivElement>) => void;
+  onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   className?: string;
+  /** @internal Injected by SpeedDial parent via cloneElement */
+  _onActionClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
 }
 
 export class SpeedDialAction extends React.PureComponent<SpeedDialActionProps> {
+  handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const { onClick, _onActionClick } = this.props;
+
+    onClick?.(event);
+    _onActionClick?.(event);
+  };
+
   render() {
-    const { icon, title, onClick, className } = this.props;
+    const { icon, title, className } = this.props;
     return (
-      <div className={styles.action}>
+      <div className={styles.action} role="menuitem">
         <button
           className={clsx(styles.actionButton, styles.actionButtonOpen, className)}
-          onClick={onClick as any}
+          onClick={this.handleClick}
           aria-label={title}
           type="button"
         >
@@ -106,17 +130,9 @@ export class SpeedDialIcon extends React.PureComponent<SpeedDialIconProps> {
     const { icon, openIcon, open } = this.props;
 
     if (openIcon) {
-      return (
-        <span className={styles.iconWrapper}>
-          {open ? openIcon : icon}
-        </span>
-      );
+      return <span className={styles.iconWrapper}>{open ? openIcon : icon}</span>;
     }
 
-    return (
-      <span className={clsx(styles.iconWrapper, open && styles.iconWrapperOpen)}>
-        {icon}
-      </span>
-    );
+    return <span className={clsx(styles.iconWrapper, open && styles.iconWrapperOpen)}>{icon}</span>;
   }
 }
