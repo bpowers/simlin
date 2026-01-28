@@ -5,7 +5,6 @@
 import * as React from 'react';
 
 import { List, Map } from 'immutable';
-import { Card, CardContent, Typography } from '@mui/material';
 
 import { SimError, ModelError, EquationError, ErrorCode, UnitError } from '@system-dynamics/core/datamodel';
 import { errorCodeDescription } from '@system-dynamics/engine2';
@@ -32,7 +31,7 @@ export class ErrorDetails extends React.PureComponent<ErrorDetailsProps> {
       )
     ) {
       errors.push(
-        <Typography className={styles.list}>simulation error: {errorCodeDescription(simError.code)}</Typography>,
+        <div className={styles.list}>simulation error: {errorCodeDescription(simError.code)}</div>,
       );
     }
     if (!modelErrors.isEmpty()) {
@@ -42,19 +41,19 @@ export class ErrorDetails extends React.PureComponent<ErrorDetailsProps> {
         }
         const details = err.details;
         errors.push(
-          <Typography className={styles.list}>
+          <div className={styles.list}>
             model error: {errorCodeDescription(err.code)}
             {details ? `: ${details}` : undefined}
-          </Typography>,
+          </div>,
         );
       }
     }
     for (const [ident, errs] of varErrors) {
       for (const err of errs) {
         errors.push(
-          <Typography className={styles.list}>
+          <div className={styles.list}>
             variable "{ident}" error: {errorCodeDescription(err.code)}
-          </Typography>,
+          </div>,
         );
       }
     }
@@ -62,20 +61,20 @@ export class ErrorDetails extends React.PureComponent<ErrorDetailsProps> {
       for (const err of errs) {
         const details = err.details;
         errors.push(
-          <Typography className={styles.list}>
+          <div className={styles.list}>
             variable "{ident}" unit error: {errorCodeDescription(err.code)}
             {details ? `: ${details}` : undefined}
-          </Typography>,
+          </div>,
         );
       }
     }
 
     return (
-      <Card className={styles.card} elevation={1}>
-        <CardContent className={styles.inner}>
-          {errors.length > 0 ? errors : <Typography className={styles.yay}>Your model is error free!</Typography>}
-        </CardContent>
-      </Card>
+      <div className={styles.card}>
+        <div className={styles.inner}>
+          {errors.length > 0 ? errors : <div className={styles.yay}>Your model is error free!</div>}
+        </div>
+      </div>
     );
   }
 }

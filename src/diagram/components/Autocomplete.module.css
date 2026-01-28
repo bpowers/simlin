@@ -1,0 +1,30 @@
+.wrapper {
+  display: inline-flex;
+  position: relative;
+  width: 100%;
+}
+
+.listbox {
+  position: absolute;
+  z-index: 1300;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.23);
+  border-radius: 4px;
+  box-shadow: 0px 2px 1px -1px rgba(0,0,0,0.2), 0px 1px 1px 0px rgba(0,0,0,0.14), 0px 1px 3px 0px rgba(0,0,0,0.12);
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.option {
+  padding: 6px 16px;
+  cursor: pointer;
+  font-family: "Roboto", "Helvetica", "Arial", sans-serif;
+  font-size: 1rem;
+}
+
+.optionHighlighted {
+  background: #ADD8E6;
+}

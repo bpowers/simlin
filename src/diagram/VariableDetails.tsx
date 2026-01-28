@@ -9,7 +9,8 @@ import { LineChart, ChartSeries } from './LineChart';
 import { createEditor, Descendant, Text, Transforms } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
-import { Button, Card, CardActions, CardContent, Tab, Tabs, Typography } from '@mui/material';
+import Button from './components/Button';
+import { Tabs, Tab } from './components/Tabs';
 import katex from 'katex';
 import { brewer } from 'chroma-js';
 
@@ -194,7 +195,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     return value.toFixed(3);
   };
 
-  handleTabChange = (event: React.ChangeEvent<{}>, newValue: number) => {
+  handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
     this.props.onActiveTabChange(newValue);
   };
 
@@ -269,7 +270,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
       if (errors) {
         errors.forEach((error) => {
           errorList.push(
-            <Typography className={styles.errorList}>error: {errorCodeDescription(error.code)}</Typography>,
+            <div className={styles.errorList}>error: {errorCodeDescription(error.code)}</div>,
           );
         });
       }
@@ -277,10 +278,10 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
         unitErrors.forEach((error) => {
           const details = error.details;
           errorList.push(
-            <Typography className={styles.errorList}>
+            <div className={styles.errorList}>
               unit error: {errorCodeDescription(error.code)}
               {details ? `: ${details}` : undefined}
-            </Typography>,
+            </div>,
           );
         });
       }
@@ -324,7 +325,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     }
 
     return (
-      <CardContent>
+      <div className={styles.cardContent}>
         {showPreview ? (
           <div
             className={styles.eqnPreview}
@@ -386,7 +387,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
           />
         </Slate>
 
-        <CardActions>
+        <div className={styles.cardActions}>
           <Button size="small" color="secondary" onClick={this.handleVariableDelete} className={styles.buttonLeft}>
             Delete
           </Button>
@@ -398,12 +399,12 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
               Save
             </Button>
           </div>
-        </CardActions>
+        </div>
 
         <hr />
         <br />
         {chartOrErrors}
-      </CardContent>
+      </div>
     );
   }
 
@@ -427,8 +428,8 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     const computeOffset = (): number => {
       // Utility: map KaTeX glyph to ASCII char
       const mapGlyphToAscii = (ch: string): string => {
-        if (ch === '·' || ch === '×' || ch === '⋅') return '*';
-        if (ch === '−') return '-';
+        if (ch === '\u00b7' || ch === '\u00d7' || ch === '\u22c5') return '*';
+        if (ch === '\u2212') return '-';
         return ch;
       };
 
@@ -790,7 +791,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
       table = <LookupEditor variable={variable} onLookupChange={this.handleLookupChange} />;
     } else {
       table = (
-        <CardContent>
+        <div className={styles.cardContent}>
           <Button
             variant="contained"
             color="secondary"
@@ -804,7 +805,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
             A lookup table is a non-linear function indexed by the variable{"'"}s equation. You edit the function by
             dragging your mouse or finger across the graph.
           </i>
-        </CardContent>
+        </div>
       );
     }
 
@@ -819,7 +820,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     const lookupTab = viewElement instanceof StockViewElement ? undefined : <Tab label="Lookup Function" />;
 
     return (
-      <Card className={styles.card} elevation={1}>
+      <div className={styles.card}>
         <Tabs
           className={styles.inner}
           variant="fullWidth"
@@ -834,7 +835,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
         </Tabs>
 
         {content}
-      </Card>
+      </div>
     );
   }
 }

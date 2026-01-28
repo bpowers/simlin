@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import SvgIcon from '@mui/material/SvgIcon';
+import SvgIcon from './components/SvgIcon';
 
 import styles from './FlowIcon.module.css';
 
@@ -27,5 +27,3 @@ export class FlowIcon extends React.PureComponent {
     );
   }
 }
-
-(FlowIcon as any).muiName = 'FlowIcon';

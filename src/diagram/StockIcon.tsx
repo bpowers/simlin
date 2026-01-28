@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import SvgIcon from '@mui/material/SvgIcon';
+import SvgIcon from './components/SvgIcon';
 
 import styles from './StockIcon.module.css';
 
@@ -19,5 +19,3 @@ export const StockIcon: React.FunctionComponent = (props) => {
 };
 
 StockIcon.displayName = 'Stock';
-
-(StockIcon as any).muiName = 'StockIcon';

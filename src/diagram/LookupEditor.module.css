@@ -34,3 +34,13 @@
 .buttonRight {
   float: right;
 }
+
+.cardContent {
+  padding: 16px;
+}
+
+.cardActions {
+  display: flex;
+  align-items: center;
+  padding: 8px;
+}
