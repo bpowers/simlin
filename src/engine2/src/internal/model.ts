@@ -202,6 +202,64 @@ export function simlin_model_get_var_names(model: SimlinModelPtr): string[] {
 }
 
 /**
+ * Helper to call a WASM function that returns a JSON string from a model pointer.
+ */
+function callModelJsonFn(model: SimlinModelPtr, fnName: string): string {
+  const exports = getExports();
+  const wasmFn = exports[fnName] as (model: number, outErr: number) => number;
+
+  const outErrPtr = allocOutPtr();
+
+  try {
+    const result = wasmFn(model, outErrPtr);
+    const errPtr = readOutPtr(outErrPtr);
+
+    if (errPtr !== 0) {
+      const code = simlin_error_get_code(errPtr);
+      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
+      simlin_error_free(errPtr);
+      throw new SimlinError(message, code, details);
+    }
+
+    if (result === 0) {
+      return '[]';
+    }
+
+    return wasmToStringAndFree(result) ?? '[]';
+  } finally {
+    free(outErrPtr);
+  }
+}
+
+/**
+ * Get stock variable details as a JSON array string.
+ * @param model Model pointer
+ * @returns JSON string containing an array of stock details
+ */
+export function simlin_model_get_stocks_json(model: SimlinModelPtr): string {
+  return callModelJsonFn(model, 'simlin_model_get_stocks_json');
+}
+
+/**
+ * Get flow variable details as a JSON array string.
+ * @param model Model pointer
+ * @returns JSON string containing an array of flow details
+ */
+export function simlin_model_get_flows_json(model: SimlinModelPtr): string {
+  return callModelJsonFn(model, 'simlin_model_get_flows_json');
+}
+
+/**
+ * Get auxiliary variable details as a JSON array string.
+ * @param model Model pointer
+ * @returns JSON string containing an array of auxiliary details
+ */
+export function simlin_model_get_auxs_json(model: SimlinModelPtr): string {
+  return callModelJsonFn(model, 'simlin_model_get_auxs_json');
+}
+
+/**
  * Get the incoming links (dependencies) for a variable.
  * @param model Model pointer
  * @param varName Variable name

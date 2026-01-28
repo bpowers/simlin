@@ -388,6 +388,33 @@ char *simlin_model_get_latex_equation(SimlinModel *model,
                                       const char *ident,
                                       SimlinError **out_error);
 
+// Returns all stock variable details as a JSON array string.
+//
+// The JSON matches the native serialization format used by `simlin_project_serialize_json`.
+// The returned string must be freed with `simlin_free_string`.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+char *simlin_model_get_stocks_json(SimlinModel *model, SimlinError **out_error);
+
+// Returns all flow variable details as a JSON array string.
+//
+// The JSON matches the native serialization format used by `simlin_project_serialize_json`.
+// The returned string must be freed with `simlin_free_string`.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+char *simlin_model_get_flows_json(SimlinModel *model, SimlinError **out_error);
+
+// Returns all auxiliary variable details as a JSON array string.
+//
+// The JSON matches the native serialization format used by `simlin_project_serialize_json`.
+// The returned string must be freed with `simlin_free_string`.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+char *simlin_model_get_auxs_json(SimlinModel *model, SimlinError **out_error);
+
 // Creates a new simulation context
 //
 // # Safety

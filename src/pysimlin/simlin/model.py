@@ -18,8 +18,6 @@ from .json_types import (
     Module as JsonModule,
     Model as JsonModel,
     View as JsonView,
-    GraphicalFunction as JsonGraphicalFunction,
-    SimSpecs as JsonSimSpecs,
     JsonModelPatch,
     JsonProjectPatch,
     JsonModelOperation,
@@ -330,56 +328,48 @@ class Model:
         self._cached_time_spec = None
         self._cached_base_case = None
 
-    def _extract_equation(
-        self,
-        top_level: str,
-        arrayed: Optional[Any],
-        field: str = "equation",
-    ) -> str:
-        """Extract equation from JSON, handling apply-to-all arrayed equations.
+    def _get_variable_details_json(self, ffi_fn: Any) -> list[dict[str, Any]]:
+        """Call a variable details FFI function and return parsed JSON."""
+        err_ptr = ffi.new("SimlinError **")
+        json_ptr = ffi_fn(self._ptr, err_ptr)
+        check_out_error(err_ptr, "Get variable details JSON")
 
-        For arrayed variables with apply-to-all equations, the top-level equation
-        field is empty and the actual equation is in arrayed_equation.equation.
+        if json_ptr == ffi.NULL:
+            return []
 
-        Note: For stocks, the initial equation is stored in arrayed_equation.equation
-        (not arrayed_equation.initial_equation) because in XMILE, the <eqn> tag
-        for stocks represents the initial value, and the serializer maps this to
-        the "equation" field in ArrayedEquation for consistency.
+        try:
+            json_str = c_to_string(json_ptr)
+            if not json_str:
+                return []
+            return json.loads(json_str)
+        finally:
+            free_c_string(json_ptr)
 
-        Args:
-            top_level: The top-level equation string (may be empty)
-            arrayed: The arrayed_equation object (may be None)
-            field: Which field to read from arrayed - use "equation" for flows/auxs
-                   and also for stock initial equations (see note above)
+    @staticmethod
+    def _parse_graphical_function(gf_dict: Optional[dict[str, Any]]) -> Optional[GraphicalFunction]:
+        """Parse a graphical function dict into a GraphicalFunction dataclass."""
+        if not gf_dict:
+            return None
 
-        Returns:
-            The equation string, preferring top-level if non-empty
-        """
-        if top_level:
-            return top_level
-        if arrayed is not None:
-            arrayed_eq = getattr(arrayed, field, None)
-            if arrayed_eq:
-                return arrayed_eq
-        return ""
+        points = gf_dict.get("points")
+        y_pts = gf_dict.get("yPoints")
 
-    def _parse_json_graphical_function(self, gf: JsonGraphicalFunction) -> GraphicalFunction:
-        """Parse a JSON GraphicalFunction into a types dataclass."""
-        # Handle points format (list of [x, y] pairs)
-        if gf.points:
-            x_points: Optional[tuple[float, ...]] = tuple(p[0] for p in gf.points)
-            y_points: tuple[float, ...] = tuple(p[1] for p in gf.points)
+        if points:
+            x_points: Optional[tuple[float, ...]] = tuple(p[0] for p in points)
+            y_points: tuple[float, ...] = tuple(p[1] for p in points)
         else:
             x_points = None
-            y_points = tuple(gf.y_points) if gf.y_points else ()
+            y_points = tuple(y_pts) if y_pts else ()
 
+        x_sc = gf_dict.get("xScale")
+        y_sc = gf_dict.get("yScale")
         x_scale = GraphicalFunctionScale(
-            min=gf.x_scale.min if gf.x_scale else 0.0,
-            max=gf.x_scale.max if gf.x_scale else float(len(y_points) - 1) if y_points else 0.0,
+            min=x_sc["min"] if x_sc else 0.0,
+            max=x_sc["max"] if x_sc else float(len(y_points) - 1) if y_points else 0.0,
         )
         y_scale = GraphicalFunctionScale(
-            min=gf.y_scale.min if gf.y_scale else 0.0,
-            max=gf.y_scale.max if gf.y_scale else 1.0,
+            min=y_sc["min"] if y_sc else 0.0,
+            max=y_sc["max"] if y_sc else 1.0,
         )
 
         return GraphicalFunction(
@@ -387,8 +377,19 @@ class Model:
             y_points=y_points,
             x_scale=x_scale,
             y_scale=y_scale,
-            kind=gf.kind or "continuous",
+            kind=gf_dict.get("kind", "continuous"),
         )
+
+    @staticmethod
+    def _extract_eq(d: dict[str, Any], field: str, arrayed_field: Optional[str] = None) -> str:
+        """Extract equation from a variable dict, falling back to arrayed equation."""
+        val = d.get(field, "")
+        if val:
+            return val
+        arrayed = d.get("arrayedEquation")
+        if arrayed:
+            return arrayed.get(arrayed_field or field, "") or ""
+        return ""
 
     @property
     def stocks(self) -> tuple[Stock, ...]:
@@ -399,21 +400,19 @@ class Model:
             Tuple of Stock objects representing all stocks in the model
         """
         if self._cached_stocks is None:
-            model = self._get_model_json()
+            raw = self._get_variable_details_json(lib.simlin_model_get_stocks_json)
             self._cached_stocks = tuple(
                 Stock(
-                    name=s.name,
-                    initial_equation=self._extract_equation(
-                        s.initial_equation, s.arrayed_equation, "equation"
-                    ),
-                    inflows=tuple(s.inflows),
-                    outflows=tuple(s.outflows),
-                    units=s.units or None,
-                    documentation=s.documentation or None,
-                    dimensions=tuple(s.arrayed_equation.dimensions) if s.arrayed_equation else (),
-                    non_negative=s.non_negative,
+                    name=s["name"],
+                    initial_equation=self._extract_eq(s, "initialEquation", "equation"),
+                    inflows=tuple(s.get("inflows", [])),
+                    outflows=tuple(s.get("outflows", [])),
+                    units=s.get("units") or None,
+                    documentation=s.get("documentation") or None,
+                    dimensions=tuple(s["arrayedEquation"]["dimensions"]) if s.get("arrayedEquation") else (),
+                    non_negative=s.get("nonNegative", False),
                 )
-                for s in model.stocks
+                for s in raw
             )
         return self._cached_stocks
 
@@ -426,26 +425,19 @@ class Model:
             Tuple of Flow objects representing all flows in the model
         """
         if self._cached_flows is None:
-            model = self._get_model_json()
-            flows_list = []
-
-            for f in model.flows:
-                gf = None
-                if f.graphical_function:
-                    gf = self._parse_json_graphical_function(f.graphical_function)
-
-                flow = Flow(
-                    name=f.name,
-                    equation=self._extract_equation(f.equation, f.arrayed_equation),
-                    units=f.units or None,
-                    documentation=f.documentation or None,
-                    dimensions=tuple(f.arrayed_equation.dimensions) if f.arrayed_equation else (),
-                    non_negative=f.non_negative,
-                    graphical_function=gf,
+            raw = self._get_variable_details_json(lib.simlin_model_get_flows_json)
+            self._cached_flows = tuple(
+                Flow(
+                    name=f["name"],
+                    equation=self._extract_eq(f, "equation"),
+                    units=f.get("units") or None,
+                    documentation=f.get("documentation") or None,
+                    dimensions=tuple(f["arrayedEquation"]["dimensions"]) if f.get("arrayedEquation") else (),
+                    non_negative=f.get("nonNegative", False),
+                    graphical_function=self._parse_graphical_function(f.get("graphicalFunction")),
                 )
-                flows_list.append(flow)
-
-            self._cached_flows = tuple(flows_list)
+                for f in raw
+            )
         return self._cached_flows
 
     @property
@@ -457,32 +449,19 @@ class Model:
             Tuple of Aux objects representing all auxiliary variables in the model
         """
         if self._cached_auxs is None:
-            model = self._get_model_json()
-            auxs_list = []
-
-            for a in model.auxiliaries:
-                gf = None
-                if a.graphical_function:
-                    gf = self._parse_json_graphical_function(a.graphical_function)
-
-                # Extract equations, handling apply-to-all arrayed equations
-                equation = self._extract_equation(a.equation, a.arrayed_equation)
-                initial_eq = self._extract_equation(
-                    a.initial_equation, a.arrayed_equation, "initial_equation"
+            raw = self._get_variable_details_json(lib.simlin_model_get_auxs_json)
+            self._cached_auxs = tuple(
+                Aux(
+                    name=a["name"],
+                    equation=self._extract_eq(a, "equation"),
+                    initial_equation=self._extract_eq(a, "initialEquation") or None,
+                    units=a.get("units") or None,
+                    documentation=a.get("documentation") or None,
+                    dimensions=tuple(a["arrayedEquation"]["dimensions"]) if a.get("arrayedEquation") else (),
+                    graphical_function=self._parse_graphical_function(a.get("graphicalFunction")),
                 )
-
-                aux = Aux(
-                    name=a.name,
-                    equation=equation,
-                    initial_equation=initial_eq or None,
-                    units=a.units or None,
-                    documentation=a.documentation or None,
-                    dimensions=tuple(a.arrayed_equation.dimensions) if a.arrayed_equation else (),
-                    graphical_function=gf,
-                )
-                auxs_list.append(aux)
-
-            self._cached_auxs = tuple(auxs_list)
+                for a in raw
+            )
         return self._cached_auxs
 
     @property

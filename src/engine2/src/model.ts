@@ -15,12 +15,15 @@ import {
   simlin_model_get_incoming_links,
   simlin_model_get_links,
   simlin_model_get_latex_equation,
+  simlin_model_get_stocks_json,
+  simlin_model_get_flows_json,
+  simlin_model_get_auxs_json,
 } from './internal/model';
 import { readLinks, simlin_free_links } from './internal/analysis';
 import { SimlinModelPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types';
 import { registerFinalizer, unregisterFinalizer } from './internal/dispose';
-import { Stock, Flow, Aux, Variable, TimeSpec, Link, Loop, LinkPolarity, ModelIssue, GraphicalFunction } from './types';
-import { JsonModel, JsonStock, JsonFlow, JsonAuxiliary, JsonGraphicalFunction, JsonProjectPatch } from './json-types';
+import { Stock, Flow, Aux, Variable, TimeSpec, Link, Loop, LinkPolarity, ModelIssue } from './types';
+import { JsonModel, JsonStock, JsonFlow, JsonAuxiliary, JsonProjectPatch } from './json-types';
 import { Project } from './project';
 import { Sim } from './sim';
 import { Run } from './run';
@@ -68,6 +71,67 @@ function parseDt(dt: string): number {
 
   const value = parseFloat(trimmed);
   return isNaN(value) ? 1 : value;
+}
+
+/**
+ * Parse a JSON array of stock objects into Stock types.
+ */
+function parseStocksJson(json: string): Stock[] {
+  const raw = JSON.parse(json) as JsonStock[];
+  return raw.map((s) => ({
+    type: 'stock' as const,
+    name: s.name,
+    uid: s.uid || undefined,
+    initialEquation: s.initialEquation || s.arrayedEquation?.initialEquation || s.arrayedEquation?.equation || '',
+    inflows: s.inflows || [],
+    outflows: s.outflows || [],
+    units: s.units || undefined,
+    documentation: s.documentation || undefined,
+    nonNegative: s.nonNegative || false,
+    canBeModuleInput: s.canBeModuleInput || false,
+    isPublic: s.isPublic || false,
+    arrayedEquation: s.arrayedEquation,
+  }));
+}
+
+/**
+ * Parse a JSON array of flow objects into Flow types.
+ */
+function parseFlowsJson(json: string): Flow[] {
+  const raw = JSON.parse(json) as JsonFlow[];
+  return raw.map((f) => ({
+    type: 'flow' as const,
+    name: f.name,
+    uid: f.uid || undefined,
+    equation: f.equation || f.arrayedEquation?.equation || '',
+    units: f.units || undefined,
+    documentation: f.documentation || undefined,
+    nonNegative: f.nonNegative || false,
+    graphicalFunction: f.graphicalFunction || undefined,
+    canBeModuleInput: f.canBeModuleInput || false,
+    isPublic: f.isPublic || false,
+    arrayedEquation: f.arrayedEquation,
+  }));
+}
+
+/**
+ * Parse a JSON array of auxiliary objects into Aux types.
+ */
+function parseAuxsJson(json: string): Aux[] {
+  const raw = JSON.parse(json) as JsonAuxiliary[];
+  return raw.map((a) => ({
+    type: 'aux' as const,
+    name: a.name,
+    uid: a.uid || undefined,
+    equation: a.equation || a.arrayedEquation?.equation || '',
+    initialEquation: a.initialEquation || a.arrayedEquation?.initialEquation || undefined,
+    units: a.units || undefined,
+    documentation: a.documentation || undefined,
+    graphicalFunction: a.graphicalFunction || undefined,
+    canBeModuleInput: a.canBeModuleInput || false,
+    isPublic: a.isPublic || false,
+    arrayedEquation: a.arrayedEquation,
+  }));
 }
 
 /**
@@ -167,45 +231,6 @@ export class Model {
     throw new Error(`Model '${this._name}' not found in project`);
   }
 
-  private extractEquation(
-    topLevel: string | undefined,
-    arrayed: { equation?: string; initialEquation?: string } | undefined,
-    field: 'equation' | 'initialEquation' = 'equation',
-  ): string {
-    if (topLevel) {
-      return topLevel;
-    }
-    if (arrayed) {
-      const value = arrayed[field];
-      if (value) {
-        return value;
-      }
-    }
-    return '';
-  }
-
-  private parseJsonGraphicalFunction(gf: JsonGraphicalFunction): GraphicalFunction {
-    // Convert to the schema format with points as [x, y] tuples
-    let points: [number, number][] | undefined;
-    let yPoints: number[] | undefined;
-
-    if (gf.points && gf.points.length > 0) {
-      // Already in [x, y] format
-      points = gf.points;
-    } else if (gf.yPoints && gf.yPoints.length > 0) {
-      // y_points only format
-      yPoints = gf.yPoints;
-    }
-
-    return {
-      points,
-      yPoints,
-      xScale: gf.xScale ? { min: gf.xScale.min, max: gf.xScale.max } : undefined,
-      yScale: gf.yScale ? { min: gf.yScale.min, max: gf.yScale.max } : undefined,
-      kind: gf.kind,
-    };
-  }
-
   /**
    * Stock variables in the model (immutable array).
    */
@@ -215,19 +240,7 @@ export class Model {
       return this._cachedStocks;
     }
 
-    const model = this.getModelJson();
-    this._cachedStocks = (model.stocks || []).map((s: JsonStock) => ({
-      type: 'stock' as const,
-      name: s.name,
-      initialEquation: this.extractEquation(s.initialEquation, s.arrayedEquation, 'initialEquation'),
-      inflows: s.inflows || [],
-      outflows: s.outflows || [],
-      units: s.units || undefined,
-      documentation: s.documentation || undefined,
-      dimensions: s.arrayedEquation?.dimensions || [],
-      nonNegative: s.nonNegative || false,
-    }));
-
+    this._cachedStocks = parseStocksJson(simlin_model_get_stocks_json(this._ptr));
     return this._cachedStocks;
   }
 
@@ -240,25 +253,7 @@ export class Model {
       return this._cachedFlows;
     }
 
-    const model = this.getModelJson();
-    this._cachedFlows = (model.flows || []).map((f: JsonFlow) => {
-      let gf: GraphicalFunction | undefined;
-      if (f.graphicalFunction) {
-        gf = this.parseJsonGraphicalFunction(f.graphicalFunction);
-      }
-
-      return {
-        type: 'flow' as const,
-        name: f.name,
-        equation: this.extractEquation(f.equation, f.arrayedEquation),
-        units: f.units || undefined,
-        documentation: f.documentation || undefined,
-        dimensions: f.arrayedEquation?.dimensions || [],
-        nonNegative: f.nonNegative || false,
-        graphicalFunction: gf,
-      };
-    });
-
+    this._cachedFlows = parseFlowsJson(simlin_model_get_flows_json(this._ptr));
     return this._cachedFlows;
   }
 
@@ -271,28 +266,7 @@ export class Model {
       return this._cachedAuxs;
     }
 
-    const model = this.getModelJson();
-    this._cachedAuxs = (model.auxiliaries || []).map((a: JsonAuxiliary) => {
-      let gf: GraphicalFunction | undefined;
-      if (a.graphicalFunction) {
-        gf = this.parseJsonGraphicalFunction(a.graphicalFunction);
-      }
-
-      const equation = this.extractEquation(a.equation, a.arrayedEquation);
-      const initialEquation = this.extractEquation(a.initialEquation, a.arrayedEquation, 'initialEquation');
-
-      return {
-        type: 'aux' as const,
-        name: a.name,
-        equation,
-        initialEquation: initialEquation || undefined,
-        units: a.units || undefined,
-        documentation: a.documentation || undefined,
-        dimensions: a.arrayedEquation?.dimensions || [],
-        graphicalFunction: gf,
-      };
-    });
-
+    this._cachedAuxs = parseAuxsJson(simlin_model_get_auxs_json(this._ptr));
     return this._cachedAuxs;
   }
 

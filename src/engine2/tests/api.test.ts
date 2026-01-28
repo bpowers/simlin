@@ -894,7 +894,7 @@ describe('High-Level API', () => {
       const stock = model.stocks.find((s) => s.name === 'population');
       expect(stock).toBeDefined();
       expect(stock!.initialEquation).toBe('1000');
-      expect(stock!.dimensions).toEqual(['Region']);
+      expect(stock!.arrayedEquation?.dimensions).toEqual(['Region']);
 
       project.dispose();
     });
