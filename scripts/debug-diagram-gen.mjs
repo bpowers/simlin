@@ -11,7 +11,6 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 import { Project as Engine2Project } from '@system-dynamics/engine2';
-import { convertMdlToXmile } from '@system-dynamics/xmutil';
 import { Project as ProjectDM } from '@system-dynamics/core/datamodel';
 import { renderSvgToString } from '@system-dynamics/diagram/render-common';
 
@@ -83,22 +82,12 @@ async function main() {
 
   try {
     // Read the input file
-    let contents = readFileSync(inputFile, 'utf-8');
+    const contents = readFileSync(inputFile, 'utf-8');
 
-    // Convert Vensim files to XMILE if needed
-    if (inputFile.endsWith('.mdl')) {
-      const [xmileContents, logs] = await convertMdlToXmile(contents, true);
-      if (xmileContents.length === 0) {
-        throw new Error('Vensim converter failed: ' + (logs || 'unknown error'));
-      }
-      contents = xmileContents;
-      if (logs) {
-        console.log('Conversion logs:', logs);
-      }
-    }
-
-    // Import the XMILE content using engine2
-    const engine2Project = await Engine2Project.open(contents, { wasm: wasmPath });
+    // Import the content using engine2
+    const engine2Project = inputFile.endsWith('.mdl')
+      ? await Engine2Project.openVensim(contents, { wasm: wasmPath })
+      : await Engine2Project.open(contents, { wasm: wasmPath });
     const projectPB = engine2Project.serializeProtobuf();
     const project = ProjectDM.deserializeBinary(projectPB);
 
@@ -111,8 +100,8 @@ async function main() {
     // Create a copy of the XMILE file without views
     console.log('\nCreating XMILE copy without views...');
 
-    // Use the converted XMILE content if we converted from MDL, otherwise read the original
-    let xmileContent = contents;
+    // Get XMILE from the engine project (handles both XMILE and MDL inputs)
+    const xmileContent = engine2Project.toXmileString();
 
     // Remove the <views>...</views> section using regex
     // This regex matches <views> tags with any attributes and all content until the closing </views>

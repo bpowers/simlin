@@ -11,7 +11,6 @@
   "main": "src/server/lib",
   "workspaces": {
     "packages": [
-      "src/xmutil-js",
       "src/engine2",
       "src/core",
       "src/diagram",
