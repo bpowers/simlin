@@ -2042,7 +2042,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     this.setState({ selectedTool: undefined });
   };
 
-  handleSelectStock = (e: React.MouseEvent<HTMLDivElement>) => {
+  handleSelectStock = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
     this.setState({
@@ -2050,7 +2050,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   };
 
-  handleSelectFlow = (e: React.MouseEvent<HTMLDivElement>) => {
+  handleSelectFlow = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
     this.setState({
@@ -2058,7 +2058,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   };
 
-  handleSelectAux = (e: React.MouseEvent<HTMLDivElement>) => {
+  handleSelectAux = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
     this.setState({
@@ -2066,7 +2066,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   };
 
-  handleSelectLink = (e: React.MouseEvent<HTMLDivElement>) => {
+  handleSelectLink = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
     this.setState({
