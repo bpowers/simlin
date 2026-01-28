@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Any, Self, Union
 from types import TracebackType
 
 from ._dt import parse_dt
-from ._ffi import ffi, lib, string_to_c, c_to_string, free_c_string, _register_finalizer, check_out_error
+from ._ffi import ffi, lib, string_to_c, c_to_string, free_c_string, _register_finalizer, check_out_error, get_stocks_json, get_flows_json, get_auxs_json
 from .errors import SimlinRuntimeError, ErrorCode
 from .analysis import Link, LinkPolarity, Loop
 from .types import Stock, Flow, Aux, TimeSpec, GraphicalFunction, GraphicalFunctionScale, ModelIssue
@@ -399,7 +399,10 @@ class Model:
             Tuple of Stock objects representing all stocks in the model
         """
         if self._cached_stocks is None:
-            model = self._get_model_json()
+            # Use direct JSON API instead of serializing entire project
+            json_bytes = get_stocks_json(self._ptr)
+            stocks_json = json.loads(json_bytes.decode("utf-8"))
+            stocks_list = [converter.structure(s, JsonStock) for s in stocks_json]
             self._cached_stocks = tuple(
                 Stock(
                     name=s.name,
@@ -413,7 +416,7 @@ class Model:
                     dimensions=tuple(s.arrayed_equation.dimensions) if s.arrayed_equation else (),
                     non_negative=s.non_negative,
                 )
-                for s in model.stocks
+                for s in stocks_list
             )
         return self._cached_stocks
 
@@ -426,10 +429,13 @@ class Model:
             Tuple of Flow objects representing all flows in the model
         """
         if self._cached_flows is None:
-            model = self._get_model_json()
+            # Use direct JSON API instead of serializing entire project
+            json_bytes = get_flows_json(self._ptr)
+            flows_json = json.loads(json_bytes.decode("utf-8"))
+            flows_data = [converter.structure(f, JsonFlow) for f in flows_json]
             flows_list = []
 
-            for f in model.flows:
+            for f in flows_data:
                 gf = None
                 if f.graphical_function:
                     gf = self._parse_json_graphical_function(f.graphical_function)
@@ -457,10 +463,13 @@ class Model:
             Tuple of Aux objects representing all auxiliary variables in the model
         """
         if self._cached_auxs is None:
-            model = self._get_model_json()
+            # Use direct JSON API instead of serializing entire project
+            json_bytes = get_auxs_json(self._ptr)
+            auxs_json = json.loads(json_bytes.decode("utf-8"))
+            auxs_data = [converter.structure(a, JsonAuxiliary) for a in auxs_json]
             auxs_list = []
 
-            for a in model.auxiliaries:
+            for a in auxs_data:
                 gf = None
                 if a.graphical_function:
                     gf = self._parse_json_graphical_function(a.graphical_function)

@@ -14,6 +14,7 @@ import {
   readOutPtr,
   allocOutUsize,
   readOutUsize,
+  copyFromWasm,
 } from './memory';
 import { SimlinModelPtr, SimlinLinksPtr } from './types';
 import {
@@ -279,6 +280,132 @@ export function simlin_model_get_incoming_links(model: SimlinModelPtr, varName: 
   } finally {
     free(varNamePtr);
     free(outCountPtr);
+    free(outErrPtr);
+  }
+}
+
+/**
+ * Get all stocks in a model as JSON bytes.
+ * @param model Model pointer
+ * @returns JSON bytes (UTF-8 encoded array of stock objects)
+ */
+export function simlin_model_get_stocks_json(model: SimlinModelPtr): Uint8Array {
+  const exports = getExports();
+  const fn = exports.simlin_model_get_stocks_json as (
+    model: number,
+    outBuf: number,
+    outLen: number,
+    outErr: number,
+  ) => void;
+
+  const outBufPtr = allocOutPtr();
+  const outLenPtr = allocOutUsize();
+  const outErrPtr = allocOutPtr();
+
+  try {
+    fn(model, outBufPtr, outLenPtr, outErrPtr);
+    const errPtr = readOutPtr(outErrPtr);
+
+    if (errPtr !== 0) {
+      const code = simlin_error_get_code(errPtr);
+      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
+      simlin_error_free(errPtr);
+      throw new SimlinError(message, code, details);
+    }
+
+    const bufPtr = readOutPtr(outBufPtr);
+    const len = readOutUsize(outLenPtr);
+    const data = copyFromWasm(bufPtr, len);
+    free(bufPtr);
+    return data;
+  } finally {
+    free(outBufPtr);
+    free(outLenPtr);
+    free(outErrPtr);
+  }
+}
+
+/**
+ * Get all flows in a model as JSON bytes.
+ * @param model Model pointer
+ * @returns JSON bytes (UTF-8 encoded array of flow objects)
+ */
+export function simlin_model_get_flows_json(model: SimlinModelPtr): Uint8Array {
+  const exports = getExports();
+  const fn = exports.simlin_model_get_flows_json as (
+    model: number,
+    outBuf: number,
+    outLen: number,
+    outErr: number,
+  ) => void;
+
+  const outBufPtr = allocOutPtr();
+  const outLenPtr = allocOutUsize();
+  const outErrPtr = allocOutPtr();
+
+  try {
+    fn(model, outBufPtr, outLenPtr, outErrPtr);
+    const errPtr = readOutPtr(outErrPtr);
+
+    if (errPtr !== 0) {
+      const code = simlin_error_get_code(errPtr);
+      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
+      simlin_error_free(errPtr);
+      throw new SimlinError(message, code, details);
+    }
+
+    const bufPtr = readOutPtr(outBufPtr);
+    const len = readOutUsize(outLenPtr);
+    const data = copyFromWasm(bufPtr, len);
+    free(bufPtr);
+    return data;
+  } finally {
+    free(outBufPtr);
+    free(outLenPtr);
+    free(outErrPtr);
+  }
+}
+
+/**
+ * Get all auxiliaries in a model as JSON bytes.
+ * @param model Model pointer
+ * @returns JSON bytes (UTF-8 encoded array of auxiliary objects)
+ */
+export function simlin_model_get_auxs_json(model: SimlinModelPtr): Uint8Array {
+  const exports = getExports();
+  const fn = exports.simlin_model_get_auxs_json as (
+    model: number,
+    outBuf: number,
+    outLen: number,
+    outErr: number,
+  ) => void;
+
+  const outBufPtr = allocOutPtr();
+  const outLenPtr = allocOutUsize();
+  const outErrPtr = allocOutPtr();
+
+  try {
+    fn(model, outBufPtr, outLenPtr, outErrPtr);
+    const errPtr = readOutPtr(outErrPtr);
+
+    if (errPtr !== 0) {
+      const code = simlin_error_get_code(errPtr);
+      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
+      simlin_error_free(errPtr);
+      throw new SimlinError(message, code, details);
+    }
+
+    const bufPtr = readOutPtr(outBufPtr);
+    const len = readOutUsize(outLenPtr);
+    const data = copyFromWasm(bufPtr, len);
+    free(bufPtr);
+    return data;
+  } finally {
+    free(outBufPtr);
+    free(outLenPtr);
     free(outErrPtr);
   }
 }

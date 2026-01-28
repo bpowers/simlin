@@ -246,6 +246,81 @@ def open_json(json_data: bytes) -> Any:
     return project_ptr
 
 
+def get_stocks_json(model_ptr: Any) -> bytes:
+    """Get all stocks in a model as JSON.
+
+    Args:
+        model_ptr: Pointer to a SimlinModel
+
+    Returns:
+        JSON-encoded array of stock objects (UTF-8 bytes)
+
+    Raises:
+        SimlinRuntimeError: If the operation fails
+    """
+    output_ptr = ffi.new("uint8_t **")
+    output_len_ptr = ffi.new("uintptr_t *")
+    err_ptr = ffi.new("SimlinError **")
+
+    lib.simlin_model_get_stocks_json(model_ptr, output_ptr, output_len_ptr, err_ptr)
+    check_out_error(err_ptr, "Get stocks JSON")
+
+    try:
+        return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))
+    finally:
+        lib.simlin_free(output_ptr[0])
+
+
+def get_flows_json(model_ptr: Any) -> bytes:
+    """Get all flows in a model as JSON.
+
+    Args:
+        model_ptr: Pointer to a SimlinModel
+
+    Returns:
+        JSON-encoded array of flow objects (UTF-8 bytes)
+
+    Raises:
+        SimlinRuntimeError: If the operation fails
+    """
+    output_ptr = ffi.new("uint8_t **")
+    output_len_ptr = ffi.new("uintptr_t *")
+    err_ptr = ffi.new("SimlinError **")
+
+    lib.simlin_model_get_flows_json(model_ptr, output_ptr, output_len_ptr, err_ptr)
+    check_out_error(err_ptr, "Get flows JSON")
+
+    try:
+        return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))
+    finally:
+        lib.simlin_free(output_ptr[0])
+
+
+def get_auxs_json(model_ptr: Any) -> bytes:
+    """Get all auxiliaries in a model as JSON.
+
+    Args:
+        model_ptr: Pointer to a SimlinModel
+
+    Returns:
+        JSON-encoded array of auxiliary objects (UTF-8 bytes)
+
+    Raises:
+        SimlinRuntimeError: If the operation fails
+    """
+    output_ptr = ffi.new("uint8_t **")
+    output_len_ptr = ffi.new("uintptr_t *")
+    err_ptr = ffi.new("SimlinError **")
+
+    lib.simlin_model_get_auxs_json(model_ptr, output_ptr, output_len_ptr, err_ptr)
+    check_out_error(err_ptr, "Get auxiliaries JSON")
+
+    try:
+        return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))
+    finally:
+        lib.simlin_free(output_ptr[0])
+
+
 __all__ = [
     "ffi",
     "lib",
@@ -259,6 +334,9 @@ __all__ = [
     "apply_patch_json",
     "serialize_json",
     "open_json",
+    "get_stocks_json",
+    "get_flows_json",
+    "get_auxs_json",
     "_register_finalizer",
     "_finalizer_refs",
 ]
