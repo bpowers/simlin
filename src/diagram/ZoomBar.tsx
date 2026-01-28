@@ -4,11 +4,8 @@
 
 import * as React from 'react';
 
-import clsx from 'clsx';
-import IconButton from '@mui/material/IconButton';
-import Paper from '@mui/material/Paper';
-import AddIcon from '@mui/icons-material/Add';
-import RemoveIcon from '@mui/icons-material/Remove';
+import IconButton from './components/IconButton';
+import { AddIcon, RemoveIcon } from './components/icons';
 
 import styles from './ZoomBar.module.css';
 
@@ -24,9 +21,9 @@ function snapToZoom(zoom: number): number {
   });
 }
 
-const ε = 0.001;
+const E = 0.001;
 function eq(a: number, b: number): boolean {
-  return Math.abs(a - b) < ε;
+  return Math.abs(a - b) < E;
 }
 
 function findNext(zoom: number, dir: 'out' | 'in'): number | undefined {
@@ -75,7 +72,7 @@ export class ZoomBar extends React.PureComponent<ZoomBarProps> {
     const zoomOutEnabled = zoom > zooms[0];
 
     return (
-      <Paper className={clsx(styles.card)} elevation={2}>
+      <div className={styles.card}>
         <IconButton
           disabled={!zoomOutEnabled}
           style={{ display: 'inline-block' }}
@@ -95,7 +92,7 @@ export class ZoomBar extends React.PureComponent<ZoomBarProps> {
         >
           <AddIcon />
         </IconButton>
-      </Paper>
+      </div>
     );
   }
 }

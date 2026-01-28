@@ -4,10 +4,8 @@
 
 import * as React from 'react';
 
-import IconButton from '@mui/material/IconButton';
-import Paper from '@mui/material/Paper';
-import RedoIcon from '@mui/icons-material/Redo';
-import UndoIcon from '@mui/icons-material/Undo';
+import IconButton from './components/IconButton';
+import { RedoIcon, UndoIcon } from './components/icons';
 
 import styles from './UndoRedoBar.module.css';
 
@@ -30,7 +28,7 @@ export class UndoRedoBar extends React.PureComponent<UndoRedoBarProps> {
     const { undoEnabled, redoEnabled } = this.props;
 
     return (
-      <Paper className={styles.card} elevation={2}>
+      <div className={styles.card}>
         <IconButton disabled={!undoEnabled} aria-label="Undo" onClick={this.handleUndo}>
           <UndoIcon />
         </IconButton>
@@ -38,7 +36,7 @@ export class UndoRedoBar extends React.PureComponent<UndoRedoBarProps> {
         <IconButton disabled={!redoEnabled} aria-label="Redo" onClick={this.handleRedo}>
           <RedoIcon />
         </IconButton>
-      </Paper>
+      </div>
     );
   }
 }

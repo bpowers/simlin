@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import SvgIcon from '@mui/material/SvgIcon';
+import SvgIcon from './components/SvgIcon';
 
 import styles from './LinkIcon.module.css';
 
@@ -28,5 +28,3 @@ export class LinkIcon extends React.PureComponent {
     );
   }
 }
-
-(LinkIcon as any).muiName = 'LinkIcon';

@@ -1,0 +1,35 @@
+.backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1200;
+  opacity: 1;
+  transition: opacity 225ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.backdropHidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 1200;
+  background: #fff;
+  overflow-y: auto;
+  box-shadow: 0px 8px 10px -5px rgba(0,0,0,0.2), 0px 16px 24px 2px rgba(0,0,0,0.14), 0px 6px 30px 5px rgba(0,0,0,0.12);
+  transform: translateX(0);
+  visibility: visible;
+  transition: transform 225ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.panelHidden {
+  transform: translateX(-100%);
+  visibility: hidden;
+}

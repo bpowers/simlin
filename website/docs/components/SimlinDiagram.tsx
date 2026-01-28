@@ -1,8 +1,6 @@
 import React from 'react';
 import { toUint8Array } from 'js-base64';
 import { Map, Set } from 'immutable';
-import { createTheme, ThemeProvider } from '@mui/material/styles';
-
 import { defined, Series } from '@system-dynamics/core/common';
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
 import { Point } from '@system-dynamics/diagram/drawing/common';
@@ -37,12 +35,6 @@ export default class SimlinDiagram extends React.PureComponent<{}, DiagramState>
   }
 
   render() {
-    const theme = createTheme({
-      palette: {
-        mode: 'light',
-      },
-    });
-
     const model = defined(this.state.project.models.get('main'));
 
     const renameVariable = (_oldName: string, _newName: string): void => {
@@ -87,7 +79,7 @@ export default class SimlinDiagram extends React.PureComponent<{}, DiagramState>
 
     return (
       <div style={{ height: '400px', width: '100%', border: '1px solid #e0e0e0', borderRadius: '8px', overflow: 'hidden' }}>
-        <ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>
+        {canvasElement}
       </div>
     );
   }

@@ -4,9 +4,8 @@
 
 import * as React from 'react';
 
-import IconButton from '@mui/material/IconButton';
-import Paper from '@mui/material/Paper';
-import PhotoCamera from '@mui/icons-material/PhotoCamera';
+import IconButton from './components/IconButton';
+import { PhotoCameraIcon } from './components/icons';
 
 import styles from './Snapshotter.module.css';
 
@@ -21,11 +20,11 @@ export class Snapshotter extends React.PureComponent<SnapshotterProps> {
 
   render() {
     return (
-      <Paper className={styles.card} elevation={2}>
+      <div className={styles.card}>
         <IconButton className={styles.button} aria-label="Snapshot" onClick={this.handleSnapshot}>
-          <PhotoCamera />
+          <PhotoCameraIcon />
         </IconButton>
-      </Paper>
+      </div>
     );
   }
 }

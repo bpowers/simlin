@@ -18,6 +18,19 @@
   width: 240px;
   margin-top: 12px;
   margin-left: 12px;
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0px 3px 1px -2px rgba(0,0,0,0.2), 0px 2px 2px 0px rgba(0,0,0,0.14), 0px 1px 5px 0px rgba(0,0,0,0.12);
+}
+
+.snapshotCardContent {
+  padding: 16px;
+}
+
+.snapshotCardActions {
+  display: flex;
+  align-items: center;
+  padding: 8px;
 }
 
 .snapshotImg {
@@ -51,6 +64,9 @@
   right: 8px;
   height: 48px;
   width: 359px;
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0px 3px 1px -2px rgba(0,0,0,0.2), 0px 2px 2px 0px rgba(0,0,0,0.14), 0px 1px 5px 0px rgba(0,0,0,0.12);
 }
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
@@ -114,6 +130,3 @@
   background-color: var(--color-secondary);
 }
 
-:global(.MuiAutocomplete-option[data-focus="true"]) {
-  background: #ADD8E6;
-}

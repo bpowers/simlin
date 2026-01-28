@@ -7,21 +7,13 @@ import * as React from 'react';
 import { List, Map, Set, Stack } from 'immutable';
 
 import clsx from 'clsx';
-import IconButton from '@mui/material/IconButton';
-import TextField from '@mui/material/TextField';
-import Autocomplete from '@mui/material/Autocomplete';
-import Paper from '@mui/material/Paper';
-import Snackbar from '@mui/material/Snackbar';
-import ClearIcon from '@mui/icons-material/Clear';
-import EditIcon from '@mui/icons-material/Edit';
-import MenuIcon from '@mui/icons-material/Menu';
-import SpeedDial, { CloseReason } from '@mui/material/SpeedDial';
-import SpeedDialAction from '@mui/material/SpeedDialAction';
-import SpeedDialIcon from '@mui/material/SpeedDialIcon';
-import { Card } from '@mui/material';
-import Button from '@mui/material/Button';
-import CardActions from '@mui/material/CardActions';
-import CardContent from '@mui/material/CardContent';
+import IconButton from './components/IconButton';
+import TextField from './components/TextField';
+import Autocomplete from './components/Autocomplete';
+import Snackbar from './components/Snackbar';
+import { ClearIcon, EditIcon, MenuIcon } from './components/icons';
+import SpeedDial, { CloseReason, SpeedDialAction, SpeedDialIcon } from './components/SpeedDial';
+import Button from './components/Button';
 import { canonicalize } from '@system-dynamics/core/canonicalize';
 
 import { Project as Engine2Project, SimlinErrorKind, SimlinUnitErrorKind } from '@system-dynamics/engine2';
@@ -416,15 +408,20 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }));
   }
 
-  handleDialClick = (_event: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
+  handleDialClick = (_event: React.MouseEvent<HTMLButtonElement>) => {
     this.setState({
       dialOpen: !this.state.dialOpen,
       selectedTool: this.state.dialOpen ? undefined : this.state.selectedTool,
     });
   };
 
-  handleDialClose = (e: React.SyntheticEvent<{}>, reason: CloseReason) => {
+  handleDialClose = (e: React.SyntheticEvent, reason: CloseReason) => {
     if (reason === 'mouseLeave' || reason === 'blur') {
+      return;
+    }
+    // When an action is clicked, close the dial but keep the selected tool
+    if (reason === 'actionClick') {
+      this.setState({ dialOpen: false });
       return;
     }
     this.setState({
@@ -1681,7 +1678,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const status = this.state.status;
 
     return (
-      <Paper className={styles.searchBar} elevation={2}>
+      <div className={styles.searchBar}>
         <IconButton
           className={styles.menuButton}
           color="inherit"
@@ -1709,7 +1706,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         </div>
         <div className={styles.divider} />
         <Status status={status} onClick={this.handleStatusClick} />
-      </Paper>
+      </div>
     );
   }
 
@@ -2045,7 +2042,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     this.setState({ selectedTool: undefined });
   };
 
-  handleSelectStock = (e: React.MouseEvent<HTMLDivElement>) => {
+  handleSelectStock = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
     this.setState({
@@ -2053,7 +2050,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   };
 
-  handleSelectFlow = (e: React.MouseEvent<HTMLDivElement>) => {
+  handleSelectFlow = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
     this.setState({
@@ -2061,7 +2058,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   };
 
-  handleSelectAux = (e: React.MouseEvent<HTMLDivElement>) => {
+  handleSelectAux = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
     this.setState({
@@ -2069,7 +2066,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   };
 
-  handleSelectLink = (e: React.MouseEvent<HTMLDivElement>) => {
+  handleSelectLink = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
     this.setState({
@@ -2363,16 +2360,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
 
     return (
-      <Card className={styles.snapshotCard} elevation={2}>
-        <CardContent>
+      <div className={styles.snapshotCard}>
+        <div className={styles.snapshotCardContent}>
           <img src={URL.createObjectURL(snapshotBlob)} className={styles.snapshotImg} alt="diagram snapshot" />
-        </CardContent>
-        <CardActions>
+        </div>
+        <div className={styles.snapshotCardActions}>
           <Button size="small" color="primary" onClick={this.handleClearSnapshot}>
             Close
           </Button>
-        </CardActions>
-      </Card>
+        </div>
+      </div>
     );
   }
 
