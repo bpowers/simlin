@@ -16,8 +16,7 @@
       "@/*": ["src/*"],
       "@system-dynamics/core": ["../src/core"],
       "@system-dynamics/diagram": ["../src/diagram"],
-      "@system-dynamics/engine2": ["../src/engine2"],
-      "@system-dynamics/xmutil": ["../src/xmutil-js"]
+      "@system-dynamics/engine2": ["../src/engine2"]
     }
   },
   "include": ["src/", "docs/", "rspress.config.ts"],

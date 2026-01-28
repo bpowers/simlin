@@ -75,7 +75,6 @@ export default defineConfig({
         '@system-dynamics/core': path.resolve(__dirname, '../src/core'),
         '@system-dynamics/diagram': path.resolve(__dirname, '../src/diagram'),
         '@system-dynamics/engine2': path.resolve(__dirname, '../src/engine2'),
-        '@system-dynamics/xmutil': path.resolve(__dirname, '../src/xmutil-js'),
         '@': path.resolve(__dirname, 'src'),
       },
     },
