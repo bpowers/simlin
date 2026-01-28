@@ -388,6 +388,63 @@ char *simlin_model_get_latex_equation(SimlinModel *model,
                                       const char *ident,
                                       SimlinError **out_error);
 
+// Returns all stocks in a model as a JSON array.
+//
+// The returned JSON is an array of stock objects, each containing fields like
+// `name`, `initialEquation`, `inflows`, `outflows`, `units`, etc.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `out_buffer` and `out_len` must be valid pointers where the serialized
+//   bytes and length will be written
+// - `out_error` may be null or a valid pointer to receive error details
+//
+// # Ownership
+// - The returned buffer is exclusively owned by the caller and MUST be freed with `simlin_free`.
+// - The caller is responsible for freeing the buffer even if subsequent operations fail.
+void simlin_model_get_stocks_json(SimlinModel *model,
+                                  uint8_t **out_buffer,
+                                  uintptr_t *out_len,
+                                  SimlinError **out_error);
+
+// Returns all flows in a model as a JSON array.
+//
+// The returned JSON is an array of flow objects, each containing fields like
+// `name`, `equation`, `units`, `nonNegative`, `graphicalFunction`, etc.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `out_buffer` and `out_len` must be valid pointers where the serialized
+//   bytes and length will be written
+// - `out_error` may be null or a valid pointer to receive error details
+//
+// # Ownership
+// - The returned buffer is exclusively owned by the caller and MUST be freed with `simlin_free`.
+// - The caller is responsible for freeing the buffer even if subsequent operations fail.
+void simlin_model_get_flows_json(SimlinModel *model,
+                                 uint8_t **out_buffer,
+                                 uintptr_t *out_len,
+                                 SimlinError **out_error);
+
+// Returns all auxiliaries in a model as a JSON array.
+//
+// The returned JSON is an array of auxiliary objects, each containing fields like
+// `name`, `equation`, `initialEquation`, `units`, `graphicalFunction`, etc.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `out_buffer` and `out_len` must be valid pointers where the serialized
+//   bytes and length will be written
+// - `out_error` may be null or a valid pointer to receive error details
+//
+// # Ownership
+// - The returned buffer is exclusively owned by the caller and MUST be freed with `simlin_free`.
+// - The caller is responsible for freeing the buffer even if subsequent operations fail.
+void simlin_model_get_auxs_json(SimlinModel *model,
+                                uint8_t **out_buffer,
+                                uintptr_t *out_len,
+                                SimlinError **out_error);
+
 // Creates a new simulation context
 //
 // # Safety

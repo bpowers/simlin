@@ -15,6 +15,9 @@ import {
   simlin_model_get_incoming_links,
   simlin_model_get_links,
   simlin_model_get_latex_equation,
+  simlin_model_get_stocks_json,
+  simlin_model_get_flows_json,
+  simlin_model_get_auxs_json,
 } from './internal/model';
 import { readLinks, simlin_free_links } from './internal/analysis';
 import { SimlinModelPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types';
@@ -215,8 +218,12 @@ export class Model {
       return this._cachedStocks;
     }
 
-    const model = this.getModelJson();
-    this._cachedStocks = (model.stocks || []).map((s: JsonStock) => ({
+    // Use direct JSON API instead of serializing entire project
+    const jsonBytes = simlin_model_get_stocks_json(this._ptr);
+    const jsonStr = new TextDecoder().decode(jsonBytes);
+    const stocksJson: JsonStock[] = JSON.parse(jsonStr);
+
+    this._cachedStocks = stocksJson.map((s: JsonStock) => ({
       type: 'stock' as const,
       name: s.name,
       initialEquation: this.extractEquation(s.initialEquation, s.arrayedEquation, 'initialEquation'),
@@ -240,8 +247,12 @@ export class Model {
       return this._cachedFlows;
     }
 
-    const model = this.getModelJson();
-    this._cachedFlows = (model.flows || []).map((f: JsonFlow) => {
+    // Use direct JSON API instead of serializing entire project
+    const jsonBytes = simlin_model_get_flows_json(this._ptr);
+    const jsonStr = new TextDecoder().decode(jsonBytes);
+    const flowsJson: JsonFlow[] = JSON.parse(jsonStr);
+
+    this._cachedFlows = flowsJson.map((f: JsonFlow) => {
       let gf: GraphicalFunction | undefined;
       if (f.graphicalFunction) {
         gf = this.parseJsonGraphicalFunction(f.graphicalFunction);
@@ -271,8 +282,12 @@ export class Model {
       return this._cachedAuxs;
     }
 
-    const model = this.getModelJson();
-    this._cachedAuxs = (model.auxiliaries || []).map((a: JsonAuxiliary) => {
+    // Use direct JSON API instead of serializing entire project
+    const jsonBytes = simlin_model_get_auxs_json(this._ptr);
+    const jsonStr = new TextDecoder().decode(jsonBytes);
+    const auxsJson: JsonAuxiliary[] = JSON.parse(jsonStr);
+
+    this._cachedAuxs = auxsJson.map((a: JsonAuxiliary) => {
       let gf: GraphicalFunction | undefined;
       if (a.graphicalFunction) {
         gf = this.parseJsonGraphicalFunction(a.graphicalFunction);

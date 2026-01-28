@@ -1434,6 +1434,295 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
     }
 }
 
+/// Returns all stocks in a model as a JSON array.
+///
+/// The returned JSON is an array of stock objects, each containing fields like
+/// `name`, `initialEquation`, `inflows`, `outflows`, `units`, etc.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `out_buffer` and `out_len` must be valid pointers where the serialized
+///   bytes and length will be written
+/// - `out_error` may be null or a valid pointer to receive error details
+///
+/// # Ownership
+/// - The returned buffer is exclusively owned by the caller and MUST be freed with `simlin_free`.
+/// - The caller is responsible for freeing the buffer even if subsequent operations fail.
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_stocks_json(
+    model: *mut SimlinModel,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let model_ref = match require_model(model) {
+        Ok(m) => m,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return;
+        }
+    };
+
+    let project_locked = (*model_ref.project).project.lock().unwrap();
+
+    let datamodel_model = match project_locked.datamodel.get_model(&model_ref.model_name) {
+        Some(m) => m,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName)
+                    .with_message(format!("model '{}' not found", model_ref.model_name)),
+            );
+            return;
+        }
+    };
+
+    // Extract stocks from the datamodel and convert to JSON types
+    let stocks: Vec<engine::json::Stock> = datamodel_model
+        .variables
+        .iter()
+        .filter_map(|var| match var {
+            engine::datamodel::Variable::Stock(stock) => {
+                Some(engine::json::Stock::from(stock.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let bytes = match serde_json::to_vec(&stocks) {
+        Ok(data) => data,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to encode stocks JSON: {err}")),
+            );
+            return;
+        }
+    };
+
+    let len = bytes.len();
+    let buf = simlin_malloc(len);
+    if buf.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("allocation failed while serializing stocks"),
+        );
+        return;
+    }
+
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+
+    *out_buffer = buf;
+    *out_len = len;
+}
+
+/// Returns all flows in a model as a JSON array.
+///
+/// The returned JSON is an array of flow objects, each containing fields like
+/// `name`, `equation`, `units`, `nonNegative`, `graphicalFunction`, etc.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `out_buffer` and `out_len` must be valid pointers where the serialized
+///   bytes and length will be written
+/// - `out_error` may be null or a valid pointer to receive error details
+///
+/// # Ownership
+/// - The returned buffer is exclusively owned by the caller and MUST be freed with `simlin_free`.
+/// - The caller is responsible for freeing the buffer even if subsequent operations fail.
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_flows_json(
+    model: *mut SimlinModel,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let model_ref = match require_model(model) {
+        Ok(m) => m,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return;
+        }
+    };
+
+    let project_locked = (*model_ref.project).project.lock().unwrap();
+
+    let datamodel_model = match project_locked.datamodel.get_model(&model_ref.model_name) {
+        Some(m) => m,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName)
+                    .with_message(format!("model '{}' not found", model_ref.model_name)),
+            );
+            return;
+        }
+    };
+
+    // Extract flows from the datamodel and convert to JSON types
+    let flows: Vec<engine::json::Flow> = datamodel_model
+        .variables
+        .iter()
+        .filter_map(|var| match var {
+            engine::datamodel::Variable::Flow(flow) => Some(engine::json::Flow::from(flow.clone())),
+            _ => None,
+        })
+        .collect();
+
+    let bytes = match serde_json::to_vec(&flows) {
+        Ok(data) => data,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to encode flows JSON: {err}")),
+            );
+            return;
+        }
+    };
+
+    let len = bytes.len();
+    let buf = simlin_malloc(len);
+    if buf.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("allocation failed while serializing flows"),
+        );
+        return;
+    }
+
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+
+    *out_buffer = buf;
+    *out_len = len;
+}
+
+/// Returns all auxiliaries in a model as a JSON array.
+///
+/// The returned JSON is an array of auxiliary objects, each containing fields like
+/// `name`, `equation`, `initialEquation`, `units`, `graphicalFunction`, etc.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `out_buffer` and `out_len` must be valid pointers where the serialized
+///   bytes and length will be written
+/// - `out_error` may be null or a valid pointer to receive error details
+///
+/// # Ownership
+/// - The returned buffer is exclusively owned by the caller and MUST be freed with `simlin_free`.
+/// - The caller is responsible for freeing the buffer even if subsequent operations fail.
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_auxs_json(
+    model: *mut SimlinModel,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let model_ref = match require_model(model) {
+        Ok(m) => m,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return;
+        }
+    };
+
+    let project_locked = (*model_ref.project).project.lock().unwrap();
+
+    let datamodel_model = match project_locked.datamodel.get_model(&model_ref.model_name) {
+        Some(m) => m,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName)
+                    .with_message(format!("model '{}' not found", model_ref.model_name)),
+            );
+            return;
+        }
+    };
+
+    // Extract auxiliaries from the datamodel and convert to JSON types
+    let auxs: Vec<engine::json::Auxiliary> = datamodel_model
+        .variables
+        .iter()
+        .filter_map(|var| match var {
+            engine::datamodel::Variable::Aux(aux) => {
+                Some(engine::json::Auxiliary::from(aux.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let bytes = match serde_json::to_vec(&auxs) {
+        Ok(data) => data,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to encode auxiliaries JSON: {err}")),
+            );
+            return;
+        }
+    };
+
+    let len = bytes.len();
+    let buf = simlin_malloc(len);
+    if buf.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("allocation failed while serializing auxiliaries"),
+        );
+        return;
+    }
+
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+
+    *out_buffer = buf;
+    *out_len = len;
+}
+
 /// Helper function to create a VM for a given project and model
 fn create_vm(project: &engine::Project, model_name: &str) -> Result<Vm, engine::Error> {
     let compiler = engine::Simulation::new(project, model_name)?;
@@ -9738,6 +10027,233 @@ mod tests {
             assert!(msg.contains("NUL"));
 
             simlin_error_free(out_error);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_model_get_stocks_json() {
+        let datamodel = TestProject::new("stocks_json")
+            .stock("population", "100", &["births"], &["deaths"], None)
+            .stock("resources", "500", &[], &["consumption"], None)
+            .flow("births", "population * 0.02", None)
+            .flow("deaths", "population * 0.01", None)
+            .flow("consumption", "resources * 0.1", None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+            assert!(!model.is_null());
+            assert!(err.is_null());
+
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+
+            simlin_model_get_stocks_json(model, &mut out_buffer, &mut out_len, &mut out_error);
+
+            assert!(out_error.is_null(), "expected no error getting stocks JSON");
+            assert!(!out_buffer.is_null(), "expected stocks JSON buffer");
+            assert!(out_len > 0, "expected non-empty stocks JSON");
+
+            let slice = std::slice::from_raw_parts(out_buffer, out_len);
+            let json_str = std::str::from_utf8(slice).expect("valid utf-8 JSON");
+
+            let stocks: Vec<engine::json::Stock> =
+                serde_json::from_str(json_str).expect("valid JSON array of stocks");
+
+            assert_eq!(stocks.len(), 2, "expected 2 stocks");
+
+            let stock_names: Vec<&str> = stocks.iter().map(|s| s.name.as_str()).collect();
+            assert!(stock_names.contains(&"population"));
+            assert!(stock_names.contains(&"resources"));
+
+            // Verify stock details
+            let pop_stock = stocks.iter().find(|s| s.name == "population").unwrap();
+            assert_eq!(pop_stock.initial_equation, "100");
+            assert!(pop_stock.inflows.contains(&"births".to_string()));
+            assert!(pop_stock.outflows.contains(&"deaths".to_string()));
+
+            simlin_free(out_buffer);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_model_get_flows_json() {
+        let datamodel = TestProject::new("flows_json")
+            .stock("population", "100", &["births"], &["deaths"], None)
+            .flow("births", "population * 0.02", None)
+            .flow("deaths", "population * 0.01", None)
+            .aux("growth_rate", "0.02", None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+            assert!(!model.is_null());
+            assert!(err.is_null());
+
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+
+            simlin_model_get_flows_json(model, &mut out_buffer, &mut out_len, &mut out_error);
+
+            assert!(out_error.is_null(), "expected no error getting flows JSON");
+            assert!(!out_buffer.is_null(), "expected flows JSON buffer");
+            assert!(out_len > 0, "expected non-empty flows JSON");
+
+            let slice = std::slice::from_raw_parts(out_buffer, out_len);
+            let json_str = std::str::from_utf8(slice).expect("valid utf-8 JSON");
+
+            let flows: Vec<engine::json::Flow> =
+                serde_json::from_str(json_str).expect("valid JSON array of flows");
+
+            assert_eq!(flows.len(), 2, "expected 2 flows");
+
+            let flow_names: Vec<&str> = flows.iter().map(|f| f.name.as_str()).collect();
+            assert!(flow_names.contains(&"births"));
+            assert!(flow_names.contains(&"deaths"));
+
+            // Verify flow details
+            let births_flow = flows.iter().find(|f| f.name == "births").unwrap();
+            assert_eq!(births_flow.equation, "population * 0.02");
+
+            simlin_free(out_buffer);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_model_get_auxs_json() {
+        let datamodel = TestProject::new("auxs_json")
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * growth_rate", None)
+            .aux("growth_rate", "0.02", None)
+            .aux("carrying_capacity", "1000", None)
+            .aux("density", "population / carrying_capacity", None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+            assert!(!model.is_null());
+            assert!(err.is_null());
+
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+
+            simlin_model_get_auxs_json(model, &mut out_buffer, &mut out_len, &mut out_error);
+
+            assert!(out_error.is_null(), "expected no error getting auxs JSON");
+            assert!(!out_buffer.is_null(), "expected auxs JSON buffer");
+            assert!(out_len > 0, "expected non-empty auxs JSON");
+
+            let slice = std::slice::from_raw_parts(out_buffer, out_len);
+            let json_str = std::str::from_utf8(slice).expect("valid utf-8 JSON");
+
+            let auxs: Vec<engine::json::Auxiliary> =
+                serde_json::from_str(json_str).expect("valid JSON array of auxiliaries");
+
+            assert_eq!(auxs.len(), 3, "expected 3 auxiliaries");
+
+            let aux_names: Vec<&str> = auxs.iter().map(|a| a.name.as_str()).collect();
+            assert!(aux_names.contains(&"growth_rate"));
+            assert!(aux_names.contains(&"carrying_capacity"));
+            assert!(aux_names.contains(&"density"));
+
+            // Verify aux details
+            let growth_rate = auxs.iter().find(|a| a.name == "growth_rate").unwrap();
+            assert_eq!(growth_rate.equation, "0.02");
+
+            simlin_free(out_buffer);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_model_get_stocks_json_empty() {
+        // Test model with no stocks
+        let datamodel = TestProject::new("no_stocks")
+            .aux("constant", "42", None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+            assert!(!model.is_null());
+
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+
+            simlin_model_get_stocks_json(model, &mut out_buffer, &mut out_len, &mut out_error);
+
+            assert!(out_error.is_null());
+            assert!(!out_buffer.is_null());
+
+            let slice = std::slice::from_raw_parts(out_buffer, out_len);
+            let json_str = std::str::from_utf8(slice).unwrap();
+
+            let stocks: Vec<engine::json::Stock> = serde_json::from_str(json_str).unwrap();
+            assert!(stocks.is_empty(), "expected empty stocks array");
+
+            simlin_free(out_buffer);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_model_get_stocks_json_null_model() {
+        unsafe {
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+
+            simlin_model_get_stocks_json(
+                ptr::null_mut(),
+                &mut out_buffer,
+                &mut out_len,
+                &mut out_error,
+            );
+
+            assert!(!out_error.is_null(), "expected error for NULL model");
+            assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
+            simlin_error_free(out_error);
+        }
+    }
+
+    #[test]
+    fn test_model_get_stocks_json_null_out_buffer() {
+        let datamodel = TestProject::new("null_buffer").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+            assert!(!model.is_null());
+
+            let mut out_len: usize = 0;
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+
+            simlin_model_get_stocks_json(model, ptr::null_mut(), &mut out_len, &mut out_error);
+
+            assert!(!out_error.is_null(), "expected error for NULL out_buffer");
+            assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
+            simlin_error_free(out_error);
+
             simlin_model_unref(model);
             simlin_project_unref(proj);
         }
