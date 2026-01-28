@@ -92,6 +92,9 @@ pub struct EquationReader<'input> {
     macro_state: MacroState<'input>,
     /// Whether we've reached the end of the equations section
     finished: bool,
+    /// Reusable token buffer -- cleared and reused across equations to avoid
+    /// per-equation heap allocations.
+    token_buffer: Vec<(usize, Token<'input>, usize)>,
 }
 
 impl<'input> EquationReader<'input> {
@@ -102,6 +105,7 @@ impl<'input> EquationReader<'input> {
             position: 0,
             macro_state: MacroState::Normal,
             finished: false,
+            token_buffer: Vec::with_capacity(32),
         }
     }
 
@@ -167,11 +171,8 @@ impl<'input> EquationReader<'input> {
         let remaining = &self.source[self.position..];
         let mut normalizer = TokenNormalizer::with_offset(remaining, self.position);
 
-        // Collect tokens into a buffer to check for EOF before parsing.
-        // Pre-allocate capacity 32 to avoid repeated Vec doublings: most equations
-        // produce fewer than 32 tokens before the second tilde/pipe.
-        let mut tokens: Vec<Result<(usize, Token<'input>, usize), NormalizerError>> =
-            Vec::with_capacity(32);
+        // Reuse the token buffer -- clear from previous equation but keep capacity.
+        self.token_buffer.clear();
         let mut tilde_count = 0;
         let mut last_end = self.position;
         // Track if we're collecting a :MACRO: header (need to read through closing paren)
@@ -185,17 +186,17 @@ impl<'input> EquationReader<'input> {
 
                     // Check for special markers that terminate token collection
                     // These markers should be parsed in isolation (or with their arguments)
-                    if tokens.is_empty() {
+                    if self.token_buffer.is_empty() {
                         match &tok {
                             Token::EqEnd | Token::EndOfMacro | Token::GroupStar(_) => {
                                 // These markers are complete on their own
-                                tokens.push(Ok((start, tok, end)));
+                                self.token_buffer.push((start, tok, end));
                                 break;
                             }
                             Token::Macro => {
                                 // :MACRO: needs to collect through closing )
                                 in_macro_header = true;
-                                tokens.push(Ok((start, tok, end)));
+                                self.token_buffer.push((start, tok, end));
                                 continue;
                             }
                             _ => {}
@@ -215,20 +216,20 @@ impl<'input> EquationReader<'input> {
                                 macro_paren_depth -= 1;
                                 if macro_paren_depth == 0 {
                                     // Finished macro header
-                                    tokens.push(Ok((start, tok, end)));
+                                    self.token_buffer.push((start, tok, end));
                                     break;
                                 }
                             }
                             _ => {}
                         }
-                        tokens.push(Ok((start, tok, end)));
+                        self.token_buffer.push((start, tok, end));
                         continue;
                     }
 
                     let is_second_tilde = matches!(tok, Token::Tilde) && tilde_count >= 2;
                     let is_pipe = matches!(tok, Token::Pipe);
 
-                    tokens.push(Ok((start, tok, end)));
+                    self.token_buffer.push((start, tok, end));
 
                     // Stop after second tilde or pipe
                     if is_second_tilde || is_pipe {
@@ -240,7 +241,7 @@ impl<'input> EquationReader<'input> {
                 }
                 None => {
                     // EOF reached
-                    if tokens.is_empty() {
+                    if self.token_buffer.is_empty() {
                         // No tokens at all - true EOF
                         self.finished = true;
                         if let MacroState::InMacro { .. } = &self.macro_state {
@@ -257,8 +258,8 @@ impl<'input> EquationReader<'input> {
         // Update position to after the collected tokens
         self.position = last_end;
 
-        // Parse the collected tokens
-        let result = parser::parse(tokens);
+        // Parse the collected tokens (borrows the buffer)
+        let result = parser::parse(&self.token_buffer);
 
         match result {
             Ok((eq, units, section_end)) => {

@@ -14,7 +14,9 @@ use crate::mdl::ast::{
     LookupTable, MappingEntry, SectionEnd, Subscript, SubscriptDef, SubscriptElement,
     SubscriptMapping, UnaryOp, UnitExpr, UnitRange, Units,
 };
-use crate::mdl::normalizer::{NormalizerError, Token};
+#[cfg(test)]
+use crate::mdl::normalizer::NormalizerError;
+use crate::mdl::normalizer::Token;
 
 // ============================================================================
 // Error type
@@ -217,13 +219,13 @@ fn token_kind(tok: &Token<'_>) -> TokenKind {
 // Parser struct
 // ============================================================================
 
-struct Parser<'input> {
-    tokens: Vec<(usize, Token<'input>, usize)>,
+struct Parser<'input, 'tokens> {
+    tokens: &'tokens [(usize, Token<'input>, usize)],
     pos: usize,
 }
 
-impl<'input> Parser<'input> {
-    fn new(tokens: Vec<(usize, Token<'input>, usize)>) -> Self {
+impl<'input, 'tokens> Parser<'input, 'tokens> {
+    fn new(tokens: &'tokens [(usize, Token<'input>, usize)]) -> Self {
         Parser { tokens, pos: 0 }
     }
 
@@ -263,10 +265,23 @@ impl<'input> Parser<'input> {
         }
     }
 
-    /// Advance to the next token, returning the current one.
-    fn advance(&mut self) -> Option<(usize, Token<'input>, usize)> {
+    /// Advance past the current token, returning its start and end positions.
+    /// Use this when you only need position info, not the token data.
+    fn advance_pos(&mut self) -> Option<(usize, usize)> {
         if self.pos < self.tokens.len() {
-            let tok = self.tokens[self.pos].clone();
+            let (l, _, r) = &self.tokens[self.pos];
+            let result = (*l, *r);
+            self.pos += 1;
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    /// Advance past the current token, returning a reference to the token triple.
+    fn advance(&mut self) -> Option<&'tokens (usize, Token<'input>, usize)> {
+        if self.pos < self.tokens.len() {
+            let tok = &self.tokens[self.pos];
             self.pos += 1;
             Some(tok)
         } else {
@@ -275,8 +290,17 @@ impl<'input> Parser<'input> {
     }
 
     /// Consume the current token if it matches the expected kind.
-    /// Returns the token on success, None on mismatch (does not advance).
-    fn eat(&mut self, kind: TokenKind) -> Option<(usize, Token<'input>, usize)> {
+    /// Returns position info on success, None on mismatch (does not advance).
+    fn eat(&mut self, kind: TokenKind) -> Option<(usize, usize)> {
+        if self.peek_kind() == Some(kind) {
+            self.advance_pos()
+        } else {
+            None
+        }
+    }
+
+    /// Consume the current token if it matches, returning a reference to the token.
+    fn eat_ref(&mut self, kind: TokenKind) -> Option<&'tokens (usize, Token<'input>, usize)> {
         if self.peek_kind() == Some(kind) {
             self.advance()
         } else {
@@ -284,13 +308,33 @@ impl<'input> Parser<'input> {
         }
     }
 
-    /// Expect and consume a specific token kind, returning an error if not found.
-    fn expect(
+    /// Expect and consume a specific token kind, returning position info.
+    fn expect(&mut self, kind: TokenKind, what: &str) -> Result<(usize, usize), ParseError> {
+        if let Some(pos) = self.eat(kind) {
+            Ok(pos)
+        } else if let Some((start, tok, end)) = self.peek() {
+            Err(ParseError {
+                start: *start,
+                end: *end,
+                message: format!("expected {}, found {:?}", what, token_kind(tok)),
+            })
+        } else {
+            let pos = self.end_pos();
+            Err(ParseError {
+                start: pos,
+                end: pos,
+                message: format!("expected {}, found end of input", what),
+            })
+        }
+    }
+
+    /// Expect and consume a specific token kind, returning a reference to the token.
+    fn expect_ref(
         &mut self,
         kind: TokenKind,
         what: &str,
-    ) -> Result<(usize, Token<'input>, usize), ParseError> {
-        if let Some(tok) = self.eat(kind) {
+    ) -> Result<&'tokens (usize, Token<'input>, usize), ParseError> {
+        if let Some(tok) = self.eat_ref(kind) {
             Ok(tok)
         } else if let Some((start, tok, end)) = self.peek() {
             Err(ParseError {
@@ -305,6 +349,28 @@ impl<'input> Parser<'input> {
                 end: pos,
                 message: format!("expected {}, found end of input", what),
             })
+        }
+    }
+
+    /// Expect a Symbol token and return its name.
+    /// This is a convenience for the common pattern of expect(Symbol) + match extraction.
+    fn expect_symbol(&mut self, what: &str) -> Result<Cow<'input, str>, ParseError> {
+        let (_, tok, _) = self.expect_ref(TokenKind::Symbol, what)?;
+        match tok {
+            Token::Symbol(s) => Ok(s.clone()),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Expect a Symbol token and return (start, name, end).
+    fn expect_symbol_with_pos(
+        &mut self,
+        what: &str,
+    ) -> Result<(usize, Cow<'input, str>, usize), ParseError> {
+        let (l, tok, r) = self.expect_ref(TokenKind::Symbol, what)?;
+        match tok {
+            Token::Symbol(s) => Ok((*l, s.clone(), *r)),
+            _ => unreachable!(),
         }
     }
 
@@ -342,7 +408,7 @@ impl<'input> Parser<'input> {
         // Check for special lead tokens
         match self.peek_kind() {
             Some(TokenKind::EqEnd) => {
-                let (l, _, r) = self.advance().unwrap();
+                let (l, r) = self.advance_pos().unwrap();
                 let loc = Loc::new(l, r);
                 return Ok((
                     Equation::EmptyRhs(Lhs::empty(loc), loc),
@@ -352,24 +418,21 @@ impl<'input> Parser<'input> {
             }
             Some(TokenKind::GroupStar) => {
                 let (l, tok, r) = self.advance().unwrap();
-                let loc = Loc::new(l, r);
-                if let Token::GroupStar(name) = tok {
-                    return Ok((
-                        Equation::EmptyRhs(Lhs::empty(loc), loc),
-                        None,
-                        SectionEnd::GroupStar(name, loc),
-                    ));
-                }
-                unreachable!();
-            }
-            Some(TokenKind::Macro) => {
-                let (l, _, r) = self.advance().unwrap();
-                let loc = Loc::new(l, r);
-                let (_, name_tok, _) = self.expect(TokenKind::Symbol, "macro name")?;
-                let name = match name_tok {
-                    Token::Symbol(s) => s,
+                let loc = Loc::new(*l, *r);
+                let name = match tok {
+                    Token::GroupStar(name) => name.clone(),
                     _ => unreachable!(),
                 };
+                return Ok((
+                    Equation::EmptyRhs(Lhs::empty(loc), loc),
+                    None,
+                    SectionEnd::GroupStar(name, loc),
+                ));
+            }
+            Some(TokenKind::Macro) => {
+                let (l, r) = self.advance_pos().unwrap();
+                let loc = Loc::new(l, r);
+                let name = self.expect_symbol("macro name")?;
                 self.expect(TokenKind::LParen, "'('")?;
                 let args = if self.peek_kind() == Some(TokenKind::RParen) {
                     vec![]
@@ -384,7 +447,7 @@ impl<'input> Parser<'input> {
                 ));
             }
             Some(TokenKind::EndOfMacro) => {
-                let (l, _, r) = self.advance().unwrap();
+                let (l, r) = self.advance_pos().unwrap();
                 let loc = Loc::new(l, r);
                 return Ok((
                     Equation::EmptyRhs(Lhs::empty(loc), loc),
@@ -401,24 +464,24 @@ impl<'input> Parser<'input> {
         // Expect tilde or pipe
         match self.peek_kind() {
             Some(TokenKind::Tilde) => {
-                self.advance(); // consume first tilde
+                self.advance_pos(); // consume first tilde
                 // Parse optional units
                 let units = self.parse_optional_units()?;
                 // Expect second tilde or pipe
                 match self.peek_kind() {
                     Some(TokenKind::Tilde) => {
-                        self.advance();
+                        self.advance_pos();
                         Ok((eq, units, SectionEnd::Tilde))
                     }
                     Some(TokenKind::Pipe) => {
-                        self.advance();
+                        self.advance_pos();
                         Ok((eq, units, SectionEnd::Pipe))
                     }
                     _ => Err(self.unexpected_error("'~' or '|' after units")),
                 }
             }
             Some(TokenKind::Pipe) => {
-                self.advance();
+                self.advance_pos();
                 Ok((eq, None, SectionEnd::Pipe))
             }
             _ => Err(self.unexpected_error("'~' or '|' after equation")),
@@ -450,7 +513,7 @@ impl<'input> Parser<'input> {
         let saved_pos = self.pos;
         let (sym_l, sym_tok, _sym_r) = self.advance().unwrap();
         let sym_name = match sym_tok {
-            Token::Symbol(s) => s,
+            Token::Symbol(s) => s.clone(),
             _ => unreachable!(),
         };
 
@@ -458,7 +521,7 @@ impl<'input> Parser<'input> {
         match self.peek_kind() {
             Some(TokenKind::Colon) => {
                 // SubscriptDef: Symbol : SubDef MapList
-                self.advance(); // consume ':'
+                self.advance_pos(); // consume ':'
                 let mut def = self.parse_sub_def()?;
                 let map = self.parse_map_list()?;
                 def.mapping = map;
@@ -466,13 +529,9 @@ impl<'input> Parser<'input> {
             }
             Some(TokenKind::Equiv) => {
                 // Equivalence: Symbol <-> Symbol
-                let l = sym_l;
-                self.advance(); // consume '<->'
-                let (_, b_tok, r) = self.expect(TokenKind::Symbol, "symbol after '<->'")?;
-                let b_name = match b_tok {
-                    Token::Symbol(s) => s,
-                    _ => unreachable!(),
-                };
+                let l = *sym_l;
+                self.advance_pos(); // consume '<->'
+                let (_, b_name, r) = self.expect_symbol_with_pos("symbol after '<->'")?;
                 Ok(Equation::Equivalence(sym_name, b_name, Loc::new(l, r)))
             }
             _ => {
@@ -495,7 +554,7 @@ impl<'input> Parser<'input> {
             }
             Some(TokenKind::DataEquals) => {
                 // Data equation: lhs := expr
-                self.advance(); // consume ':='
+                self.advance_pos(); // consume ':='
                 let expr = self.parse_expr()?;
                 Ok(Equation::Data(lhs, Some(expr)))
             }
@@ -509,16 +568,17 @@ impl<'input> Parser<'input> {
     /// Parse the RHS after '='.
     /// Handles: Regular, EmptyRhs, WithLookup, TabbedArray
     fn parse_eq_rhs(&mut self, lhs: Lhs<'input>) -> Result<Equation<'input>, ParseError> {
-        let (l, _, r) = self.expect(TokenKind::Eq, "'='")?;
+        let (l, r) = self.expect(TokenKind::Eq, "'='")?;
         let eq_loc = Loc::new(l, r);
 
         // Check for TabbedArray
         if self.peek_kind() == Some(TokenKind::TabbedArray) {
             let (_, tok, _) = self.advance().unwrap();
-            if let Token::TabbedArray(values) = tok {
-                return Ok(Equation::TabbedArray(lhs, values));
-            }
-            unreachable!();
+            let values = match tok {
+                Token::TabbedArray(values) => values.clone(),
+                _ => unreachable!(),
+            };
+            return Ok(Equation::TabbedArray(lhs, values));
         }
 
         // Check for empty RHS (= followed by ~ or | or EOF)
@@ -531,7 +591,7 @@ impl<'input> Parser<'input> {
 
         // Check for WITH LOOKUP
         if self.peek_kind() == Some(TokenKind::WithLookup) {
-            self.advance(); // consume WITH LOOKUP
+            self.advance_pos(); // consume WITH LOOKUP
             self.expect(TokenKind::LParen, "'(' after WITH LOOKUP")?;
             let expr = self.parse_expr()?;
             self.expect(TokenKind::Comma, "',' in WITH LOOKUP")?;
@@ -552,7 +612,7 @@ impl<'input> Parser<'input> {
         // Use LHS start for error spans, matching LALRPOP's @L which covered
         // from the start of the entire production (including the LHS Symbol).
         let l = lhs.loc.start as usize;
-        self.expect(TokenKind::LParen, "'('")?;
+        self.expect(TokenKind::LParen, "'(' for lookup")?;
 
         // Disambiguate table format
         match self.peek_kind() {
@@ -656,11 +716,7 @@ impl<'input> Parser<'input> {
 
     /// Parse a variable: Symbol [SubList]
     fn parse_var(&mut self) -> Result<(Cow<'input, str>, Vec<Subscript<'input>>), ParseError> {
-        let (_, tok, _) = self.expect(TokenKind::Symbol, "variable name")?;
-        let name = match tok {
-            Token::Symbol(s) => s,
-            _ => unreachable!(),
-        };
+        let name = self.expect_symbol("variable name")?;
 
         let subs = if self.peek_kind() == Some(TokenKind::LBracket) {
             self.parse_sub_list()?
@@ -683,11 +739,7 @@ impl<'input> Parser<'input> {
     fn parse_sym_list(&mut self) -> Result<Vec<Subscript<'input>>, ParseError> {
         let mut list = Vec::new();
 
-        let (l, tok, r) = self.expect(TokenKind::Symbol, "symbol in subscript list")?;
-        let name = match tok {
-            Token::Symbol(s) => s,
-            _ => unreachable!(),
-        };
+        let (l, name, r) = self.expect_symbol_with_pos("symbol in subscript list")?;
 
         if self.eat(TokenKind::Bang).is_some() {
             let r2 = self.end_pos();
@@ -697,11 +749,7 @@ impl<'input> Parser<'input> {
         }
 
         while self.eat(TokenKind::Comma).is_some() {
-            let (l, tok, r) = self.expect(TokenKind::Symbol, "symbol in subscript list")?;
-            let name = match tok {
-                Token::Symbol(s) => s,
-                _ => unreachable!(),
-            };
+            let (l, name, r) = self.expect_symbol_with_pos("symbol in subscript list")?;
             if self.eat(TokenKind::Bang).is_some() {
                 let r2 = self.end_pos();
                 list.push(Subscript::BangElement(name, Loc::new(l, r2)));
@@ -740,19 +788,11 @@ impl<'input> Parser<'input> {
     fn parse_sub_def_element(&mut self) -> Result<SubscriptElement<'input>, ParseError> {
         if self.peek_kind() == Some(TokenKind::LParen) {
             // Range element: (start - end)
-            let (l, _, _) = self.advance().unwrap(); // consume '('
-            let (_, start_tok, _) = self.expect(TokenKind::Symbol, "range start")?;
-            let start_name = match start_tok {
-                Token::Symbol(s) => s,
-                _ => unreachable!(),
-            };
+            let (l, _) = self.advance_pos().unwrap(); // consume '('
+            let start_name = self.expect_symbol("range start")?;
             self.expect(TokenKind::Minus, "'-' in range")?;
-            let (_, end_tok, _) = self.expect(TokenKind::Symbol, "range end")?;
-            let end_name = match end_tok {
-                Token::Symbol(s) => s,
-                _ => unreachable!(),
-            };
-            let (_, _, r) = self.expect(TokenKind::RParen, "')'")?;
+            let end_name = self.expect_symbol("range end")?;
+            let (_, r) = self.expect(TokenKind::RParen, "')'")?;
             Ok(SubscriptElement::Range(
                 start_name,
                 end_name,
@@ -760,18 +800,14 @@ impl<'input> Parser<'input> {
             ))
         } else {
             // Simple element
-            let (l, tok, r) = self.expect(TokenKind::Symbol, "subscript element")?;
-            let name = match tok {
-                Token::Symbol(s) => s,
-                _ => unreachable!(),
-            };
+            let (l, name, r) = self.expect_symbol_with_pos("subscript element")?;
             Ok(SubscriptElement::Element(name, Loc::new(l, r)))
         }
     }
 
     /// Parse an exception list: :EXCEPT: [SubList] (, [SubList])*
     fn parse_except_list(&mut self) -> Result<ExceptList<'input>, ParseError> {
-        let (l, _, _) = self.expect(TokenKind::Except, ":EXCEPT:")?;
+        let (l, _) = self.expect(TokenKind::Except, ":EXCEPT:")?;
         let first_sub = self.parse_sub_list()?;
         let mut subscripts = vec![first_sub];
 
@@ -791,19 +827,19 @@ impl<'input> Parser<'input> {
     fn parse_interp_mode(&mut self) -> Result<InterpMode, ParseError> {
         match self.peek_kind() {
             Some(TokenKind::Interpolate) => {
-                self.advance();
+                self.advance_pos();
                 Ok(InterpMode::Interpolate)
             }
             Some(TokenKind::Raw) => {
-                self.advance();
+                self.advance_pos();
                 Ok(InterpMode::Raw)
             }
             Some(TokenKind::HoldBackward) => {
-                self.advance();
+                self.advance_pos();
                 Ok(InterpMode::HoldBackward)
             }
             Some(TokenKind::LookForward) => {
-                self.advance();
+                self.advance_pos();
                 Ok(InterpMode::LookForward)
             }
             _ => Err(self.unexpected_error("interpolation mode")),
@@ -844,15 +880,11 @@ impl<'input> Parser<'input> {
     fn parse_map_entry(&mut self) -> Result<MappingEntry<'input>, ParseError> {
         if self.peek_kind() == Some(TokenKind::LParen) {
             // Dimension mapping: (DimB: elem1, elem2)
-            let (l, _, _) = self.advance().unwrap(); // consume '('
-            let (_, dim_tok, _) = self.expect(TokenKind::Symbol, "dimension name in mapping")?;
-            let dim = match dim_tok {
-                Token::Symbol(s) => s,
-                _ => unreachable!(),
-            };
+            let (l, _) = self.advance_pos().unwrap(); // consume '('
+            let dim = self.expect_symbol("dimension name in mapping")?;
             self.expect(TokenKind::Colon, "':' in dimension mapping")?;
             let list = self.parse_sym_list()?;
-            let (_, _, r) = self.expect(TokenKind::RParen, "')'")?;
+            let (_, r) = self.expect(TokenKind::RParen, "')'")?;
             Ok(MappingEntry::DimensionMapping {
                 dimension: dim,
                 elements: list,
@@ -860,11 +892,7 @@ impl<'input> Parser<'input> {
             })
         } else {
             // Simple name
-            let (l, tok, r) = self.expect(TokenKind::Symbol, "symbol in mapping")?;
-            let name = match tok {
-                Token::Symbol(s) => s,
-                _ => unreachable!(),
-            };
+            let (l, name, r) = self.expect_symbol_with_pos("symbol in mapping")?;
             Ok(MappingEntry::Name(name, Loc::new(l, r)))
         }
     }
@@ -886,7 +914,7 @@ impl<'input> Parser<'input> {
         loop {
             match self.peek_kind() {
                 Some(TokenKind::Plus) => {
-                    self.advance();
+                    self.advance_pos();
                     let right = self.parse_logic_or()?;
                     let r = self.end_pos();
                     left = Expr::Op2(
@@ -897,7 +925,7 @@ impl<'input> Parser<'input> {
                     );
                 }
                 Some(TokenKind::Minus) => {
-                    self.advance();
+                    self.advance_pos();
                     let right = self.parse_logic_or()?;
                     let r = self.end_pos();
                     left = Expr::Op2(
@@ -920,7 +948,7 @@ impl<'input> Parser<'input> {
         let mut left = self.parse_cmp()?;
 
         while self.peek_kind() == Some(TokenKind::Or) {
-            self.advance();
+            self.advance_pos();
             let right = self.parse_cmp()?;
             let r = self.end_pos();
             left = Expr::Op2(
@@ -949,7 +977,7 @@ impl<'input> Parser<'input> {
                 Some(TokenKind::Neq) => BinaryOp::Neq,
                 _ => break,
             };
-            self.advance();
+            self.advance_pos();
             let right = self.parse_logic_and()?;
             let r = self.end_pos();
             left = Expr::Op2(op, Box::new(left), Box::new(right), Loc::new(l, r));
@@ -964,7 +992,7 @@ impl<'input> Parser<'input> {
         let mut left = self.parse_mul_div()?;
 
         while self.peek_kind() == Some(TokenKind::And) {
-            self.advance();
+            self.advance_pos();
             let right = self.parse_mul_div()?;
             let r = self.end_pos();
             left = Expr::Op2(
@@ -986,7 +1014,7 @@ impl<'input> Parser<'input> {
         loop {
             match self.peek_kind() {
                 Some(TokenKind::Mul) => {
-                    self.advance();
+                    self.advance_pos();
                     let right = self.parse_unary()?;
                     let r = self.end_pos();
                     left = Expr::Op2(
@@ -997,7 +1025,7 @@ impl<'input> Parser<'input> {
                     );
                 }
                 Some(TokenKind::Div) => {
-                    self.advance();
+                    self.advance_pos();
                     let right = self.parse_unary()?;
                     let r = self.end_pos();
                     left = Expr::Op2(
@@ -1019,13 +1047,13 @@ impl<'input> Parser<'input> {
         let l = self.start_pos();
         match self.peek_kind() {
             Some(TokenKind::Not) => {
-                self.advance();
+                self.advance_pos();
                 let inner = self.parse_unary()?;
                 let r = self.end_pos();
                 Ok(Expr::Op1(UnaryOp::Not, Box::new(inner), Loc::new(l, r)))
             }
             Some(TokenKind::Minus) => {
-                self.advance();
+                self.advance_pos();
                 let inner = self.parse_unary()?;
                 let r = self.end_pos();
                 Ok(Expr::Op1(
@@ -1035,7 +1063,7 @@ impl<'input> Parser<'input> {
                 ))
             }
             Some(TokenKind::Plus) => {
-                self.advance();
+                self.advance_pos();
                 let inner = self.parse_unary()?;
                 let r = self.end_pos();
                 Ok(Expr::Op1(
@@ -1054,7 +1082,7 @@ impl<'input> Parser<'input> {
         let base = self.parse_atom()?;
 
         if self.peek_kind() == Some(TokenKind::Exp) {
-            self.advance();
+            self.advance_pos();
             // Right-associative: exponent calls parse_unary (which can recurse to power)
             let exp = self.parse_unary()?;
             let r = self.end_pos();
@@ -1073,30 +1101,30 @@ impl<'input> Parser<'input> {
     fn parse_atom(&mut self) -> Result<Expr<'input>, ParseError> {
         match self.peek_kind() {
             Some(TokenKind::Number) => {
-                let (l, tok, r) = self.advance().unwrap();
+                let &(l, ref tok, r) = self.advance().unwrap();
                 let s = match tok {
                     Token::Number(s) => s,
                     _ => unreachable!(),
                 };
-                let val = parse_number(&s, l, r)?;
+                let val = parse_number(s, l, r)?;
                 Ok(Expr::Const(val, Loc::new(l, r)))
             }
             Some(TokenKind::Na) => {
-                let (l, _, r) = self.advance().unwrap();
+                let (l, r) = self.advance_pos().unwrap();
                 Ok(Expr::Na(Loc::new(l, r)))
             }
             Some(TokenKind::Literal) => {
-                let (l, tok, r) = self.advance().unwrap();
+                let &(l, ref tok, r) = self.advance().unwrap();
                 let lit = match tok {
-                    Token::Literal(s) => s,
+                    Token::Literal(s) => s.clone(),
                     _ => unreachable!(),
                 };
                 Ok(Expr::Literal(lit, Loc::new(l, r)))
             }
             Some(TokenKind::LParen) => {
-                let (l, _, _) = self.advance().unwrap();
+                let (l, _) = self.advance_pos().unwrap();
                 let inner = self.parse_expr()?;
-                let (_, _, r) = self.expect(TokenKind::RParen, "')'")?;
+                let (_, r) = self.expect(TokenKind::RParen, "')'")?;
                 Ok(Expr::Paren(Box::new(inner), Loc::new(l, r)))
             }
             Some(TokenKind::Symbol) => {
@@ -1107,9 +1135,9 @@ impl<'input> Parser<'input> {
                 // Symbol calls require at least one argument (ExprList),
                 // unlike builtin Function calls which allow empty parens.
                 if self.peek_kind() == Some(TokenKind::LParen) {
-                    self.advance(); // consume '('
+                    self.advance_pos(); // consume '('
                     if self.peek_kind() == Some(TokenKind::RParen) {
-                        let (start, _, end) = self.advance().unwrap();
+                        let (start, end) = self.advance_pos().unwrap();
                         return Err(ParseError {
                             start,
                             end,
@@ -1117,7 +1145,7 @@ impl<'input> Parser<'input> {
                         });
                     }
                     let args = self.parse_expr_list()?.into_exprs();
-                    let (_, _, r) = self.expect(TokenKind::RParen, "')'")?;
+                    let (_, r) = self.expect(TokenKind::RParen, "')'")?;
                     Ok(Expr::App(
                         name,
                         subscripts,
@@ -1131,16 +1159,16 @@ impl<'input> Parser<'input> {
                 }
             }
             Some(TokenKind::Function) => {
-                let (l, tok, _) = self.advance().unwrap();
+                let &(l, ref tok, _) = self.advance().unwrap();
                 let name = match tok {
-                    Token::Function(s) => s,
+                    Token::Function(s) => s.clone(),
                     _ => unreachable!(),
                 };
                 self.expect(TokenKind::LParen, "'(' after function name")?;
 
                 // Empty args: FUNC()
                 if self.peek_kind() == Some(TokenKind::RParen) {
-                    let (_, _, r) = self.advance().unwrap();
+                    let (_, r) = self.advance_pos().unwrap();
                     return Ok(Expr::App(
                         name,
                         vec![],
@@ -1158,7 +1186,7 @@ impl<'input> Parser<'input> {
                 loop {
                     match self.peek_kind() {
                         Some(TokenKind::Comma) => {
-                            self.advance(); // consume comma
+                            self.advance_pos(); // consume comma
                             // Check for trailing comma: `,)`
                             if self.peek_kind() == Some(TokenKind::RParen) {
                                 let r_pos = self.start_pos();
@@ -1171,7 +1199,7 @@ impl<'input> Parser<'input> {
                             exprs.push(self.parse_expr()?);
                         }
                         Some(TokenKind::Semicolon) => {
-                            self.advance(); // consume semicolon
+                            self.advance_pos(); // consume semicolon
                             // Trailing semicolon check
                             if self.peek_kind() == Some(TokenKind::RParen) {
                                 break;
@@ -1182,7 +1210,7 @@ impl<'input> Parser<'input> {
                     }
                 }
 
-                let (_, _, r) = self.expect(TokenKind::RParen, "')'")?;
+                let (_, r) = self.expect(TokenKind::RParen, "')'")?;
                 Ok(Expr::App(
                     name,
                     vec![],
@@ -1203,12 +1231,12 @@ impl<'input> Parser<'input> {
         loop {
             match self.peek_kind() {
                 Some(TokenKind::Comma) => {
-                    self.advance();
+                    self.advance_pos();
                     let next = self.parse_expr()?;
                     result = result.append(next);
                 }
                 Some(TokenKind::Semicolon) => {
-                    self.advance();
+                    self.advance_pos();
                     // Trailing semicolon: check if next token is an expression start
                     match self.peek_kind() {
                         Some(TokenKind::Number)
@@ -1274,7 +1302,7 @@ impl<'input> Parser<'input> {
             // Could be embedded pairs (skipped) or end of range prefix
             // If after comma we see '(' it's embedded pairs
             let saved = self.pos;
-            self.advance(); // consume comma
+            self.advance_pos(); // consume comma
 
             if self.peek_kind() == Some(TokenKind::LParen) {
                 // Embedded pairs: parse and validate as TablePairs, then discard.
@@ -1317,12 +1345,12 @@ impl<'input> Parser<'input> {
             if self.pos + 1 < self.tokens.len()
                 && token_kind(&self.tokens[self.pos + 1].1) == TokenKind::LParen
             {
-                self.advance(); // consume comma
+                self.advance_pos(); // consume comma
                 self.expect(TokenKind::LParen, "'(' for pair")?;
                 let x = self.parse_signed_number()?;
                 self.expect(TokenKind::Comma, "',' in pair")?;
                 let y = self.parse_signed_number()?;
-                let (_, _, r) = self.expect(TokenKind::RParen, "')' for pair")?;
+                let (_, r) = self.expect(TokenKind::RParen, "')' for pair")?;
                 table.add_pair(x, y);
                 table.loc = Loc::merge(table.loc, Loc::new(table.loc.end as usize, r));
             } else {
@@ -1352,7 +1380,7 @@ impl<'input> Parser<'input> {
 
             match after_comma {
                 Some(TokenKind::Number) | Some(TokenKind::Minus) | Some(TokenKind::Plus) => {
-                    self.advance(); // consume comma
+                    self.advance_pos(); // consume comma
                     let n = self.parse_signed_number()?;
                     let r = self.end_pos();
                     table.add_raw(n);
@@ -1369,31 +1397,31 @@ impl<'input> Parser<'input> {
     fn parse_signed_number(&mut self) -> Result<f64, ParseError> {
         match self.peek_kind() {
             Some(TokenKind::Minus) => {
-                self.advance();
-                let (l, tok, r) = self.expect(TokenKind::Number, "number after '-'")?;
+                self.advance_pos();
+                let &(l, ref tok, r) = self.expect_ref(TokenKind::Number, "number after '-'")?;
                 let s = match tok {
                     Token::Number(s) => s,
                     _ => unreachable!(),
                 };
-                let val = parse_number(&s, l, r)?;
+                let val = parse_number(s, l, r)?;
                 Ok(-val)
             }
             Some(TokenKind::Plus) => {
-                self.advance();
-                let (l, tok, r) = self.expect(TokenKind::Number, "number after '+'")?;
+                self.advance_pos();
+                let &(l, ref tok, r) = self.expect_ref(TokenKind::Number, "number after '+'")?;
                 let s = match tok {
                     Token::Number(s) => s,
                     _ => unreachable!(),
                 };
-                parse_number(&s, l, r)
+                parse_number(s, l, r)
             }
             Some(TokenKind::Number) => {
-                let (l, tok, r) = self.advance().unwrap();
+                let &(l, ref tok, r) = self.advance().unwrap();
                 let s = match tok {
                     Token::Number(s) => s,
                     _ => unreachable!(),
                 };
-                parse_number(&s, l, r)
+                parse_number(s, l, r)
             }
             _ => Err(self.unexpected_error("number")),
         }
@@ -1476,13 +1504,13 @@ impl<'input> Parser<'input> {
         loop {
             match self.peek_kind() {
                 Some(TokenKind::Div) => {
-                    self.advance();
+                    self.advance_pos();
                     let right = self.parse_unit_term()?;
                     let r = self.end_pos();
                     left = UnitExpr::Div(Box::new(left), Box::new(right), Loc::new(l, r));
                 }
                 Some(TokenKind::Mul) => {
-                    self.advance();
+                    self.advance_pos();
                     let right = self.parse_unit_term()?;
                     let r = self.end_pos();
                     left = UnitExpr::Mul(Box::new(left), Box::new(right), Loc::new(l, r));
@@ -1497,14 +1525,14 @@ impl<'input> Parser<'input> {
     /// Parse a unit term: UnitsSymbol or (UnitExpr).
     fn parse_unit_term(&mut self) -> Result<UnitExpr<'input>, ParseError> {
         if self.peek_kind() == Some(TokenKind::LParen) {
-            self.advance(); // consume '('
+            self.advance_pos(); // consume '('
             let inner = self.parse_unit_expr()?;
             self.expect(TokenKind::RParen, "')'")?;
             Ok(inner)
         } else {
-            let (l, tok, r) = self.expect(TokenKind::UnitsSymbol, "unit name")?;
+            let &(l, ref tok, r) = self.expect_ref(TokenKind::UnitsSymbol, "unit name")?;
             let name = match tok {
-                Token::UnitsSymbol(s) => s,
+                Token::UnitsSymbol(s) => s.clone(),
                 _ => unreachable!(),
             };
             Ok(UnitExpr::Unit(name, Loc::new(l, r)))
@@ -1519,25 +1547,11 @@ impl<'input> Parser<'input> {
 /// Parse a token stream into an equation with units and section end.
 ///
 /// This is the public entry point used by EquationReader.
+/// Takes a borrowed slice to avoid allocating a copy of the token vector.
 pub fn parse<'input>(
-    tokens: Vec<Result<(usize, Token<'input>, usize), NormalizerError>>,
+    tokens: &[(usize, Token<'input>, usize)],
 ) -> Result<(Equation<'input>, Option<Units<'input>>, SectionEnd<'input>), ParseError> {
-    // Convert Result tokens, stopping at first error
-    let mut good_tokens = Vec::with_capacity(tokens.len());
-    for tok_result in tokens {
-        match tok_result {
-            Ok(tok) => good_tokens.push(tok),
-            Err(e) => {
-                return Err(ParseError {
-                    start: e.start,
-                    end: e.end,
-                    message: format!("{}", e),
-                });
-            }
-        }
-    }
-
-    let mut parser = Parser::new(good_tokens);
+    let mut parser = Parser::new(tokens);
     let result = parser.parse_full_eq_with_units()?;
 
     // Full consumption check
@@ -1561,8 +1575,14 @@ pub fn parse<'input>(
 mod tests {
     use super::*;
     use crate::mdl::ast::BinaryOp;
-    use crate::mdl::normalizer::NormalizerErrorCode;
     use std::borrow::Cow;
+
+    /// Helper to collect tokens from normalizer into a Vec suitable for parse().
+    fn collect_tokens<'a>(
+        normalizer: impl Iterator<Item = Result<(usize, Token<'a>, usize), NormalizerError>>,
+    ) -> Vec<(usize, Token<'a>, usize)> {
+        normalizer.map(|r| r.unwrap()).collect()
+    }
 
     fn loc() -> Loc {
         Loc::new(0, 1)
@@ -1782,15 +1802,15 @@ mod tests {
     #[test]
     fn test_error_span_unexpected_token() {
         // Feed tokens that produce a parse error mid-stream
-        let tokens: Vec<Result<(usize, Token, usize), NormalizerError>> = vec![
-            Ok((0, Token::Symbol(Cow::Borrowed("x")), 1)),
-            Ok((2, Token::Eq, 3)),
+        let tokens = vec![
+            (0, Token::Symbol(Cow::Borrowed("x")), 1),
+            (2, Token::Eq, 3),
             // Bad: another Eq where an expression is expected
-            Ok((4, Token::Eq, 5)),
-            Ok((6, Token::Tilde, 7)),
-            Ok((8, Token::Tilde, 9)),
+            (4, Token::Eq, 5),
+            (6, Token::Tilde, 7),
+            (8, Token::Tilde, 9),
         ];
-        let err = parse(tokens).unwrap_err();
+        let err = parse(&tokens).unwrap_err();
         assert_eq!(err.start, 4);
         assert_eq!(err.end, 5);
     }
@@ -1798,19 +1818,16 @@ mod tests {
     #[test]
     fn test_error_span_eof_with_tokens() {
         // Truncated: Symbol = with no RHS and no tilde
-        let tokens: Vec<Result<(usize, Token, usize), NormalizerError>> = vec![
-            Ok((0, Token::Symbol(Cow::Borrowed("x")), 1)),
-            Ok((2, Token::Eq, 3)),
-        ];
-        let err = parse(tokens).unwrap_err();
+        let tokens = vec![(0, Token::Symbol(Cow::Borrowed("x")), 1), (2, Token::Eq, 3)];
+        let err = parse(&tokens).unwrap_err();
         // EOF error should use end position of last consumed token
         assert!(err.start >= 3 || err.start == 0);
     }
 
     #[test]
     fn test_error_span_eof_empty() {
-        let tokens: Vec<Result<(usize, Token, usize), NormalizerError>> = vec![];
-        let err = parse(tokens).unwrap_err();
+        let tokens: Vec<(usize, Token, usize)> = vec![];
+        let err = parse(&tokens).unwrap_err();
         assert_eq!(err.start, 0);
         assert_eq!(err.end, 0);
     }
@@ -1825,8 +1842,8 @@ mod tests {
 
         let input = "x = 5 ~ Units ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, units, section_end) = result.unwrap();
         assert!(matches!(eq, Equation::Regular(_, _)));
@@ -1840,8 +1857,8 @@ mod tests {
 
         let input = "placeholder = ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         assert!(matches!(eq, Equation::EmptyRhs(_, _)));
@@ -1853,8 +1870,8 @@ mod tests {
 
         let input = "exogenous data ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         assert!(matches!(eq, Equation::Implicit(_)));
@@ -1866,8 +1883,8 @@ mod tests {
 
         let input = "DimA: A1, A2, A3 ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::SubscriptDef(name, def) = &eq {
@@ -1884,8 +1901,8 @@ mod tests {
 
         let input = "DimA <-> DimB ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         assert!(matches!(eq, Equation::Equivalence(_, _, _)));
@@ -1897,8 +1914,8 @@ mod tests {
 
         let input = "table((0, 0), (1, 1), (2, 4)) ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::Lookup(_, table) = &eq {
@@ -1915,8 +1932,8 @@ mod tests {
 
         let input = "table(0, 1, 2, 10, 20, 30) ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::Lookup(_, table) = &eq {
@@ -1933,8 +1950,8 @@ mod tests {
 
         let input = "y = WITH LOOKUP(Time, ((0, 0), (1, 1))) ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         assert!(matches!(eq, Equation::WithLookup(_, _, _)));
@@ -1946,8 +1963,8 @@ mod tests {
 
         let input = "data var := GET XLS DATA('file.xlsx', 'Sheet1', 'A', 'B2') ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         assert!(matches!(eq, Equation::Data(_, _)));
@@ -1959,8 +1976,8 @@ mod tests {
 
         let input = "x = 1, 2, 3 ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::NumberList(_, nums) = &eq {
@@ -1976,8 +1993,8 @@ mod tests {
 
         let input = "x = MAX(a, b) ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::Regular(_, Expr::App(name, _, args, kind, _)) = &eq {
@@ -1996,8 +2013,8 @@ mod tests {
         // a + b * c should parse as a + (b * c)
         let input = "x = a + b * c ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::Regular(_, Expr::Op2(BinaryOp::Add, _, rhs, _)) = &eq {
@@ -2016,8 +2033,8 @@ mod tests {
 
         let input = "x = 5 ~ widgets [0, 100] ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (_, units, _) = result.unwrap();
         let units = units.unwrap();
@@ -2033,8 +2050,8 @@ mod tests {
 
         let input = "var[DimA] :EXCEPT: [A1, A2] = 5 ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::Regular(lhs, _) = &eq {
@@ -2050,8 +2067,8 @@ mod tests {
 
         let input = "x = 5 ~ Units |";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (_, _, section_end) = result.unwrap();
         assert!(matches!(section_end, SectionEnd::Pipe));
@@ -2063,8 +2080,8 @@ mod tests {
 
         let input = "\\\\\\---///";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (_, _, section_end) = result.unwrap();
         assert!(matches!(section_end, SectionEnd::EqEnd(_)));
@@ -2076,8 +2093,8 @@ mod tests {
 
         let input = "data var :INTERPOLATE: ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::Implicit(lhs) = &eq {
@@ -2093,8 +2110,8 @@ mod tests {
 
         let input = "DimA: (A1 - A10) ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::SubscriptDef(_, def) = &eq {
@@ -2111,8 +2128,8 @@ mod tests {
 
         let input = "DimA: A1, A2 -> DimB ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::SubscriptDef(_, def) = &eq {
@@ -2128,8 +2145,8 @@ mod tests {
 
         let input = "x = SMOOTH(input, delay,) ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::Regular(_, Expr::App(_, _, args, _, _)) = &eq {
@@ -2146,8 +2163,8 @@ mod tests {
 
         let input = "x = RANDOM 0 1() ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::Regular(_, Expr::App(name, _, args, _, _)) = &eq {
@@ -2164,8 +2181,8 @@ mod tests {
 
         let input = "table([(0, 0) - (10, 10)], (0, 0), (5, 5), (10, 10)) ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::Lookup(_, table) = &eq {
@@ -2182,8 +2199,8 @@ mod tests {
 
         let input = "x = 5 ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (_, units, _) = result.unwrap();
         assert!(units.is_none());
@@ -2195,8 +2212,8 @@ mod tests {
 
         let input = ":MACRO: MYFUNC(arg1, arg2)";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (_, _, section_end) = result.unwrap();
         if let SectionEnd::MacroStart(name, args, _) = &section_end {
@@ -2213,35 +2230,21 @@ mod tests {
 
         let input = ":END OF MACRO:";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (_, _, section_end) = result.unwrap();
         assert!(matches!(section_end, SectionEnd::MacroEnd(_)));
     }
 
     #[test]
-    fn test_parse_normalizer_error_converted() {
-        // Test that NormalizerError in the token stream is converted to ParseError
-        let tokens: Vec<Result<(usize, Token, usize), NormalizerError>> =
-            vec![Err(NormalizerError {
-                start: 5,
-                end: 10,
-                code: NormalizerErrorCode::DollarSymbolOutsideUnits,
-            })];
-        let err = parse(tokens).unwrap_err();
-        assert_eq!(err.start, 5);
-        assert_eq!(err.end, 10);
-    }
-
-    #[test]
     fn test_parse_trailing_token_error() {
         // Tokens that would be valid but have extra trailing content
-        let tokens: Vec<Result<(usize, Token, usize), NormalizerError>> = vec![
-            Ok((0, Token::EqEnd, 9)),
-            Ok((10, Token::Symbol(Cow::Borrowed("extra")), 15)),
+        let tokens = vec![
+            (0, Token::EqEnd, 9),
+            (10, Token::Symbol(Cow::Borrowed("extra")), 15),
         ];
-        let err = parse(tokens).unwrap_err();
+        let err = parse(&tokens).unwrap_err();
         assert_eq!(err.start, 10);
         assert_eq!(err.end, 15);
         assert!(err.message.contains("trailing"));
@@ -2260,8 +2263,8 @@ mod tests {
 
         let input = "x = table() ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_err(), "empty-arg symbol call should be rejected");
     }
 
@@ -2272,8 +2275,8 @@ mod tests {
 
         let input = "x = table(Time) ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::Regular(_, Expr::App(name, _, args, kind, _)) = &eq {
@@ -2298,8 +2301,8 @@ mod tests {
         // Malformed: inner pairs have missing comma between x and y
         let input = "table([(0, 0) - (10, 10), (1 2)], (0, 0), (10, 10)) ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(
             result.is_err(),
             "malformed embedded pairs should be rejected"
@@ -2313,8 +2316,8 @@ mod tests {
 
         let input = "table([(0, 0) - (10, 10), (0, 0), (10, 10)], (0, 0), (5, 5), (10, 10)) ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
         if let Equation::Lookup(_, table) = &eq {
@@ -2340,8 +2343,8 @@ mod tests {
         // 3 values => odd count => transform_legacy fails
         let input = "table(1, 2, 3) ~ ~";
         let normalizer = TokenNormalizer::new(input);
-        let tokens: Vec<_> = normalizer.collect();
-        let result = parse(tokens);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
         assert!(result.is_err());
         let err = result.unwrap_err();
         // The error span should start at "table" (position 0), not at "(" (position 5)
