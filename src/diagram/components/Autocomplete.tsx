@@ -35,6 +35,11 @@ export default function Autocomplete(props: AutocompleteProps) {
     width: number;
   } | null>(null);
 
+  // Sync inputValue when value prop changes externally
+  React.useEffect(() => {
+    setInputValue(value || '');
+  }, [value]);
+
   const filteredOptions = React.useMemo(() => {
     if (!inputValue) return options;
     const lower = inputValue.toLowerCase();

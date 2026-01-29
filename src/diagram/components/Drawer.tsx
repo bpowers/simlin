@@ -51,7 +51,7 @@ export default class Drawer extends React.PureComponent<DrawerProps> {
     if (event.key === 'Tab' && this.props.open && this.panelRef.current) {
       const panel = this.panelRef.current;
       const focusableElements = panel.querySelectorAll<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        'a, button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"]), [contenteditable]',
       );
 
       if (focusableElements.length === 0) {
