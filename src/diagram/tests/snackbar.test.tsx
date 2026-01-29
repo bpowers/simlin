@@ -174,6 +174,64 @@ describe('Snackbar', () => {
     expect(ref.current!.state.closeCount).toBe(1);
   });
 
+  test('does not reset timer on unrelated re-renders', () => {
+    // Create a wrapper that can trigger re-renders without changing open/autoHideDuration
+    class ReRenderWrapper extends React.Component<
+      Record<string, never>,
+      { counter: number; open: boolean; closeCount: number }
+    > {
+      state = { counter: 0, open: true, closeCount: 0 };
+
+      forceRerender = () => {
+        this.setState((prev) => ({ counter: prev.counter + 1 }));
+      };
+
+      handleClose = () => {
+        this.setState((prev) => ({ open: false, closeCount: prev.closeCount + 1 }));
+      };
+
+      render() {
+        return (
+          <Snackbar open={this.state.open} autoHideDuration={3000} onClose={this.handleClose}>
+            <SnackbarContent message={`Count: ${this.state.counter}`} />
+          </Snackbar>
+        );
+      }
+    }
+
+    const ref = React.createRef<ReRenderWrapper>();
+    render(<ReRenderWrapper ref={ref} />);
+
+    // Advance 1 second
+    act(() => {
+      jest.advanceTimersByTime(1000);
+    });
+
+    // Trigger unrelated re-render (counter changes, but open/duration stay same)
+    act(() => {
+      ref.current!.forceRerender();
+    });
+
+    // Advance 1 more second
+    act(() => {
+      jest.advanceTimersByTime(1000);
+    });
+
+    // Trigger another unrelated re-render
+    act(() => {
+      ref.current!.forceRerender();
+    });
+
+    // Advance the remaining 1 second (total 3 seconds since open)
+    act(() => {
+      jest.advanceTimersByTime(1000);
+    });
+
+    // Timer should have fired because 3 seconds total elapsed
+    // If timer was reset on each re-render, it would take 5 seconds total
+    expect(ref.current!.state.closeCount).toBe(1);
+  });
+
   test('does not start timer if no autoHideDuration', () => {
     const onClose = jest.fn();
     render(

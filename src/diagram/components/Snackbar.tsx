@@ -27,13 +27,16 @@ export default class Snackbar extends React.PureComponent<SnackbarProps> {
     }
   }
 
-  componentDidUpdate(_prevProps: SnackbarProps) {
-    // Always clear first to prevent race conditions on rapid open/close
-    this.clearTimer();
+  componentDidUpdate(prevProps: SnackbarProps) {
+    // Only restart timer when open or autoHideDuration changes
+    const openChanged = this.props.open !== prevProps.open;
+    const durationChanged = this.props.autoHideDuration !== prevProps.autoHideDuration;
 
-    // Start new timer if now open
-    if (this.props.open) {
-      this.startTimer();
+    if (openChanged || durationChanged) {
+      this.clearTimer();
+      if (this.props.open) {
+        this.startTimer();
+      }
     }
   }
 
