@@ -43,12 +43,16 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
     };
   }
 
-  handleFocus = () => {
+  handleFocus = (event: React.FocusEvent<HTMLInputElement>) => {
     this.setState({ isFocused: true });
+    // Chain with any external handler from inputProps
+    this.props.inputProps?.onFocus?.(event);
   };
 
-  handleBlur = () => {
+  handleBlur = (event: React.FocusEvent<HTMLInputElement>) => {
     this.setState({ isFocused: false });
+    // Chain with any external handler from inputProps
+    this.props.inputProps?.onBlur?.(event);
   };
 
   render() {
@@ -73,6 +77,9 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
     const inputId = id || generatedId;
     const hasValue = value !== undefined && value !== null && value !== '';
     const shouldShrink = isFocused || hasValue;
+
+    // Extract onFocus/onBlur from inputProps since we chain them in our handlers
+    const { onFocus: _onFocus, onBlur: _onBlur, ...restInputProps } = inputProps || {};
 
     const rootClasses = clsx(
       styles.root,
@@ -118,7 +125,7 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
               placeholder={placeholder}
               onFocus={this.handleFocus}
               onBlur={this.handleBlur}
-              {...inputProps}
+              {...restInputProps}
               {...rest}
             />
           </div>
@@ -159,7 +166,7 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
             placeholder={placeholder}
             onFocus={this.handleFocus}
             onBlur={this.handleBlur}
-            {...inputProps}
+            {...restInputProps}
             {...rest}
           />
         </div>
