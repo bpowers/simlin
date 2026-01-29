@@ -20,12 +20,20 @@ interface SnackbarProps {
 export default class Snackbar extends React.PureComponent<SnackbarProps> {
   timerHandle: ReturnType<typeof setTimeout> | undefined;
 
-  componentDidUpdate(prevProps: SnackbarProps) {
-    if (this.props.open && !prevProps.open && this.props.autoHideDuration && this.props.onClose) {
+  componentDidMount() {
+    // Start timer if mounted with open={true}
+    if (this.props.open) {
       this.startTimer();
     }
-    if (!this.props.open && prevProps.open) {
-      this.clearTimer();
+  }
+
+  componentDidUpdate(_prevProps: SnackbarProps) {
+    // Always clear first to prevent race conditions on rapid open/close
+    this.clearTimer();
+
+    // Start new timer if now open
+    if (this.props.open) {
+      this.startTimer();
     }
   }
 
@@ -34,7 +42,6 @@ export default class Snackbar extends React.PureComponent<SnackbarProps> {
   }
 
   startTimer() {
-    this.clearTimer();
     if (this.props.autoHideDuration && this.props.onClose) {
       this.timerHandle = setTimeout(this.props.onClose, this.props.autoHideDuration);
     }

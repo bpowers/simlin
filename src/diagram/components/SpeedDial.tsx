@@ -43,14 +43,14 @@ export default class SpeedDial extends React.PureComponent<SpeedDialProps> {
   render() {
     const { ariaLabel, className, hidden, icon, onClick, open, children } = this.props;
 
-    const enrichedIcon = React.isValidElement(icon)
-      ? React.cloneElement(icon as React.ReactElement<SpeedDialIconProps>, { open })
+    const enrichedIcon = React.isValidElement<SpeedDialIconProps>(icon)
+      ? React.cloneElement(icon, { open })
       : icon;
 
     // Inject onActionClick into children so they can close the dial
     const enrichedChildren = React.Children.map(children, (child) => {
-      if (React.isValidElement(child)) {
-        return React.cloneElement(child as React.ReactElement<SpeedDialActionProps>, {
+      if (React.isValidElement<SpeedDialActionProps>(child)) {
+        return React.cloneElement(child, {
           _onActionClick: this.handleActionClick,
         });
       }
