@@ -85,7 +85,6 @@ This is a yarn workspace with these packages:
 - `@system-dynamics/app` - Frontend application
 - `@system-dynamics/server` - Backend API server
 - `@system-dynamics/engine2` - WASM simulation engine
-- `@system-dynamics/xmutil` - WASM XML utilities
 
 ### Prerequisites for Development
 
