@@ -1,0 +1,80 @@
+.overlay {
+  background-color: rgba(0, 0, 0, 0.5);
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  animation: fadeIn 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.content {
+  background-color: #fff;
+  border-radius: 4px;
+  box-shadow:
+    0px 11px 15px -7px rgba(0, 0, 0, 0.2),
+    0px 24px 38px 3px rgba(0, 0, 0, 0.14),
+    0px 9px 46px 8px rgba(0, 0, 0, 0.12);
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 90vw;
+  max-width: 600px;
+  max-height: 85vh;
+  overflow-y: auto;
+  z-index: 1300;
+  animation: contentShow 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes contentShow {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -48%) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+.content:focus {
+  outline: none;
+}
+
+.title {
+  margin: 0;
+  padding: 16px 24px;
+  font-size: 1.25rem;
+  font-weight: 500;
+  line-height: 1.6;
+  color: rgba(0, 0, 0, 0.87);
+}
+
+.dialogContent {
+  padding: 8px 24px;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+.contentText {
+  margin: 0;
+  color: rgba(0, 0, 0, 0.6);
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  padding: 8px;
+  justify-content: flex-end;
+  gap: 8px;
+}

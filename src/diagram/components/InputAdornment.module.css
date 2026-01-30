@@ -1,0 +1,16 @@
+.adornment {
+  display: flex;
+  height: 0.01em;
+  max-height: 2em;
+  align-items: center;
+  white-space: nowrap;
+  color: rgba(0, 0, 0, 0.54);
+}
+
+.positionStart {
+  margin-right: 8px;
+}
+
+.positionEnd {
+  margin-left: 8px;
+}

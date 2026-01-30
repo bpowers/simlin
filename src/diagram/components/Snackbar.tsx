@@ -60,11 +60,7 @@ export default class Snackbar extends React.PureComponent<SnackbarProps> {
   render() {
     const { open, children } = this.props;
 
-    const content = (
-      <div className={clsx(styles.snackbar, !open && styles.snackbarHidden)}>
-        {children}
-      </div>
-    );
+    const content = <div className={clsx(styles.snackbar, !open && styles.snackbarHidden)}>{children}</div>;
 
     return ReactDOM.createPortal(content, document.body);
   }

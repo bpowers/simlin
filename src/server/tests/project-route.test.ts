@@ -8,7 +8,12 @@ import { createProjectRouteHandler, ProjectRecord, ProjectRouteHandlerDeps } fro
 import { getAuthenticatedUser, isResourceOwner, AuthenticatedUser } from '../auth-helpers';
 
 // Mock project factory
-function createMockProject(opts: { id: string; isPublic: boolean; ownerId?: string; fileId?: string | undefined }): ProjectRecord {
+function createMockProject(opts: {
+  id: string;
+  isPublic: boolean;
+  ownerId?: string;
+  fileId?: string | undefined;
+}): ProjectRecord {
   const ownerId = opts.ownerId ?? opts.id.split('/')[0];
   return {
     getId: () => opts.id,

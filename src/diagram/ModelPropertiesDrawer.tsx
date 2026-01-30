@@ -42,11 +42,7 @@ export class ModelPropertiesDrawer extends React.PureComponent<ModelPropertiesDr
   render() {
     const { modelName, open } = this.props;
     return (
-      <Drawer
-        open={open}
-        onOpen={this.handleOpen}
-        onClose={this.handleClose}
-      >
+      <Drawer open={open} onOpen={this.handleOpen} onClose={this.handleClose}>
         <div className={styles.content}>
           <div>
             <div className={styles.modelApp}>

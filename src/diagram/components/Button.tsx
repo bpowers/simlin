@@ -9,19 +9,40 @@ import clsx from 'clsx';
 import styles from './Button.module.css';
 
 interface ButtonProps {
-  variant?: 'text' | 'contained';
-  color?: 'primary' | 'secondary';
+  variant?: 'text' | 'contained' | 'outlined';
+  color?: 'primary' | 'secondary' | 'inherit';
   size?: 'small' | 'medium' | 'large';
   disabled?: boolean;
   onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   className?: string;
+  style?: React.CSSProperties;
   startIcon?: React.ReactNode;
   children?: React.ReactNode;
+  type?: 'button' | 'submit' | 'reset';
+  component?: 'button' | 'label';
+  'aria-label'?: string;
+  'aria-owns'?: string;
+  'aria-haspopup'?: boolean | 'true' | 'false';
 }
 
 export default class Button extends React.PureComponent<ButtonProps> {
   render() {
-    const { variant = 'text', color = 'primary', size = 'medium', disabled, onClick, className, startIcon, children } = this.props;
+    const {
+      variant = 'text',
+      color = 'primary',
+      size = 'medium',
+      disabled,
+      onClick,
+      className,
+      style,
+      startIcon,
+      children,
+      type = 'button',
+      component = 'button',
+      'aria-label': ariaLabel,
+      'aria-owns': ariaOwns,
+      'aria-haspopup': ariaHaspopup,
+    } = this.props;
 
     const sizeClass = size === 'small' ? styles.sizeSmall : size === 'large' ? styles.sizeLarge : styles.sizeMedium;
 
@@ -30,17 +51,41 @@ export default class Button extends React.PureComponent<ButtonProps> {
     if (variant === 'contained') {
       variantColorClass = color === 'secondary' ? styles.containedSecondary : styles.containedPrimary;
       disabledClass = disabled ? styles.disabledContained : undefined;
+    } else if (variant === 'outlined') {
+      variantColorClass =
+        color === 'secondary'
+          ? styles.outlinedSecondary
+          : color === 'inherit'
+            ? styles.outlinedInherit
+            : styles.outlinedPrimary;
+      disabledClass = disabled ? styles.disabledOutlined : undefined;
     } else {
-      variantColorClass = color === 'secondary' ? styles.textSecondary : styles.textPrimary;
+      variantColorClass =
+        color === 'secondary' ? styles.textSecondary : color === 'inherit' ? styles.textInherit : styles.textPrimary;
       disabledClass = disabled ? styles.disabledText : undefined;
+    }
+
+    const buttonClassName = clsx(styles.button, sizeClass, variantColorClass, disabledClass, className);
+
+    if (component === 'label') {
+      return (
+        <label className={buttonClassName} style={style} aria-label={ariaLabel}>
+          {startIcon && <span className={styles.startIcon}>{startIcon}</span>}
+          {children}
+        </label>
+      );
     }
 
     return (
       <button
-        className={clsx(styles.button, sizeClass, variantColorClass, disabledClass, className)}
+        className={buttonClassName}
+        style={style}
         disabled={disabled}
         onClick={onClick}
-        type="button"
+        type={type}
+        aria-label={ariaLabel}
+        aria-owns={ariaOwns}
+        aria-haspopup={ariaHaspopup}
       >
         {startIcon && <span className={styles.startIcon}>{startIcon}</span>}
         {children}

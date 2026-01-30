@@ -25,13 +25,7 @@ describe('TextField', () => {
 
   test('chains inputProps.onFocus with internal focus handler', () => {
     const externalOnFocus = jest.fn();
-    render(
-      <TextField
-        label="Test"
-        inputProps={{ onFocus: externalOnFocus }}
-        data-testid="text-field"
-      />,
-    );
+    render(<TextField label="Test" inputProps={{ onFocus: externalOnFocus }} data-testid="text-field" />);
 
     const input = screen.getByTestId('text-field');
     fireEvent.focus(input);
@@ -42,13 +36,7 @@ describe('TextField', () => {
 
   test('chains inputProps.onBlur with internal blur handler', () => {
     const externalOnBlur = jest.fn();
-    render(
-      <TextField
-        label="Test"
-        inputProps={{ onBlur: externalOnBlur }}
-        data-testid="text-field"
-      />,
-    );
+    render(<TextField label="Test" inputProps={{ onBlur: externalOnBlur }} data-testid="text-field" />);
 
     const input = screen.getByTestId('text-field');
     fireEvent.focus(input);
@@ -90,11 +78,7 @@ describe('TextField', () => {
   });
 
   test('passes through other inputProps correctly', () => {
-    render(
-      <TextField
-        inputProps={{ 'data-testid': 'custom-input', maxLength: 10 }}
-      />,
-    );
+    render(<TextField inputProps={{ 'data-testid': 'custom-input', maxLength: 10 }} />);
 
     const input = screen.getByTestId('custom-input');
     expect(input.getAttribute('maxLength')).toBe('10');

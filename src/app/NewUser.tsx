@@ -4,15 +4,17 @@
 
 import * as React from 'react';
 
-import Button from '@mui/material/Button';
-import Dialog from '@mui/material/Dialog';
-import DialogActions from '@mui/material/DialogActions';
-import DialogContent from '@mui/material/DialogContent';
-import DialogContentText from '@mui/material/DialogContentText';
-import DialogTitle from '@mui/material/DialogTitle';
-import TextField from '@mui/material/TextField';
-import FormControlLabel from '@mui/material/FormControlLabel';
-import Checkbox from '@mui/material/Checkbox';
+import {
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
+  TextField,
+  FormControlLabel,
+  Checkbox,
+} from '@system-dynamics/diagram';
 
 import { User } from './User';
 
@@ -44,9 +46,9 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
     });
   };
 
-  handleAgreedToTerms = (): void => {
+  handleAgreedToTerms = (checked: boolean): void => {
     this.setState({
-      agreedToTerms: !this.state.agreedToTerms,
+      agreedToTerms: checked,
     });
   };
 

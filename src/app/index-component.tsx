@@ -5,12 +5,8 @@
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 
-import { createTheme, ThemeProvider } from '@mui/material/styles';
-
 import { baseURL } from '@system-dynamics/core/common';
 import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';
-
-const theme = createTheme({});
 
 // try to get the base URL from the src attribute of the current script
 // (so that e.g. localhost:3000 works for testing), but fall back to baseURL
@@ -37,9 +33,7 @@ class SDModel extends HTMLElement {
       <div className="model-Editor-full">
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,400,500" />
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto+Mono&display=swap" />
-        <ThemeProvider theme={theme}>
-          <HostedWebEditor username={username} projectName={projectName} embedded={true} baseURL={base} />
-        </ThemeProvider>
+        <HostedWebEditor username={username} projectName={projectName} embedded={true} baseURL={base} />
       </div>,
     );
   }

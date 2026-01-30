@@ -128,7 +128,11 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     return { margin, plotWidth, plotHeight, xScale, yScale, yInvert, xTicks, yTicks, xMin, xMax };
   }
 
-  private buildPath(points: ReadonlyArray<{ x: number; y: number }>, xScale: (v: number) => number, yScale: (v: number) => number): string {
+  private buildPath(
+    points: ReadonlyArray<{ x: number; y: number }>,
+    xScale: (v: number) => number,
+    yScale: (v: number) => number,
+  ): string {
     const parts: string[] = [];
     let started = false;
     for (const p of points) {
@@ -320,13 +324,7 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
                     stroke="#666"
                     strokeWidth={1}
                   />
-                  <text
-                    x={x}
-                    y={margin.top + plotHeight + 18}
-                    textAnchor="middle"
-                    fontSize={11}
-                    fill="#666"
-                  >
+                  <text x={x} y={margin.top + plotHeight + 18} textAnchor="middle" fontSize={11} fill="#666">
                     {formatTickLabel(tick)}
                   </text>
                 </g>
@@ -348,22 +346,8 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
               const y = margin.top + yScale(tick);
               return (
                 <g key={i}>
-                  <line
-                    x1={margin.left - 5}
-                    y1={y}
-                    x2={margin.left}
-                    y2={y}
-                    stroke="#666"
-                    strokeWidth={1}
-                  />
-                  <text
-                    x={margin.left - 8}
-                    y={y}
-                    textAnchor="end"
-                    dominantBaseline="middle"
-                    fontSize={11}
-                    fill="#666"
-                  >
+                  <line x1={margin.left - 5} y1={y} x2={margin.left} y2={y} stroke="#666" strokeWidth={1} />
+                  <text x={margin.left - 8} y={y} textAnchor="end" dominantBaseline="middle" fontSize={11} fill="#666">
                     {formatTickLabel(tick)}
                   </text>
                 </g>
@@ -372,7 +356,11 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
           </g>
 
           {/* Series lines */}
-          <g className="series-lines" clipPath={`url(#${this.clipId})`} transform={`translate(${margin.left},${margin.top})`}>
+          <g
+            className="series-lines"
+            clipPath={`url(#${this.clipId})`}
+            transform={`translate(${margin.left},${margin.top})`}
+          >
             {series.map((s, i) => (
               <path
                 key={i}
@@ -428,11 +416,10 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
             <div className={styles.tooltipHeader}>{formatTickLabel(tooltip.dataX)}</div>
             {tooltip.seriesValues.map((sv, i) => (
               <div key={i} className={styles.tooltipRow}>
-                <span
-                  className={styles.tooltipSwatch}
-                  style={{ backgroundColor: sv.color }}
-                />
-                <span>{sv.name}: {fmt(sv.value)}</span>
+                <span className={styles.tooltipSwatch} style={{ backgroundColor: sv.color }} />
+                <span>
+                  {sv.name}: {fmt(sv.value)}
+                </span>
               </div>
             ))}
           </div>

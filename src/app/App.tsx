@@ -14,8 +14,6 @@ import {
 } from '@firebase/auth';
 
 import { useLocation, Route, RouteComponentProps, Switch, Redirect } from 'wouter';
-import { createTheme, ThemeProvider, StyledEngineProvider } from '@mui/material/styles';
-import CssBaseline from '@mui/material/CssBaseline';
 
 import { defined } from '@system-dynamics/core/common';
 import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';
@@ -39,13 +37,6 @@ interface EditorMatchParams {
 
   readonly [paramName: string | number]: string | undefined;
 }
-
-const theme = createTheme({
-  palette: {
-    /* primary: purple,
-     * secondary: green, */
-  },
-});
 
 class UserInfoSingleton {
   private resultPromise?: Promise<[User | undefined, number]>;
@@ -253,7 +244,6 @@ class InnerApp extends React.PureComponent<{}, AppState> {
 
     return (
       <React.Fragment>
-        <CssBaseline />
         <Switch>
           <div className={styles.inner}>
             <Route path="/" component={this.home} />
@@ -270,11 +260,7 @@ export class App extends React.PureComponent {
   render(): React.JSX.Element {
     return (
       <React.StrictMode>
-        <StyledEngineProvider injectFirst>
-          <ThemeProvider theme={theme}>
-            <InnerApp />
-          </ThemeProvider>
-        </StyledEngineProvider>
+        <InnerApp />
       </React.StrictMode>
     );
   }

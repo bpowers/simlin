@@ -7,10 +7,7 @@ import { render, act } from '@testing-library/react';
 import Snackbar, { SnackbarContent } from '../components/Snackbar';
 
 // Controlled wrapper to test open/close transitions
-class ControlledSnackbar extends React.Component<
-  { autoHideDuration?: number },
-  { open: boolean; closeCount: number }
-> {
+class ControlledSnackbar extends React.Component<{ autoHideDuration?: number }, { open: boolean; closeCount: number }> {
   state = { open: false, closeCount: 0 };
 
   setOpen = (open: boolean) => {
@@ -23,11 +20,7 @@ class ControlledSnackbar extends React.Component<
 
   render() {
     return (
-      <Snackbar
-        open={this.state.open}
-        autoHideDuration={this.props.autoHideDuration}
-        onClose={this.handleClose}
-      >
+      <Snackbar open={this.state.open} autoHideDuration={this.props.autoHideDuration} onClose={this.handleClose}>
         <SnackbarContent message="Test message" />
       </Snackbar>
     );

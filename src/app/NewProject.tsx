@@ -5,16 +5,18 @@
 import * as React from 'react';
 
 import { fromUint8Array } from 'js-base64';
-import Accordion from '@mui/material/Accordion';
-import AccordionDetails from '@mui/material/AccordionDetails';
-import AccordionSummary from '@mui/material/AccordionSummary';
-import Button from '@mui/material/Button';
-import Checkbox from '@mui/material/Checkbox';
-import Grid from '@mui/material/Grid';
-import InputAdornment from '@mui/material/InputAdornment';
-import TextField from '@mui/material/TextField';
-import Typography from '@mui/material/Typography';
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+
+import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
+  Button,
+  Checkbox,
+  FormControlLabel,
+  InputAdornment,
+  TextField,
+  ExpandMoreIcon,
+} from '@system-dynamics/diagram';
 
 import { Project } from './Project';
 import { User } from './User';
@@ -23,6 +25,7 @@ import { Project as Engine2Project } from '@system-dynamics/engine2';
 import type { JsonProject } from '@system-dynamics/engine2';
 
 import styles from './NewProject.module.css';
+import typography from './typography.module.css';
 
 interface NewProjectProps {
   user: User;
@@ -131,8 +134,8 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
     }
   };
 
-  handlePublicChecked = (): void => {
-    this.setState((state) => ({ isPublic: !state.isPublic }));
+  handlePublicChecked = (checked: boolean): void => {
+    this.setState({ isPublic: checked });
   };
 
   uploadModel = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -178,9 +181,9 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
     const warningText = this.state.errorMsg || '';
     return (
       <div>
-        <Typography variant="h2">Create a project</Typography>
+        <h2 className={typography.heading2}>Create a project</h2>
         <div className={styles.subtitle}>
-          <Typography variant="subtitle1">A project holds models and data, along with simulation results.</Typography>
+          <p className={typography.subtitle1}>A project holds models and data, along with simulation results.</p>
         </div>
         <br />
         <TextField
@@ -213,16 +216,16 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
         <Accordion>
           <AccordionSummary expandIcon={<ExpandMoreIcon />}>
             <div>
-              <Typography>Advanced</Typography>
+              <span>Advanced</span>
             </div>
           </AccordionSummary>
           <AccordionDetails>
             <form>
-              <Grid container spacing={10} justifyContent="center" alignItems="center">
-                <Grid item xs={8}>
-                  <Typography>Use existing model</Typography>
-                </Grid>
-                <Grid item xs={4}>
+              <div className={styles.advancedGrid}>
+                <div className={styles.gridCol8}>
+                  <span>Use existing model</span>
+                </div>
+                <div className={styles.gridCol4}>
                   <Button variant="contained" className="NewProject-upload-button" color="secondary" component="label">
                     Select
                     <input
@@ -233,14 +236,14 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
                       onChange={this.uploadModel}
                     />
                   </Button>
-                </Grid>
-                <Grid item xs={12}>
-                  <Typography>
-                    <Checkbox checked={this.state.isPublic} onChange={this.handlePublicChecked} />
-                    Publicly accessible
-                  </Typography>
-                </Grid>
-              </Grid>
+                </div>
+                <div className={styles.gridCol12}>
+                  <FormControlLabel
+                    control={<Checkbox checked={this.state.isPublic} onChange={this.handlePublicChecked} />}
+                    label="Publicly accessible"
+                  />
+                </div>
+              </div>
             </form>
           </AccordionDetails>
         </Accordion>
@@ -248,14 +251,14 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
         <br />
         <br />
         <br />
-        <Typography variant="subtitle2" style={{ whiteSpace: 'pre-wrap' }}>
+        <p className={typography.subtitle2} style={{ whiteSpace: 'pre-wrap' }}>
           <b>{warningText || '\xa0'}</b>
-        </Typography>
-        <Typography align="right">
+        </p>
+        <p className={typography.textRight}>
           <Button onClick={this.handleClose} color="primary">
             Create
           </Button>
-        </Typography>
+        </p>
       </div>
     );
   }

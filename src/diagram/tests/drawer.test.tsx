@@ -7,10 +7,7 @@ import { render, fireEvent, waitFor, act } from '@testing-library/react';
 import Drawer from '../components/Drawer';
 
 // Controlled wrapper for Drawer to test open/close behavior
-class ControlledDrawer extends React.Component<
-  { children?: React.ReactNode },
-  { open: boolean; closeCount: number }
-> {
+class ControlledDrawer extends React.Component<{ children?: React.ReactNode }, { open: boolean; closeCount: number }> {
   state = { open: false, closeCount: 0 };
 
   setOpen = (open: boolean) => {
@@ -71,7 +68,11 @@ describe('Drawer', () => {
 
   test('calls onClose when backdrop is clicked', () => {
     const ref = React.createRef<ControlledDrawer>();
-    render(<ControlledDrawer ref={ref}><div>Content</div></ControlledDrawer>);
+    render(
+      <ControlledDrawer ref={ref}>
+        <div>Content</div>
+      </ControlledDrawer>,
+    );
 
     // Open the drawer first
     act(() => {
@@ -87,7 +88,11 @@ describe('Drawer', () => {
 
   test('calls onClose when Escape key is pressed', () => {
     const ref = React.createRef<ControlledDrawer>();
-    render(<ControlledDrawer ref={ref}><div>Content</div></ControlledDrawer>);
+    render(
+      <ControlledDrawer ref={ref}>
+        <div>Content</div>
+      </ControlledDrawer>,
+    );
 
     // Open the drawer first
     act(() => {
@@ -102,7 +107,11 @@ describe('Drawer', () => {
 
   test('does not call onClose when Escape key is pressed while closed', () => {
     const ref = React.createRef<ControlledDrawer>();
-    render(<ControlledDrawer ref={ref}><div>Content</div></ControlledDrawer>);
+    render(
+      <ControlledDrawer ref={ref}>
+        <div>Content</div>
+      </ControlledDrawer>,
+    );
 
     fireEvent.keyDown(document, { key: 'Escape' });
 
@@ -111,7 +120,11 @@ describe('Drawer', () => {
 
   test('focuses the panel when opened', async () => {
     const ref = React.createRef<ControlledDrawer>();
-    render(<ControlledDrawer ref={ref}><div>Content</div></ControlledDrawer>);
+    render(
+      <ControlledDrawer ref={ref}>
+        <div>Content</div>
+      </ControlledDrawer>,
+    );
 
     act(() => {
       ref.current!.setOpen(true);
@@ -131,7 +144,9 @@ describe('Drawer', () => {
     render(
       <>
         <button ref={buttonRef}>Outside Button</button>
-        <ControlledDrawer ref={ref}><div>Content</div></ControlledDrawer>
+        <ControlledDrawer ref={ref}>
+          <div>Content</div>
+        </ControlledDrawer>
       </>,
     );
 
@@ -218,7 +233,9 @@ describe('Drawer focus trap', () => {
   test('focus trap includes anchor elements', () => {
     render(
       <Drawer open={true} onClose={() => {}}>
-        <a href="#test" data-testid="link">Link</a>
+        <a href="#test" data-testid="link">
+          Link
+        </a>
         <a data-testid="anchor-no-href">Anchor without href</a>
       </Drawer>,
     );
@@ -235,7 +252,9 @@ describe('Drawer focus trap', () => {
     render(
       <Drawer open={true} onClose={() => {}}>
         <input type="text" data-testid="input" />
-        <select data-testid="select"><option>Option</option></select>
+        <select data-testid="select">
+          <option>Option</option>
+        </select>
         <textarea data-testid="textarea" />
       </Drawer>,
     );
@@ -250,7 +269,9 @@ describe('Drawer focus trap', () => {
   test('focus trap includes elements with contenteditable', () => {
     render(
       <Drawer open={true} onClose={() => {}}>
-        <div contentEditable suppressContentEditableWarning data-testid="editable">Editable</div>
+        <div contentEditable suppressContentEditableWarning data-testid="editable">
+          Editable
+        </div>
       </Drawer>,
     );
 
@@ -264,8 +285,12 @@ describe('Drawer focus trap', () => {
   test('focus trap includes elements with tabindex', () => {
     render(
       <Drawer open={true} onClose={() => {}}>
-        <div tabIndex={0} data-testid="focusable-div">Focusable div</div>
-        <div tabIndex={-1} data-testid="not-focusable-div">Not focusable via Tab</div>
+        <div tabIndex={0} data-testid="focusable-div">
+          Focusable div
+        </div>
+        <div tabIndex={-1} data-testid="not-focusable-div">
+          Not focusable via Tab
+        </div>
       </Drawer>,
     );
 

@@ -269,9 +269,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
       const errorList: Array<React.ReactElement> = [];
       if (errors) {
         errors.forEach((error) => {
-          errorList.push(
-            <div className={styles.errorList}>error: {errorCodeDescription(error.code)}</div>,
-          );
+          errorList.push(<div className={styles.errorList}>error: {errorCodeDescription(error.code)}</div>);
         });
       }
       if (unitErrors) {
@@ -288,12 +286,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
       chartOrErrors = errorList;
     } else {
       chartOrErrors = (
-        <LineChart
-          height={300}
-          series={chartSeries}
-          yDomain={[yMin, yMax]}
-          tooltipFormatter={this.formatValue}
-        />
+        <LineChart height={300} series={chartSeries} yDomain={[yMin, yMax]} tooltipFormatter={this.formatValue} />
       );
     }
 

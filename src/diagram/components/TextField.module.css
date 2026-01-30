@@ -143,3 +143,28 @@
 .standardLabelError {
   color: var(--color-error);
 }
+
+/* Dense margin */
+.marginDense {
+  margin-top: 8px;
+  margin-bottom: 4px;
+}
+
+/* Input container for adornments */
+.inputContainer {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+/* Helper text */
+.helperText {
+  font-size: 0.75rem;
+  margin: 3px 14px 0;
+  color: rgba(0, 0, 0, 0.6);
+  line-height: 1.66;
+}
+
+.helperTextError {
+  color: var(--color-error);
+}

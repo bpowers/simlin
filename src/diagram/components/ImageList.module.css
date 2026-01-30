@@ -1,0 +1,12 @@
+.imageList {
+  display: grid;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.imageListItem {
+  overflow: hidden;
+  position: relative;
+}
