@@ -12,6 +12,7 @@ import {
   AccordionSummary,
   Button,
   Checkbox,
+  FormControlLabel,
   InputAdornment,
   TextField,
   ExpandMoreIcon,
@@ -237,10 +238,10 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
                   </Button>
                 </div>
                 <div className={styles.gridCol12}>
-                  <span>
-                    <Checkbox checked={this.state.isPublic} onChange={this.handlePublicChecked} />
-                    Publicly accessible
-                  </span>
+                  <FormControlLabel
+                    control={<Checkbox checked={this.state.isPublic} onChange={this.handlePublicChecked} />}
+                    label="Publicly accessible"
+                  />
                 </div>
               </div>
             </form>

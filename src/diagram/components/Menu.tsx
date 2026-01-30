@@ -22,7 +22,7 @@ export function Menu(props: MenuProps): React.ReactElement {
   const side = anchorOrigin?.vertical === 'top' ? 'top' : 'bottom';
   const align = anchorOrigin?.horizontal === 'right' ? 'end' : 'start';
 
-  const anchorRect = anchorEl?.getBoundingClientRect();
+  const anchorRect = React.useMemo(() => anchorEl?.getBoundingClientRect(), [anchorEl]);
 
   return (
     <DropdownMenu.Root open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
