@@ -16,18 +16,21 @@ import {
   signInWithEmailAndPassword,
 } from '@firebase/auth';
 import clsx from 'clsx';
-import AppleIcon from '@mui/icons-material/Apple';
-import EmailIcon from '@mui/icons-material/Email';
-import Button from '@mui/material/Button';
-import SvgIcon from '@mui/material/SvgIcon';
-import Card from '@mui/material/Card';
-import CardActions from '@mui/material/CardActions';
-import CardContent from '@mui/material/CardContent';
-import Link from '@mui/material/Link';
-import Typography from '@mui/material/Typography';
-import TextField from '@mui/material/TextField';
 
+import {
+  AppleIcon,
+  EmailIcon,
+  Button,
+  SvgIcon,
+  Card,
+  CardActions,
+  CardContent,
+  TextLink,
+  TextField,
+} from '@system-dynamics/diagram';
 import { ModelIcon } from '@system-dynamics/diagram/ModelIcon';
+
+import typography from './typography.module.css';
 
 import styles from './Login.module.css';
 
@@ -220,12 +223,14 @@ export class Login extends React.Component<LoginProps, LoginState> {
       switch (this.state.emailLoginFlow) {
         case 'showEmail':
           loginUI = (
-            <Card variant="outlined" sx={{ minWidth: 275, maxWidth: 360, width: '100%' }} className={styles.emailForm}>
+            <Card
+              variant="outlined"
+              style={{ minWidth: 275, maxWidth: 360, width: '100%' }}
+              className={styles.emailForm}
+            >
               <form onSubmit={this.onNullSubmit}>
                 <CardContent>
-                  <Typography variant="h6" component="div">
-                    Sign in with email
-                  </Typography>
+                  <h6 className={typography.heading6}>Sign in with email</h6>
                   <TextField
                     label="Email"
                     value={this.state.email}
@@ -240,7 +245,7 @@ export class Login extends React.Component<LoginProps, LoginState> {
                   />
                 </CardContent>
                 <CardActions>
-                  <Button sx={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
+                  <Button style={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
                     Cancel
                   </Button>
                   <Button type="submit" variant="contained" onClick={this.onSubmitEmail}>
@@ -253,12 +258,14 @@ export class Login extends React.Component<LoginProps, LoginState> {
           break;
         case 'showPassword':
           loginUI = (
-            <Card variant="outlined" sx={{ minWidth: 275, maxWidth: 360, width: '100%' }} className={styles.emailForm}>
+            <Card
+              variant="outlined"
+              style={{ minWidth: 275, maxWidth: 360, width: '100%' }}
+              className={styles.emailForm}
+            >
               <form onSubmit={this.onNullSubmit}>
                 <CardContent>
-                  <Typography variant="h6" component="div">
-                    Sign in
-                  </Typography>
+                  <h6 className={typography.heading6}>Sign in</h6>
                   <TextField
                     label="Email"
                     value={this.state.email}
@@ -285,11 +292,11 @@ export class Login extends React.Component<LoginProps, LoginState> {
                   />
                 </CardContent>
                 <CardActions>
-                  <Typography sx={{ marginRight: 'auto' }} variant="body2">
-                    <Link sx={{ cursor: 'help' }} underline="hover" onClick={this.onEmailHelp}>
+                  <span className={typography.body2} style={{ marginRight: 'auto' }}>
+                    <TextLink style={{ cursor: 'help' }} underline="hover" onClick={this.onEmailHelp}>
                       Trouble signing in?
-                    </Link>
-                  </Typography>
+                    </TextLink>
+                  </span>
                   <Button type="submit" variant="contained" onClick={this.onEmailLogin}>
                     Sign in
                   </Button>
@@ -300,12 +307,14 @@ export class Login extends React.Component<LoginProps, LoginState> {
           break;
         case 'showSignup':
           loginUI = (
-            <Card variant="outlined" sx={{ minWidth: 275, maxWidth: 360, width: '100%' }} className={styles.emailForm}>
+            <Card
+              variant="outlined"
+              style={{ minWidth: 275, maxWidth: 360, width: '100%' }}
+              className={styles.emailForm}
+            >
               <form onSubmit={this.onNullSubmit}>
                 <CardContent>
-                  <Typography variant="h6" component="div">
-                    Create account
-                  </Typography>
+                  <h6 className={typography.heading6}>Create account</h6>
                   <TextField
                     label="Email"
                     value={this.state.email}
@@ -342,7 +351,7 @@ export class Login extends React.Component<LoginProps, LoginState> {
                   />
                 </CardContent>
                 <CardActions>
-                  <Button sx={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
+                  <Button style={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
                     Cancel
                   </Button>
                   <Button type="submit" variant="contained" onClick={this.onSubmitNewUser}>
@@ -356,20 +365,22 @@ export class Login extends React.Component<LoginProps, LoginState> {
         case 'showProviderRedirect':
           const provider = this.state.provider === 'google.com' ? 'Google' : 'Apple';
           loginUI = (
-            <Card variant="outlined" sx={{ minWidth: 275, maxWidth: 360, width: '100%' }} className={styles.emailForm}>
+            <Card
+              variant="outlined"
+              style={{ minWidth: 275, maxWidth: 360, width: '100%' }}
+              className={styles.emailForm}
+            >
               <form onSubmit={this.onNullSubmit}>
                 <CardContent>
-                  <Typography variant="h6" component="div">
-                    Sign in - you already have an account
-                  </Typography>
-                  <Typography className={styles.recoverInstructions}>
+                  <h6 className={typography.heading6}>Sign in - you already have an account</h6>
+                  <p className={styles.recoverInstructions}>
                     You've already used {provider} to sign up with <b>{this.state.email}</b>. Sign in with {provider} to
                     continue.
-                  </Typography>
+                  </p>
                 </CardContent>
                 <CardActions>
                   <Button
-                    sx={{ marginLeft: 'auto' }}
+                    style={{ marginLeft: 'auto' }}
                     type="submit"
                     variant="contained"
                     onClick={this.state.provider === 'google.com' ? this.googleLoginClick : this.appleLoginClick}
@@ -383,15 +394,17 @@ export class Login extends React.Component<LoginProps, LoginState> {
           break;
         case 'showRecover':
           loginUI = (
-            <Card variant="outlined" sx={{ minWidth: 275, maxWidth: 360, width: '100%' }} className={styles.emailForm}>
+            <Card
+              variant="outlined"
+              style={{ minWidth: 275, maxWidth: 360, width: '100%' }}
+              className={styles.emailForm}
+            >
               <form onSubmit={this.onNullSubmit}>
                 <CardContent>
-                  <Typography variant="h6" component="div">
-                    Recover password
-                  </Typography>
-                  <Typography className={styles.recoverInstructions}>
+                  <h6 className={typography.heading6}>Recover password</h6>
+                  <p className={styles.recoverInstructions}>
                     Get instructions sent to this email that explain how to reset your password
-                  </Typography>
+                  </p>
                   <TextField
                     label="Email"
                     value={this.state.email}
@@ -406,7 +419,7 @@ export class Login extends React.Component<LoginProps, LoginState> {
                   />
                 </CardContent>
                 <CardActions>
-                  <Button sx={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
+                  <Button style={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
                     Cancel
                   </Button>
                   <Button type="submit" variant="contained" onClick={this.onSubmitRecovery}>
@@ -422,7 +435,7 @@ export class Login extends React.Component<LoginProps, LoginState> {
             <div className={styles.optionsButtons}>
               <Button
                 variant="contained"
-                sx={{ backgroundColor: 'black' }}
+                style={{ backgroundColor: 'black' }}
                 startIcon={<AppleIcon />}
                 onClick={this.appleLoginClick}
               >
@@ -435,7 +448,7 @@ export class Login extends React.Component<LoginProps, LoginState> {
               <br />
               <Button
                 variant="contained"
-                sx={{ backgroundColor: '#db4437' }}
+                style={{ backgroundColor: '#db4437' }}
                 startIcon={<EmailIcon />}
                 onClick={this.emailLoginClick}
               >

@@ -94,3 +94,33 @@ export const WarningIcon = (props: IconProps) => (
     <path d="M1 21h22L12 2zm12-3h-2v-2h2zm0-4h-2v-4h2z" />
   </SvgIcon>
 );
+
+export const CheckIcon = (props: IconProps) => (
+  <SvgIcon {...props}>
+    <path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+  </SvgIcon>
+);
+
+export const AccountCircleIcon = (props: IconProps) => (
+  <SvgIcon {...props}>
+    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2m0 4c1.93 0 3.5 1.57 3.5 3.5S13.93 13 12 13s-3.5-1.57-3.5-3.5S10.07 6 12 6m0 14c-2.03 0-4.43-.82-6.14-2.88C7.55 15.8 9.68 15 12 15s4.45.8 6.14 2.12C16.43 19.18 14.03 20 12 20" />
+  </SvgIcon>
+);
+
+export const ExpandMoreIcon = (props: IconProps) => (
+  <SvgIcon {...props}>
+    <path d="M16.59 8.59 12 13.17 7.41 8.59 6 10l6 6 6-6z" />
+  </SvgIcon>
+);
+
+export const AppleIcon = (props: IconProps) => (
+  <SvgIcon {...props}>
+    <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25" />
+  </SvgIcon>
+);
+
+export const EmailIcon = (props: IconProps) => (
+  <SvgIcon {...props}>
+    <path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2m0 4-8 5-8-5V6l8 5 8-5z" />
+  </SvgIcon>
+);

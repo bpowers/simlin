@@ -6,28 +6,29 @@ import * as React from 'react';
 
 import { Link } from 'wouter';
 import clsx from 'clsx';
-import AppBar from '@mui/material/AppBar';
-import Button from '@mui/material/Button';
-import Grid from '@mui/material/Grid';
-import ImageList from '@mui/material/ImageList';
-import ImageListItem from '@mui/material/ImageListItem';
-import IconButton from '@mui/material/IconButton';
-import Menu from '@mui/material/Menu';
-import MenuItem from '@mui/material/MenuItem';
-import Paper from '@mui/material/Paper';
-import Toolbar from '@mui/material/Toolbar';
-import Typography from '@mui/material/Typography';
-import Avatar from '@mui/material/Avatar';
 import { List } from 'immutable';
-import { PopoverOrigin } from '@mui/material/Popover';
-import AccountCircle from '@mui/icons-material/AccountCircle';
-import MenuIcon from '@mui/icons-material/Menu';
+
+import {
+  AppBar,
+  Button,
+  ImageList,
+  ImageListItem,
+  IconButton,
+  Menu,
+  MenuItem,
+  Paper,
+  Toolbar,
+  Avatar,
+  AccountCircleIcon,
+  MenuIcon,
+} from '@system-dynamics/diagram';
 
 import { NewProject } from './NewProject';
 import { Project } from './Project';
 import { User } from './User';
 
 import styles from './Home.module.css';
+import typography from './typography.module.css';
 
 interface HomeState {
   anchorEl?: HTMLElement;
@@ -40,9 +41,9 @@ interface HomeProps {
   onNewProjectDone?: () => void;
 }
 
-const AnchorOrigin: PopoverOrigin = {
-  vertical: 'bottom',
-  horizontal: 'right',
+const AnchorOrigin = {
+  vertical: 'bottom' as const,
+  horizontal: 'right' as const,
 };
 
 class Home extends React.Component<HomeProps, HomeState> {
@@ -97,11 +98,11 @@ class Home extends React.Component<HomeProps, HomeState> {
   newProjectForm() {
     return (
       <div className={styles.newProjectForm}>
-        <Grid container direction="row" justifyContent="center" alignItems="center">
-          <Grid item>
+        <div className={styles.centeredFlex}>
+          <div>
             <NewProject user={this.props.user} onProjectCreated={this.handleProjectCreated} />
-          </Grid>
-        </Grid>
+          </div>
+        </div>
       </div>
     );
   }
@@ -118,10 +119,8 @@ class Home extends React.Component<HomeProps, HomeState> {
                   <div className={styles.preview}>
                     <img src={`/api/preview/${project.id}`} alt="model preview" className={styles.previewImg} />
                   </div>
-                  <Typography variant="h5" component="h3">
-                    {project.displayName}
-                  </Typography>
-                  <Typography component="p">{project.description}&nbsp;</Typography>
+                  <h3 className={typography.heading5}>{project.displayName}</h3>
+                  <p>{project.description}&nbsp;</p>
                 </Paper>
               </Link>
             </ImageListItem>
@@ -139,7 +138,7 @@ class Home extends React.Component<HomeProps, HomeState> {
     const account = photoUrl ? (
       <Avatar alt={this.props.user.displayName} src={photoUrl} className={styles.avatar} />
     ) : (
-      <AccountCircle />
+      <AccountCircleIcon />
     );
 
     const content = this.props.isNewProject ? this.newProjectForm() : this.projects();
@@ -151,15 +150,11 @@ class Home extends React.Component<HomeProps, HomeState> {
             <IconButton className={styles.menuButton} color="inherit" aria-label="Menu">
               <MenuIcon />
             </IconButton>
-            <Typography variant="h6" color="inherit" className={styles.flex}>
+            <h6 className={clsx(typography.heading6, typography.colorInherit, styles.flex)}>
               <Link to="/" className={styles.modelLink}>
                 Simlin
               </Link>
-              {/*&nbsp;*/}
-              {/*<span className={classes.sdTitle}>*/}
-              {/*  System Dynamics*/}
-              {/*</span>*/}
-            </Typography>
+            </h6>
             <div>
               <Link to="/new" className={styles.modelLink}>
                 <Button variant="outlined" className={styles.newProjectButton}>
@@ -178,7 +173,7 @@ class Home extends React.Component<HomeProps, HomeState> {
               </IconButton>
               <Menu
                 id="menu-appbar"
-                anchorEl={anchorEl}
+                anchorEl={anchorEl ?? null}
                 anchorOrigin={AnchorOrigin}
                 transformOrigin={AnchorOrigin}
                 open={open}

@@ -99,6 +99,58 @@
   pointer-events: none;
 }
 
+/* outlined + primary */
+.outlinedPrimary {
+  color: var(--color-primary);
+  border: 1px solid rgba(25, 118, 210, 0.5);
+  background: transparent;
+}
+
+.outlinedPrimary:hover {
+  border-color: var(--color-primary);
+  background-color: rgba(25, 118, 210, 0.04);
+}
+
+/* outlined + secondary */
+.outlinedSecondary {
+  color: var(--color-secondary);
+  border: 1px solid rgba(220, 0, 78, 0.5);
+  background: transparent;
+}
+
+.outlinedSecondary:hover {
+  border-color: var(--color-secondary);
+  background-color: rgba(220, 0, 78, 0.04);
+}
+
+/* outlined + inherit */
+.outlinedInherit {
+  color: inherit;
+  border: 1px solid rgba(0, 0, 0, 0.23);
+  background: transparent;
+}
+
+.outlinedInherit:hover {
+  border-color: rgba(0, 0, 0, 0.87);
+  background-color: rgba(0, 0, 0, 0.04);
+}
+
+/* text + inherit */
+.textInherit {
+  color: inherit;
+  background: transparent;
+}
+
+.textInherit:hover {
+  background-color: rgba(0, 0, 0, 0.04);
+}
+
+.disabledOutlined {
+  color: rgba(0, 0, 0, 0.26);
+  border-color: rgba(0, 0, 0, 0.12);
+  pointer-events: none;
+}
+
 .startIcon {
   display: inherit;
   margin-right: 8px;

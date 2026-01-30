@@ -1,0 +1,20 @@
+.link {
+  color: #1976d2;
+  cursor: pointer;
+}
+
+.underlineNone {
+  text-decoration: none;
+}
+
+.underlineHover {
+  text-decoration: none;
+}
+
+.underlineHover:hover {
+  text-decoration: underline;
+}
+
+.underlineAlways {
+  text-decoration: underline;
+}

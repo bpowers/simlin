@@ -1,0 +1,31 @@
+.card {
+  background-color: #fff;
+  color: rgba(0, 0, 0, 0.87);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.outlined {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+}
+
+.elevation {
+  box-shadow:
+    0px 2px 1px -1px rgba(0, 0, 0, 0.2),
+    0px 1px 1px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 3px 0px rgba(0, 0, 0, 0.12);
+}
+
+.cardContent {
+  padding: 16px;
+}
+
+.cardContent:last-child {
+  padding-bottom: 24px;
+}
+
+.cardActions {
+  display: flex;
+  align-items: center;
+  padding: 8px;
+}

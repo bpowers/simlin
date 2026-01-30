@@ -1,3 +1,23 @@
 .subtitle {
   margin-top: 6px;
 }
+
+.advancedGrid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 80px;
+  align-items: center;
+  width: 100%;
+}
+
+.gridCol4 {
+  grid-column: span 4;
+}
+
+.gridCol8 {
+  grid-column: span 8;
+}
+
+.gridCol12 {
+  grid-column: span 12;
+}

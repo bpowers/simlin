@@ -17,16 +17,22 @@ interface TextFieldProps {
   value?: string | number;
   onChange?: (event: React.ChangeEvent<HTMLInputElement>) => void;
   type?: string;
-  margin?: 'none' | 'normal';
+  margin?: 'none' | 'normal' | 'dense';
   fullWidth?: boolean;
   error?: boolean;
+  helperText?: React.ReactNode;
   placeholder?: string;
   className?: string;
+  autoFocus?: boolean;
+  autoComplete?: string;
+  name?: string;
   InputProps?: {
     disableUnderline?: boolean;
     ref?: React.Ref<HTMLDivElement>;
+    startAdornment?: React.ReactNode;
   };
   inputProps?: React.InputHTMLAttributes<HTMLInputElement>;
+  onKeyPress?: (event: React.KeyboardEvent<HTMLInputElement>) => void;
 }
 
 interface TextFieldState {
@@ -66,10 +72,15 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
       margin,
       fullWidth,
       error,
+      helperText,
       placeholder,
       className,
+      autoFocus,
+      autoComplete,
+      name,
       InputProps,
       inputProps,
+      onKeyPress,
       ...rest
     } = this.props;
     const { isFocused, generatedId } = this.state;
@@ -81,10 +92,13 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
     // Extract onFocus/onBlur from inputProps since we chain them in our handlers
     const { onFocus: _onFocus, onBlur: _onBlur, ...restInputProps } = inputProps || {};
 
+    const startAdornment = InputProps?.startAdornment;
+
     const rootClasses = clsx(
       styles.root,
       fullWidth && styles.fullWidth,
       margin === 'normal' && styles.marginNormal,
+      margin === 'dense' && styles.marginDense,
       className,
     );
 
@@ -116,19 +130,27 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
                 {label}
               </label>
             )}
-            <input
-              id={inputId}
-              className={styles.standardInput}
-              value={value}
-              onChange={onChange}
-              type={type}
-              placeholder={placeholder}
-              onFocus={this.handleFocus}
-              onBlur={this.handleBlur}
-              {...restInputProps}
-              {...rest}
-            />
+            <div className={styles.inputContainer}>
+              {startAdornment}
+              <input
+                id={inputId}
+                className={styles.standardInput}
+                value={value}
+                onChange={onChange}
+                type={type}
+                placeholder={placeholder}
+                onFocus={this.handleFocus}
+                onBlur={this.handleBlur}
+                autoFocus={autoFocus}
+                autoComplete={autoComplete}
+                name={name}
+                onKeyPress={onKeyPress}
+                {...restInputProps}
+                {...rest}
+              />
+            </div>
           </div>
+          {helperText && <p className={clsx(styles.helperText, error && styles.helperTextError)}>{helperText}</p>}
         </div>
       );
     }
@@ -157,19 +179,27 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
               {label}
             </label>
           )}
-          <input
-            id={inputId}
-            className={styles.outlinedInput}
-            value={value}
-            onChange={onChange}
-            type={type}
-            placeholder={placeholder}
-            onFocus={this.handleFocus}
-            onBlur={this.handleBlur}
-            {...restInputProps}
-            {...rest}
-          />
+          <div className={styles.inputContainer}>
+            {startAdornment}
+            <input
+              id={inputId}
+              className={styles.outlinedInput}
+              value={value}
+              onChange={onChange}
+              type={type}
+              placeholder={placeholder}
+              onFocus={this.handleFocus}
+              onBlur={this.handleBlur}
+              autoFocus={autoFocus}
+              autoComplete={autoComplete}
+              name={name}
+              onKeyPress={onKeyPress}
+              {...restInputProps}
+              {...rest}
+            />
+          </div>
         </div>
+        {helperText && <p className={clsx(styles.helperText, error && styles.helperTextError)}>{helperText}</p>}
       </div>
     );
   }
