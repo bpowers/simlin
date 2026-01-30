@@ -16,6 +16,7 @@ export interface DialogProps {
 
 export function Dialog(props: DialogProps): React.ReactElement {
   const { open, onClose, disableEscapeKeyDown, className, style, children } = props;
+  const ariaLabelledBy = props['aria-labelledby'];
 
   return (
     <RadixDialog.Root
@@ -31,6 +32,7 @@ export function Dialog(props: DialogProps): React.ReactElement {
         <RadixDialog.Content
           className={clsx(styles.content, className)}
           style={style}
+          aria-labelledby={ariaLabelledBy}
           onEscapeKeyDown={(event) => {
             if (disableEscapeKeyDown) {
               event.preventDefault();

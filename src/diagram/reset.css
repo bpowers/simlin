@@ -35,9 +35,11 @@ body {
   font-family: 'Roboto', 'Helvetica', 'Arial', sans-serif;
 }
 
-/* Smooth scroll */
-html:focus-within {
-  scroll-behavior: smooth;
+/* Smooth scroll - only when user hasn't requested reduced motion */
+@media (prefers-reduced-motion: no-preference) {
+  html:focus-within {
+    scroll-behavior: smooth;
+  }
 }
 
 /* A elements without class get default styles */

@@ -145,8 +145,8 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
                 autoComplete={autoComplete}
                 name={name}
                 onKeyPress={onKeyPress}
-                {...restInputProps}
                 {...rest}
+                {...restInputProps}
               />
             </div>
           </div>
@@ -194,8 +194,8 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
               autoComplete={autoComplete}
               name={name}
               onKeyPress={onKeyPress}
-              {...restInputProps}
               {...rest}
+              {...restInputProps}
             />
           </div>
         </div>

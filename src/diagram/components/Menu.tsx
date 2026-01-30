@@ -22,15 +22,17 @@ export function Menu(props: MenuProps): React.ReactElement {
   const side = anchorOrigin?.vertical === 'top' ? 'top' : 'bottom';
   const align = anchorOrigin?.horizontal === 'right' ? 'end' : 'start';
 
+  const anchorRect = anchorEl?.getBoundingClientRect();
+
   return (
     <DropdownMenu.Root open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
       <DropdownMenu.Trigger asChild>
         <span
           style={{
             position: 'fixed',
-            top: anchorEl?.getBoundingClientRect().bottom ?? 0,
-            left: anchorEl?.getBoundingClientRect().left ?? 0,
-            width: anchorEl?.getBoundingClientRect().width ?? 0,
+            top: anchorRect?.bottom ?? 0,
+            left: anchorRect?.left ?? 0,
+            width: anchorRect?.width ?? 0,
             height: 0,
             pointerEvents: 'none',
           }}
