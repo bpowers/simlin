@@ -164,13 +164,13 @@ export class Login extends React.Component<LoginProps, LoginState> {
 
     const fullName = this.state.fullName.trim();
     if (!fullName) {
-      this.setState({ emailError: 'Enter your email address to continue' });
+      this.setState({ fullNameError: 'Enter your name to continue' });
       return;
     }
 
     const password = this.state.password.trim();
     if (!password) {
-      this.setState({ passwordError: 'Enter your email address to continue' });
+      this.setState({ passwordError: 'Enter a password to continue' });
       return;
     }
 
