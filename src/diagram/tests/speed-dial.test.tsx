@@ -42,13 +42,7 @@ class ControlledSpeedDial extends React.Component<
 
 describe('SpeedDial', () => {
   test('renders FAB button with aria-label', () => {
-    render(
-      <SpeedDial
-        ariaLabel="Test SpeedDial"
-        open={false}
-        icon={<span>+</span>}
-      />,
-    );
+    render(<SpeedDial ariaLabel="Test SpeedDial" open={false} icon={<span>+</span>} />);
 
     const fab = screen.getByRole('button', { name: 'Test SpeedDial' });
     expect(fab).not.toBeNull();
@@ -56,12 +50,7 @@ describe('SpeedDial', () => {
 
   test('renders when hidden prop is true (visibility controlled by CSS)', () => {
     const { container } = render(
-      <SpeedDial
-        ariaLabel="Test SpeedDial"
-        open={false}
-        hidden={true}
-        icon={<span>+</span>}
-      />,
+      <SpeedDial ariaLabel="Test SpeedDial" open={false} hidden={true} icon={<span>+</span>} />,
     );
 
     // Element is still rendered (visibility controlled by CSS)
@@ -74,11 +63,7 @@ describe('SpeedDial', () => {
 
   test('renders actions when open', () => {
     render(
-      <SpeedDial
-        ariaLabel="Test SpeedDial"
-        open={true}
-        icon={<span>+</span>}
-      >
+      <SpeedDial ariaLabel="Test SpeedDial" open={true} icon={<span>+</span>}>
         <SpeedDialAction icon={<span>A</span>} title="Action A" />
         <SpeedDialAction icon={<span>B</span>} title="Action B" />
       </SpeedDial>,
@@ -90,11 +75,7 @@ describe('SpeedDial', () => {
 
   test('does not render actions when closed', () => {
     render(
-      <SpeedDial
-        ariaLabel="Test SpeedDial"
-        open={false}
-        icon={<span>+</span>}
-      >
+      <SpeedDial ariaLabel="Test SpeedDial" open={false} icon={<span>+</span>}>
         <SpeedDialAction icon={<span>A</span>} title="Action A" />
       </SpeedDial>,
     );
@@ -105,14 +86,7 @@ describe('SpeedDial', () => {
 
   test('calls onClick when FAB is clicked', () => {
     const onClick = jest.fn();
-    render(
-      <SpeedDial
-        ariaLabel="Test SpeedDial"
-        open={false}
-        onClick={onClick}
-        icon={<span>+</span>}
-      />,
-    );
+    render(<SpeedDial ariaLabel="Test SpeedDial" open={false} onClick={onClick} icon={<span>+</span>} />);
 
     const fab = screen.getByRole('button', { name: 'Test SpeedDial' });
     fireEvent.click(fab);
@@ -163,24 +137,12 @@ describe('SpeedDial', () => {
   });
 
   test('sets aria-expanded based on open state', () => {
-    const { rerender } = render(
-      <SpeedDial
-        ariaLabel="Test SpeedDial"
-        open={false}
-        icon={<span>+</span>}
-      />,
-    );
+    const { rerender } = render(<SpeedDial ariaLabel="Test SpeedDial" open={false} icon={<span>+</span>} />);
 
     let fab = screen.getByRole('button', { name: 'Test SpeedDial' });
     expect(fab.getAttribute('aria-expanded')).toBe('false');
 
-    rerender(
-      <SpeedDial
-        ariaLabel="Test SpeedDial"
-        open={true}
-        icon={<span>+</span>}
-      />,
-    );
+    rerender(<SpeedDial ariaLabel="Test SpeedDial" open={true} icon={<span>+</span>} />);
 
     fab = screen.getByRole('button', { name: 'Test SpeedDial' });
     expect(fab.getAttribute('aria-expanded')).toBe('true');
@@ -188,12 +150,7 @@ describe('SpeedDial', () => {
 
   test('applies custom className', () => {
     const { container } = render(
-      <SpeedDial
-        ariaLabel="Test SpeedDial"
-        open={false}
-        icon={<span>+</span>}
-        className="custom-class"
-      />,
+      <SpeedDial ariaLabel="Test SpeedDial" open={false} icon={<span>+</span>} className="custom-class" />,
     );
 
     const speedDial = container.firstChild as HTMLElement;
@@ -275,7 +232,12 @@ describe('SpeedDialIcon', () => {
       <SpeedDial
         ariaLabel="Test"
         open={false}
-        icon={<SpeedDialIcon icon={<span data-testid="closed-icon">+</span>} openIcon={<span data-testid="open-icon">x</span>} />}
+        icon={
+          <SpeedDialIcon
+            icon={<span data-testid="closed-icon">+</span>}
+            openIcon={<span data-testid="open-icon">x</span>}
+          />
+        }
       />,
     );
 
@@ -288,7 +250,12 @@ describe('SpeedDialIcon', () => {
       <SpeedDial
         ariaLabel="Test"
         open={true}
-        icon={<SpeedDialIcon icon={<span data-testid="closed-icon">+</span>} openIcon={<span data-testid="open-icon">x</span>} />}
+        icon={
+          <SpeedDialIcon
+            icon={<span data-testid="closed-icon">+</span>}
+            openIcon={<span data-testid="open-icon">x</span>}
+          />
+        }
       />,
     );
 
@@ -298,11 +265,7 @@ describe('SpeedDialIcon', () => {
 
   test('renders icon wrapper consistently when no openIcon provided', () => {
     const { rerender } = render(
-      <SpeedDial
-        ariaLabel="Test"
-        open={false}
-        icon={<SpeedDialIcon icon={<span data-testid="the-icon">+</span>} />}
-      />,
+      <SpeedDial ariaLabel="Test" open={false} icon={<SpeedDialIcon icon={<span data-testid="the-icon">+</span>} />} />,
     );
 
     // Icon is present when closed
@@ -310,11 +273,7 @@ describe('SpeedDialIcon', () => {
     expect(icon).not.toBeNull();
 
     rerender(
-      <SpeedDial
-        ariaLabel="Test"
-        open={true}
-        icon={<SpeedDialIcon icon={<span data-testid="the-icon">+</span>} />}
-      />,
+      <SpeedDial ariaLabel="Test" open={true} icon={<SpeedDialIcon icon={<span data-testid="the-icon">+</span>} />} />,
     );
 
     // Icon is still present when open (rotation is CSS-based)
@@ -330,9 +289,7 @@ describe('SpeedDialIcon', () => {
       </span>
     );
 
-    render(
-      <SpeedDial ariaLabel="Test" open={true} icon={<CustomIcon />} />,
-    );
+    render(<SpeedDial ariaLabel="Test" open={true} icon={<CustomIcon />} />);
 
     const icon = screen.getByTestId('custom-icon');
     expect(icon.getAttribute('data-open')).toBe('true');

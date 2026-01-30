@@ -30,9 +30,7 @@ export class ErrorDetails extends React.PureComponent<ErrorDetailsProps> {
         !modelErrors.isEmpty()
       )
     ) {
-      errors.push(
-        <div className={styles.list}>simulation error: {errorCodeDescription(simError.code)}</div>,
-      );
+      errors.push(<div className={styles.list}>simulation error: {errorCodeDescription(simError.code)}</div>);
     }
     if (!modelErrors.isEmpty()) {
       for (const err of modelErrors) {

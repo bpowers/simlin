@@ -218,8 +218,8 @@ describe('formatTickLabel', () => {
   });
 
   test('strips trailing zeros', () => {
-    expect(formatTickLabel(1.10)).toBe('1.1');
-    expect(formatTickLabel(2.00)).toBe('2');
+    expect(formatTickLabel(1.1)).toBe('1.1');
+    expect(formatTickLabel(2.0)).toBe('2');
   });
 
   test('handles large numbers', () => {

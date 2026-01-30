@@ -1090,7 +1090,10 @@ describe('High-Level API', () => {
             name: 'main',
             stocks: [],
             flows: [],
-            auxiliaries: [{ name: 'a', equation: '1' }, { name: 'b', equation: 'a' }],
+            auxiliaries: [
+              { name: 'a', equation: '1' },
+              { name: 'b', equation: 'a' },
+            ],
             views: [
               {
                 elements: [

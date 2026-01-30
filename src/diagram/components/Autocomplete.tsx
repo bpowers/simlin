@@ -46,13 +46,7 @@ export default function Autocomplete(props: AutocompleteProps) {
     return options.filter((opt) => opt.toLowerCase().includes(lower));
   }, [options, inputValue]);
 
-  const {
-    isOpen,
-    getInputProps,
-    getMenuProps,
-    getItemProps,
-    highlightedIndex,
-  } = useCombobox({
+  const { isOpen, getInputProps, getMenuProps, getItemProps, highlightedIndex } = useCombobox({
     items: filteredOptions,
     itemToString,
     inputValue,

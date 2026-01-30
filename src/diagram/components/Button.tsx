@@ -21,7 +21,16 @@ interface ButtonProps {
 
 export default class Button extends React.PureComponent<ButtonProps> {
   render() {
-    const { variant = 'text', color = 'primary', size = 'medium', disabled, onClick, className, startIcon, children } = this.props;
+    const {
+      variant = 'text',
+      color = 'primary',
+      size = 'medium',
+      disabled,
+      onClick,
+      className,
+      startIcon,
+      children,
+    } = this.props;
 
     const sizeClass = size === 'small' ? styles.sizeSmall : size === 'large' ? styles.sizeLarge : styles.sizeMedium;
 
