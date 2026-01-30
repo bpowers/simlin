@@ -62,8 +62,18 @@
   transform: scale(0);
   opacity: 0;
   transition: transform 200ms cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 200ms cubic-bezier(0.4, 0, 0.2, 1);
+              opacity 200ms cubic-bezier(0.4, 0, 0.2, 1),
+              background-color 200ms cubic-bezier(0.4, 0, 0.2, 1);
   outline: none;
+}
+
+.actionButton:hover {
+  background-color: #d0d0d0;
+}
+
+.actionButton:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 
 .actionButtonOpen {
@@ -71,23 +81,33 @@
   opacity: 1;
 }
 
-.actionLabel {
-  position: absolute;
-  right: calc(100% + 8px);
-  white-space: nowrap;
+.actionButtonSelected {
+  background-color: var(--color-secondary);
+  color: #fff;
+}
+
+.actionButtonSelected:hover {
+  background-color: #9a0036;
+}
+
+.tooltip {
   background: #616161;
   color: #fff;
   padding: 4px 8px;
   border-radius: 4px;
-  font-size: 0.625rem;
-  font-family: "Roboto", "Helvetica", "Arial", sans-serif;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  font-size: 0.75rem;
+  font-family: inherit;
+  z-index: 1400;
+  animation: tooltipFadeIn 150ms ease-out;
 }
 
-.actionLabelOpen {
-  opacity: 1;
+.tooltipArrow {
+  fill: #616161;
+}
+
+@keyframes tooltipFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .iconWrapper {

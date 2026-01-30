@@ -411,19 +411,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   handleDialClick = (_event: React.MouseEvent<HTMLButtonElement>) => {
     this.setState({
       dialOpen: !this.state.dialOpen,
-      selectedTool: this.state.dialOpen ? undefined : this.state.selectedTool,
     });
   };
 
-  handleDialClose = (e: React.SyntheticEvent, reason: CloseReason) => {
+  handleDialClose = (_e: React.SyntheticEvent, reason: CloseReason) => {
     if (reason === 'mouseLeave' || reason === 'blur') {
       return;
     }
-    // When an action is clicked, close the dial but keep the selected tool
-    if (reason === 'actionClick') {
-      this.setState({ dialOpen: false });
-      return;
-    }
+    // escapeKeyDown: close dial and clear tool
     this.setState({
       dialOpen: false,
       selectedTool: undefined,
@@ -2323,30 +2318,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         onClose={this.handleDialClose}
         open={dialOpen}
       >
-        <SpeedDialAction
-          icon={<StockIcon />}
-          title="Stock"
-          onClick={this.handleSelectStock}
-          className={selectedTool === 'stock' ? styles.selectedTool : undefined}
-        />
-        <SpeedDialAction
-          icon={<FlowIcon />}
-          title="Flow"
-          onClick={this.handleSelectFlow}
-          className={selectedTool === 'flow' ? styles.selectedTool : undefined}
-        />
-        <SpeedDialAction
-          icon={<AuxIcon />}
-          title="Variable"
-          onClick={this.handleSelectAux}
-          className={selectedTool === 'aux' ? styles.selectedTool : undefined}
-        />
-        <SpeedDialAction
-          icon={<LinkIcon />}
-          title="Link"
-          onClick={this.handleSelectLink}
-          className={selectedTool === 'link' ? styles.selectedTool : undefined}
-        />
+        <SpeedDialAction icon={<StockIcon />} title="Stock" onClick={this.handleSelectStock} selected={selectedTool === 'stock'} />
+        <SpeedDialAction icon={<FlowIcon />} title="Flow" onClick={this.handleSelectFlow} selected={selectedTool === 'flow'} />
+        <SpeedDialAction icon={<AuxIcon />} title="Variable" onClick={this.handleSelectAux} selected={selectedTool === 'aux'} />
+        <SpeedDialAction icon={<LinkIcon />} title="Link" onClick={this.handleSelectLink} selected={selectedTool === 'link'} />
       </SpeedDial>
     );
   }

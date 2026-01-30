@@ -86,8 +86,6 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
     const { isFocused, generatedId } = this.state;
 
     const inputId = id || generatedId;
-    const hasValue = value !== undefined && value !== null && value !== '';
-    const shouldShrink = isFocused || hasValue;
 
     // Extract onFocus/onBlur from inputProps since we chain them in our handlers
     const { onFocus: _onFocus, onBlur: _onBlur, ...restInputProps } = inputProps || {};
@@ -114,22 +112,17 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
       );
 
       const labelClasses = label
-        ? clsx(
-            styles.standardLabel,
-            shouldShrink && styles.standardLabelShrunk,
-            isFocused && styles.standardLabelFocused,
-            error && styles.standardLabelError,
-          )
+        ? clsx(styles.standardLabel, isFocused && styles.standardLabelFocused, error && styles.standardLabelError)
         : undefined;
 
       return (
         <div className={rootClasses}>
+          {label && (
+            <label htmlFor={inputId} className={labelClasses}>
+              {label}
+            </label>
+          )}
           <div className={wrapperClasses} ref={wrapperRef}>
-            {label && (
-              <label htmlFor={inputId} className={labelClasses}>
-                {label}
-              </label>
-            )}
             <div className={styles.inputContainer}>
               {startAdornment}
               <input
@@ -163,22 +156,17 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
     );
 
     const labelClasses = label
-      ? clsx(
-          styles.outlinedLabel,
-          shouldShrink && styles.outlinedLabelShrunk,
-          isFocused && styles.outlinedLabelFocused,
-          error && styles.outlinedLabelError,
-        )
+      ? clsx(styles.outlinedLabel, isFocused && styles.outlinedLabelFocused, error && styles.outlinedLabelError)
       : undefined;
 
     return (
       <div className={rootClasses}>
+        {label && (
+          <label htmlFor={inputId} className={labelClasses}>
+            {label}
+          </label>
+        )}
         <div className={wrapperClasses}>
-          {label && (
-            <label htmlFor={inputId} className={labelClasses}>
-              {label}
-            </label>
-          )}
           <div className={styles.inputContainer}>
             {startAdornment}
             <input

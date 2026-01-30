@@ -170,16 +170,17 @@ describe('SpeedDialAction', () => {
     expect(icon).not.toBeNull();
   });
 
-  test('renders label with title', () => {
+  test('renders action button with aria-label for accessibility', () => {
     render(
       <SpeedDial ariaLabel="Test" open={true} icon={<span>+</span>}>
         <SpeedDialAction icon={<span>A</span>} title="Action A" />
       </SpeedDial>,
     );
 
-    // The title appears both as aria-label on button and in the label span
+    // The title appears as aria-label on button (tooltips appear on hover/focus)
     const button = screen.getByRole('button', { name: 'Action A' });
     expect(button).not.toBeNull();
+    expect(button.getAttribute('aria-label')).toBe('Action A');
   });
 
   test('calls onClick when action button is clicked', () => {
@@ -196,22 +197,29 @@ describe('SpeedDialAction', () => {
     expect(onClick).toHaveBeenCalledTimes(1);
   });
 
-  test('closes SpeedDial when action is clicked', () => {
-    const ref = React.createRef<ControlledSpeedDial>();
+  test('action click does not trigger onClose', () => {
+    const onClose = jest.fn();
     render(
-      <ControlledSpeedDial ref={ref}>
+      <SpeedDial ariaLabel="Test" open={true} onClose={onClose} icon={<span>+</span>}>
         <SpeedDialAction icon={<span>A</span>} title="Action A" />
-      </ControlledSpeedDial>,
+      </SpeedDial>,
     );
-
-    act(() => {
-      ref.current!.setOpen(true);
-    });
 
     const button = screen.getByRole('button', { name: 'Action A' });
     fireEvent.click(button);
 
-    expect(ref.current!.state.lastCloseReason).toBe('actionClick');
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  test('selected action has selected class', () => {
+    render(
+      <SpeedDial ariaLabel="Test" open={true} icon={<span>+</span>}>
+        <SpeedDialAction icon={<span>A</span>} title="Action A" selected={true} />
+      </SpeedDial>,
+    );
+
+    const button = screen.getByRole('button', { name: 'Action A' });
+    expect(button.className).toContain('actionButtonSelected');
   });
 
   test('applies custom className to action button', () => {

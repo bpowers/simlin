@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
+import * as Tooltip from '@radix-ui/react-tooltip';
 
 import clsx from 'clsx';
 
@@ -36,24 +37,10 @@ export default class SpeedDial extends React.PureComponent<SpeedDialProps> {
     }
   };
 
-  handleActionClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    this.props.onClose?.(event, 'actionClick');
-  };
-
   render() {
     const { ariaLabel, className, hidden, icon, onClick, open, children } = this.props;
 
     const enrichedIcon = React.isValidElement<SpeedDialIconProps>(icon) ? React.cloneElement(icon, { open }) : icon;
-
-    // Inject onActionClick into children so they can close the dial
-    const enrichedChildren = React.Children.map(children, (child) => {
-      if (React.isValidElement<SpeedDialActionProps>(child)) {
-        return React.cloneElement(child, {
-          _onActionClick: this.handleActionClick,
-        });
-      }
-      return child;
-    });
 
     return (
       <div
@@ -73,9 +60,11 @@ export default class SpeedDial extends React.PureComponent<SpeedDialProps> {
           {enrichedIcon}
         </button>
         {open && (
-          <div className={styles.actions} role="menu">
-            {enrichedChildren}
-          </div>
+          <Tooltip.Provider delayDuration={300}>
+            <div className={styles.actions} role="menu">
+              {children}
+            </div>
+          </Tooltip.Provider>
         )}
       </div>
     );
@@ -87,31 +76,37 @@ interface SpeedDialActionProps {
   title: string;
   onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   className?: string;
-  /** @internal Injected by SpeedDial parent via cloneElement */
-  _onActionClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  selected?: boolean;
 }
 
 export class SpeedDialAction extends React.PureComponent<SpeedDialActionProps> {
-  handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    const { onClick, _onActionClick } = this.props;
-
-    onClick?.(event);
-    _onActionClick?.(event);
-  };
-
   render() {
-    const { icon, title, className } = this.props;
+    const { icon, title, className, onClick, selected } = this.props;
     return (
       <div className={styles.action} role="menuitem">
-        <button
-          className={clsx(styles.actionButton, styles.actionButtonOpen, className)}
-          onClick={this.handleClick}
-          aria-label={title}
-          type="button"
-        >
-          {icon}
-        </button>
-        <span className={clsx(styles.actionLabel, styles.actionLabelOpen)}>{title}</span>
+        <Tooltip.Root>
+          <Tooltip.Trigger asChild>
+            <button
+              className={clsx(
+                styles.actionButton,
+                styles.actionButtonOpen,
+                selected && styles.actionButtonSelected,
+                className,
+              )}
+              onClick={onClick}
+              aria-label={title}
+              type="button"
+            >
+              {icon}
+            </button>
+          </Tooltip.Trigger>
+          <Tooltip.Portal>
+            <Tooltip.Content className={styles.tooltip} side="right" sideOffset={8} collisionPadding={16}>
+              {title}
+              <Tooltip.Arrow className={styles.tooltipArrow} />
+            </Tooltip.Content>
+          </Tooltip.Portal>
+        </Tooltip.Root>
       </div>
     );
   }
