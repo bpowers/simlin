@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import { CloudViewElement, FlowViewElement } from '@system-dynamics/core/datamodel';
-import { defined } from '@system-dynamics/core/common';
+import { first, last } from '@system-dynamics/core/collections';
 
 /**
  * Determines if a cloud is on the source side (first point) of a flow.
@@ -14,7 +14,7 @@ export function isCloudOnSourceSide(cloud: CloudViewElement, flow: FlowViewEleme
   if (flow.points.size < 2) {
     throw new Error(`Flow ${flow.uid} has fewer than 2 points`);
   }
-  const firstPoint = defined(flow.points.first());
+  const firstPoint = first(flow.points);
   return firstPoint.attachedToUid === cloud.uid;
 }
 
@@ -27,6 +27,6 @@ export function isCloudOnSinkSide(cloud: CloudViewElement, flow: FlowViewElement
   if (flow.points.size < 2) {
     throw new Error(`Flow ${flow.uid} has fewer than 2 points`);
   }
-  const lastPoint = defined(flow.points.last());
+  const lastPoint = last(flow.points);
   return lastPoint.attachedToUid === cloud.uid;
 }

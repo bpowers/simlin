@@ -8,6 +8,7 @@ import { List } from 'immutable';
 import { fromUint8Array, toUint8Array } from 'js-base64';
 
 import { baseURL, defined } from '@system-dynamics/core/common';
+import { first } from '@system-dynamics/core/collections';
 
 import { Editor, ProtobufProjectData } from './Editor';
 
@@ -121,7 +122,7 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
 
     if (!this.state.projectBinary || !this.state.projectVersion) {
       if (!this.state.serviceErrors.isEmpty()) {
-        return <div>{defined(this.state.serviceErrors.first()).message}</div>;
+        return <div>{first(this.state.serviceErrors).message}</div>;
       } else {
         return <div />;
       }

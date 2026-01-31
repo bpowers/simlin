@@ -9,6 +9,7 @@ import Button from './components/Button';
 import TextField from './components/TextField';
 
 import { defined } from '@system-dynamics/core/common';
+import { at } from '@system-dynamics/core/collections';
 import {
   Variable,
   GraphicalFunction,
@@ -48,9 +49,9 @@ function tableFrom(gf: GraphicalFunction): GFTable | undefined {
     // either the x points have been explicitly specified, or
     // it is a linear mapping of points between xmin and xmax,
     // inclusive
-    const xVal = xpts ? defined(xpts.get(i)) : (i / (size - 1)) * (xmax - xmin) + xmin;
+    const xVal = xpts ? at(xpts, i) : (i / (size - 1)) * (xmax - xmin) + xmin;
     xList[i] = xVal;
-    yList[i] = defined(ypts.get(i));
+    yList[i] = at(ypts, i);
   }
 
   return {
@@ -144,7 +145,7 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
       let min = 0;
       let max = 0;
       for (let i = 0; i < gf.yPoints.size; i++) {
-        const y = defined(gf.yPoints.get(i));
+        const y = at(gf.yPoints, i);
         if (y < min) {
           min = y;
         }

@@ -27,6 +27,7 @@ import {
 } from '@system-dynamics/core/datamodel';
 
 import { defined, Series } from '@system-dynamics/core/common';
+import { at } from '@system-dynamics/core/collections';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { CustomElement, FormattedText, CustomEditor } from './drawing/SlateEditor';
 import { LookupEditor } from './LookupEditor';
@@ -86,7 +87,7 @@ function highlightErrors(
 ): CustomElement[] {
   const result = descendantsFromString(s);
   if (!isUnits && errors && errors.size > 0) {
-    const err = defined(errors.get(0));
+    const err = at(errors, 0);
     console.log(err);
     if (err.end > 0) {
       const children = defined(result[0]).children as Array<Text>;
