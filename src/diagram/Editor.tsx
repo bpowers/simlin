@@ -56,7 +56,7 @@ import {
   UnitError,
 } from '@system-dynamics/core/datamodel';
 import { defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
-import { at, first, getOrThrow, last, only } from '@system-dynamics/core/collections';
+import { first, getOrThrow, last, only } from '@system-dynamics/core/collections';
 
 import { AuxIcon } from './AuxIcon';
 import { Toast } from './ErrorToast';
@@ -2201,7 +2201,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // ensure our offset is always valid
     projectOffset = Math.min(projectOffset, this.state.projectHistory.size - 1);
     projectOffset = Math.max(projectOffset, 0);
-    const serializedProject = at(this.state.projectHistory, projectOffset);
+    const serializedProject = defined(this.state.projectHistory.get(projectOffset));
     const projectVersion = this.state.projectVersion + 0.01;
     this.setState({ projectOffset, projectVersion });
 
