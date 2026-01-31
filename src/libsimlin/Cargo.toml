@@ -11,7 +11,7 @@ edition = "2021"
 crate-type = ["staticlib", "rlib", "cdylib"]
 
 [features]
-default = ["xmutil"]
+default = []
 xmutil = ["simlin-compat/xmutil"]
 
 [dependencies]
