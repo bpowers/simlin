@@ -11,13 +11,13 @@ import { renderToString } from 'react-dom/server';
 
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
 
-import { defined } from '@system-dynamics/core/common';
+import { at, getOrThrow } from '@system-dynamics/core/collections';
 import { Canvas } from './drawing/Canvas';
 import { Box, Point } from './drawing/common';
 import { renderStyles } from './drawing/render-styles';
 
 export function renderSvgToString(project: Project, modelName: string): [string, Box] {
-  const model = defined(project.models.get(modelName));
+  const model = getOrThrow(project.models, modelName);
 
   const renameVariable = (_oldName: string, _newName: string): void => {};
   const onSelection = (_selected: Set<UID>): void => {};
@@ -33,7 +33,7 @@ export function renderSvgToString(project: Project, modelName: string): [string,
       embedded={true}
       project={project}
       model={model}
-      view={defined(model.views.get(0))}
+      view={at(model.views, 0)}
       version={1}
       selectedTool={undefined}
       selection={Set()}

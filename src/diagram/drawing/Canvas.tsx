@@ -11,6 +11,7 @@ import { Descendant } from 'slate';
 import { List, Map, Set } from 'immutable';
 
 import { defined, exists } from '@system-dynamics/core/common';
+import { at, first, getOrThrow, last, only } from '@system-dynamics/core/collections';
 import {
   ViewElement,
   AliasViewElement,
@@ -262,7 +263,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       if (uid === inCreationUid && inCreation) {
         selection = selection.set(uid, inCreation);
       } else {
-        const e = defined(elements.get(uid));
+        const e = getOrThrow(elements, uid);
         selection = selection.set(e.uid, e);
       }
     }
@@ -341,7 +342,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       return undefined;
     }
 
-    const arrowUid = defined(this.props.selection.first());
+    const arrowUid = only(this.props.selection);
     const arrow = this.getElementByUid(arrowUid);
 
     const off = this.selectionCenterOffset;
@@ -393,30 +394,30 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
       if (isMovingSource) {
         // For source movement: check if target stock is valid source
-        const last = defined(arrow.points.last());
+        const lastPt = last(arrow.points);
         // Don't allow connecting source and sink to the same stock
-        if (last.attachedToUid === element.uid) {
+        if (lastPt.attachedToUid === element.uid) {
           return false;
         }
         // For multi-segment flows (3+ points), the source needs to align with
         // the adjacent point (second), not the sink point. For 2-point flows,
         // points.get(1) gives us the last point, which is correct.
-        const adjacentToSource = defined(arrow.points.get(1));
+        const adjacentToSource = at(arrow.points, 1);
         return (
           Math.abs(adjacentToSource.x - element.cx) < StockWidth / 2 ||
           Math.abs(adjacentToSource.y - element.cy) < StockHeight / 2
         );
       } else {
         // For arrowhead movement: check if target stock is valid sink
-        const first = defined(arrow.points.first());
+        const firstPt = first(arrow.points);
         // make sure we don't point a flow back at its source
-        if (first.attachedToUid === element.uid) {
+        if (firstPt.attachedToUid === element.uid) {
           return false;
         }
         // For multi-segment flows (3+ points), the arrowhead needs to align with
         // the adjacent point (second-to-last), not the source point. For 2-point
         // flows, points.size - 2 = 0 gives us the first point, which is correct.
-        const adjacentToArrowhead = defined(arrow.points.get(arrow.points.size - 2));
+        const adjacentToArrowhead = at(arrow.points, arrow.points.size - 2);
         return (
           Math.abs(adjacentToArrowhead.x - element.cx) < StockWidth / 2 ||
           Math.abs(adjacentToArrowhead.y - element.cy) < StockHeight / 2
@@ -529,8 +530,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       }
     }
     if (isMovingArrow || this.isSelected(from) || this.isSelected(to)) {
-      const oldTo = defined(this.elements.get(toUid));
-      const oldFrom = defined(this.elements.get(from.uid));
+      const oldTo = getOrThrow(this.elements, toUid);
+      const oldFrom = getOrThrow(this.elements, from.uid);
       const oldToVisual = getVisualCenter(oldTo);
       const oldFromVisual = getVisualCenter(oldFrom);
       const toVisual = getVisualCenter(to);
@@ -580,7 +581,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       return;
     }
 
-    const sourceId = defined(element.points.first()).attachedToUid;
+    const sourceId = first(element.points).attachedToUid;
     if (!sourceId) {
       return;
     }
@@ -589,7 +590,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       throw new Error('invariant broken');
     }
 
-    const sinkId = defined(element.points.last()).attachedToUid;
+    const sinkId = last(element.points).attachedToUid;
     if (!sinkId) {
       return;
     }
@@ -625,13 +626,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     flow: FlowViewElement,
     moveDelta: Point,
   ): [FlowViewElement, List<StockViewElement | CloudViewElement>] {
-    const sourceId = defined(defined(flow.points.first()).attachedToUid);
+    const sourceId = defined(first(flow.points).attachedToUid);
     let source = this.getElementByUid(sourceId) as StockViewElement | CloudViewElement;
     if (!(source instanceof StockViewElement || source instanceof CloudViewElement)) {
       throw new Error('invariant broken');
     }
 
-    const sinkId = defined(defined(defined(flow.points.last()).attachedToUid));
+    const sinkId = defined(last(flow.points).attachedToUid);
     let sink = this.getElementByUid(sinkId) as StockViewElement | CloudViewElement;
     if (!(sink instanceof StockViewElement || sink instanceof CloudViewElement)) {
       throw new Error('invariant broken');
@@ -860,7 +861,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     this.pointerId = undefined;
 
     if (this.state.isMovingLabel && this.state.labelSide) {
-      const selected = defined(this.props.selection.first());
+      const selected = only(this.props.selection);
       this.props.onMoveLabel(selected, this.state.labelSide);
       this.clearPointerState(false);
       return;
@@ -896,7 +897,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         } else if (!this.state.isMovingArrow && !this.state.isMovingSource) {
           this.props.onMoveSelection(delta, arcPoint, this.state.draggingSegmentIndex);
         } else {
-          const element = this.getElementByUid(defined(this.props.selection.first()));
+          const element = this.getElementByUid(only(this.props.selection));
           let foundInvalidTarget = false;
           const validTarget = this.cachedElements.find((e: ViewElement) => {
             const isValid = this.isValidTarget(e);
@@ -1903,7 +1904,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
       // Only allow editing name if single selection
       if (isEditingName && selection.size === 1) {
-        const uid = defined(selection.first());
+        const uid = only(selection);
         const editingElement = this.getElementByUid(uid) as NamedViewElement;
         editingName = plainDeserialize('label', displayName(defined(editingElement.name)));
       } else {
@@ -1962,7 +1963,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       return;
     }
 
-    const uid = defined(this.props.selection.first());
+    const uid = only(this.props.selection);
     const element = this.getElementByUid(uid);
     const oldName = displayName(defined((element as NamedViewElement).name));
     const newName = plainSerialize(defined(this.state.editingName));
@@ -1996,7 +1997,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
     for (let element of displayElements) {
       if (this.selectionUpdates.has(element.uid)) {
-        element = defined(this.selectionUpdates.get(element.uid));
+        element = getOrThrow(this.selectionUpdates, element.uid);
       }
 
       // const ZOrder = Map<'flow' | 'module' | 'stock' | 'aux' | 'link' | 'style' | 'reference' | 'cloud' | 'alias', number>([
@@ -2231,7 +2232,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       overlayClass += ' ' + styles.noPointerEvents;
     } else {
       const zoom = this.props.view.zoom;
-      const editingUid = defined(this.props.selection.first());
+      const editingUid = only(this.props.selection);
       const editingElement = this.getElementByUid(editingUid) as NamedViewElement;
       const rw = editingElement instanceof StockViewElement ? StockWidth / 2 : AuxRadius;
       const rh = editingElement instanceof StockViewElement ? StockHeight / 2 : AuxRadius;

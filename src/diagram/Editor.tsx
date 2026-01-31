@@ -56,6 +56,7 @@ import {
   UnitError,
 } from '@system-dynamics/core/datamodel';
 import { defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
+import { at, first, getOrThrow, last, only } from '@system-dynamics/core/collections';
 
 import { AuxIcon } from './AuxIcon';
 import { Toast } from './ErrorToast';
@@ -635,7 +636,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
       if (isSourceAttach) {
         // Handle source attachment (first point)
-        const oldFrom = getUid(defined(defined(element.points.first()).attachedToUid));
+        const oldFrom = getUid(defined(first(element.points).attachedToUid));
         let newCloud = false;
         let updateCloud = false;
         let from: StockViewElement | CloudViewElement;
@@ -705,7 +706,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       }
 
       // Handle sink attachment (last point) - original behavior
-      const oldTo = getUid(defined(defined(element.points.last()).attachedToUid));
+      const oldTo = getUid(defined(last(element.points).attachedToUid));
       let newCloud = false;
       let updateCloud = false;
       let to: StockViewElement | CloudViewElement;
@@ -782,7 +783,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       flow = flow.merge({
         uid: nextUid++,
       });
-      const firstPt = defined(flow.points.first());
+      const firstPt = first(flow.points);
       const sourceUid = firstPt.attachedToUid;
       if (sourceUid === inCreationCloudUid) {
         const newCloud = new CloudViewElement({
@@ -806,7 +807,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         const sourceStock = getUid(sourceUid) as StockViewElement;
         sourceStockIdent = defined(sourceStock.ident);
       }
-      const lastPt = defined(flow.points.last());
+      const lastPt = last(flow.points);
       if (lastPt.attachedToUid === fauxCloudTargetUid) {
         let newCloud = false;
         let to: StockViewElement | CloudViewElement;
@@ -1156,10 +1157,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
       if (selection.size === 1 && element instanceof FlowViewElement) {
         const pts = element.points;
-        const sourceId = defined(defined(pts.first()).attachedToUid);
+        const sourceId = defined(first(pts).attachedToUid);
         const source = getUid(sourceId) as StockViewElement | CloudViewElement;
 
-        const sinkId = defined(defined(pts.last()).attachedToUid);
+        const sinkId = defined(last(pts).attachedToUid);
         const sink = getUid(sinkId) as StockViewElement | CloudViewElement;
 
         const ends = List<StockViewElement | CloudViewElement>([source, sink]);
@@ -1167,12 +1168,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         element = newElement;
         updatedElements = updatedElements.concat(newUpdatedClouds);
       } else if (selection.size === 1 && element instanceof CloudViewElement) {
-        const flow = defined(getUid(defined(element.flowUid))) as FlowViewElement;
+        const flow = getUid(defined(element.flowUid)) as FlowViewElement;
         const [newCloud, newUpdatedFlow] = UpdateCloudAndFlow(element, flow, delta);
         element = newCloud;
         updatedElements = updatedElements.push(newUpdatedFlow);
       } else if (selection.size === 1 && element instanceof StockViewElement) {
-        const stock = defined(defined(this.getModel()).variables.get(element.ident)) as StockVar;
+        const stock = getOrThrow(defined(this.getModel()).variables, element.ident) as StockVar;
         const flowNames: List<string> = stock.inflows.concat(stock.outflows);
         const flows: List<ViewElement> = flowNames.map(getName);
         const [newElement, newUpdatedFlows] = UpdateStockAndFlows(element, flows as List<FlowViewElement>, delta);
@@ -1200,7 +1201,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const updatedFlowsByUid: Map<UID, ViewElement> = updatedElements.toMap().mapKeys((_, e) => e.uid);
     elements = elements.map((element) => {
       if (updatedFlowsByUid.has(element.uid)) {
-        return defined(updatedFlowsByUid.get(element.uid));
+        return getOrThrow(updatedFlowsByUid, element.uid);
       }
       return element;
     });
@@ -1222,7 +1223,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     elements = elements.map((element: ViewElement) => {
       if (!(element instanceof LinkViewElement)) {
-        return element.isNamed() ? defined(namedElements.get(defined(element.ident))) : element;
+        return element.isNamed() ? getOrThrow(namedElements, defined(element.ident)) : element;
       }
       // TODO: this could be an alias, which doesn't have a name.  Why are we doing this by name anyway?
       // const fromName = defined(getUid(element.fromUid).ident);
@@ -1588,7 +1589,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return;
     }
 
-    const uid = defined(this.state.selection.first());
+    const uid = only(this.state.selection);
 
     const view = this.getView();
     if (!view) {
@@ -1995,7 +1996,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const model = defined(this.getModel());
 
     const ident = defined(namedElement.ident);
-    const variable = defined(model.variables.get(ident));
+    const variable = getOrThrow(model.variables, ident);
 
     const activeTab = this.state.variableDetailsActiveTab;
 
@@ -2080,7 +2081,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const { varErrors, unitErrors } = convertErrorDetails(errors, modelName);
 
     if (varErrors.size > 0) {
-      const model = defined(project.models.get(modelName));
+      const model = getOrThrow(project.models, modelName);
 
       // if all the errors are 'just' that we have no equations,
       // don't scream "error" at the user -- they are starting from
@@ -2089,7 +2090,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         let foundOtherError = false;
 
         for (const [, errs] of varErrors) {
-          if (errs.size !== 1 || defined(errs.first()).code !== ErrorCode.EmptyEquation) {
+          if (errs.size !== 1 || first(errs).code !== ErrorCode.EmptyEquation) {
             foundOtherError = true;
             break;
           }
@@ -2200,7 +2201,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // ensure our offset is always valid
     projectOffset = Math.min(projectOffset, this.state.projectHistory.size - 1);
     projectOffset = Math.max(projectOffset, 0);
-    const serializedProject = defined(this.state.projectHistory.get(projectOffset));
+    const serializedProject = at(this.state.projectHistory, projectOffset);
     const projectVersion = this.state.projectVersion + 0.01;
     this.setState({ projectOffset, projectVersion });
 

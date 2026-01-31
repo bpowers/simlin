@@ -9,7 +9,8 @@ import { Map, Set } from 'immutable';
 
 import './theme.css';
 
-import { defined, Series } from '@system-dynamics/core/common';
+import { Series } from '@system-dynamics/core/common';
+import { at, getOrThrow } from '@system-dynamics/core/collections';
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
 import { Project as Engine2Project } from '@system-dynamics/engine2';
 import type { JsonProject } from '@system-dynamics/engine2';
@@ -74,7 +75,7 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
     const canUseDOM = !!(typeof window !== 'undefined' && window.document && window.document.createElement);
     const isDarkTheme = this.props.isDarkTheme;
 
-    const model = defined(project.models.get('main'));
+    const model = getOrThrow(project.models, 'main');
 
     const renameVariable = (_oldName: string, _newName: string): void => {};
     const onSelection = (_selected: Set<UID>): void => {};
@@ -90,7 +91,7 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
         embedded={true}
         project={project}
         model={model}
-        view={defined(model.views.get(0))}
+        view={at(model.views, 0)}
         version={1}
         selectedTool={undefined}
         selection={Set()}

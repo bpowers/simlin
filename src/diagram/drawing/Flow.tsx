@@ -15,6 +15,7 @@ import {
   CloudViewElement,
 } from '@system-dynamics/core/datamodel';
 import { defined, Series } from '@system-dynamics/core/common';
+import { at, first, last } from '@system-dynamics/core/collections';
 
 import { Arrowhead } from './Arrowhead';
 import { displayName, Point as IPoint, Rect } from './common';
@@ -87,12 +88,12 @@ interface FlowAttachmentInfo {
  * the flow attaches to the stock).
  */
 function getStockAdjacentPoint(points: List<Point>, stockIsFirst: boolean): Point {
-  const firstPoint = defined(points.first());
-  const lastPoint = defined(points.last());
+  const firstPoint = first(points);
+  const lastPoint = last(points);
   if (stockIsFirst) {
-    return points.size >= 2 ? defined(points.get(1)) : lastPoint;
+    return points.size >= 2 ? at(points, 1) : lastPoint;
   } else {
-    return points.size >= 2 ? defined(points.get(points.size - 2)) : firstPoint;
+    return points.size >= 2 ? at(points, points.size - 2) : firstPoint;
   }
 }
 
@@ -100,14 +101,14 @@ function getStockAdjacentPoint(points: List<Point>, stockIsFirst: boolean): Poin
  * Returns the point adjacent to the anchor (used to determine the original flow direction).
  */
 function getAnchorAdjacentPoint(points: List<Point>, stockIsFirst: boolean): Point {
-  const firstPoint = defined(points.first());
-  const lastPoint = defined(points.last());
+  const firstPoint = first(points);
+  const lastPoint = last(points);
   if (stockIsFirst) {
     // anchor is last, so adjacent to anchor is second-to-last
-    return points.size >= 2 ? defined(points.get(points.size - 2)) : firstPoint;
+    return points.size >= 2 ? at(points, points.size - 2) : firstPoint;
   } else {
     // anchor is first, so adjacent to anchor is second
-    return points.size >= 2 ? defined(points.get(1)) : lastPoint;
+    return points.size >= 2 ? at(points, 1) : lastPoint;
   }
 }
 
@@ -128,8 +129,8 @@ function getFlowAttachmentInfo(
     return undefined;
   }
 
-  const firstPoint = defined(points.first());
-  const lastPoint = defined(points.last());
+  const firstPoint = first(points);
+  const lastPoint = last(points);
 
   const stockIsFirst = firstPoint.attachedToUid === stockUid;
   const stockIsLast = lastPoint.attachedToUid === stockUid;
@@ -284,8 +285,8 @@ export function computeFlowRoute(
     return flow;
   }
 
-  const firstPoint = defined(points.first());
-  const lastPoint = defined(points.last());
+  const firstPoint = first(points);
+  const lastPoint = last(points);
 
   const stockIsFirst = firstPoint.attachedToUid === stockEl.uid;
   const stockIsLast = lastPoint.attachedToUid === stockEl.uid;
@@ -308,7 +309,7 @@ export function computeFlowRoute(
   // corner is adjusted to maintain axis alignment.
   if (points.size >= 4) {
     const adjacentPointIndex = stockIsFirst ? 1 : points.size - 2;
-    const adjacentPoint = defined(points.get(adjacentPointIndex));
+    const adjacentPoint = at(points, adjacentPointIndex);
 
     // Determine the ORIGINAL first segment's orientation from the existing geometry.
     // We must preserve this orientation to avoid creating diagonal segments between
@@ -569,7 +570,7 @@ function adjustFlows(
       const valveOldSegment = findClosestSegment(currentValve, oldSegments);
 
       // Determine which endpoint is being moved (attached to stock)
-      const stockIsFirst = defined(flow.points.first()).attachedToUid === stock.uid;
+      const stockIsFirst = first(flow.points).attachedToUid === stock.uid;
       const movedEndpointSegmentIndex = stockIsFirst ? 0 : oldSegments.length - 1;
 
       let newValve: IPoint;
@@ -658,8 +659,8 @@ function allEqual<T>(extractor: (pt: Point) => T): (flow: FlowViewElement) => bo
       return false;
     }
 
-    const first = extractor(defined(flow.points.get(0)));
-    return flow.points.every((pt) => extractor(pt) === first);
+    const firstVal = extractor(at(flow.points, 0));
+    return flow.points.every((pt) => extractor(pt) === firstVal);
   };
 }
 
@@ -672,8 +673,8 @@ export function UpdateCloudAndFlow(
   moveDelta: IPoint,
 ): [StockViewElement | CloudViewElement, FlowViewElement] {
   let points = flow.points;
-  const firstPoint = defined(points.first());
-  const lastPoint = defined(points.last());
+  const firstPoint = first(points);
+  const lastPoint = last(points);
 
   // Determine if cloud is at first or last position
   const cloudIsFirst = firstPoint.attachedToUid === cloud.uid;
@@ -785,15 +786,15 @@ export function UpdateCloudAndFlow(
       y: proposed.y,
     });
 
-    flow = defined(adjustFlows(origCloud, cloud, List([flow]), true).first());
+    flow = first(adjustFlows(origCloud, cloud, List([flow]), true));
     return [cloud, flow];
   }
 
   // For multi-segment flows: update adjacent corner to maintain orthogonality
   const cloudPointIndex = cloudIsFirst ? 0 : points.size - 1;
   const adjacentPointIndex = cloudIsFirst ? 1 : points.size - 2;
-  const cloudPoint = defined(points.get(cloudPointIndex));
-  const adjacentPoint = defined(points.get(adjacentPointIndex));
+  const cloudPoint = at(points, cloudPointIndex);
+  const adjacentPoint = at(points, adjacentPointIndex);
 
   // Determine segment orientation between cloud and adjacent point
   const adjacentSegment = cloudIsFirst ? segments[0] : segments[segments.length - 1];
@@ -942,8 +943,8 @@ interface Segment {
 export function getSegments(points: List<Point>): Segment[] {
   const segments: Segment[] = [];
   for (let i = 0; i < points.size - 1; i++) {
-    const p1 = defined(points.get(i));
-    const p2 = defined(points.get(i + 1));
+    const p1 = at(points, i);
+    const p2 = at(points, i + 1);
     const isHorizontal = p1.y === p2.y;
     const isVertical = p1.x === p2.x;
     const isDiagonal = !isHorizontal && !isVertical;
@@ -983,15 +984,15 @@ export function normalizeFlowPoints(points: List<Point>): List<Point> {
   }
 
   // First and last points are attached to stocks/clouds - always preserve them
-  const firstPoint = defined(points.first());
-  const lastPoint = defined(points.last());
+  const firstPoint = first(points);
+  const lastPoint = last(points);
 
   let result = List<Point>([firstPoint]);
 
   for (let i = 1; i < points.size - 1; i++) {
-    const prev = defined(result.last());
-    const curr = defined(points.get(i));
-    const next = defined(points.get(i + 1));
+    const prev = last(result);
+    const curr = at(points, i);
+    const next = at(points, i + 1);
 
     // Skip if this point creates a zero-length segment with prev
     if (prev.x === curr.x && prev.y === curr.y) {
@@ -1399,8 +1400,8 @@ export function UpdateFlow(
     const shouldReroute = perpAbs >= PERP_THRESHOLD && perpAbs > parAbs;
 
     if (shouldReroute) {
-      const firstPoint = defined(points.first());
-      const lastPoint = defined(points.last());
+      const firstPoint = first(points);
+      const lastPoint = last(points);
 
       // Find which endpoint is the cloud vs stock
       const firstIsCloud = clouds.some((c) => c.uid === firstPoint.attachedToUid);
@@ -1678,10 +1679,10 @@ export class Flow extends React.PureComponent<FlowProps> {
     }
 
     if (sink instanceof CloudViewElement && !isMovingArrow) {
-      const x = defined(pts.get(pts.size - 1)).x;
-      const y = defined(pts.get(pts.size - 1)).y;
-      const prevX = defined(pts.get(pts.size - 2)).x;
-      const prevY = defined(pts.get(pts.size - 2)).y;
+      const x = at(pts, pts.size - 1).x;
+      const y = at(pts, pts.size - 1).y;
+      const prevX = at(pts, pts.size - 2).x;
+      const prevY = at(pts, pts.size - 2).y;
 
       if (prevX < x) {
         pts = pts.update(pts.size - 1, (pt) => defined(pt).set('x', x - CloudRadius));
@@ -1699,11 +1700,11 @@ export class Flow extends React.PureComponent<FlowProps> {
     let spath = '';
     let arrowθ = 0;
     for (let j = 0; j < pts.size; j++) {
-      let x = defined(pts.get(j)).x;
-      let y = defined(pts.get(j)).y;
+      let x = at(pts, j).x;
+      let y = at(pts, j).y;
       if (j === pts.size - 1) {
-        const dx = x - defined(pts.get(j - 1)).x;
-        const dy = y - defined(pts.get(j - 1)).y;
+        const dx = x - at(pts, j - 1).x;
+        const dy = y - at(pts, j - 1).y;
         let θ = (atan2(dy, dx) * 180) / PI;
         if (θ < 0) {
           θ += 360;
@@ -1730,7 +1731,7 @@ export class Flow extends React.PureComponent<FlowProps> {
     const cy = element.cy;
     const r = this.radius();
 
-    const lastPt = defined(pts.get(pts.size - 1));
+    const lastPt = at(pts, pts.size - 1);
     const side = element.labelSide;
     const label = isEditingName ? undefined : (
       <Label
@@ -1771,8 +1772,8 @@ export class Flow extends React.PureComponent<FlowProps> {
 
     // Invisible hit area at the source end for grabbing the source
     // Position it slightly into the first segment from the source point
-    const firstPt = defined(pts.get(0));
-    const secondPt = defined(pts.get(1));
+    const firstPt = at(pts, 0);
+    const secondPt = at(pts, 1);
     const sourceHitSize = 20;
 
     // Calculate position along the first segment, offset from the source
