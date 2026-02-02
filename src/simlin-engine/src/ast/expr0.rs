@@ -109,11 +109,8 @@ impl Expr0 {
     /// new returns a new Expression AST if one can be constructed, or a list of
     /// source/equation errors if one couldn't be constructed.
     pub fn new(eqn: &str, lexer_type: LexerType) -> StdResult<Option<Expr0>, Vec<EquationError>> {
-        let mut errs = Vec::new();
-
-        let lexer = crate::lexer::Lexer::new(eqn, lexer_type);
-        match crate::equation::EquationParser::new().parse(eqn, lexer) {
-            Ok(ast) => Ok(Some(match lexer_type {
+        match crate::parser::parse(eqn, lexer_type) {
+            Ok(Some(ast)) => Ok(Some(match lexer_type {
                 // in variable equations we want to treat `pi` or `time`
                 // as calls to `pi()` or `time()` builtin functions.  But
                 // in unit equations we might have a unit called "time", and
@@ -122,54 +119,8 @@ impl Expr0 {
                 LexerType::Equation => ast.reify_0_arity_builtins(),
                 LexerType::Units => ast,
             })),
-            Err(err) => {
-                use crate::common::ErrorCode::*;
-                use lalrpop_util::ParseError;
-                let err = match err {
-                    ParseError::InvalidToken { location: l } => EquationError {
-                        start: l as u16,
-                        end: (l + 1) as u16,
-                        code: InvalidToken,
-                    },
-                    ParseError::UnrecognizedEof {
-                        location: l,
-                        expected: _e,
-                    } => {
-                        // if we get an EOF at position 0, that simply means
-                        // we have an empty (or comment-only) equation.  Its not
-                        // an _error_, but we also don't have an AST
-                        if l == 0 {
-                            return Ok(None);
-                        }
-                        // TODO: we can give a more precise error message here, including what
-                        //   types of tokens would be ok
-                        EquationError {
-                            start: l as u16,
-                            end: (l + 1) as u16,
-                            code: UnrecognizedEof,
-                        }
-                    }
-                    ParseError::UnrecognizedToken {
-                        token: (l, _t, r), ..
-                    } => EquationError {
-                        start: l as u16,
-                        end: r as u16,
-                        code: UnrecognizedToken,
-                    },
-                    ParseError::ExtraToken {
-                        token: (l, _t, r), ..
-                    } => EquationError {
-                        start: l as u16,
-                        end: r as u16,
-                        code: ExtraToken,
-                    },
-                    ParseError::User { error: e } => e,
-                };
-
-                errs.push(err);
-
-                Err(errs)
-            }
+            Ok(None) => Ok(None),
+            Err(errs) => Err(errs),
         }
     }
 

@@ -19,7 +19,6 @@ simlin-core = { version = "0.1", path = "../simlin-core" }
 lazy_static = "1"
 regex = "1"
 unicode-xid = "0.2"
-lalrpop-util = "0.22"
 prost = "0.14"
 float-cmp = "0.10"
 ordered-float = "5"
@@ -42,4 +41,3 @@ name = "array_ops"
 harness = false
 
 [build-dependencies]
-lalrpop = "0.22"

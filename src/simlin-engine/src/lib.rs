@@ -7,25 +7,22 @@
 pub use prost;
 
 mod ast;
+pub mod builtins;
+mod builtins_visitor;
 pub mod common;
+mod compiler;
 pub mod datamodel;
+mod dimensions;
 pub mod json;
 pub mod json_sdai;
+mod lexer;
+mod model;
+mod parser;
+mod patch;
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[path = "project_io.gen.rs"]
 pub mod project_io;
 pub mod serde;
-mod equation {
-    #![allow(clippy::all)]
-    include!(concat!(env!("OUT_DIR"), "/equation.rs"));
-}
-pub mod builtins;
-mod builtins_visitor;
-mod compiler;
-mod dimensions;
-mod lexer;
-mod model;
-mod patch;
 mod variable;
 mod stdlib {
     include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));

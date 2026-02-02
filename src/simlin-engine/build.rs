@@ -95,6 +95,5 @@ pub fn get(name: &str) -> Option<datamodel::Model> {{
 }
 
 fn main() {
-    lalrpop::process_root().unwrap();
     build_stdlib().unwrap();
 }
