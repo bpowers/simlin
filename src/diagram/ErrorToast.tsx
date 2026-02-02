@@ -57,7 +57,7 @@ export class Toast extends React.PureComponent<ToastProps, ToastState> {
       return;
     }
 
-    if (this.state.open && this.lastDuration !== this.context) {
+    if (prevState.open && this.state.open && this.lastDuration !== this.context) {
       this.lastDuration = this.context;
       this.startTimer();
     }

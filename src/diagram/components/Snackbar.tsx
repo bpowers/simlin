@@ -22,6 +22,7 @@ export const SnackbarDurationContext = React.createContext<number | undefined>(u
 export default class Snackbar extends React.PureComponent<SnackbarProps> {
   render() {
     const { open, autoHideDuration, children } = this.props;
+    // We manage timing per-toast; keep Radix's provider duration effectively disabled.
     const providerDuration = 2147483647;
 
     return (

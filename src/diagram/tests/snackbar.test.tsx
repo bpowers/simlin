@@ -208,6 +208,54 @@ describe('Snackbar', () => {
     expect(ref.current!.state.closeCount).toBe(1);
   });
 
+  test('restarts timer when duration changes while open', () => {
+    class DurationWrapper extends React.Component<
+      Record<string, never>,
+      { duration: number; open: boolean; closeCount: number }
+    > {
+      state = { duration: 5000, open: true, closeCount: 0 };
+
+      setDuration = (duration: number) => {
+        this.setState({ duration });
+      };
+
+      handleClose = () => {
+        this.setState((prev) => ({ open: false, closeCount: prev.closeCount + 1 }));
+      };
+
+      render() {
+        return (
+          <Snackbar open={this.state.open} autoHideDuration={this.state.duration}>
+            <Toast message="Test message" onClose={this.handleClose} variant="info" />
+          </Snackbar>
+        );
+      }
+    }
+
+    const ref = React.createRef<DurationWrapper>();
+    render(<DurationWrapper ref={ref} />);
+
+    act(() => {
+      jest.advanceTimersByTime(1000);
+    });
+
+    act(() => {
+      ref.current!.setDuration(1000);
+    });
+
+    act(() => {
+      jest.advanceTimersByTime(900);
+    });
+
+    expect(ref.current!.state.closeCount).toBe(0);
+
+    act(() => {
+      jest.advanceTimersByTime(200);
+    });
+
+    expect(ref.current!.state.closeCount).toBe(1);
+  });
+
   test('does not auto-hide when duration is omitted', () => {
     const onClose = jest.fn();
     render(
@@ -230,11 +278,15 @@ describe('Snackbar', () => {
       </Snackbar>,
     );
 
+    const initialContent = document.querySelector('[id="client-snackbar"]');
+    expect(initialContent).not.toBeNull();
+
     act(() => {
       jest.advanceTimersByTime(5000);
     });
 
-    expect(true).toBe(true);
+    const content = document.querySelector('[id="client-snackbar"]');
+    expect(content).toBeNull();
   });
 });
 
@@ -272,12 +324,12 @@ describe('SnackbarContent', () => {
 
   test('filters out non-DOM props like onClose and variant', () => {
     // This should not throw a React warning about unknown DOM props
-    const props: any = {
+    const props = {
       message: 'Test',
       onClose: () => {},
       variant: 'error',
       'data-testid': 'content',
-    };
+    } as React.ComponentProps<typeof SnackbarContent> & { onClose: () => void; variant: string };
     render(<SnackbarContent {...props} />);
     const content = document.querySelector('[data-testid="content"]');
     expect(content).not.toBeNull();
