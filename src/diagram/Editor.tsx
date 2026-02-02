@@ -470,8 +470,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     try {
-      engine2.applyPatch(patch);
+      engine2.applyPatch(patch, { allowErrors: true });
     } catch (e: any) {
+      console.error('applyPatch error (rename):', e?.code, e?.message, e?.details);
       const msg = e?.message ?? 'Unknown error during rename';
       this.appendModelError(msg);
       return;
@@ -569,8 +570,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         models: [{ name: modelName, ops: deleteOps }],
       };
       try {
-        engine2.applyPatch(patch);
+        engine2.applyPatch(patch, { allowErrors: true });
       } catch (e: any) {
+        console.error('applyPatch error (delete):', e?.code, e?.message, e?.details);
         this.appendModelError(e?.message ?? 'Unknown error during delete');
       }
     }
@@ -951,8 +953,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         models: [{ name: this.state.modelName, ops }],
       };
       try {
-        engine2.applyPatch(patch);
+        engine2.applyPatch(patch, { allowErrors: true });
       } catch (e: any) {
+        console.error('applyPatch error (flow attach):', e?.code, e?.message, e?.details);
         this.appendModelError(e?.message ?? 'Unknown error during flow attach');
         this.setState({ selection, flowStillBeingCreated: inCreation });
         return;
@@ -1054,8 +1057,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         models: [{ name: this.state.modelName, ops }],
       };
       try {
-        engine2.applyPatch(patch);
+        engine2.applyPatch(patch, { allowErrors: true });
       } catch (e: any) {
+        console.error('applyPatch error (view update):', e?.code, e?.message, e?.details);
         const msg = e?.message ?? 'Unknown error during view update';
         this.appendModelError(msg);
         return;
@@ -1116,8 +1120,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     try {
-      engine2.applyPatch(patch);
+      engine2.applyPatch(patch, { allowErrors: true });
     } catch (e: any) {
+      console.error('applyPatch error (variable creation):', e?.code, e?.message, e?.details);
       this.appendModelError(e?.message ?? 'Unknown error during variable creation');
     }
 
@@ -1301,8 +1306,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     try {
-      engine2.applyPatch(patch);
+      engine2.applyPatch(patch, { allowErrors: true });
     } catch (e: any) {
+      console.error('applyPatch error (sim specs):', e?.code, e?.message, e?.details);
       this.appendModelError(e?.message ?? 'Unknown error updating sim specs');
       return;
     }
@@ -1436,8 +1442,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         models: [{ name: this.state.modelName, ops }],
       };
       try {
-        engine2.applyPatch(patch);
+        engine2.applyPatch(patch, { allowErrors: true });
       } catch (e: any) {
+        console.error('applyPatch error (queue view update):', e?.code, e?.message, e?.details);
         const msg = e?.message ?? 'Unknown error during view update';
         this.appendModelError(msg);
         return;
@@ -1839,8 +1846,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     try {
-      engine2.applyPatch(patch);
+      engine2.applyPatch(patch, { allowErrors: true });
     } catch (e: any) {
+      console.error('applyPatch error (equation update):', e?.code, e?.message, e?.details);
       this.appendModelError(e?.message ?? 'Unknown error during equation update');
       return;
     }
@@ -1914,8 +1922,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     try {
-      engine2.applyPatch(patch);
+      engine2.applyPatch(patch, { allowErrors: true });
     } catch (e: any) {
+      console.error('applyPatch error (table update):', e?.code, e?.message, e?.details);
       this.appendModelError(e?.message ?? 'Unknown error during table update');
       return;
     }

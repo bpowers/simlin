@@ -330,6 +330,14 @@ unsafe fn drop_links_vec(links: &mut Vec<SimlinLink>) {
 
 fn build_simlin_error(code: SimlinErrorCode, details: &[ErrorDetailData]) -> SimlinError {
     let mut error = SimlinError::new(code);
+
+    // Set top-level message from first detail's message, or construct from code
+    let message = details
+        .iter()
+        .find_map(|d| d.message.clone())
+        .unwrap_or_else(|| format!("{:?}", code));
+    error.set_message(Some(message));
+
     error.extend_details(details.iter().cloned());
     error
 }
