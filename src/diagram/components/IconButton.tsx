@@ -34,8 +34,12 @@ export default class IconButton extends React.PureComponent<IconButtonProps> {
       ...rest
     } = this.props;
 
-    const sizeClass =
-      size === 'small' ? styles.sizeSmall : size === 'large' ? styles.sizeLarge : styles.sizeMedium;
+    const sizeClassMap: Record<NonNullable<IconButtonProps['size']>, string> = {
+      small: styles.sizeSmall,
+      medium: styles.sizeMedium,
+      large: styles.sizeLarge,
+    };
+    const sizeClass = sizeClassMap[size];
 
     return (
       <button

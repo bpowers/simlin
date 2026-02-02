@@ -23,7 +23,8 @@ export default class Snackbar extends React.PureComponent<SnackbarProps> {
   render() {
     const { open, autoHideDuration, children } = this.props;
     // We manage timing per-toast; keep Radix's provider duration effectively disabled.
-    const providerDuration = 2147483647;
+    const EFFECTIVELY_INFINITE_DURATION_MS = 2147483647;
+    const providerDuration = EFFECTIVELY_INFINITE_DURATION_MS;
 
     return (
       <SnackbarDurationContext.Provider value={autoHideDuration}>
@@ -36,12 +37,9 @@ export default class Snackbar extends React.PureComponent<SnackbarProps> {
   }
 }
 
-interface SnackbarContentProps {
-  className?: string;
+interface SnackbarContentProps extends React.HTMLAttributes<HTMLDivElement> {
   message?: React.ReactNode;
   action?: React.ReactNode;
-  'aria-describedby'?: string;
-  [key: string]: unknown;
 }
 
 export class SnackbarContent extends React.PureComponent<SnackbarContentProps> {

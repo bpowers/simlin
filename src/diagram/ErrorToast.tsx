@@ -51,13 +51,9 @@ export class Toast extends React.PureComponent<ToastProps, ToastState> {
   }
 
   componentDidUpdate(_prevProps: ToastProps, prevState: ToastState) {
-    if (!prevState.open && this.state.open) {
-      this.lastDuration = this.context;
-      this.startTimer();
-      return;
-    }
-
-    if (prevState.open && this.state.open && this.lastDuration !== this.context) {
+    const becameOpen = !prevState.open && this.state.open;
+    const durationChanged = prevState.open && this.state.open && this.lastDuration !== this.context;
+    if (becameOpen || durationChanged) {
       this.lastDuration = this.context;
       this.startTimer();
     }

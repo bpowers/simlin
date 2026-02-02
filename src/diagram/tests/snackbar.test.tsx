@@ -256,6 +256,48 @@ describe('Snackbar', () => {
     expect(ref.current!.state.closeCount).toBe(1);
   });
 
+  test('does not reset timer when message changes', () => {
+    class MessageWrapper extends React.Component<
+      Record<string, never>,
+      { message: string; open: boolean; closeCount: number }
+    > {
+      state = { message: 'First', open: true, closeCount: 0 };
+
+      setMessage = (message: string) => {
+        this.setState({ message });
+      };
+
+      handleClose = () => {
+        this.setState((prev) => ({ open: false, closeCount: prev.closeCount + 1 }));
+      };
+
+      render() {
+        return (
+          <Snackbar open={this.state.open} autoHideDuration={3000}>
+            <Toast message={this.state.message} onClose={this.handleClose} variant="info" />
+          </Snackbar>
+        );
+      }
+    }
+
+    const ref = React.createRef<MessageWrapper>();
+    render(<MessageWrapper ref={ref} />);
+
+    act(() => {
+      jest.advanceTimersByTime(1000);
+    });
+
+    act(() => {
+      ref.current!.setMessage('Second');
+    });
+
+    act(() => {
+      jest.advanceTimersByTime(2000);
+    });
+
+    expect(ref.current!.state.closeCount).toBe(1);
+  });
+
   test('does not auto-hide when duration is omitted', () => {
     const onClose = jest.fn();
     render(
@@ -271,7 +313,7 @@ describe('Snackbar', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  test('renders without errors when no onClose callback is provided', () => {
+  test('renders and auto-hides with a noop onClose callback', () => {
     render(
       <Snackbar open={true} autoHideDuration={3000}>
         <Toast message="Test message" onClose={() => {}} variant="info" />
