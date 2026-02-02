@@ -22,17 +22,7 @@ interface IconButtonProps {
 
 export default class IconButton extends React.PureComponent<IconButtonProps> {
   render() {
-    const {
-      color,
-      edge = false,
-      size = 'medium',
-      disabled,
-      onClick,
-      className,
-      style,
-      children,
-      ...rest
-    } = this.props;
+    const { color, edge = false, size = 'medium', disabled, onClick, className, style, children, ...rest } = this.props;
 
     const sizeClassMap: Record<NonNullable<IconButtonProps['size']>, string> = {
       small: styles.sizeSmall,
