@@ -7,11 +7,19 @@
   "license": "Apache-2.0",
   "browser": "lib.browser",
   "dependencies": {
-    "@system-dynamics/core": "^1.0.0",
-    "@system-dynamics/diagram": "^1.0.0",
-    "@system-dynamics/engine2": "^2.0.0"
+    "@system-dynamics/core": "workspace:*",
+    "@system-dynamics/diagram": "workspace:*",
+    "@system-dynamics/engine2": "workspace:*",
+    "clsx": "^2.1.1",
+    "immutable": "^5.0.3",
+    "js-base64": "^3.7.7",
+    "katex": "^0.16.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "jest": "^30.0.0",
+    "picocolors": "^1.1.1",
     "@rsbuild/core": "^1.3.22",
     "@rsbuild/plugin-node-polyfill": "^1.3.0",
     "@rsbuild/plugin-react": "^1.3.2",
@@ -35,16 +43,15 @@
     "typescript": "^5.7.2",
     "wouter": "^3.6.0"
   },
-  "resolutions": {},
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
     "lint": "eslint .",
-    "prepublishOnly": "yarn build",
+    "prepublishOnly": "pnpm build",
     "deploy": "cp -r build/* public && cp -r build-component/static/js/* ./public/static/js/ && cp -r build-component/static/wasm/* ./public/static/wasm/ && rm public ../server/public ../server/default_projects",
     "deploy-clean": "git checkout HEAD -- ../../public/index.html ./public ../server/public ../server/default_projects && rm -r public/asset-manifest.json public/static/js public/static/wasm build build-component",
     "clean": "rm -rf ./lib.browser ./build ./build-component ./node_modules/.cache",
-    "build": "yarn build:frontend && yarn build:webcomponent",
+    "build": "pnpm run build:frontend && pnpm run build:webcomponent",
     "build:tsc": "tsc -p tsconfig.browser.json",
     "build:webcomponent": "node scripts/build-component.js",
     "build:frontend": "node scripts/build.js",

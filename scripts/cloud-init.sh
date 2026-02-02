@@ -75,14 +75,14 @@ else
     echo -e "    ${YELLOW}Install Node.js: https://nodejs.org/${NC}"
 fi
 
-# Check yarn
-echo -n "  Yarn: "
-if command -v yarn >/dev/null 2>&1; then
-    YARN_VERSION=$(yarn --version 2>/dev/null)
-    echo -e "${GREEN}$YARN_VERSION${NC}"
+# Check pnpm
+echo -n "  pnpm: "
+if command -v pnpm >/dev/null 2>&1; then
+    PNPM_VERSION=$(pnpm --version 2>/dev/null)
+    echo -e "${GREEN}$PNPM_VERSION${NC}"
 else
     echo -e "${RED}not found${NC}"
-    echo -e "    ${YELLOW}Install Yarn: npm install -g yarn${NC}"
+    echo -e "    ${YELLOW}Install pnpm: npm install -g pnpm${NC}"
 fi
 
 # Check Python (optional, for pysimlin)
@@ -102,22 +102,22 @@ else
     echo -e "${YELLOW}not found (optional, needed for pysimlin)${NC}"
 fi
 
-# 3. Install yarn dependencies if node_modules doesn't exist
+# 3. Install pnpm dependencies if node_modules doesn't exist
 echo ""
 if [ ! -d "node_modules" ]; then
-    echo -n "Installing yarn dependencies... "
-    if command -v yarn >/dev/null 2>&1; then
-        if yarn install --frozen-lockfile >/dev/null 2>&1; then
+    echo -n "Installing pnpm dependencies... "
+    if command -v pnpm >/dev/null 2>&1; then
+        if pnpm install --frozen-lockfile >/dev/null 2>&1; then
             echo -e "${GREEN}done${NC}"
         else
             echo -e "${YELLOW}failed (non-critical)${NC}"
-            echo -e "    Try running: yarn install"
+            echo -e "    Try running: pnpm install"
         fi
     else
-        echo -e "${YELLOW}skipped (yarn not available)${NC}"
+        echo -e "${YELLOW}skipped (pnpm not available)${NC}"
     fi
 else
-    echo -e "Yarn dependencies: ${GREEN}already installed${NC}"
+    echo -e "pnpm dependencies: ${GREEN}already installed${NC}"
 fi
 
 # 4. Install and configure AI tools for pre-commit hook
@@ -194,5 +194,5 @@ echo -e "${GREEN}Environment setup complete!${NC}"
 echo ""
 echo "Next steps:"
 echo "  - Run 'cargo test' to verify Rust tests pass"
-echo "  - Run 'yarn build' to build the TypeScript/WASM components"
+echo "  - Run 'pnpm build' to build the TypeScript/WASM components"
 echo ""

@@ -17,7 +17,7 @@ Integration tests automatically start the full stack:
 The test command will automatically start all required services:
 
 ```bash
-yarn test:integration
+pnpm test:integration
 ```
 
 ### Interactive UI Mode
@@ -25,7 +25,7 @@ yarn test:integration
 To debug tests interactively:
 
 ```bash
-yarn test:integration:ui
+pnpm test:integration:ui
 ```
 
 ## Test Coverage
@@ -78,7 +78,7 @@ The Firebase Auth emulator configuration could be refined for complete end-to-en
 
 If tests fail:
 
-1. **Build artifacts missing**: Run `yarn build` first to ensure all TypeScript and protobuf files are compiled
+1. **Build artifacts missing**: Run `pnpm build` first to ensure all TypeScript and protobuf files are compiled
 2. **Port conflicts**: Check that ports 3000, 3030, 8092, 9099 aren't in use by other processes  
 3. **Service startup issues**: Services have 120s timeout to start - check console for specific errors
 4. **Firebase Auth errors**: Expected with current emulator setup; tests handle this gracefully

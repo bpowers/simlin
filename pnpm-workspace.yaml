@@ -1,0 +1,7 @@
+packages:
+  - 'src/engine2'
+  - 'src/core'
+  - 'src/diagram'
+  - 'src/app'
+  - 'src/server'
+  - 'website'

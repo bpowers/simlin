@@ -34,6 +34,7 @@
   },
   "sideEffects": false,
   "dependencies": {
+    "@system-dynamics/engine2": "workspace:*",
     "immutable": "^5.0.3"
   },
   "devDependencies": {
@@ -53,7 +54,7 @@
     "needs-format": "prettier -l '*.ts'",
     "format": "prettier --write '*.ts'",
     "lint": "eslint .",
-    "prepublishOnly": "yarn build",
+    "prepublishOnly": "pnpm build",
     "clean": "rm -rf ./lib ./lib.module",
     "build": "tsc && tsc -p tsconfig.browser.json",
     "test": "jest",

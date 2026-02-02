@@ -52,6 +52,7 @@
     "lint": "eslint src",
     "clean": "rm -rf ./lib ./lib.browser ./core",
     "build": "./build.sh",
+    "tsc": "tsc",
     "test": "jest",
     "test:watch": "jest --watch"
   }

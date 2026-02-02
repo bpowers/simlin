@@ -35,16 +35,16 @@ Simlin is an [open source](LICENSE) tool for creating and editing [System Dynami
 
 ```bash
 # dependencies; ignore warnings
-$ yarn install
+$ pnpm install
 # build everything -- necessary to compile the rust simulation engine to WebAssembly
-$ yarn build
+$ pnpm build
 # (the next 3 commands don't exit on their own -- they should be run in 3 separate terminals)
 # start a local Firestore instance using the Google Cloud SDK
-$ yarn start:firestore
+$ pnpm start:firestore
 # in another tab:
-$ yarn start:backend
+$ pnpm start:backend
 # in third and final tab:
-$ yarn start:frontend
+$ pnpm start:frontend
 ```
 
 Now to the browser!
