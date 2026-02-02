@@ -79,6 +79,7 @@ import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 import styles from './Editor.module.css';
 
 const MaxUndoSize = 5;
+// These must stay in sync with --panel-width-sm and --panel-width-lg in theme.css
 const SearchbarWidthSm = 359;
 const SearchbarWidthLg = 480;
 
@@ -1687,12 +1688,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     return (
       <div className={styles.searchBar}>
-        <IconButton
-          className={styles.menuButton}
-          aria-label="Menu"
-          onClick={this.handleShowDrawer}
-          size="small"
-        >
+        <IconButton className={styles.menuButton} aria-label="Menu" onClick={this.handleShowDrawer} size="small">
           <MenuIcon />
         </IconButton>
         <div className={styles.searchBox}>
@@ -2332,10 +2328,30 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         onClose={this.handleDialClose}
         open={dialOpen}
       >
-        <SpeedDialAction icon={<StockIcon />} title="Stock" onClick={this.handleSelectStock} selected={selectedTool === 'stock'} />
-        <SpeedDialAction icon={<FlowIcon />} title="Flow" onClick={this.handleSelectFlow} selected={selectedTool === 'flow'} />
-        <SpeedDialAction icon={<AuxIcon />} title="Variable" onClick={this.handleSelectAux} selected={selectedTool === 'aux'} />
-        <SpeedDialAction icon={<LinkIcon />} title="Link" onClick={this.handleSelectLink} selected={selectedTool === 'link'} />
+        <SpeedDialAction
+          icon={<StockIcon />}
+          title="Stock"
+          onClick={this.handleSelectStock}
+          selected={selectedTool === 'stock'}
+        />
+        <SpeedDialAction
+          icon={<FlowIcon />}
+          title="Flow"
+          onClick={this.handleSelectFlow}
+          selected={selectedTool === 'flow'}
+        />
+        <SpeedDialAction
+          icon={<AuxIcon />}
+          title="Variable"
+          onClick={this.handleSelectAux}
+          selected={selectedTool === 'aux'}
+        />
+        <SpeedDialAction
+          icon={<LinkIcon />}
+          title="Link"
+          onClick={this.handleSelectLink}
+          selected={selectedTool === 'link'}
+        />
       </SpeedDial>
     );
   }

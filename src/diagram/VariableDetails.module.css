@@ -1,5 +1,5 @@
 .card {
-  width: 359px;
+  width: var(--panel-width-sm);
   max-height: calc(100vh - 18px);
   overflow-y: auto;
   scrollbar-gutter: stable;
@@ -10,13 +10,13 @@
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
   .card {
-    width: 420px;
+    width: var(--panel-width-md);
   }
 }
 
 @media (min-width: 1200px) {
   .card {
-    width: 480px;
+    width: var(--panel-width-lg);
   }
 }
 

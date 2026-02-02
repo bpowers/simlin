@@ -1,6 +1,12 @@
 /* Theme CSS Custom Properties for Simlin Diagram Components */
 
 :root {
+  /* Panel widths (sidebar panels: search bar, variable details, error details) */
+  /* Note: SearchbarWidthSm and SearchbarWidthLg in Editor.tsx must stay in sync */
+  --panel-width-sm: 359px;
+  --panel-width-md: 420px;
+  --panel-width-lg: 480px;
+
   /* Spacing (base: 8px) */
   --spacing-1: 8px;
   --spacing-1-5: 12px;

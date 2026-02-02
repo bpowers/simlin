@@ -56,7 +56,7 @@
   top: 8px;
   right: 8px;
   height: 48px;
-  width: 359px;
+  width: var(--panel-width-sm);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -68,13 +68,13 @@
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
   .searchBar {
-    width: 420px;
+    width: var(--panel-width-md);
   }
 }
 
 @media (min-width: 1200px) {
   .searchBar {
-    width: 480px;
+    width: var(--panel-width-lg);
   }
 }
 
@@ -83,7 +83,7 @@
   top: 8px;
   right: 8px;
   height: 48px;
-  width: 359px;
+  width: var(--panel-width-sm);
 }
 
 .varDetails {
