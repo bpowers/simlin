@@ -2,12 +2,16 @@
   flex-grow: 1;
 }
 
+.toolbarSpacer {
+  height: 48px;
+}
+
 .flex {
   flex: 1;
 }
 
 .profileIcon {
-  padding: 8px;
+  margin-left: 8px;
 }
 
 .sdTitle {
@@ -20,7 +24,6 @@
 }
 
 .menuButton {
-  margin-left: -12px;
   margin-right: 20px;
 }
 

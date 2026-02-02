@@ -2,8 +2,8 @@
   position: relative;
   display: flex;
   align-items: center;
-  padding-left: 12px;
-  padding-right: 12px;
+  padding-left: 16px;
+  padding-right: 16px;
 }
 
 .regular {
@@ -11,12 +11,16 @@
 }
 
 .dense {
-  min-height: 40px;
+  min-height: 48px;
 }
 
 @media (min-width: 600px) {
   .toolbar {
-    padding-left: 16px;
-    padding-right: 16px;
+    padding-left: 24px;
+    padding-right: 24px;
+  }
+
+  .regular {
+    min-height: 64px;
   }
 }

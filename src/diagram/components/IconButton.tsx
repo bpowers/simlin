@@ -10,6 +10,8 @@ import styles from './IconButton.module.css';
 
 interface IconButtonProps {
   color?: 'default' | 'inherit';
+  edge?: 'start' | 'end' | false;
+  size?: 'small' | 'medium' | 'large';
   disabled?: boolean;
   onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   className?: string;
@@ -20,13 +22,29 @@ interface IconButtonProps {
 
 export default class IconButton extends React.PureComponent<IconButtonProps> {
   render() {
-    const { color, disabled, onClick, className, style, children, ...rest } = this.props;
+    const {
+      color,
+      edge = false,
+      size = 'medium',
+      disabled,
+      onClick,
+      className,
+      style,
+      children,
+      ...rest
+    } = this.props;
+
+    const sizeClass =
+      size === 'small' ? styles.sizeSmall : size === 'large' ? styles.sizeLarge : styles.sizeMedium;
 
     return (
       <button
         className={clsx(
           styles.iconButton,
           color === 'inherit' && styles.colorInherit,
+          edge === 'start' && styles.edgeStart,
+          edge === 'end' && styles.edgeEnd,
+          sizeClass,
           disabled && styles.disabled,
           className,
         )}

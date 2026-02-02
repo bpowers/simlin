@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import ReactDOM from 'react-dom';
+import * as Toast from '@radix-ui/react-toast';
 
 import clsx from 'clsx';
 
@@ -17,52 +17,21 @@ interface SnackbarProps {
   children?: React.ReactNode;
 }
 
+export const SnackbarDurationContext = React.createContext<number | undefined>(undefined);
+
 export default class Snackbar extends React.PureComponent<SnackbarProps> {
-  timerHandle: ReturnType<typeof setTimeout> | undefined;
-
-  componentDidMount() {
-    // Start timer if mounted with open={true}
-    if (this.props.open) {
-      this.startTimer();
-    }
-  }
-
-  componentDidUpdate(prevProps: SnackbarProps) {
-    // Only restart timer when open or autoHideDuration changes
-    const openChanged = this.props.open !== prevProps.open;
-    const durationChanged = this.props.autoHideDuration !== prevProps.autoHideDuration;
-
-    if (openChanged || durationChanged) {
-      this.clearTimer();
-      if (this.props.open) {
-        this.startTimer();
-      }
-    }
-  }
-
-  componentWillUnmount() {
-    this.clearTimer();
-  }
-
-  startTimer() {
-    if (this.props.autoHideDuration && this.props.onClose) {
-      this.timerHandle = setTimeout(this.props.onClose, this.props.autoHideDuration);
-    }
-  }
-
-  clearTimer() {
-    if (this.timerHandle !== undefined) {
-      window.clearTimeout(this.timerHandle);
-      this.timerHandle = undefined;
-    }
-  }
-
   render() {
-    const { open, children } = this.props;
+    const { open, autoHideDuration, children } = this.props;
+    const providerDuration = 2147483647;
 
-    const content = <div className={clsx(styles.snackbar, !open && styles.snackbarHidden)}>{children}</div>;
-
-    return ReactDOM.createPortal(content, document.body);
+    return (
+      <SnackbarDurationContext.Provider value={autoHideDuration}>
+        <Toast.Provider duration={providerDuration}>
+          {open ? children : null}
+          <Toast.Viewport className={clsx(styles.toastViewport)} />
+        </Toast.Provider>
+      </SnackbarDurationContext.Provider>
+    );
   }
 }
 

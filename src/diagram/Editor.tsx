@@ -1677,10 +1677,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       <div className={styles.searchBar}>
         <IconButton
           className={styles.menuButton}
-          color="inherit"
           aria-label="Menu"
           onClick={this.handleShowDrawer}
-          style={{ color: '#666', display: 'block', marginLeft: 4, position: 'absolute', marginTop: 4, height: 40 }}
+          size="small"
         >
           <MenuIcon />
         </IconButton>
@@ -1696,7 +1695,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
               if (params.InputProps) {
                 params.InputProps.disableUnderline = true;
               }
-              return <TextField {...params} variant="standard" placeholder={placeholder} />;
+              return <TextField {...params} variant="standard" placeholder={placeholder} fullWidth />;
             }}
           />
         </div>

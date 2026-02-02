@@ -147,7 +147,7 @@ class Home extends React.Component<HomeProps, HomeState> {
       <div className={clsx(styles.root)}>
         <AppBar position="fixed">
           <Toolbar variant="dense">
-            <IconButton className={styles.menuButton} color="inherit" aria-label="Menu">
+            <IconButton className={styles.menuButton} color="inherit" aria-label="Menu" edge="start" size="small">
               <MenuIcon />
             </IconButton>
             <h6 className={clsx(typography.heading6, typography.colorInherit, styles.flex)}>
@@ -168,6 +168,7 @@ class Home extends React.Component<HomeProps, HomeState> {
                 aria-haspopup="true"
                 onClick={this.handleMenu}
                 color="inherit"
+                size="small"
               >
                 {account}
               </IconButton>
@@ -184,9 +185,7 @@ class Home extends React.Component<HomeProps, HomeState> {
             </div>
           </Toolbar>
         </AppBar>
-        <br />
-        <br />
-        <br />
+        <div className={styles.toolbarSpacer} />
         {content}
       </div>
     );

@@ -12,10 +12,8 @@
   vertical-align: middle;
   text-decoration: none;
   text-align: center;
-  padding: 8px;
   border-radius: 50%;
   color: rgba(0, 0, 0, 0.54);
-  font-size: 1.5rem;
   transition: background-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -30,6 +28,37 @@
 
 .colorInherit {
   color: inherit;
+}
+
+.sizeSmall {
+  padding: 5px;
+  font-size: 1.125rem;
+}
+
+.sizeMedium {
+  padding: 8px;
+  font-size: 1.5rem;
+}
+
+.sizeLarge {
+  padding: 12px;
+  font-size: 1.75rem;
+}
+
+.edgeStart {
+  margin-left: -12px;
+}
+
+.edgeEnd {
+  margin-right: -12px;
+}
+
+.edgeStart.sizeSmall {
+  margin-left: -3px;
+}
+
+.edgeEnd.sizeSmall {
+  margin-right: -3px;
 }
 
 .disabled {
