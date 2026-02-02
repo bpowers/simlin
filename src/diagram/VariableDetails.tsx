@@ -12,7 +12,7 @@ import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-
 import Button from './components/Button';
 import { Tabs, Tab } from './components/Tabs';
 import katex from 'katex';
-import { brewer } from 'chroma-js';
+import { Dark2 } from './colors';
 
 import {
   StockViewElement,
@@ -235,7 +235,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     let yMax = 0;
     const chartSeries: ChartSeries[] = [];
     if (data) {
-      const colors = brewer.Dark2;
+      const colors = Dark2;
       for (let i = 0; i < data.length; i++) {
         const dataset = data[i];
         const name = data.length === 1 ? 'y' : dataset.name;

@@ -5,9 +5,9 @@
 import * as React from 'react';
 
 import { List } from 'immutable';
-import { brewer } from 'chroma-js';
 
 import { defined, Series } from '@system-dynamics/core/common';
+import { Dark2 } from '../colors';
 
 import styles from './Sparkline.module.css';
 
@@ -78,7 +78,7 @@ export class Sparkline extends React.PureComponent<SparklineProps> {
     }
     const ySpan = yMax - yMin || 1;
 
-    const colors = brewer.Dark2;
+    const colors = Dark2;
     const sparklines = [];
     let i = 0;
     for (const dataset of this.props.series) {
