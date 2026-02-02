@@ -1558,8 +1558,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         autoHideDuration={6000}
       >
         <div>
-          {this.state.modelErrors.map((err, i) => (
-            <Toast variant="warning" onClose={this.handleCloseSnackbar} message={err.message} key={i} />
+          {this.state.modelErrors.map((err) => (
+            <Toast
+              variant="warning"
+              onClose={this.handleCloseSnackbar}
+              message={err.message}
+              key={`${err.name}:${err.message}`}
+            />
           ))}
         </div>
       </Snackbar>
