@@ -1077,3 +1077,496 @@ fn test_loc_span_transpose() {
     assert_eq!(loc.start, 0);
     assert_eq!(loc.end, 2);
 }
+
+// ============================================================================
+// Additional coverage tests
+// ============================================================================
+
+#[test]
+fn test_error_extra_token() {
+    // Valid expression followed by extra content should fail with ExtraToken
+    let err = parse_eq("1 2").unwrap_err();
+    assert!(!err.is_empty());
+    assert_eq!(err[0].code, ErrorCode::ExtraToken);
+}
+
+#[test]
+fn test_error_extra_token_after_expr() {
+    let err = parse_eq("a + b c").unwrap_err();
+    assert!(!err.is_empty());
+    assert_eq!(err[0].code, ErrorCode::ExtraToken);
+}
+
+#[test]
+fn test_chained_logical_and() {
+    let ast = parse_eq("a && b && c").unwrap().unwrap().strip_loc();
+    // Should be ((a && b) && c) - left associative
+    let expected = Expr0::Op2(
+        BinaryOp::And,
+        Box::new(Expr0::Op2(
+            BinaryOp::And,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_chained_logical_or() {
+    let ast = parse_eq("a || b || c").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Or,
+        Box::new(Expr0::Op2(
+            BinaryOp::Or,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_chained_equality() {
+    let ast = parse_eq("a = b = c").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Eq,
+        Box::new(Expr0::Op2(
+            BinaryOp::Eq,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_chained_comparison() {
+    let ast = parse_eq("a < b < c").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Lt,
+        Box::new(Expr0::Op2(
+            BinaryOp::Lt,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_chained_addition() {
+    let ast = parse_eq("a + b + c").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Add,
+        Box::new(Expr0::Op2(
+            BinaryOp::Add,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_chained_multiplication() {
+    let ast = parse_eq("a * b * c").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Mul,
+        Box::new(Expr0::Op2(
+            BinaryOp::Mul,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_division_chain() {
+    let ast = parse_eq("a / b / c").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Div,
+        Box::new(Expr0::Op2(
+            BinaryOp::Div,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_modulo_chain() {
+    let ast = parse_eq("a mod b mod c").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Mod,
+        Box::new(Expr0::Op2(
+            BinaryOp::Mod,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_function_three_args() {
+    let ast = parse_eq("clamp(a, b, c)").unwrap().unwrap().strip_loc();
+    let expected = Expr0::App(
+        UntypedBuiltinFn(
+            "clamp".to_string(),
+            vec![
+                Expr0::Var(RawIdent::new_from_str("a"), Loc::default()),
+                Expr0::Var(RawIdent::new_from_str("b"), Loc::default()),
+                Expr0::Var(RawIdent::new_from_str("c"), Loc::default()),
+            ],
+        ),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_subscript_with_expression() {
+    let ast = parse_eq("a[b + 1]").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Subscript(
+        RawIdent::new_from_str("a"),
+        vec![IndexExpr0::Expr(Expr0::Op2(
+            BinaryOp::Add,
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
+            Loc::default(),
+        ))],
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_nested_parens() {
+    let ast = parse_eq("((a))").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Var(RawIdent::new_from_str("a"), Loc::default());
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_deeply_nested_if() {
+    let ast = parse_eq("if a then (if b then 1 else 2) else 3")
+        .unwrap()
+        .unwrap()
+        .strip_loc();
+    let expected = Expr0::If(
+        Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+        Box::new(Expr0::If(
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Expr0::Const("2".to_string(), 2.0, Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Const("3".to_string(), 3.0, Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_error_at_not_followed_by_number() {
+    // @x should fail because @ must be followed by integer
+    let err = parse_eq("a[@x]").unwrap_err();
+    assert!(!err.is_empty());
+    assert_eq!(err[0].code, ErrorCode::ExpectedInteger);
+}
+
+#[test]
+fn test_error_at_alone() {
+    // @ alone should fail
+    let err = parse_eq("a[@]").unwrap_err();
+    assert!(!err.is_empty());
+    assert_eq!(err[0].code, ErrorCode::ExpectedInteger);
+}
+
+#[test]
+fn test_subscript_multiple_dim_positions() {
+    let ast = parse_eq("a[@1, @2, @3]").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Subscript(
+        RawIdent::new_from_str("a"),
+        vec![
+            IndexExpr0::DimPosition(1, Loc::default()),
+            IndexExpr0::DimPosition(2, Loc::default()),
+            IndexExpr0::DimPosition(3, Loc::default()),
+        ],
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_lte_operator() {
+    let ast = parse_eq("a <= b").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Lte,
+        Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+        Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_gte_operator() {
+    let ast = parse_eq("a >= b").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Gte,
+        Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+        Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_neq_operator() {
+    let ast = parse_eq("a <> b").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Neq,
+        Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+        Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_mixed_comparison_chain() {
+    // a <= b >= c tests both Lte and Gte in the chain
+    let ast = parse_eq("a <= b >= c").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Gte,
+        Box::new(Expr0::Op2(
+            BinaryOp::Lte,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_safe_div_chain() {
+    let ast = parse_eq("a // b // c").unwrap().unwrap().strip_loc();
+    // a // b // c = safediv(safediv(a, b), c)
+    let expected = Expr0::App(
+        UntypedBuiltinFn(
+            "safediv".to_string(),
+            vec![
+                Expr0::App(
+                    UntypedBuiltinFn(
+                        "safediv".to_string(),
+                        vec![
+                            Expr0::Var(RawIdent::new_from_str("a"), Loc::default()),
+                            Expr0::Var(RawIdent::new_from_str("b"), Loc::default()),
+                        ],
+                    ),
+                    Loc::default(),
+                ),
+                Expr0::Var(RawIdent::new_from_str("c"), Loc::default()),
+            ],
+        ),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_scientific_negative_exponent() {
+    let ast = parse_eq("1.5e-3").unwrap().unwrap();
+    assert!(matches!(ast, Expr0::Const(s, n, _) if s == "1.5e-3" && (n - 0.0015).abs() < 1e-10));
+}
+
+#[test]
+fn test_leading_decimal() {
+    let ast = parse_eq(".5").unwrap().unwrap();
+    assert!(matches!(ast, Expr0::Const(s, n, _) if s == ".5" && (n - 0.5).abs() < 1e-10));
+}
+
+#[test]
+fn test_if_with_complex_condition() {
+    let ast = parse_eq("if a < b and c > d then 1 else 0")
+        .unwrap()
+        .unwrap()
+        .strip_loc();
+    let expected = Expr0::If(
+        Box::new(Expr0::Op2(
+            BinaryOp::And,
+            Box::new(Expr0::Op2(
+                BinaryOp::Lt,
+                Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+                Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+                Loc::default(),
+            )),
+            Box::new(Expr0::Op2(
+                BinaryOp::Gt,
+                Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+                Box::new(Expr0::Var(RawIdent::new_from_str("d"), Loc::default())),
+                Loc::default(),
+            )),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
+        Box::new(Expr0::Const("0".to_string(), 0.0, Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_unary_in_expression() {
+    let ast = parse_eq("a + -b").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Add,
+        Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+        Box::new(Expr0::Op1(
+            UnaryOp::Negative,
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_exp_with_unary() {
+    let ast = parse_eq("-a ^ b").unwrap().unwrap().strip_loc();
+    // -a ^ b is -(a ^ b) because exp binds tighter than unary
+    let expected = Expr0::Op1(
+        UnaryOp::Negative,
+        Box::new(Expr0::Op2(
+            BinaryOp::Exp,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_error_star_colon_eof() {
+    // *: followed by EOF should fail
+    let err = parse_eq("a[*:").unwrap_err();
+    assert!(!err.is_empty());
+    assert_eq!(err[0].code, ErrorCode::UnrecognizedEof);
+}
+
+#[test]
+fn test_error_at_eof() {
+    // @ followed by EOF should fail
+    let err = parse_eq("a[@").unwrap_err();
+    assert!(!err.is_empty());
+    assert_eq!(err[0].code, ErrorCode::ExpectedInteger);
+}
+
+#[test]
+fn test_error_at_float() {
+    // @1.5 should fail because dim position needs integer
+    let err = parse_eq("a[@1.5]").unwrap_err();
+    assert!(!err.is_empty());
+    assert_eq!(err[0].code, ErrorCode::ExpectedInteger);
+}
+
+#[test]
+fn test_error_just_operator() {
+    // Just an operator with no operands
+    let err = parse_eq("+").unwrap_err();
+    assert!(!err.is_empty());
+}
+
+#[test]
+fn test_error_missing_right_operand() {
+    let err = parse_eq("a *").unwrap_err();
+    assert!(!err.is_empty());
+}
+
+#[test]
+fn test_error_unexpected_keyword() {
+    // 'then' as a standalone should fail
+    let err = parse_eq("then").unwrap_err();
+    assert!(!err.is_empty());
+}
+
+#[test]
+fn test_error_unexpected_rparen() {
+    // Unexpected close paren
+    let err = parse_eq(")").unwrap_err();
+    assert!(!err.is_empty());
+}
+
+#[test]
+fn test_error_unexpected_rbracket() {
+    // Unexpected close bracket
+    let err = parse_eq("]").unwrap_err();
+    assert!(!err.is_empty());
+}
+
+#[test]
+fn test_multiple_subscripts_with_ranges() {
+    let ast = parse_eq("a[1:2, 3:4]").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Subscript(
+        RawIdent::new_from_str("a"),
+        vec![
+            IndexExpr0::Range(
+                Expr0::Const("1".to_string(), 1.0, Loc::default()),
+                Expr0::Const("2".to_string(), 2.0, Loc::default()),
+                Loc::default(),
+            ),
+            IndexExpr0::Range(
+                Expr0::Const("3".to_string(), 3.0, Loc::default()),
+                Expr0::Const("4".to_string(), 4.0, Loc::default()),
+                Loc::default(),
+            ),
+        ],
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
+fn test_wildcard_simple() {
+    let ast = parse_eq("a[*]").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Subscript(
+        RawIdent::new_from_str("a"),
+        vec![IndexExpr0::Wildcard(Loc::default())],
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
