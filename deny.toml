@@ -17,8 +17,6 @@ multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
 skip = [
-    # lalrpop uses petgraph 0.7.1 while prost-build uses 0.8.3
-    { crate = "petgraph@0.7.1", reason = "lalrpop build dependency" },
     # transitive dependency of petgraph version mismatch
     { crate = "hashbrown@0.15.5", reason = "petgraph 0.8.3 transitive dependency" },
 ]
@@ -27,6 +25,5 @@ skip = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
-#    "https://github.com/bpowers/lalrpop",
     "https://github.com/bpowers/test-generator",
 ]

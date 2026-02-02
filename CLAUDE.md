@@ -20,7 +20,7 @@ You should think of this as a monorepo without external users that depend on it 
 
 **simlin-engine (Rust)**: The simulation engine that compiles, edits, and executes system dynamics models
 - Entry point: `src/simlin-engine/src/lib.rs`
-- Equation text is parsed into an AST using LALRPOP parser (`equation.lalrpop`)
+- Equation text is parsed into an AST using a recursive descent parser (`src/simlin-engine/src/parser/mod.rs`)
 - Projects consisting of models are compiled to a simple bytecode format (`compiler.rs`).  Today, there are NO places where the bytecode is serialized to disk, so no need for backwards compatibility of improvements here.
 - Executes simulations using a bytecode-based virtual machine (`vm.rs`)
 - There is also a AST-walking interpreter -- it is used as a "spec"/simple implementation to verify we get the exact same behavior from the more complicated bytecode VM.
