@@ -39,23 +39,16 @@
 }
 
 .searchBox {
-  position: relative;
-  top: 0;
-  left: 0;
-  padding-left: 52px;
-  padding-right: 64px;
-  padding-top: 8px;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
   border: 0;
 }
 
 .menuButton {
-  margin-left: 4px;
-  position: absolute;
-  z-index: 100;
-  left: 0;
-  top: 0;
-  display: block;
   color: #666;
+  flex: 0 0 auto;
 }
 
 .searchBar {
@@ -64,6 +57,10 @@
   right: 8px;
   height: 48px;
   width: 359px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
   border-radius: 4px;
   background: #fff;
   box-shadow: 0px 3px 1px -2px rgba(0,0,0,0.2), 0px 2px 2px 0px rgba(0,0,0,0.14), 0px 1px 5px 0px rgba(0,0,0,0.12);
@@ -105,15 +102,10 @@
 }
 
 .divider {
-  position: absolute;
-  top: 0;
-  right: 0;
-  height: 28px;
-  margin-top: 10px;
-  margin-right: 54px;
-  border-left-width: 1px;
-  border-left-style: solid;
-  border-color: #ddd;
+  width: 1px;
+  height: 24px;
+  background: #ddd;
+  flex: 0 0 auto;
 }
 
 .editor {

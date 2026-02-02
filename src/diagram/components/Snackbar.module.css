@@ -1,13 +1,15 @@
-.snackbar {
+.toastViewport {
   position: fixed;
   bottom: 8px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 1400;
-}
-
-.snackbarHidden {
-  display: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
 .snackbarContent {

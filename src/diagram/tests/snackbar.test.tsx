@@ -5,6 +5,7 @@
 import * as React from 'react';
 import { render, act } from '@testing-library/react';
 import Snackbar, { SnackbarContent } from '../components/Snackbar';
+import { Toast } from '../ErrorToast';
 
 // Controlled wrapper to test open/close transitions
 class ControlledSnackbar extends React.Component<{ autoHideDuration?: number }, { open: boolean; closeCount: number }> {
@@ -20,8 +21,8 @@ class ControlledSnackbar extends React.Component<{ autoHideDuration?: number }, 
 
   render() {
     return (
-      <Snackbar open={this.state.open} autoHideDuration={this.props.autoHideDuration} onClose={this.handleClose}>
-        <SnackbarContent message="Test message" />
+      <Snackbar open={this.state.open} autoHideDuration={this.props.autoHideDuration}>
+        <Toast message="Test message" onClose={this.handleClose} variant="info" />
       </Snackbar>
     );
   }
@@ -39,32 +40,31 @@ describe('Snackbar', () => {
   test('renders children when open', () => {
     render(
       <Snackbar open={true}>
-        <SnackbarContent message="Test message" data-testid="snackbar-content" />
+        <Toast message="Test message" onClose={jest.fn()} variant="info" />
       </Snackbar>,
     );
 
-    const content = document.querySelector('[data-testid="snackbar-content"]');
+    const content = document.querySelector('[id="client-snackbar"]');
     expect(content).not.toBeNull();
     expect(content!.textContent).toContain('Test message');
   });
 
-  test('renders content even when closed (for transition purposes)', () => {
+  test('does not render children when closed', () => {
     render(
       <Snackbar open={false}>
-        <SnackbarContent message="Test message" data-testid="snackbar-content" />
+        <Toast message="Test message" onClose={jest.fn()} variant="info" />
       </Snackbar>,
     );
 
-    // Content is still rendered (visibility controlled by CSS)
-    const content = document.querySelector('[data-testid="snackbar-content"]');
-    expect(content).not.toBeNull();
+    const content = document.querySelector('[id="client-snackbar"]');
+    expect(content).toBeNull();
   });
 
-  test('starts auto-hide timer when mounted with open=true', () => {
+  test('auto-hides when duration is provided', () => {
     const onClose = jest.fn();
     render(
-      <Snackbar open={true} autoHideDuration={3000} onClose={onClose}>
-        <SnackbarContent message="Test message" />
+      <Snackbar open={true} autoHideDuration={3000}>
+        <Toast message="Test message" onClose={onClose} variant="info" />
       </Snackbar>,
     );
 
@@ -83,7 +83,6 @@ describe('Snackbar', () => {
 
     expect(ref.current!.state.closeCount).toBe(0);
 
-    // Open the snackbar
     act(() => {
       ref.current!.setOpen(true);
     });
@@ -100,27 +99,22 @@ describe('Snackbar', () => {
     const ref = React.createRef<ControlledSnackbar>();
     render(<ControlledSnackbar ref={ref} autoHideDuration={5000} />);
 
-    // Open the snackbar
     act(() => {
       ref.current!.setOpen(true);
     });
 
-    // Advance part way through
     act(() => {
       jest.advanceTimersByTime(2000);
     });
 
-    // Close before timeout
     act(() => {
       ref.current!.setOpen(false);
     });
 
-    // Advance past original timeout
     act(() => {
       jest.advanceTimersByTime(5000);
     });
 
-    // Should only have closed once (from manual close)
     expect(ref.current!.state.closeCount).toBe(0);
     expect(ref.current!.state.open).toBe(false);
   });
@@ -129,7 +123,6 @@ describe('Snackbar', () => {
     const ref = React.createRef<ControlledSnackbar>();
     render(<ControlledSnackbar ref={ref} autoHideDuration={3000} />);
 
-    // Rapidly toggle open/close
     act(() => {
       ref.current!.setOpen(true);
     });
@@ -158,17 +151,14 @@ describe('Snackbar', () => {
       ref.current!.setOpen(true);
     });
 
-    // Now advance through the full timeout
     act(() => {
       jest.advanceTimersByTime(3000);
     });
 
-    // Should have triggered exactly one auto-close from the final open
     expect(ref.current!.state.closeCount).toBe(1);
   });
 
   test('does not reset timer on unrelated re-renders', () => {
-    // Create a wrapper that can trigger re-renders without changing open/autoHideDuration
     class ReRenderWrapper extends React.Component<
       Record<string, never>,
       { counter: number; open: boolean; closeCount: number }
@@ -185,8 +175,8 @@ describe('Snackbar', () => {
 
       render() {
         return (
-          <Snackbar open={this.state.open} autoHideDuration={3000} onClose={this.handleClose}>
-            <SnackbarContent message={`Count: ${this.state.counter}`} />
+          <Snackbar open={this.state.open} autoHideDuration={3000}>
+            <Toast message={`Count: ${this.state.counter}`} onClose={this.handleClose} variant="info" />
           </Snackbar>
         );
       }
@@ -195,41 +185,124 @@ describe('Snackbar', () => {
     const ref = React.createRef<ReRenderWrapper>();
     render(<ReRenderWrapper ref={ref} />);
 
-    // Advance 1 second
     act(() => {
       jest.advanceTimersByTime(1000);
     });
 
-    // Trigger unrelated re-render (counter changes, but open/duration stay same)
     act(() => {
       ref.current!.forceRerender();
     });
 
-    // Advance 1 more second
     act(() => {
       jest.advanceTimersByTime(1000);
     });
 
-    // Trigger another unrelated re-render
     act(() => {
       ref.current!.forceRerender();
     });
 
-    // Advance the remaining 1 second (total 3 seconds since open)
     act(() => {
       jest.advanceTimersByTime(1000);
     });
 
-    // Timer should have fired because 3 seconds total elapsed
-    // If timer was reset on each re-render, it would take 5 seconds total
     expect(ref.current!.state.closeCount).toBe(1);
   });
 
-  test('does not start timer if no autoHideDuration', () => {
+  test('restarts timer when duration changes while open', () => {
+    class DurationWrapper extends React.Component<
+      Record<string, never>,
+      { duration: number; open: boolean; closeCount: number }
+    > {
+      state = { duration: 5000, open: true, closeCount: 0 };
+
+      setDuration = (duration: number) => {
+        this.setState({ duration });
+      };
+
+      handleClose = () => {
+        this.setState((prev) => ({ open: false, closeCount: prev.closeCount + 1 }));
+      };
+
+      render() {
+        return (
+          <Snackbar open={this.state.open} autoHideDuration={this.state.duration}>
+            <Toast message="Test message" onClose={this.handleClose} variant="info" />
+          </Snackbar>
+        );
+      }
+    }
+
+    const ref = React.createRef<DurationWrapper>();
+    render(<DurationWrapper ref={ref} />);
+
+    act(() => {
+      jest.advanceTimersByTime(1000);
+    });
+
+    act(() => {
+      ref.current!.setDuration(1000);
+    });
+
+    act(() => {
+      jest.advanceTimersByTime(900);
+    });
+
+    expect(ref.current!.state.closeCount).toBe(0);
+
+    act(() => {
+      jest.advanceTimersByTime(200);
+    });
+
+    expect(ref.current!.state.closeCount).toBe(1);
+  });
+
+  test('does not reset timer when message changes', () => {
+    class MessageWrapper extends React.Component<
+      Record<string, never>,
+      { message: string; open: boolean; closeCount: number }
+    > {
+      state = { message: 'First', open: true, closeCount: 0 };
+
+      setMessage = (message: string) => {
+        this.setState({ message });
+      };
+
+      handleClose = () => {
+        this.setState((prev) => ({ open: false, closeCount: prev.closeCount + 1 }));
+      };
+
+      render() {
+        return (
+          <Snackbar open={this.state.open} autoHideDuration={3000}>
+            <Toast message={this.state.message} onClose={this.handleClose} variant="info" />
+          </Snackbar>
+        );
+      }
+    }
+
+    const ref = React.createRef<MessageWrapper>();
+    render(<MessageWrapper ref={ref} />);
+
+    act(() => {
+      jest.advanceTimersByTime(1000);
+    });
+
+    act(() => {
+      ref.current!.setMessage('Second');
+    });
+
+    act(() => {
+      jest.advanceTimersByTime(2000);
+    });
+
+    expect(ref.current!.state.closeCount).toBe(1);
+  });
+
+  test('does not auto-hide when duration is omitted', () => {
     const onClose = jest.fn();
     render(
-      <Snackbar open={true} onClose={onClose}>
-        <SnackbarContent message="Test message" />
+      <Snackbar open={true}>
+        <Toast message="Test message" onClose={onClose} variant="info" />
       </Snackbar>,
     );
 
@@ -240,20 +313,22 @@ describe('Snackbar', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  test('does not start timer if no onClose callback', () => {
-    // This should not throw and should render fine
+  test('renders and auto-hides with a noop onClose callback', () => {
     render(
       <Snackbar open={true} autoHideDuration={3000}>
-        <SnackbarContent message="Test message" />
+        <Toast message="Test message" onClose={() => {}} variant="info" />
       </Snackbar>,
     );
+
+    const initialContent = document.querySelector('[id="client-snackbar"]');
+    expect(initialContent).not.toBeNull();
 
     act(() => {
       jest.advanceTimersByTime(5000);
     });
 
-    // Just verify no error is thrown
-    expect(true).toBe(true);
+    const content = document.querySelector('[id="client-snackbar"]');
+    expect(content).toBeNull();
   });
 });
 
@@ -291,12 +366,12 @@ describe('SnackbarContent', () => {
 
   test('filters out non-DOM props like onClose and variant', () => {
     // This should not throw a React warning about unknown DOM props
-    const props: any = {
+    const props = {
       message: 'Test',
       onClose: () => {},
       variant: 'error',
       'data-testid': 'content',
-    };
+    } as React.ComponentProps<typeof SnackbarContent> & { onClose: () => void; variant: string };
     render(<SnackbarContent {...props} />);
     const content = document.querySelector('[data-testid="content"]');
     expect(content).not.toBeNull();

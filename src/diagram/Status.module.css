@@ -1,9 +1,7 @@
 .status {
-  position: absolute;
-  top: 0px;
-  right: 0px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   height: 24px;
   width: 24px;
-  margin: 12px;
-  margin-right: 16px;
 }
