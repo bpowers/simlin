@@ -9,25 +9,13 @@
     "email": "bobbypowers@gmail.com"
   },
   "main": "src/server/lib",
-  "workspaces": {
-    "packages": [
-      "src/engine2",
-      "src/core",
-      "src/diagram",
-      "src/app",
-      "src/server",
-      "website"
-    ],
-    "nohoist": [
-      "**/html-minifier-terser"
-    ]
-  },
+  "packageManager": "pnpm@10.6.0",
   "devDependencies": {
     "@playwright/test": "^1.48.0",
     "npm-run-all": "^4.1.5",
-    "ts-protoc-gen": "^0.15.0"
+    "ts-protoc-gen": "^0.15.0",
+    "typescript": "^5.7.2"
   },
-  "resolutions": {},
   "scripts": {
     "js-needs-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|core)/' | xargs prettier -l",
     "rust-needs-format": "cargo fmt -- --check",
@@ -36,19 +24,19 @@
     "format": "npm-run-all -p js-format rust-format",
     "precommit": "npm-run-all -p js-needs-format rust-needs-format lint",
     "install-git-hooks": "cd .git/hooks && rm -f pre-commit && ln -s ../../scripts/pre-commit ./pre-commit",
-    "lint": "yarn rust-lint && yarn workspaces run lint",
-    "patch": "true",
+    "lint": "pnpm rust-lint && pnpm -r run lint",
+    "tsc": "pnpm --filter @system-dynamics/core exec tsc --noEmit && pnpm --filter @system-dynamics/diagram exec tsc --noEmit && pnpm --filter @system-dynamics/server exec tsc --noEmit && pnpm --filter @system-dynamics/app exec tsc --noEmit",
     "rust-lint": "cargo clippy",
-    "start:firestore": "(gcloud beta emulators firestore start --host-port=127.0.0.1:8092 &) && yarn workspace @system-dynamics/app run firebase emulators:start",
-    "start:backend": "yarn workspace @system-dynamics/server start:backend",
-    "start:frontend": "yarn workspace @system-dynamics/app start:frontend",
-    "build:gen-protobufs": "protoc --plugin='protoc-gen-ts=node_modules/.bin/protoc-gen-ts' --js_out='import_style=commonjs_strict,binary:.' --ts_out=. $(find src/server -name '*.proto') && scripts/gen-rust-protobufs.sh && yarn format",
+    "start:firestore": "(gcloud beta emulators firestore start --host-port=127.0.0.1:8092 &) && pnpm --filter @system-dynamics/app run firebase emulators:start",
+    "start:backend": "pnpm --filter @system-dynamics/server start:backend",
+    "start:frontend": "pnpm --filter @system-dynamics/app start:frontend",
+    "build:gen-protobufs": "protoc --plugin='protoc-gen-ts=node_modules/.bin/protoc-gen-ts' --js_out='import_style=commonjs_strict,binary:.' --ts_out=. $(find src/server -name '*.proto') && scripts/gen-rust-protobufs.sh && pnpm format",
     "rebuild-stdlib": "cargo build && for input in stdlib/*.stmx; do model=\"$(basename $input | cut -d '.' -f 1)\"; target/debug/simlin convert --model-only \"$input\" --output src/simlin-engine/src/stdlib/\"$model\".pb; done",
-    "build": "yarn patch && yarn workspaces run build",
-    "clean": "yarn workspaces run clean",
-    "deploy": "export NODE_ENV=production && yarn clean && yarn build && yarn workspace @system-dynamics/app deploy && gcloud app deploy ./.app.prod.yaml && yarn workspace @system-dynamics/app deploy-clean",
+    "build": "pnpm -r run build",
+    "clean": "pnpm -r run clean",
+    "deploy": "export NODE_ENV=production && pnpm clean && pnpm build && pnpm --filter @system-dynamics/app deploy && gcloud app deploy ./.app.prod.yaml && pnpm --filter @system-dynamics/app deploy-clean",
     "start": "node src/server/lib",
-    "test": "yarn workspace @system-dynamics/core test && yarn workspace @system-dynamics/diagram test && yarn workspace @system-dynamics/engine2 test && yarn workspace @system-dynamics/app test && yarn workspace @system-dynamics/server test",
+    "test": "pnpm --filter @system-dynamics/core test && pnpm --filter @system-dynamics/diagram test && pnpm --filter @system-dynamics/engine2 test && pnpm --filter @system-dynamics/app test && pnpm --filter @system-dynamics/server test",
     "test:ui": "playwright test",
     "test:ui:ui": "playwright test --ui"
   },

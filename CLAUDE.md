@@ -79,7 +79,7 @@ First is the Rust workspace with these packages:
 - `src/simlin-cli` - a command line tool for simulating system dynamics models, mostly for testing/debugging.
 - `src/xmutil` - Rust wrapper around Bob Eberlein's tool to convert Vensim models to XMILE format, including diagrams.
 
-This is a yarn workspace with these packages:
+This is a pnpm workspace with these packages:
 - `@system-dynamics/core` - Shared TypeScript utilities
 - `@system-dynamics/diagram` - React diagram components
 - `@system-dynamics/app` - Frontend application
@@ -89,7 +89,7 @@ This is a yarn workspace with these packages:
 ### Prerequisites for Development
 
 - Google Cloud CLI with Firestore emulator
-- Node.js and Yarn
+- Node.js and pnpm
 - Rust toolchain (specified in `rust-toolchain.toml`)
 
 ### Initial Environment Setup
@@ -105,7 +105,7 @@ For Claude Code on the web, Codex Web, or any fresh checkout, run the initializa
 This script:
 - Installs git pre-commit hooks
 - Verifies required tools are available
-- Installs yarn dependencies if needed
+- Installs pnpm dependencies if needed
 - Configures AI tools (Claude CLI or Codex) for pre-commit checks
 
 ### Pre-commit Hooks
@@ -114,8 +114,8 @@ The pre-commit hook (`scripts/pre-commit`) runs automatically before each commit
 1. Rust formatting check (`cargo fmt --check`)
 2. Rust linting (`cargo clippy`)
 3. Rust tests (`cargo test`)
-4. TypeScript/JavaScript linting (`yarn lint`)
-5. TypeScript type checking (`yarn tsc`)
+4. TypeScript/JavaScript linting (`pnpm lint`)
+5. TypeScript type checking (`pnpm tsc`)
 6. Python bindings tests (requires Python 3.11+)
 7. AI-powered test quality verification (checks for incomplete/stubbed tests)
 
@@ -126,31 +126,31 @@ If any check fails, the commit is rejected. Fix the issues and try again.
 ## Development Commands
 
 ### Build Commands
-- `yarn build` - Build the web application and System Dynamics model editor, including compiling the simulation engine to WebAssembly.
-- `yarn clean` - Clean all build artifacts  
+- `pnpm build` - Build the web application and System Dynamics model editor, including compiling the simulation engine to WebAssembly.
+- `pnpm clean` - Clean all build artifacts
 - `cargo build` - Build Rust components
 - `cargo fmt` - Format Rust code
-- `yarn format` - Format both JavaScript/TypeScript and Rust code
+- `pnpm format` - Format both JavaScript/TypeScript and Rust code
 
 ### Development Server
 Start these commands in 3 separate terminals:
 ```bash
-yarn start:firestore  # Start local Firestore emulator (port 8092)
-yarn start:backend    # Start backend server (port 3030) 
-yarn start:frontend   # Start frontend dev server (port 3000)
+pnpm start:firestore  # Start local Firestore emulator (port 8092)
+pnpm start:backend    # Start backend server (port 3030)
+pnpm start:frontend   # Start frontend dev server (port 3000)
 ```
 
 ### Linting and Type Checking
-- `yarn lint` - Run linters for all workspaces (includes `cargo clippy`)
+- `pnpm lint` - Run linters for all workspaces (includes `cargo clippy`)
 - `cargo clippy` - Run Rust clippy linter only
-- `yarn precommit` - Run format checks and linting (used by git hooks)
+- `pnpm precommit` - Run format checks and linting (used by git hooks)
 
 ### Testing
 - `cargo test` - Run Rust tests: the simulation engine is in Rust.
 - most of the TypeScript code is related to an interactive web editor and doesn't have tests at this time.
 
 ### Protobuf Generation
-- `yarn build:gen-protobufs` - Regenerate protobuf bindings (TypeScript from server schemas, Rust from simlin-engine schema)
+- `pnpm build:gen-protobufs` - Regenerate protobuf bindings (TypeScript from server schemas, Rust from simlin-engine schema)
 
 ## Commit Message Style
 
@@ -219,8 +219,8 @@ Follow these steps when working on code changes in Rust crates like `src/simlin-
 - Use TypeScript with strict mode enabled
 - Prefer class components — AVOID hooks like useState
 - Use proper TypeScript types, avoid `any`
-- Run `yarn lint` before committing
-- Run `yarn tsc` to check types
+- Run `pnpm lint` before committing
+- Run `pnpm tsc` to check types
 - Especially when working on the TypeScript side of the project, do NOT manually copy files around to get builds or tests passing. If there is some sort of regression or error where source files are not able to imported or used, ultrathink to understand why and fix the build scripts.
 
 ## Testing Strategy
@@ -243,7 +243,7 @@ Follow these steps when working on code changes in Rust crates like `src/simlin-
 - Be careful with floating point comparisons in tests
 
 ### TypeScript Development
-- The development server auto-reloads, but the production build does not (you can build it with `yarn build`)
+- The development server auto-reloads, but the production build does not (you can build it with `pnpm build`)
 - Ensure proper typing for all components and functions
 
 ### System Integration

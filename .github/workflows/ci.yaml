@@ -89,6 +89,9 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Install Python
         uses: actions/setup-python@v5
         with:
@@ -101,8 +104,8 @@ jobs:
       - name: Build the Typescript project
         run: |
           rustup target add wasm32-unknown-unknown
-          yarn install
-          DISABLE_WASM_OPT=1 yarn build
+          pnpm install
+          DISABLE_WASM_OPT=1 pnpm build
 
       - name: Run TypeScript tests
-        run: yarn test
+        run: pnpm test

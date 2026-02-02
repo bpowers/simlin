@@ -30,8 +30,8 @@ fi
 
 # Build TypeScript
 echo "Compiling TypeScript..."
-yarn run tsc
-yarn run tsc -p tsconfig.browser.json
+pnpm run tsc
+pnpm run tsc -p tsconfig.browser.json
 
 # Copy WASM to output directories
 cp -r core lib/

@@ -11,9 +11,10 @@
     "@google-cloud/firestore": "^7.11.0",
     "@google-cloud/trace-agent": "^8.0.0",
     "@iarna/toml": "^2.2.5",
-    "@system-dynamics/core": "^1.0.0",
-    "@system-dynamics/diagram": "^1.0.0",
-    "@system-dynamics/engine2": "^2.0.0",
+    "@system-dynamics/core": "workspace:*",
+    "@system-dynamics/diagram": "workspace:*",
+    "@system-dynamics/engine2": "workspace:*",
+    "body-parser": "^1.20.3",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "express": "^5.0.1",
@@ -31,6 +32,7 @@
     "winston": "^3.17.0"
   },
   "devDependencies": {
+    "@types/body-parser": "^1.19.5",
     "@types/cookie-parser": "^1.4.2",
     "@types/cors": "^2.8.9",
     "@types/express": "^5.0.0",
@@ -52,15 +54,14 @@
     "ts-jest": "^29.4.0",
     "typescript": "^5.7.2"
   },
-  "resolutions": {},
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
     "lint": "eslint .",
-    "prepublishOnly": "yarn build",
+    "prepublishOnly": "pnpm build",
     "clean": "rm -rf ./lib",
     "build": "tsc -p tsconfig.json",
     "test": "jest",
-    "start:backend": "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8092; export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099; export GCLOUD_PROJECT=simlin; yarn build && exec node lib/index.js"
+    "start:backend": "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8092; export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099; export GCLOUD_PROJECT=simlin; pnpm build && exec node lib/index.js"
   }
 }
