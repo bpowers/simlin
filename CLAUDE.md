@@ -150,7 +150,7 @@ yarn start:frontend   # Start frontend dev server (port 3000)
 - most of the TypeScript code is related to an interactive web editor and doesn't have tests at this time.
 
 ### Protobuf Generation
-- `yarn build:gen-protobufs` - Regenerate protobuf TypeScript bindings from .proto files
+- `yarn build:gen-protobufs` - Regenerate protobuf bindings (TypeScript from server schemas, Rust from simlin-engine schema)
 
 ## Commit Message Style
 

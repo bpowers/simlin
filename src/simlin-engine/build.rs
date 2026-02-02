@@ -7,8 +7,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-const PROTOS: &[&str] = &["src/project_io.proto"];
-
 const PB_SUFFIX: &str = ".pb";
 
 fn build_stdlib() -> io::Result<()> {
@@ -97,10 +95,6 @@ pub fn get(name: &str) -> Option<datamodel::Model> {{
 }
 
 fn main() {
-    let mut prost_build = prost_build::Config::new();
-    prost_build.protoc_arg("--experimental_allow_proto3_optional");
-    prost_build.compile_protos(PROTOS, &["src/"]).unwrap();
     lalrpop::process_root().unwrap();
-
     build_stdlib().unwrap();
 }
