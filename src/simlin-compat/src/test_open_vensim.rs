@@ -1,15 +1,15 @@
 #[cfg(test)]
 mod tests {
-    use crate::open_vensim;
+    use crate::open_vensim_xmutil;
     use std::fs;
 
     #[test]
-    fn test_open_vensim_sir() {
+    fn test_open_vensim_xmutil_sir() {
         let mdl_path = "../libsimlin/testdata/SIR.mdl";
         let mdl_content = fs::read_to_string(mdl_path).unwrap();
 
-        let project =
-            open_vensim(&mdl_content).expect("open_vensim should successfully parse SIR.mdl");
+        let project = open_vensim_xmutil(&mdl_content)
+            .expect("open_vensim_xmutil should successfully parse SIR.mdl");
 
         // Validate the project has expected structure
         assert!(

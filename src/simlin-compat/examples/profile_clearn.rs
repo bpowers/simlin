@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Profiling harness for open_vensim vs open_vensim_native on the C-LEARN model.
+//! Profiling harness for open_vensim_xmutil vs open_vensim on the C-LEARN model.
 //!
 //! Usage:
 //!   cargo build --example profile_clearn --features xmutil --release
@@ -12,7 +12,7 @@
 //!   valgrind --tool=dhat ./target/release/examples/profile_clearn xmutil
 //!   valgrind --tool=dhat ./target/release/examples/profile_clearn native
 
-use simlin_compat::{open_vensim, open_vensim_native};
+use simlin_compat::{open_vensim, open_vensim_xmutil};
 
 const CLEARN_MDL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -30,24 +30,24 @@ fn main() {
     match mode {
         "xmutil" => {
             for _ in 0..ITERATIONS {
-                let _project = open_vensim(&mdl_contents).expect("open_vensim should succeed");
+                let _project =
+                    open_vensim_xmutil(&mdl_contents).expect("open_vensim_xmutil should succeed");
             }
         }
         "native" => {
             for _ in 0..ITERATIONS {
-                let _project =
-                    open_vensim_native(&mdl_contents).expect("open_vensim_native should succeed");
+                let _project = open_vensim(&mdl_contents).expect("open_vensim should succeed");
             }
         }
         "both" => {
             eprintln!("--- xmutil path ---");
             for _ in 0..ITERATIONS {
-                let _project = open_vensim(&mdl_contents).expect("open_vensim should succeed");
+                let _project =
+                    open_vensim_xmutil(&mdl_contents).expect("open_vensim_xmutil should succeed");
             }
             eprintln!("--- native path ---");
             for _ in 0..ITERATIONS {
-                let _project =
-                    open_vensim_native(&mdl_contents).expect("open_vensim_native should succeed");
+                let _project = open_vensim(&mdl_contents).expect("open_vensim should succeed");
             }
         }
         _ => {

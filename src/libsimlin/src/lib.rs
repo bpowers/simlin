@@ -2620,7 +2620,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
         }
     };
 
-    match simlin_compat::open_vensim_native(contents) {
+    match simlin_compat::open_vensim(contents) {
         Ok(datamodel_project) => {
             let project: engine::Project = datamodel_project.into();
             let boxed = Box::new(SimlinProject {

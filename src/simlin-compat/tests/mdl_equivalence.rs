@@ -4,8 +4,8 @@
 
 //! MDL equivalence tests comparing xmutil-based parsing vs native Rust parsing.
 //!
-//! These tests verify that `open_vensim()` (MDL -> xmutil -> XMILE -> datamodel) produces
-//! equivalent results to `open_vensim_native()` (MDL -> datamodel directly).
+//! These tests verify that `open_vensim_xmutil()` (MDL -> xmutil -> XMILE -> datamodel) produces
+//! equivalent results to `open_vensim()` (MDL -> datamodel directly).
 //!
 //! ## Known Feature Gaps in Native Parser
 //!
@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::fs;
 
-use simlin_compat::{open_vensim, open_vensim_native};
+use simlin_compat::{open_vensim, open_vensim_xmutil};
 use simlin_core::canonicalize;
 use simlin_core::datamodel::{
     Aux, Dimension, DimensionElements, Dt, Equation, Flow, Model, Module, Project, SimSpecs, Stock,
@@ -647,11 +647,11 @@ fn test_single_mdl(mdl_path: &str) {
 
     // Parse via xmutil (MDL -> XMILE -> datamodel)
     let xmutil_project =
-        open_vensim(&content).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
+        open_vensim_xmutil(&content).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
 
     // Parse via native (MDL -> datamodel directly)
     let native_project =
-        open_vensim_native(&content).unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
+        open_vensim(&content).unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
 
     // Normalize both projects
     let xmutil_norm = normalize_project(xmutil_project);
@@ -679,7 +679,7 @@ fn test_clearn_xmutil() {
 
     // Parse via xmutil (MDL -> XMILE -> datamodel) -- this segfaults in xmutil's C++ code
     let _project =
-        open_vensim(&content).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
+        open_vensim_xmutil(&content).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
 }
 
 /// Verify the native Rust parser can handle the C-LEARN model (no xmutil dependency).
@@ -693,7 +693,7 @@ fn test_clearn_native() {
 
     // Parse via native (MDL -> datamodel directly)
     let _project =
-        open_vensim_native(&content).unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
+        open_vensim(&content).unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
 }
 
 // ===== Non-panicking comparison infrastructure =====
@@ -1003,10 +1003,10 @@ fn test_clearn_equivalence() {
         fs::read_to_string(&full_path).unwrap_or_else(|e| panic!("Failed to read {mdl_path}: {e}"));
 
     let xmutil_project =
-        open_vensim(&content).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
+        open_vensim_xmutil(&content).unwrap_or_else(|e| panic!("{mdl_path}: xmutil failed: {e}"));
 
     let native_project =
-        open_vensim_native(&content).unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
+        open_vensim(&content).unwrap_or_else(|e| panic!("{mdl_path}: native failed: {e}"));
 
     let xmutil_norm = normalize_project(xmutil_project);
     let native_norm = normalize_project(native_project);

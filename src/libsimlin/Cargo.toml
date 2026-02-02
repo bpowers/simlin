@@ -12,7 +12,6 @@ crate-type = ["staticlib", "rlib", "cdylib"]
 
 [features]
 default = []
-xmutil = ["simlin-compat/xmutil"]
 
 [dependencies]
 simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }

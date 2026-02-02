@@ -38,7 +38,7 @@ pub fn to_xmile(project: &Project) -> Result<String> {
 }
 
 #[cfg(feature = "xmutil")]
-pub fn open_vensim(contents: &str) -> Result<Project> {
+pub fn open_vensim_xmutil(contents: &str) -> Result<Project> {
     use simlin_core::common::{Error, ErrorCode, ErrorKind};
     use xmutil::convert_vensim_mdl;
 
@@ -55,10 +55,8 @@ pub fn open_vensim(contents: &str) -> Result<Project> {
     xmile::project_from_reader(&mut f)
 }
 
-/// Parse a Vensim MDL file directly using the native Rust parser.
-///
-/// This bypasses the xmutil C++ dependency and converts MDL directly to datamodel.
-pub fn open_vensim_native(contents: &str) -> Result<Project> {
+/// Parse a Vensim MDL file using the native Rust parser.
+pub fn open_vensim(contents: &str) -> Result<Project> {
     mdl::parse_mdl(contents)
 }
 

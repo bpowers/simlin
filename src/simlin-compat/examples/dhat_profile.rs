@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! DHAT allocation profiler for open_vensim_native on the C-LEARN model.
+//! DHAT allocation profiler for open_vensim on the C-LEARN model.
 //!
 //! Usage:
 //!   cargo run --example dhat_profile --release
@@ -13,7 +13,7 @@
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-use simlin_compat::open_vensim_native;
+use simlin_compat::open_vensim;
 
 const CLEARN_MDL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -25,7 +25,7 @@ fn main() {
 
     let mdl_contents = std::fs::read_to_string(CLEARN_MDL).expect("failed to read C-LEARN model");
 
-    let _project = open_vensim_native(&mdl_contents).expect("open_vensim_native should succeed");
+    let _project = open_vensim(&mdl_contents).expect("open_vensim should succeed");
 
     // dhat stats are printed on drop
 }
