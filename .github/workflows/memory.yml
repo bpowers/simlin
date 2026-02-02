@@ -31,9 +31,6 @@ jobs:
           toolchain: nightly
           components: rust-src
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-
       - name: Install dependencies
         run: |
           uv pip install --system cffi numpy pandas pytest pytest-cov
@@ -97,9 +94,6 @@ jobs:
         with:
           toolchain: nightly
           components: rust-src
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
 
       - name: Run ASAN tests
         run: ./test-asan.sh
