@@ -762,30 +762,166 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     if (this.state.moveDelta) {
       let otherUpdates = List<ViewElement>();
       const { x, y } = defined(this.state.moveDelta);
+      const moveDelta = defined(this.state.moveDelta);
+
+      // For group movement, we need to know which UIDs are selected
+      const selectedUids = this.props.selection;
+
+      // Helper to check if an element (by UID) is in the selection
+      const isInSelection = (uid: UID | undefined): boolean => {
+        return uid !== undefined && selectedUids.has(uid);
+      };
+
+      // First pass: move all selected elements
       this.selectionUpdates = this.selectionUpdates.map((initialEl) => {
-        // only constrain flow movement if we're not doing a group-move
-        if (initialEl instanceof FlowViewElement && this.selectionUpdates.size === 1) {
-          const [flow, updatedClouds] = this.constrainFlowMovement(initialEl, defined(this.state.moveDelta));
-          otherUpdates = otherUpdates.concat(updatedClouds);
-          return flow;
-        } else if (initialEl instanceof StockViewElement && this.selectionUpdates.size === 1) {
-          const [stock, updatedFlows] = this.constrainStockMovement(initialEl, defined(this.state.moveDelta));
-          otherUpdates = otherUpdates.concat(updatedFlows);
-          return stock;
-        } else if (initialEl instanceof CloudViewElement && this.selectionUpdates.size === 1) {
-          const [cloud, updatedFlow] = this.constrainCloudMovement(initialEl, defined(this.state.moveDelta));
-          otherUpdates = otherUpdates.push(updatedFlow);
-          return cloud;
+        // Single-element selection: use existing constraint logic
+        if (this.selectionUpdates.size === 1) {
+          if (initialEl instanceof FlowViewElement) {
+            const [flow, updatedClouds] = this.constrainFlowMovement(initialEl, moveDelta);
+            otherUpdates = otherUpdates.concat(updatedClouds);
+            return flow;
+          } else if (initialEl instanceof StockViewElement) {
+            const [stock, updatedFlows] = this.constrainStockMovement(initialEl, moveDelta);
+            otherUpdates = otherUpdates.concat(updatedFlows);
+            return stock;
+          } else if (initialEl instanceof CloudViewElement) {
+            const [cloud, updatedFlow] = this.constrainCloudMovement(initialEl, moveDelta);
+            otherUpdates = otherUpdates.push(updatedFlow);
+            return cloud;
+          }
+        }
+
+        // Group movement logic
+        if (initialEl instanceof FlowViewElement) {
+          const pts = initialEl.points;
+          if (pts.size < 2) {
+            return initialEl;
+          }
+
+          const sourceUid = first(pts).attachedToUid;
+          const sinkUid = last(pts).attachedToUid;
+          const sourceInSelection = isInSelection(sourceUid);
+          const sinkInSelection = isInSelection(sinkUid);
+
+          if (sourceInSelection && sinkInSelection) {
+            // Both endpoints are selected: translate entire flow uniformly
+            const newPoints = pts.map((p) =>
+              p.merge({
+                x: p.x - x,
+                y: p.y - y,
+              }),
+            );
+            return initialEl.merge({
+              x: initialEl.cx - x,
+              y: initialEl.cy - y,
+              points: newPoints,
+            });
+          } else if (sourceInSelection || sinkInSelection) {
+            // One endpoint is selected: that end moves, other adjusts
+            // Translate points that belong to the selected endpoint's side
+            const newPoints = pts.map((p, i) => {
+              const isSourcePoint = i === 0;
+              const isSinkPoint = i === pts.size - 1;
+              if ((isSourcePoint && sourceInSelection) || (isSinkPoint && sinkInSelection)) {
+                return p.merge({
+                  x: p.x - x,
+                  y: p.y - y,
+                });
+              }
+              return p;
+            });
+            return initialEl.merge({
+              x: initialEl.cx - x,
+              y: initialEl.cy - y,
+              points: newPoints,
+            });
+          } else {
+            // Neither endpoint is selected: just move valve
+            return initialEl.merge({
+              x: initialEl.cx - x,
+              y: initialEl.cy - y,
+            });
+          }
+        } else if (initialEl instanceof StockViewElement) {
+          // Stock always moves by delta in group selection
+          return initialEl.merge({
+            x: initialEl.cx - x,
+            y: initialEl.cy - y,
+          });
+        } else if (initialEl instanceof CloudViewElement) {
+          // Cloud moves by delta in group selection
+          return initialEl.merge({
+            x: initialEl.cx - x,
+            y: initialEl.cy - y,
+          });
         } else if (!(initialEl instanceof LinkViewElement)) {
+          // Aux, Alias, Module, etc.
           return (initialEl as AuxViewElement).merge({
             x: initialEl.cx - x,
             y: initialEl.cy - y,
           });
         } else {
+          // Links are handled separately - don't move their position directly
           return initialEl;
         }
       });
-      // now add flows that also were updated
+
+      // Second pass: update flows NOT in selection that are attached to stocks IN selection
+      if (this.selectionUpdates.size > 1) {
+        for (const [uid, element] of this.elements) {
+          if (!(element instanceof FlowViewElement)) continue;
+          if (selectedUids.has(uid)) continue; // Already processed
+
+          const pts = element.points;
+          if (pts.size < 2) continue;
+
+          const sourceUid = first(pts).attachedToUid;
+          const sinkUid = last(pts).attachedToUid;
+          const sourceStockSelected = sourceUid !== undefined && selectedUids.has(sourceUid);
+          const sinkStockSelected = sinkUid !== undefined && selectedUids.has(sinkUid);
+
+          if (sourceStockSelected || sinkStockSelected) {
+            // This flow is attached to a selected stock but the flow itself is not selected
+            // Get the updated stock position from selectionUpdates
+            if (sourceStockSelected && sinkStockSelected) {
+              // Both ends selected: translate entire flow uniformly
+              const newPoints = pts.map((p) =>
+                p.merge({
+                  x: p.x - x,
+                  y: p.y - y,
+                }),
+              );
+              otherUpdates = otherUpdates.push(
+                element.merge({
+                  x: element.cx - x,
+                  y: element.cy - y,
+                  points: newPoints,
+                }),
+              );
+            } else if (sourceStockSelected) {
+              // Only source stock is selected - use UpdateStockAndFlows logic
+              const sourceStock = this.selectionUpdates.get(sourceUid!) as StockViewElement | undefined;
+              if (sourceStock) {
+                const [_, updatedFlows] = UpdateStockAndFlows(sourceStock, List([element]), moveDelta);
+                if (updatedFlows.size > 0) {
+                  otherUpdates = otherUpdates.push(updatedFlows.first()!);
+                }
+              }
+            } else if (sinkStockSelected) {
+              // Only sink stock is selected - use UpdateStockAndFlows logic
+              const sinkStock = this.selectionUpdates.get(sinkUid!) as StockViewElement | undefined;
+              if (sinkStock) {
+                const [_, updatedFlows] = UpdateStockAndFlows(sinkStock, List([element]), moveDelta);
+                if (updatedFlows.size > 0) {
+                  otherUpdates = otherUpdates.push(updatedFlows.first()!);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Add all updated elements that weren't directly selected
       const namedUpdates: Map<UID, ViewElement> = otherUpdates.toMap().mapKeys((_, el) => el.uid);
       this.selectionUpdates = this.selectionUpdates.concat(namedUpdates);
     }
@@ -1005,12 +1141,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       // Find all elements within the selection rectangle
       let selectedElements = Set<UID>();
       for (const element of this.cachedElements) {
-        // Skip flows, stocks, and clouds for now - focus on auxes
-        if (
-          element instanceof FlowViewElement ||
-          element instanceof StockViewElement ||
-          element instanceof CloudViewElement
-        ) {
+        // Skip clouds since they're tied to flows
+        if (element instanceof CloudViewElement) {
           continue;
         }
 
@@ -1023,6 +1155,16 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             auxContains(element, { x: right, y: bottom }) ||
             (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom)
           ) {
+            selectedElements = selectedElements.add(element.uid);
+          }
+        } else if (element instanceof StockViewElement) {
+          // For stocks, check if center is within rectangle
+          if (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom) {
+            selectedElements = selectedElements.add(element.uid);
+          }
+        } else if (element instanceof FlowViewElement) {
+          // For flows, check if valve center (cx, cy) is within rectangle
+          if (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom) {
             selectedElements = selectedElements.add(element.uid);
           }
         } else if (element instanceof AliasViewElement || element instanceof ModuleViewElement) {

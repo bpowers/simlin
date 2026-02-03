@@ -1154,56 +1154,189 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       throw new Error(`unknown UID ${uid}`);
     };
 
+    // Helper to check if an element is in the selection
+    const isInSelection = (uid: UID | undefined): boolean => {
+      return uid !== undefined && selection.has(uid);
+    };
+
     let updatedElements = List<ViewElement>();
 
+    // First pass: update all selected elements
     let elements = view.elements.map((element: ViewElement) => {
       if (!selection.has(element.uid)) {
         return element;
       }
 
-      if (selection.size === 1 && element instanceof FlowViewElement) {
+      // Single-element selection: use existing constraint logic
+      if (selection.size === 1) {
+        if (element instanceof FlowViewElement) {
+          const pts = element.points;
+          const sourceId = defined(first(pts).attachedToUid);
+          const source = getUid(sourceId) as StockViewElement | CloudViewElement;
+
+          const sinkId = defined(last(pts).attachedToUid);
+          const sink = getUid(sinkId) as StockViewElement | CloudViewElement;
+
+          const ends = List<StockViewElement | CloudViewElement>([source, sink]);
+          const [newElement, newUpdatedClouds] = UpdateFlow(element, ends, delta, segmentIndex);
+          element = newElement;
+          updatedElements = updatedElements.concat(newUpdatedClouds);
+          return element;
+        } else if (element instanceof CloudViewElement) {
+          const flow = getUid(defined(element.flowUid)) as FlowViewElement;
+          const [newCloud, newUpdatedFlow] = UpdateCloudAndFlow(element, flow, delta);
+          element = newCloud;
+          updatedElements = updatedElements.push(newUpdatedFlow);
+          return element;
+        } else if (element instanceof StockViewElement) {
+          const stock = getOrThrow(defined(this.getModel()).variables, element.ident) as StockVar;
+          const flowNames: List<string> = stock.inflows.concat(stock.outflows);
+          const flows: List<ViewElement> = flowNames.map(getName);
+          const [newElement, newUpdatedFlows] = UpdateStockAndFlows(element, flows as List<FlowViewElement>, delta);
+          element = newElement;
+          updatedElements = updatedElements.concat(newUpdatedFlows);
+          return element;
+        }
+      }
+
+      // Group movement logic
+      if (element instanceof FlowViewElement) {
         const pts = element.points;
-        const sourceId = defined(first(pts).attachedToUid);
-        const source = getUid(sourceId) as StockViewElement | CloudViewElement;
+        if (pts.size < 2) {
+          return element;
+        }
 
-        const sinkId = defined(last(pts).attachedToUid);
-        const sink = getUid(sinkId) as StockViewElement | CloudViewElement;
+        const sourceUid = first(pts).attachedToUid;
+        const sinkUid = last(pts).attachedToUid;
+        const sourceInSelection = isInSelection(sourceUid);
+        const sinkInSelection = isInSelection(sinkUid);
 
-        const ends = List<StockViewElement | CloudViewElement>([source, sink]);
-        const [newElement, newUpdatedClouds] = UpdateFlow(element, ends, delta, segmentIndex);
-        element = newElement;
-        updatedElements = updatedElements.concat(newUpdatedClouds);
-      } else if (selection.size === 1 && element instanceof CloudViewElement) {
-        const flow = getUid(defined(element.flowUid)) as FlowViewElement;
-        const [newCloud, newUpdatedFlow] = UpdateCloudAndFlow(element, flow, delta);
-        element = newCloud;
-        updatedElements = updatedElements.push(newUpdatedFlow);
-      } else if (selection.size === 1 && element instanceof StockViewElement) {
-        const stock = getOrThrow(defined(this.getModel()).variables, element.ident) as StockVar;
-        const flowNames: List<string> = stock.inflows.concat(stock.outflows);
-        const flows: List<ViewElement> = flowNames.map(getName);
-        const [newElement, newUpdatedFlows] = UpdateStockAndFlows(element, flows as List<FlowViewElement>, delta);
-        element = newElement;
-        updatedElements = updatedElements.concat(newUpdatedFlows);
+        if (sourceInSelection && sinkInSelection) {
+          // Both endpoints are selected: translate entire flow uniformly
+          const newPoints = pts.map((p) =>
+            p.merge({
+              x: p.x - delta.x,
+              y: p.y - delta.y,
+            }),
+          );
+          return element.merge({
+            x: element.cx - delta.x,
+            y: element.cy - delta.y,
+            points: newPoints,
+          });
+        } else if (sourceInSelection || sinkInSelection) {
+          // One endpoint is selected: that end moves, other adjusts
+          // Translate points that belong to the selected endpoint's side
+          const newPoints = pts.map((p, i) => {
+            const isSourcePoint = i === 0;
+            const isSinkPoint = i === pts.size - 1;
+            if ((isSourcePoint && sourceInSelection) || (isSinkPoint && sinkInSelection)) {
+              return p.merge({
+                x: p.x - delta.x,
+                y: p.y - delta.y,
+              });
+            }
+            return p;
+          });
+          return element.merge({
+            x: element.cx - delta.x,
+            y: element.cy - delta.y,
+            points: newPoints,
+          });
+        } else {
+          // Neither endpoint is selected: just move valve
+          return element.merge({
+            x: element.cx - delta.x,
+            y: element.cy - delta.y,
+          });
+        }
+      } else if (element instanceof StockViewElement) {
+        // Stock always moves by delta in group selection
+        return element.merge({
+          x: element.cx - delta.x,
+          y: element.cy - delta.y,
+        });
+      } else if (element instanceof CloudViewElement) {
+        // Cloud moves by delta in group selection
+        return element.merge({
+          x: element.cx - delta.x,
+          y: element.cy - delta.y,
+        });
       } else if (element instanceof LinkViewElement) {
+        // Links: if both from and to are in selection, link moves with them
+        // Arc adjustment is handled later
         const from = getUid(element.fromUid);
         const to = getUid(element.toUid);
         const newTakeoffθ = takeoffθ({ element, from, to, arcPoint: defined(arcPoint) });
         const newTakeoff = radToDeg(newTakeoffθ);
-        element = element.merge({
+        return element.merge({
           arc: newTakeoff,
         });
       } else {
-        // everything else has an x and a y, the cast is to make typescript
-        // happy with our dumb type decisions
-        element = (element as AuxViewElement).merge({
+        // Aux, Alias, Module, etc.
+        return (element as AuxViewElement).merge({
           x: element.cx - delta.x,
           y: element.cy - delta.y,
         });
       }
-      return element;
     });
 
+    // Second pass: update flows NOT in selection that are attached to stocks IN selection
+    if (selection.size > 1) {
+      for (const element of view.elements) {
+        if (!(element instanceof FlowViewElement)) continue;
+        if (selection.has(element.uid)) continue; // Already processed
+
+        const pts = element.points;
+        if (pts.size < 2) continue;
+
+        const sourceUid = first(pts).attachedToUid;
+        const sinkUid = last(pts).attachedToUid;
+        const sourceStockSelected = sourceUid !== undefined && selection.has(sourceUid);
+        const sinkStockSelected = sinkUid !== undefined && selection.has(sinkUid);
+
+        if (sourceStockSelected || sinkStockSelected) {
+          // This flow is attached to a selected stock but the flow itself is not selected
+          if (sourceStockSelected && sinkStockSelected) {
+            // Both ends selected: translate entire flow uniformly
+            const newPoints = pts.map((p) =>
+              p.merge({
+                x: p.x - delta.x,
+                y: p.y - delta.y,
+              }),
+            );
+            updatedElements = updatedElements.push(
+              element.merge({
+                x: element.cx - delta.x,
+                y: element.cy - delta.y,
+                points: newPoints,
+              }),
+            );
+          } else if (sourceStockSelected) {
+            // Only source stock is selected
+            // Find the updated stock position
+            const sourceStock = elements.find((e) => e.uid === sourceUid) as StockViewElement | undefined;
+            if (sourceStock) {
+              const [, flows] = UpdateStockAndFlows(sourceStock, List([element]), delta);
+              if (flows.size > 0) {
+                updatedElements = updatedElements.push(flows.first()!);
+              }
+            }
+          } else if (sinkStockSelected) {
+            // Only sink stock is selected
+            const sinkStock = elements.find((e) => e.uid === sinkUid) as StockViewElement | undefined;
+            if (sinkStock) {
+              const [, flows] = UpdateStockAndFlows(sinkStock, List([element]), delta);
+              if (flows.size > 0) {
+                updatedElements = updatedElements.push(flows.first()!);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Apply updates from updatedElements
     const updatedFlowsByUid: Map<UID, ViewElement> = updatedElements.toMap().mapKeys((_, e) => e.uid);
     elements = elements.map((element) => {
       if (updatedFlowsByUid.has(element.uid)) {
@@ -1227,28 +1360,43 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       }
     }
 
+    // Update links connected to moved elements
     elements = elements.map((element: ViewElement) => {
       if (!(element instanceof LinkViewElement)) {
         return element.isNamed() ? getOrThrow(namedElements, defined(element.ident)) : element;
       }
-      // TODO: this could be an alias, which doesn't have a name.  Why are we doing this by name anyway?
-      // const fromName = defined(getUid(element.fromUid).ident);
-      // const toName = defined(getUid(element.toUid).ident);
-      // if it hasn't been updated, nothing to do
-      if (!(selectedElements.has(element.fromUid) || selectedElements.has(element.toUid))) {
+      // If it hasn't been updated, nothing to do
+      if (!(selectedElements.has(element.fromUid) || selectedElements.has(element.toUid) || updatedFlowsByUid.has(element.fromUid) || updatedFlowsByUid.has(element.toUid))) {
         return element;
       }
-      const from = selectedElements.get(element.fromUid) || nonSelectedElements.get(element.fromUid);
+      const from = selectedElements.get(element.fromUid) || updatedFlowsByUid.get(element.fromUid) || nonSelectedElements.get(element.fromUid);
       if (!from) {
         return element;
       }
-      const to = selectedElements.get(element.toUid) || nonSelectedElements.get(element.toUid);
+      const to = selectedElements.get(element.toUid) || updatedFlowsByUid.get(element.toUid) || nonSelectedElements.get(element.toUid);
       if (!to) {
         return element;
       }
+
+      // If both from and to moved by the same amount (both in selection), no arc change needed
+      const fromMoved = selectedElements.has(element.fromUid) || updatedFlowsByUid.has(element.fromUid);
+      const toMoved = selectedElements.has(element.toUid) || updatedFlowsByUid.has(element.toUid);
+      if (fromMoved && toMoved) {
+        // Both endpoints moved - check if they moved by the same amount
+        // If so, no arc adjustment needed (link translates with selection)
+        const oldFrom = getUid(element.fromUid);
+        const oldTo = getUid(element.toUid);
+        const fromDelta = { x: oldFrom.cx - from.cx, y: oldFrom.cy - from.cy };
+        const toDelta = { x: oldTo.cx - to.cx, y: oldTo.cy - to.cy };
+        const sameMovement = Math.abs(fromDelta.x - toDelta.x) < 0.1 && Math.abs(fromDelta.y - toDelta.y) < 0.1;
+        if (sameMovement) {
+          return element; // No arc change needed
+        }
+      }
+
       const atan2 = Math.atan2;
-      const oldTo = defined(getUid(element.toUid));
-      const oldFrom = defined(getUid(element.fromUid));
+      const oldTo = getUid(element.toUid);
+      const oldFrom = getUid(element.fromUid);
       const oldToVisual = getVisualCenter(oldTo);
       const oldFromVisual = getVisualCenter(oldFrom);
       const toVisual = getVisualCenter(to);
