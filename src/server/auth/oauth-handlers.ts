@@ -118,12 +118,7 @@ export function createGoogleOAuthCallbackHandler(deps: GoogleOAuthHandlerDeps): 
       await deps.stateStore.invalidate(state);
 
       const redirectUri = `${deps.baseUrl}${deps.config.callbackPath}`;
-      const tokens = await exchangeGoogleCode(
-        deps.config.clientId,
-        deps.config.clientSecret,
-        code,
-        redirectUri,
-      );
+      const tokens = await exchangeGoogleCode(deps.config.clientId, deps.config.clientSecret, code, redirectUri);
 
       const userInfo = await fetchGoogleUserInfo(tokens.access_token);
 
@@ -231,12 +226,7 @@ export function createAppleOAuthCallbackHandler(deps: AppleOAuthHandlerDeps): Re
       );
 
       const redirectUri = `${deps.baseUrl}${deps.config.callbackPath}`;
-      const tokens = await exchangeAppleCode(
-        deps.config.clientId,
-        clientSecret,
-        code,
-        redirectUri,
-      );
+      const tokens = await exchangeAppleCode(deps.config.clientId, clientSecret, code, redirectUri);
 
       const idToken = tokens.id_token || bodyIdToken;
       if (!idToken) {
@@ -262,26 +252,7 @@ export function createAppleOAuthCallbackHandler(deps: AppleOAuthHandlerDeps): Re
       const email = claims.email;
 
       if (!email) {
-        let fbUser: admin.auth.UserRecord | undefined;
-        try {
-          const listResult = await deps.firebaseAdmin.listUsers(1000);
-          for (const user of listResult.users) {
-            const appleProviderData = user.providerData.find((p) => p.providerId === 'apple.com');
-            if (appleProviderData && appleProviderData.uid === claims.sub) {
-              fbUser = user;
-              break;
-            }
-          }
-        } catch (err) {
-          logger.error('Error searching for Apple user by sub:', err);
-        }
-
-        if (!fbUser) {
-          logger.error('Apple user has no email and could not be found by sub');
-          res.redirect('/?error=apple_no_email');
-          return;
-        }
-
+        // Apple omits email on subsequent logins. Look up user by providerUserId.
         const existingUser = await deps.users.findOneByScan({ providerUserId: claims.sub });
         if (existingUser) {
           await loginUser(req, existingUser);
@@ -289,7 +260,9 @@ export function createAppleOAuthCallbackHandler(deps: AppleOAuthHandlerDeps): Re
           return;
         }
 
-        res.redirect('/?error=apple_user_not_found');
+        // No email and no existing user - we can't create a new account
+        logger.error('Apple user has no email and could not be found by providerUserId');
+        res.redirect('/?error=apple_no_email');
         return;
       }
 

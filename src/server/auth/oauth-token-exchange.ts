@@ -70,12 +70,7 @@ export async function fetchGoogleUserInfo(accessToken: string): Promise<GoogleUs
   return (await response.json()) as GoogleUserInfo;
 }
 
-export function generateAppleClientSecret(
-  teamId: string,
-  clientId: string,
-  keyId: string,
-  privateKey: string,
-): string {
+export function generateAppleClientSecret(teamId: string, clientId: string, keyId: string, privateKey: string): string {
   const crypto = require('crypto');
   const now = Math.floor(Date.now() / 1000);
   const expiresIn = 15777000; // ~6 months
@@ -157,10 +152,7 @@ async function fetchAppleJwks(): Promise<jose.JSONWebKeySet> {
   return cachedJwks;
 }
 
-export async function verifyAppleIdToken(
-  idToken: string,
-  options: { clientId: string },
-): Promise<AppleIdTokenClaims> {
+export async function verifyAppleIdToken(idToken: string, options: { clientId: string }): Promise<AppleIdTokenClaims> {
   const jwks = await fetchAppleJwks();
   const JWKS = jose.createLocalJWKSet(jwks);
 
