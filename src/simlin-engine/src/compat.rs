@@ -6,9 +6,8 @@ use std::io::BufRead;
 #[cfg(any(feature = "file_io", feature = "xmutil"))]
 use std::io::BufReader;
 
-use simlin_core::datamodel::Project;
-pub use simlin_core::{Result, Results};
-pub use simlin_engine::{self as engine, prost};
+use crate::common::Result;
+use crate::datamodel::Project;
 
 #[cfg(feature = "file_io")]
 use std::collections::HashMap;
@@ -20,18 +19,14 @@ use std::fs::File;
 use std::result::Result as StdResult;
 
 #[cfg(feature = "file_io")]
-use simlin_core::common::{Canonical, Ident};
+use crate::canonicalize;
 #[cfg(feature = "file_io")]
-use simlin_core::{Method, Specs, canonicalize};
+use crate::common::{Canonical, Ident};
+#[cfg(feature = "file_io")]
+use crate::results::{Method, Results, Specs};
 
-pub mod mdl;
-pub mod xmile;
-
-#[cfg(test)]
-mod test_sir_xmile;
-
-#[cfg(all(test, feature = "xmutil"))]
-mod test_open_vensim;
+use crate::mdl;
+use crate::xmile;
 
 pub fn to_xmile(project: &Project) -> Result<String> {
     xmile::project_to_xmile(project)
@@ -39,7 +34,7 @@ pub fn to_xmile(project: &Project) -> Result<String> {
 
 #[cfg(feature = "xmutil")]
 pub fn open_vensim_xmutil(contents: &str) -> Result<Project> {
-    use simlin_core::common::{Error, ErrorCode, ErrorKind};
+    use crate::common::{Error, ErrorCode, ErrorKind};
     use xmutil::convert_vensim_mdl;
 
     let (xmile_src, logs) = convert_vensim_mdl(contents, false);

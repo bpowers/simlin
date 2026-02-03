@@ -9,11 +9,11 @@ use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
-use simlin_compat::{load_csv, load_dat, xmile};
-use simlin_core::common::{Canonical, Ident};
+use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::interpreter::Simulation;
 use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{Project, Results, Vm, project_io};
+use simlin_engine::{load_csv, load_dat, xmile};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
@@ -230,7 +230,7 @@ fn simulate_path(xmile_path: &str) {
 
     // serialized our project through protobufs and ensure we don't see problems
     let results3 = {
-        use simlin_compat::prost::Message;
+        use simlin_engine::prost::Message;
 
         let pb_project_inner = serialize(&datamodel_project);
         let pb_project = &pb_project_inner;

@@ -14,9 +14,9 @@ use crate::bytecode::{
 };
 use crate::common::{Canonical, Ident, Result};
 use crate::dimensions::{Dimension, match_dimensions_two_pass};
-use crate::sim_err;
 #[allow(unused_imports)]
-pub use simlin_core::{Method, Results, Specs};
+pub use crate::results::{Method, Results, Specs};
+use crate::sim_err;
 
 /// Key for looking up compiled modules.
 /// A model can have multiple instantiations with different input sets,

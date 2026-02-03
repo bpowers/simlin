@@ -4,7 +4,7 @@
 
 //! Dimension building methods for MDL to datamodel conversion.
 
-use simlin_core::datamodel::{Dimension, DimensionElements};
+use crate::datamodel::{Dimension, DimensionElements};
 
 use crate::mdl::ast::{Equation as MdlEquation, MdlItem, SubscriptElement};
 use crate::mdl::xmile_compat::space_to_underbar;
@@ -293,7 +293,7 @@ impl<'input> ConversionContext<'input> {
 mod tests {
     use super::super::convert_mdl;
     use super::*;
-    use simlin_core::datamodel::Variable;
+    use crate::datamodel::Variable;
 
     #[test]
     fn test_element_ownership_larger_dimension_wins() {
@@ -531,7 +531,7 @@ x[DimA] = 1
         // Should be recognized and processed correctly
         if let Variable::Aux(a) = x {
             match &a.equation {
-                simlin_core::datamodel::Equation::Arrayed(dims, elements) => {
+                crate::datamodel::Equation::Arrayed(dims, elements) => {
                     assert_eq!(dims, &["dima"]);
                     assert_eq!(elements.len(), 2);
                 }
@@ -566,7 +566,7 @@ x[b1] = 2
 
         if let Variable::Aux(a) = x {
             match &a.equation {
-                simlin_core::datamodel::Equation::Arrayed(dims, elements) => {
+                crate::datamodel::Equation::Arrayed(dims, elements) => {
                     // Dimension should be dima (from the first equation)
                     assert_eq!(dims, &["dima"]);
                     assert_eq!(elements.len(), 2);

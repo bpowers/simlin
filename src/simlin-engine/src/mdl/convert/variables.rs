@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use simlin_core::datamodel::{
+use crate::datamodel::{
     self, DimensionElements, Equation, GraphicalFunction, GraphicalFunctionKind,
     GraphicalFunctionScale, Model, ModelGroup, Project, Variable, View, Visibility,
 };
@@ -122,7 +122,7 @@ impl<'input> ConversionContext<'input> {
 
         // Add dimension element names to namespace
         for dim in &self.dimensions {
-            if let simlin_core::datamodel::DimensionElements::Named(names) = &dim.elements {
+            if let crate::datamodel::DimensionElements::Named(names) = &dim.elements {
                 for name in names {
                     namespace.insert(canonical_name(name));
                 }
@@ -1013,7 +1013,7 @@ impl<'input> ConversionContext<'input> {
 #[cfg(test)]
 mod tests {
     use super::super::convert_mdl;
-    use simlin_core::datamodel::{Equation, Variable};
+    use crate::datamodel::{Equation, Variable};
 
     #[test]
     fn test_stock_conversion() {

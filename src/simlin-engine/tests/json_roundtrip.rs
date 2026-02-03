@@ -14,8 +14,8 @@
 use std::fs::File;
 use std::io::BufReader;
 
-use simlin_compat::xmile;
 use simlin_engine::prost::Message;
+use simlin_engine::xmile;
 use simlin_engine::{datamodel, json, project_io, serde as project_serde};
 
 /// Performs a full roundtrip through protobuf and JSON:

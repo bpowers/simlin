@@ -4,7 +4,7 @@
 
 //! Type definitions for MDL to datamodel conversion.
 
-use simlin_core::datamodel::{Dt, Equation, SimMethod, SimSpecs};
+use crate::datamodel::{Dt, Equation, SimMethod, SimSpecs};
 
 use crate::mdl::ast::FullEquation;
 

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use simlin_core::datamodel::{Equation, GraphicalFunction};
+use crate::datamodel::{Equation, GraphicalFunction};
 
 use super::ConversionContext;
 use super::helpers::{
@@ -669,7 +669,7 @@ impl<'input> ConversionContext<'input> {
 #[cfg(test)]
 mod tests {
     use super::super::convert_mdl;
-    use simlin_core::datamodel::{Equation, GraphicalFunctionKind, Variable};
+    use crate::datamodel::{Equation, GraphicalFunctionKind, Variable};
 
     #[test]
     fn test_top_level_integ_detected_as_stock() {

@@ -5,8 +5,8 @@
 use std::fs::File;
 use std::io::BufReader;
 
-use simlin_compat::xmile;
 use simlin_engine::Project;
+use simlin_engine::xmile;
 
 static TEST_MODELS: &[&str] = &[
     "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
@@ -68,8 +68,8 @@ fn roundtrips_model() {
             }
         }
 
-        assert!(project.models.contains_key(&simlin_core::common::Ident::<
-            simlin_core::common::Canonical,
+        assert!(project.models.contains_key(&simlin_engine::common::Ident::<
+            simlin_engine::common::Canonical,
         >::from_raw("main")));
     }
 }

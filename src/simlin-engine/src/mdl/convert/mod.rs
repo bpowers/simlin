@@ -23,7 +23,7 @@ use crate::mdl::view::{self, VensimView};
 
 use std::collections::{HashMap, HashSet};
 
-use simlin_core::datamodel::{Dimension, Project, SimMethod, Unit};
+use crate::datamodel::{Dimension, Project, SimMethod, Unit};
 
 use crate::mdl::ast::{Equation as MdlEquation, MdlItem, SubscriptElement};
 
@@ -300,7 +300,7 @@ pub fn convert_mdl(source: &str) -> Result<Project, ConvertError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use simlin_core::datamodel::{Dt, Equation, Variable};
+    use crate::datamodel::{Dt, Equation, Variable};
 
     #[test]
     fn test_simple_conversion() {
@@ -829,7 +829,7 @@ $192-192-192,0,Helvetica|10|B|0-0-0|0-0-0|0-0-0|-1--1--1|-1--1--1|96,96,100,0
         assert_eq!(model.views.len(), 1);
 
         // Verify the view contains elements
-        let simlin_core::datamodel::View::StockFlow(sf) = &model.views[0];
+        let crate::datamodel::View::StockFlow(sf) = &model.views[0];
         assert!(!sf.elements.is_empty(), "View should have elements");
     }
 
@@ -856,7 +856,7 @@ $font
         let model = &project.models[0];
 
         assert_eq!(model.views.len(), 1);
-        let simlin_core::datamodel::View::StockFlow(sf) = &model.views[0];
+        let crate::datamodel::View::StockFlow(sf) = &model.views[0];
         // Should have at least stock, flow, and maybe link elements
         assert!(
             sf.elements.len() >= 2,

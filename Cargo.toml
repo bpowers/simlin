@@ -4,8 +4,6 @@ resolver = "2"
 members = [
     "src/libsimlin",
     "src/simlin-cli",
-    "src/simlin-compat",
-    "src/simlin-core",
     "src/simlin-engine",
     "src/xmutil",
 ]

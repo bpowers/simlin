@@ -9,9 +9,9 @@ use std::io::BufReader;
 use std::rc::Rc;
 use std::result::Result as StdResult;
 
-use simlin_compat::xmile;
-use simlin_core::common::{Canonical, Ident, canonicalize};
+use simlin_engine::common::{Canonical, Ident, canonicalize};
 use simlin_engine::interpreter::Simulation;
+use simlin_engine::xmile;
 use simlin_engine::{Project, Results, Vm, ltm};
 
 const LTM_TOLERANCE: f64 = 0.05;

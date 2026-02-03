@@ -5,16 +5,16 @@
 use std::collections::HashMap;
 use std::io::{BufRead, Cursor, Write};
 
+use crate::common::{Result, canonicalize};
+use crate::datamodel;
+use crate::datamodel::Visibility;
+use crate::datamodel::{Equation, Rect, ViewElement};
 use crate::xmile::view_element::LinkEnd;
 use float_cmp::approx_eq;
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use simlin_core::common::{Result, canonicalize};
-use simlin_core::datamodel;
-use simlin_core::datamodel::Visibility;
-use simlin_core::datamodel::{Equation, Rect, ViewElement};
 
 trait ToXml<W: Clone + Write> {
     fn write_xml(&self, writer: &mut Writer<W>) -> Result<()>;
@@ -27,7 +27,7 @@ const STOCK_HEIGHT: f64 = 35.0;
 
 macro_rules! import_err(
     ($code:tt, $str:expr) => {{
-        use simlin_core::common::{Error, ErrorCode, ErrorKind};
+        use crate::common::{Error, ErrorCode, ErrorKind};
         Err(Error::new(ErrorKind::Model, ErrorCode::$code, Some($str)))
     }}
 );
@@ -364,8 +364,8 @@ pub struct Header {
     pub includes: Option<Includes>,
 }
 
-fn xml_error(err: std::io::Error) -> simlin_core::common::Error {
-    use simlin_core::common::{Error, ErrorCode, ErrorKind};
+fn xml_error(err: std::io::Error) -> crate::common::Error {
+    use crate::common::{Error, ErrorCode, ErrorKind};
 
     Error::new(
         ErrorKind::Import,
@@ -1149,8 +1149,7 @@ impl From<Model> for datamodel::Model {
                         .collect();
                     // Sort variables by canonical identifier for deterministic ordering
                     variables.sort_by(|a, b| {
-                        simlin_core::canonicalize(a.get_ident())
-                            .cmp(&simlin_core::canonicalize(b.get_ident()))
+                        crate::canonicalize(a.get_ident()).cmp(&crate::canonicalize(b.get_ident()))
                     });
                     variables
                 }
@@ -1291,16 +1290,16 @@ impl ViewType {
 
 pub mod view_element {
     use super::datamodel;
+    use crate::common::Result;
+    #[cfg(test)]
+    use crate::datamodel::StockFlow;
+    use crate::datamodel::view_element::LinkShape;
     use crate::xmile::{
         STOCK_HEIGHT, STOCK_WIDTH, ToXml, XmlWriter, write_tag, write_tag_end, write_tag_start,
         write_tag_start_with_attrs, write_tag_text, write_tag_with_attrs,
     };
     use quick_xml::Writer;
     use serde::{Deserialize, Deserializer, Serialize};
-    use simlin_core::common::Result;
-    #[cfg(test)]
-    use simlin_core::datamodel::StockFlow;
-    use simlin_core::datamodel::view_element::LinkShape;
 
     /// Normalize an angle to the range [0, 360).
     /// Use this to sanitize angles read from XMILE files before conversion.
@@ -3419,7 +3418,7 @@ impl From<datamodel::View> for View {
 
 #[test]
 fn test_view_roundtrip() {
-    use simlin_core::datamodel::Rect;
+    use crate::datamodel::Rect;
     let cases: &[_] = &[datamodel::View::StockFlow(datamodel::StockFlow {
         elements: vec![datamodel::ViewElement::Stock(
             datamodel::view_element::Stock {
@@ -4324,7 +4323,7 @@ pub fn project_to_xmile(project: &datamodel::Project) -> Result<String> {
 
     let result = writer.into_inner().into_inner();
 
-    use simlin_core::common::{Error, ErrorCode, ErrorKind};
+    use crate::common::{Error, ErrorCode, ErrorKind};
     String::from_utf8(result).map_err(|_err| {
         Error::new(
             ErrorKind::Import,
