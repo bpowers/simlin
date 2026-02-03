@@ -1362,15 +1362,24 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           y: element.cy - delta.y,
         });
       } else if (element instanceof LinkViewElement) {
-        // Links: if both from and to are in selection, link moves with them
-        // Arc adjustment is handled later
-        const from = getUid(element.fromUid);
-        const to = getUid(element.toUid);
-        const newTakeoffθ = takeoffθ({ element, from, to, arcPoint: defined(arcPoint) });
-        const newTakeoff = radToDeg(newTakeoffθ);
-        return element.merge({
-          arc: newTakeoff,
-        });
+        // Links: if both from and to are in selection, link maintains its arc (pure translation)
+        // Only recalculate arc if one endpoint is fixed (not in selection)
+        const fromInSelection = isInSelection(element.fromUid);
+        const toInSelection = isInSelection(element.toUid);
+
+        if (fromInSelection && toInSelection) {
+          // Both endpoints moving together - keep existing arc
+          return element;
+        } else {
+          // One endpoint fixed - arc needs adjustment
+          const from = getUid(element.fromUid);
+          const to = getUid(element.toUid);
+          const newTakeoffθ = takeoffθ({ element, from, to, arcPoint: defined(arcPoint) });
+          const newTakeoff = radToDeg(newTakeoffθ);
+          return element.merge({
+            arc: newTakeoff,
+          });
+        }
       } else {
         // Aux, Alias, Module, etc.
         return (element as AuxViewElement).merge({
