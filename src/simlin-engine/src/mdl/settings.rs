@@ -11,7 +11,7 @@
 //! - Type 15: Integration type (comma-separated values, 4th is method code)
 //! - Type 22: Unit equivalence strings
 
-use simlin_core::datamodel::{SimMethod, Unit};
+use crate::datamodel::{SimMethod, Unit};
 
 /// Parsed settings from an MDL file's settings section.
 #[derive(Debug, Default)]

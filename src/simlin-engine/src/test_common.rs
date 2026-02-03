@@ -687,7 +687,7 @@ impl TestProject {
         let results = vm.into_results();
 
         // Extract results - VM results use the same format as interpreter
-        let mut output = HashMap::new();
+        let mut output: HashMap<String, Vec<f64>> = HashMap::new();
 
         for (name, &offset) in &results.offsets {
             let mut values = Vec::new();

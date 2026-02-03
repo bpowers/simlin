@@ -10,20 +10,24 @@ mod ast;
 pub mod builtins;
 mod builtins_visitor;
 pub mod common;
+pub mod compat;
 mod compiler;
 pub mod datamodel;
 mod dimensions;
 pub mod json;
 pub mod json_sdai;
 mod lexer;
+pub mod mdl;
 mod model;
 mod parser;
 mod patch;
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[path = "project_io.gen.rs"]
 pub mod project_io;
+mod results;
 pub mod serde;
 mod variable;
+pub mod xmile;
 mod stdlib {
     include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));
 }
@@ -41,6 +45,10 @@ pub mod ltm;
 pub mod ltm_augment;
 mod project;
 pub mod test_common;
+#[cfg(all(test, feature = "xmutil"))]
+mod test_open_vensim;
+#[cfg(test)]
+mod test_sir_xmile;
 #[cfg(test)]
 mod testutils;
 #[cfg(test)]
@@ -55,10 +63,16 @@ pub use self::interpreter::Simulation;
 pub use self::model::{ModelStage1, resolve_non_private_dependencies};
 pub use self::patch::apply_patch;
 pub use self::project::Project;
+pub use self::results::{Method, Results, Specs as SimSpecs};
 pub use self::variable::{Variable, identifier_set};
 pub use self::vm::Vm;
-// Re-export results types from simlin-core
-pub use simlin_core::{Method, Results, Specs as SimSpecs};
+
+// Re-export compat functions at the crate root for convenience
+#[cfg(feature = "xmutil")]
+pub use self::compat::open_vensim_xmutil;
+#[cfg(feature = "file_io")]
+pub use self::compat::{load_csv, load_dat};
+pub use self::compat::{open_vensim, open_xmile, to_xmile};
 
 #[cfg(test)]
 mod protobuf_freshness_tests {

@@ -5,7 +5,7 @@
 //! AST types for the Vensim MDL parser.
 //!
 //! These types are produced by the recursive descent parser from normalized
-//! tokens and later converted to `simlin_core::datamodel` structures.
+//! tokens and later converted to `crate::datamodel` structures.
 
 use std::borrow::Cow;
 

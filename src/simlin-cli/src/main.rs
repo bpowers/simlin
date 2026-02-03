@@ -13,14 +13,14 @@ use simlin::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_issues,
     format_simulation_error,
 };
-use simlin_compat::engine::common::ErrorKind;
-use simlin_compat::engine::datamodel::Project as DatamodelProject;
-use simlin_compat::engine::{
+use simlin_engine::common::ErrorKind;
+use simlin_engine::datamodel::Project as DatamodelProject;
+use simlin_engine::prost::Message;
+use simlin_engine::{
     Error, ErrorCode, Project, Result, Results, Simulation, Variable, Vm, datamodel, project_io,
     serde,
 };
-use simlin_compat::prost::Message;
-use simlin_compat::{load_csv, load_dat, open_vensim, open_xmile, to_xmile};
+use simlin_engine::{load_csv, load_dat, open_vensim, open_xmile, to_xmile};
 
 const VERSION: &str = "1.0";
 const EXIT_FAILURE: i32 = 1;
@@ -215,7 +215,7 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
         let engine_project = Project::from(project.clone());
 
         // First detect and output loops
-        use simlin_compat::engine::ltm;
+        use simlin_engine::ltm;
         if let Ok(loops_by_model) = ltm::detect_loops(&engine_project) {
             // Output loop information to stderr
             for (model_name, loops) in &loops_by_model {

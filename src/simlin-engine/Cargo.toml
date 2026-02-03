@@ -13,9 +13,10 @@ crate-type = ["rlib"]
 default = ["schema", "ai_info"]
 schema = ["dep:schemars"]
 ai_info = ["dep:ed25519", "dep:base64"]
+file_io = ["dep:csv"]
+xmutil = ["dep:xmutil"]
 
 [dependencies]
-simlin-core = { version = "0.1", path = "../simlin-core" }
 lazy_static = "1"
 unicode-xid = "0.2"
 prost = "0.14"
@@ -27,13 +28,38 @@ base64 = { version = "0.22", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = { version = "1", features = ["preserve_order"], optional = true }
+# compat dependencies
+quick-xml = { version = "0.38", features = [ "serialize", "overlapped-lists" ] }
+csv = { version = "1", optional = true }
+xmutil = { version = "1", path = "../xmutil", optional = true }
 
 [dev-dependencies]
+csv = "1"
 rand = "0.9"
 proptest = "1.5"
 jsonschema = { version = "0.26", default-features = false }
 criterion = { version = "0.5", features = ["html_reports"] }
 sha2 = "0.10"
+test-generator = { version = "0.3.0", git = "https://github.com/bpowers/test-generator", rev = "b78145bfb6a6f81425dfd6fbacb9c03624e79b2c" }
+ed25519-dalek = "2"
+ssh-key = "0.6"
+
+[[test]]
+name = "simulate"
+required-features = ["file_io"]
+
+[[test]]
+name = "simulate_ltm"
+required-features = ["file_io"]
+
+[[test]]
+name = "roundtrip"
+
+[[test]]
+name = "mdl_equivalence"
+
+[[test]]
+name = "json_roundtrip"
 
 [[bench]]
 name = "array_ops"

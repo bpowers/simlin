@@ -19,12 +19,12 @@
 use std::collections::HashMap;
 use std::fs;
 
-use simlin_compat::{open_vensim, open_vensim_xmutil};
-use simlin_core::canonicalize;
-use simlin_core::datamodel::{
+use simlin_engine::canonicalize;
+use simlin_engine::datamodel::{
     Aux, Dimension, DimensionElements, Dt, Equation, Flow, Model, Module, Project, SimSpecs, Stock,
     Variable, View, ViewElement, view_element,
 };
+use simlin_engine::{open_vensim, open_vensim_xmutil};
 
 /// Models that should produce equivalent output from both parsers.
 /// Add models here as they pass equivalence testing.

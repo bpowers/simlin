@@ -2562,7 +2562,7 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
     let slice = std::slice::from_raw_parts(data, len);
     let mut reader = BufReader::new(slice);
 
-    match simlin_compat::open_xmile(&mut reader) {
+    match simlin_engine::open_xmile(&mut reader) {
         Ok(datamodel_project) => {
             let project: engine::Project = datamodel_project.into();
             let boxed = Box::new(SimlinProject {
@@ -2620,7 +2620,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
         }
     };
 
-    match simlin_compat::open_vensim(contents) {
+    match simlin_engine::open_vensim(contents) {
         Ok(datamodel_project) => {
             let project: engine::Project = datamodel_project.into();
             let boxed = Box::new(SimlinProject {
@@ -2682,7 +2682,7 @@ pub unsafe extern "C" fn simlin_project_serialize_xmile(
     };
 
     let project_locked = proj.project.lock().unwrap();
-    match simlin_compat::to_xmile(&project_locked.datamodel) {
+    match simlin_engine::to_xmile(&project_locked.datamodel) {
         Ok(xmile_str) => {
             let bytes = xmile_str.into_bytes();
             let len = bytes.len();

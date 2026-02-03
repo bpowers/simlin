@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use simlin_core::datamodel::{self, View, ViewElement, view_element};
+use crate::datamodel::{self, View, ViewElement, view_element};
 
 use std::collections::HashSet;
 

@@ -5,7 +5,7 @@
 //! Vensim MDL file parser.
 //!
 //! This module provides a pure Rust implementation for parsing Vensim MDL files
-//! directly into `simlin_core::datamodel::Project` structures, replacing the
+//! directly into `crate::datamodel::Project` structures, replacing the
 //! C++ xmutil dependency.
 //!
 //! See `CLAUDE.md` in this directory for implementation context and goals.
@@ -26,8 +26,8 @@ pub use lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
 pub use normalizer::{NormalizerError, NormalizerErrorCode, Token, TokenNormalizer};
 pub use reader::{EquationReader, ReaderError};
 
-use simlin_core::datamodel::Project;
-use simlin_core::{Error, ErrorCode, ErrorKind, Result};
+use crate::common::{Error, ErrorCode, ErrorKind, Result};
+use crate::datamodel::Project;
 
 use convert::convert_mdl;
 
@@ -82,7 +82,7 @@ outflow = 5
         assert!(!project.models[0].variables.is_empty());
 
         // Verify stock has inflows/outflows
-        use simlin_core::datamodel::Variable;
+        use crate::datamodel::Variable;
         let stock = project.models[0]
             .variables
             .iter()
