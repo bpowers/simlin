@@ -921,6 +921,35 @@ export function applyGroupMovement(input: GroupMovementInput): GroupMovementOutp
       continue;
     }
 
+    // Single-flow selection without segmentIndex: delegate to UpdateFlow for flows
+    // with cloud endpoints to preserve perpendicular drag L-shape behavior
+    if (selection.size === 1) {
+      const pts = el.points;
+      if (pts.size >= 2) {
+        const sourceId = first(pts).attachedToUid;
+        const sinkId = last(pts).attachedToUid;
+        const source = sourceId !== undefined ? originalElements.get(sourceId) : undefined;
+        const sink = sinkId !== undefined ? originalElements.get(sinkId) : undefined;
+        const hasCloud = source instanceof CloudViewElement || sink instanceof CloudViewElement;
+
+        if (
+          hasCloud &&
+          source &&
+          sink &&
+          (source instanceof StockViewElement || source instanceof CloudViewElement) &&
+          (sink instanceof StockViewElement || sink instanceof CloudViewElement)
+        ) {
+          const ends = List<StockViewElement | CloudViewElement>([source, sink]);
+          const [newFlow, newClouds] = UpdateFlow(el, ends, delta, undefined);
+          updatedElements = updatedElements.set(uid, newFlow);
+          for (const cloud of newClouds) {
+            updatedElements = updatedElements.set(cloud.uid, cloud);
+          }
+          continue;
+        }
+      }
+    }
+
     const [newFlow, sideEffects] = processSelectedFlow(el, delta, isInSelection, preProcessedFlows, (flowUid) =>
       originalElements.get(flowUid),
     );

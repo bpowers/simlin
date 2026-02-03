@@ -385,6 +385,113 @@ describe('Group Movement', () => {
     });
   });
 
+  describe('Cloud-stock flow perpendicular drag behavior', () => {
+    it('should create L-shape when single cloud-stock flow dragged perpendicular', () => {
+      // Setup: Cloud -> Flow (selected) -> Stock, horizontal flow
+      // This tests the behavior from UpdateFlow where perpendicular drag
+      // converts a 2-point flow to an L-shape and moves the cloud endpoint.
+      const cloud = makeCloud(1, 2, 100, 100);
+      const stock = makeStock(3, 200, 100, [2], []);
+      const flow = makeFlow(2, 150, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
+      ]);
+
+      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock);
+
+      // Only select the flow (single-flow selection, not group movement)
+      const selection = Set<UID>([2]);
+      // Drag DOWN 30 (perpendicular to horizontal flow, > 5px threshold)
+      // delta is subtracted, so y: -30 moves down
+      const delta = { x: 0, y: -30 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Stock should NOT move
+      expect((result.get(3) as StockViewElement).cx).toBe(200);
+      expect((result.get(3) as StockViewElement).cy).toBe(100);
+
+      // Cloud should move down (perpendicular to flow direction)
+      const newCloud = result.get(1) as CloudViewElement;
+      expect(newCloud.cx).toBe(100); // x unchanged
+      expect(newCloud.cy).toBe(130); // moved down 30
+
+      // Flow should become L-shaped (3 points)
+      const newFlow = result.get(2) as FlowViewElement;
+      expect(newFlow.points.size).toBe(3);
+
+      // First point: at cloud's new position
+      expect(newFlow.points.first()!.x).toBe(100);
+      expect(newFlow.points.first()!.y).toBe(130);
+
+      // Middle point: corner (at stock's x, cloud's new y)
+      expect(newFlow.points.get(1)!.x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points.get(1)!.y).toBe(130);
+
+      // Last point: at stock (unchanged)
+      expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points.last()!.y).toBe(100);
+    });
+
+    it('should not create L-shape when perpendicular drag is too small', () => {
+      // When perpendicular movement is < 5px, the flow should remain 2-point
+      // and just clamp the valve (no L-shape conversion)
+      const cloud = makeCloud(1, 2, 100, 100);
+      const stock = makeStock(3, 200, 100, [2], []);
+      const flow = makeFlow(2, 150, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
+      ]);
+
+      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock);
+
+      // Small perpendicular drag (< 5px threshold)
+      const selection = Set<UID>([2]);
+      const delta = { x: 0, y: -3 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Flow should remain 2-point (no L-shape)
+      const newFlow = result.get(2) as FlowViewElement;
+      expect(newFlow.points.size).toBe(2);
+
+      // Cloud should NOT move
+      expect((result.get(1) as CloudViewElement).cy).toBe(100);
+    });
+
+    it('should slide valve along path when single cloud-stock flow dragged parallel', () => {
+      // When drag is parallel to the flow (not perpendicular), valve should
+      // slide along the flow path, not convert to L-shape
+      const cloud = makeCloud(1, 2, 100, 100);
+      const stock = makeStock(3, 200, 100, [2], []);
+      const flow = makeFlow(2, 140, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
+      ]);
+
+      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock);
+
+      // Parallel drag (along the flow)
+      const selection = Set<UID>([2]);
+      const delta = { x: -20, y: 0 }; // Move right 20
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Flow should remain 2-point
+      const newFlow = result.get(2) as FlowViewElement;
+      expect(newFlow.points.size).toBe(2);
+
+      // Valve should move right (clamped to flow path)
+      // Original: 140, proposed: 160
+      // Flow spans from 100 to 177.5 (stock edge minus 10px margin = 167.5)
+      expect(newFlow.cx).toBe(160);
+      expect(newFlow.cy).toBe(100);
+
+      // Cloud should NOT move (parallel drag)
+      expect((result.get(1) as CloudViewElement).cx).toBe(100);
+    });
+  });
+
   describe('Flow in selection, endpoint stocks not in selection', () => {
     it('should only move valve when flow selected but attached stocks are not', () => {
       // Setup: Stock A (not selected) -> Flow 1 (selected) -> Stock B (not selected)
