@@ -400,11 +400,16 @@ export function processSelectedFlow(
     ];
   } else {
     // Neither endpoint is selected. For cloud-cloud flows, move the entire flow
-    // and both clouds together. For stock-attached flows, just move the valve.
+    // and both clouds together. For flows with cloud endpoints, use UpdateFlow
+    // to allow perpendicular drag rerouting. For stock-to-stock flows, just move
+    // the valve.
     const sourceEl = sourceUid !== undefined ? getElementByUid(sourceUid) : undefined;
     const sinkEl = sinkUid !== undefined ? getElementByUid(sinkUid) : undefined;
     const sourceIsCloud = sourceEl instanceof CloudViewElement;
     const sinkIsCloud = sinkEl instanceof CloudViewElement;
+    const sourceIsStock = sourceEl instanceof StockViewElement;
+    const sinkIsStock = sinkEl instanceof StockViewElement;
+    const hasCloud = sourceIsCloud || sinkIsCloud;
 
     // Cloud-to-cloud flows: translate everything uniformly (matches UpdateFlow behavior)
     if (sourceIsCloud && sinkIsCloud) {
@@ -432,7 +437,20 @@ export function processSelectedFlow(
       return [updatedFlow, sideEffects];
     }
 
-    // Stock-attached flows: move valve but clamp to flow path
+    // Cloud-stock flows: delegate to UpdateFlow for perpendicular drag L-shape behavior
+    if (hasCloud && sourceEl && sinkEl && (sourceIsStock || sourceIsCloud) && (sinkIsStock || sinkIsCloud)) {
+      const ends = List<StockViewElement | CloudViewElement>([
+        sourceEl as StockViewElement | CloudViewElement,
+        sinkEl as StockViewElement | CloudViewElement,
+      ]);
+      const [newFlow, newClouds] = UpdateFlow(flow, ends, delta, undefined);
+      for (const cloud of newClouds) {
+        sideEffects = sideEffects.push(cloud);
+      }
+      return [newFlow, sideEffects];
+    }
+
+    // Stock-to-stock flows: move valve but clamp to flow path
     const proposedValve = {
       x: flow.cx - delta.x,
       y: flow.cy - delta.y,

@@ -425,6 +425,60 @@ describe('Group Movement', () => {
   });
 
   describe('Cloud-stock flow perpendicular drag behavior', () => {
+    it('should create L-shape when cloud-stock flow in group selection dragged perpendicular', () => {
+      // Setup: Cloud -> Flow (selected) -> Stock, horizontal flow
+      // This tests the bug where selecting a flow with a cloud endpoint as part
+      // of a group (e.g., flow + aux) prevents perpendicular drag rerouting.
+      // The cloud should move and the flow should become L-shaped, same as single-flow selection.
+      const cloud = makeCloud(1, 2, 100, 100);
+      const stock = makeStock(3, 200, 100, [2], []);
+      const flow = makeFlow(2, 150, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
+      ]);
+      // Add an aux that's also selected (making this a group selection)
+      const aux = makeAux(4, 300, 200);
+
+      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock).set(4, aux);
+
+      // Select the flow AND the aux (group selection, but neither flow endpoint is selected)
+      const selection = Set<UID>([2, 4]);
+      // Drag DOWN 30 (perpendicular to horizontal flow, > 5px threshold)
+      // delta is subtracted, so y: -30 moves down
+      const delta = { x: 0, y: -30 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Stock should NOT move (not selected)
+      expect((result.get(3) as StockViewElement).cx).toBe(200);
+      expect((result.get(3) as StockViewElement).cy).toBe(100);
+
+      // Aux should move with the group
+      expect((result.get(4) as AuxViewElement).cx).toBe(300);
+      expect((result.get(4) as AuxViewElement).cy).toBe(230);
+
+      // Cloud should move down (perpendicular to flow direction)
+      const newCloud = result.get(1) as CloudViewElement;
+      expect(newCloud.cx).toBe(100); // x unchanged
+      expect(newCloud.cy).toBe(130); // moved down 30
+
+      // Flow should become L-shaped (3 points)
+      const newFlow = result.get(2) as FlowViewElement;
+      expect(newFlow.points.size).toBe(3);
+
+      // First point: at cloud's new position
+      expect(newFlow.points.first()!.x).toBe(100);
+      expect(newFlow.points.first()!.y).toBe(130);
+
+      // Middle point: corner (at stock's x, cloud's new y)
+      expect(newFlow.points.get(1)!.x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points.get(1)!.y).toBe(130);
+
+      // Last point: at stock (unchanged)
+      expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points.last()!.y).toBe(100);
+    });
+
     it('should create L-shape when single cloud-stock flow dragged perpendicular', () => {
       // Setup: Cloud -> Flow (selected) -> Stock, horizontal flow
       // This tests the behavior from UpdateFlow where perpendicular drag
