@@ -5,10 +5,8 @@ ignore = []
 [licenses]
 allow = [
     "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
     "MIT",
     "Unicode-3.0",
-    "Zlib",
 ]
 confidence-threshold = 0.9
 
@@ -17,8 +15,6 @@ multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
 skip = [
-    # transitive dependency of petgraph version mismatch
-    { crate = "hashbrown@0.15.5", reason = "petgraph 0.8.3 transitive dependency" },
 ]
 
 [sources]
