@@ -900,8 +900,15 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         }
       });
 
-      // Second pass: update flows NOT in selection that are attached to stocks IN selection
+      // Second pass: update flows NOT in selection that are attached to endpoints IN selection
+      // To preserve multi-flow spacing, we collect all flows attached to each stock
+      // and update them together so offset calculations consider all attached flows.
       if (this.selectionUpdates.size > 1) {
+        // First, collect flows grouped by their attached endpoint
+        const flowsBySourceEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
+        const flowsBySinkEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
+        const bothEndsSelectedFlows: FlowViewElement[] = [];
+
         for (const [uid, element] of this.elements) {
           if (!(element instanceof FlowViewElement)) continue;
           if (selectedUids.has(uid)) continue; // Already processed
@@ -914,49 +921,61 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           const sourceEndpointSelected = sourceUid !== undefined && selectedUids.has(sourceUid);
           const sinkEndpointSelected = sinkUid !== undefined && selectedUids.has(sinkUid);
 
-          if (sourceEndpointSelected || sinkEndpointSelected) {
-            // This flow is attached to a selected endpoint (stock or cloud) but the flow itself is not selected
-            if (sourceEndpointSelected && sinkEndpointSelected) {
-              // Both ends selected: translate entire flow uniformly
-              const newPoints = pts.map((p) =>
-                p.merge({
-                  x: p.x - x,
-                  y: p.y - y,
-                }),
-              );
-              otherUpdates = otherUpdates.push(
-                element.merge({
-                  x: element.cx - x,
-                  y: element.cy - y,
-                  points: newPoints,
-                }),
-              );
-            } else if (sourceEndpointSelected) {
-              // Only source endpoint is selected - it already moved in pass 1,
-              // so pass zero delta to just re-route the flow to the new position
-              const sourceEndpoint = this.selectionUpdates.get(sourceUid!);
-              if (sourceEndpoint instanceof StockViewElement) {
-                const [, updatedFlows] = UpdateStockAndFlows(sourceEndpoint, List([element]), { x: 0, y: 0 });
-                if (updatedFlows.size > 0) {
-                  otherUpdates = otherUpdates.push(updatedFlows.first()!);
-                }
-              } else if (sourceEndpoint instanceof CloudViewElement) {
-                const [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, element, { x: 0, y: 0 });
-                otherUpdates = otherUpdates.push(updatedFlow);
-              }
-            } else if (sinkEndpointSelected) {
-              // Only sink endpoint is selected - it already moved in pass 1,
-              // so pass zero delta to just re-route the flow to the new position
-              const sinkEndpoint = this.selectionUpdates.get(sinkUid!);
-              if (sinkEndpoint instanceof StockViewElement) {
-                const [, updatedFlows] = UpdateStockAndFlows(sinkEndpoint, List([element]), { x: 0, y: 0 });
-                if (updatedFlows.size > 0) {
-                  otherUpdates = otherUpdates.push(updatedFlows.first()!);
-                }
-              } else if (sinkEndpoint instanceof CloudViewElement) {
-                const [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, element, { x: 0, y: 0 });
-                otherUpdates = otherUpdates.push(updatedFlow);
-              }
+          if (sourceEndpointSelected && sinkEndpointSelected) {
+            bothEndsSelectedFlows.push(element);
+          } else if (sourceEndpointSelected && sourceUid !== undefined) {
+            const existing = flowsBySourceEndpoint.get(sourceUid) || List<FlowViewElement>();
+            flowsBySourceEndpoint.set(sourceUid, existing.push(element));
+          } else if (sinkEndpointSelected && sinkUid !== undefined) {
+            const existing = flowsBySinkEndpoint.get(sinkUid) || List<FlowViewElement>();
+            flowsBySinkEndpoint.set(sinkUid, existing.push(element));
+          }
+        }
+
+        // Handle flows where both ends are selected: translate uniformly
+        for (const element of bothEndsSelectedFlows) {
+          const pts = element.points;
+          const newPoints = pts.map((p) =>
+            p.merge({
+              x: p.x - x,
+              y: p.y - y,
+            }),
+          );
+          otherUpdates = otherUpdates.push(
+            element.merge({
+              x: element.cx - x,
+              y: element.cy - y,
+              points: newPoints,
+            }),
+          );
+        }
+
+        // Update flows grouped by source endpoint - pass all flows at once to preserve spacing
+        for (const [endpointUid, flows] of flowsBySourceEndpoint) {
+          const endpoint = this.selectionUpdates.get(endpointUid);
+          if (endpoint instanceof StockViewElement) {
+            const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, { x: 0, y: 0 });
+            otherUpdates = otherUpdates.concat(updatedFlows);
+          } else if (endpoint instanceof CloudViewElement) {
+            // Clouds only have one flow, so process individually
+            for (const flow of flows) {
+              const [, updatedFlow] = UpdateCloudAndFlow(endpoint, flow, { x: 0, y: 0 });
+              otherUpdates = otherUpdates.push(updatedFlow);
+            }
+          }
+        }
+
+        // Update flows grouped by sink endpoint - pass all flows at once to preserve spacing
+        for (const [endpointUid, flows] of flowsBySinkEndpoint) {
+          const endpoint = this.selectionUpdates.get(endpointUid);
+          if (endpoint instanceof StockViewElement) {
+            const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, { x: 0, y: 0 });
+            otherUpdates = otherUpdates.concat(updatedFlows);
+          } else if (endpoint instanceof CloudViewElement) {
+            // Clouds only have one flow, so process individually
+            for (const flow of flows) {
+              const [, updatedFlow] = UpdateCloudAndFlow(endpoint, flow, { x: 0, y: 0 });
+              otherUpdates = otherUpdates.push(updatedFlow);
             }
           }
         }
