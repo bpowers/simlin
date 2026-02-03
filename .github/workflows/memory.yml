@@ -23,13 +23,16 @@ jobs:
           python-version: '3.13'
 
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh && echo "$HOME/.local/bin" >> $GITHUB_PATH
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: nightly
           components: rust-src
+          # Cache is enabled by default with actions-rust-lang/setup-rust-toolchain
 
       - name: Install dependencies
         run: |

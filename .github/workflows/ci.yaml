@@ -7,6 +7,11 @@ name: CI
   pull_request:
     branches:
       - main
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
 jobs:
   build:
     name: Build
@@ -24,6 +29,18 @@ jobs:
 
       - name: Install Rust toolchain
         run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-build-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-build-${{ matrix.os }}-
 
       - name: Compile
         run: cargo build --workspace --verbose
@@ -47,16 +64,31 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-lint-
+
       - name: Check formatting
         run: cargo fmt -- --check --color=auto
 
       - name: Lint with Clippy
         run: cargo clippy --workspace -- -D warnings
 
-      - name: Install and run cargo-deny
-        run: |
-          cargo install --locked cargo-deny
-          cargo deny check
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Run cargo-deny
+        run: cargo deny check
 
   coverage:
     name: Code Coverage
@@ -68,10 +100,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-coverage-
+
+      - name: Install cargo-tarpaulin
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+
       - name: Run cargo-tarpaulin
-        run: |
-          cargo install cargo-tarpaulin
-          cargo tarpaulin --out Xml
+        run: cargo tarpaulin --out Xml
 
       - name: Upload Coverage
         uses: codecov/codecov-action@v5
@@ -84,28 +134,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Install node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'pnpm'
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-wasm-
 
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          architecture: 'x64'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: python -m pip install jupyterlab
 
+      - name: Install pnpm dependencies
+        run: pnpm install
+
       - name: Build the Typescript project
-        run: |
-          rustup target add wasm32-unknown-unknown
-          pnpm install
-          DISABLE_WASM_OPT=1 pnpm build
+        run: DISABLE_WASM_OPT=1 pnpm build
 
       - name: Run TypeScript tests
         run: pnpm test
