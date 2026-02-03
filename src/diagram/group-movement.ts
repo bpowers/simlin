@@ -383,12 +383,27 @@ export function routeUnselectedFlows(
         updatedFlows = updatedFlows.push(updatedFlow);
       }
     } else if (movedEndpoint instanceof CloudViewElement) {
-      // For clouds, use UpdateCloudAndFlow for orthogonal re-routing
-      // Trust UpdateCloudAndFlow's output - it handles axis clamping correctly
+      // For clouds, use UpdateCloudAndFlow for routing but honor full delta if cloud is selected
       const originalCloud = getOriginalElement(endpointUid) as CloudViewElement | undefined;
       if (originalCloud) {
+        const cloudIsSelected = selection.has(endpointUid);
+        const newCloudX = originalCloud.cx - delta.x;
+        const newCloudY = originalCloud.cy - delta.y;
         for (const flow of flows) {
-          const [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+          let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+          // If cloud is selected, ensure flow endpoint matches full delta position
+          if (cloudIsSelected) {
+            const cloudPointIndex =
+              first(updatedFlow.points).attachedToUid === endpointUid ? 0 : updatedFlow.points.size - 1;
+            const cloudPoint = updatedFlow.points.get(cloudPointIndex);
+            if (cloudPoint) {
+              const updatedPoints = updatedFlow.points.set(
+                cloudPointIndex,
+                cloudPoint.merge({ x: newCloudX, y: newCloudY }),
+              );
+              updatedFlow = updatedFlow.set('points', updatedPoints);
+            }
+          }
           updatedFlows = updatedFlows.push(updatedFlow);
         }
       }
@@ -416,12 +431,27 @@ export function routeUnselectedFlows(
         updatedFlows = updatedFlows.push(updatedFlow);
       }
     } else if (movedEndpoint instanceof CloudViewElement) {
-      // For clouds, use UpdateCloudAndFlow for orthogonal re-routing
-      // Trust UpdateCloudAndFlow's output - it handles axis clamping correctly
+      // For clouds, use UpdateCloudAndFlow for routing but honor full delta if cloud is selected
       const originalCloud = getOriginalElement(endpointUid) as CloudViewElement | undefined;
       if (originalCloud) {
+        const cloudIsSelected = selection.has(endpointUid);
+        const newCloudX = originalCloud.cx - delta.x;
+        const newCloudY = originalCloud.cy - delta.y;
         for (const flow of flows) {
-          const [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+          let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+          // If cloud is selected, ensure flow endpoint matches full delta position
+          if (cloudIsSelected) {
+            const cloudPointIndex =
+              last(updatedFlow.points).attachedToUid === endpointUid ? updatedFlow.points.size - 1 : 0;
+            const cloudPoint = updatedFlow.points.get(cloudPointIndex);
+            if (cloudPoint) {
+              const updatedPoints = updatedFlow.points.set(
+                cloudPointIndex,
+                cloudPoint.merge({ x: newCloudX, y: newCloudY }),
+              );
+              updatedFlow = updatedFlow.set('points', updatedPoints);
+            }
+          }
           updatedFlows = updatedFlows.push(updatedFlow);
         }
       }
