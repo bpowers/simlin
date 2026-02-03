@@ -271,3 +271,96 @@ fn safediv_mixed_with_div() {
         ],
     );
 }
+
+mod scan_number_tests {
+    use super::super::scan_number;
+
+    #[test]
+    fn test_integer() {
+        assert_eq!(scan_number("123"), 3);
+        assert_eq!(scan_number("0"), 1);
+        assert_eq!(scan_number("9876543210"), 10);
+    }
+
+    #[test]
+    fn test_decimal() {
+        assert_eq!(scan_number("123.456"), 7);
+        assert_eq!(scan_number("0.5"), 3);
+        assert_eq!(scan_number(".5"), 2);
+    }
+
+    #[test]
+    fn test_decimal_no_fractional_part() {
+        // "123." is valid - decimal with no fractional digits
+        assert_eq!(scan_number("123."), 4);
+    }
+
+    #[test]
+    fn test_exponent_lowercase() {
+        assert_eq!(scan_number("1e10"), 4);
+        assert_eq!(scan_number("1e-10"), 5);
+        assert_eq!(scan_number("1e+10"), 5);
+    }
+
+    #[test]
+    fn test_exponent_uppercase() {
+        assert_eq!(scan_number("1E10"), 4);
+        assert_eq!(scan_number("1E-10"), 5);
+        assert_eq!(scan_number("1E+10"), 5);
+    }
+
+    #[test]
+    fn test_full_scientific() {
+        assert_eq!(scan_number("4.0e5"), 5);
+        assert_eq!(scan_number("4.0e-5"), 6);
+        assert_eq!(scan_number("2.06101e+06"), 11);
+        assert_eq!(scan_number("1.5e-10"), 7);
+    }
+
+    #[test]
+    fn test_exponent_with_decimal() {
+        // Exponent part can also have decimal: 1e2.5 (unusual but supported by original regex)
+        assert_eq!(scan_number("1e2.5"), 5);
+    }
+
+    #[test]
+    fn test_partial_match() {
+        // Should stop at non-number characters
+        assert_eq!(scan_number("123abc"), 3);
+        assert_eq!(scan_number("1.5 + 2"), 3);
+    }
+
+    #[test]
+    fn test_leading_dot() {
+        // .5 is a valid number
+        assert_eq!(scan_number(".5"), 2);
+        assert_eq!(scan_number(".123e10"), 7);
+    }
+
+    #[test]
+    fn test_empty_returns_zero() {
+        assert_eq!(scan_number(""), 0);
+    }
+
+    #[test]
+    fn test_non_number_returns_zero() {
+        assert_eq!(scan_number("abc"), 0);
+    }
+
+    #[test]
+    fn test_just_dot() {
+        // Just "." should return 1 (it's the start of a potential decimal)
+        assert_eq!(scan_number("."), 1);
+    }
+
+    #[test]
+    fn test_exponent_without_integer_part() {
+        // Note: scan_number is only called when is_number_start() is true,
+        // meaning the first char is a digit or '.'. The lexer would not call
+        // scan_number on "e10" - it would parse it as an identifier.
+        // However, the regex \d*(\.\d*)?([eE][-+]?(\d*(\.\d*)?)?)? does match
+        // "e10" with a zero-length match for \d*, then consuming the exponent.
+        // For consistency with the regex behavior, we match what the regex does.
+        assert_eq!(scan_number("e10"), 3);
+    }
+}

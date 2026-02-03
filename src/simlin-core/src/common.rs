@@ -6,8 +6,6 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::{error, result};
 
-use lazy_static::lazy_static;
-use regex::Regex;
 use std::borrow::Cow;
 
 // Legacy type aliases - to be deprecated
@@ -245,16 +243,9 @@ pub fn canonicalize(name: &str) -> Ident<Canonical> {
     // for quotedness as we should treat a quoted string as sacrosanct
     let name = name.trim();
 
-    lazy_static! {
-        // TODO: \x{C2AO} ?
-        static ref UNDERSCORE_RE: Regex = Regex::new(r"(\\n|\\r|\n|\r| |\x{00A0})+").unwrap();
-        // parses a."b \" c" into: ('a.', '"b \" c"')
-        static ref QUOTED_RE: Regex = Regex::new(r#"[^"]+|"((\\")|[^"])*""#).unwrap();
-    }
-
     let mut canonicalized_name = String::with_capacity(name.len());
 
-    for part in QUOTED_RE.find_iter(name).map(|part| part.as_str()) {
+    for part in IdentifierPartIterator::new(name) {
         let bytes = part.as_bytes();
         let quoted: bool =
             { bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' };
@@ -270,7 +261,7 @@ pub fn canonicalize(name: &str) -> Ident<Canonical> {
         };
 
         let part = part.replace("\\\\", "\\");
-        let part = UNDERSCORE_RE.replace_all(&part, "_");
+        let part = replace_whitespace_with_underscore(&part);
         let part = part.to_lowercase();
 
         canonicalized_name.push_str(&part);
@@ -1062,5 +1053,245 @@ impl<'a> fmt::Display for IdentRef<'a, Canonical> {
 impl<'a> fmt::Display for CanonicalStr<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.inner)
+    }
+}
+
+// ===== Helper Functions for Regex-Free Parsing =====
+
+/// Replace whitespace sequences with underscores.
+/// Handles: literal `\n` and `\r` (two-character sequences), actual newlines/carriage returns,
+/// spaces, and non-breaking spaces (U+00A0). Consecutive matches become a single underscore.
+fn replace_whitespace_with_underscore(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    let mut in_whitespace = false;
+
+    while let Some(c) = chars.next() {
+        // Check for escaped sequences: literal \n or \r (two characters)
+        if c == '\\'
+            && let Some(&next) = chars.peek()
+            && (next == 'n' || next == 'r')
+        {
+            chars.next(); // consume the 'n' or 'r'
+            if !in_whitespace {
+                result.push('_');
+                in_whitespace = true;
+            }
+            continue;
+        } else if c == '\\' {
+            // Not an escape sequence we handle, pass through
+            in_whitespace = false;
+            result.push(c);
+        } else if c == '\n' || c == '\r' || c == ' ' || c == '\u{00A0}' {
+            // Actual whitespace characters
+            if !in_whitespace {
+                result.push('_');
+                in_whitespace = true;
+            }
+        } else {
+            in_whitespace = false;
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+/// Iterator over identifier parts (quoted and unquoted sections).
+/// Handles quoted strings with escaped quotes inside them.
+/// Matches the regex: [^"]+|"((\\")|[^"])*"
+struct IdentifierPartIterator<'a> {
+    remaining: &'a str,
+}
+
+impl<'a> IdentifierPartIterator<'a> {
+    fn new(s: &'a str) -> Self {
+        IdentifierPartIterator { remaining: s }
+    }
+}
+
+impl<'a> Iterator for IdentifierPartIterator<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining.is_empty() {
+            return None;
+        }
+
+        let bytes = self.remaining.as_bytes();
+
+        if bytes[0] == b'"' {
+            // Quoted section: find the closing quote, handling escaped quotes
+            let mut i = 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    // Skip escaped quote
+                    i += 2;
+                } else if bytes[i] == b'"' {
+                    // Found closing quote
+                    let part = &self.remaining[..i + 1];
+                    self.remaining = &self.remaining[i + 1..];
+                    return Some(part);
+                } else {
+                    i += 1;
+                }
+            }
+            // Unclosed quote - return rest as is
+            let part = self.remaining;
+            self.remaining = "";
+            Some(part)
+        } else {
+            // Unquoted section: find the next quote or end
+            let end = self.remaining.find('"').unwrap_or(self.remaining.len());
+            let part = &self.remaining[..end];
+            self.remaining = &self.remaining[end..];
+            if part.is_empty() {
+                self.next()
+            } else {
+                Some(part)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod whitespace_replacement_tests {
+    use super::*;
+
+    #[test]
+    fn test_replace_actual_newline() {
+        assert_eq!(replace_whitespace_with_underscore("a\nb"), "a_b");
+    }
+
+    #[test]
+    fn test_replace_actual_carriage_return() {
+        assert_eq!(replace_whitespace_with_underscore("a\rb"), "a_b");
+    }
+
+    #[test]
+    fn test_replace_crlf() {
+        assert_eq!(replace_whitespace_with_underscore("a\r\nb"), "a_b");
+    }
+
+    #[test]
+    fn test_replace_escaped_newline() {
+        // Literal backslash-n in the string (two characters: '\' and 'n')
+        assert_eq!(replace_whitespace_with_underscore("a\\nb"), "a_b");
+    }
+
+    #[test]
+    fn test_replace_escaped_carriage_return() {
+        // Literal backslash-r in the string (two characters: '\' and 'r')
+        assert_eq!(replace_whitespace_with_underscore("a\\rb"), "a_b");
+    }
+
+    #[test]
+    fn test_replace_space() {
+        assert_eq!(
+            replace_whitespace_with_underscore("hello world"),
+            "hello_world"
+        );
+    }
+
+    #[test]
+    fn test_replace_non_breaking_space() {
+        // U+00A0 non-breaking space
+        assert_eq!(replace_whitespace_with_underscore("a\u{00A0}b"), "a_b");
+    }
+
+    #[test]
+    fn test_consecutive_whitespace_collapsed() {
+        // Multiple spaces should become single underscore
+        assert_eq!(replace_whitespace_with_underscore("a   b"), "a_b");
+        // Mixed whitespace types should collapse
+        assert_eq!(replace_whitespace_with_underscore("a \n \r b"), "a_b");
+    }
+
+    #[test]
+    fn test_leading_trailing_whitespace() {
+        assert_eq!(replace_whitespace_with_underscore(" a b "), "_a_b_");
+    }
+
+    #[test]
+    fn test_empty_string() {
+        assert_eq!(replace_whitespace_with_underscore(""), "");
+    }
+
+    #[test]
+    fn test_no_whitespace() {
+        assert_eq!(replace_whitespace_with_underscore("hello"), "hello");
+    }
+
+    #[test]
+    fn test_unicode_preserved() {
+        assert_eq!(replace_whitespace_with_underscore("Å b"), "Å_b");
+    }
+
+    #[test]
+    fn test_multiple_segments() {
+        assert_eq!(replace_whitespace_with_underscore("a b c d"), "a_b_c_d");
+    }
+}
+
+#[cfg(test)]
+mod identifier_part_iterator_tests {
+    use super::*;
+
+    #[test]
+    fn test_simple_unquoted() {
+        let parts: Vec<_> = IdentifierPartIterator::new("abc").collect();
+        assert_eq!(parts, vec!["abc"]);
+    }
+
+    #[test]
+    fn test_simple_quoted() {
+        let parts: Vec<_> = IdentifierPartIterator::new("\"abc\"").collect();
+        assert_eq!(parts, vec!["\"abc\""]);
+    }
+
+    #[test]
+    fn test_mixed_unquoted_quoted() {
+        // a."b c" should yield "a." and "\"b c\""
+        let parts: Vec<_> = IdentifierPartIterator::new("a.\"b c\"").collect();
+        assert_eq!(parts, vec!["a.", "\"b c\""]);
+    }
+
+    #[test]
+    fn test_multiple_quoted_sections() {
+        // "a/d"."b c" should yield "\"a/d\"", ".", "\"b c\""
+        let parts: Vec<_> = IdentifierPartIterator::new("\"a/d\".\"b c\"").collect();
+        assert_eq!(parts, vec!["\"a/d\"", ".", "\"b c\""]);
+    }
+
+    #[test]
+    fn test_escaped_quote_inside_quoted() {
+        // "b \"c\"" should be a single part with escaped quotes
+        let parts: Vec<_> = IdentifierPartIterator::new("\"b \\\"c\\\"\"").collect();
+        assert_eq!(parts, vec!["\"b \\\"c\\\"\""]);
+    }
+
+    #[test]
+    fn test_complex_mixed() {
+        // "a/d"."b \"c\"" should yield parts correctly
+        let parts: Vec<_> = IdentifierPartIterator::new("\"a/d\".\"b \\\"c\\\"\"").collect();
+        assert_eq!(parts, vec!["\"a/d\"", ".", "\"b \\\"c\\\"\""]);
+    }
+
+    #[test]
+    fn test_empty_string() {
+        let parts: Vec<_> = IdentifierPartIterator::new("").collect();
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn test_only_dots() {
+        let parts: Vec<_> = IdentifierPartIterator::new("...").collect();
+        assert_eq!(parts, vec!["..."]);
+    }
+
+    #[test]
+    fn test_unquoted_with_dots() {
+        let parts: Vec<_> = IdentifierPartIterator::new("a.b.c").collect();
+        assert_eq!(parts, vec!["a.b.c"]);
     }
 }

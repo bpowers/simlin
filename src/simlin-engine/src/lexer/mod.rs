@@ -7,7 +7,6 @@
 
 use std::str::CharIndices;
 
-use lazy_static::lazy_static;
 use unicode_xid::UnicodeXID;
 
 use self::Token::*;
@@ -164,18 +163,11 @@ impl<'input> Lexer<'input> {
     }
 
     fn number(&mut self, idx0: usize) -> Spanned<Token<'input>> {
-        use regex::{Match, Regex};
+        let len = scan_number(&self.text[idx0..]);
 
-        lazy_static! {
-            static ref NUMBER_RE: Regex =
-                Regex::new(r"\d*(\.\d*)?([eE][-+]?(\d*(\.\d*)?)?)?").unwrap();
-        }
+        self.bump_n(len);
 
-        let m: Match = NUMBER_RE.find(&self.text[idx0..]).unwrap();
-
-        self.bump_n(m.end());
-
-        let end = idx0 + m.end();
+        let end = idx0 + len;
         (idx0, Num(&self.text[idx0..end]), end)
     }
 
@@ -312,4 +304,52 @@ fn is_identifier_start(c: char, is_units: bool) -> bool {
 
 fn is_identifier_continue(c: char, is_units: bool) -> bool {
     UnicodeXID::is_xid_continue(c) || c == '.' || (is_units && c == '$')
+}
+
+/// Scan a numeric literal and return the number of bytes consumed.
+/// Matches: \d*(\.\d*)?([eE][-+]?(\d*(\.\d*)?)?)?
+/// This handles integers, decimals, and scientific notation.
+pub(crate) fn scan_number(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut pos = 0;
+
+    // Parse initial digits: \d*
+    while pos < len && bytes[pos].is_ascii_digit() {
+        pos += 1;
+    }
+
+    // Parse optional decimal part: (\.\d*)?
+    if pos < len && bytes[pos] == b'.' {
+        pos += 1; // consume the dot
+        // Parse optional fractional digits
+        while pos < len && bytes[pos].is_ascii_digit() {
+            pos += 1;
+        }
+    }
+
+    // Parse optional exponent part: ([eE][-+]?(\d*(\.\d*)?)?)?
+    if pos < len && (bytes[pos] == b'e' || bytes[pos] == b'E') {
+        pos += 1; // consume e/E
+
+        // Parse optional sign: [-+]?
+        if pos < len && (bytes[pos] == b'-' || bytes[pos] == b'+') {
+            pos += 1;
+        }
+
+        // Parse optional digits in exponent: \d*
+        while pos < len && bytes[pos].is_ascii_digit() {
+            pos += 1;
+        }
+
+        // Parse optional decimal in exponent: (\.\d*)?
+        if pos < len && bytes[pos] == b'.' {
+            pos += 1;
+            while pos < len && bytes[pos].is_ascii_digit() {
+                pos += 1;
+            }
+        }
+    }
+
+    pos
 }

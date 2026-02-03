@@ -20,6 +20,56 @@ use std::collections::{HashMap, HashSet};
 // Type alias for clarity
 type SyntheticVariables = Vec<(Ident<Canonical>, datamodel::Variable)>;
 
+/// Replace whole-word occurrences of `pattern` with `replacement` in `text`.
+/// A word boundary is defined as the position where an ASCII alphanumeric or underscore
+/// character meets a non-word character (or start/end of string).
+fn replace_whole_word(text: &str, pattern: &str, replacement: &str) -> String {
+    if pattern.is_empty() {
+        return text.to_string();
+    }
+
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(pos) = remaining.find(pattern) {
+        // Check if this is a word boundary match
+        let before_ok = if pos == 0 {
+            true
+        } else {
+            let prev_char = remaining[..pos].chars().last().unwrap();
+            !is_word_char(prev_char)
+        };
+
+        let after_pos = pos + pattern.len();
+        let after_ok = if after_pos >= remaining.len() {
+            true
+        } else {
+            let next_char = remaining[after_pos..].chars().next().unwrap();
+            !is_word_char(next_char)
+        };
+
+        if before_ok && after_ok {
+            // This is a whole-word match, replace it
+            result.push_str(&remaining[..pos]);
+            result.push_str(replacement);
+            remaining = &remaining[after_pos..];
+        } else {
+            // Not a whole-word match, skip past this occurrence
+            result.push_str(&remaining[..pos + pattern.len()]);
+            remaining = &remaining[after_pos..];
+        }
+    }
+
+    result.push_str(remaining);
+    result
+}
+
+/// Check if a character is a word character (alphanumeric or underscore).
+/// This matches the regex definition of \b word boundary.
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
 /// Augment a project with LTM synthetic variables
 /// Returns a map of model name to synthetic variables to add
 pub fn generate_ltm_variables(
@@ -286,13 +336,8 @@ fn generate_auxiliary_to_auxiliary_equation(
     for dep in &deps {
         if dep != from {
             // Replace whole word occurrences of the dependency
-            let pattern = format!(r"\b{}\b", regex::escape(dep.as_str()));
             let replacement = format!("PREVIOUS({})", dep.as_str());
-            if let Ok(re) = regex::Regex::new(&pattern) {
-                partial_eq = re
-                    .replace_all(&partial_eq, replacement.as_str())
-                    .to_string();
-            }
+            partial_eq = replace_whole_word(&partial_eq, dep.as_str(), &replacement);
         }
     }
 
@@ -386,13 +431,8 @@ fn generate_stock_to_flow_equation(
     for dep in &deps {
         if dep != stock {
             // Replace whole word occurrences of the dependency
-            let pattern = format!(r"\b{}\b", regex::escape(dep.as_str()));
             let replacement = format!("PREVIOUS({})", dep.as_str());
-            if let Ok(re) = regex::Regex::new(&pattern) {
-                partial_eq = re
-                    .replace_all(&partial_eq, replacement.as_str())
-                    .to_string();
-            }
+            partial_eq = replace_whole_word(&partial_eq, dep.as_str(), &replacement);
         }
     }
 
@@ -1465,5 +1505,96 @@ mod tests {
             equation, expected,
             "Equation must match LTM paper formula with first-order stock diff for sign"
         );
+    }
+
+    mod replace_whole_word_tests {
+        use super::super::replace_whole_word;
+
+        #[test]
+        fn test_simple_replacement() {
+            assert_eq!(
+                replace_whole_word("x + y", "x", "PREVIOUS(x)"),
+                "PREVIOUS(x) + y"
+            );
+        }
+
+        #[test]
+        fn test_no_partial_match_prefix() {
+            // "xy" should NOT match when looking for "x"
+            assert_eq!(replace_whole_word("xy + y", "x", "PREVIOUS(x)"), "xy + y");
+        }
+
+        #[test]
+        fn test_no_partial_match_suffix() {
+            // "ax" should NOT match when looking for "x"
+            assert_eq!(replace_whole_word("ax + y", "x", "PREVIOUS(x)"), "ax + y");
+        }
+
+        #[test]
+        fn test_multiple_occurrences() {
+            assert_eq!(replace_whole_word("x * x + x", "x", "z"), "z * z + z");
+        }
+
+        #[test]
+        fn test_at_start() {
+            assert_eq!(replace_whole_word("x + 1", "x", "y"), "y + 1");
+        }
+
+        #[test]
+        fn test_at_end() {
+            assert_eq!(replace_whole_word("1 + x", "x", "y"), "1 + y");
+        }
+
+        #[test]
+        fn test_whole_string() {
+            assert_eq!(replace_whole_word("x", "x", "y"), "y");
+        }
+
+        #[test]
+        fn test_with_underscore_boundary() {
+            // Underscores are word characters, so x_1 should NOT match "x"
+            assert_eq!(replace_whole_word("x_1 + x", "x", "y"), "x_1 + y");
+        }
+
+        #[test]
+        fn test_with_digit_boundary() {
+            // Digits are word characters, so x1 should NOT match "x"
+            assert_eq!(replace_whole_word("x1 + x", "x", "y"), "x1 + y");
+        }
+
+        #[test]
+        fn test_surrounded_by_operators() {
+            assert_eq!(replace_whole_word("a*x+b", "x", "y"), "a*y+b");
+        }
+
+        #[test]
+        fn test_in_parentheses() {
+            assert_eq!(replace_whole_word("(x)", "x", "y"), "(y)");
+        }
+
+        #[test]
+        fn test_complex_equation() {
+            let result = replace_whole_word(
+                "population * birth_rate",
+                "birth_rate",
+                "PREVIOUS(birth_rate)",
+            );
+            assert_eq!(result, "population * PREVIOUS(birth_rate)");
+        }
+
+        #[test]
+        fn test_no_match() {
+            assert_eq!(replace_whole_word("abc", "x", "y"), "abc");
+        }
+
+        #[test]
+        fn test_empty_string() {
+            assert_eq!(replace_whole_word("", "x", "y"), "");
+        }
+
+        #[test]
+        fn test_unicode_variable_name() {
+            assert_eq!(replace_whole_word("Å + b", "Å", "alpha"), "alpha + b");
+        }
     }
 }
