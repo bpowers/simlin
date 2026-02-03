@@ -31,18 +31,108 @@ import {
   findClosestSegment,
   getSegments,
   UpdateCloudAndFlow,
+  UpdateFlow,
 } from './drawing/Flow';
 
-export interface Point2D {
+// Tolerance for floating-point comparison when checking if two movements are equal
+const MOVEMENT_EQUALITY_EPSILON = 0.1;
+
+// Minimum distance in pixels before requiring L-shape routing to avoid diagonal flows
+const MIN_DIAGONAL_DISTANCE = 1;
+
+/**
+ * Represents a 2D movement delta (change in position).
+ * Distinct from Point which represents an absolute position with optional attachment.
+ */
+export interface MovementDelta {
   x: number;
   y: number;
 }
+
+/**
+ * @deprecated Use MovementDelta instead. Kept for backwards compatibility.
+ */
+export type Point2D = MovementDelta;
 
 export interface GroupMovementResult {
   /** Map from element UID to updated element (for elements that changed) */
   updatedElements: Map<UID, ViewElement>;
   /** Additional elements to update (clouds updated via flow routing, etc.) */
   sideEffects: List<ViewElement>;
+}
+
+/**
+ * Result of routing a flow attached to a cloud endpoint.
+ */
+interface CloudFlowRouteResult {
+  updatedFlow: FlowViewElement;
+  movedCloud: CloudViewElement;
+}
+
+/**
+ * Route a flow attached to a cloud endpoint during group movement.
+ *
+ * This handles:
+ * - Moving the cloud by the full delta
+ * - Creating an L-shaped flow if the movement would create a diagonal
+ * - Re-clamping the valve to the new flow path
+ *
+ * @param cloud The cloud endpoint being moved
+ * @param flow The flow attached to the cloud
+ * @param delta The movement delta
+ * @param isSource True if the cloud is the source (first point), false if sink (last point)
+ * @returns The updated flow and moved cloud
+ */
+function routeCloudEndpointFlow(
+  cloud: CloudViewElement,
+  flow: FlowViewElement,
+  delta: MovementDelta,
+  isSource: boolean,
+): CloudFlowRouteResult {
+  const [, routedFlow] = UpdateCloudAndFlow(cloud, flow, delta);
+
+  const newCloudX = cloud.cx - delta.x;
+  const newCloudY = cloud.cy - delta.y;
+  const movedCloud = cloud.merge({ x: newCloudX, y: newCloudY });
+
+  const cloudPointIndex = isSource ? 0 : routedFlow.points.size - 1;
+  const otherPointIndex = isSource ? routedFlow.points.size - 1 : 0;
+  const cloudPoint = routedFlow.points.get(cloudPointIndex);
+  const otherPoint = routedFlow.points.get(otherPointIndex);
+
+  let updatedFlow = routedFlow;
+  if (cloudPoint && otherPoint) {
+    // Check if the flow is 2-point straight and movement would create a diagonal
+    const needsLShape =
+      routedFlow.points.size === 2 &&
+      Math.abs(newCloudX - otherPoint.x) > MIN_DIAGONAL_DISTANCE &&
+      Math.abs(newCloudY - otherPoint.y) > MIN_DIAGONAL_DISTANCE;
+
+    if (needsLShape) {
+      // Add intermediate point to create L-shape (horizontal then vertical)
+      const intermediatePoint = new Point({ x: newCloudX, y: otherPoint.y, attachedToUid: undefined });
+      const newCloudPoint = cloudPoint.merge({ x: newCloudX, y: newCloudY });
+      // Order depends on whether cloud is source or sink
+      const newPoints = isSource
+        ? List([newCloudPoint, intermediatePoint, otherPoint])
+        : List([otherPoint, intermediatePoint, newCloudPoint]);
+      updatedFlow = routedFlow.set('points', newPoints);
+
+      // Re-clamp valve to the new path
+      const segments = getSegments(newPoints);
+      if (segments.length > 0) {
+        const closestSegment = findClosestSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, segments);
+        const clampedValve = clampToSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, closestSegment);
+        updatedFlow = updatedFlow.merge({ x: clampedValve.x, y: clampedValve.y });
+      }
+    } else {
+      // Just update the cloud point position
+      const updatedPoints = routedFlow.points.set(cloudPointIndex, cloudPoint.merge({ x: newCloudX, y: newCloudY }));
+      updatedFlow = routedFlow.set('points', updatedPoints);
+    }
+  }
+
+  return { updatedFlow, movedCloud };
 }
 
 /**
@@ -263,43 +353,7 @@ export function processSelectedFlow(
         }
         return [updatedFlow, sideEffects];
       } else if (sourceEndpoint instanceof CloudViewElement) {
-        const [, routedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, delta);
-        // Move cloud by full delta (not clamped) and update flow with proper orthogonal geometry
-        const newCloudX = sourceEndpoint.cx - delta.x;
-        const newCloudY = sourceEndpoint.cy - delta.y;
-        const movedCloud = sourceEndpoint.merge({ x: newCloudX, y: newCloudY });
-        const cloudPointIndex = 0; // source is first point
-        const cloudPoint = routedFlow.points.get(cloudPointIndex);
-        const otherPointIndex = routedFlow.points.size - 1;
-        const otherPoint = routedFlow.points.get(otherPointIndex);
-        let updatedFlow = routedFlow;
-        if (cloudPoint && otherPoint) {
-          // Check if the flow is 2-point straight and we'd create a diagonal
-          const needsLShape =
-            routedFlow.points.size === 2 &&
-            Math.abs(newCloudX - otherPoint.x) > 1 &&
-            Math.abs(newCloudY - otherPoint.y) > 1;
-          if (needsLShape) {
-            // Add intermediate point to create L-shape (horizontal then vertical)
-            const intermediatePoint = new Point({ x: newCloudX, y: otherPoint.y, attachedToUid: undefined });
-            const newCloudPoint = cloudPoint.merge({ x: newCloudX, y: newCloudY });
-            const newPoints = List([newCloudPoint, intermediatePoint, otherPoint]);
-            updatedFlow = routedFlow.set('points', newPoints);
-            // Re-clamp valve to the new path
-            const segments = getSegments(newPoints);
-            if (segments.length > 0) {
-              const closestSegment = findClosestSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, segments);
-              const clampedValve = clampToSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, closestSegment);
-              updatedFlow = updatedFlow.merge({ x: clampedValve.x, y: clampedValve.y });
-            }
-          } else if (cloudPoint) {
-            const updatedPoints = routedFlow.points.set(
-              cloudPointIndex,
-              cloudPoint.merge({ x: newCloudX, y: newCloudY }),
-            );
-            updatedFlow = routedFlow.set('points', updatedPoints);
-          }
-        }
+        const { updatedFlow, movedCloud } = routeCloudEndpointFlow(sourceEndpoint, flow, delta, true);
         sideEffects = sideEffects.push(movedCloud);
         return [updatedFlow, sideEffects];
       }
@@ -327,43 +381,7 @@ export function processSelectedFlow(
         }
         return [updatedFlow, sideEffects];
       } else if (sinkEndpoint instanceof CloudViewElement) {
-        const [, routedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, delta);
-        // Move cloud by full delta (not clamped) and update flow with proper orthogonal geometry
-        const newCloudX = sinkEndpoint.cx - delta.x;
-        const newCloudY = sinkEndpoint.cy - delta.y;
-        const movedCloud = sinkEndpoint.merge({ x: newCloudX, y: newCloudY });
-        const cloudPointIndex = routedFlow.points.size - 1; // sink is last point
-        const cloudPoint = routedFlow.points.get(cloudPointIndex);
-        const otherPointIndex = 0;
-        const otherPoint = routedFlow.points.get(otherPointIndex);
-        let updatedFlow = routedFlow;
-        if (cloudPoint && otherPoint) {
-          // Check if the flow is 2-point straight and we'd create a diagonal
-          const needsLShape =
-            routedFlow.points.size === 2 &&
-            Math.abs(newCloudX - otherPoint.x) > 1 &&
-            Math.abs(newCloudY - otherPoint.y) > 1;
-          if (needsLShape) {
-            // Add intermediate point to create L-shape (horizontal then vertical)
-            const intermediatePoint = new Point({ x: newCloudX, y: otherPoint.y, attachedToUid: undefined });
-            const newCloudPoint = cloudPoint.merge({ x: newCloudX, y: newCloudY });
-            const newPoints = List([otherPoint, intermediatePoint, newCloudPoint]);
-            updatedFlow = routedFlow.set('points', newPoints);
-            // Re-clamp valve to the new path
-            const segments = getSegments(newPoints);
-            if (segments.length > 0) {
-              const closestSegment = findClosestSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, segments);
-              const clampedValve = clampToSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, closestSegment);
-              updatedFlow = updatedFlow.merge({ x: clampedValve.x, y: clampedValve.y });
-            }
-          } else if (cloudPoint) {
-            const updatedPoints = routedFlow.points.set(
-              cloudPointIndex,
-              cloudPoint.merge({ x: newCloudX, y: newCloudY }),
-            );
-            updatedFlow = routedFlow.set('points', updatedPoints);
-          }
-        }
+        const { updatedFlow, movedCloud } = routeCloudEndpointFlow(sinkEndpoint, flow, delta, false);
         sideEffects = sideEffects.push(movedCloud);
         return [updatedFlow, sideEffects];
       }
@@ -514,8 +532,8 @@ export function routeUnselectedFlows(
               // Check if the flow is 2-point straight and we'd create a diagonal
               const needsLShape =
                 updatedFlow.points.size === 2 &&
-                Math.abs(newCloudX - otherPoint.x) > 1 &&
-                Math.abs(newCloudY - otherPoint.y) > 1;
+                Math.abs(newCloudX - otherPoint.x) > MIN_DIAGONAL_DISTANCE &&
+                Math.abs(newCloudY - otherPoint.y) > MIN_DIAGONAL_DISTANCE;
               if (needsLShape) {
                 // Add intermediate point to create L-shape (horizontal then vertical)
                 const intermediateX = newCloudX;
@@ -584,8 +602,8 @@ export function routeUnselectedFlows(
               // Check if the flow is 2-point straight and we'd create a diagonal
               const needsLShape =
                 updatedFlow.points.size === 2 &&
-                Math.abs(newCloudX - otherPoint.x) > 1 &&
-                Math.abs(newCloudY - otherPoint.y) > 1;
+                Math.abs(newCloudX - otherPoint.x) > MIN_DIAGONAL_DISTANCE &&
+                Math.abs(newCloudY - otherPoint.y) > MIN_DIAGONAL_DISTANCE;
               if (needsLShape) {
                 // Add intermediate point to create L-shape (horizontal then vertical)
                 const intermediateX = newCloudX;
@@ -628,11 +646,22 @@ export function routeUnselectedFlows(
  * Input for the unified applyGroupMovement function.
  */
 export interface GroupMovementInput {
+  /**
+   * All view elements in the diagram. This can be any Iterable (List, array, Map.values(), etc.).
+   *
+   * IMPORTANT: The iterator will be consumed exactly once when building an internal lookup Map.
+   * This allows callers to pass any Iterable without pre-materializing it, while the function
+   * handles the materialization internally for efficient repeated access.
+   */
   elements: Iterable<ViewElement>;
+  /** UIDs of elements in the selection that should move */
   selection: Set<UID>;
-  delta: Point2D;
-  arcPoint?: Point2D; // For single-link arc drag
-  segmentIndex?: number; // For single-flow segment drag
+  /** Movement delta to apply (subtracted from positions, so negative = move right/down) */
+  delta: MovementDelta;
+  /** For single-link arc drag: the current drag position */
+  arcPoint?: MovementDelta;
+  /** For single-flow segment drag: which segment is being dragged */
+  segmentIndex?: number;
 }
 
 /**
@@ -681,7 +710,9 @@ export function processLinks(
     // Check if both endpoints moved by the same amount (pure translation)
     const fromDelta = { x: oldFrom.cx - newFrom.cx, y: oldFrom.cy - newFrom.cy };
     const toDelta = { x: oldTo.cx - newTo.cx, y: oldTo.cy - newTo.cy };
-    const sameMovement = Math.abs(fromDelta.x - toDelta.x) < 0.1 && Math.abs(fromDelta.y - toDelta.y) < 0.1;
+    const sameMovement =
+      Math.abs(fromDelta.x - toDelta.x) < MOVEMENT_EQUALITY_EPSILON &&
+      Math.abs(fromDelta.y - toDelta.y) < MOVEMENT_EQUALITY_EPSILON;
     const didMove = fromDelta.x !== 0 || fromDelta.y !== 0 || toDelta.x !== 0 || toDelta.y !== 0;
 
     // Single link selection with arcPoint: adjust arc based on drag position
@@ -845,7 +876,6 @@ export function applyGroupMovement(input: GroupMovementInput): GroupMovementOutp
           (source instanceof StockViewElement || source instanceof CloudViewElement) &&
           (sink instanceof StockViewElement || sink instanceof CloudViewElement)
         ) {
-          const { UpdateFlow } = require('./drawing/Flow');
           const ends = List<StockViewElement | CloudViewElement>([source, sink]);
           const [newFlow, newClouds] = UpdateFlow(el, ends, delta, segmentIndex);
           updatedElements = updatedElements.set(uid, newFlow);
