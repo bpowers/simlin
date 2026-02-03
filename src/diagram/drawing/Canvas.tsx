@@ -41,7 +41,16 @@ import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect
 import { Connector, ConnectorProps, getVisualCenter } from './Connector';
 import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
-import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
+import {
+  clampToSegment,
+  findClosestSegment,
+  Flow,
+  flowBounds,
+  getSegments,
+  UpdateCloudAndFlow,
+  UpdateFlow,
+  UpdateStockAndFlows,
+} from './Flow';
 import { Group, groupBounds, GroupProps } from './Group';
 import { Module, moduleBounds, ModuleProps } from './Module';
 import { CustomElement } from './SlateEditor';
@@ -848,10 +857,23 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
               y: initialEl.cy - y,
             });
           } else {
-            // Neither endpoint is selected: just move valve
-            return initialEl.merge({
+            // Neither endpoint is selected: move valve but clamp to flow path
+            const proposedValve = {
               x: initialEl.cx - x,
               y: initialEl.cy - y,
+            };
+            const segments = getSegments(pts);
+            if (segments.length > 0) {
+              const closestSegment = findClosestSegment(proposedValve, segments);
+              const clampedValve = clampToSegment(proposedValve, closestSegment);
+              return initialEl.merge({
+                x: clampedValve.x,
+                y: clampedValve.y,
+              });
+            }
+            return initialEl.merge({
+              x: proposedValve.x,
+              y: proposedValve.y,
             });
           }
         } else if (initialEl instanceof StockViewElement) {

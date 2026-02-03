@@ -15,7 +15,13 @@ import {
 } from '@system-dynamics/core/datamodel';
 
 import { StockWidth } from '../drawing/Stock';
-import { UpdateCloudAndFlow, UpdateStockAndFlows } from '../drawing/Flow';
+import {
+  clampToSegment,
+  findClosestSegment,
+  getSegments,
+  UpdateCloudAndFlow,
+  UpdateStockAndFlows,
+} from '../drawing/Flow';
 
 // Helper functions to create test elements
 function makeStock(
@@ -212,14 +218,31 @@ export function applyGroupMovement(
         }
       }
     } else {
-      // Neither endpoint in selection: just move valve
-      result = result.set(
-        flowUid,
-        flow.merge({
-          x: flow.cx - delta.x,
-          y: flow.cy - delta.y,
-        }),
-      );
+      // Neither endpoint in selection: move valve but clamp to flow path
+      const proposedValve = {
+        x: flow.cx - delta.x,
+        y: flow.cy - delta.y,
+      };
+      const segments = getSegments(points);
+      if (segments.length > 0) {
+        const closestSegment = findClosestSegment(proposedValve, segments);
+        const clampedValve = clampToSegment(proposedValve, closestSegment);
+        result = result.set(
+          flowUid,
+          flow.merge({
+            x: clampedValve.x,
+            y: clampedValve.y,
+          }),
+        );
+      } else {
+        result = result.set(
+          flowUid,
+          flow.merge({
+            x: proposedValve.x,
+            y: proposedValve.y,
+          }),
+        );
+      }
     }
   }
 
@@ -437,13 +460,47 @@ describe('Group Movement', () => {
       expect((result.get(1) as StockViewElement).cx).toBe(100);
       expect((result.get(3) as StockViewElement).cx).toBe(200);
 
-      // Flow valve should move
+      // Flow valve should move but be clamped to stay on the flow path
+      // Flow goes from x=122.5 to x=177.5 (with 10px margin, max is 167.5)
+      // Proposed position is 170, so it gets clamped to 167.5
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.cx).toBe(170); // 150 + 20
+      expect(newFlow.cx).toBe(167.5); // Clamped to stay within flow bounds
 
       // Flow endpoints should stay fixed (attached to stocks)
       expect(newFlow.points.first()!.x).toBe(100 + StockWidth / 2);
       expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
+    });
+
+    it('should clamp valve to flow path when moving perpendicular to flow direction', () => {
+      // Setup: Stock A -> horizontal Flow -> Stock B
+      // When we select only the flow (not the stocks) and move it perpendicular,
+      // the valve should stay on the flow path, not move off into empty space
+      const stockA = makeStock(1, 100, 100, [], [2]);
+      const stockB = makeStock(3, 200, 100, [2], []);
+      const flow = makeFlow(2, 150, 100, [
+        { x: 100 + StockWidth / 2, y: 100, attachedToUid: 1 },
+        { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
+      ]);
+
+      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, stockB);
+
+      // Only select the flow, move UP (perpendicular to the horizontal flow)
+      const selection = Set<UID>([2]);
+      const delta = { x: 0, y: 50 }; // Move up 50
+
+      const result = applyGroupMovement(elements, selection, delta);
+
+      // Stocks should NOT move
+      expect((result.get(1) as StockViewElement).cy).toBe(100);
+      expect((result.get(3) as StockViewElement).cy).toBe(100);
+
+      // Flow valve should be clamped to stay on the horizontal flow path (y=100)
+      const newFlow = result.get(2) as FlowViewElement;
+      expect(newFlow.cy).toBe(100); // Should stay on the flow path
+
+      // Flow endpoints should stay fixed
+      expect(newFlow.points.first()!.y).toBe(100);
+      expect(newFlow.points.last()!.y).toBe(100);
     });
   });
 

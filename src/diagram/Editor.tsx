@@ -73,7 +73,14 @@ import { ZoomBar } from './ZoomBar';
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point, searchableName } from './drawing/common';
 import { takeoffθ, getVisualCenter } from './drawing/Connector';
-import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
+import {
+  clampToSegment,
+  findClosestSegment,
+  getSegments,
+  UpdateCloudAndFlow,
+  UpdateFlow,
+  UpdateStockAndFlows,
+} from './drawing/Flow';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 
 import styles from './Editor.module.css';
@@ -1256,10 +1263,23 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
             y: element.cy - delta.y,
           });
         } else {
-          // Neither endpoint is selected: just move valve
-          return element.merge({
+          // Neither endpoint is selected: move valve but clamp to flow path
+          const proposedValve = {
             x: element.cx - delta.x,
             y: element.cy - delta.y,
+          };
+          const segments = getSegments(pts);
+          if (segments.length > 0) {
+            const closestSegment = findClosestSegment(proposedValve, segments);
+            const clampedValve = clampToSegment(proposedValve, closestSegment);
+            return element.merge({
+              x: clampedValve.x,
+              y: clampedValve.y,
+            });
+          }
+          return element.merge({
+            x: proposedValve.x,
+            y: proposedValve.y,
           });
         }
       } else if (element instanceof StockViewElement) {
