@@ -73,16 +73,13 @@ import { ZoomBar } from './ZoomBar';
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point, searchableName } from './drawing/common';
 import { takeoffθ, getVisualCenter } from './drawing/Connector';
+import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
 import {
-  clampToSegment,
-  computeFlowOffsets,
-  computeFlowRoute,
-  findClosestSegment,
-  getSegments,
-  UpdateCloudAndFlow,
-  UpdateFlow,
-  UpdateStockAndFlows,
-} from './drawing/Flow';
+  computePreRoutedOffsets,
+  preProcessSelectedFlows,
+  processSelectedFlow,
+  routeUnselectedFlows,
+} from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 
 import styles from './Editor.module.css';
@@ -1170,84 +1167,35 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     let updatedElements = List<ViewElement>();
 
-    // Pre-compute flow offsets for all flows attached to moved stocks.
-    // This ensures both selected and unselected flows maintain proper spacing.
-    const preComputedOffsets = new globalThis.Map<UID, number>();
-    const preProcessedFlows = new globalThis.Map<UID, FlowViewElement>();
-    if (selection.size > 1) {
-      // Identify all moved stocks and compute offsets for flows that need routing
+    // Pre-compute flow offsets and pre-process selected flows for group movement
+    const selectedStockUids = new globalThis.Set<UID>();
+    const selectedFlowUids = Set<UID>().withMutations((mutable) => {
       for (const element of view.elements) {
-        if (!(element instanceof StockViewElement)) continue;
         if (!selection.has(element.uid)) continue;
-
-        // Collect flows attached to this stock that need routing (excluding flows where
-        // both endpoints are selected, since those translate uniformly and don't use
-        // the stock's routing logic - including them would miscompute offsets because
-        // their anchors aren't adjusted for the drag)
-        let flowsNeedingRouting = List<FlowViewElement>();
-        for (const el of view.elements) {
-          if (!(el instanceof FlowViewElement)) continue;
-          const pts = el.points;
-          if (pts.size < 2) continue;
-          const sourceUid = first(pts).attachedToUid;
-          const sinkUid = last(pts).attachedToUid;
-          const attachedToThisStock = sourceUid === element.uid || sinkUid === element.uid;
-          if (!attachedToThisStock) continue;
-
-          // Exclude flows where both endpoints are selected (they translate uniformly)
-          const otherEndpointUid = sourceUid === element.uid ? sinkUid : sourceUid;
-          const bothEndpointsSelected = isInSelection(otherEndpointUid);
-          if (!bothEndpointsSelected) {
-            flowsNeedingRouting = flowsNeedingRouting.push(el);
-          }
-        }
-
-        // Compute offsets at the new stock position
-        const newStockCx = element.cx - delta.x;
-        const newStockCy = element.cy - delta.y;
-        const offsets = computeFlowOffsets(flowsNeedingRouting, element.uid, newStockCx, newStockCy);
-
-        // Store offsets for flows needing routing
-        for (const [flowUid, offset] of offsets) {
-          preComputedOffsets.set(flowUid, offset);
+        if (element instanceof StockViewElement) {
+          selectedStockUids.add(element.uid);
+        } else if (element instanceof FlowViewElement) {
+          mutable.add(element.uid);
         }
       }
+    });
 
-      // Pre-process selected flows with one endpoint selected (stock endpoint only)
-      for (const element of view.elements) {
-        if (!(element instanceof FlowViewElement)) continue;
-        if (!selection.has(element.uid)) continue;
+    const preComputedOffsets =
+      selection.size > 1
+        ? computePreRoutedOffsets(view.elements, selectedStockUids, delta, isInSelection)
+        : new globalThis.Map<UID, number>();
 
-        const pts = element.points;
-        if (pts.size < 2) continue;
-
-        const sourceUid = first(pts).attachedToUid;
-        const sinkUid = last(pts).attachedToUid;
-        const sourceInSel = isInSelection(sourceUid);
-        const sinkInSel = isInSelection(sinkUid);
-
-        // Process flows where exactly one endpoint is a selected stock
-        if (sourceInSel && !sinkInSel && sourceUid !== undefined) {
-          const endpoint = view.elements.find((e) => e.uid === sourceUid);
-          if (endpoint instanceof StockViewElement) {
-            const newStockCx = endpoint.cx - delta.x;
-            const newStockCy = endpoint.cy - delta.y;
-            const offset = preComputedOffsets.get(element.uid) ?? 0.5;
-            const updatedFlow = computeFlowRoute(element, endpoint, newStockCx, newStockCy, offset);
-            preProcessedFlows.set(element.uid, updatedFlow);
-          }
-        } else if (!sourceInSel && sinkInSel && sinkUid !== undefined) {
-          const endpoint = view.elements.find((e) => e.uid === sinkUid);
-          if (endpoint instanceof StockViewElement) {
-            const newStockCx = endpoint.cx - delta.x;
-            const newStockCy = endpoint.cy - delta.y;
-            const offset = preComputedOffsets.get(element.uid) ?? 0.5;
-            const updatedFlow = computeFlowRoute(element, endpoint, newStockCx, newStockCy, offset);
-            preProcessedFlows.set(element.uid, updatedFlow);
-          }
-        }
-      }
-    }
+    const [preProcessedFlows] =
+      selection.size > 1
+        ? preProcessSelectedFlows(
+            view.elements,
+            selectedFlowUids,
+            preComputedOffsets,
+            delta,
+            isInSelection,
+            (uid) => view.elements.find((e) => e.uid === uid),
+          )
+        : [new globalThis.Map<UID, FlowViewElement>()];
 
     // First pass: update all selected elements
     let elements = view.elements.map((element: ViewElement) => {
@@ -1289,83 +1237,15 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
       // Group movement logic
       if (element instanceof FlowViewElement) {
-        const pts = element.points;
-        if (pts.size < 2) {
-          return element;
-        }
-
-        const sourceUid = first(pts).attachedToUid;
-        const sinkUid = last(pts).attachedToUid;
-        const sourceInSelection = isInSelection(sourceUid);
-        const sinkInSelection = isInSelection(sinkUid);
-
-        if (sourceInSelection && sinkInSelection) {
-          // Both endpoints are selected: translate entire flow uniformly
-          const newPoints = pts.map((p) =>
-            p.merge({
-              x: p.x - delta.x,
-              y: p.y - delta.y,
-            }),
-          );
-          return element.merge({
-            x: element.cx - delta.x,
-            y: element.cy - delta.y,
-            points: newPoints,
-          });
-        } else if (sourceInSelection || sinkInSelection) {
-          // One endpoint is selected: that endpoint moves, flow re-routes to fixed endpoint
-          // Check if this flow was pre-processed (for multi-flow spacing preservation)
-          const preProcessed = preProcessedFlows.get(element.uid);
-          if (preProcessed) {
-            return preProcessed;
-          }
-          // Handle clouds (not pre-processed since they only have one flow each)
-          // Use UpdateCloudAndFlow to route the flow and add the routed cloud to updatedElements
-          // so it takes precedence over the raw delta move later
-          if (sourceInSelection && sourceUid !== undefined) {
-            const sourceEndpoint = view.elements.find((e) => e.uid === sourceUid);
-            if (sourceEndpoint instanceof CloudViewElement) {
-              const [routedCloud, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, element, delta);
-              // Add the routed cloud position to updatedElements - this will override
-              // the raw delta move when applied, maintaining orthogonal geometry
-              updatedElements = updatedElements.push(routedCloud);
-              return updatedFlow;
-            }
-          } else if (sinkInSelection && sinkUid !== undefined) {
-            const sinkEndpoint = view.elements.find((e) => e.uid === sinkUid);
-            if (sinkEndpoint instanceof CloudViewElement) {
-              const [routedCloud, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, element, delta);
-              // Add the routed cloud position to updatedElements - this will override
-              // the raw delta move when applied, maintaining orthogonal geometry
-              updatedElements = updatedElements.push(routedCloud);
-              return updatedFlow;
-            }
-          }
-          // Fallback: just move valve if we couldn't find the endpoint
-          return element.merge({
-            x: element.cx - delta.x,
-            y: element.cy - delta.y,
-          });
-        } else {
-          // Neither endpoint is selected: move valve but clamp to flow path
-          const proposedValve = {
-            x: element.cx - delta.x,
-            y: element.cy - delta.y,
-          };
-          const segments = getSegments(pts);
-          if (segments.length > 0) {
-            const closestSegment = findClosestSegment(proposedValve, segments);
-            const clampedValve = clampToSegment(proposedValve, closestSegment);
-            return element.merge({
-              x: clampedValve.x,
-              y: clampedValve.y,
-            });
-          }
-          return element.merge({
-            x: proposedValve.x,
-            y: proposedValve.y,
-          });
-        }
+        const [newFlow, sideEffects] = processSelectedFlow(
+          element,
+          delta,
+          isInSelection,
+          preProcessedFlows,
+          (uid) => view.elements.find((e) => e.uid === uid),
+        );
+        updatedElements = updatedElements.concat(sideEffects);
+        return newFlow;
       } else if (element instanceof StockViewElement) {
         // Stock always moves by delta in group selection
         return element.merge({
@@ -1407,134 +1287,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
 
     // Second pass: update flows NOT in selection that are attached to endpoints IN selection
-    // To preserve multi-flow spacing, we collect all flows attached to each stock
-    // and update them together so offset calculations consider all attached flows.
     if (selection.size > 1) {
-      // First, collect flows grouped by their attached endpoint
-      const flowsBySourceEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
-      const flowsBySinkEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
-      const bothEndsSelectedFlows: FlowViewElement[] = [];
-
-      for (const element of view.elements) {
-        if (!(element instanceof FlowViewElement)) continue;
-        if (selection.has(element.uid)) continue; // Already processed
-
-        const pts = element.points;
-        if (pts.size < 2) continue;
-
-        const sourceUid = first(pts).attachedToUid;
-        const sinkUid = last(pts).attachedToUid;
-        const sourceEndpointSelected = sourceUid !== undefined && selection.has(sourceUid);
-        const sinkEndpointSelected = sinkUid !== undefined && selection.has(sinkUid);
-
-        if (sourceEndpointSelected && sinkEndpointSelected) {
-          bothEndsSelectedFlows.push(element);
-        } else if (sourceEndpointSelected && sourceUid !== undefined) {
-          const existing = flowsBySourceEndpoint.get(sourceUid) || List<FlowViewElement>();
-          flowsBySourceEndpoint.set(sourceUid, existing.push(element));
-        } else if (sinkEndpointSelected && sinkUid !== undefined) {
-          const existing = flowsBySinkEndpoint.get(sinkUid) || List<FlowViewElement>();
-          flowsBySinkEndpoint.set(sinkUid, existing.push(element));
-        }
-      }
-
-      // Handle flows where both ends are selected: translate uniformly
-      for (const element of bothEndsSelectedFlows) {
-        const pts = element.points;
-        const newPoints = pts.map((p) =>
-          p.merge({
-            x: p.x - delta.x,
-            y: p.y - delta.y,
-          }),
-        );
-        updatedElements = updatedElements.push(
-          element.merge({
-            x: element.cx - delta.x,
-            y: element.cy - delta.y,
-            points: newPoints,
-          }),
-        );
-      }
-
-      // Update flows grouped by source endpoint using pre-computed offsets
-      for (const [endpointUid, flows] of flowsBySourceEndpoint) {
-        const endpoint = elements.find((e) => e.uid === endpointUid);
-        if (endpoint instanceof StockViewElement) {
-          // Use pre-computed offsets to maintain spacing with selected flows
-          const originalStock = view.elements.find((e) => e.uid === endpointUid) as StockViewElement;
-          const newStockCx = originalStock.cx - delta.x;
-          const newStockCy = originalStock.cy - delta.y;
-          for (const flow of flows) {
-            const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
-            const updatedFlow = computeFlowRoute(flow, originalStock, newStockCx, newStockCy, offset);
-            updatedElements = updatedElements.push(updatedFlow);
-          }
-        } else if (endpoint instanceof CloudViewElement) {
-          // For clouds, use UpdateCloudAndFlow for orthogonal re-routing on perpendicular moves,
-          // but ensure the endpoint matches the cloud's actual new position (which was set
-          // in pass 1 without clamping). UpdateCloudAndFlow may clamp near-parallel moves,
-          // which would disconnect the flow from the already-moved cloud.
-          const originalCloud = view.elements.find((e) => e.uid === endpointUid) as CloudViewElement | undefined;
-          if (originalCloud) {
-            const newCloudCx = originalCloud.cx - delta.x;
-            const newCloudCy = originalCloud.cy - delta.y;
-            for (const flow of flows) {
-              let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
-              // Ensure the cloud endpoint matches the actual cloud position
-              const cloudPointIndex =
-                first(updatedFlow.points).attachedToUid === endpointUid ? 0 : updatedFlow.points.size - 1;
-              const cloudPoint = updatedFlow.points.get(cloudPointIndex);
-              if (cloudPoint) {
-                const updatedPoints = updatedFlow.points.set(
-                  cloudPointIndex,
-                  cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
-                );
-                updatedFlow = updatedFlow.set('points', updatedPoints);
-              }
-              updatedElements = updatedElements.push(updatedFlow);
-            }
-          }
-        }
-      }
-
-      // Update flows grouped by sink endpoint using pre-computed offsets
-      for (const [endpointUid, flows] of flowsBySinkEndpoint) {
-        const endpoint = elements.find((e) => e.uid === endpointUid);
-        if (endpoint instanceof StockViewElement) {
-          // Use pre-computed offsets to maintain spacing with selected flows
-          const originalStock = view.elements.find((e) => e.uid === endpointUid) as StockViewElement;
-          const newStockCx = originalStock.cx - delta.x;
-          const newStockCy = originalStock.cy - delta.y;
-          for (const flow of flows) {
-            const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
-            const updatedFlow = computeFlowRoute(flow, originalStock, newStockCx, newStockCy, offset);
-            updatedElements = updatedElements.push(updatedFlow);
-          }
-        } else if (endpoint instanceof CloudViewElement) {
-          // For clouds, use UpdateCloudAndFlow for orthogonal re-routing on perpendicular moves,
-          // but ensure the endpoint matches the cloud's actual new position.
-          const originalCloud = view.elements.find((e) => e.uid === endpointUid) as CloudViewElement | undefined;
-          if (originalCloud) {
-            const newCloudCx = originalCloud.cx - delta.x;
-            const newCloudCy = originalCloud.cy - delta.y;
-            for (const flow of flows) {
-              let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
-              // Ensure the cloud endpoint matches the actual cloud position
-              const cloudPointIndex =
-                last(updatedFlow.points).attachedToUid === endpointUid ? updatedFlow.points.size - 1 : 0;
-              const cloudPoint = updatedFlow.points.get(cloudPointIndex);
-              if (cloudPoint) {
-                const updatedPoints = updatedFlow.points.set(
-                  cloudPointIndex,
-                  cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
-                );
-                updatedFlow = updatedFlow.set('points', updatedPoints);
-              }
-              updatedElements = updatedElements.push(updatedFlow);
-            }
-          }
-        }
-      }
+      const routedFlows = routeUnselectedFlows(elements, view.elements, selection, preComputedOffsets, delta);
+      updatedElements = updatedElements.concat(routedFlows);
     }
 
     // Apply updates from updatedElements
