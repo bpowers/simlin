@@ -999,21 +999,14 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, { x: 0, y: 0 });
             otherUpdates = otherUpdates.concat(updatedFlows);
           } else if (endpoint instanceof CloudViewElement) {
-            // For clouds, directly update the flow endpoint to match the cloud's new position
-            // (UpdateCloudAndFlow uses delta to adjust points, not the cloud's current position)
-            for (const flow of flows) {
-              const pts = flow.points;
-              const newPoints = pts.map((p, idx) => {
-                if (idx === 0 && p.attachedToUid === endpointUid) {
-                  return p.merge({ x: endpoint.cx, y: endpoint.cy });
-                }
-                return p;
-              });
-              otherUpdates = otherUpdates.push(
-                flow.merge({
-                  points: newPoints,
-                }),
-              );
+            // For clouds, use UpdateCloudAndFlow with the ORIGINAL cloud position and delta
+            // This handles orthogonal re-routing for perpendicular moves
+            const originalCloud = this.elements.get(endpointUid);
+            if (originalCloud instanceof CloudViewElement) {
+              for (const flow of flows) {
+                const [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, moveDelta);
+                otherUpdates = otherUpdates.push(updatedFlow);
+              }
             }
           }
         }
@@ -1025,21 +1018,14 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, { x: 0, y: 0 });
             otherUpdates = otherUpdates.concat(updatedFlows);
           } else if (endpoint instanceof CloudViewElement) {
-            // For clouds, directly update the flow endpoint to match the cloud's new position
-            // (UpdateCloudAndFlow uses delta to adjust points, not the cloud's current position)
-            for (const flow of flows) {
-              const pts = flow.points;
-              const newPoints = pts.map((p, idx) => {
-                if (idx === pts.size - 1 && p.attachedToUid === endpointUid) {
-                  return p.merge({ x: endpoint.cx, y: endpoint.cy });
-                }
-                return p;
-              });
-              otherUpdates = otherUpdates.push(
-                flow.merge({
-                  points: newPoints,
-                }),
-              );
+            // For clouds, use UpdateCloudAndFlow with the ORIGINAL cloud position and delta
+            // This handles orthogonal re-routing for perpendicular moves
+            const originalCloud = this.elements.get(endpointUid);
+            if (originalCloud instanceof CloudViewElement) {
+              for (const flow of flows) {
+                const [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, moveDelta);
+                otherUpdates = otherUpdates.push(updatedFlow);
+              }
             }
           }
         }

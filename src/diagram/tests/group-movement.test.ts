@@ -360,21 +360,14 @@ export function applyGroupMovement(
         result = result.set(updatedFlow.uid, updatedFlow);
       }
     } else if (endpoint instanceof CloudViewElement) {
-      // For clouds, directly update the flow endpoint to match the cloud's new position
-      for (const flow of flows) {
-        const pts = flow.points;
-        const newPoints = pts.map((p, i) => {
-          if (i === 0 && p.attachedToUid === endpointUid) {
-            return p.merge({ x: endpoint.cx, y: endpoint.cy });
-          }
-          return p;
-        });
-        result = result.set(
-          flow.uid,
-          flow.merge({
-            points: newPoints,
-          }),
-        );
+      // For clouds, use UpdateCloudAndFlow with the ORIGINAL cloud position and delta
+      // This handles orthogonal re-routing for perpendicular moves
+      const originalCloud = elements.get(endpointUid);
+      if (originalCloud instanceof CloudViewElement) {
+        for (const flow of flows) {
+          const [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+          result = result.set(updatedFlow.uid, updatedFlow);
+        }
       }
     }
   }
@@ -388,21 +381,14 @@ export function applyGroupMovement(
         result = result.set(updatedFlow.uid, updatedFlow);
       }
     } else if (endpoint instanceof CloudViewElement) {
-      // For clouds, directly update the flow endpoint to match the cloud's new position
-      for (const flow of flows) {
-        const pts = flow.points;
-        const newPoints = pts.map((p, i) => {
-          if (i === pts.size - 1 && p.attachedToUid === endpointUid) {
-            return p.merge({ x: endpoint.cx, y: endpoint.cy });
-          }
-          return p;
-        });
-        result = result.set(
-          flow.uid,
-          flow.merge({
-            points: newPoints,
-          }),
-        );
+      // For clouds, use UpdateCloudAndFlow with the ORIGINAL cloud position and delta
+      // This handles orthogonal re-routing for perpendicular moves
+      const originalCloud = elements.get(endpointUid);
+      if (originalCloud instanceof CloudViewElement) {
+        for (const flow of flows) {
+          const [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+          result = result.set(updatedFlow.uid, updatedFlow);
+        }
       }
     }
   }
@@ -711,8 +697,8 @@ describe('Group Movement', () => {
   });
 
   describe('Cloud in selection, attached flow not in selection', () => {
-    it('should adjust flow when cloud moves but flow is not selected', () => {
-      // Setup: Cloud -> Flow 1 (not selected) -> Stock
+    it('should adjust flow when cloud moves parallel to flow direction', () => {
+      // Setup: Cloud -> Flow (not selected) -> Stock, horizontal flow
       const cloud = makeCloud(1, 2, 100, 100);
       const stock = makeStock(3, 200, 100, [2], []);
       const flow = makeFlow(2, 150, 100, [
@@ -724,7 +710,7 @@ describe('Group Movement', () => {
 
       // Only select the cloud, not the flow
       const selection = Set<UID>([1]);
-      const delta = { x: -50, y: 0 }; // Move cloud right 50
+      const delta = { x: -50, y: 0 }; // Move cloud right 50 (parallel to flow)
 
       const result = applyGroupMovement(elements, selection, delta);
 
@@ -734,12 +720,68 @@ describe('Group Movement', () => {
 
       // Flow should be adjusted (routed from new cloud position to fixed stock)
       const newFlow = result.get(2) as FlowViewElement;
+      // Flow remains 2 points (straight horizontal line)
+      expect(newFlow.points.size).toBe(2);
       // The source point should be updated to connect to new cloud position
       expect(newFlow.points.first()!.attachedToUid).toBe(1);
       expect(newFlow.points.first()!.x).toBe(150);
+      expect(newFlow.points.first()!.y).toBe(100);
       // The sink point should still be at stock
       expect(newFlow.points.last()!.attachedToUid).toBe(3);
       expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
+    });
+
+    it('should create L-shaped flow when cloud moves perpendicular to flow direction', () => {
+      // Setup: Cloud -> Flow (not selected) -> Stock, horizontal flow
+      const cloud = makeCloud(1, 2, 100, 100);
+      const stock = makeStock(3, 200, 100, [2], []);
+      const flow = makeFlow(2, 150, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
+      ]);
+
+      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock);
+
+      // Only select the cloud, not the flow
+      const selection = Set<UID>([1]);
+      // Move cloud DOWN 30 (perpendicular to horizontal flow)
+      // delta is subtracted, so y: -30 moves from y=100 to y=130
+      const delta = { x: 0, y: -30 };
+
+      const result = applyGroupMovement(elements, selection, delta);
+
+      // Cloud should move down
+      const newCloud = result.get(1) as CloudViewElement;
+      expect(newCloud.cx).toBe(100); // x unchanged
+      expect(newCloud.cy).toBe(130); // moved down 30
+
+      // Flow should be re-routed as L-shaped (3 points)
+      const newFlow = result.get(2) as FlowViewElement;
+      expect(newFlow.points.size).toBe(3);
+
+      // First point: at cloud's new position
+      const firstPt = newFlow.points.first()!;
+      expect(firstPt.attachedToUid).toBe(1);
+      expect(firstPt.x).toBe(100);
+      expect(firstPt.y).toBe(130);
+
+      // Middle point: corner creating the L-shape (at stock's x, cloud's new y)
+      const middlePt = newFlow.points.get(1)!;
+      expect(middlePt.attachedToUid).toBeUndefined(); // corner point, not attached
+      expect(middlePt.x).toBe(200 - StockWidth / 2); // at stock's x
+      expect(middlePt.y).toBe(130); // at cloud's new y
+
+      // Last point: at stock (unchanged)
+      const lastPt = newFlow.points.last()!;
+      expect(lastPt.attachedToUid).toBe(3);
+      expect(lastPt.x).toBe(200 - StockWidth / 2);
+      expect(lastPt.y).toBe(100);
+
+      // Verify flow maintains orthogonal segments (horizontal + vertical)
+      // Segment 1: (100, 130) -> (175, 130) is horizontal
+      expect(firstPt.y).toBe(middlePt.y);
+      // Segment 2: (175, 130) -> (175, 100) is vertical
+      expect(middlePt.x).toBe(lastPt.x);
     });
   });
 });
