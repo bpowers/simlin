@@ -1320,16 +1320,41 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
             return preProcessed;
           }
           // Handle clouds (not pre-processed since they only have one flow each)
+          // Ensure flow endpoint matches cloud's actual new position after routing
           if (sourceInSelection && sourceUid !== undefined) {
             const sourceEndpoint = view.elements.find((e) => e.uid === sourceUid);
             if (sourceEndpoint instanceof CloudViewElement) {
-              const [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, element, delta);
+              let [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, element, delta);
+              // Ensure endpoint matches cloud's actual new position (raw delta, not clamped)
+              const newCloudCx = sourceEndpoint.cx - delta.x;
+              const newCloudCy = sourceEndpoint.cy - delta.y;
+              const cloudPointIndex = 0; // source is at index 0
+              const cloudPoint = updatedFlow.points.get(cloudPointIndex);
+              if (cloudPoint) {
+                const updatedPoints = updatedFlow.points.set(
+                  cloudPointIndex,
+                  cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
+                );
+                updatedFlow = updatedFlow.set('points', updatedPoints);
+              }
               return updatedFlow;
             }
           } else if (sinkInSelection && sinkUid !== undefined) {
             const sinkEndpoint = view.elements.find((e) => e.uid === sinkUid);
             if (sinkEndpoint instanceof CloudViewElement) {
-              const [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, element, delta);
+              let [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, element, delta);
+              // Ensure endpoint matches cloud's actual new position (raw delta, not clamped)
+              const newCloudCx = sinkEndpoint.cx - delta.x;
+              const newCloudCy = sinkEndpoint.cy - delta.y;
+              const cloudPointIndex = updatedFlow.points.size - 1; // sink is at last index
+              const cloudPoint = updatedFlow.points.get(cloudPointIndex);
+              if (cloudPoint) {
+                const updatedPoints = updatedFlow.points.set(
+                  cloudPointIndex,
+                  cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
+                );
+                updatedFlow = updatedFlow.set('points', updatedPoints);
+              }
               return updatedFlow;
             }
           }

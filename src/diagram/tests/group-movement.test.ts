@@ -275,15 +275,40 @@ export function applyGroupMovement(
         result = result.set(flowUid, preProcessed);
       } else if (sourceInSelection && sourceUid !== undefined) {
         // Handle clouds (not pre-processed since they only have one flow each)
+        // Ensure flow endpoint matches cloud's actual new position after routing
         const sourceEndpoint = elements.get(sourceUid);
         if (sourceEndpoint instanceof CloudViewElement) {
-          const [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, delta);
+          let [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, delta);
+          // Ensure endpoint matches cloud's actual new position (raw delta, not clamped)
+          const newCloudCx = sourceEndpoint.cx - delta.x;
+          const newCloudCy = sourceEndpoint.cy - delta.y;
+          const cloudPointIndex = 0; // source is at index 0
+          const cloudPoint = updatedFlow.points.get(cloudPointIndex);
+          if (cloudPoint) {
+            const updatedPoints = updatedFlow.points.set(
+              cloudPointIndex,
+              cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
+            );
+            updatedFlow = updatedFlow.set('points', updatedPoints);
+          }
           result = result.set(flowUid, updatedFlow);
         }
       } else if (sinkInSelection && sinkUid !== undefined) {
         const sinkEndpoint = elements.get(sinkUid);
         if (sinkEndpoint instanceof CloudViewElement) {
-          const [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, delta);
+          let [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, delta);
+          // Ensure endpoint matches cloud's actual new position (raw delta, not clamped)
+          const newCloudCx = sinkEndpoint.cx - delta.x;
+          const newCloudCy = sinkEndpoint.cy - delta.y;
+          const cloudPointIndex = updatedFlow.points.size - 1; // sink is at last index
+          const cloudPoint = updatedFlow.points.get(cloudPointIndex);
+          if (cloudPoint) {
+            const updatedPoints = updatedFlow.points.set(
+              cloudPointIndex,
+              cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
+            );
+            updatedFlow = updatedFlow.set('points', updatedPoints);
+          }
           result = result.set(flowUid, updatedFlow);
         }
       }
