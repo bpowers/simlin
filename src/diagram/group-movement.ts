@@ -10,16 +10,20 @@
  * Editor.tsx (for persisting changes) and Canvas.tsx (for live preview).
  */
 
-import { List, Set } from 'immutable';
+import { List, Map, Set } from 'immutable';
 import { first, last } from '@system-dynamics/core/collections';
 import {
   ViewElement,
   FlowViewElement,
   StockViewElement,
   CloudViewElement,
+  AuxViewElement,
+  LinkViewElement,
   UID,
   Point,
 } from '@system-dynamics/core/datamodel';
+import { updateArcAngle, radToDeg } from './arc-utils';
+import { getVisualCenter, takeoffθ } from './drawing/Connector';
 import {
   clampToSegment,
   computeFlowOffsets,
@@ -221,12 +225,17 @@ export function processSelectedFlow(
       return [preProcessed, sideEffects];
     }
 
-    // Handle clouds: when a cloud is selected in a group, it should move by the full delta
-    // without axis clamping (unlike single-element cloud movement which clamps small perpendicular moves).
-    // We use UpdateCloudAndFlow for flow routing but override the cloud position to honor full delta.
+    // Handle different endpoint types: stocks need computeFlowRoute, clouds need UpdateCloudAndFlow
     if (sourceInSelection && sourceUid !== undefined) {
       const sourceEndpoint = getElementByUid(sourceUid);
-      if (sourceEndpoint instanceof CloudViewElement) {
+      if (sourceEndpoint instanceof StockViewElement) {
+        // Route flow from moved stock to fixed sink endpoint
+        const newStockCx = sourceEndpoint.cx - delta.x;
+        const newStockCy = sourceEndpoint.cy - delta.y;
+        // Use default offset of 0.5 (center) for selected flows
+        const updatedFlow = computeFlowRoute(flow, sourceEndpoint, newStockCx, newStockCy, 0.5);
+        return [updatedFlow, sideEffects];
+      } else if (sourceEndpoint instanceof CloudViewElement) {
         const [, routedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, delta);
         // Move cloud by full delta (not clamped) and update flow with proper orthogonal geometry
         const newCloudX = sourceEndpoint.cx - delta.x;
@@ -269,7 +278,14 @@ export function processSelectedFlow(
       }
     } else if (sinkInSelection && sinkUid !== undefined) {
       const sinkEndpoint = getElementByUid(sinkUid);
-      if (sinkEndpoint instanceof CloudViewElement) {
+      if (sinkEndpoint instanceof StockViewElement) {
+        // Route flow from fixed source to moved stock
+        const newStockCx = sinkEndpoint.cx - delta.x;
+        const newStockCy = sinkEndpoint.cy - delta.y;
+        // Use default offset of 0.5 (center) for selected flows
+        const updatedFlow = computeFlowRoute(flow, sinkEndpoint, newStockCx, newStockCy, 0.5);
+        return [updatedFlow, sideEffects];
+      } else if (sinkEndpoint instanceof CloudViewElement) {
         const [, routedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, delta);
         // Move cloud by full delta (not clamped) and update flow with proper orthogonal geometry
         const newCloudX = sinkEndpoint.cx - delta.x;
@@ -367,12 +383,23 @@ export function routeUnselectedFlows(
 ): List<ViewElement> {
   let updatedFlows = List<ViewElement>();
 
-  // First, collect flows grouped by their attached endpoint
+  // Build maps FIRST so we can reuse them (iterators can only be consumed once)
+  const elementsMap = new globalThis.Map<UID, ViewElement>();
+  for (const el of elements) {
+    elementsMap.set(el.uid, el);
+  }
+  const originalElementsMap = new globalThis.Map<UID, ViewElement>();
+  for (const el of originalElements) {
+    originalElementsMap.set(el.uid, el);
+  }
+  const getOriginalElement = (uid: UID) => originalElementsMap.get(uid);
+
+  // Collect flows grouped by their attached endpoint
   const flowsBySourceEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
   const flowsBySinkEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
   const bothEndsSelectedFlows: FlowViewElement[] = [];
 
-  for (const element of elements) {
+  for (const element of elementsMap.values()) {
     if (!(element instanceof FlowViewElement)) continue;
     if (selection.has(element.uid)) continue; // Already processed
 
@@ -413,23 +440,9 @@ export function routeUnselectedFlows(
     );
   }
 
-  // Helper to find original element by UID
-  const originalElementsMap = new globalThis.Map<UID, ViewElement>();
-  for (const el of originalElements) {
-    originalElementsMap.set(el.uid, el);
-  }
-  const getOriginalElement = (uid: UID) => originalElementsMap.get(uid);
-
   // Update flows grouped by source endpoint using pre-computed offsets
   for (const [endpointUid, flows] of flowsBySourceEndpoint) {
-    // Get the moved endpoint from elements
-    let movedEndpoint: ViewElement | undefined;
-    for (const el of elements) {
-      if (el.uid === endpointUid) {
-        movedEndpoint = el;
-        break;
-      }
-    }
+    const movedEndpoint = elementsMap.get(endpointUid);
 
     if (movedEndpoint instanceof StockViewElement) {
       const originalStock = getOriginalElement(endpointUid) as StockViewElement;
@@ -499,14 +512,7 @@ export function routeUnselectedFlows(
 
   // Update flows grouped by sink endpoint using pre-computed offsets
   for (const [endpointUid, flows] of flowsBySinkEndpoint) {
-    // Get the moved endpoint from elements
-    let movedEndpoint: ViewElement | undefined;
-    for (const el of elements) {
-      if (el.uid === endpointUid) {
-        movedEndpoint = el;
-        break;
-      }
-    }
+    const movedEndpoint = elementsMap.get(endpointUid);
 
     if (movedEndpoint instanceof StockViewElement) {
       const originalStock = getOriginalElement(endpointUid) as StockViewElement;
@@ -575,4 +581,295 @@ export function routeUnselectedFlows(
   }
 
   return updatedFlows;
+}
+
+/**
+ * Input for the unified applyGroupMovement function.
+ */
+export interface GroupMovementInput {
+  elements: Iterable<ViewElement>;
+  selection: Set<UID>;
+  delta: Point2D;
+  arcPoint?: Point2D; // For single-link arc drag
+  segmentIndex?: number; // For single-flow segment drag
+}
+
+/**
+ * Output from the unified applyGroupMovement function.
+ */
+export interface GroupMovementOutput {
+  updatedElements: Map<UID, ViewElement>;
+}
+
+/**
+ * Process links during group movement.
+ *
+ * Links are processed LAST because flows may re-route during group movement,
+ * so we need to use the actual final positions of endpoints (not assume they
+ * moved by exactly `delta`).
+ *
+ * @param links Links to process
+ * @param originalElements Map of original elements (before movement)
+ * @param updatedElements Map of updated elements (after movement)
+ * @param selection Set of selected UIDs
+ * @param delta Movement delta
+ * @param arcPoint Optional arc point for single-link drag
+ * @returns Map of updated link elements
+ */
+export function processLinks(
+  links: Iterable<LinkViewElement>,
+  originalElements: Map<UID, ViewElement>,
+  updatedElements: Map<UID, ViewElement>,
+  selection: Set<UID>,
+  delta: Point2D,
+  arcPoint?: Point2D,
+): Map<UID, LinkViewElement> {
+  let result = Map<UID, LinkViewElement>();
+
+  for (const link of links) {
+    // Get original and updated endpoint positions
+    const oldFrom = originalElements.get(link.fromUid);
+    const oldTo = originalElements.get(link.toUid);
+    if (!oldFrom || !oldTo) {
+      continue;
+    }
+
+    const newFrom = updatedElements.get(link.fromUid) ?? oldFrom;
+    const newTo = updatedElements.get(link.toUid) ?? oldTo;
+
+    // Check if both endpoints moved by the same amount (pure translation)
+    const fromDelta = { x: oldFrom.cx - newFrom.cx, y: oldFrom.cy - newFrom.cy };
+    const toDelta = { x: oldTo.cx - newTo.cx, y: oldTo.cy - newTo.cy };
+    const sameMovement = Math.abs(fromDelta.x - toDelta.x) < 0.1 && Math.abs(fromDelta.y - toDelta.y) < 0.1;
+    const didMove = fromDelta.x !== 0 || fromDelta.y !== 0 || toDelta.x !== 0 || toDelta.y !== 0;
+
+    // Single link selection with arcPoint: adjust arc based on drag position
+    if (selection.size === 1 && selection.has(link.uid) && arcPoint) {
+      const newTakeoff = takeoffθ({
+        element: link,
+        from: oldFrom,
+        to: oldTo,
+        arcPoint: { x: arcPoint.x, y: arcPoint.y },
+      });
+      result = result.set(link.uid, link.merge({ arc: radToDeg(newTakeoff) }));
+    } else if (sameMovement && didMove) {
+      // Both endpoints moved together - translate multiPoint if present, keep arc
+      if (link.multiPoint) {
+        const translatedMultiPoint = link.multiPoint.map((p) =>
+          p.merge({
+            x: p.x - fromDelta.x,
+            y: p.y - fromDelta.y,
+          }),
+        );
+        result = result.set(link.uid, link.merge({ multiPoint: translatedMultiPoint }));
+      }
+      // arc is preserved (no change needed)
+    } else if (didMove) {
+      // Endpoints moved differently - adjust arc based on rotation of the
+      // line between endpoints' visual centers
+      const oldFromVisual = getVisualCenter(oldFrom);
+      const oldToVisual = getVisualCenter(oldTo);
+      const newFromVisual = getVisualCenter(newFrom);
+      const newToVisual = getVisualCenter(newTo);
+
+      const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
+      const newθ = Math.atan2(newToVisual.cy - newFromVisual.cy, newToVisual.cx - newFromVisual.cx);
+      const diffθ = oldθ - newθ;
+
+      result = result.set(link.uid, link.merge({ arc: updateArcAngle(link.arc, radToDeg(diffθ)) }));
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Unified function to apply group movement to all element types.
+ *
+ * This function handles:
+ * 1. Single-element movement (delegates to existing helpers for special cases)
+ * 2. Multi-element group movement with proper flow routing and link arc adjustment
+ *
+ * Processing order:
+ * 1. Move stocks and auxes by delta
+ * 2. Pre-compute flow offsets for multi-flow spacing
+ * 3. Process selected flows (route or translate based on endpoint selection)
+ * 4. Move selected clouds by delta
+ * 5. Route unselected flows attached to selected endpoints
+ * 6. Process links LAST (using actual updated positions)
+ *
+ * @param input Movement input parameters
+ * @returns Map of element UID to updated element
+ */
+export function applyGroupMovement(input: GroupMovementInput): GroupMovementOutput {
+  const { elements, selection, delta, arcPoint, segmentIndex } = input;
+
+  // Build maps of elements for efficient lookup
+  const originalElements = Map<UID, ViewElement>().withMutations((mutable) => {
+    for (const el of elements) {
+      mutable.set(el.uid, el);
+    }
+  });
+
+  // Helper to check if a UID is in selection
+  const isInSelection = (uid: UID | undefined): boolean => {
+    return uid !== undefined && selection.has(uid);
+  };
+
+  // Classify elements by type
+  const selectedStockUids = new globalThis.Set<UID>();
+  const selectedFlowUids = Set<UID>().withMutations((mutable) => {
+    for (const uid of selection) {
+      const el = originalElements.get(uid);
+      if (!el) continue;
+      if (el instanceof StockViewElement) {
+        selectedStockUids.add(uid);
+      } else if (el instanceof FlowViewElement) {
+        mutable.add(uid);
+      }
+    }
+  });
+
+  let updatedElements = originalElements;
+
+  // First pass: Move stocks and auxes by delta
+  for (const uid of selection) {
+    const el = originalElements.get(uid);
+    if (!el) continue;
+
+    if (el instanceof StockViewElement) {
+      updatedElements = updatedElements.set(
+        uid,
+        el.merge({
+          x: el.cx - delta.x,
+          y: el.cy - delta.y,
+        }),
+      );
+    } else if (el instanceof AuxViewElement) {
+      updatedElements = updatedElements.set(
+        uid,
+        el.merge({
+          x: el.cx - delta.x,
+          y: el.cy - delta.y,
+        }),
+      );
+    } else if (el instanceof CloudViewElement) {
+      updatedElements = updatedElements.set(
+        uid,
+        el.merge({
+          x: el.cx - delta.x,
+          y: el.cy - delta.y,
+        }),
+      );
+    }
+  }
+
+  // Pre-compute flow offsets for all flows attached to moved stocks.
+  // Note: We use originalElements.values() since the input `elements` iterator was already consumed.
+  const preComputedOffsets =
+    selection.size > 1
+      ? computePreRoutedOffsets(originalElements.values(), selectedStockUids, delta, isInSelection)
+      : new globalThis.Map<UID, number>();
+
+  // Pre-process selected flows with one endpoint selected (stock endpoint only)
+  const [preProcessedFlows] =
+    selection.size > 1
+      ? preProcessSelectedFlows(
+          originalElements.values(),
+          selectedFlowUids,
+          preComputedOffsets,
+          delta,
+          isInSelection,
+          (uid) => originalElements.get(uid),
+        )
+      : [new globalThis.Map<UID, FlowViewElement>()];
+
+  // Process selected flows
+  for (const uid of selection) {
+    const el = originalElements.get(uid);
+    if (!(el instanceof FlowViewElement)) continue;
+
+    // Single-flow selection with segmentIndex: move segment
+    if (selection.size === 1 && segmentIndex !== undefined) {
+      const pts = el.points;
+      if (pts.size >= 2) {
+        const sourceId = first(pts).attachedToUid;
+        const sinkId = last(pts).attachedToUid;
+        const source = sourceId !== undefined ? originalElements.get(sourceId) : undefined;
+        const sink = sinkId !== undefined ? originalElements.get(sinkId) : undefined;
+
+        if (
+          source &&
+          sink &&
+          (source instanceof StockViewElement || source instanceof CloudViewElement) &&
+          (sink instanceof StockViewElement || sink instanceof CloudViewElement)
+        ) {
+          const { UpdateFlow } = require('./drawing/Flow');
+          const ends = List<StockViewElement | CloudViewElement>([source, sink]);
+          const [newFlow, newClouds] = UpdateFlow(el, ends, delta, segmentIndex);
+          updatedElements = updatedElements.set(uid, newFlow);
+          for (const cloud of newClouds) {
+            updatedElements = updatedElements.set(cloud.uid, cloud);
+          }
+        }
+      }
+      continue;
+    }
+
+    const [newFlow, sideEffects] = processSelectedFlow(el, delta, isInSelection, preProcessedFlows, (flowUid) =>
+      originalElements.get(flowUid),
+    );
+    updatedElements = updatedElements.set(uid, newFlow);
+    for (const sideEffect of sideEffects) {
+      updatedElements = updatedElements.set(sideEffect.uid, sideEffect);
+    }
+  }
+
+  // Route unselected flows attached to selected endpoints.
+  // This applies even for single-element selection (e.g., moving a single stock
+  // should route its attached flows).
+  // Note: We use originalElements.values() here because the input `elements` iterator
+  // was already consumed when building originalElements.
+  const hasSelectedEndpoints = selectedStockUids.size > 0 || selection.size > 0;
+  if (hasSelectedEndpoints) {
+    const routedFlows = routeUnselectedFlows(
+      originalElements.values(),
+      originalElements.values(),
+      selection,
+      preComputedOffsets,
+      delta,
+    );
+    for (const flow of routedFlows) {
+      updatedElements = updatedElements.set(flow.uid, flow);
+    }
+  }
+
+  // Process links LAST using actual updated positions
+  const links: LinkViewElement[] = [];
+  for (const el of originalElements.values()) {
+    if (el instanceof LinkViewElement) {
+      // Include link if it's selected OR if either endpoint was updated
+      const fromUpdated = updatedElements.get(el.fromUid) !== originalElements.get(el.fromUid);
+      const toUpdated = updatedElements.get(el.toUid) !== originalElements.get(el.toUid);
+      if (selection.has(el.uid) || fromUpdated || toUpdated) {
+        links.push(el);
+      }
+    }
+  }
+
+  const updatedLinks = processLinks(links, originalElements, updatedElements, selection, delta, arcPoint);
+  for (const [uid, link] of updatedLinks) {
+    updatedElements = updatedElements.set(uid, link);
+  }
+
+  // Filter to only return elements that actually changed
+  let result = Map<UID, ViewElement>();
+  for (const [uid, newEl] of updatedElements) {
+    const oldEl = originalElements.get(uid);
+    if (newEl !== oldEl) {
+      result = result.set(uid, newEl);
+    }
+  }
+
+  return { updatedElements: result };
 }

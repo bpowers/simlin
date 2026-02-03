@@ -42,12 +42,7 @@ import { Connector, ConnectorProps, getVisualCenter } from './Connector';
 import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
 import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
-import {
-  computePreRoutedOffsets,
-  preProcessSelectedFlows,
-  processSelectedFlow,
-  routeUnselectedFlows,
-} from '../group-movement';
+import { applyGroupMovement } from '../group-movement';
 import { Group, groupBounds, GroupProps } from './Group';
 import { Module, moduleBounds, ModuleProps } from './Module';
 import { CustomElement } from './SlateEditor';
@@ -509,6 +504,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     const { isMovingArrow } = this.state;
     const isSelected = this.props.selection.has(element.uid);
 
+    // Get the updated element from selectionUpdates if available (arc was already adjusted
+    // by applyGroupMovement for group selection cases)
+    const updatedElement = this.selectionUpdates.get(element.uid);
+    if (updatedElement instanceof LinkViewElement) {
+      element = updatedElement;
+    }
+
     const from = this.selectionUpdates.get(element.fromUid) || this.getElementByUid(element.fromUid);
     let to = this.selectionUpdates.get(element.toUid) || this.getElementByUid(element.toUid);
     const toUid = to.uid;
@@ -535,7 +537,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         }) as ViewElement;
       }
     }
-    if (isMovingArrow || this.isSelected(from) || this.isSelected(to)) {
+    // When dragging a link arrow (isMovingArrow), adjust arc based on the dynamic to position.
+    // For other movement cases, the arc is already adjusted by applyGroupMovement.
+    if (isMovingArrow) {
       const oldTo = getOrThrow(this.elements, toUid);
       const oldFrom = getOrThrow(this.elements, from.uid);
       const oldToVisual = getVisualCenter(oldTo);
@@ -543,30 +547,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       const toVisual = getVisualCenter(to);
       const fromVisual = getVisualCenter(from);
 
-      // Check if both endpoints moved by the same amount (pure translation)
-      const fromDelta = { x: oldFrom.cx - from.cx, y: oldFrom.cy - from.cy };
-      const toDelta = { x: oldTo.cx - to.cx, y: oldTo.cy - to.cy };
-      const sameMovement = Math.abs(fromDelta.x - toDelta.x) < 0.1 && Math.abs(fromDelta.y - toDelta.y) < 0.1;
-
-      if (sameMovement && (fromDelta.x !== 0 || fromDelta.y !== 0)) {
-        // Both endpoints moved together - translate multiPoint if present, keep arc
-        if (element.multiPoint) {
-          const translatedMultiPoint = element.multiPoint.map((p) =>
-            p.merge({
-              x: p.x - fromDelta.x,
-              y: p.y - fromDelta.y,
-            }),
-          );
-          element = element.merge({ multiPoint: translatedMultiPoint });
-        }
-        // No arc change needed for pure translation
-      } else {
-        // Endpoints moved differently - adjust arc based on rotation
-        const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
-        const newθ = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
-        const diffθ = oldθ - newθ;
-        element = element.set('arc', updateArcAngle(element.arc, radToDeg(diffθ)));
-      }
+      // Endpoints moved differently - adjust arc based on rotation
+      const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
+      const newθ = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
+      const diffθ = oldθ - newθ;
+      element = element.set('arc', updateArcAngle(element.arc, radToDeg(diffθ)));
     }
     const props: ConnectorProps = {
       element,
@@ -787,121 +772,17 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       });
     }
     if (this.state.moveDelta) {
-      let otherUpdates = List<ViewElement>();
-      const { x, y } = defined(this.state.moveDelta);
       const moveDelta = defined(this.state.moveDelta);
 
-      // For group movement, we need to know which UIDs are selected
-      const selectedUids = this.props.selection;
-
-      // Helper to check if an element (by UID) is in the selection
-      const isInSelection = (uid: UID | undefined): boolean => {
-        return uid !== undefined && selectedUids.has(uid);
-      };
-
-      // Pre-compute flow offsets and pre-process selected flows for group movement
-      const selectedStockUids = new globalThis.Set<UID>();
-      const selectedFlowUids = Set<UID>().withMutations((mutable) => {
-        for (const [, element] of this.selectionUpdates) {
-          if (element instanceof StockViewElement) {
-            selectedStockUids.add(element.uid);
-          } else if (element instanceof FlowViewElement) {
-            mutable.add(element.uid);
-          }
-        }
+      const { updatedElements } = applyGroupMovement({
+        elements: this.elements.values(),
+        selection: this.props.selection,
+        delta: moveDelta,
+        arcPoint: this.getArcPoint(),
+        segmentIndex: this.state.draggingSegmentIndex,
       });
 
-      // Materialize elements to array so it can be iterated multiple times
-      const elementsArray = Array.from(this.elements.values());
-
-      const preComputedOffsets =
-        this.selectionUpdates.size > 1
-          ? computePreRoutedOffsets(elementsArray, selectedStockUids, moveDelta, isInSelection)
-          : new globalThis.Map<UID, number>();
-
-      const [preProcessedFlows] =
-        this.selectionUpdates.size > 1
-          ? preProcessSelectedFlows(
-              elementsArray,
-              selectedFlowUids,
-              preComputedOffsets,
-              moveDelta,
-              isInSelection,
-              (uid) => this.getElementByUid(uid),
-            )
-          : [new globalThis.Map<UID, FlowViewElement>()];
-
-      // First pass: move all selected elements
-      this.selectionUpdates = this.selectionUpdates.map((initialEl) => {
-        // Single-element selection: use existing constraint logic
-        if (this.selectionUpdates.size === 1) {
-          if (initialEl instanceof FlowViewElement) {
-            const [flow, updatedClouds] = this.constrainFlowMovement(initialEl, moveDelta);
-            otherUpdates = otherUpdates.concat(updatedClouds);
-            return flow;
-          } else if (initialEl instanceof StockViewElement) {
-            const [stock, updatedFlows] = this.constrainStockMovement(initialEl, moveDelta);
-            otherUpdates = otherUpdates.concat(updatedFlows);
-            return stock;
-          } else if (initialEl instanceof CloudViewElement) {
-            const [cloud, updatedFlow] = this.constrainCloudMovement(initialEl, moveDelta);
-            otherUpdates = otherUpdates.push(updatedFlow);
-            return cloud;
-          }
-        }
-
-        // Group movement logic
-        if (initialEl instanceof FlowViewElement) {
-          const [newFlow, sideEffects] = processSelectedFlow(
-            initialEl,
-            moveDelta,
-            isInSelection,
-            preProcessedFlows,
-            (uid) => this.getElementByUid(uid),
-          );
-          otherUpdates = otherUpdates.concat(sideEffects);
-          return newFlow;
-        } else if (initialEl instanceof StockViewElement) {
-          // Stock always moves by delta in group selection
-          return initialEl.merge({
-            x: initialEl.cx - x,
-            y: initialEl.cy - y,
-          });
-        } else if (initialEl instanceof CloudViewElement) {
-          // Cloud moves by delta in group selection
-          return initialEl.merge({
-            x: initialEl.cx - x,
-            y: initialEl.cy - y,
-          });
-        } else if (initialEl instanceof LinkViewElement) {
-          // Defer all link processing to the connector() method, which has access to the
-          // actual updated element positions. This is important because flows may re-route
-          // during group movement, so we can't assume endpoints moved by exactly `delta`.
-          return initialEl;
-        } else {
-          // Aux, Alias, Module, etc.
-          return (initialEl as AuxViewElement).merge({
-            x: initialEl.cx - x,
-            y: initialEl.cy - y,
-          });
-        }
-      });
-
-      // Second pass: update flows NOT in selection that are attached to endpoints IN selection
-      if (this.selectionUpdates.size > 1) {
-        const routedFlows = routeUnselectedFlows(
-          elementsArray,
-          elementsArray,
-          selectedUids,
-          preComputedOffsets,
-          moveDelta,
-        );
-        otherUpdates = otherUpdates.concat(routedFlows);
-      }
-
-      // Add all updated elements that weren't directly selected
-      const namedUpdates: Map<UID, ViewElement> = otherUpdates.toMap().mapKeys((_, el) => el.uid);
-      this.selectionUpdates = this.selectionUpdates.concat(namedUpdates);
+      this.selectionUpdates = this.selectionUpdates.merge(updatedElements);
     }
 
     return displayElements;
