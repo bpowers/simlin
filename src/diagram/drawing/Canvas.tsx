@@ -781,6 +781,53 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         return uid !== undefined && selectedUids.has(uid);
       };
 
+      // Pre-process flows in selection with one endpoint selected - group them by endpoint
+      // to preserve multi-flow spacing when multiple flows share the same selected stock
+      const preProcessedFlows = new globalThis.Map<UID, FlowViewElement>();
+      if (this.selectionUpdates.size > 1) {
+        const selectedFlowsBySourceEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
+        const selectedFlowsBySinkEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
+
+        for (const [, element] of this.selectionUpdates) {
+          if (!(element instanceof FlowViewElement)) continue;
+
+          const pts = element.points;
+          if (pts.size < 2) continue;
+
+          const sourceUid = first(pts).attachedToUid;
+          const sinkUid = last(pts).attachedToUid;
+          const sourceInSel = isInSelection(sourceUid);
+          const sinkInSel = isInSelection(sinkUid);
+
+          if (sourceInSel && !sinkInSel && sourceUid !== undefined) {
+            const existing = selectedFlowsBySourceEndpoint.get(sourceUid) || List<FlowViewElement>();
+            selectedFlowsBySourceEndpoint.set(sourceUid, existing.push(element));
+          } else if (!sourceInSel && sinkInSel && sinkUid !== undefined) {
+            const existing = selectedFlowsBySinkEndpoint.get(sinkUid) || List<FlowViewElement>();
+            selectedFlowsBySinkEndpoint.set(sinkUid, existing.push(element));
+          }
+        }
+
+        for (const [endpointUid, flows] of selectedFlowsBySourceEndpoint) {
+          const endpoint = this.getElementByUid(endpointUid);
+          if (endpoint instanceof StockViewElement) {
+            const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, moveDelta);
+            for (const f of updatedFlows) {
+              preProcessedFlows.set(f.uid, f);
+            }
+          }
+        }
+        for (const [endpointUid, flows] of selectedFlowsBySinkEndpoint) {
+          const endpoint = this.getElementByUid(endpointUid);
+          if (endpoint instanceof StockViewElement) {
+            const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, moveDelta);
+            for (const f of updatedFlows) {
+              preProcessedFlows.set(f.uid, f);
+            }
+          }
+        }
+      }
+
       // First pass: move all selected elements
       this.selectionUpdates = this.selectionUpdates.map((initialEl) => {
         // Single-element selection: use existing constraint logic
@@ -827,26 +874,21 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             });
           } else if (sourceInSelection || sinkInSelection) {
             // One endpoint is selected: that endpoint moves, flow re-routes to fixed endpoint
-            // Use the appropriate update function to maintain orthogonal geometry
+            // Check if this flow was pre-processed (for multi-flow spacing preservation)
+            const preProcessed = preProcessedFlows.get(initialEl.uid);
+            if (preProcessed) {
+              return preProcessed;
+            }
+            // Handle clouds (not pre-processed since they only have one flow each)
             if (sourceInSelection && sourceUid !== undefined) {
               const sourceEndpoint = this.getElementByUid(sourceUid);
-              if (sourceEndpoint instanceof StockViewElement) {
-                const [, updatedFlows] = UpdateStockAndFlows(sourceEndpoint, List([initialEl]), moveDelta);
-                if (updatedFlows.size > 0) {
-                  return updatedFlows.first()!;
-                }
-              } else if (sourceEndpoint instanceof CloudViewElement) {
+              if (sourceEndpoint instanceof CloudViewElement) {
                 const [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, initialEl, moveDelta);
                 return updatedFlow;
               }
             } else if (sinkInSelection && sinkUid !== undefined) {
               const sinkEndpoint = this.getElementByUid(sinkUid);
-              if (sinkEndpoint instanceof StockViewElement) {
-                const [, updatedFlows] = UpdateStockAndFlows(sinkEndpoint, List([initialEl]), moveDelta);
-                if (updatedFlows.size > 0) {
-                  return updatedFlows.first()!;
-                }
-              } else if (sinkEndpoint instanceof CloudViewElement) {
+              if (sinkEndpoint instanceof CloudViewElement) {
                 const [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, initialEl, moveDelta);
                 return updatedFlow;
               }

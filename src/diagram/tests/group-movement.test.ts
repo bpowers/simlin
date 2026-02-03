@@ -162,6 +162,52 @@ export function applyGroupMovement(
     );
   }
 
+  // Pre-process flows in selection with one endpoint selected - group by endpoint
+  // to preserve multi-flow spacing when multiple flows share the same selected stock
+  const preProcessedFlows = new globalThis.Map<UID, FlowViewElement>();
+  if (selectedFlowUids.size > 0) {
+    const selectedFlowsBySourceEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
+    const selectedFlowsBySinkEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
+
+    for (const flowUid of selectedFlowUids) {
+      const flow = elements.get(flowUid) as FlowViewElement;
+      const points = flow.points;
+      if (points.size < 2) continue;
+
+      const sourceUid = points.first()!.attachedToUid;
+      const sinkUid = points.last()!.attachedToUid;
+      const sourceInSel = sourceUid !== undefined && selectedStockUids.has(sourceUid);
+      const sinkInSel = sinkUid !== undefined && selectedStockUids.has(sinkUid);
+
+      if (sourceInSel && !sinkInSel && sourceUid !== undefined) {
+        const existing = selectedFlowsBySourceEndpoint.get(sourceUid) || List<FlowViewElement>();
+        selectedFlowsBySourceEndpoint.set(sourceUid, existing.push(flow));
+      } else if (!sourceInSel && sinkInSel && sinkUid !== undefined) {
+        const existing = selectedFlowsBySinkEndpoint.get(sinkUid) || List<FlowViewElement>();
+        selectedFlowsBySinkEndpoint.set(sinkUid, existing.push(flow));
+      }
+    }
+
+    for (const [endpointUid, flows] of selectedFlowsBySourceEndpoint) {
+      const endpoint = elements.get(endpointUid);
+      if (endpoint instanceof StockViewElement) {
+        const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, delta);
+        for (const f of updatedFlows) {
+          preProcessedFlows.set(f.uid, f);
+        }
+      }
+    }
+    for (const [endpointUid, flows] of selectedFlowsBySinkEndpoint) {
+      const endpoint = elements.get(endpointUid);
+      if (endpoint instanceof StockViewElement) {
+        const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, delta);
+        for (const f of updatedFlows) {
+          preProcessedFlows.set(f.uid, f);
+        }
+      }
+    }
+  }
+
   // Process flows in selection
   for (const flowUid of selectedFlowUids) {
     const flow = result.get(flowUid) as FlowViewElement;
@@ -193,26 +239,20 @@ export function applyGroupMovement(
       );
     } else if (sourceInSelection || sinkInSelection) {
       // One endpoint in selection: that endpoint moves, flow re-routes to fixed endpoint
-      // Use the appropriate update function to maintain orthogonal geometry
-      if (sourceInSelection && sourceUid !== undefined) {
+      // Check if this flow was pre-processed (for multi-flow spacing preservation)
+      const preProcessed = preProcessedFlows.get(flowUid);
+      if (preProcessed) {
+        result = result.set(flowUid, preProcessed);
+      } else if (sourceInSelection && sourceUid !== undefined) {
+        // Handle clouds (not pre-processed since they only have one flow each)
         const sourceEndpoint = elements.get(sourceUid);
-        if (sourceEndpoint instanceof StockViewElement) {
-          const [, updatedFlows] = UpdateStockAndFlows(sourceEndpoint, List([flow]), delta);
-          if (updatedFlows.size > 0) {
-            result = result.set(flowUid, updatedFlows.first()!);
-          }
-        } else if (sourceEndpoint instanceof CloudViewElement) {
+        if (sourceEndpoint instanceof CloudViewElement) {
           const [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, delta);
           result = result.set(flowUid, updatedFlow);
         }
       } else if (sinkInSelection && sinkUid !== undefined) {
         const sinkEndpoint = elements.get(sinkUid);
-        if (sinkEndpoint instanceof StockViewElement) {
-          const [, updatedFlows] = UpdateStockAndFlows(sinkEndpoint, List([flow]), delta);
-          if (updatedFlows.size > 0) {
-            result = result.set(flowUid, updatedFlows.first()!);
-          }
-        } else if (sinkEndpoint instanceof CloudViewElement) {
+        if (sinkEndpoint instanceof CloudViewElement) {
           const [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, delta);
           result = result.set(flowUid, updatedFlow);
         }
