@@ -186,31 +186,31 @@ export function applyGroupMovement(
         }),
       );
     } else if (sourceInSelection || sinkInSelection) {
-      // One endpoint in selection: that end moves, other adjusts
-      // For now, translate the valve and let the routing handle endpoints
-      // This is a simplified approach - a more complete implementation would
-      // use UpdateCloudAndFlow for the moving end
-      const newPoints = points.map((p, i) => {
-        const isSource = i === 0;
-        const isSink = i === points.size - 1;
-        if ((isSource && sourceInSelection) || (isSink && sinkInSelection)) {
-          return p.merge({
-            x: p.x - delta.x,
-            y: p.y - delta.y,
-          });
+      // One endpoint in selection: that endpoint moves, flow re-routes to fixed endpoint
+      // Use the appropriate update function to maintain orthogonal geometry
+      if (sourceInSelection && sourceUid !== undefined) {
+        const sourceEndpoint = elements.get(sourceUid);
+        if (sourceEndpoint instanceof StockViewElement) {
+          const [, updatedFlows] = UpdateStockAndFlows(sourceEndpoint, List([flow]), delta);
+          if (updatedFlows.size > 0) {
+            result = result.set(flowUid, updatedFlows.first()!);
+          }
+        } else if (sourceEndpoint instanceof CloudViewElement) {
+          const [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, delta);
+          result = result.set(flowUid, updatedFlow);
         }
-        // Keep other points (including corners) fixed for now
-        // A complete implementation would re-route
-        return p;
-      });
-      result = result.set(
-        flowUid,
-        flow.merge({
-          x: flow.cx - delta.x,
-          y: flow.cy - delta.y,
-          points: newPoints,
-        }),
-      );
+      } else if (sinkInSelection && sinkUid !== undefined) {
+        const sinkEndpoint = elements.get(sinkUid);
+        if (sinkEndpoint instanceof StockViewElement) {
+          const [, updatedFlows] = UpdateStockAndFlows(sinkEndpoint, List([flow]), delta);
+          if (updatedFlows.size > 0) {
+            result = result.set(flowUid, updatedFlows.first()!);
+          }
+        } else if (sinkEndpoint instanceof CloudViewElement) {
+          const [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, delta);
+          result = result.set(flowUid, updatedFlow);
+        }
+      }
     } else {
       // Neither endpoint in selection: just move valve
       result = result.set(
@@ -477,6 +477,41 @@ describe('Group Movement', () => {
 
       // Flow sink should stay at Stock B's position
       expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
+    });
+
+    it('should preserve orthogonal flow geometry when moving perpendicular to flow direction', () => {
+      // Setup: Stock A -> horizontal Flow -> Stock B
+      // When we move Stock A + Flow UP (perpendicular to the flow), the flow
+      // should maintain orthogonal segments rather than becoming diagonal
+      const stockA = makeStock(1, 100, 100, [], [2]);
+      const stockB = makeStock(3, 200, 100, [2], []);
+      const flow = makeFlow(2, 150, 100, [
+        { x: 100 + StockWidth / 2, y: 100, attachedToUid: 1 },
+        { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
+      ]);
+
+      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, stockB);
+
+      // Select Stock A and Flow, but NOT Stock B
+      // Move UP by 50 (perpendicular to original horizontal flow)
+      const selection = Set<UID>([1, 2]);
+      const delta = { x: 0, y: 50 }; // Move up 50
+
+      const result = applyGroupMovement(elements, selection, delta);
+
+      // Stock A should move up
+      expect((result.get(1) as StockViewElement).cy).toBe(50);
+
+      // Stock B should stay in place
+      expect((result.get(3) as StockViewElement).cy).toBe(100);
+
+      // Flow should be re-routed properly (L-shaped or straight to fixed stock)
+      // The key assertion: the flow should NOT have a diagonal segment
+      // The sink point should still connect to Stock B at its edge
+      const newFlow = result.get(2) as FlowViewElement;
+      expect(newFlow.points.last()!.attachedToUid).toBe(3);
+      expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points.last()!.y).toBe(100);
     });
   });
 

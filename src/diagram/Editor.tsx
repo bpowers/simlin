@@ -1225,23 +1225,35 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
             points: newPoints,
           });
         } else if (sourceInSelection || sinkInSelection) {
-          // One endpoint is selected: that end moves, other adjusts
-          // Translate points that belong to the selected endpoint's side
-          const newPoints = pts.map((p, i) => {
-            const isSourcePoint = i === 0;
-            const isSinkPoint = i === pts.size - 1;
-            if ((isSourcePoint && sourceInSelection) || (isSinkPoint && sinkInSelection)) {
-              return p.merge({
-                x: p.x - delta.x,
-                y: p.y - delta.y,
-              });
+          // One endpoint is selected: that endpoint moves, flow re-routes to fixed endpoint
+          // Use the appropriate update function to maintain orthogonal geometry
+          if (sourceInSelection && sourceUid !== undefined) {
+            const sourceEndpoint = view.elements.find((e) => e.uid === sourceUid);
+            if (sourceEndpoint instanceof StockViewElement) {
+              const [, updatedFlows] = UpdateStockAndFlows(sourceEndpoint, List([element]), delta);
+              if (updatedFlows.size > 0) {
+                return updatedFlows.first()!;
+              }
+            } else if (sourceEndpoint instanceof CloudViewElement) {
+              const [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, element, delta);
+              return updatedFlow;
             }
-            return p;
-          });
+          } else if (sinkInSelection && sinkUid !== undefined) {
+            const sinkEndpoint = view.elements.find((e) => e.uid === sinkUid);
+            if (sinkEndpoint instanceof StockViewElement) {
+              const [, updatedFlows] = UpdateStockAndFlows(sinkEndpoint, List([element]), delta);
+              if (updatedFlows.size > 0) {
+                return updatedFlows.first()!;
+              }
+            } else if (sinkEndpoint instanceof CloudViewElement) {
+              const [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, element, delta);
+              return updatedFlow;
+            }
+          }
+          // Fallback: just move valve if we couldn't find the endpoint
           return element.merge({
             x: element.cx - delta.x,
             y: element.cy - delta.y,
-            points: newPoints,
           });
         } else {
           // Neither endpoint is selected: just move valve
