@@ -1313,20 +1313,21 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
               }),
             );
           } else if (sourceStockSelected) {
-            // Only source stock is selected
-            // Find the updated stock position
+            // Only source stock is selected - stock already moved in pass 1,
+            // so pass zero delta to just re-route the flow to the new position
             const sourceStock = elements.find((e) => e.uid === sourceUid) as StockViewElement | undefined;
             if (sourceStock) {
-              const [, flows] = UpdateStockAndFlows(sourceStock, List([element]), delta);
+              const [, flows] = UpdateStockAndFlows(sourceStock, List([element]), { x: 0, y: 0 });
               if (flows.size > 0) {
                 updatedElements = updatedElements.push(flows.first()!);
               }
             }
           } else if (sinkStockSelected) {
-            // Only sink stock is selected
+            // Only sink stock is selected - stock already moved in pass 1,
+            // so pass zero delta to just re-route the flow to the new position
             const sinkStock = elements.find((e) => e.uid === sinkUid) as StockViewElement | undefined;
             if (sinkStock) {
-              const [, flows] = UpdateStockAndFlows(sinkStock, List([element]), delta);
+              const [, flows] = UpdateStockAndFlows(sinkStock, List([element]), { x: 0, y: 0 });
               if (flows.size > 0) {
                 updatedElements = updatedElements.push(flows.first()!);
               }
@@ -1366,14 +1367,27 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         return element.isNamed() ? getOrThrow(namedElements, defined(element.ident)) : element;
       }
       // If it hasn't been updated, nothing to do
-      if (!(selectedElements.has(element.fromUid) || selectedElements.has(element.toUid) || updatedFlowsByUid.has(element.fromUid) || updatedFlowsByUid.has(element.toUid))) {
+      if (
+        !(
+          selectedElements.has(element.fromUid) ||
+          selectedElements.has(element.toUid) ||
+          updatedFlowsByUid.has(element.fromUid) ||
+          updatedFlowsByUid.has(element.toUid)
+        )
+      ) {
         return element;
       }
-      const from = selectedElements.get(element.fromUid) || updatedFlowsByUid.get(element.fromUid) || nonSelectedElements.get(element.fromUid);
+      const from =
+        selectedElements.get(element.fromUid) ||
+        updatedFlowsByUid.get(element.fromUid) ||
+        nonSelectedElements.get(element.fromUid);
       if (!from) {
         return element;
       }
-      const to = selectedElements.get(element.toUid) || updatedFlowsByUid.get(element.toUid) || nonSelectedElements.get(element.toUid);
+      const to =
+        selectedElements.get(element.toUid) ||
+        updatedFlowsByUid.get(element.toUid) ||
+        nonSelectedElements.get(element.toUid);
       if (!to) {
         return element;
       }

@@ -899,19 +899,21 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
                 }),
               );
             } else if (sourceStockSelected) {
-              // Only source stock is selected - use UpdateStockAndFlows logic
+              // Only source stock is selected - stock already moved in pass 1,
+              // so pass zero delta to just re-route the flow to the new position
               const sourceStock = this.selectionUpdates.get(sourceUid!) as StockViewElement | undefined;
               if (sourceStock) {
-                const [_, updatedFlows] = UpdateStockAndFlows(sourceStock, List([element]), moveDelta);
+                const [_, updatedFlows] = UpdateStockAndFlows(sourceStock, List([element]), { x: 0, y: 0 });
                 if (updatedFlows.size > 0) {
                   otherUpdates = otherUpdates.push(updatedFlows.first()!);
                 }
               }
             } else if (sinkStockSelected) {
-              // Only sink stock is selected - use UpdateStockAndFlows logic
+              // Only sink stock is selected - stock already moved in pass 1,
+              // so pass zero delta to just re-route the flow to the new position
               const sinkStock = this.selectionUpdates.get(sinkUid!) as StockViewElement | undefined;
               if (sinkStock) {
-                const [_, updatedFlows] = UpdateStockAndFlows(sinkStock, List([element]), moveDelta);
+                const [_, updatedFlows] = UpdateStockAndFlows(sinkStock, List([element]), { x: 0, y: 0 });
                 if (updatedFlows.size > 0) {
                   otherUpdates = otherUpdates.push(updatedFlows.first()!);
                 }

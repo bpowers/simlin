@@ -272,16 +272,18 @@ export function applyGroupMovement(
           }),
         );
       } else if (sourceStockSelected) {
-        // Only source stock is selected
+        // Only source stock is selected - stock already moved in pass 1,
+        // so pass zero delta to just re-route the flow to the new position
         const sourceStock = result.get(sourceUid!) as StockViewElement;
-        const [, updatedFlows] = UpdateStockAndFlows(sourceStock, List([flow]), delta);
+        const [, updatedFlows] = UpdateStockAndFlows(sourceStock, List([flow]), { x: 0, y: 0 });
         if (updatedFlows.size > 0) {
           result = result.set(uid, updatedFlows.first()!);
         }
       } else if (sinkStockSelected) {
-        // Only sink stock is selected
+        // Only sink stock is selected - stock already moved in pass 1,
+        // so pass zero delta to just re-route the flow to the new position
         const sinkStock = result.get(sinkUid!) as StockViewElement;
-        const [, updatedFlows] = UpdateStockAndFlows(sinkStock, List([flow]), delta);
+        const [, updatedFlows] = UpdateStockAndFlows(sinkStock, List([flow]), { x: 0, y: 0 });
         if (updatedFlows.size > 0) {
           result = result.set(uid, updatedFlows.first()!);
         }
@@ -303,10 +305,7 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>()
-        .set(1, stockA)
-        .set(2, flow)
-        .set(3, stockB);
+      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, stockB);
 
       const selection = Set<UID>([1, 2, 3]);
       const delta = { x: -50, y: -30 }; // Move right 50, down 30
@@ -350,12 +349,7 @@ describe('Group Movement', () => {
         { x: 300 - StockWidth / 2, y: 100, attachedToUid: 5 },
       ]);
 
-      let elements = Map<UID, ViewElement>()
-        .set(1, stockA)
-        .set(2, flow1)
-        .set(3, stockB)
-        .set(4, flow2)
-        .set(5, stockC);
+      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow1).set(3, stockB).set(4, flow2).set(5, stockC);
 
       const selection = Set<UID>([1, 2, 3, 4, 5]);
       const delta = { x: -100, y: 0 }; // Move right 100
@@ -383,10 +377,7 @@ describe('Group Movement', () => {
         { x: 200, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>()
-        .set(1, stockA)
-        .set(2, flow)
-        .set(3, cloud);
+      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, cloud);
 
       // Only select the stock, not the flow
       const selection = Set<UID>([1]);
@@ -402,6 +393,10 @@ describe('Group Movement', () => {
       const newFlow = result.get(2) as FlowViewElement;
       // The source point should be updated to connect to new stock position
       expect(newFlow.points.first()!.attachedToUid).toBe(1);
+      // IMPORTANT: Verify the source point x-coordinate is at the NEW stock edge
+      // (not double-moved). Stock moved from 100 to 150, so source point should
+      // be at 150 + StockWidth/2.
+      expect(newFlow.points.first()!.x).toBe(150 + StockWidth / 2);
       // The sink point should still be at cloud
       expect(newFlow.points.last()!.attachedToUid).toBe(3);
       expect(newFlow.points.last()!.x).toBe(200);
@@ -418,10 +413,7 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>()
-        .set(1, stockA)
-        .set(2, flow)
-        .set(3, stockB);
+      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, stockB);
 
       // Only select the flow
       const selection = Set<UID>([2]);
@@ -453,10 +445,7 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>()
-        .set(1, stockA)
-        .set(2, flow)
-        .set(3, stockB);
+      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, stockB);
 
       // Select Stock A and Flow 1, but NOT Stock B
       const selection = Set<UID>([1, 2]);
@@ -485,10 +474,7 @@ describe('Group Movement', () => {
       const aux2 = makeAux(2, 150, 150);
       const stock = makeStock(3, 200, 100);
 
-      let elements = Map<UID, ViewElement>()
-        .set(1, aux1)
-        .set(2, aux2)
-        .set(3, stock);
+      let elements = Map<UID, ViewElement>().set(1, aux1).set(2, aux2).set(3, stock);
 
       const selection = Set<UID>([1, 2, 3]);
       const delta = { x: -30, y: -20 };
@@ -514,10 +500,7 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>()
-        .set(1, cloud)
-        .set(2, flow)
-        .set(3, stock);
+      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock);
 
       // Select cloud, flow, and stock
       const selection = Set<UID>([1, 2, 3]);
