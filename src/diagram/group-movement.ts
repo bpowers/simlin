@@ -240,6 +240,13 @@ export function processSelectedFlow(
             const newCloudPoint = cloudPoint.merge({ x: newCloudX, y: newCloudY });
             const newPoints = List([newCloudPoint, intermediatePoint, otherPoint]);
             updatedFlow = routedFlow.set('points', newPoints);
+            // Re-clamp valve to the new path
+            const segments = getSegments(newPoints);
+            if (segments.length > 0) {
+              const closestSegment = findClosestSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, segments);
+              const clampedValve = clampToSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, closestSegment);
+              updatedFlow = updatedFlow.merge({ x: clampedValve.x, y: clampedValve.y });
+            }
           } else if (cloudPoint) {
             const updatedPoints = routedFlow.points.set(
               cloudPointIndex,
@@ -276,6 +283,13 @@ export function processSelectedFlow(
             const newCloudPoint = cloudPoint.merge({ x: newCloudX, y: newCloudY });
             const newPoints = List([otherPoint, intermediatePoint, newCloudPoint]);
             updatedFlow = routedFlow.set('points', newPoints);
+            // Re-clamp valve to the new path
+            const segments = getSegments(newPoints);
+            if (segments.length > 0) {
+              const closestSegment = findClosestSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, segments);
+              const clampedValve = clampToSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, closestSegment);
+              updatedFlow = updatedFlow.merge({ x: clampedValve.x, y: clampedValve.y });
+            }
           } else if (cloudPoint) {
             const updatedPoints = routedFlow.points.set(
               cloudPointIndex,
@@ -452,6 +466,13 @@ export function routeUnselectedFlows(
                     ? List([newCloudPoint, intermediatePoint, otherPoint])
                     : List([otherPoint, intermediatePoint, newCloudPoint]);
                 updatedFlow = updatedFlow.set('points', newPoints);
+                // Re-clamp valve to the new path
+                const segments = getSegments(newPoints);
+                if (segments.length > 0) {
+                  const closestSegment = findClosestSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, segments);
+                  const clampedValve = clampToSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, closestSegment);
+                  updatedFlow = updatedFlow.merge({ x: clampedValve.x, y: clampedValve.y });
+                }
               } else {
                 const updatedPoints = updatedFlow.points.set(
                   cloudPointIndex,
@@ -522,6 +543,13 @@ export function routeUnselectedFlows(
                     ? List([newCloudPoint, intermediatePoint, otherPoint])
                     : List([otherPoint, intermediatePoint, newCloudPoint]);
                 updatedFlow = updatedFlow.set('points', newPoints);
+                // Re-clamp valve to the new path
+                const segments = getSegments(newPoints);
+                if (segments.length > 0) {
+                  const closestSegment = findClosestSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, segments);
+                  const clampedValve = clampToSegment({ x: updatedFlow.cx, y: updatedFlow.cy }, closestSegment);
+                  updatedFlow = updatedFlow.merge({ x: clampedValve.x, y: clampedValve.y });
+                }
               } else {
                 const updatedPoints = updatedFlow.points.set(
                   cloudPointIndex,
