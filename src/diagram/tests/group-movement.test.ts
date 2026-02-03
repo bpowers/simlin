@@ -395,12 +395,25 @@ export function applyGroupMovement(
         result = result.set(updatedFlow.uid, updatedFlow);
       }
     } else if (endpoint instanceof CloudViewElement) {
-      // For clouds, use UpdateCloudAndFlow with the ORIGINAL cloud position and delta
-      // This handles orthogonal re-routing for perpendicular moves
+      // For clouds, use UpdateCloudAndFlow for orthogonal re-routing on perpendicular moves,
+      // but ensure the endpoint matches the cloud's actual new position.
       const originalCloud = elements.get(endpointUid);
       if (originalCloud instanceof CloudViewElement) {
+        const newCloudCx = originalCloud.cx - delta.x;
+        const newCloudCy = originalCloud.cy - delta.y;
         for (const flow of flows) {
-          const [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+          let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+          // Ensure the cloud endpoint matches the actual cloud position
+          const cloudPointIndex =
+            updatedFlow.points.first()!.attachedToUid === endpointUid ? 0 : updatedFlow.points.size - 1;
+          const cloudPoint = updatedFlow.points.get(cloudPointIndex);
+          if (cloudPoint) {
+            const updatedPoints = updatedFlow.points.set(
+              cloudPointIndex,
+              cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
+            );
+            updatedFlow = updatedFlow.set('points', updatedPoints);
+          }
           result = result.set(updatedFlow.uid, updatedFlow);
         }
       }
@@ -421,12 +434,25 @@ export function applyGroupMovement(
         result = result.set(updatedFlow.uid, updatedFlow);
       }
     } else if (endpoint instanceof CloudViewElement) {
-      // For clouds, use UpdateCloudAndFlow with the ORIGINAL cloud position and delta
-      // This handles orthogonal re-routing for perpendicular moves
+      // For clouds, use UpdateCloudAndFlow for orthogonal re-routing on perpendicular moves,
+      // but ensure the endpoint matches the cloud's actual new position.
       const originalCloud = elements.get(endpointUid);
       if (originalCloud instanceof CloudViewElement) {
+        const newCloudCx = originalCloud.cx - delta.x;
+        const newCloudCy = originalCloud.cy - delta.y;
         for (const flow of flows) {
-          const [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+          let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+          // Ensure the cloud endpoint matches the actual cloud position
+          const cloudPointIndex =
+            updatedFlow.points.last()!.attachedToUid === endpointUid ? updatedFlow.points.size - 1 : 0;
+          const cloudPoint = updatedFlow.points.get(cloudPointIndex);
+          if (cloudPoint) {
+            const updatedPoints = updatedFlow.points.set(
+              cloudPointIndex,
+              cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
+            );
+            updatedFlow = updatedFlow.set('points', updatedPoints);
+          }
           result = result.set(updatedFlow.uid, updatedFlow);
         }
       }

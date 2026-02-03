@@ -1462,12 +1462,27 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
             updatedElements = updatedElements.push(updatedFlow);
           }
         } else if (endpoint instanceof CloudViewElement) {
-          // For clouds, use UpdateCloudAndFlow with the ORIGINAL cloud position and delta
-          // This handles orthogonal re-routing for perpendicular moves
+          // For clouds, use UpdateCloudAndFlow for orthogonal re-routing on perpendicular moves,
+          // but ensure the endpoint matches the cloud's actual new position (which was set
+          // in pass 1 without clamping). UpdateCloudAndFlow may clamp near-parallel moves,
+          // which would disconnect the flow from the already-moved cloud.
           const originalCloud = view.elements.find((e) => e.uid === endpointUid) as CloudViewElement | undefined;
           if (originalCloud) {
+            const newCloudCx = originalCloud.cx - delta.x;
+            const newCloudCy = originalCloud.cy - delta.y;
             for (const flow of flows) {
-              const [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+              let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+              // Ensure the cloud endpoint matches the actual cloud position
+              const cloudPointIndex =
+                first(updatedFlow.points).attachedToUid === endpointUid ? 0 : updatedFlow.points.size - 1;
+              const cloudPoint = updatedFlow.points.get(cloudPointIndex);
+              if (cloudPoint) {
+                const updatedPoints = updatedFlow.points.set(
+                  cloudPointIndex,
+                  cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
+                );
+                updatedFlow = updatedFlow.set('points', updatedPoints);
+              }
               updatedElements = updatedElements.push(updatedFlow);
             }
           }
@@ -1488,12 +1503,25 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
             updatedElements = updatedElements.push(updatedFlow);
           }
         } else if (endpoint instanceof CloudViewElement) {
-          // For clouds, use UpdateCloudAndFlow with the ORIGINAL cloud position and delta
-          // This handles orthogonal re-routing for perpendicular moves
+          // For clouds, use UpdateCloudAndFlow for orthogonal re-routing on perpendicular moves,
+          // but ensure the endpoint matches the cloud's actual new position.
           const originalCloud = view.elements.find((e) => e.uid === endpointUid) as CloudViewElement | undefined;
           if (originalCloud) {
+            const newCloudCx = originalCloud.cx - delta.x;
+            const newCloudCy = originalCloud.cy - delta.y;
             for (const flow of flows) {
-              const [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+              let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
+              // Ensure the cloud endpoint matches the actual cloud position
+              const cloudPointIndex =
+                last(updatedFlow.points).attachedToUid === endpointUid ? updatedFlow.points.size - 1 : 0;
+              const cloudPoint = updatedFlow.points.get(cloudPointIndex);
+              if (cloudPoint) {
+                const updatedPoints = updatedFlow.points.set(
+                  cloudPointIndex,
+                  cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
+                );
+                updatedFlow = updatedFlow.set('points', updatedPoints);
+              }
               updatedElements = updatedElements.push(updatedFlow);
             }
           }
