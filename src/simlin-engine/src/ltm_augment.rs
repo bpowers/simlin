@@ -16,13 +16,14 @@ use crate::ltm::{Link, Loop, detect_loops};
 use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
+use unicode_xid::UnicodeXID;
 
 // Type alias for clarity
 type SyntheticVariables = Vec<(Ident<Canonical>, datamodel::Variable)>;
 
 /// Replace whole-word occurrences of `pattern` with `replacement` in `text`.
-/// A word boundary is defined as the position where an ASCII alphanumeric or underscore
-/// character meets a non-word character (or start/end of string).
+/// A word boundary is defined as the position where a Unicode identifier character
+/// (XID_Continue or underscore) meets a non-identifier character (or start/end of string).
 fn replace_whole_word(text: &str, pattern: &str, replacement: &str) -> String {
     if pattern.is_empty() {
         return text.to_string();
@@ -64,10 +65,10 @@ fn replace_whole_word(text: &str, pattern: &str, replacement: &str) -> String {
     result
 }
 
-/// Check if a character is a word character (alphanumeric or underscore).
-/// This matches the regex definition of \b word boundary.
+/// Check if a character is a word character for identifier boundaries.
+/// Uses Unicode XID_Continue to match Simlin's identifier rules, plus underscore.
 fn is_word_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+    UnicodeXID::is_xid_continue(c) || c == '_'
 }
 
 /// Augment a project with LTM synthetic variables
@@ -1595,6 +1596,23 @@ mod tests {
         #[test]
         fn test_unicode_variable_name() {
             assert_eq!(replace_whole_word("Å + b", "Å", "alpha"), "alpha + b");
+        }
+
+        #[test]
+        fn test_unicode_word_boundary() {
+            // Unicode letters adjacent to other Unicode letters should NOT be replaced
+            // because they form a single identifier
+            assert_eq!(replace_whole_word("Åβ + γ", "Å", "alpha"), "Åβ + γ");
+            // But standalone Unicode identifiers should be replaced
+            assert_eq!(replace_whole_word("Å + β", "Å", "alpha"), "alpha + β");
+        }
+
+        #[test]
+        fn test_mixed_ascii_unicode_boundary() {
+            // Unicode letter followed by ASCII should not match partial
+            assert_eq!(replace_whole_word("Åbc + x", "Å", "alpha"), "Åbc + x");
+            // ASCII followed by Unicode should not match partial
+            assert_eq!(replace_whole_word("aÅ + x", "Å", "alpha"), "aÅ + x");
         }
     }
 }
