@@ -7,6 +7,11 @@ name: CI
   pull_request:
     branches:
       - main
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
 jobs:
   build:
     name: Build
@@ -25,11 +30,17 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
         with:
-          # Use shared cache key across matrix builds for cargo registry
-          shared-key: build-${{ matrix.os }}
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-build-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-build-${{ matrix.os }}-
 
       - name: Compile
         run: cargo build --workspace --verbose
@@ -53,10 +64,17 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
         with:
-          prefix-key: rust-lint
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-lint-
 
       - name: Check formatting
         run: cargo fmt -- --check --color=auto
@@ -85,10 +103,17 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
         with:
-          prefix-key: coverage
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-coverage-
 
       - name: Install cargo-tarpaulin
         uses: taiki-e/install-action@v2
@@ -121,10 +146,17 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
         with:
-          prefix-key: frontend-wasm
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-wasm-
 
       - name: Install Python
         uses: actions/setup-python@v5
