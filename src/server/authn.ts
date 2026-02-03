@@ -3,8 +3,6 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
-import { Request, Response } from 'express';
-import { Strategy as BaseStrategy } from 'passport-strategy';
 import passport from 'passport';
 import { v4 as uuidV4 } from 'uuid';
 import * as logger from 'winston';
@@ -14,32 +12,18 @@ import { Application } from './application';
 import { Table } from './models/table';
 import { User } from './schemas/user_pb';
 
-interface StrategyOptions {}
+export type AuthProvider = 'google' | 'apple' | 'password';
+
+export interface VerifiedUserInfo {
+  email: string;
+  displayName: string;
+  photoUrl?: string;
+  provider: AuthProvider;
+  providerUserId: string;
+}
 
 interface SerializedSessionUser {
   id: string;
-}
-
-type VerifyDone = (error: Error | null, user?: unknown) => void;
-
-interface VerifyFunction {
-  (firestoreIdToken: string, done: VerifyDone): Promise<void>;
-}
-
-function toError(error: unknown): Error {
-  if (error instanceof Error) {
-    return error;
-  }
-  if (typeof error === 'string') {
-    return new Error(error);
-  }
-  if (typeof error === 'object' && error !== null) {
-    const message = (error as Record<string, unknown>).message;
-    if (typeof message === 'string') {
-      return new Error(message);
-    }
-  }
-  return new Error(String(error));
 }
 
 function isSerializedSessionUser(value: unknown): value is SerializedSessionUser {
@@ -50,43 +34,52 @@ function isSerializedSessionUser(value: unknown): value is SerializedSessionUser
   );
 }
 
-class FirestoreAuthStrategy extends BaseStrategy implements passport.Strategy {
-  readonly name: 'firestore-auth';
-  private readonly verify: VerifyFunction;
-
-  constructor(options: StrategyOptions, verify: VerifyFunction) {
-    super();
-    this.name = 'firestore-auth';
-    this.verify = verify;
+function getProviderFromFirebaseUser(fbUser: admin.auth.UserRecord): AuthProvider {
+  if (!fbUser.providerData || fbUser.providerData.length === 0) {
+    return 'password';
   }
-
-  authenticate(req: Request, _options?: unknown): void {
-    if (!req.body || !req.body.idToken) {
-      this.error(new Error('no idToken in body'));
-      return;
-    }
-
-    const idToken = req.body.idToken as string;
-
-    const verified: VerifyDone = (error, user): void => {
-      if (error) {
-        return this.error(error);
-      }
-      if (!user) {
-        return this.fail(401);
-      }
-      this.success(user as User);
-    };
-
-    this.verify(idToken, verified)
-      .then(() => {})
-      .catch((err) => {
-        this.error(toError(err));
-      });
+  const providerIds = fbUser.providerData.map((p) => p.providerId);
+  if (providerIds.includes('google.com')) {
+    return 'google';
   }
+  if (providerIds.includes('apple.com')) {
+    return 'apple';
+  }
+  return 'password';
 }
 
-async function getOrCreateUserFromProfile(
+// We have an eventual consistency problem where sometimes the temp user isn't
+// deleted when completing the sign-up flow, leaving duplicate documents for
+// the same email.  When findOneByScan fails with "expected single result
+// document", clean up temp- users and retry the lookup.
+async function recoverFromDuplicateUsers(users: Table<User>, email: string): Promise<User | undefined> {
+  const userDocs = await users.findByScan({ email });
+  if (!userDocs) {
+    return undefined;
+  }
+
+  let fullUserFound = false;
+  for (const user of userDocs) {
+    if (!user.getId().startsWith('temp-')) {
+      fullUserFound = true;
+      break;
+    }
+  }
+
+  if (fullUserFound) {
+    for (const user of userDocs) {
+      const userId = user.getId();
+      if (userId.startsWith('temp-')) {
+        logger.info(`fixing inconsistency with ${email} -- deleting '${userId}' in DB`);
+        await users.deleteOne(userId);
+      }
+    }
+  }
+
+  return users.findOneByScan({ email });
+}
+
+export async function getOrCreateUserFromIdToken(
   users: Table<User>,
   firebaseAuthn: admin.auth.Auth,
   firebaseIdToken: string,
@@ -118,13 +111,10 @@ async function getOrCreateUserFromProfile(
   }
   const email = fbUser.email;
 
-  // TODO: should we verify the email?
-
   const displayName = fbUser.displayName ?? email;
   const photoUrl = fbUser.photoURL;
+  const provider = getProviderFromFirebaseUser(fbUser);
 
-  // since a document with the email already exists, just get the
-  // document with it
   let user: User | undefined;
   try {
     user = await users.findOneByScan({ email });
@@ -136,7 +126,8 @@ async function getOrCreateUserFromProfile(
       user.setId(`temp-${uuidV4()}`);
       user.setEmail(email);
       user.setDisplayName(displayName);
-      user.setProvider('google');
+      user.setProvider(provider);
+      user.setProviderUserId(decodedToken.uid);
       if (photoUrl) {
         user.setPhotoUrl(photoUrl);
       }
@@ -146,33 +137,8 @@ async function getOrCreateUserFromProfile(
       await users.create(user.getId(), user);
     }
   } catch (err) {
-    if (err instanceof Error) {
-      // we have some eventual consistency problem where sometimes we don't
-      // delete the temp user when completing the sign-up flow.  Resolve that
-      // consistency issue manually for now.
-      if (err.message.includes('expected single result document')) {
-        const userDocs = await users.findByScan({ email });
-        if (userDocs) {
-          let fullUserFound = false;
-          for (const user of userDocs) {
-            if (!user.getId().startsWith('temp-')) {
-              fullUserFound = true;
-              break;
-            }
-          }
-          if (fullUserFound) {
-            for (const user of userDocs) {
-              const userId = user.getId();
-              if (userId.startsWith('temp-')) {
-                logger.info(`fixing inconsistency with ${email} -- deleting '${userId}' in DB`);
-                await users.deleteOne(userId);
-              }
-            }
-          }
-          // it should work now
-          user = await users.findOneByScan({ email });
-        }
-      }
+    if (err instanceof Error && err.message.includes('expected single result document')) {
+      user = await recoverFromDuplicateUsers(users, email);
     }
   }
 
@@ -183,23 +149,72 @@ async function getOrCreateUserFromProfile(
   return [user, undefined];
 }
 
-export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void => {
-  // const config = app.get('authentication');
+export async function getOrCreateUserFromVerifiedInfo(
+  users: Table<User>,
+  info: VerifiedUserInfo,
+): Promise<[User, undefined] | [undefined, Error]> {
+  if (!info.email) {
+    return [undefined, new Error('expected user to have an email')];
+  }
 
-  passport.use(
-    new FirestoreAuthStrategy({}, async (firestoreIdToken: string, done: VerifyDone) => {
-      const [user, err] = await getOrCreateUserFromProfile(app.db.user, firebaseAuthn, firestoreIdToken);
-      if (err !== undefined) {
-        logger.error(err);
-        done(err);
-      } else if (user) {
-        done(null, user);
-      } else {
-        throw new Error('unreachable');
+  let user: User | undefined;
+  let matchedByEmail = false;
+  try {
+    if (info.providerUserId) {
+      // Include provider in lookup to prevent cross-provider collisions
+      user = await users.findOneByScan({ providerUserId: info.providerUserId, provider: info.provider });
+    }
+    if (!user && info.email) {
+      user = await users.findOneByScan({ email: info.email });
+      if (user) {
+        matchedByEmail = true;
       }
-    }),
-  );
+    }
+    if (user && matchedByEmail && info.providerUserId) {
+      const existingProvider = user.getProvider();
+      // Update if: user has no providerUserId, OR existing provider is 'password'
+      // (password provider uses Firebase UID as providerUserId, not useful for lookups).
+      // DON'T update if existing provider is an OAuth provider (google/apple) -
+      // that would break re-login via the original OAuth provider since they
+      // often omit email on subsequent logins.
+      if (!user.getProviderUserId() || existingProvider === 'password') {
+        user.setProviderUserId(info.providerUserId);
+        user.setProvider(info.provider);
+        await users.update(user.getId(), {}, user);
+      }
+    }
+    if (!user) {
+      const created = new Timestamp();
+      created.fromDate(new Date());
 
+      user = new User();
+      user.setId(`temp-${uuidV4()}`);
+      user.setEmail(info.email);
+      user.setDisplayName(info.displayName);
+      user.setProvider(info.provider);
+      user.setProviderUserId(info.providerUserId);
+      if (info.photoUrl) {
+        user.setPhotoUrl(info.photoUrl);
+      }
+      user.setCreated(created);
+      user.setCanCreateProjects(false);
+
+      await users.create(user.getId(), user);
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('expected single result document')) {
+      user = await recoverFromDuplicateUsers(users, info.email);
+    }
+  }
+
+  if (!user) {
+    return [undefined, new Error(`unable to insert or find user ${info.email}`)];
+  }
+
+  return [user, undefined];
+}
+
+export const authn = (app: Application): void => {
   passport.serializeUser((rawUser, done) => {
     if (!(rawUser instanceof User)) {
       done(new Error('serializeUser expected a User instance'));
@@ -230,12 +245,4 @@ export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void =>
 
   app.use(passport.initialize());
   app.use(passport.session());
-
-  app.post('/session', passport.authenticate('firestore-auth', {}), (req: Request, res: Response): void => {
-    res.sendStatus(200);
-  });
-
-  app.delete('/session', (_req: Request, _res: Response): void => {
-    console.log(`TODO: unset cookie`);
-  });
 };

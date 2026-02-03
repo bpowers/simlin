@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { CollectionReference, FieldPath, Firestore } from '@google-cloud/firestore';
+import { CollectionReference, FieldPath, Firestore, Query as FirestoreQuery } from '@google-cloud/firestore';
 import { Message } from 'google-protobuf';
 
 import { Query, SerializableClass, Table } from './table';
@@ -68,11 +68,17 @@ export class FirestoreTable<T extends Message> implements Table<T> {
 
   async findByScan(query: Query): Promise<T[] | undefined> {
     const keys = Object.keys(query);
-    if (keys.length !== 1) {
-      throw new Error('findByScan: expected single query key');
+    if (keys.length === 0) {
+      throw new Error('findByScan: expected at least one query key');
     }
-    const key = keys[0];
-    const querySnapshot = await this.collection.where(key, '==', query[key]).get();
+
+    // Build query with all conditions (Firestore supports chaining where clauses)
+    let firestoreQuery: FirestoreQuery = this.collection;
+    for (const key of keys) {
+      firestoreQuery = firestoreQuery.where(key, '==', query[key]);
+    }
+
+    const querySnapshot = await firestoreQuery.get();
     if (!querySnapshot || querySnapshot.empty) {
       return undefined;
     }

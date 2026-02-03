@@ -68,16 +68,29 @@ test.describe('User Authentication', () => {
     // 5. Integration infrastructure is working
   });
   
-  test('can navigate through login UI flow', async ({ page }) => {
+  test('hides OAuth options when backend providers are unavailable', async ({ page }) => {
+    await page.route('**/auth/providers', async (route) => {
+      if (route.request().method() === 'GET') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ oauthProviders: [] }),
+        });
+        return;
+      }
+
+      await route.continue();
+    });
+
     await page.goto('/');
     
     // Wait for login page to load
     await page.waitForSelector('.simlin-login-outer', { state: 'visible' });
     
-    // Should see login options
+    // Only email should be shown when server-side OAuth is unavailable
     await expect(page.locator('button:has-text("Sign in with email")')).toBeVisible();
-    await expect(page.locator('button:has-text("Sign in with Google")')).toBeVisible();
-    await expect(page.locator('button:has-text("Sign in with Apple")')).toBeVisible();
+    await expect(page.locator('button:has-text("Sign in with Google")')).toHaveCount(0);
+    await expect(page.locator('button:has-text("Sign in with Apple")')).toHaveCount(0);
     
     // Click sign in with email
     const emailButton = page.locator('button:has-text("Sign in with email")');
@@ -97,8 +110,48 @@ test.describe('User Authentication', () => {
     const cancelButton = page.locator('button:has-text("Cancel")');
     await cancelButton.click();
     
-    // Should be back to main login options
+    // Should be back to the email-only login options
     await expect(page.locator('button:has-text("Sign in with email")')).toBeVisible();
+    await expect(page.locator('button:has-text("Sign in with Google")')).toHaveCount(0);
+  });
+
+  test('shows unavailable provider messaging instead of a broken redirect button', async ({ page }) => {
+    await page.route('**/auth/providers', async (route) => {
+      if (route.request().method() === 'GET') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ oauthProviders: [] }),
+        });
+        return;
+      }
+
+      if (route.request().method() === 'POST') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            registered: true,
+            providers: ['google.com'],
+            oauthProviders: [],
+          }),
+        });
+        return;
+      }
+
+      await route.continue();
+    });
+
+    await page.goto('/');
+    await page.waitForSelector('.simlin-login-outer', { state: 'visible' });
+
+    await page.getByRole('button', { name: 'Sign in with email' }).click();
+    await page.getByRole('textbox', { name: /email/i }).fill('existing.user@example.com');
+    await page.getByRole('button', { name: 'Next' }).click();
+
+    await expect(page.getByText('Sign in unavailable')).toBeVisible();
+    await expect(page.getByText(/uses Google sign-in/i)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Back' })).toBeVisible();
   });
   
   test('shows error for invalid email format', async ({ page }) => {
