@@ -1259,44 +1259,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           y: element.cy - delta.y,
         });
       } else if (element instanceof LinkViewElement) {
-        // Links: if both from and to are in selection, link maintains its arc (pure translation)
-        // Only recalculate arc if one endpoint is fixed (not in selection)
-        const fromInSelection = isInSelection(element.fromUid);
-        const toInSelection = isInSelection(element.toUid);
-
-        if (fromInSelection && toInSelection) {
-          // Both endpoints moving together - translate multiPoint if present, keep arc
-          if (element.multiPoint) {
-            const translatedMultiPoint = element.multiPoint.map((p) =>
-              p.merge({
-                x: p.x - delta.x,
-                y: p.y - delta.y,
-              }),
-            );
-            return element.merge({ multiPoint: translatedMultiPoint });
-          }
-          return element;
-        } else {
-          // One endpoint fixed - preserve arc shape by adjusting arc angle based on
-          // the rotation of the line between endpoints' visual centers. This ensures
-          // the arc shape follows the endpoint movement naturally, rather than jumping
-          // to a new curvature based on drag position.
-          const from = getUid(element.fromUid);
-          const to = getUid(element.toUid);
-          const oldFromVisual = getVisualCenter(from);
-          const oldToVisual = getVisualCenter(to);
-          // Calculate new positions from visual centers: if endpoint is in selection, it moved by delta
-          const newFromCx = fromInSelection ? oldFromVisual.cx - delta.x : oldFromVisual.cx;
-          const newFromCy = fromInSelection ? oldFromVisual.cy - delta.y : oldFromVisual.cy;
-          const newToCx = toInSelection ? oldToVisual.cx - delta.x : oldToVisual.cx;
-          const newToCy = toInSelection ? oldToVisual.cy - delta.y : oldToVisual.cy;
-          const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
-          const newθ = Math.atan2(newToCy - newFromCy, newToCx - newFromCx);
-          const diffθ = oldθ - newθ;
-          return element.merge({
-            arc: updateArcAngle(element.arc, radToDeg(diffθ)),
-          });
-        }
+        // Defer all link processing to the second pass, which has access to the
+        // actual updated element positions. This is important because flows may
+        // re-route during group movement, so we can't assume endpoints moved by
+        // exactly `delta`.
+        return element;
       } else {
         // Aux, Alias, Module, etc.
         return (element as AuxViewElement).merge({
@@ -1336,16 +1303,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       }
     }
 
-    // Update links connected to moved elements (but not links already processed in group movement)
+    // Update links connected to moved elements (including selected links deferred from first pass)
     elements = elements.map((element: ViewElement) => {
       if (!(element instanceof LinkViewElement)) {
         return element.isNamed() ? getOrThrow(namedElements, defined(element.ident)) : element;
       }
-      // Skip links that were already processed in the group movement pass
-      if (selection.has(element.uid)) {
-        return element;
-      }
-      // If it hasn't been updated, nothing to do
+      // If no endpoint was updated, nothing to do
       if (
         !(
           selectedElements.has(element.fromUid) ||
@@ -1383,6 +1346,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         const toDelta = { x: oldTo.cx - to.cx, y: oldTo.cy - to.cy };
         const sameMovement = Math.abs(fromDelta.x - toDelta.x) < 0.1 && Math.abs(fromDelta.y - toDelta.y) < 0.1;
         if (sameMovement) {
+          // Both endpoints moved together - translate multiPoint if present, keep arc
+          if (element.multiPoint) {
+            const translatedMultiPoint = element.multiPoint.map((p) =>
+              p.merge({
+                x: p.x - fromDelta.x,
+                y: p.y - fromDelta.y,
+              }),
+            );
+            return element.merge({ multiPoint: translatedMultiPoint });
+          }
           return element; // No arc change needed
         }
       }

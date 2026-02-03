@@ -542,10 +542,31 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       const oldFromVisual = getVisualCenter(oldFrom);
       const toVisual = getVisualCenter(to);
       const fromVisual = getVisualCenter(from);
-      const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
-      const newθ = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
-      const diffθ = oldθ - newθ;
-      element = element.set('arc', updateArcAngle(element.arc, radToDeg(diffθ)));
+
+      // Check if both endpoints moved by the same amount (pure translation)
+      const fromDelta = { x: oldFrom.cx - from.cx, y: oldFrom.cy - from.cy };
+      const toDelta = { x: oldTo.cx - to.cx, y: oldTo.cy - to.cy };
+      const sameMovement = Math.abs(fromDelta.x - toDelta.x) < 0.1 && Math.abs(fromDelta.y - toDelta.y) < 0.1;
+
+      if (sameMovement && (fromDelta.x !== 0 || fromDelta.y !== 0)) {
+        // Both endpoints moved together - translate multiPoint if present, keep arc
+        if (element.multiPoint) {
+          const translatedMultiPoint = element.multiPoint.map((p) =>
+            p.merge({
+              x: p.x - fromDelta.x,
+              y: p.y - fromDelta.y,
+            }),
+          );
+          element = element.merge({ multiPoint: translatedMultiPoint });
+        }
+        // No arc change needed for pure translation
+      } else {
+        // Endpoints moved differently - adjust arc based on rotation
+        const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
+        const newθ = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
+        const diffθ = oldθ - newθ;
+        element = element.set('arc', updateArcAngle(element.arc, radToDeg(diffθ)));
+      }
     }
     const props: ConnectorProps = {
       element,
@@ -853,18 +874,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             y: initialEl.cy - y,
           });
         } else if (initialEl instanceof LinkViewElement) {
-          // Links: if both endpoints are in selection, translate multiPoint if present
-          const fromInSelection = isInSelection(initialEl.fromUid);
-          const toInSelection = isInSelection(initialEl.toUid);
-          if (fromInSelection && toInSelection && initialEl.multiPoint) {
-            const translatedMultiPoint = initialEl.multiPoint.map((p) =>
-              p.merge({
-                x: p.x - x,
-                y: p.y - y,
-              }),
-            );
-            return initialEl.merge({ multiPoint: translatedMultiPoint });
-          }
+          // Defer all link processing to the connector() method, which has access to the
+          // actual updated element positions. This is important because flows may re-route
+          // during group movement, so we can't assume endpoints moved by exactly `delta`.
           return initialEl;
         } else {
           // Aux, Alias, Module, etc.
