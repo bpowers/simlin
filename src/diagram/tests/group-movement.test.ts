@@ -404,6 +404,48 @@ describe('Group Movement', () => {
       expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
     });
 
+    it('should move flow valve with the group when flow and one endpoint are selected', () => {
+      // This tests the bug where valve "lags behind" because computeFlowRoute
+      // preserves the valve based on old position without applying drag delta.
+      //
+      // Setup: Stock A (selected) -> Flow (selected, valve at 140) -> Stock B (not selected)
+      // When we drag Stock A + Flow, the valve should move with the drag delta,
+      // then be clamped to the new flow path.
+      const stockA = makeStock(1, 100, 100, [], [2]);
+      const stockB = makeStock(3, 300, 100, [2], []);
+      // Valve is at x=140, which is closer to Stock A
+      // Flow spans from 122.5 (Stock A edge) to 277.5 (Stock B edge)
+      const flow = makeFlow(2, 140, 100, [
+        { x: 100 + StockWidth / 2, y: 100, attachedToUid: 1 }, // x = 122.5
+        { x: 300 - StockWidth / 2, y: 100, attachedToUid: 3 }, // x = 277.5
+      ]);
+
+      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, stockB);
+
+      // Select Stock A and Flow (not Stock B)
+      const selection = Set<UID>([1, 2]);
+      const delta = { x: -50, y: 0 }; // Move right 50
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Stock A should move from 100 to 150
+      expect((result.get(1) as StockViewElement).cx).toBe(150);
+
+      // Flow should be re-routed:
+      // - Source moves from 122.5 to 172.5 (at new Stock A edge)
+      // - Sink stays at 277.5 (at Stock B edge)
+      const newFlow = result.get(2) as FlowViewElement;
+      expect(newFlow.points.first()!.x).toBe(150 + StockWidth / 2); // 172.5
+      expect(newFlow.points.last()!.x).toBe(300 - StockWidth / 2); // 277.5
+
+      // The valve should have moved with the drag:
+      // Original valve at 140, drag delta of 50 right -> proposed position 190
+      // Flow now spans 172.5 to 277.5, so 190 is within bounds
+      // Valve should be at or near 190 (clamped to flow path)
+      expect(newFlow.cx).toBeCloseTo(190, 0);
+      expect(newFlow.cy).toBe(100);
+    });
+
     it('should preserve orthogonal flow geometry when moving perpendicular to flow direction', () => {
       // Setup: Stock A -> horizontal Flow -> Stock B
       // When we move Stock A + Flow UP (perpendicular to the flow), the flow

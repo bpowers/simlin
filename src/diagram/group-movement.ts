@@ -222,6 +222,19 @@ export function processSelectedFlow(
     // Check if this flow was pre-processed (for multi-flow spacing preservation)
     const preProcessed = preProcessedFlows.get(flow.uid);
     if (preProcessed) {
+      // When the flow is selected, the valve should move with the drag delta,
+      // then be clamped to the new flow path. The pre-processed flow has the
+      // valve's fractional position preserved, which is wrong when selected.
+      const proposedValve = {
+        x: flow.cx - delta.x,
+        y: flow.cy - delta.y,
+      };
+      const segments = getSegments(preProcessed.points);
+      if (segments.length > 0) {
+        const closestSegment = findClosestSegment(proposedValve, segments);
+        const clampedValve = clampToSegment(proposedValve, closestSegment);
+        return [preProcessed.merge({ x: clampedValve.x, y: clampedValve.y }), sideEffects];
+      }
       return [preProcessed, sideEffects];
     }
 
@@ -233,7 +246,21 @@ export function processSelectedFlow(
         const newStockCx = sourceEndpoint.cx - delta.x;
         const newStockCy = sourceEndpoint.cy - delta.y;
         // Use default offset of 0.5 (center) for selected flows
-        const updatedFlow = computeFlowRoute(flow, sourceEndpoint, newStockCx, newStockCy, 0.5);
+        let updatedFlow = computeFlowRoute(flow, sourceEndpoint, newStockCx, newStockCy, 0.5);
+
+        // When the flow is selected, the valve should move with the drag delta,
+        // then be clamped to the new flow path. computeFlowRoute preserves the
+        // valve's fractional position which is wrong when the flow is selected.
+        const proposedValve = {
+          x: flow.cx - delta.x,
+          y: flow.cy - delta.y,
+        };
+        const segments = getSegments(updatedFlow.points);
+        if (segments.length > 0) {
+          const closestSegment = findClosestSegment(proposedValve, segments);
+          const clampedValve = clampToSegment(proposedValve, closestSegment);
+          updatedFlow = updatedFlow.merge({ x: clampedValve.x, y: clampedValve.y });
+        }
         return [updatedFlow, sideEffects];
       } else if (sourceEndpoint instanceof CloudViewElement) {
         const [, routedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, delta);
@@ -283,7 +310,21 @@ export function processSelectedFlow(
         const newStockCx = sinkEndpoint.cx - delta.x;
         const newStockCy = sinkEndpoint.cy - delta.y;
         // Use default offset of 0.5 (center) for selected flows
-        const updatedFlow = computeFlowRoute(flow, sinkEndpoint, newStockCx, newStockCy, 0.5);
+        let updatedFlow = computeFlowRoute(flow, sinkEndpoint, newStockCx, newStockCy, 0.5);
+
+        // When the flow is selected, the valve should move with the drag delta,
+        // then be clamped to the new flow path. computeFlowRoute preserves the
+        // valve's fractional position which is wrong when the flow is selected.
+        const proposedValve = {
+          x: flow.cx - delta.x,
+          y: flow.cy - delta.y,
+        };
+        const segments = getSegments(updatedFlow.points);
+        if (segments.length > 0) {
+          const closestSegment = findClosestSegment(proposedValve, segments);
+          const clampedValve = clampToSegment(proposedValve, closestSegment);
+          updatedFlow = updatedFlow.merge({ x: clampedValve.x, y: clampedValve.y });
+        }
         return [updatedFlow, sideEffects];
       } else if (sinkEndpoint instanceof CloudViewElement) {
         const [, routedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, delta);
