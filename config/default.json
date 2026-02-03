@@ -25,6 +25,12 @@
       "clientID": "",
       "clientSecret": ""
     },
+    "apple": {
+      "clientID": "",
+      "teamID": "",
+      "keyID": "",
+      "privateKey": ""
+    },
     "path": "/authn",
     "service": "users"
   }

@@ -15,6 +15,7 @@ const config = {
     '^@simlin/core/(.*)$': '<rootDir>/../core/lib/$1.js',
     '^@simlin/core$': '<rootDir>/../core/lib/index.js',
   },
+  transformIgnorePatterns: ['/node_modules/(?!(jose)/)'],
 };
 
 module.exports = config;

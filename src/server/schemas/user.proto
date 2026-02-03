@@ -16,4 +16,5 @@ message User {
   bool is_admin = 6;
   bool is_deactivated = 7;
   bool can_create_projects = 9;
+  string provider_user_id = 10; // Stable identifier from OAuth provider (sub claim)
 }
