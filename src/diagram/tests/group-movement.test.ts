@@ -15,7 +15,7 @@ import {
 } from '@system-dynamics/core/datamodel';
 
 import { StockWidth } from '../drawing/Stock';
-import { UpdateStockAndFlows } from '../drawing/Flow';
+import { UpdateCloudAndFlow, UpdateStockAndFlows } from '../drawing/Flow';
 
 // Helper functions to create test elements
 function makeStock(
@@ -247,16 +247,18 @@ export function applyGroupMovement(
     const sourceUid = points.first()!.attachedToUid;
     const sinkUid = points.last()!.attachedToUid;
 
-    // Check if source or sink is a selected stock
-    const sourceStockSelected = sourceUid !== undefined && selectedStockUids.has(sourceUid);
-    const sinkStockSelected = sinkUid !== undefined && selectedStockUids.has(sinkUid);
+    // Check if source or sink is a selected endpoint (stock or cloud)
+    const sourceEndpointSelected =
+      sourceUid !== undefined && (selectedStockUids.has(sourceUid) || selectedCloudUids.has(sourceUid));
+    const sinkEndpointSelected =
+      sinkUid !== undefined && (selectedStockUids.has(sinkUid) || selectedCloudUids.has(sinkUid));
 
-    if (sourceStockSelected || sinkStockSelected) {
-      // This flow is attached to a selected stock but the flow itself is not selected
-      // We need to adjust the flow as if moving just that stock
+    if (sourceEndpointSelected || sinkEndpointSelected) {
+      // This flow is attached to a selected endpoint but the flow itself is not selected
+      // We need to adjust the flow as if moving just that endpoint
 
-      if (sourceStockSelected && sinkStockSelected) {
-        // Both ends are selected stocks: translate the flow
+      if (sourceEndpointSelected && sinkEndpointSelected) {
+        // Both ends are selected: translate the flow
         const newPoints = points.map((p) =>
           p.merge({
             x: p.x - delta.x,
@@ -271,21 +273,31 @@ export function applyGroupMovement(
             points: newPoints,
           }),
         );
-      } else if (sourceStockSelected) {
-        // Only source stock is selected - stock already moved in pass 1,
+      } else if (sourceEndpointSelected) {
+        // Only source endpoint is selected - it already moved in pass 1,
         // so pass zero delta to just re-route the flow to the new position
-        const sourceStock = result.get(sourceUid!) as StockViewElement;
-        const [, updatedFlows] = UpdateStockAndFlows(sourceStock, List([flow]), { x: 0, y: 0 });
-        if (updatedFlows.size > 0) {
-          result = result.set(uid, updatedFlows.first()!);
+        const sourceEndpoint = result.get(sourceUid!);
+        if (sourceEndpoint instanceof StockViewElement) {
+          const [, updatedFlows] = UpdateStockAndFlows(sourceEndpoint, List([flow]), { x: 0, y: 0 });
+          if (updatedFlows.size > 0) {
+            result = result.set(uid, updatedFlows.first()!);
+          }
+        } else if (sourceEndpoint instanceof CloudViewElement) {
+          const [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, { x: 0, y: 0 });
+          result = result.set(uid, updatedFlow);
         }
-      } else if (sinkStockSelected) {
-        // Only sink stock is selected - stock already moved in pass 1,
+      } else if (sinkEndpointSelected) {
+        // Only sink endpoint is selected - it already moved in pass 1,
         // so pass zero delta to just re-route the flow to the new position
-        const sinkStock = result.get(sinkUid!) as StockViewElement;
-        const [, updatedFlows] = UpdateStockAndFlows(sinkStock, List([flow]), { x: 0, y: 0 });
-        if (updatedFlows.size > 0) {
-          result = result.set(uid, updatedFlows.first()!);
+        const sinkEndpoint = result.get(sinkUid!);
+        if (sinkEndpoint instanceof StockViewElement) {
+          const [, updatedFlows] = UpdateStockAndFlows(sinkEndpoint, List([flow]), { x: 0, y: 0 });
+          if (updatedFlows.size > 0) {
+            result = result.set(uid, updatedFlows.first()!);
+          }
+        } else if (sinkEndpoint instanceof CloudViewElement) {
+          const [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, { x: 0, y: 0 });
+          result = result.set(uid, updatedFlow);
         }
       }
     }
@@ -522,6 +534,39 @@ describe('Group Movement', () => {
       expect(newFlow.cy).toBe(130);
       expect(newFlow.points.first()!.x).toBe(150);
       expect(newFlow.points.first()!.y).toBe(130);
+    });
+  });
+
+  describe('Cloud in selection, attached flow not in selection', () => {
+    it('should adjust flow when cloud moves but flow is not selected', () => {
+      // Setup: Cloud -> Flow 1 (not selected) -> Stock
+      const cloud = makeCloud(1, 2, 100, 100);
+      const stock = makeStock(3, 200, 100, [2], []);
+      const flow = makeFlow(2, 150, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
+      ]);
+
+      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock);
+
+      // Only select the cloud, not the flow
+      const selection = Set<UID>([1]);
+      const delta = { x: -50, y: 0 }; // Move cloud right 50
+
+      const result = applyGroupMovement(elements, selection, delta);
+
+      // Cloud should move
+      const newCloud = result.get(1) as CloudViewElement;
+      expect(newCloud.cx).toBe(150);
+
+      // Flow should be adjusted (routed from new cloud position to fixed stock)
+      const newFlow = result.get(2) as FlowViewElement;
+      // The source point should be updated to connect to new cloud position
+      expect(newFlow.points.first()!.attachedToUid).toBe(1);
+      expect(newFlow.points.first()!.x).toBe(150);
+      // The sink point should still be at stock
+      expect(newFlow.points.last()!.attachedToUid).toBe(3);
+      expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
     });
   });
 });

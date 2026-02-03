@@ -1292,12 +1292,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
         const sourceUid = first(pts).attachedToUid;
         const sinkUid = last(pts).attachedToUid;
-        const sourceStockSelected = sourceUid !== undefined && selection.has(sourceUid);
-        const sinkStockSelected = sinkUid !== undefined && selection.has(sinkUid);
+        const sourceEndpointSelected = sourceUid !== undefined && selection.has(sourceUid);
+        const sinkEndpointSelected = sinkUid !== undefined && selection.has(sinkUid);
 
-        if (sourceStockSelected || sinkStockSelected) {
-          // This flow is attached to a selected stock but the flow itself is not selected
-          if (sourceStockSelected && sinkStockSelected) {
+        if (sourceEndpointSelected || sinkEndpointSelected) {
+          // This flow is attached to a selected endpoint (stock or cloud) but the flow itself is not selected
+          if (sourceEndpointSelected && sinkEndpointSelected) {
             // Both ends selected: translate entire flow uniformly
             const newPoints = pts.map((p) =>
               p.merge({
@@ -1312,25 +1312,31 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
                 points: newPoints,
               }),
             );
-          } else if (sourceStockSelected) {
-            // Only source stock is selected - stock already moved in pass 1,
+          } else if (sourceEndpointSelected) {
+            // Only source endpoint is selected - it already moved in pass 1,
             // so pass zero delta to just re-route the flow to the new position
-            const sourceStock = elements.find((e) => e.uid === sourceUid) as StockViewElement | undefined;
-            if (sourceStock) {
-              const [, flows] = UpdateStockAndFlows(sourceStock, List([element]), { x: 0, y: 0 });
+            const sourceEndpoint = elements.find((e) => e.uid === sourceUid);
+            if (sourceEndpoint instanceof StockViewElement) {
+              const [, flows] = UpdateStockAndFlows(sourceEndpoint, List([element]), { x: 0, y: 0 });
               if (flows.size > 0) {
                 updatedElements = updatedElements.push(flows.first()!);
               }
+            } else if (sourceEndpoint instanceof CloudViewElement) {
+              const [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, element, { x: 0, y: 0 });
+              updatedElements = updatedElements.push(updatedFlow);
             }
-          } else if (sinkStockSelected) {
-            // Only sink stock is selected - stock already moved in pass 1,
+          } else if (sinkEndpointSelected) {
+            // Only sink endpoint is selected - it already moved in pass 1,
             // so pass zero delta to just re-route the flow to the new position
-            const sinkStock = elements.find((e) => e.uid === sinkUid) as StockViewElement | undefined;
-            if (sinkStock) {
-              const [, flows] = UpdateStockAndFlows(sinkStock, List([element]), { x: 0, y: 0 });
+            const sinkEndpoint = elements.find((e) => e.uid === sinkUid);
+            if (sinkEndpoint instanceof StockViewElement) {
+              const [, flows] = UpdateStockAndFlows(sinkEndpoint, List([element]), { x: 0, y: 0 });
               if (flows.size > 0) {
                 updatedElements = updatedElements.push(flows.first()!);
               }
+            } else if (sinkEndpoint instanceof CloudViewElement) {
+              const [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, element, { x: 0, y: 0 });
+              updatedElements = updatedElements.push(updatedFlow);
             }
           }
         }
