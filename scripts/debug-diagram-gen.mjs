@@ -10,7 +10,7 @@ import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
-import { Project as Engine2Project } from '@simlin/engine';
+import { Project as EngineProject } from '@simlin/engine';
 import { Project as ProjectDM } from '@simlin/core/datamodel';
 import { renderSvgToString } from '@simlin/diagram/render-common';
 
@@ -85,10 +85,10 @@ async function main() {
     const contents = readFileSync(inputFile, 'utf-8');
 
     // Import the content using the engine
-    const engine2Project = inputFile.endsWith('.mdl')
-      ? await Engine2Project.openVensim(contents, { wasm: wasmPath })
-      : await Engine2Project.open(contents, { wasm: wasmPath });
-    const projectPB = engine2Project.serializeProtobuf();
+    const engineProject = inputFile.endsWith('.mdl')
+      ? await EngineProject.openVensim(contents, { wasm: wasmPath })
+      : await EngineProject.open(contents, { wasm: wasmPath });
+    const projectPB = engineProject.serializeProtobuf();
     const project = ProjectDM.deserializeBinary(projectPB);
 
     // Generate and open the original SVG
@@ -101,7 +101,7 @@ async function main() {
     console.log('\nCreating XMILE copy without views...');
 
     // Get XMILE from the engine project (handles both XMILE and MDL inputs)
-    const xmileContent = engine2Project.toXmileString();
+    const xmileContent = engineProject.toXmileString();
 
     // Remove the <views>...</views> section using regex
     // This regex matches <views> tags with any attributes and all content until the closing </views>
@@ -124,14 +124,14 @@ async function main() {
 
     // Load the no-views XMILE into the engine
     console.log('\nLoading model into engine...');
-    const noViewsEngine2Project = await Engine2Project.open(xmileWithoutViews, { wasm: wasmPath });
+    const noViewsEngineProject = await EngineProject.open(xmileWithoutViews, { wasm: wasmPath });
 
     // Note: generateViews is not yet implemented in the engine
     console.log('Note: View generation is not yet implemented');
 
     // Serialize back to protobuf and then to XMILE
-    const regeneratedPB = noViewsEngine2Project.serializeProtobuf();
-    const regeneratedXmile = noViewsEngine2Project.toXmileString();
+    const regeneratedPB = noViewsEngineProject.serializeProtobuf();
+    const regeneratedXmile = noViewsEngineProject.toXmileString();
 
     if (!regeneratedXmile) {
       throw new Error('Failed to convert regenerated model to XMILE');

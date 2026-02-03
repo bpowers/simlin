@@ -16,7 +16,7 @@ import SpeedDial, { CloseReason, SpeedDialAction, SpeedDialIcon } from './compon
 import Button from './components/Button';
 import { canonicalize } from '@simlin/core/canonicalize';
 
-import { Project as Engine2Project, SimlinErrorKind, SimlinUnitErrorKind } from '@simlin/engine';
+import { Project as EngineProject, SimlinErrorKind, SimlinUnitErrorKind } from '@simlin/engine';
 import type {
   JsonProjectPatch,
   JsonModelOperation,
@@ -195,7 +195,7 @@ interface EditorPropsBase {
 export type EditorProps = EditorPropsBase & ProjectInputProps;
 
 export class Editor extends React.PureComponent<EditorProps, EditorState> {
-  engine2Project?: Engine2Project;
+  engineProject?: EngineProject;
   newEngineShouldPullView = false;
   newEngineQueuedView?: StockFlowView;
 
@@ -279,28 +279,28 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     return this.state.activeProject;
   }
 
-  engine2(): Engine2Project | undefined {
-    return this.engine2Project;
+  engine(): EngineProject | undefined {
+    return this.engineProject;
   }
 
   scheduleSimRun(): void {
     setTimeout(() => {
-      const engine2 = this.engine2();
-      if (!engine2) {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
-      this.loadSim(engine2);
+      this.loadSim(engine);
     });
   }
 
-  loadSim(engine2: Engine2Project) {
+  loadSim(engine: EngineProject) {
     this.recalculateStatus();
 
-    if (!engine2.isSimulatable()) {
+    if (!engine.isSimulatable()) {
       return;
     }
     try {
-      const model = engine2.mainModel;
+      const model = engine.mainModel;
       const run = model.run();
       const idents = run.varNames;
       const time = run.getSeries('time') ?? new Float64Array(0);
@@ -330,11 +330,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       }
     }
 
-    const engine2 = this.engine2Project;
-    if (!engine2) {
+    const engine = this.engineProject;
+    if (!engine) {
       return;
     }
-    const json = JSON.parse(engine2.serializeJson()) as JsonProject;
+    const json = JSON.parse(engine.serializeJson()) as JsonProject;
     let activeProject = this.updateVariableErrors(Project.fromJson(json));
     if (this.state.data) {
       activeProject = activeProject.attachData(this.state.data, this.state.modelName);
@@ -375,11 +375,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     let version: number | undefined;
     try {
-      const engine2 = defined(this.engine2Project);
+      const engine = defined(this.engineProject);
       if (this.props.inputFormat === 'json') {
-        version = await this.props.onSave({ format: 'json', data: engine2.serializeJson() }, currVersion);
+        version = await this.props.onSave({ format: 'json', data: engine.serializeJson() }, currVersion);
       } else {
-        version = await this.props.onSave({ format: 'protobuf', data: engine2.serializeProtobuf() }, currVersion);
+        version = await this.props.onSave({ format: 'protobuf', data: engine.serializeProtobuf() }, currVersion);
       }
       if (version) {
         this.setState({ projectVersion: version });
@@ -433,8 +433,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return;
     }
 
-    const engine2 = this.engine2();
-    if (!engine2) {
+    const engine = this.engine();
+    if (!engine) {
       return;
     }
 
@@ -472,7 +472,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     try {
-      engine2.applyPatch(patch, { allowErrors: true });
+      engine.applyPatch(patch, { allowErrors: true });
     } catch (e: any) {
       console.error('applyPatch error (rename):', e?.code, e?.message, e?.details);
       const msg = e?.message ?? 'Unknown error during rename';
@@ -483,7 +483,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     this.setState({
       flowStillBeingCreated: false,
     });
-    this.updateProject(engine2.serializeProtobuf());
+    this.updateProject(engine.serializeProtobuf());
     this.scheduleSimRun();
   };
 
@@ -503,10 +503,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   };
 
   getLatexEquation = (ident: string): string | undefined => {
-    const engine2 = this.engine2();
-    if (!engine2) return undefined;
+    const engine = this.engine();
+    if (!engine) return undefined;
     try {
-      const model = engine2.getModel(this.state.modelName);
+      const model = engine.getModel(this.state.modelName);
       return model.getLatexEquation(ident) ?? undefined;
     } catch {
       return undefined;
@@ -557,8 +557,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
     elements = elements.concat(clouds);
 
-    const engine2 = this.engine2();
-    if (!engine2) {
+    const engine = this.engine();
+    if (!engine) {
       return;
     }
 
@@ -572,7 +572,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         models: [{ name: modelName, ops: deleteOps }],
       };
       try {
-        engine2.applyPatch(patch, { allowErrors: true });
+        engine.applyPatch(patch, { allowErrors: true });
       } catch (e: any) {
         console.error('applyPatch error (delete):', e?.code, e?.message, e?.details);
         this.appendModelError(e?.message ?? 'Unknown error during delete');
@@ -852,8 +852,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
     elements = elements.concat(newClouds);
 
-    const engine2 = this.engine2();
-    if (!engine2) {
+    const engine = this.engine();
+    if (!engine) {
       return;
     }
 
@@ -955,7 +955,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         models: [{ name: this.state.modelName, ops }],
       };
       try {
-        engine2.applyPatch(patch, { allowErrors: true });
+        engine.applyPatch(patch, { allowErrors: true });
       } catch (e: any) {
         console.error('applyPatch error (flow attach):', e?.code, e?.message, e?.details);
         this.appendModelError(e?.message ?? 'Unknown error during flow attach');
@@ -1047,8 +1047,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   };
 
   updateView(view: StockFlowView) {
-    const engine2 = this.engine2();
-    if (engine2) {
+    const engine = this.engine();
+    if (engine) {
       const ops: JsonModelOperation[] = [
         {
           type: 'upsertView',
@@ -1059,21 +1059,21 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         models: [{ name: this.state.modelName, ops }],
       };
       try {
-        engine2.applyPatch(patch, { allowErrors: true });
+        engine.applyPatch(patch, { allowErrors: true });
       } catch (e: any) {
         console.error('applyPatch error (view update):', e?.code, e?.message, e?.details);
         const msg = e?.message ?? 'Unknown error during view update';
         this.appendModelError(msg);
         return;
       }
-      this.updateProject(engine2.serializeProtobuf());
+      this.updateProject(engine.serializeProtobuf());
     }
   }
 
   handleCreateVariable = (element: ViewElement) => {
     const view = defined(this.getView());
-    const engine2 = this.engine2();
-    if (!engine2) {
+    const engine = this.engine();
+    if (!engine) {
       return;
     }
 
@@ -1122,7 +1122,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     try {
-      engine2.applyPatch(patch, { allowErrors: true });
+      engine.applyPatch(patch, { allowErrors: true });
     } catch (e: any) {
       console.error('applyPatch error (variable creation):', e?.code, e?.message, e?.details);
       this.appendModelError(e?.message ?? 'Unknown error during variable creation');
@@ -1157,8 +1157,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   };
 
   applySimSpecChange(updates: Partial<JsonSimSpecs>) {
-    const engine2 = this.engine2();
-    if (!engine2) {
+    const engine = this.engine();
+    if (!engine) {
       return;
     }
 
@@ -1195,14 +1195,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     try {
-      engine2.applyPatch(patch, { allowErrors: true });
+      engine.applyPatch(patch, { allowErrors: true });
     } catch (e: any) {
       console.error('applyPatch error (sim specs):', e?.code, e?.message, e?.details);
       this.appendModelError(e?.message ?? 'Unknown error updating sim specs');
       return;
     }
 
-    this.updateProject(engine2.serializeProtobuf());
+    this.updateProject(engine.serializeProtobuf());
     this.scheduleSimRun();
   }
 
@@ -1227,12 +1227,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   };
 
   handleDownloadXmile = () => {
-    const engine2 = this.engine2();
-    if (!engine2) {
+    const engine = this.engine();
+    if (!engine) {
       return;
     }
     try {
-      const xmile = engine2.toXmileString();
+      const xmile = engine.toXmileString();
       const encoder = new TextEncoder();
       const xmileBytes = encoder.encode(xmile);
       const blob = new Blob([xmileBytes], {
@@ -1319,8 +1319,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   }
 
   queueViewUpdate(view: StockFlowView): void {
-    const engine2 = this.engine2();
-    if (engine2) {
+    const engine = this.engine();
+    if (engine) {
       const ops: JsonModelOperation[] = [
         {
           type: 'upsertView',
@@ -1331,7 +1331,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         models: [{ name: this.state.modelName, ops }],
       };
       try {
-        engine2.applyPatch(patch, { allowErrors: true });
+        engine.applyPatch(patch, { allowErrors: true });
       } catch (e: any) {
         console.error('applyPatch error (queue view update):', e?.code, e?.message, e?.details);
         const msg = e?.message ?? 'Unknown error during view update';
@@ -1339,7 +1339,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         return;
       }
 
-      this.updateProject(engine2.serializeProtobuf(), false);
+      this.updateProject(engine.serializeProtobuf(), false);
     } else {
       // there exists a race where we need to center/update the viewBox when
       // displaying a newly imported model, but the async wasm stuff doesn't
@@ -1643,8 +1643,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     newUnits: string | undefined,
     newDocs: string | undefined,
   ) => {
-    const engine2 = this.engine2();
-    if (!engine2) {
+    const engine = this.engine();
+    if (!engine) {
       return;
     }
 
@@ -1730,20 +1730,20 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     try {
-      engine2.applyPatch(patch, { allowErrors: true });
+      engine.applyPatch(patch, { allowErrors: true });
     } catch (e: any) {
       console.error('applyPatch error (equation update):', e?.code, e?.message, e?.details);
       this.appendModelError(e?.message ?? 'Unknown error during equation update');
       return;
     }
 
-    this.updateProject(engine2.serializeProtobuf());
+    this.updateProject(engine.serializeProtobuf());
     this.scheduleSimRun();
   };
 
   handleTableChange = (ident: string, newTable: GraphicalFunction | null) => {
-    const engine2 = this.engine2();
-    if (!engine2) {
+    const engine = this.engine();
+    if (!engine) {
       return;
     }
 
@@ -1806,14 +1806,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     try {
-      engine2.applyPatch(patch, { allowErrors: true });
+      engine.applyPatch(patch, { allowErrors: true });
     } catch (e: any) {
       console.error('applyPatch error (table update):', e?.code, e?.message, e?.details);
       this.appendModelError(e?.message ?? 'Unknown error during table update');
       return;
     }
 
-    this.updateProject(engine2.serializeProtobuf());
+    this.updateProject(engine.serializeProtobuf());
     this.scheduleSimRun();
   };
 
@@ -1823,10 +1823,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     let varErrors = Map<string, List<EquationError>>();
     let unitErrors = Map<string, List<UnitError>>();
 
-    const engine2 = this.engine2();
-    if (engine2) {
+    const engine = this.engine();
+    if (engine) {
       const modelName = this.state.modelName;
-      const errors = engine2.getErrors();
+      const errors = engine.getErrors();
 
       for (const err of errors) {
         // Skip errors from other models
@@ -1968,13 +1968,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   };
 
   updateVariableErrors(project: Project): Project {
-    const engine2 = this.engine2();
-    if (!engine2) {
+    const engine = this.engine();
+    if (!engine) {
       return project;
     }
 
     const modelName = this.state.modelName;
-    const errors = engine2.getErrors();
+    const errors = engine.getErrors();
     const { varErrors, unitErrors } = convertErrorDetails(errors, modelName);
 
     if (varErrors.size > 0) {
@@ -2018,23 +2018,23 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   }
 
   async openInitialProject(): Promise<void> {
-    let engine2: Engine2Project;
+    let engine: EngineProject;
     try {
       if (this.props.inputFormat === 'json') {
-        engine2 = await Engine2Project.openJson(this.props.initialProjectJson);
+        engine = await EngineProject.openJson(this.props.initialProjectJson);
       } else {
-        engine2 = await Engine2Project.openProtobuf(this.props.initialProjectBinary as Uint8Array);
+        engine = await EngineProject.openProtobuf(this.props.initialProjectBinary as Uint8Array);
       }
     } catch (e: any) {
       this.appendModelError(`opening the project in the engine failed: ${e?.message ?? 'Unknown error'}`);
       return;
     }
 
-    this.engine2Project = engine2;
+    this.engineProject = engine;
 
-    const serializedProject = engine2.serializeProtobuf();
+    const serializedProject = engine.serializeProtobuf();
 
-    const json = JSON.parse(engine2.serializeJson()) as JsonProject;
+    const json = JSON.parse(engine.serializeJson()) as JsonProject;
     const project = this.updateVariableErrors(Project.fromJson(json));
 
     this.setState({
@@ -2043,20 +2043,20 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   }
 
-  async openEngine2Project(serializedProject: Readonly<Uint8Array>): Promise<Engine2Project | undefined> {
-    this.engine2Project?.dispose();
-    this.engine2Project = undefined;
+  async openEngineProject(serializedProject: Readonly<Uint8Array>): Promise<EngineProject | undefined> {
+    this.engineProject?.dispose();
+    this.engineProject = undefined;
 
-    let engine2: Engine2Project;
+    let engine: EngineProject;
     try {
-      engine2 = await Engine2Project.openProtobuf(serializedProject as Uint8Array);
+      engine = await EngineProject.openProtobuf(serializedProject as Uint8Array);
     } catch (e: any) {
       this.appendModelError(`opening the project in the engine failed: ${e?.message ?? 'Unknown error'}`);
       return;
     }
-    this.engine2Project = engine2;
+    this.engineProject = engine;
 
-    const json = JSON.parse(engine2.serializeJson()) as JsonProject;
+    const json = JSON.parse(engine.serializeJson()) as JsonProject;
     let project = Project.fromJson(json);
 
     if (this.newEngineShouldPullView) {
@@ -2071,17 +2071,17 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       activeProject: this.updateVariableErrors(project),
     });
 
-    return engine2;
+    return engine;
   }
 
   recalculateStatus() {
     const project = this.project();
-    const engine2 = this.engine2();
+    const engine = this.engine();
 
     let status: 'ok' | 'error' | 'disabled';
-    if (!engine2 || !project || project.hasNoEquations) {
+    if (!engine || !project || project.hasNoEquations) {
       status = 'disabled';
-    } else if (!engine2.isSimulatable()) {
+    } else if (!engine.isSimulatable()) {
       status = 'error';
     } else {
       status = 'ok';
@@ -2103,7 +2103,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     this.setState({ projectOffset, projectVersion });
 
     setTimeout(async () => {
-      await this.openEngine2Project(serializedProject);
+      await this.openEngineProject(serializedProject);
       this.scheduleSimRun();
       this.scheduleSave();
     });
