@@ -183,12 +183,23 @@ export async function getOrCreateUserFromVerifiedInfo(
   }
 
   let user: User | undefined;
+  let matchedByEmail = false;
   try {
     if (info.providerUserId) {
       user = await users.findOneByScan({ providerUserId: info.providerUserId });
     }
     if (!user && info.email) {
       user = await users.findOneByScan({ email: info.email });
+      if (user) {
+        matchedByEmail = true;
+      }
+    }
+    if (user && matchedByEmail && info.providerUserId && user.getProviderUserId() !== info.providerUserId) {
+      // User was found by email but has different (or no) providerUserId.
+      // Update to use the new provider info so future logins without email work.
+      user.setProviderUserId(info.providerUserId);
+      user.setProvider(info.provider);
+      await users.update(user.getId(), {}, user);
     }
     if (!user) {
       const created = new Timestamp();
