@@ -72,7 +72,7 @@ import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point, searchableName } from './drawing/common';
-import { getVisualCenter } from './drawing/Connector';
+import { getVisualCenter, takeoffθ } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
 import {
   computePreRoutedOffsets,
@@ -1227,6 +1227,15 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           element = newElement;
           updatedElements = updatedElements.concat(newUpdatedFlows);
           return element;
+        } else if (element instanceof LinkViewElement) {
+          // Single link drag: adjust arc based on drag position (arcPoint)
+          const from = getUid(element.fromUid);
+          const to = getUid(element.toUid);
+          const newTakeoffθ = takeoffθ({ element, from, to, arcPoint: defined(arcPoint) });
+          const newTakeoff = radToDeg(newTakeoffθ);
+          return element.merge({
+            arc: newTakeoff,
+          });
         }
       }
 

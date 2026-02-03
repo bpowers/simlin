@@ -25,7 +25,7 @@ import {
   UpdateCloudAndFlow,
 } from '../drawing/Flow';
 import { updateArcAngle, radToDeg } from '../arc-utils';
-import { getVisualCenter } from '../drawing/Connector';
+import { getVisualCenter, takeoffθ } from '../drawing/Connector';
 
 // Helper functions to create test elements
 function makeStock(
@@ -129,6 +129,7 @@ export function applyGroupMovement(
   elements: Map<UID, ViewElement>,
   selection: Set<UID>,
   delta: Point2D,
+  arcPoint?: Point2D,
 ): Map<UID, ViewElement> {
   // First pass: identify what types of elements are in selection
   const selectedStockUids = new globalThis.Set<UID>();
@@ -197,7 +198,20 @@ export function applyGroupMovement(
     const fromInSelection = isInSelection(link.fromUid);
     const toInSelection = isInSelection(link.toUid);
 
-    if (fromInSelection && toInSelection) {
+    // Single link selection with arcPoint: adjust arc based on drag position
+    if (selection.size === 1 && arcPoint) {
+      const from = elements.get(link.fromUid);
+      const to = elements.get(link.toUid);
+      if (from && to) {
+        const newTakeoff = takeoffθ({
+          element: link,
+          from,
+          to,
+          arcPoint: { x: arcPoint.x, y: arcPoint.y },
+        });
+        result = result.set(uid, link.merge({ arc: radToDeg(newTakeoff) }));
+      }
+    } else if (fromInSelection && toInSelection) {
       // Both endpoints moving together - translate multiPoint if present, keep arc
       if (link.multiPoint) {
         const translatedMultiPoint = link.multiPoint.map((p) =>
@@ -1105,5 +1119,30 @@ describe('Link arc adjustment during group movement', () => {
     // If double-adjusted, arc would be around -90 instead of -45
     expect(Math.abs(newLink.arc - (-45))).toBeLessThan(1);
     expect(Math.abs(newLink.arc - (-90))).toBeGreaterThan(40); // Verify it's not -90
+  });
+
+  it('should adjust arc based on drag position when only link is selected', () => {
+    // When a link is the only selected element, dragging it should change its
+    // curvature based on the arcPoint (drag position), not just preserve it.
+    const auxA = makeAux(1, 100, 100);
+    const auxB = makeAux(2, 200, 100);
+    const link = makeLink(3, 1, 2, 0); // Initially straight (arc = 0)
+
+    let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+
+    // Select only the link (no endpoints)
+    const selection = Set<UID>([3]);
+    const delta = { x: 0, y: 0 }; // No actual movement
+    // Drag to a point above the link line to create an arc
+    const arcPoint = { x: 150, y: 50 };
+
+    const result = applyGroupMovement(elements, selection, delta, arcPoint);
+
+    const newLink = result.get(3) as LinkViewElement;
+    // Arc should have changed from 0 to some non-zero value
+    // The exact value depends on takeoffθ calculation, but it should be non-zero
+    expect(newLink.arc).not.toBe(0);
+    // Dragging above the line should create a positive arc
+    expect(newLink.arc).toBeGreaterThan(0);
   });
 });
