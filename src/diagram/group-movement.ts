@@ -12,13 +12,7 @@
 
 import { List, Set } from 'immutable';
 import { first, last } from '@system-dynamics/core/collections';
-import {
-  ViewElement,
-  FlowViewElement,
-  StockViewElement,
-  CloudViewElement,
-  UID,
-} from '@system-dynamics/core/datamodel';
+import { ViewElement, FlowViewElement, StockViewElement, CloudViewElement, UID } from '@system-dynamics/core/datamodel';
 import {
   clampToSegment,
   computeFlowOffsets,
@@ -211,20 +205,51 @@ export function processSelectedFlow(
       return [preProcessed, sideEffects];
     }
 
-    // Handle clouds (not pre-processed since they only have one flow each)
-    // Use UpdateCloudAndFlow to route the flow and add the routed cloud to sideEffects
+    // Handle clouds: when a cloud is selected in a group, it should move by the full delta
+    // without axis clamping (unlike single-element cloud movement which clamps small perpendicular moves).
+    // We use UpdateCloudAndFlow for flow routing but override the cloud position to honor full delta.
     if (sourceInSelection && sourceUid !== undefined) {
       const sourceEndpoint = getElementByUid(sourceUid);
       if (sourceEndpoint instanceof CloudViewElement) {
-        const [routedCloud, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, delta);
-        sideEffects = sideEffects.push(routedCloud);
+        const [, routedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, delta);
+        // Move cloud by full delta (not clamped) and update flow endpoint to match
+        const newCloudX = sourceEndpoint.cx - delta.x;
+        const newCloudY = sourceEndpoint.cy - delta.y;
+        const movedCloud = sourceEndpoint.merge({ x: newCloudX, y: newCloudY });
+        // Update the flow's cloud endpoint to match the full-delta cloud position
+        const cloudPointIndex = 0; // source is first point
+        const cloudPoint = routedFlow.points.get(cloudPointIndex);
+        let updatedFlow = routedFlow;
+        if (cloudPoint) {
+          const updatedPoints = routedFlow.points.set(
+            cloudPointIndex,
+            cloudPoint.merge({ x: newCloudX, y: newCloudY }),
+          );
+          updatedFlow = routedFlow.set('points', updatedPoints);
+        }
+        sideEffects = sideEffects.push(movedCloud);
         return [updatedFlow, sideEffects];
       }
     } else if (sinkInSelection && sinkUid !== undefined) {
       const sinkEndpoint = getElementByUid(sinkUid);
       if (sinkEndpoint instanceof CloudViewElement) {
-        const [routedCloud, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, delta);
-        sideEffects = sideEffects.push(routedCloud);
+        const [, routedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, delta);
+        // Move cloud by full delta (not clamped) and update flow endpoint to match
+        const newCloudX = sinkEndpoint.cx - delta.x;
+        const newCloudY = sinkEndpoint.cy - delta.y;
+        const movedCloud = sinkEndpoint.merge({ x: newCloudX, y: newCloudY });
+        // Update the flow's cloud endpoint to match the full-delta cloud position
+        const cloudPointIndex = routedFlow.points.size - 1; // sink is last point
+        const cloudPoint = routedFlow.points.get(cloudPointIndex);
+        let updatedFlow = routedFlow;
+        if (cloudPoint) {
+          const updatedPoints = routedFlow.points.set(
+            cloudPointIndex,
+            cloudPoint.merge({ x: newCloudX, y: newCloudY }),
+          );
+          updatedFlow = routedFlow.set('points', updatedPoints);
+        }
+        sideEffects = sideEffects.push(movedCloud);
         return [updatedFlow, sideEffects];
       }
     }
@@ -359,22 +384,11 @@ export function routeUnselectedFlows(
       }
     } else if (movedEndpoint instanceof CloudViewElement) {
       // For clouds, use UpdateCloudAndFlow for orthogonal re-routing
+      // Trust UpdateCloudAndFlow's output - it handles axis clamping correctly
       const originalCloud = getOriginalElement(endpointUid) as CloudViewElement | undefined;
       if (originalCloud) {
-        const newCloudCx = originalCloud.cx - delta.x;
-        const newCloudCy = originalCloud.cy - delta.y;
         for (const flow of flows) {
-          let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
-          // Ensure the cloud endpoint matches the actual cloud position
-          const cloudPointIndex = first(updatedFlow.points).attachedToUid === endpointUid ? 0 : updatedFlow.points.size - 1;
-          const cloudPoint = updatedFlow.points.get(cloudPointIndex);
-          if (cloudPoint) {
-            const updatedPoints = updatedFlow.points.set(
-              cloudPointIndex,
-              cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
-            );
-            updatedFlow = updatedFlow.set('points', updatedPoints);
-          }
+          const [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
           updatedFlows = updatedFlows.push(updatedFlow);
         }
       }
@@ -403,22 +417,11 @@ export function routeUnselectedFlows(
       }
     } else if (movedEndpoint instanceof CloudViewElement) {
       // For clouds, use UpdateCloudAndFlow for orthogonal re-routing
+      // Trust UpdateCloudAndFlow's output - it handles axis clamping correctly
       const originalCloud = getOriginalElement(endpointUid) as CloudViewElement | undefined;
       if (originalCloud) {
-        const newCloudCx = originalCloud.cx - delta.x;
-        const newCloudCy = originalCloud.cy - delta.y;
         for (const flow of flows) {
-          let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
-          // Ensure the cloud endpoint matches the actual cloud position
-          const cloudPointIndex = last(updatedFlow.points).attachedToUid === endpointUid ? updatedFlow.points.size - 1 : 0;
-          const cloudPoint = updatedFlow.points.get(cloudPointIndex);
-          if (cloudPoint) {
-            const updatedPoints = updatedFlow.points.set(
-              cloudPointIndex,
-              cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
-            );
-            updatedFlow = updatedFlow.set('points', updatedPoints);
-          }
+          const [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
           updatedFlows = updatedFlows.push(updatedFlow);
         }
       }

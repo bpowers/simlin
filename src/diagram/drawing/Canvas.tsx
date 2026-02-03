@@ -849,15 +849,26 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             x: initialEl.cx - x,
             y: initialEl.cy - y,
           });
-        } else if (!(initialEl instanceof LinkViewElement)) {
+        } else if (initialEl instanceof LinkViewElement) {
+          // Links: if both endpoints are in selection, translate multiPoint if present
+          const fromInSelection = isInSelection(initialEl.fromUid);
+          const toInSelection = isInSelection(initialEl.toUid);
+          if (fromInSelection && toInSelection && initialEl.multiPoint) {
+            const translatedMultiPoint = initialEl.multiPoint.map((p) =>
+              p.merge({
+                x: p.x - x,
+                y: p.y - y,
+              }),
+            );
+            return initialEl.merge({ multiPoint: translatedMultiPoint });
+          }
+          return initialEl;
+        } else {
           // Aux, Alias, Module, etc.
           return (initialEl as AuxViewElement).merge({
             x: initialEl.cx - x,
             y: initialEl.cy - y,
           });
-        } else {
-          // Links are handled separately - don't move their position directly
-          return initialEl;
         }
       });
 

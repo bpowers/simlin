@@ -1187,13 +1187,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     const [preProcessedFlows] =
       selection.size > 1
-        ? preProcessSelectedFlows(
-            view.elements,
-            selectedFlowUids,
-            preComputedOffsets,
-            delta,
-            isInSelection,
-            (uid) => view.elements.find((e) => e.uid === uid),
+        ? preProcessSelectedFlows(view.elements, selectedFlowUids, preComputedOffsets, delta, isInSelection, (uid) =>
+            view.elements.find((e) => e.uid === uid),
           )
         : [new globalThis.Map<UID, FlowViewElement>()];
 
@@ -1237,12 +1232,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
       // Group movement logic
       if (element instanceof FlowViewElement) {
-        const [newFlow, sideEffects] = processSelectedFlow(
-          element,
-          delta,
-          isInSelection,
-          preProcessedFlows,
-          (uid) => view.elements.find((e) => e.uid === uid),
+        const [newFlow, sideEffects] = processSelectedFlow(element, delta, isInSelection, preProcessedFlows, (uid) =>
+          view.elements.find((e) => e.uid === uid),
         );
         updatedElements = updatedElements.concat(sideEffects);
         return newFlow;
@@ -1265,7 +1256,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         const toInSelection = isInSelection(element.toUid);
 
         if (fromInSelection && toInSelection) {
-          // Both endpoints moving together - keep existing arc
+          // Both endpoints moving together - translate multiPoint if present, keep arc
+          if (element.multiPoint) {
+            const translatedMultiPoint = element.multiPoint.map((p) =>
+              p.merge({
+                x: p.x - delta.x,
+                y: p.y - delta.y,
+              }),
+            );
+            return element.merge({ multiPoint: translatedMultiPoint });
+          }
           return element;
         } else {
           // One endpoint fixed - arc needs adjustment
