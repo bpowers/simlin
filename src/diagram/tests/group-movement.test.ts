@@ -17,10 +17,11 @@ import {
 import { StockWidth } from '../drawing/Stock';
 import {
   clampToSegment,
+  computeFlowOffsets,
+  computeFlowRoute,
   findClosestSegment,
   getSegments,
   UpdateCloudAndFlow,
-  UpdateStockAndFlows,
 } from '../drawing/Flow';
 
 // Helper functions to create test elements
@@ -162,48 +163,68 @@ export function applyGroupMovement(
     );
   }
 
-  // Pre-process flows in selection with one endpoint selected - group by endpoint
-  // to preserve multi-flow spacing when multiple flows share the same selected stock
+  // Pre-compute flow offsets for all flows attached to moved stocks.
+  // This ensures both selected and unselected flows maintain proper spacing.
+  const preComputedOffsets = new globalThis.Map<UID, number>();
   const preProcessedFlows = new globalThis.Map<UID, FlowViewElement>();
-  if (selectedFlowUids.size > 0) {
-    const selectedFlowsBySourceEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
-    const selectedFlowsBySinkEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
 
-    for (const flowUid of selectedFlowUids) {
-      const flow = elements.get(flowUid) as FlowViewElement;
-      const points = flow.points;
-      if (points.size < 2) continue;
+  // Identify all moved stocks and compute offsets for ALL their attached flows
+  for (const stockUid of selectedStockUids) {
+    const stock = elements.get(stockUid) as StockViewElement;
 
-      const sourceUid = points.first()!.attachedToUid;
-      const sinkUid = points.last()!.attachedToUid;
-      const sourceInSel = sourceUid !== undefined && selectedStockUids.has(sourceUid);
-      const sinkInSel = sinkUid !== undefined && selectedStockUids.has(sinkUid);
-
-      if (sourceInSel && !sinkInSel && sourceUid !== undefined) {
-        const existing = selectedFlowsBySourceEndpoint.get(sourceUid) || List<FlowViewElement>();
-        selectedFlowsBySourceEndpoint.set(sourceUid, existing.push(flow));
-      } else if (!sourceInSel && sinkInSel && sinkUid !== undefined) {
-        const existing = selectedFlowsBySinkEndpoint.get(sinkUid) || List<FlowViewElement>();
-        selectedFlowsBySinkEndpoint.set(sinkUid, existing.push(flow));
+    // Collect ALL flows attached to this stock (both selected and unselected)
+    let allAttachedFlows = List<FlowViewElement>();
+    for (const [, el] of elements) {
+      if (!(el instanceof FlowViewElement)) continue;
+      const pts = el.points;
+      if (pts.size < 2) continue;
+      const sourceUid = pts.first()!.attachedToUid;
+      const sinkUid = pts.last()!.attachedToUid;
+      if (sourceUid === stockUid || sinkUid === stockUid) {
+        allAttachedFlows = allAttachedFlows.push(el);
       }
     }
 
-    for (const [endpointUid, flows] of selectedFlowsBySourceEndpoint) {
-      const endpoint = elements.get(endpointUid);
-      if (endpoint instanceof StockViewElement) {
-        const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, delta);
-        for (const f of updatedFlows) {
-          preProcessedFlows.set(f.uid, f);
-        }
-      }
+    // Compute offsets at the new stock position
+    const newStockCx = stock.cx - delta.x;
+    const newStockCy = stock.cy - delta.y;
+    const offsets = computeFlowOffsets(allAttachedFlows, stock.uid, newStockCx, newStockCy);
+
+    // Store offsets for all attached flows
+    for (const [flowUid, offset] of offsets) {
+      preComputedOffsets.set(flowUid, offset);
     }
-    for (const [endpointUid, flows] of selectedFlowsBySinkEndpoint) {
-      const endpoint = elements.get(endpointUid);
+  }
+
+  // Pre-process selected flows with one endpoint selected (stock endpoint only)
+  for (const flowUid of selectedFlowUids) {
+    const flow = elements.get(flowUid) as FlowViewElement;
+    const points = flow.points;
+    if (points.size < 2) continue;
+
+    const sourceUid = points.first()!.attachedToUid;
+    const sinkUid = points.last()!.attachedToUid;
+    const sourceInSel = sourceUid !== undefined && selectedStockUids.has(sourceUid);
+    const sinkInSel = sinkUid !== undefined && selectedStockUids.has(sinkUid);
+
+    // Process flows where exactly one endpoint is a selected stock
+    if (sourceInSel && !sinkInSel && sourceUid !== undefined) {
+      const endpoint = elements.get(sourceUid);
       if (endpoint instanceof StockViewElement) {
-        const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, delta);
-        for (const f of updatedFlows) {
-          preProcessedFlows.set(f.uid, f);
-        }
+        const newStockCx = endpoint.cx - delta.x;
+        const newStockCy = endpoint.cy - delta.y;
+        const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
+        const updatedFlow = computeFlowRoute(flow, endpoint, newStockCx, newStockCy, offset);
+        preProcessedFlows.set(flow.uid, updatedFlow);
+      }
+    } else if (!sourceInSel && sinkInSel && sinkUid !== undefined) {
+      const endpoint = elements.get(sinkUid);
+      if (endpoint instanceof StockViewElement) {
+        const newStockCx = endpoint.cx - delta.x;
+        const newStockCy = endpoint.cy - delta.y;
+        const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
+        const updatedFlow = computeFlowRoute(flow, endpoint, newStockCx, newStockCy, offset);
+        preProcessedFlows.set(flow.uid, updatedFlow);
       }
     }
   }
@@ -351,12 +372,17 @@ export function applyGroupMovement(
     );
   }
 
-  // Update flows grouped by source endpoint - pass all flows at once to preserve spacing
+  // Update flows grouped by source endpoint using pre-computed offsets
   for (const [endpointUid, flows] of flowsBySourceEndpoint) {
     const endpoint = result.get(endpointUid);
     if (endpoint instanceof StockViewElement) {
-      const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, { x: 0, y: 0 });
-      for (const updatedFlow of updatedFlows) {
+      // Use pre-computed offsets to maintain spacing with selected flows
+      const originalStock = elements.get(endpointUid) as StockViewElement;
+      const newStockCx = originalStock.cx - delta.x;
+      const newStockCy = originalStock.cy - delta.y;
+      for (const flow of flows) {
+        const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
+        const updatedFlow = computeFlowRoute(flow, originalStock, newStockCx, newStockCy, offset);
         result = result.set(updatedFlow.uid, updatedFlow);
       }
     } else if (endpoint instanceof CloudViewElement) {
@@ -372,12 +398,17 @@ export function applyGroupMovement(
     }
   }
 
-  // Update flows grouped by sink endpoint - pass all flows at once to preserve spacing
+  // Update flows grouped by sink endpoint using pre-computed offsets
   for (const [endpointUid, flows] of flowsBySinkEndpoint) {
     const endpoint = result.get(endpointUid);
     if (endpoint instanceof StockViewElement) {
-      const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, { x: 0, y: 0 });
-      for (const updatedFlow of updatedFlows) {
+      // Use pre-computed offsets to maintain spacing with selected flows
+      const originalStock = elements.get(endpointUid) as StockViewElement;
+      const newStockCx = originalStock.cx - delta.x;
+      const newStockCy = originalStock.cy - delta.y;
+      for (const flow of flows) {
+        const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
+        const updatedFlow = computeFlowRoute(flow, originalStock, newStockCx, newStockCy, offset);
         result = result.set(updatedFlow.uid, updatedFlow);
       }
     } else if (endpoint instanceof CloudViewElement) {

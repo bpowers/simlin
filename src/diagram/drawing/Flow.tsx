@@ -199,7 +199,7 @@ function getFlowAttachmentInfo(
  *
  * Returns a map from flow UID to its offset fraction (0 to 1).
  */
-function computeFlowOffsets(
+export function computeFlowOffsets(
   flows: List<FlowViewElement>,
   stockUid: number,
   newStockCx: number,

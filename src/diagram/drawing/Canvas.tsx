@@ -43,6 +43,8 @@ import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
 import {
   clampToSegment,
+  computeFlowOffsets,
+  computeFlowRoute,
   findClosestSegment,
   Flow,
   flowBounds,
@@ -781,13 +783,40 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         return uid !== undefined && selectedUids.has(uid);
       };
 
-      // Pre-process flows in selection with one endpoint selected - group them by endpoint
-      // to preserve multi-flow spacing when multiple flows share the same selected stock
+      // Pre-compute flow offsets for all flows attached to moved stocks.
+      // This ensures both selected and unselected flows maintain proper spacing.
+      const preComputedOffsets = new globalThis.Map<UID, number>();
       const preProcessedFlows = new globalThis.Map<UID, FlowViewElement>();
       if (this.selectionUpdates.size > 1) {
-        const selectedFlowsBySourceEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
-        const selectedFlowsBySinkEndpoint = new globalThis.Map<UID, List<FlowViewElement>>();
+        // Identify all moved stocks and compute offsets for ALL their attached flows
+        for (const [, element] of this.selectionUpdates) {
+          if (!(element instanceof StockViewElement)) continue;
 
+          // Collect ALL flows attached to this stock (both selected and unselected)
+          let allAttachedFlows = List<FlowViewElement>();
+          for (const [, el] of this.elements) {
+            if (!(el instanceof FlowViewElement)) continue;
+            const pts = el.points;
+            if (pts.size < 2) continue;
+            const sourceUid = first(pts).attachedToUid;
+            const sinkUid = last(pts).attachedToUid;
+            if (sourceUid === element.uid || sinkUid === element.uid) {
+              allAttachedFlows = allAttachedFlows.push(el);
+            }
+          }
+
+          // Compute offsets at the new stock position
+          const newStockCx = element.cx - moveDelta.x;
+          const newStockCy = element.cy - moveDelta.y;
+          const offsets = computeFlowOffsets(allAttachedFlows, element.uid, newStockCx, newStockCy);
+
+          // Store offsets for all attached flows
+          for (const [flowUid, offset] of offsets) {
+            preComputedOffsets.set(flowUid, offset);
+          }
+        }
+
+        // Pre-process selected flows with one endpoint selected (stock endpoint only)
         for (const [, element] of this.selectionUpdates) {
           if (!(element instanceof FlowViewElement)) continue;
 
@@ -799,30 +828,24 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           const sourceInSel = isInSelection(sourceUid);
           const sinkInSel = isInSelection(sinkUid);
 
+          // Process flows where exactly one endpoint is a selected stock
           if (sourceInSel && !sinkInSel && sourceUid !== undefined) {
-            const existing = selectedFlowsBySourceEndpoint.get(sourceUid) || List<FlowViewElement>();
-            selectedFlowsBySourceEndpoint.set(sourceUid, existing.push(element));
-          } else if (!sourceInSel && sinkInSel && sinkUid !== undefined) {
-            const existing = selectedFlowsBySinkEndpoint.get(sinkUid) || List<FlowViewElement>();
-            selectedFlowsBySinkEndpoint.set(sinkUid, existing.push(element));
-          }
-        }
-
-        for (const [endpointUid, flows] of selectedFlowsBySourceEndpoint) {
-          const endpoint = this.getElementByUid(endpointUid);
-          if (endpoint instanceof StockViewElement) {
-            const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, moveDelta);
-            for (const f of updatedFlows) {
-              preProcessedFlows.set(f.uid, f);
+            const endpoint = this.getElementByUid(sourceUid);
+            if (endpoint instanceof StockViewElement) {
+              const newStockCx = endpoint.cx - moveDelta.x;
+              const newStockCy = endpoint.cy - moveDelta.y;
+              const offset = preComputedOffsets.get(element.uid) ?? 0.5;
+              const updatedFlow = computeFlowRoute(element, endpoint, newStockCx, newStockCy, offset);
+              preProcessedFlows.set(element.uid, updatedFlow);
             }
-          }
-        }
-        for (const [endpointUid, flows] of selectedFlowsBySinkEndpoint) {
-          const endpoint = this.getElementByUid(endpointUid);
-          if (endpoint instanceof StockViewElement) {
-            const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, moveDelta);
-            for (const f of updatedFlows) {
-              preProcessedFlows.set(f.uid, f);
+          } else if (!sourceInSel && sinkInSel && sinkUid !== undefined) {
+            const endpoint = this.getElementByUid(sinkUid);
+            if (endpoint instanceof StockViewElement) {
+              const newStockCx = endpoint.cx - moveDelta.x;
+              const newStockCy = endpoint.cy - moveDelta.y;
+              const offset = preComputedOffsets.get(element.uid) ?? 0.5;
+              const updatedFlow = computeFlowRoute(element, endpoint, newStockCx, newStockCy, offset);
+              preProcessedFlows.set(element.uid, updatedFlow);
             }
           }
         }
@@ -992,12 +1015,19 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           );
         }
 
-        // Update flows grouped by source endpoint - pass all flows at once to preserve spacing
+        // Update flows grouped by source endpoint using pre-computed offsets
         for (const [endpointUid, flows] of flowsBySourceEndpoint) {
           const endpoint = this.selectionUpdates.get(endpointUid);
           if (endpoint instanceof StockViewElement) {
-            const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, { x: 0, y: 0 });
-            otherUpdates = otherUpdates.concat(updatedFlows);
+            // Use pre-computed offsets to maintain spacing with selected flows
+            const originalStock = this.elements.get(endpointUid) as StockViewElement;
+            const newStockCx = originalStock.cx - moveDelta.x;
+            const newStockCy = originalStock.cy - moveDelta.y;
+            for (const flow of flows) {
+              const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
+              const updatedFlow = computeFlowRoute(flow, originalStock, newStockCx, newStockCy, offset);
+              otherUpdates = otherUpdates.push(updatedFlow);
+            }
           } else if (endpoint instanceof CloudViewElement) {
             // For clouds, use UpdateCloudAndFlow with the ORIGINAL cloud position and delta
             // This handles orthogonal re-routing for perpendicular moves
@@ -1011,12 +1041,19 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           }
         }
 
-        // Update flows grouped by sink endpoint - pass all flows at once to preserve spacing
+        // Update flows grouped by sink endpoint using pre-computed offsets
         for (const [endpointUid, flows] of flowsBySinkEndpoint) {
           const endpoint = this.selectionUpdates.get(endpointUid);
           if (endpoint instanceof StockViewElement) {
-            const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, { x: 0, y: 0 });
-            otherUpdates = otherUpdates.concat(updatedFlows);
+            // Use pre-computed offsets to maintain spacing with selected flows
+            const originalStock = this.elements.get(endpointUid) as StockViewElement;
+            const newStockCx = originalStock.cx - moveDelta.x;
+            const newStockCy = originalStock.cy - moveDelta.y;
+            for (const flow of flows) {
+              const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
+              const updatedFlow = computeFlowRoute(flow, originalStock, newStockCx, newStockCy, offset);
+              otherUpdates = otherUpdates.push(updatedFlow);
+            }
           } else if (endpoint instanceof CloudViewElement) {
             // For clouds, use UpdateCloudAndFlow with the ORIGINAL cloud position and delta
             // This handles orthogonal re-routing for perpendicular moves
