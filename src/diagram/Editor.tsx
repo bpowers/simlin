@@ -72,8 +72,9 @@ import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point, searchableName } from './drawing/common';
-import { takeoffθ, getVisualCenter } from './drawing/Connector';
-import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
+import { getVisualCenter } from './drawing/Connector';
+import { UpdateCloudAndFlow } from './drawing/Flow';
+import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 
 import styles from './Editor.module.css';
@@ -1137,128 +1138,15 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const view = defined(this.getView());
     const selection = this.state.selection;
 
-    const getName = (ident: string) => {
-      for (const e of view.elements) {
-        if (e.isNamed() && e.ident === ident) {
-          return e;
-        }
-      }
-      throw new Error(`unknown name ${ident}`);
-    };
-    const getUid = (uid: UID) => {
-      for (const e of view.elements) {
-        if (e.uid === uid) {
-          return e;
-        }
-      }
-      throw new Error(`unknown UID ${uid}`);
-    };
-
-    let updatedElements = List<ViewElement>();
-
-    let elements = view.elements.map((element: ViewElement) => {
-      if (!selection.has(element.uid)) {
-        return element;
-      }
-
-      if (selection.size === 1 && element instanceof FlowViewElement) {
-        const pts = element.points;
-        const sourceId = defined(first(pts).attachedToUid);
-        const source = getUid(sourceId) as StockViewElement | CloudViewElement;
-
-        const sinkId = defined(last(pts).attachedToUid);
-        const sink = getUid(sinkId) as StockViewElement | CloudViewElement;
-
-        const ends = List<StockViewElement | CloudViewElement>([source, sink]);
-        const [newElement, newUpdatedClouds] = UpdateFlow(element, ends, delta, segmentIndex);
-        element = newElement;
-        updatedElements = updatedElements.concat(newUpdatedClouds);
-      } else if (selection.size === 1 && element instanceof CloudViewElement) {
-        const flow = getUid(defined(element.flowUid)) as FlowViewElement;
-        const [newCloud, newUpdatedFlow] = UpdateCloudAndFlow(element, flow, delta);
-        element = newCloud;
-        updatedElements = updatedElements.push(newUpdatedFlow);
-      } else if (selection.size === 1 && element instanceof StockViewElement) {
-        const stock = getOrThrow(defined(this.getModel()).variables, element.ident) as StockVar;
-        const flowNames: List<string> = stock.inflows.concat(stock.outflows);
-        const flows: List<ViewElement> = flowNames.map(getName);
-        const [newElement, newUpdatedFlows] = UpdateStockAndFlows(element, flows as List<FlowViewElement>, delta);
-        element = newElement;
-        updatedElements = updatedElements.concat(newUpdatedFlows);
-      } else if (element instanceof LinkViewElement) {
-        const from = getUid(element.fromUid);
-        const to = getUid(element.toUid);
-        const newTakeoffθ = takeoffθ({ element, from, to, arcPoint: defined(arcPoint) });
-        const newTakeoff = radToDeg(newTakeoffθ);
-        element = element.merge({
-          arc: newTakeoff,
-        });
-      } else {
-        // everything else has an x and a y, the cast is to make typescript
-        // happy with our dumb type decisions
-        element = (element as AuxViewElement).merge({
-          x: element.cx - delta.x,
-          y: element.cy - delta.y,
-        });
-      }
-      return element;
+    const { updatedElements } = applyGroupMovement({
+      elements: view.elements,
+      selection,
+      delta,
+      arcPoint,
+      segmentIndex,
     });
 
-    const updatedFlowsByUid: Map<UID, ViewElement> = updatedElements.toMap().mapKeys((_, e) => e.uid);
-    elements = elements.map((element) => {
-      if (updatedFlowsByUid.has(element.uid)) {
-        return getOrThrow(updatedFlowsByUid, element.uid);
-      }
-      return element;
-    });
-
-    let namedElements = Map<string, ViewElement>();
-    let nonSelectedElements = Map<number, ViewElement>();
-    let selectedElements = Map<number, ViewElement>();
-    for (const e of elements) {
-      if (selection.has(e.uid)) {
-        selectedElements = selectedElements.set(e.uid, e);
-      } else {
-        nonSelectedElements = nonSelectedElements.set(e.uid, e);
-      }
-      if (e.isNamed()) {
-        const ident = defined(e.ident);
-        namedElements = namedElements.set(ident, selectedElements.get(e.uid, e));
-      }
-    }
-
-    elements = elements.map((element: ViewElement) => {
-      if (!(element instanceof LinkViewElement)) {
-        return element.isNamed() ? getOrThrow(namedElements, defined(element.ident)) : element;
-      }
-      // TODO: this could be an alias, which doesn't have a name.  Why are we doing this by name anyway?
-      // const fromName = defined(getUid(element.fromUid).ident);
-      // const toName = defined(getUid(element.toUid).ident);
-      // if it hasn't been updated, nothing to do
-      if (!(selectedElements.has(element.fromUid) || selectedElements.has(element.toUid))) {
-        return element;
-      }
-      const from = selectedElements.get(element.fromUid) || nonSelectedElements.get(element.fromUid);
-      if (!from) {
-        return element;
-      }
-      const to = selectedElements.get(element.toUid) || nonSelectedElements.get(element.toUid);
-      if (!to) {
-        return element;
-      }
-      const atan2 = Math.atan2;
-      const oldTo = defined(getUid(element.toUid));
-      const oldFrom = defined(getUid(element.fromUid));
-      const oldToVisual = getVisualCenter(oldTo);
-      const oldFromVisual = getVisualCenter(oldFrom);
-      const toVisual = getVisualCenter(to);
-      const fromVisual = getVisualCenter(from);
-      const oldθ = atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
-      const newθ = atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
-      const diffθ = oldθ - newθ;
-
-      return element.update('arc', (angle) => updateArcAngle(angle, radToDeg(diffθ)));
-    });
+    const elements = view.elements.map((el) => updatedElements.get(el.uid) ?? el);
     this.updateView(view.merge({ elements }));
   };
 

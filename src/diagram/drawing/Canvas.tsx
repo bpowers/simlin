@@ -42,6 +42,7 @@ import { Connector, ConnectorProps, getVisualCenter } from './Connector';
 import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
 import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
+import { applyGroupMovement } from '../group-movement';
 import { Group, groupBounds, GroupProps } from './Group';
 import { Module, moduleBounds, ModuleProps } from './Module';
 import { CustomElement } from './SlateEditor';
@@ -503,6 +504,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     const { isMovingArrow } = this.state;
     const isSelected = this.props.selection.has(element.uid);
 
+    // Get the updated element from selectionUpdates if available (arc was already adjusted
+    // by applyGroupMovement for group selection cases)
+    const updatedElement = this.selectionUpdates.get(element.uid);
+    if (updatedElement instanceof LinkViewElement) {
+      element = updatedElement;
+    }
+
     const from = this.selectionUpdates.get(element.fromUid) || this.getElementByUid(element.fromUid);
     let to = this.selectionUpdates.get(element.toUid) || this.getElementByUid(element.toUid);
     const toUid = to.uid;
@@ -529,13 +537,17 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         }) as ViewElement;
       }
     }
-    if (isMovingArrow || this.isSelected(from) || this.isSelected(to)) {
+    // When dragging a link arrow (isMovingArrow), adjust arc based on the dynamic to position.
+    // For other movement cases, the arc is already adjusted by applyGroupMovement.
+    if (isMovingArrow) {
       const oldTo = getOrThrow(this.elements, toUid);
       const oldFrom = getOrThrow(this.elements, from.uid);
       const oldToVisual = getVisualCenter(oldTo);
       const oldFromVisual = getVisualCenter(oldFrom);
       const toVisual = getVisualCenter(to);
       const fromVisual = getVisualCenter(from);
+
+      // Endpoints moved differently - adjust arc based on rotation
       const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
       const newθ = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
       const diffθ = oldθ - newθ;
@@ -760,34 +772,17 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       });
     }
     if (this.state.moveDelta) {
-      let otherUpdates = List<ViewElement>();
-      const { x, y } = defined(this.state.moveDelta);
-      this.selectionUpdates = this.selectionUpdates.map((initialEl) => {
-        // only constrain flow movement if we're not doing a group-move
-        if (initialEl instanceof FlowViewElement && this.selectionUpdates.size === 1) {
-          const [flow, updatedClouds] = this.constrainFlowMovement(initialEl, defined(this.state.moveDelta));
-          otherUpdates = otherUpdates.concat(updatedClouds);
-          return flow;
-        } else if (initialEl instanceof StockViewElement && this.selectionUpdates.size === 1) {
-          const [stock, updatedFlows] = this.constrainStockMovement(initialEl, defined(this.state.moveDelta));
-          otherUpdates = otherUpdates.concat(updatedFlows);
-          return stock;
-        } else if (initialEl instanceof CloudViewElement && this.selectionUpdates.size === 1) {
-          const [cloud, updatedFlow] = this.constrainCloudMovement(initialEl, defined(this.state.moveDelta));
-          otherUpdates = otherUpdates.push(updatedFlow);
-          return cloud;
-        } else if (!(initialEl instanceof LinkViewElement)) {
-          return (initialEl as AuxViewElement).merge({
-            x: initialEl.cx - x,
-            y: initialEl.cy - y,
-          });
-        } else {
-          return initialEl;
-        }
+      const moveDelta = defined(this.state.moveDelta);
+
+      const { updatedElements } = applyGroupMovement({
+        elements: this.elements.values(),
+        selection: this.props.selection,
+        delta: moveDelta,
+        arcPoint: this.getArcPoint(),
+        segmentIndex: this.state.draggingSegmentIndex,
       });
-      // now add flows that also were updated
-      const namedUpdates: Map<UID, ViewElement> = otherUpdates.toMap().mapKeys((_, el) => el.uid);
-      this.selectionUpdates = this.selectionUpdates.concat(namedUpdates);
+
+      this.selectionUpdates = this.selectionUpdates.merge(updatedElements);
     }
 
     return displayElements;
@@ -1005,12 +1000,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       // Find all elements within the selection rectangle
       let selectedElements = Set<UID>();
       for (const element of this.cachedElements) {
-        // Skip flows, stocks, and clouds for now - focus on auxes
-        if (
-          element instanceof FlowViewElement ||
-          element instanceof StockViewElement ||
-          element instanceof CloudViewElement
-        ) {
+        // Skip clouds since they're tied to flows
+        if (element instanceof CloudViewElement) {
           continue;
         }
 
@@ -1023,6 +1014,16 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             auxContains(element, { x: right, y: bottom }) ||
             (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom)
           ) {
+            selectedElements = selectedElements.add(element.uid);
+          }
+        } else if (element instanceof StockViewElement) {
+          // For stocks, check if center is within rectangle
+          if (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom) {
+            selectedElements = selectedElements.add(element.uid);
+          }
+        } else if (element instanceof FlowViewElement) {
+          // For flows, check if valve center (cx, cy) is within rectangle
+          if (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom) {
             selectedElements = selectedElements.add(element.uid);
           }
         } else if (element instanceof AliasViewElement || element instanceof ModuleViewElement) {

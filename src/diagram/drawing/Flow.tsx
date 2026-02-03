@@ -199,7 +199,7 @@ function getFlowAttachmentInfo(
  *
  * Returns a map from flow UID to its offset fraction (0 to 1).
  */
-function computeFlowOffsets(
+export function computeFlowOffsets(
   flows: List<FlowViewElement>,
   stockUid: number,
   newStockCx: number,
@@ -930,7 +930,7 @@ export function UpdateCloudAndFlow(
   return [cloud, flow];
 }
 
-interface Segment {
+export interface Segment {
   index: number;
   p1: IPoint;
   p2: IPoint;
@@ -1077,7 +1077,7 @@ function distanceToSegment(point: IPoint, seg: Segment): number {
   }
 }
 
-function findClosestSegment(point: IPoint, segments: Segment[]): Segment {
+export function findClosestSegment(point: IPoint, segments: Segment[]): Segment {
   if (segments.length === 0) {
     throw new Error('findClosestSegment called with empty segments array');
   }
@@ -1093,7 +1093,7 @@ function findClosestSegment(point: IPoint, segments: Segment[]): Segment {
   return closest;
 }
 
-function clampToSegment(point: IPoint, seg: Segment, margin: number = VALVE_CLAMP_MARGIN): IPoint {
+export function clampToSegment(point: IPoint, seg: Segment, margin: number = VALVE_CLAMP_MARGIN): IPoint {
   const { p1, p2 } = seg;
 
   // For diagonal segments, project onto the line and apply margin
