@@ -1278,18 +1278,18 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           return element;
         } else {
           // One endpoint fixed - preserve arc shape by adjusting arc angle based on
-          // the rotation of the line between endpoints. This ensures the arc shape
-          // follows the endpoint movement naturally, rather than jumping to a new
-          // curvature based on drag position.
+          // the rotation of the line between endpoints' visual centers. This ensures
+          // the arc shape follows the endpoint movement naturally, rather than jumping
+          // to a new curvature based on drag position.
           const from = getUid(element.fromUid);
           const to = getUid(element.toUid);
           const oldFromVisual = getVisualCenter(from);
           const oldToVisual = getVisualCenter(to);
-          // Calculate new positions: if endpoint is in selection, it moved by delta
-          const newFromCx = fromInSelection ? from.cx - delta.x : from.cx;
-          const newFromCy = fromInSelection ? from.cy - delta.y : from.cy;
-          const newToCx = toInSelection ? to.cx - delta.x : to.cx;
-          const newToCy = toInSelection ? to.cy - delta.y : to.cy;
+          // Calculate new positions from visual centers: if endpoint is in selection, it moved by delta
+          const newFromCx = fromInSelection ? oldFromVisual.cx - delta.x : oldFromVisual.cx;
+          const newFromCy = fromInSelection ? oldFromVisual.cy - delta.y : oldFromVisual.cy;
+          const newToCx = toInSelection ? oldToVisual.cx - delta.x : oldToVisual.cx;
+          const newToCy = toInSelection ? oldToVisual.cy - delta.y : oldToVisual.cy;
           const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
           const newθ = Math.atan2(newToCy - newFromCy, newToCx - newFromCx);
           const diffθ = oldθ - newθ;

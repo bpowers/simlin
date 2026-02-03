@@ -13,6 +13,8 @@ import {
   LinkViewElement,
   ViewElement,
   UID,
+  Aux,
+  ApplyToAllEquation,
 } from '@system-dynamics/core/datamodel';
 
 import { StockWidth } from '../drawing/Stock';
@@ -78,12 +80,28 @@ function makeCloud(uid: number, flowUid: number, x: number, y: number): CloudVie
   });
 }
 
-function makeAux(uid: number, x: number, y: number): AuxViewElement {
+function makeAux(uid: number, x: number, y: number, isArrayed = false): AuxViewElement {
+  const auxVar = isArrayed
+    ? new Aux({
+        ident: `aux_${uid}`,
+        equation: new ApplyToAllEquation({
+          dimensionNames: List(['dim1']),
+          equation: '1',
+        }),
+        documentation: '',
+        units: '',
+        gf: undefined,
+        data: undefined,
+        errors: undefined,
+        unitErrors: undefined,
+        uid: undefined,
+      })
+    : undefined;
   return new AuxViewElement({
     uid,
     name: `Aux${uid}`,
     ident: `aux_${uid}`,
-    var: undefined,
+    var: auxVar,
     x,
     y,
     labelSide: 'center',
@@ -224,16 +242,18 @@ export function applyGroupMovement(
       }
       // arc is preserved
     } else {
-      // One endpoint fixed - preserve arc shape by adjusting arc angle
+      // One endpoint fixed - preserve arc shape by adjusting arc angle based on
+      // the rotation of the line between endpoints' visual centers
       const from = elements.get(link.fromUid);
       const to = elements.get(link.toUid);
       if (from && to) {
         const oldFromVisual = getVisualCenter(from);
         const oldToVisual = getVisualCenter(to);
-        const newFromCx = fromInSelection ? from.cx - delta.x : from.cx;
-        const newFromCy = fromInSelection ? from.cy - delta.y : from.cy;
-        const newToCx = toInSelection ? to.cx - delta.x : to.cx;
-        const newToCy = toInSelection ? to.cy - delta.y : to.cy;
+        // Calculate new positions from visual centers: if endpoint is in selection, it moved by delta
+        const newFromCx = fromInSelection ? oldFromVisual.cx - delta.x : oldFromVisual.cx;
+        const newFromCy = fromInSelection ? oldFromVisual.cy - delta.y : oldFromVisual.cy;
+        const newToCx = toInSelection ? oldToVisual.cx - delta.x : oldToVisual.cx;
+        const newToCy = toInSelection ? oldToVisual.cy - delta.y : oldToVisual.cy;
         const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
         const newθ = Math.atan2(newToCy - newFromCy, newToCx - newFromCx);
         const diffθ = oldθ - newθ;
@@ -692,12 +712,7 @@ describe('Group Movement', () => {
         { x: 200, y: 150, attachedToUid: 5 },
       ]);
 
-      let elements = Map<UID, ViewElement>()
-        .set(1, stockA)
-        .set(2, flow1)
-        .set(3, flow2)
-        .set(4, stockB)
-        .set(5, cloud);
+      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow1).set(3, flow2).set(4, stockB).set(5, cloud);
 
       // Select Stock A and Stock B (so Flow 1 has both endpoints selected)
       // Don't select the cloud (so Flow 2 has only one endpoint selected)
@@ -1095,7 +1110,7 @@ describe('Link arc adjustment during group movement', () => {
     // newArc = originalArc - angleDiff = 0 - 45 = -45 degrees
     const newLink = result.get(3) as LinkViewElement;
     // Arc should have been adjusted to preserve curve shape
-    expect(Math.abs(newLink.arc - (-45))).toBeLessThan(1);
+    expect(Math.abs(newLink.arc - -45)).toBeLessThan(1);
   });
 
   it('should not double-adjust arc when link is selected with one endpoint', () => {
@@ -1117,8 +1132,8 @@ describe('Link arc adjustment during group movement', () => {
     const newLink = result.get(3) as LinkViewElement;
     // Arc should be adjusted once (-45 degrees), not twice (-90 degrees)
     // If double-adjusted, arc would be around -90 instead of -45
-    expect(Math.abs(newLink.arc - (-45))).toBeLessThan(1);
-    expect(Math.abs(newLink.arc - (-90))).toBeGreaterThan(40); // Verify it's not -90
+    expect(Math.abs(newLink.arc - -45)).toBeLessThan(1);
+    expect(Math.abs(newLink.arc - -90)).toBeGreaterThan(40); // Verify it's not -90
   });
 
   it('should adjust arc based on drag position when only link is selected', () => {
@@ -1144,5 +1159,90 @@ describe('Link arc adjustment during group movement', () => {
     expect(newLink.arc).not.toBe(0);
     // Dragging above the line should create a positive arc
     expect(newLink.arc).toBeGreaterThan(0);
+  });
+
+  describe('arrayed elements', () => {
+    it('should correctly adjust arc when arrayed source moves with fixed endpoint', () => {
+      // This tests the bug where arrayed elements use visual centers (with ArrayedOffset)
+      // for old positions but raw cx/cy for new positions, causing arc drift.
+      //
+      // Setup: Arrayed Aux A -> Link -> Non-arrayed Aux B
+      // Move Aux A down (perpendicular movement causes rotation).
+      // The arc adjustment should be the same as for non-arrayed elements.
+      const auxA = makeAux(1, 100, 100, true); // Arrayed
+      const auxB = makeAux(2, 200, 100, false); // Not arrayed
+      const link = makeLink(3, 1, 2, 0); // Initially straight
+
+      let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+
+      // Select Aux A and link (not Aux B)
+      const selection = Set<UID>([1, 3]);
+      // Move Aux A down by 100 - this causes a 45-degree rotation
+      const delta = { x: 0, y: -100 };
+
+      const result = applyGroupMovement(elements, selection, delta);
+
+      // Aux A should move down
+      expect((result.get(1) as AuxViewElement).cy).toBe(200);
+
+      // Link arc should be adjusted by -45 degrees (same as non-arrayed case)
+      // This verifies the bug is fixed: without the fix, the arc would drift
+      // due to the ArrayedOffset (3px) mismatch between old and new position calculations.
+      const newLink = result.get(3) as LinkViewElement;
+      expect(Math.abs(newLink.arc - -45)).toBeLessThan(1);
+    });
+
+    it('should correctly adjust arc when arrayed target moves with fixed source', () => {
+      // Setup: Non-arrayed Aux A -> Link -> Arrayed Aux B
+      // Move Aux B down (perpendicular movement causes rotation).
+      // The arc adjustment should match the geometric rotation based on visual centers.
+      const auxA = makeAux(1, 100, 100, false); // Not arrayed
+      const auxB = makeAux(2, 200, 100, true); // Arrayed (visual center at 197, 97 due to ArrayedOffset)
+      const link = makeLink(3, 1, 2, 0); // Initially straight
+
+      let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+
+      // Select Aux B and link (not Aux A)
+      const selection = Set<UID>([2, 3]);
+      // Move Aux B down by 100 (causes rotation)
+      const delta = { x: 0, y: -100 };
+
+      const result = applyGroupMovement(elements, selection, delta);
+
+      // Aux B should move down (y increases by 100)
+      expect((result.get(2) as AuxViewElement).cy).toBe(200);
+
+      // Calculate expected arc adjustment based on visual centers:
+      // Old visual line: (100, 100) -> (197, 97), old angle ≈ atan2(-3, 97)
+      // New visual line: (100, 100) -> (197, 197), new angle = atan2(97, 97) = 45 degrees
+      // The arc should be adjusted to preserve the curve shape
+      const newLink = result.get(3) as LinkViewElement;
+      // Without the fix, the arc would be wrong because old angle was computed from visual
+      // centers but new angle was computed from raw positions.
+      // With the fix, both angles are computed from visual centers, so the geometry is consistent.
+      // We just verify the arc changed significantly (rotation occurred)
+      expect(Math.abs(newLink.arc)).toBeGreaterThan(30);
+    });
+
+    it('should correctly adjust arc when both endpoints are arrayed', () => {
+      // Setup: Arrayed Aux A -> Link -> Arrayed Aux B
+      // Move Aux A diagonally while Aux B stays fixed.
+      const auxA = makeAux(1, 100, 100, true); // Arrayed
+      const auxB = makeAux(2, 200, 100, true); // Arrayed
+      const link = makeLink(3, 1, 2, 0); // Initially straight
+
+      let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+
+      // Select Aux A and link (not Aux B)
+      const selection = Set<UID>([1, 3]);
+      // Move Aux A down by 100 (causes 45-degree rotation)
+      const delta = { x: 0, y: -100 };
+
+      const result = applyGroupMovement(elements, selection, delta);
+
+      // Link arc should be adjusted by -45 degrees (same as non-arrayed case)
+      const newLink = result.get(3) as LinkViewElement;
+      expect(Math.abs(newLink.arc - -45)).toBeLessThan(1);
+    });
   });
 });
