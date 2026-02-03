@@ -2,8 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { Project as Engine2Project } from '@system-dynamics/engine2';
-import type { JsonProject } from '@system-dynamics/engine2';
+import { Project as Engine2Project } from '@simlin/engine';
+import type { JsonProject } from '@simlin/engine';
 import { emptyProject } from '../project-creation';
 
 describe('emptyProject', () => {
@@ -24,7 +24,7 @@ describe('emptyProject', () => {
   it('creates a project with correct simulation specs', async () => {
     const protobuf = await emptyProject('SimSpecs Test', 'testuser');
 
-    // Verify the round-trip: protobuf -> engine2 -> JSON produces expected structure
+    // Verify the round-trip: protobuf -> engine -> JSON produces expected structure
     const project = await Engine2Project.openProtobuf(protobuf);
     const json = JSON.parse(project.serializeJson()) as JsonProject;
     project.dispose();

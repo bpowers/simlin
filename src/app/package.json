@@ -1,5 +1,5 @@
 {
-  "name": "@system-dynamics/app",
+  "name": "@simlin/app",
   "version": "1.0.0",
   "description": "Simlin web frontend",
   "repository": "http://github.com/bpowers/simlin",
@@ -7,9 +7,9 @@
   "license": "Apache-2.0",
   "browser": "lib.browser",
   "dependencies": {
-    "@system-dynamics/core": "workspace:*",
-    "@system-dynamics/diagram": "workspace:*",
-    "@system-dynamics/engine2": "workspace:*",
+    "@simlin/core": "workspace:*",
+    "@simlin/diagram": "workspace:*",
+    "@simlin/engine": "workspace:*",
     "clsx": "^2.1.1",
     "immutable": "^5.0.3",
     "js-base64": "^3.7.7",

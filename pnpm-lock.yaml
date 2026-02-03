@@ -23,15 +23,15 @@ importers:
 
   src/app:
     dependencies:
-      '@system-dynamics/core':
+      '@simlin/core':
         specifier: workspace:*
         version: link:../core
-      '@system-dynamics/diagram':
+      '@simlin/diagram':
         specifier: workspace:*
         version: link:../diagram
-      '@system-dynamics/engine2':
+      '@simlin/engine':
         specifier: workspace:*
-        version: link:../engine2
+        version: link:../engine
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
@@ -126,9 +126,9 @@ importers:
 
   src/core:
     dependencies:
-      '@system-dynamics/engine2':
+      '@simlin/engine':
         specifier: workspace:*
-        version: link:../engine2
+        version: link:../engine
       immutable:
         specifier: ^5.0.3
         version: 5.1.4
@@ -190,12 +190,12 @@ importers:
       '@radix-ui/react-tooltip':
         specifier: ^1.1.0
         version: 1.2.8(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
-      '@system-dynamics/core':
+      '@simlin/core':
         specifier: workspace:*
         version: link:../core
-      '@system-dynamics/engine2':
+      '@simlin/engine':
         specifier: workspace:*
-        version: link:../engine2
+        version: link:../engine
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
@@ -288,7 +288,7 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
-  src/engine2:
+  src/engine:
     devDependencies:
       '@types/jest':
         specifier: ^30.0.0
@@ -338,15 +338,15 @@ importers:
       '@iarna/toml':
         specifier: ^2.2.5
         version: 2.2.5
-      '@system-dynamics/core':
+      '@simlin/core':
         specifier: workspace:*
         version: link:../core
-      '@system-dynamics/diagram':
+      '@simlin/diagram':
         specifier: workspace:*
         version: link:../diagram
-      '@system-dynamics/engine2':
+      '@simlin/engine':
         specifier: workspace:*
-        version: link:../engine2
+        version: link:../engine
       body-parser:
         specifier: ^1.20.3
         version: 1.20.4
@@ -9669,7 +9669,7 @@ snapshots:
 
   '@types/cors@2.8.19':
     dependencies:
-      '@types/node': 18.19.130
+      '@types/node': 22.19.7
 
   '@types/debug@4.1.12':
     dependencies:
@@ -9693,7 +9693,7 @@ snapshots:
 
   '@types/express-serve-static-core@5.1.1':
     dependencies:
-      '@types/node': 18.19.130
+      '@types/node': 22.19.7
       '@types/qs': 6.14.0
       '@types/range-parser': 1.2.7
       '@types/send': 1.2.1
@@ -9749,7 +9749,7 @@ snapshots:
   '@types/jsonwebtoken@9.0.10':
     dependencies:
       '@types/ms': 2.1.0
-      '@types/node': 18.19.130
+      '@types/node': 22.19.7
 
   '@types/katex@0.11.1': {}
 
@@ -9799,7 +9799,7 @@ snapshots:
   '@types/request@2.48.13':
     dependencies:
       '@types/caseless': 0.12.5
-      '@types/node': 18.19.130
+      '@types/node': 22.19.7
       '@types/tough-cookie': 4.0.5
       form-data: 2.5.5
 
@@ -9807,7 +9807,7 @@ snapshots:
 
   '@types/send@1.2.1':
     dependencies:
-      '@types/node': 18.19.130
+      '@types/node': 22.19.7
 
   '@types/serve-favicon@2.5.7':
     dependencies:
@@ -9816,7 +9816,7 @@ snapshots:
   '@types/serve-static@2.2.0':
     dependencies:
       '@types/http-errors': 2.0.5
-      '@types/node': 18.19.130
+      '@types/node': 22.19.7
 
   '@types/stack-utils@2.0.3': {}
 
@@ -14810,7 +14810,7 @@ snapshots:
       '@protobufjs/path': 1.1.2
       '@protobufjs/pool': 1.1.0
       '@protobufjs/utf8': 1.1.0
-      '@types/node': 18.19.130
+      '@types/node': 22.19.7
       long: 5.3.2
 
   proxy-addr@2.0.7:

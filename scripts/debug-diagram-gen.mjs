@@ -10,14 +10,14 @@ import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
-import { Project as Engine2Project } from '@system-dynamics/engine2';
-import { Project as ProjectDM } from '@system-dynamics/core/datamodel';
-import { renderSvgToString } from '@system-dynamics/diagram/render-common';
+import { Project as Engine2Project } from '@simlin/engine';
+import { Project as ProjectDM } from '@simlin/core/datamodel';
+import { renderSvgToString } from '@simlin/diagram/render-common';
 
-// Compute the WASM path relative to the engine2 package
+// Compute the WASM path relative to the engine package
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const wasmPath = resolve(__dirname, '../src/engine2/core/libsimlin.wasm');
+const wasmPath = resolve(__dirname, '../src/engine/core/libsimlin.wasm');
 
 /**
  * Generate an SVG from a project and save it to a file
@@ -84,7 +84,7 @@ async function main() {
     // Read the input file
     const contents = readFileSync(inputFile, 'utf-8');
 
-    // Import the content using engine2
+    // Import the content using the engine
     const engine2Project = inputFile.endsWith('.mdl')
       ? await Engine2Project.openVensim(contents, { wasm: wasmPath })
       : await Engine2Project.open(contents, { wasm: wasmPath });
@@ -126,7 +126,7 @@ async function main() {
     console.log('\nLoading model into engine...');
     const noViewsEngine2Project = await Engine2Project.open(xmileWithoutViews, { wasm: wasmPath });
 
-    // Note: generateViews is not yet implemented in engine2
+    // Note: generateViews is not yet implemented in the engine
     console.log('Note: View generation is not yet implemented');
 
     // Serialize back to protobuf and then to XMILE

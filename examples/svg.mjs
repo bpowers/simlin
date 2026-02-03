@@ -2,14 +2,14 @@ import { readFileSync, createWriteStream } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 
-import { Project as Engine2Project } from '@system-dynamics/engine2';
-import { Project } from '@system-dynamics/core/datamodel';
-import { renderSvgToString } from '@system-dynamics/diagram/render-common';
+import { Project as Engine2Project } from '@simlin/engine';
+import { Project } from '@simlin/core/datamodel';
+import { renderSvgToString } from '@simlin/diagram/render-common';
 
-// Compute the WASM path relative to the engine2 package
+// Compute the WASM path relative to the engine package
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const wasmPath = resolve(__dirname, '../src/engine2/core/libsimlin.wasm');
+const wasmPath = resolve(__dirname, '../src/engine/core/libsimlin.wasm');
 
 const args = process.argv.slice(2);
 const inputFile = args[0];

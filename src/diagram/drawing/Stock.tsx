@@ -6,8 +6,8 @@ import * as React from 'react';
 
 import clsx from 'clsx';
 
-import { StockViewElement, ViewElement } from '@system-dynamics/core/datamodel';
-import { defined, Series } from '@system-dynamics/core/common';
+import { StockViewElement, ViewElement } from '@simlin/core/datamodel';
+import { defined, Series } from '@simlin/core/common';
 
 import { displayName, mergeBounds, Point, Rect } from './common';
 import { Label, labelBounds, LabelProps } from './Label';

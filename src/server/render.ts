@@ -4,10 +4,10 @@
 
 import { Worker } from 'worker_threads';
 
-import { Project as DmProject } from '@system-dynamics/core/datamodel';
-import { Project as Engine2Project } from '@system-dynamics/engine2';
-import type { JsonProject } from '@system-dynamics/engine2';
-import { renderSvgToString } from '@system-dynamics/diagram/render-common';
+import { Project as DmProject } from '@simlin/core/datamodel';
+import { Project as Engine2Project } from '@simlin/engine';
+import type { JsonProject } from '@simlin/engine';
+import { renderSvgToString } from '@simlin/diagram/render-common';
 import { File } from './schemas/file_pb';
 
 export async function renderToPNG(fileDoc: File): Promise<Uint8Array> {

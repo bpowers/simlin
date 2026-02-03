@@ -1,10 +1,10 @@
 import React from 'react';
 import { toUint8Array } from 'js-base64';
 import { Map, Set } from 'immutable';
-import { defined, Series } from '@system-dynamics/core/common';
-import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
-import { Point } from '@system-dynamics/diagram/drawing/common';
-import { Canvas } from '@system-dynamics/diagram/drawing/Canvas';
+import { defined, Series } from '@simlin/core/common';
+import { UID, ViewElement, Project } from '@simlin/core/datamodel';
+import { Point } from '@simlin/diagram/drawing/common';
+import { Canvas } from '@simlin/diagram/drawing/Canvas';
 
 const logisticGrowthProject = 'Cg9sb2dpc3RpYy1ncm93dGgSFBEAAAAAAABZQBoJCQAAAAAAAPA/GrYGCgRtYWluGiUKIwoKcG9wdWxhdGlvbioObmV0X2JpcnRoX3JhdGVCBQoDCgE1GjsSOQoObmV0X2JpcnRoX3JhdGVCJwolCiNmcmFjdGlvbmFsX2dyb3d0aF9yYXRlICogcG9wdWxhdGlvbhogGh4KE21heGltdW1fZ3Jvd3RoX3JhdGUyBwoFCgMuMTIaHxodChFjYXJyeWluZ19jYXBhY2l0eTIICgYKBDEwMDAaXhpcChZmcmFjdGlvbmFsX2dyb3d0aF9yYXRlMkIKQAo+bWF4aW11bV9ncm93dGhfcmF0ZSAqICgxIC0gZnJhY3Rpb25fb2ZfY2FycnlpbmdfY2FwYWNpdHlfdXNlZCkaSBpGCiJmcmFjdGlvbl9vZl9jYXJyeWluZ19jYXBhY2l0eV91c2VkMiAKHgoccG9wdWxhdGlvbi9jYXJyeWluZ19jYXBhY2l0eSLcAxoiEiAKClBvcHVsYXRpb24QARkAAABAM9OCQCEAAADgzDxwQBpSGlAKDm5ldCBiaXJ0aCByYXRlEAIZqvbqaC4ygEAhAAAAwJkpcEAyFAkAAADAzIx8QBEAAADAmSlwQBgNMhQJAAAAQDMfgkARAAAAwJkpcEAYARotCisKE21heGltdW0KZ3Jvd3RoIHJhdGUQAxnNzMxMM/N8QCEAAABACgd5QCgBGisKKQoRY2FycnlpbmcgY2FwYWNpdHkQBBmZmZlZuF6EQCFnZmbm1vN4QCgEGjEKLwoXZnJhY3Rpb25hbCAKZ3Jvd3RoIHJhdGUQBRkAAAAAACB/QCEAAABAM4N1QCgBGjwKOgoiZnJhY3Rpb24gb2YgY2FycnlpbmcKY2FwYWNpdHkgdXNlZBAGGQAAAIBmFoNAIQAAAKCZiXVAKAQaESIPCAcQBBgGIWZANqZnymxAGhEiDwgIEAEYBiEgMB5yvNFIQBoRIg8ICRAGGAUhjENNVBh1YEAaESIPCAoQAxgFIbDL4YNiz3JAGhEiDwgLEAUYAiHS1VhKsiVuQBoRIg8IDBABGAIh4KA0JrmkWUAaGDoWCA0QAhkAAADAzIx8QCEAAADAmSlwQCIAKQAAAAAAAPA/';
 

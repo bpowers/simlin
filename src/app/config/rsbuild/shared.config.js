@@ -135,9 +135,9 @@ const sharedConfig = defineConfig({
         extensions: ['.web.mjs', '.mjs', '.web.js', '.js', '.web.ts', '.ts', '.web.tsx', '.tsx', '.json', '.web.jsx', '.jsx'],
         alias: {
           '@': resolveApp('.'),
-          '@system-dynamics/core': resolveApp('../core'),
-          '@system-dynamics/diagram': resolveApp('../diagram'),
-          '@system-dynamics/engine2': resolveApp('../engine2'),
+          '@simlin/core': resolveApp('../core'),
+          '@simlin/diagram': resolveApp('../diagram'),
+          '@simlin/engine': resolveApp('../engine'),
         },
       },
     },

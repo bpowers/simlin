@@ -4,8 +4,8 @@
 
 import * as React from 'react';
 
-import { ViewElement, CloudViewElement } from '@system-dynamics/core/datamodel';
-import { defined } from '@system-dynamics/core/common';
+import { ViewElement, CloudViewElement } from '@simlin/core/datamodel';
+import { defined } from '@simlin/core/common';
 
 import { Point, Rect, square } from './common';
 import { CloudRadius, CloudWidth } from './default';

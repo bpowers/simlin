@@ -4,7 +4,7 @@
 
 // Import and export functions
 
-import { getExports } from '@system-dynamics/engine2/internal/wasm';
+import { getExports } from '@simlin/engine/internal/wasm';
 import { free, copyToWasm, copyFromWasm, allocOutPtr, readOutPtr, allocOutUsize, readOutUsize } from './memory';
 import { SimlinProjectPtr } from './types';
 import {

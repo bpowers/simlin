@@ -5,7 +5,7 @@
     { "path": "./src/diagram" },
     { "path": "./src/app" },
     { "path": "./src/server" },
-    { "path": "./src/engine2" },
+    { "path": "./src/engine" },
     { "path": "./website" }
   ]
 }

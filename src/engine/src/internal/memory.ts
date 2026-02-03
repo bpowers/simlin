@@ -4,7 +4,7 @@
 
 // Memory management helpers for WASM interop
 
-import { getExports, getMemory } from '@system-dynamics/engine2/internal/wasm';
+import { getExports, getMemory } from '@simlin/engine/internal/wasm';
 import { Ptr } from './types';
 
 // Text encoder/decoder for string conversion

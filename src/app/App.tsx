@@ -15,8 +15,8 @@ import {
 
 import { useLocation, Route, RouteComponentProps, Switch, Redirect } from 'wouter';
 
-import { defined } from '@system-dynamics/core/common';
-import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';
+import { defined } from '@simlin/core/common';
+import { HostedWebEditor } from '@simlin/diagram/HostedWebEditor';
 
 import Home from './Home';
 import { Login } from './Login';

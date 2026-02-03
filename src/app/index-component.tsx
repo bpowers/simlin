@@ -5,8 +5,8 @@
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 
-import { baseURL } from '@system-dynamics/core/common';
-import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';
+import { baseURL } from '@simlin/core/common';
+import { HostedWebEditor } from '@simlin/diagram/HostedWebEditor';
 
 // try to get the base URL from the src attribute of the current script
 // (so that e.g. localhost:3000 works for testing), but fall back to baseURL

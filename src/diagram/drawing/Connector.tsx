@@ -11,7 +11,7 @@ import {
   ModuleViewElement,
   StockViewElement,
   ViewElement,
-} from '@system-dynamics/core/datamodel';
+} from '@simlin/core/datamodel';
 
 import { Arrowhead } from './Arrowhead';
 import { Circle, isInf, isZero, Point, Rect, square } from './common';

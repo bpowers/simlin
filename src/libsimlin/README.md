@@ -1,11 +1,11 @@
-# engine2
+# libsimlin
 
 A C-compatible FFI interface to the Simlin system dynamics simulation engine, providing language-agnostic access to simulation capabilities through WebAssembly.
 
 
 ## Overview
 
-engine2 exposes the core Simlin simulation engine through a stable C ABI, enabling integration with any programming language that can call C functions or execute WebAssembly modules.
+libsimlin exposes the core Simlin simulation engine through a stable C ABI, enabling integration with any programming language that can call C functions or execute WebAssembly modules.
 This allows system dynamics models to be simulated in environments beyond the web browser, including server-side applications written in languages other than Rust.
 
 

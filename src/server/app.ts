@@ -17,7 +17,7 @@ import { seshcookie } from 'seshcookie';
 import * as logger from 'winston';
 
 import { apiRouter } from './api';
-import { defined } from '@system-dynamics/core/common';
+import { defined } from '@simlin/core/common';
 import { Application } from './application';
 import { authn } from './authn';
 import authz from './authz';

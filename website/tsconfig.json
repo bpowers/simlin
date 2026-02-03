@@ -14,9 +14,9 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
-      "@system-dynamics/core": ["../src/core"],
-      "@system-dynamics/diagram": ["../src/diagram"],
-      "@system-dynamics/engine2": ["../src/engine2"]
+      "@simlin/core": ["../src/core"],
+      "@simlin/diagram": ["../src/diagram"],
+      "@simlin/engine": ["../src/engine"]
     }
   },
   "include": ["src/", "docs/", "rspress.config.ts"],

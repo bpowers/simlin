@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import { List } from 'immutable';
 
-import { defined, Series } from '@system-dynamics/core/common';
+import { defined, Series } from '@simlin/core/common';
 import { Dark2 } from '../colors';
 
 import styles from './Sparkline.module.css';

@@ -27,8 +27,8 @@ import {
   CardContent,
   TextLink,
   TextField,
-} from '@system-dynamics/diagram';
-import { ModelIcon } from '@system-dynamics/diagram/ModelIcon';
+} from '@simlin/diagram';
+import { ModelIcon } from '@simlin/diagram/ModelIcon';
 
 import typography from './typography.module.css';
 

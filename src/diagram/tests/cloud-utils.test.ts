@@ -4,7 +4,7 @@
 
 import { List } from 'immutable';
 
-import { Point, FlowViewElement, CloudViewElement } from '@system-dynamics/core/datamodel';
+import { Point, FlowViewElement, CloudViewElement } from '@simlin/core/datamodel';
 
 import { isCloudOnSourceSide, isCloudOnSinkSide } from '../drawing/cloud-utils';
 

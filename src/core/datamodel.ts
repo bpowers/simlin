@@ -40,7 +40,7 @@ import {
   type JsonLoopMetadata,
   type JsonModelGroup,
   type JsonSource,
-} from '@system-dynamics/engine2';
+} from '@simlin/engine';
 
 export { ErrorCode };
 

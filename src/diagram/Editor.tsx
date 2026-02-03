@@ -14,17 +14,17 @@ import Snackbar from './components/Snackbar';
 import { ClearIcon, EditIcon, MenuIcon } from './components/icons';
 import SpeedDial, { CloseReason, SpeedDialAction, SpeedDialIcon } from './components/SpeedDial';
 import Button from './components/Button';
-import { canonicalize } from '@system-dynamics/core/canonicalize';
+import { canonicalize } from '@simlin/core/canonicalize';
 
-import { Project as Engine2Project, SimlinErrorKind, SimlinUnitErrorKind } from '@system-dynamics/engine2';
+import { Project as Engine2Project, SimlinErrorKind, SimlinUnitErrorKind } from '@simlin/engine';
 import type {
   JsonProjectPatch,
   JsonModelOperation,
   JsonSimSpecs,
   JsonArrayedEquation,
   JsonProject,
-} from '@system-dynamics/engine2';
-import type { ErrorDetail } from '@system-dynamics/engine2';
+} from '@simlin/engine';
+import type { ErrorDetail } from '@simlin/engine';
 import { stockFlowViewToJson } from './view-conversion';
 import { updateArcAngle, radToDeg } from './arc-utils';
 import {
@@ -54,9 +54,9 @@ import {
   ErrorCode,
   Rect,
   UnitError,
-} from '@system-dynamics/core/datamodel';
-import { defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
-import { first, getOrThrow, last, only } from '@system-dynamics/core/collections';
+} from '@simlin/core/datamodel';
+import { defined, exists, Series, toInt, uint8ArraysEqual } from '@simlin/core/common';
+import { first, getOrThrow, last, only } from '@simlin/core/collections';
 
 import { AuxIcon } from './AuxIcon';
 import { Toast } from './ErrorToast';

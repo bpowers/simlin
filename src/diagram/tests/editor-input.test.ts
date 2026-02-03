@@ -9,13 +9,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project as Engine2Project, configureWasm, ready } from '@system-dynamics/engine2';
-import { reset } from '@system-dynamics/engine2/internal/wasm';
+import { Project as Engine2Project, configureWasm, ready } from '@simlin/engine';
+import { reset } from '@simlin/engine/internal/wasm';
 
 import type { EditorProps, ProtobufProjectData, JsonProjectData, ProjectData } from '../Editor';
 
 async function loadWasm(): Promise<void> {
-  const wasmPath = path.join(__dirname, '..', '..', 'engine2', 'core', 'libsimlin.wasm');
+  const wasmPath = path.join(__dirname, '..', '..', 'engine', 'core', 'libsimlin.wasm');
   const wasmBuffer = fs.readFileSync(wasmPath);
   reset();
   configureWasm({ source: wasmBuffer });

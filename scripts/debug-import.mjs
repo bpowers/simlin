@@ -4,14 +4,14 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 
 import base64 from 'js-base64';
-import { Project } from '@system-dynamics/engine2';
-import { createFile, createProject } from '@system-dynamics/server/lib/project-creation.js';
-import { createDatabase } from '@system-dynamics/server/lib/models/db.js';
+import { Project } from '@simlin/engine';
+import { createFile, createProject } from '@simlin/server/lib/project-creation.js';
+import { createDatabase } from '@simlin/server/lib/models/db.js';
 
-// Compute the WASM path relative to the engine2 package
+// Compute the WASM path relative to the engine package
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const wasmPath = resolve(__dirname, '../src/engine2/core/libsimlin.wasm');
+const wasmPath = resolve(__dirname, '../src/engine/core/libsimlin.wasm');
 
 const args = process.argv.slice(2);
 const inputFile = args[0];
@@ -19,7 +19,7 @@ const projectName = inputFile.split('.')[0];
 
 let pb = readFileSync(inputFile);
 
-// Validate the protobuf by opening it with engine2
+// Validate the protobuf by opening it with engine
 // If it fails (throws), try decoding from base64 and retry
 let project;
 try {

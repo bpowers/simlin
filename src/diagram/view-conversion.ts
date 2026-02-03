@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import type { JsonView, JsonViewElement, JsonRect, JsonFlowPoint, JsonLinkPoint } from '@system-dynamics/engine2';
+import type { JsonView, JsonViewElement, JsonRect, JsonFlowPoint, JsonLinkPoint } from '@simlin/engine';
 
 import {
   ViewElement,
@@ -17,7 +17,7 @@ import {
   StockFlowView,
   Rect,
   Point,
-} from '@system-dynamics/core/datamodel';
+} from '@simlin/core/datamodel';
 
 function rectToJson(rect: Rect): JsonRect {
   return {
@@ -146,7 +146,7 @@ function elementToJson(element: ViewElement): JsonViewElement | null {
 }
 
 /**
- * Convert a StockFlowView (datamodel) to a JsonView (engine2).
+ * Convert a StockFlowView (datamodel) to a JsonView (engine).
  */
 export function stockFlowViewToJson(view: StockFlowView): JsonView {
   const elements: JsonViewElement[] = [];

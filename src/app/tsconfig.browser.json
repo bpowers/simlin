@@ -27,11 +27,11 @@
     "../**/*.spec.ts",
     "../server/**",
     "../**/node_modules/**",
-    "../engine2/src/internal/wasm.node.ts"
+    "../engine/src/internal/wasm.node.ts"
   ],
   "references": [
     { "path": "../core/tsconfig.browser.json" },
     { "path": "../diagram/tsconfig.browser.json" },
-    { "path": "../engine2/tsconfig.browser.json" }
+    { "path": "../engine/tsconfig.browser.json" }
   ]
 }

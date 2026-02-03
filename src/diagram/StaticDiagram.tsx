@@ -9,11 +9,11 @@ import { Map, Set } from 'immutable';
 
 import './theme.css';
 
-import { Series } from '@system-dynamics/core/common';
-import { at, getOrThrow } from '@system-dynamics/core/collections';
-import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
-import { Project as Engine2Project } from '@system-dynamics/engine2';
-import type { JsonProject } from '@system-dynamics/engine2';
+import { Series } from '@simlin/core/common';
+import { at, getOrThrow } from '@simlin/core/collections';
+import { UID, ViewElement, Project } from '@simlin/core/datamodel';
+import { Project as Engine2Project } from '@simlin/engine';
+import type { JsonProject } from '@simlin/engine';
 import { Point } from './drawing/common';
 import { Canvas } from './drawing/Canvas';
 

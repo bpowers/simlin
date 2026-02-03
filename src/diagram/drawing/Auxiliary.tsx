@@ -6,8 +6,8 @@ import * as React from 'react';
 
 import clsx from 'clsx';
 
-import { AuxViewElement, ViewElement } from '@system-dynamics/core/datamodel';
-import { defined, Series } from '@system-dynamics/core/common';
+import { AuxViewElement, ViewElement } from '@simlin/core/datamodel';
+import { defined, Series } from '@simlin/core/common';
 
 import { displayName, mergeBounds, Point, Rect, square } from './common';
 import { AuxRadius } from './default';

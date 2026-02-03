@@ -7,8 +7,8 @@ import * as React from 'react';
 import { List } from 'immutable';
 import { fromUint8Array, toUint8Array } from 'js-base64';
 
-import { baseURL, defined } from '@system-dynamics/core/common';
-import { first } from '@system-dynamics/core/collections';
+import { baseURL, defined } from '@simlin/core/common';
+import { first } from '@simlin/core/collections';
 
 import { Editor, ProtobufProjectData } from './Editor';
 

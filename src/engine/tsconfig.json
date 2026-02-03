@@ -8,8 +8,8 @@
     "module": "commonjs",
     "lib": ["es2020", "dom"],
     "paths": {
-      "@system-dynamics/engine2/internal/wasm": ["src/internal/wasm.node.ts"],
-      "@system-dynamics/engine2/*": ["src/*"]
+      "@simlin/engine/internal/wasm": ["src/internal/wasm.node.ts"],
+      "@simlin/engine/*": ["src/*"]
     }
   },
   "include": ["src/**/*.ts"],

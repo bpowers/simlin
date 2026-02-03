@@ -11,7 +11,7 @@ import { Table } from './models/table';
 import { createFile, createProject } from './project-creation';
 import { File } from './schemas/file_pb';
 import { User } from './schemas/user_pb';
-import { Project as Engine2Project } from '@system-dynamics/engine2';
+import { Project as Engine2Project } from '@simlin/engine';
 
 async function fileFromXmile(files: Table<File>, projectId: string, userId: string, xmile: string): Promise<File> {
   const project = await Engine2Project.open(xmile);

@@ -9,9 +9,9 @@ import * as React from 'react';
 import { Set } from 'immutable';
 import { renderToString } from 'react-dom/server';
 
-import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
+import { UID, ViewElement, Project } from '@simlin/core/datamodel';
 
-import { at, getOrThrow } from '@system-dynamics/core/collections';
+import { at, getOrThrow } from '@simlin/core/collections';
 import { Canvas } from './drawing/Canvas';
 import { Box, Point } from './drawing/common';
 import { renderStyles } from './drawing/render-styles';

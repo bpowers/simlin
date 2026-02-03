@@ -11,7 +11,7 @@
  */
 
 import { List, Map, Set } from 'immutable';
-import { first, last } from '@system-dynamics/core/collections';
+import { first, last } from '@simlin/core/collections';
 import {
   ViewElement,
   FlowViewElement,
@@ -24,7 +24,7 @@ import {
   GroupViewElement,
   UID,
   Point,
-} from '@system-dynamics/core/datamodel';
+} from '@simlin/core/datamodel';
 import { updateArcAngle, radToDeg } from './arc-utils';
 import { getVisualCenter, takeoffθ } from './drawing/Connector';
 import {

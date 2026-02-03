@@ -22,7 +22,7 @@
     "strictNullChecks": true,
     "noUnusedLocals": true,
     "paths": {
-      "@system-dynamics/*": [
+      "@simlin/*": [
         "src/*"
       ]
     }

@@ -16,13 +16,13 @@ import {
   InputAdornment,
   TextField,
   ExpandMoreIcon,
-} from '@system-dynamics/diagram';
+} from '@simlin/diagram';
 
 import { Project } from './Project';
 import { User } from './User';
-import { Project as ProjectDM } from '@system-dynamics/core/datamodel';
-import { Project as Engine2Project } from '@system-dynamics/engine2';
-import type { JsonProject } from '@system-dynamics/engine2';
+import { Project as ProjectDM } from '@simlin/core/datamodel';
+import { Project as Engine2Project } from '@simlin/engine';
+import type { JsonProject } from '@simlin/engine';
 
 import styles from './NewProject.module.css';
 import typography from './typography.module.css';

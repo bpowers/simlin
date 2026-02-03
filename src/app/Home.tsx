@@ -21,7 +21,7 @@ import {
   Avatar,
   AccountCircleIcon,
   MenuIcon,
-} from '@system-dynamics/diagram';
+} from '@simlin/diagram';
 
 import { NewProject } from './NewProject';
 import { Project } from './Project';

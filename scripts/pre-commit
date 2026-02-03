@@ -91,7 +91,7 @@ else
         exit 1
     fi
 
-    # Build WASM and run engine2 tests
+    # Build WASM and run engine tests
     echo -n "Building WASM module... "
     BUILD_OUTPUT="$(mktemp)"
     if pnpm build > "$BUILD_OUTPUT" 2>&1; then

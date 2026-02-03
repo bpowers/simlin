@@ -18,7 +18,7 @@ import {
   UID,
   Aux,
   ApplyToAllEquation,
-} from '@system-dynamics/core/datamodel';
+} from '@simlin/core/datamodel';
 
 import { StockWidth } from '../drawing/Stock';
 import { applyGroupMovement } from '../group-movement';

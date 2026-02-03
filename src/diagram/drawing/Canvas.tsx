@@ -10,8 +10,8 @@ import clsx from 'clsx';
 import { Descendant } from 'slate';
 import { List, Map, Set } from 'immutable';
 
-import { defined, exists } from '@system-dynamics/core/common';
-import { at, first, getOrThrow, last, only } from '@system-dynamics/core/collections';
+import { defined, exists } from '@simlin/core/common';
+import { at, first, getOrThrow, last, only } from '@simlin/core/collections';
 import {
   ViewElement,
   AliasViewElement,
@@ -30,8 +30,8 @@ import {
   Project,
   Model,
   Rect as ViewRect,
-} from '@system-dynamics/core/datamodel';
-import { canonicalize } from '@system-dynamics/core/canonicalize';
+} from '@simlin/core/datamodel';
+import { canonicalize } from '@simlin/core/canonicalize';
 
 import { Alias, AliasProps } from './Alias';
 import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';

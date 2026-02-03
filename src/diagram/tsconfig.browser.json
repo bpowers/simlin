@@ -22,6 +22,6 @@
   ],
   "references": [
     { "path": "../core/tsconfig.browser.json" },
-    { "path": "../engine2/tsconfig.browser.json" }
+    { "path": "../engine/tsconfig.browser.json" }
   ]
 }

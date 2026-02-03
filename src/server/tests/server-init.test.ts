@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { isReady, configureWasm, resetWasm } from '@system-dynamics/engine2';
+import { isReady, configureWasm, resetWasm } from '@simlin/engine';
 import { initializeServerDependencies, ServerInitError } from '../server-init';
 
 describe('Server WASM initialization', () => {
