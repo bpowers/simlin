@@ -396,7 +396,40 @@ export function processSelectedFlow(
       sideEffects,
     ];
   } else {
-    // Neither endpoint is selected: move valve but clamp to flow path
+    // Neither endpoint is selected. For cloud-cloud flows, move the entire flow
+    // and both clouds together. For stock-attached flows, just move the valve.
+    const sourceEl = sourceUid !== undefined ? getElementByUid(sourceUid) : undefined;
+    const sinkEl = sinkUid !== undefined ? getElementByUid(sinkUid) : undefined;
+    const sourceIsCloud = sourceEl instanceof CloudViewElement;
+    const sinkIsCloud = sinkEl instanceof CloudViewElement;
+
+    // Cloud-to-cloud flows: translate everything uniformly (matches UpdateFlow behavior)
+    if (sourceIsCloud && sinkIsCloud) {
+      const newPoints = pts.map((p) =>
+        p.merge({
+          x: p.x - delta.x,
+          y: p.y - delta.y,
+        }),
+      );
+      const updatedFlow = flow.merge({
+        x: flow.cx - delta.x,
+        y: flow.cy - delta.y,
+        points: newPoints,
+      });
+      // Update both clouds as side effects
+      const movedSourceCloud = (sourceEl as CloudViewElement).merge({
+        x: sourceEl.cx - delta.x,
+        y: sourceEl.cy - delta.y,
+      });
+      const movedSinkCloud = (sinkEl as CloudViewElement).merge({
+        x: sinkEl.cx - delta.x,
+        y: sinkEl.cy - delta.y,
+      });
+      sideEffects = sideEffects.push(movedSourceCloud, movedSinkCloud);
+      return [updatedFlow, sideEffects];
+    }
+
+    // Stock-attached flows: move valve but clamp to flow path
     const proposedValve = {
       x: flow.cx - delta.x,
       y: flow.cy - delta.y,

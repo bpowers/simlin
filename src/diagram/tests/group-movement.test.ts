@@ -306,6 +306,85 @@ describe('Group Movement', () => {
     });
   });
 
+  describe('Cloud-to-cloud flow movement', () => {
+    it('should move entire flow and both clouds when cloud-cloud flow selected alone', () => {
+      // Setup: Cloud A -> Flow -> Cloud B (both clouds, no stocks)
+      // This tests the regression where cloud-cloud flows only moved the valve
+      // instead of translating the entire flow + both clouds together.
+      const cloudA = makeCloud(1, 2, 100, 100);
+      const cloudB = makeCloud(3, 2, 200, 100);
+      const flow = makeFlow(2, 150, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 200, y: 100, attachedToUid: 3 },
+      ]);
+
+      let elements = Map<UID, ViewElement>().set(1, cloudA).set(2, flow).set(3, cloudB);
+
+      // Only select the flow (not the clouds)
+      const selection = Set<UID>([2]);
+      const delta = { x: -50, y: -30 }; // Move right 50, down 30
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Both clouds should move along with the flow
+      const newCloudA = result.get(1) as CloudViewElement;
+      expect(newCloudA.cx).toBe(150); // 100 + 50
+      expect(newCloudA.cy).toBe(130); // 100 + 30
+
+      const newCloudB = result.get(3) as CloudViewElement;
+      expect(newCloudB.cx).toBe(250); // 200 + 50
+      expect(newCloudB.cy).toBe(130); // 100 + 30
+
+      // Flow valve should move
+      const newFlow = result.get(2) as FlowViewElement;
+      expect(newFlow.cx).toBe(200); // 150 + 50
+      expect(newFlow.cy).toBe(130); // 100 + 30
+
+      // Flow endpoints should move too
+      expect(newFlow.points.first()!.x).toBe(150);
+      expect(newFlow.points.first()!.y).toBe(130);
+      expect(newFlow.points.last()!.x).toBe(250);
+      expect(newFlow.points.last()!.y).toBe(130);
+    });
+
+    it('should move L-shaped cloud-cloud flow uniformly', () => {
+      // Setup: Cloud A -> L-shaped Flow (3 points) -> Cloud B
+      const cloudA = makeCloud(1, 2, 100, 100);
+      const cloudB = makeCloud(3, 2, 200, 200);
+      // L-shaped flow with corner at (100, 200)
+      const flow = makeFlow(2, 100, 150, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 100, y: 200 }, // corner point
+        { x: 200, y: 200, attachedToUid: 3 },
+      ]);
+
+      let elements = Map<UID, ViewElement>().set(1, cloudA).set(2, flow).set(3, cloudB);
+
+      // Only select the flow
+      const selection = Set<UID>([2]);
+      const delta = { x: -25, y: -25 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Both clouds should move
+      expect((result.get(1) as CloudViewElement).cx).toBe(125);
+      expect((result.get(1) as CloudViewElement).cy).toBe(125);
+      expect((result.get(3) as CloudViewElement).cx).toBe(225);
+      expect((result.get(3) as CloudViewElement).cy).toBe(225);
+
+      // Flow valve and all points should move
+      const newFlow = result.get(2) as FlowViewElement;
+      expect(newFlow.cx).toBe(125);
+      expect(newFlow.cy).toBe(175);
+      expect(newFlow.points.get(0)!.x).toBe(125);
+      expect(newFlow.points.get(0)!.y).toBe(125);
+      expect(newFlow.points.get(1)!.x).toBe(125);
+      expect(newFlow.points.get(1)!.y).toBe(225);
+      expect(newFlow.points.get(2)!.x).toBe(225);
+      expect(newFlow.points.get(2)!.y).toBe(225);
+    });
+  });
+
   describe('Flow in selection, endpoint stocks not in selection', () => {
     it('should only move valve when flow selected but attached stocks are not', () => {
       // Setup: Stock A (not selected) -> Flow 1 (selected) -> Stock B (not selected)
