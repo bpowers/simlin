@@ -11,6 +11,9 @@ import {
   CloudViewElement,
   AuxViewElement,
   LinkViewElement,
+  ModuleViewElement,
+  AliasViewElement,
+  GroupViewElement,
   ViewElement,
   UID,
   Aux,
@@ -107,6 +110,42 @@ function makeLink(uid: number, fromUid: number, toUid: number, arc: number = 0):
     toUid,
     arc,
     multiPoint: undefined,
+  });
+}
+
+function makeModule(uid: number, x: number, y: number): ModuleViewElement {
+  return new ModuleViewElement({
+    uid,
+    name: `Module${uid}`,
+    ident: `module_${uid}`,
+    var: undefined,
+    x,
+    y,
+    labelSide: 'center',
+    isZeroRadius: false,
+  });
+}
+
+function makeAlias(uid: number, aliasOfUid: number, x: number, y: number): AliasViewElement {
+  return new AliasViewElement({
+    uid,
+    aliasOfUid,
+    x,
+    y,
+    labelSide: 'center',
+    isZeroRadius: false,
+  });
+}
+
+function makeGroup(uid: number, x: number, y: number, width: number = 100, height: number = 80): GroupViewElement {
+  return new GroupViewElement({
+    uid,
+    name: `Group${uid}`,
+    x,
+    y,
+    width,
+    height,
+    isZeroRadius: false,
   });
 }
 
@@ -687,6 +726,118 @@ describe('Group Movement', () => {
       expect((result.get(2) as AuxViewElement).cy).toBe(170);
       expect((result.get(3) as StockViewElement).cx).toBe(230);
       expect((result.get(3) as StockViewElement).cy).toBe(120);
+    });
+  });
+
+  describe('Module movement in group', () => {
+    it('should move modules when selected', () => {
+      const module1 = makeModule(1, 100, 100);
+      const stock = makeStock(2, 200, 100);
+
+      let elements = Map<UID, ViewElement>().set(1, module1).set(2, stock);
+
+      const selection = Set<UID>([1, 2]);
+      const delta = { x: -50, y: -25 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      const newModule = result.get(1) as ModuleViewElement;
+      expect(newModule.cx).toBe(150);
+      expect(newModule.cy).toBe(125);
+      expect((result.get(2) as StockViewElement).cx).toBe(250);
+    });
+
+    it('should move a single selected module', () => {
+      const module1 = makeModule(1, 100, 100);
+
+      let elements = Map<UID, ViewElement>().set(1, module1);
+
+      const selection = Set<UID>([1]);
+      const delta = { x: -30, y: -20 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      const newModule = result.get(1) as ModuleViewElement;
+      expect(newModule.cx).toBe(130);
+      expect(newModule.cy).toBe(120);
+    });
+  });
+
+  describe('Alias movement in group', () => {
+    it('should move aliases when selected', () => {
+      const aux = makeAux(1, 100, 100);
+      const alias = makeAlias(2, 1, 200, 150);
+
+      let elements = Map<UID, ViewElement>().set(1, aux).set(2, alias);
+
+      const selection = Set<UID>([1, 2]);
+      const delta = { x: -40, y: -30 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      expect((result.get(1) as AuxViewElement).cx).toBe(140);
+      expect((result.get(1) as AuxViewElement).cy).toBe(130);
+      const newAlias = result.get(2) as AliasViewElement;
+      expect(newAlias.cx).toBe(240);
+      expect(newAlias.cy).toBe(180);
+    });
+
+    it('should move a single selected alias', () => {
+      const aux = makeAux(1, 100, 100);
+      const alias = makeAlias(2, 1, 200, 150);
+
+      let elements = Map<UID, ViewElement>().set(1, aux).set(2, alias);
+
+      // Only select the alias
+      const selection = Set<UID>([2]);
+      const delta = { x: -25, y: -15 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Aux should NOT move
+      expect((result.get(1) as AuxViewElement).cx).toBe(100);
+      // Alias should move
+      const newAlias = result.get(2) as AliasViewElement;
+      expect(newAlias.cx).toBe(225);
+      expect(newAlias.cy).toBe(165);
+    });
+  });
+
+  describe('Group element movement', () => {
+    it('should move group elements when selected', () => {
+      const group = makeGroup(1, 150, 140, 100, 80);
+      const stock = makeStock(2, 150, 140);
+
+      let elements = Map<UID, ViewElement>().set(1, group).set(2, stock);
+
+      const selection = Set<UID>([1, 2]);
+      const delta = { x: -50, y: -30 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      const newGroup = result.get(1) as GroupViewElement;
+      expect(newGroup.cx).toBe(200);
+      expect(newGroup.cy).toBe(170);
+      // Width and height should be preserved
+      expect(newGroup.width).toBe(100);
+      expect(newGroup.height).toBe(80);
+    });
+
+    it('should move a single selected group element', () => {
+      const group = makeGroup(1, 150, 140, 120, 90);
+
+      let elements = Map<UID, ViewElement>().set(1, group);
+
+      const selection = Set<UID>([1]);
+      const delta = { x: -20, y: -10 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      const newGroup = result.get(1) as GroupViewElement;
+      expect(newGroup.cx).toBe(170);
+      expect(newGroup.cy).toBe(150);
+      expect(newGroup.width).toBe(120);
+      expect(newGroup.height).toBe(90);
     });
   });
 

@@ -19,6 +19,9 @@ import {
   CloudViewElement,
   AuxViewElement,
   LinkViewElement,
+  ModuleViewElement,
+  AliasViewElement,
+  GroupViewElement,
   UID,
   Point,
 } from '@system-dynamics/core/datamodel';
@@ -837,7 +840,7 @@ export function applyGroupMovement(input: GroupMovementInput): GroupMovementOutp
 
   let updatedElements = originalElements;
 
-  // First pass: Move stocks and auxes by delta
+  // First pass: Move positioned elements (stocks, auxes, clouds, modules, aliases, groups) by delta
   for (const uid of selection) {
     const el = originalElements.get(uid);
     if (!el) continue;
@@ -859,6 +862,30 @@ export function applyGroupMovement(input: GroupMovementInput): GroupMovementOutp
         }),
       );
     } else if (el instanceof CloudViewElement) {
+      updatedElements = updatedElements.set(
+        uid,
+        el.merge({
+          x: el.cx - delta.x,
+          y: el.cy - delta.y,
+        }),
+      );
+    } else if (el instanceof ModuleViewElement) {
+      updatedElements = updatedElements.set(
+        uid,
+        el.merge({
+          x: el.cx - delta.x,
+          y: el.cy - delta.y,
+        }),
+      );
+    } else if (el instanceof AliasViewElement) {
+      updatedElements = updatedElements.set(
+        uid,
+        el.merge({
+          x: el.cx - delta.x,
+          y: el.cy - delta.y,
+        }),
+      );
+    } else if (el instanceof GroupViewElement) {
       updatedElements = updatedElements.set(
         uid,
         el.merge({
