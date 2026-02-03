@@ -168,29 +168,38 @@ export function applyGroupMovement(
   const preComputedOffsets = new globalThis.Map<UID, number>();
   const preProcessedFlows = new globalThis.Map<UID, FlowViewElement>();
 
-  // Identify all moved stocks and compute offsets for ALL their attached flows
+  // Identify all moved stocks and compute offsets for flows that need routing
   for (const stockUid of selectedStockUids) {
     const stock = elements.get(stockUid) as StockViewElement;
 
-    // Collect ALL flows attached to this stock (both selected and unselected)
-    let allAttachedFlows = List<FlowViewElement>();
+    // Collect flows attached to this stock that need routing (excluding flows where
+    // both endpoints are selected, since those translate uniformly and don't use
+    // the stock's routing logic - including them would miscompute offsets because
+    // their anchors aren't adjusted for the drag)
+    let flowsNeedingRouting = List<FlowViewElement>();
     for (const [, el] of elements) {
       if (!(el instanceof FlowViewElement)) continue;
       const pts = el.points;
       if (pts.size < 2) continue;
       const sourceUid = pts.first()!.attachedToUid;
       const sinkUid = pts.last()!.attachedToUid;
-      if (sourceUid === stockUid || sinkUid === stockUid) {
-        allAttachedFlows = allAttachedFlows.push(el);
+      const attachedToThisStock = sourceUid === stockUid || sinkUid === stockUid;
+      if (!attachedToThisStock) continue;
+
+      // Exclude flows where both endpoints are selected (they translate uniformly)
+      const otherEndpointUid = sourceUid === stockUid ? sinkUid : sourceUid;
+      const bothEndpointsSelected = otherEndpointUid !== undefined && selectedStockUids.has(otherEndpointUid);
+      if (!bothEndpointsSelected) {
+        flowsNeedingRouting = flowsNeedingRouting.push(el);
       }
     }
 
     // Compute offsets at the new stock position
     const newStockCx = stock.cx - delta.x;
     const newStockCy = stock.cy - delta.y;
-    const offsets = computeFlowOffsets(allAttachedFlows, stock.uid, newStockCx, newStockCy);
+    const offsets = computeFlowOffsets(flowsNeedingRouting, stock.uid, newStockCx, newStockCy);
 
-    // Store offsets for all attached flows
+    // Store offsets for flows needing routing
     for (const [flowUid, offset] of offsets) {
       preComputedOffsets.set(flowUid, offset);
     }
