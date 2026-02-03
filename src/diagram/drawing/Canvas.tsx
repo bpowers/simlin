@@ -790,15 +790,18 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         }
       });
 
+      // Materialize elements to array so it can be iterated multiple times
+      const elementsArray = Array.from(this.elements.values());
+
       const preComputedOffsets =
         this.selectionUpdates.size > 1
-          ? computePreRoutedOffsets(this.elements.values(), selectedStockUids, moveDelta, isInSelection)
+          ? computePreRoutedOffsets(elementsArray, selectedStockUids, moveDelta, isInSelection)
           : new globalThis.Map<UID, number>();
 
       const [preProcessedFlows] =
         this.selectionUpdates.size > 1
           ? preProcessSelectedFlows(
-              this.elements.values(),
+              elementsArray,
               selectedFlowUids,
               preComputedOffsets,
               moveDelta,
@@ -875,8 +878,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       // Second pass: update flows NOT in selection that are attached to endpoints IN selection
       if (this.selectionUpdates.size > 1) {
         const routedFlows = routeUnselectedFlows(
-          this.elements.values(),
-          this.elements.values(),
+          elementsArray,
+          elementsArray,
           selectedUids,
           preComputedOffsets,
           moveDelta,
