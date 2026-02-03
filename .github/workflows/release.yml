@@ -90,7 +90,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh && echo "$HOME/.local/bin" >> $GITHUB_PATH
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
 
       - name: Download wheels
         uses: actions/download-artifact@v4
