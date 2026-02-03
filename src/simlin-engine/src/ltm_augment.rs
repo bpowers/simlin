@@ -31,14 +31,17 @@ fn replace_whole_word(text: &str, pattern: &str, replacement: &str) -> String {
 
     let mut result = String::with_capacity(text.len());
     let mut remaining = text;
+    // Track the last character we processed to maintain boundary context across iterations
+    let mut prev_char: Option<char> = None;
 
     while let Some(pos) = remaining.find(pattern) {
         // Check if this is a word boundary match
         let before_ok = if pos == 0 {
-            true
+            // At start of remaining slice - use tracked prev_char for context
+            prev_char.is_none_or(|c| !is_word_char(c))
         } else {
-            let prev_char = remaining[..pos].chars().last().unwrap();
-            !is_word_char(prev_char)
+            let prev_c = remaining[..pos].chars().last().unwrap();
+            !is_word_char(prev_c)
         };
 
         let after_pos = pos + pattern.len();
@@ -53,11 +56,17 @@ fn replace_whole_word(text: &str, pattern: &str, replacement: &str) -> String {
             // This is a whole-word match, replace it
             result.push_str(&remaining[..pos]);
             result.push_str(replacement);
+            // Update prev_char to the last char of replacement
+            prev_char = replacement.chars().last();
             remaining = &remaining[after_pos..];
         } else {
-            // Not a whole-word match, skip past this occurrence
-            result.push_str(&remaining[..pos + pattern.len()]);
-            remaining = &remaining[after_pos..];
+            // Not a whole-word match. Advance past the first character of where
+            // we found the pattern to continue searching with proper context.
+            let char_at_pos = remaining[pos..].chars().next().unwrap();
+            let char_len = char_at_pos.len_utf8();
+            result.push_str(&remaining[..pos + char_len]);
+            prev_char = Some(char_at_pos);
+            remaining = &remaining[pos + char_len..];
         }
     }
 
@@ -1613,6 +1622,25 @@ mod tests {
             assert_eq!(replace_whole_word("Åbc + x", "Å", "alpha"), "Åbc + x");
             // ASCII followed by Unicode should not match partial
             assert_eq!(replace_whole_word("aÅ + x", "Å", "alpha"), "aÅ + x");
+        }
+
+        #[test]
+        fn test_repeated_pattern_preserves_boundary_context() {
+            // "xx" should not have either x replaced - both are adjacent to word chars
+            assert_eq!(replace_whole_word("xx", "x", "y"), "xx");
+            // "xx + x" should only replace the standalone x
+            assert_eq!(replace_whole_word("xx + x", "x", "y"), "xx + y");
+            // Pattern appearing as prefix of longer identifier
+            assert_eq!(replace_whole_word("x1x + x", "x", "y"), "x1x + y");
+        }
+
+        #[test]
+        fn test_overlapping_pattern_occurrences() {
+            // "abab" with pattern "ab" - neither should be replaced
+            // First "ab" is followed by 'a', second "ab" is preceded by 'b'
+            assert_eq!(replace_whole_word("abab", "ab", "XY"), "abab");
+            // "ab + ab" - both should be replaced
+            assert_eq!(replace_whole_word("ab + ab", "ab", "XY"), "XY + XY");
         }
     }
 }
