@@ -275,41 +275,22 @@ export function applyGroupMovement(
         result = result.set(flowUid, preProcessed);
       } else if (sourceInSelection && sourceUid !== undefined) {
         // Handle clouds (not pre-processed since they only have one flow each)
-        // Ensure flow endpoint matches cloud's actual new position after routing
+        // Use UpdateCloudAndFlow to route the flow and update the cloud position
+        // to maintain orthogonal geometry
         const sourceEndpoint = elements.get(sourceUid);
         if (sourceEndpoint instanceof CloudViewElement) {
-          let [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, delta);
-          // Ensure endpoint matches cloud's actual new position (raw delta, not clamped)
-          const newCloudCx = sourceEndpoint.cx - delta.x;
-          const newCloudCy = sourceEndpoint.cy - delta.y;
-          const cloudPointIndex = 0; // source is at index 0
-          const cloudPoint = updatedFlow.points.get(cloudPointIndex);
-          if (cloudPoint) {
-            const updatedPoints = updatedFlow.points.set(
-              cloudPointIndex,
-              cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
-            );
-            updatedFlow = updatedFlow.set('points', updatedPoints);
-          }
+          const [routedCloud, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, delta);
           result = result.set(flowUid, updatedFlow);
+          // Update the cloud to the routed position (may differ from raw delta for clamping)
+          result = result.set(routedCloud.uid, routedCloud);
         }
       } else if (sinkInSelection && sinkUid !== undefined) {
         const sinkEndpoint = elements.get(sinkUid);
         if (sinkEndpoint instanceof CloudViewElement) {
-          let [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, delta);
-          // Ensure endpoint matches cloud's actual new position (raw delta, not clamped)
-          const newCloudCx = sinkEndpoint.cx - delta.x;
-          const newCloudCy = sinkEndpoint.cy - delta.y;
-          const cloudPointIndex = updatedFlow.points.size - 1; // sink is at last index
-          const cloudPoint = updatedFlow.points.get(cloudPointIndex);
-          if (cloudPoint) {
-            const updatedPoints = updatedFlow.points.set(
-              cloudPointIndex,
-              cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
-            );
-            updatedFlow = updatedFlow.set('points', updatedPoints);
-          }
+          const [routedCloud, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, delta);
           result = result.set(flowUid, updatedFlow);
+          // Update the cloud to the routed position (may differ from raw delta for clamping)
+          result = result.set(routedCloud.uid, routedCloud);
         }
       }
     } else {

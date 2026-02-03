@@ -912,41 +912,24 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
               return preProcessed;
             }
             // Handle clouds (not pre-processed since they only have one flow each)
-            // Ensure flow endpoint matches cloud's actual new position after routing
+            // Use UpdateCloudAndFlow to route the flow and add the routed cloud to otherUpdates
+            // so it takes precedence over the raw delta move later
             if (sourceInSelection && sourceUid !== undefined) {
               const sourceEndpoint = this.getElementByUid(sourceUid);
               if (sourceEndpoint instanceof CloudViewElement) {
-                let [, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, initialEl, moveDelta);
-                // Ensure endpoint matches cloud's actual new position (raw delta, not clamped)
-                const newCloudCx = sourceEndpoint.cx - moveDelta.x;
-                const newCloudCy = sourceEndpoint.cy - moveDelta.y;
-                const cloudPointIndex = 0; // source is at index 0
-                const cloudPoint = updatedFlow.points.get(cloudPointIndex);
-                if (cloudPoint) {
-                  const updatedPoints = updatedFlow.points.set(
-                    cloudPointIndex,
-                    cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
-                  );
-                  updatedFlow = updatedFlow.set('points', updatedPoints);
-                }
+                const [routedCloud, updatedFlow] = UpdateCloudAndFlow(sourceEndpoint, initialEl, moveDelta);
+                // Add the routed cloud position to otherUpdates - this will override
+                // the raw delta move when applied, maintaining orthogonal geometry
+                otherUpdates = otherUpdates.push(routedCloud);
                 return updatedFlow;
               }
             } else if (sinkInSelection && sinkUid !== undefined) {
               const sinkEndpoint = this.getElementByUid(sinkUid);
               if (sinkEndpoint instanceof CloudViewElement) {
-                let [, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, initialEl, moveDelta);
-                // Ensure endpoint matches cloud's actual new position (raw delta, not clamped)
-                const newCloudCx = sinkEndpoint.cx - moveDelta.x;
-                const newCloudCy = sinkEndpoint.cy - moveDelta.y;
-                const cloudPointIndex = updatedFlow.points.size - 1; // sink is at last index
-                const cloudPoint = updatedFlow.points.get(cloudPointIndex);
-                if (cloudPoint) {
-                  const updatedPoints = updatedFlow.points.set(
-                    cloudPointIndex,
-                    cloudPoint.merge({ x: newCloudCx, y: newCloudCy }),
-                  );
-                  updatedFlow = updatedFlow.set('points', updatedPoints);
-                }
+                const [routedCloud, updatedFlow] = UpdateCloudAndFlow(sinkEndpoint, initialEl, moveDelta);
+                // Add the routed cloud position to otherUpdates - this will override
+                // the raw delta move when applied, maintaining orthogonal geometry
+                otherUpdates = otherUpdates.push(routedCloud);
                 return updatedFlow;
               }
             }
