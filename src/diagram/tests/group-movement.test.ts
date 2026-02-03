@@ -286,6 +286,89 @@ describe('Group Movement', () => {
   });
 
   describe('Offset preservation with translated and routed flows', () => {
+    it('should compute offsets for all stocks regardless of iteration order', () => {
+      // This test verifies that computePreRoutedOffsets correctly handles its
+      // `elements` iterable even when it's a single-use iterator (like Map.values()).
+      // The bug: elements was iterated twice (outer loop for stocks, inner loop for flows).
+      // When applyGroupMovement calls computePreRoutedOffsets with originalElements.values(),
+      // the inner loop continues from the iterator's current position instead of restarting,
+      // causing flows appearing earlier in iteration order to be skipped for later stocks.
+      //
+      // Setup: Two stocks (A and B), each with TWO outflows to clouds.
+      // Stock A has flows 1 and 2. Stock B has flows 3 and 4.
+      // When both stocks move, ALL flows should get proper offset computation.
+      // Without the fix, Stock B's flows might have incorrect/missing offsets because
+      // the flows for Stock A were already consumed by the iterator.
+
+      const stockA = makeStock(1, 100, 100, [], [10, 11]);
+      const stockB = makeStock(2, 300, 100, [], [20, 21]);
+
+      // Stock A's two outflows
+      const cloudA1 = makeCloud(30, 10, 200, 80);
+      const cloudA2 = makeCloud(31, 11, 200, 120);
+      const flowA1 = makeFlow(10, 150, 90, [
+        { x: 100 + StockWidth / 2, y: 90, attachedToUid: 1 },
+        { x: 200, y: 80, attachedToUid: 30 },
+      ]);
+      const flowA2 = makeFlow(11, 150, 110, [
+        { x: 100 + StockWidth / 2, y: 110, attachedToUid: 1 },
+        { x: 200, y: 120, attachedToUid: 31 },
+      ]);
+
+      // Stock B's two outflows
+      const cloudB1 = makeCloud(40, 20, 400, 80);
+      const cloudB2 = makeCloud(41, 21, 400, 120);
+      const flowB1 = makeFlow(20, 350, 90, [
+        { x: 300 + StockWidth / 2, y: 90, attachedToUid: 2 },
+        { x: 400, y: 80, attachedToUid: 40 },
+      ]);
+      const flowB2 = makeFlow(21, 350, 110, [
+        { x: 300 + StockWidth / 2, y: 110, attachedToUid: 2 },
+        { x: 400, y: 120, attachedToUid: 41 },
+      ]);
+
+      let elements = Map<UID, ViewElement>()
+        .set(1, stockA)
+        .set(2, stockB)
+        .set(10, flowA1)
+        .set(11, flowA2)
+        .set(20, flowB1)
+        .set(21, flowB2)
+        .set(30, cloudA1)
+        .set(31, cloudA2)
+        .set(40, cloudB1)
+        .set(41, cloudB2);
+
+      // Select both stocks (not the flows or clouds)
+      const selection = Set<UID>([1, 2]);
+      const delta = { x: -50, y: 0 }; // Move stocks right by 50
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Both stocks should move
+      expect((result.get(1) as StockViewElement).cx).toBe(150);
+      expect((result.get(2) as StockViewElement).cx).toBe(350);
+
+      // All four flows should be routed and have DIFFERENT y-coordinates on their stock edges.
+      // This verifies that offsets were computed correctly for both stocks.
+
+      // Stock A's flows should have different y-coordinates at the stock edge
+      const newFlowA1 = result.get(10) as FlowViewElement;
+      const newFlowA2 = result.get(11) as FlowViewElement;
+      const flowA1SourceY = newFlowA1.points.first()!.y;
+      const flowA2SourceY = newFlowA2.points.first()!.y;
+      expect(flowA1SourceY).not.toBe(flowA2SourceY);
+
+      // Stock B's flows should have different y-coordinates at the stock edge
+      const newFlowB1 = result.get(20) as FlowViewElement;
+      const newFlowB2 = result.get(21) as FlowViewElement;
+      const flowB1SourceY = newFlowB1.points.first()!.y;
+      const flowB2SourceY = newFlowB2.points.first()!.y;
+      // This assertion will FAIL if the iterator bug exists, because Stock B's
+      // flows won't have proper offsets computed (inner loop consumed iterator)
+      expect(flowB1SourceY).not.toBe(flowB2SourceY);
+    });
+
     it('should preserve flow spacing when stock has both translated and routed flows', () => {
       // Setup: Stock A with two outflows - one to another selected stock (translated),
       // one to a non-selected cloud (routed). Both flows should maintain proper spacing.

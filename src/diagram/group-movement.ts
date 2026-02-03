@@ -156,7 +156,12 @@ export function computePreRoutedOffsets(
 ): globalThis.Map<UID, number> {
   const preComputedOffsets = new globalThis.Map<UID, number>();
 
-  for (const element of elements) {
+  // Materialize the iterable into an array so we can iterate multiple times.
+  // The caller may pass a single-use iterator (e.g., Map.values()), and we need
+  // to iterate once for stocks (outer loop) and again for flows (inner loop).
+  const allElements = Array.from(elements);
+
+  for (const element of allElements) {
     if (!(element instanceof StockViewElement)) continue;
     if (!selectedStockUids.has(element.uid)) continue;
 
@@ -165,7 +170,7 @@ export function computePreRoutedOffsets(
     // so their anchor position is correct relative to the stock's new position.
     // This ensures translated flows reserve their slots and don't overlap with routed flows.
     let allFlows = List<FlowViewElement>();
-    for (const el of elements) {
+    for (const el of allElements) {
       if (!(el instanceof FlowViewElement)) continue;
       const pts = el.points;
       if (pts.size < 2) continue;
