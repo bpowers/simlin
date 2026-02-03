@@ -7,15 +7,29 @@ jest.mock('jose', () => ({
   jwtVerify: jest.fn(),
 }));
 
+jest.mock('../auth/oauth-token-exchange', () => {
+  const actual = jest.requireActual('../auth/oauth-token-exchange');
+  return {
+    ...actual,
+    generateAppleClientSecret: jest.fn(() => 'mock-client-secret'),
+    exchangeAppleCode: jest.fn(),
+    verifyAppleIdToken: jest.fn(),
+  };
+});
+
 import { Request, Response } from 'express';
 import * as admin from 'firebase-admin';
 
 import {
   createGoogleOAuthInitiateHandler,
   createGoogleOAuthCallbackHandler,
+  createAppleOAuthCallbackHandler,
   GoogleOAuthHandlerDeps,
+  AppleOAuthHandlerDeps,
   OAuthConfig,
+  AppleOAuthConfig,
 } from '../auth/oauth-handlers';
+import { exchangeAppleCode, verifyAppleIdToken } from '../auth/oauth-token-exchange';
 import { OAuthStateStore } from '../auth/oauth-state';
 import { Table } from '../models/table';
 import { User } from '../schemas/user_pb';
@@ -53,10 +67,7 @@ function createMockUsers(): jest.Mocked<Table<User>> {
   };
 }
 
-function createMockRequest(
-  query: Record<string, string> = {},
-  body: Record<string, unknown> = {},
-): Partial<Request> {
+function createMockRequest(query: Record<string, string> = {}, body: Record<string, unknown> = {}): Partial<Request> {
   const loginFn = jest.fn((user: unknown, cb: (err?: Error) => void) => cb());
   return {
     query,
@@ -515,6 +526,126 @@ describe('createGoogleOAuthCallbackHandler', () => {
       await handler(req as Request, res as Response, jest.fn());
 
       expect(getRedirectUrl()).toBe('/?error=oauth_denied');
+    });
+  });
+});
+
+function createAppleConfig(): AppleOAuthConfig {
+  return {
+    clientId: 'com.simlin.app',
+    clientSecret: '', // Not used directly, generated dynamically
+    authorizationUrl: 'https://appleid.apple.com/auth/authorize',
+    tokenUrl: 'https://appleid.apple.com/auth/token',
+    scopes: ['name', 'email'],
+    callbackPath: '/auth/apple/callback',
+    teamId: 'TEAM123',
+    keyId: 'KEY456',
+    privateKey: '-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----',
+  };
+}
+
+function createAppleMockDeps(): AppleOAuthHandlerDeps {
+  return {
+    config: createAppleConfig(),
+    stateStore: createMockStateStore(),
+    firebaseAdmin: createMockFirebaseAdmin(),
+    users: createMockUsers(),
+    baseUrl: 'https://app.simlin.com',
+  };
+}
+
+describe('createAppleOAuthCallbackHandler', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+    jest.clearAllMocks();
+  });
+
+  describe('returning user without email', () => {
+    it('should login existing user by providerUserId when Apple omits email', async () => {
+      const deps = createAppleMockDeps();
+      const handler = createAppleOAuthCallbackHandler(deps);
+
+      (deps.stateStore as jest.Mocked<OAuthStateStore>).validate.mockResolvedValue({
+        valid: true,
+        returnUrl: '/projects/test',
+      });
+      (deps.stateStore as jest.Mocked<OAuthStateStore>).invalidate.mockResolvedValue();
+
+      // Mock Apple token exchange
+      (exchangeAppleCode as jest.Mock).mockResolvedValue({
+        access_token: 'test-access-token',
+        id_token: 'test-id-token',
+        expires_in: 3600,
+        token_type: 'Bearer',
+      });
+
+      // Mock verifyAppleIdToken to return claims WITHOUT email (returning user)
+      (verifyAppleIdToken as jest.Mock).mockResolvedValue({
+        sub: 'apple-user-123',
+        // no email - common for returning Apple users
+      });
+
+      // User exists in local database by providerUserId
+      const existingUser = new User();
+      existingUser.setId('user-id-123');
+      existingUser.setEmail('user@example.com');
+      existingUser.setProvider('apple');
+      existingUser.setProviderUserId('apple-user-123');
+
+      (deps.users as jest.Mocked<Table<User>>).findOneByScan.mockResolvedValue(existingUser);
+
+      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' });
+      const { res, getRedirectUrl } = createMockResponse();
+
+      await handler(req as Request, res as Response, jest.fn());
+
+      // Should find user by providerUserId
+      expect(deps.users.findOneByScan).toHaveBeenCalledWith({ providerUserId: 'apple-user-123' });
+
+      // Should login the existing user
+      expect(req.login).toHaveBeenCalledWith(existingUser, expect.any(Function));
+
+      // Should redirect to the returnUrl
+      expect(getRedirectUrl()).toBe('/projects/test');
+    });
+
+    it('should return error only if no email AND user not found by providerUserId', async () => {
+      const deps = createAppleMockDeps();
+      const handler = createAppleOAuthCallbackHandler(deps);
+
+      (deps.stateStore as jest.Mocked<OAuthStateStore>).validate.mockResolvedValue({
+        valid: true,
+        returnUrl: '/',
+      });
+      (deps.stateStore as jest.Mocked<OAuthStateStore>).invalidate.mockResolvedValue();
+
+      // Mock Apple token exchange
+      (exchangeAppleCode as jest.Mock).mockResolvedValue({
+        access_token: 'test-access-token',
+        id_token: 'test-id-token',
+        expires_in: 3600,
+        token_type: 'Bearer',
+      });
+
+      // Mock verifyAppleIdToken to return claims WITHOUT email
+      (verifyAppleIdToken as jest.Mock).mockResolvedValue({
+        sub: 'apple-user-unknown',
+        // no email
+      });
+
+      // User does NOT exist in local database
+      (deps.users as jest.Mocked<Table<User>>).findOneByScan.mockResolvedValue(undefined);
+
+      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' });
+      const { res, getRedirectUrl } = createMockResponse();
+
+      await handler(req as Request, res as Response, jest.fn());
+
+      // Should try to find user by providerUserId
+      expect(deps.users.findOneByScan).toHaveBeenCalledWith({ providerUserId: 'apple-user-unknown' });
+
+      // Should redirect with error since user not found and no email to create one
+      expect(getRedirectUrl()).toBe('/?error=apple_no_email');
     });
   });
 });

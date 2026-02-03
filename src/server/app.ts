@@ -275,10 +275,7 @@ class App {
             }
           : undefined,
       appleConfig:
-        appleAuthConfig?.clientID &&
-        appleAuthConfig?.teamID &&
-        appleAuthConfig?.keyID &&
-        appleAuthConfig?.privateKey
+        appleAuthConfig?.clientID && appleAuthConfig?.teamID && appleAuthConfig?.keyID && appleAuthConfig?.privateKey
           ? {
               clientId: appleAuthConfig.clientID,
               clientSecret: '', // Generated dynamically
