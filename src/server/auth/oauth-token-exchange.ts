@@ -76,6 +76,7 @@ export function generateAppleClientSecret(
   keyId: string,
   privateKey: string,
 ): string {
+  const crypto = require('crypto');
   const now = Math.floor(Date.now() / 1000);
   const expiresIn = 15777000; // ~6 months
 
@@ -92,19 +93,18 @@ export function generateAppleClientSecret(
     sub: clientId,
   };
 
-  const privateKeyObj = require('crypto').createPrivateKey(privateKey);
-  const sign = require('crypto').createSign('SHA256');
+  const privateKeyObj = crypto.createPrivateKey(privateKey);
 
   const headerB64 = Buffer.from(JSON.stringify(header)).toString('base64url');
   const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const signingInput = `${headerB64}.${payloadB64}`;
 
-  sign.update(signingInput);
-  const signature = sign.sign(privateKeyObj);
+  const signature = crypto.sign('SHA256', Buffer.from(signingInput), {
+    key: privateKeyObj,
+    dsaEncoding: 'ieee-p1363',
+  });
 
-  const r = signature.slice(0, 32);
-  const s = signature.slice(32, 64);
-  const signatureB64 = Buffer.concat([r, s]).toString('base64url');
+  const signatureB64 = signature.toString('base64url');
 
   return `${signingInput}.${signatureB64}`;
 }
