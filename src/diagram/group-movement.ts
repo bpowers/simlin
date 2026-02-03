@@ -63,11 +63,11 @@ export function computePreRoutedOffsets(
     if (!(element instanceof StockViewElement)) continue;
     if (!selectedStockUids.has(element.uid)) continue;
 
-    // Collect flows attached to this stock that need routing (excluding flows where
-    // both endpoints are selected, since those translate uniformly and don't use
-    // the stock's routing logic - including them would miscompute offsets because
-    // their anchors aren't adjusted for the drag)
-    let flowsNeedingRouting = List<FlowViewElement>();
+    // Collect ALL flows attached to this stock for proper offset computation.
+    // For flows where both endpoints are selected, we translate their points by delta
+    // so their anchor position is correct relative to the stock's new position.
+    // This ensures translated flows reserve their slots and don't overlap with routed flows.
+    let allFlows = List<FlowViewElement>();
     for (const el of elements) {
       if (!(el instanceof FlowViewElement)) continue;
       const pts = el.points;
@@ -77,20 +77,29 @@ export function computePreRoutedOffsets(
       const attachedToThisStock = sourceUid === element.uid || sinkUid === element.uid;
       if (!attachedToThisStock) continue;
 
-      // Exclude flows where both endpoints are selected (they translate uniformly)
       const otherEndpointUid = sourceUid === element.uid ? sinkUid : sourceUid;
       const bothEndpointsSelected = isInSelection(otherEndpointUid);
-      if (!bothEndpointsSelected) {
-        flowsNeedingRouting = flowsNeedingRouting.push(el);
+
+      if (bothEndpointsSelected) {
+        // Translate points by delta so anchor is correct relative to new stock position
+        const translatedPoints = pts.map((p) =>
+          p.merge({
+            x: p.x - delta.x,
+            y: p.y - delta.y,
+          }),
+        );
+        allFlows = allFlows.push(el.set('points', translatedPoints));
+      } else {
+        allFlows = allFlows.push(el);
       }
     }
 
     // Compute offsets at the new stock position
     const newStockCx = element.cx - delta.x;
     const newStockCy = element.cy - delta.y;
-    const offsets = computeFlowOffsets(flowsNeedingRouting, element.uid, newStockCx, newStockCy);
+    const offsets = computeFlowOffsets(allFlows, element.uid, newStockCx, newStockCy);
 
-    // Store offsets for flows needing routing
+    // Store offsets for flows
     for (const [flowUid, offset] of offsets) {
       preComputedOffsets.set(flowUid, offset);
     }

@@ -168,15 +168,15 @@ export function applyGroupMovement(
   const preComputedOffsets = new globalThis.Map<UID, number>();
   const preProcessedFlows = new globalThis.Map<UID, FlowViewElement>();
 
-  // Identify all moved stocks and compute offsets for flows that need routing
+  // Identify all moved stocks and compute offsets for ALL flows attached to them.
+  // For flows where both endpoints are selected, we translate their points by delta
+  // so their anchor position is correct relative to the stock's new position.
+  // This ensures translated flows reserve their slots and don't overlap with routed flows.
   for (const stockUid of selectedStockUids) {
     const stock = elements.get(stockUid) as StockViewElement;
 
-    // Collect flows attached to this stock that need routing (excluding flows where
-    // both endpoints are selected, since those translate uniformly and don't use
-    // the stock's routing logic - including them would miscompute offsets because
-    // their anchors aren't adjusted for the drag)
-    let flowsNeedingRouting = List<FlowViewElement>();
+    // Collect ALL flows attached to this stock for proper offset computation
+    let allFlows = List<FlowViewElement>();
     for (const [, el] of elements) {
       if (!(el instanceof FlowViewElement)) continue;
       const pts = el.points;
@@ -186,20 +186,29 @@ export function applyGroupMovement(
       const attachedToThisStock = sourceUid === stockUid || sinkUid === stockUid;
       if (!attachedToThisStock) continue;
 
-      // Exclude flows where both endpoints are selected (they translate uniformly)
       const otherEndpointUid = sourceUid === stockUid ? sinkUid : sourceUid;
       const bothEndpointsSelected = otherEndpointUid !== undefined && selectedStockUids.has(otherEndpointUid);
-      if (!bothEndpointsSelected) {
-        flowsNeedingRouting = flowsNeedingRouting.push(el);
+
+      if (bothEndpointsSelected) {
+        // Translate points by delta so anchor is correct relative to new stock position
+        const translatedPoints = pts.map((p) =>
+          p.merge({
+            x: p.x - delta.x,
+            y: p.y - delta.y,
+          }),
+        );
+        allFlows = allFlows.push(el.set('points', translatedPoints));
+      } else {
+        allFlows = allFlows.push(el);
       }
     }
 
     // Compute offsets at the new stock position
     const newStockCx = stock.cx - delta.x;
     const newStockCy = stock.cy - delta.y;
-    const offsets = computeFlowOffsets(flowsNeedingRouting, stock.uid, newStockCx, newStockCy);
+    const offsets = computeFlowOffsets(allFlows, stock.uid, newStockCx, newStockCy);
 
-    // Store offsets for flows needing routing
+    // Store offsets for flows
     for (const [flowUid, offset] of offsets) {
       preComputedOffsets.set(flowUid, offset);
     }
@@ -574,6 +583,71 @@ describe('Group Movement', () => {
       // The sink point should still be at cloud
       expect(newFlow.points.last()!.attachedToUid).toBe(3);
       expect(newFlow.points.last()!.x).toBe(200);
+    });
+  });
+
+  describe('Offset preservation with translated and routed flows', () => {
+    it('should preserve flow spacing when stock has both translated and routed flows', () => {
+      // Setup: Stock A with two outflows - one to another selected stock (translated),
+      // one to a non-selected cloud (routed). Both flows should maintain proper spacing.
+      //
+      // Stock A (selected) -> Flow 1 (both endpoints selected) -> Stock B (selected)
+      // Stock A (selected) -> Flow 2 (one endpoint selected) -> Cloud (not selected)
+      //
+      // When Stock A moves, Flow 1 translates and Flow 2 is routed. Both should
+      // maintain their relative positions on Stock A's right edge.
+
+      const stockA = makeStock(1, 100, 100, [], [2, 3]);
+      const stockB = makeStock(4, 200, 50, [2], []);
+      const cloud = makeCloud(5, 3, 200, 150);
+
+      // Flow 1: Stock A -> Stock B (horizontal, from right side of A)
+      const flow1 = makeFlow(2, 150, 75, [
+        { x: 100 + StockWidth / 2, y: 100, attachedToUid: 1 },
+        { x: 200 - StockWidth / 2, y: 50, attachedToUid: 4 },
+      ]);
+
+      // Flow 2: Stock A -> Cloud (horizontal, from right side of A)
+      const flow2 = makeFlow(3, 150, 125, [
+        { x: 100 + StockWidth / 2, y: 100, attachedToUid: 1 },
+        { x: 200, y: 150, attachedToUid: 5 },
+      ]);
+
+      let elements = Map<UID, ViewElement>()
+        .set(1, stockA)
+        .set(2, flow1)
+        .set(3, flow2)
+        .set(4, stockB)
+        .set(5, cloud);
+
+      // Select Stock A and Stock B (so Flow 1 has both endpoints selected)
+      // Don't select the cloud (so Flow 2 has only one endpoint selected)
+      const selection = Set<UID>([1, 4]);
+      const delta = { x: -50, y: 0 }; // Move stocks right 50
+
+      const result = applyGroupMovement(elements, selection, delta);
+
+      // Both stocks should move
+      const newStockA = result.get(1) as StockViewElement;
+      const newStockB = result.get(4) as StockViewElement;
+      expect(newStockA.cx).toBe(150);
+      expect(newStockB.cx).toBe(250);
+
+      // Flow 1 should translate uniformly (both endpoints moved)
+      const newFlow1 = result.get(2) as FlowViewElement;
+      expect(newFlow1.points.first()!.x).toBe(150 + StockWidth / 2);
+      expect(newFlow1.points.last()!.x).toBe(250 - StockWidth / 2);
+
+      // Flow 2 should be routed (one endpoint moved, one fixed)
+      const newFlow2 = result.get(3) as FlowViewElement;
+      expect(newFlow2.points.first()!.x).toBe(150 + StockWidth / 2); // at new stock position
+      expect(newFlow2.points.last()!.x).toBe(200); // cloud unchanged
+
+      // Both flows should have different y-coordinates on Stock A's edge
+      // (i.e., they should not overlap)
+      const flow1SourceY = newFlow1.points.first()!.y;
+      const flow2SourceY = newFlow2.points.first()!.y;
+      expect(flow1SourceY).not.toBe(flow2SourceY);
     });
   });
 
