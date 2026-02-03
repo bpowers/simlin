@@ -24,14 +24,14 @@ import {
   ScalarEquation,
   EquationError,
   UnitError,
-} from '@system-dynamics/core/datamodel';
+} from '@simlin/core/datamodel';
 
-import { defined, Series } from '@system-dynamics/core/common';
-import { at } from '@system-dynamics/core/collections';
+import { defined, Series } from '@simlin/core/common';
+import { at } from '@simlin/core/collections';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { CustomElement, FormattedText, CustomEditor } from './drawing/SlateEditor';
 import { LookupEditor } from './LookupEditor';
-import { errorCodeDescription } from '@system-dynamics/engine2';
+import { errorCodeDescription } from '@simlin/engine';
 
 import styles from './VariableDetails.module.css';
 

@@ -1,5 +1,5 @@
 packages:
-  - 'src/engine2'
+  - 'src/engine'
   - 'src/core'
   - 'src/diagram'
   - 'src/app'

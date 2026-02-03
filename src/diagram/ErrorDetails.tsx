@@ -6,8 +6,8 @@ import * as React from 'react';
 
 import { List, Map } from 'immutable';
 
-import { SimError, ModelError, EquationError, ErrorCode, UnitError } from '@system-dynamics/core/datamodel';
-import { errorCodeDescription } from '@system-dynamics/engine2';
+import { SimError, ModelError, EquationError, ErrorCode, UnitError } from '@simlin/core/datamodel';
+import { errorCodeDescription } from '@simlin/engine';
 
 import styles from './ErrorDetails.module.css';
 

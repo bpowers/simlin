@@ -14,7 +14,7 @@ import * as path from 'path';
 
 import { Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder, configureWasm, ready } from '../src';
 import { JsonStock, JsonFlow, JsonAuxiliary } from '../src/json-types';
-import { reset } from '@system-dynamics/engine2/internal/wasm';
+import { reset } from '@simlin/engine/internal/wasm';
 
 // Helper to load the WASM module
 async function loadWasm(): Promise<void> {

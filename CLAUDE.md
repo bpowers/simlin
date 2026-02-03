@@ -80,11 +80,11 @@ First is the Rust workspace with these packages:
 - `src/xmutil` - Rust wrapper around Bob Eberlein's tool to convert Vensim models to XMILE format, including diagrams.
 
 This is a pnpm workspace with these packages:
-- `@system-dynamics/core` - Shared TypeScript utilities
-- `@system-dynamics/diagram` - React diagram components
-- `@system-dynamics/app` - Frontend application
-- `@system-dynamics/server` - Backend API server
-- `@system-dynamics/engine2` - WASM simulation engine
+- `@simlin/core` - Shared TypeScript utilities
+- `@simlin/diagram` - React diagram components
+- `@simlin/app` - Frontend application
+- `@simlin/server` - Backend API server
+- `@simlin/engine` - WASM simulation engine
 
 ### Prerequisites for Development
 

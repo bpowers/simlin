@@ -14,7 +14,7 @@ import {
   TextField,
   FormControlLabel,
   Checkbox,
-} from '@system-dynamics/diagram';
+} from '@simlin/diagram';
 
 import { User } from './User';
 

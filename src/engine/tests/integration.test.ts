@@ -5,7 +5,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { init, reset, getMemory, isUrl, isNode } from '@system-dynamics/engine2/internal/wasm';
+import { init, reset, getMemory, isUrl, isNode } from '@simlin/engine/internal/wasm';
 import { malloc, free } from '../src/internal/memory';
 import { SimlinError, readErrorDetail } from '../src/internal/error';
 import { SimlinErrorCode, SimlinJsonFormat } from '../src/internal/types';

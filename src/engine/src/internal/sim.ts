@@ -4,7 +4,7 @@
 
 // Simulation functions
 
-import { getExports } from '@system-dynamics/engine2/internal/wasm';
+import { getExports } from '@simlin/engine/internal/wasm';
 import {
   free,
   stringToWasm,

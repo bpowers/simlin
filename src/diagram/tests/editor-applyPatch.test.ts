@@ -9,12 +9,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project as Engine2Project, configureWasm, ready } from '@system-dynamics/engine2';
-import { reset } from '@system-dynamics/engine2/internal/wasm';
+import { Project as Project, configureWasm, ready } from '@simlin/engine';
+import { reset } from '@simlin/engine/internal/wasm';
 import { JsonProjectPatch } from '../json-types';
 
 async function loadWasm(): Promise<void> {
-  const wasmPath = path.join(__dirname, '..', '..', 'engine2', 'core', 'libsimlin.wasm');
+  const wasmPath = path.join(__dirname, '..', '..', 'engine', 'core', 'libsimlin.wasm');
   const wasmBuffer = fs.readFileSync(wasmPath);
   reset();
   configureWasm({ source: wasmBuffer });
@@ -35,7 +35,7 @@ describe('applyPatch with variable creation', () => {
   });
 
   it('should reject patch with empty equation when allowErrors is false', async () => {
-    const project = await Engine2Project.open(loadTestXmile());
+    const project = await Project.open(loadTestXmile());
 
     const patch: JsonProjectPatch = {
       models: [
@@ -58,7 +58,7 @@ describe('applyPatch with variable creation', () => {
   });
 
   it('should accept patch with empty equation when allowErrors is true', async () => {
-    const project = await Engine2Project.open(loadTestXmile());
+    const project = await Project.open(loadTestXmile());
 
     const patch: JsonProjectPatch = {
       models: [
@@ -89,7 +89,7 @@ describe('applyPatch with variable creation', () => {
   });
 
   it('should provide descriptive error message when patch is rejected', async () => {
-    const project = await Engine2Project.open(loadTestXmile());
+    const project = await Project.open(loadTestXmile());
 
     const patch: JsonProjectPatch = {
       models: [

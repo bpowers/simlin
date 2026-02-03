@@ -9,11 +9,11 @@ import { Map, Set } from 'immutable';
 
 import './theme.css';
 
-import { Series } from '@system-dynamics/core/common';
-import { at, getOrThrow } from '@system-dynamics/core/collections';
-import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
-import { Project as Engine2Project } from '@system-dynamics/engine2';
-import type { JsonProject } from '@system-dynamics/engine2';
+import { Series } from '@simlin/core/common';
+import { at, getOrThrow } from '@simlin/core/collections';
+import { UID, ViewElement, Project } from '@simlin/core/datamodel';
+import { Project as EngineProject } from '@simlin/engine';
+import type { JsonProject } from '@simlin/engine';
 import { Point } from './drawing/common';
 import { Canvas } from './drawing/Canvas';
 
@@ -52,10 +52,10 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
 
   async loadProject() {
     const serializedProject = toUint8Array(this.props.projectPbBase64);
-    const engine2Project = await Engine2Project.openProtobuf(serializedProject);
-    const json = JSON.parse(engine2Project.serializeJson()) as JsonProject;
+    const engineProject = await EngineProject.openProtobuf(serializedProject);
+    const json = JSON.parse(engineProject.serializeJson()) as JsonProject;
     let project = Project.fromJson(json);
-    engine2Project.dispose();
+    engineProject.dispose();
 
     if (this.props.data !== undefined) {
       project = project.attachData(this.props.data, 'main');

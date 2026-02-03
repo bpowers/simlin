@@ -13,9 +13,9 @@ import {
   ViewElement,
   StockViewElement,
   CloudViewElement,
-} from '@system-dynamics/core/datamodel';
-import { defined, Series } from '@system-dynamics/core/common';
-import { at, first, last } from '@system-dynamics/core/collections';
+} from '@simlin/core/datamodel';
+import { defined, Series } from '@simlin/core/common';
+import { at, first, last } from '@simlin/core/collections';
 
 import { Arrowhead } from './Arrowhead';
 import { displayName, Point as IPoint, Rect } from './common';

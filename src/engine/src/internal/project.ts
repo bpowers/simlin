@@ -4,7 +4,7 @@
 
 // Project management functions
 
-import { getExports, getMemory } from '@system-dynamics/engine2/internal/wasm';
+import { getExports, getMemory } from '@simlin/engine/internal/wasm';
 import {
   malloc,
   free,

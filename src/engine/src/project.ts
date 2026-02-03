@@ -31,7 +31,7 @@ import { simlin_analyze_get_loops, readLoops, simlin_free_loops } from './intern
 import { SimlinProjectPtr, SimlinJsonFormat, ErrorDetail } from './internal/types';
 import { readAllErrorDetails, simlin_error_free } from './internal/error';
 import { registerFinalizer, unregisterFinalizer } from './internal/dispose';
-import { ensureInitialized, WasmSourceProvider } from '@system-dynamics/engine2/internal/wasm';
+import { ensureInitialized, WasmSourceProvider } from '@simlin/engine/internal/wasm';
 import { Loop, LoopPolarity } from './types';
 import { Model } from './model';
 import { JsonProjectPatch } from './json-types';

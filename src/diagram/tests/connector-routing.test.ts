@@ -13,7 +13,7 @@ import {
   Flow,
   ApplyToAllEquation,
   ScalarEquation,
-} from '@system-dynamics/core/datamodel';
+} from '@simlin/core/datamodel';
 import { List } from 'immutable';
 
 import { Connector, circleFromPoints, getVisualCenter, ArrayedOffset } from '../drawing/Connector';

@@ -1,8 +1,8 @@
 {
-  "name": "@system-dynamics/core",
+  "name": "@simlin/core",
   "version": "1.3.5",
   "description": "System dynamics data model and utilities",
-  "repository": "http://github.com/bpowers/model-app",
+  "repository": "https://github.com/bpowers/simlin",
   "author": {
     "name": "Bobby Powers",
     "email": "bobbypowers@gmail.com"
@@ -34,7 +34,7 @@
   },
   "sideEffects": false,
   "dependencies": {
-    "@system-dynamics/engine2": "workspace:*",
+    "@simlin/engine": "workspace:*",
     "immutable": "^5.0.3"
   },
   "devDependencies": {

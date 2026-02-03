@@ -1,5 +1,5 @@
 {
-  "name": "@system-dynamics/engine2",
+  "name": "@simlin/engine",
   "version": "2.0.0",
   "description": "an engine for building, running and analyzing system dynamics models",
   "repository": "http://github.com/bpowers/simlin",

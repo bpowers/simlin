@@ -16,13 +16,13 @@ import {
   InputAdornment,
   TextField,
   ExpandMoreIcon,
-} from '@system-dynamics/diagram';
+} from '@simlin/diagram';
 
 import { Project } from './Project';
 import { User } from './User';
-import { Project as ProjectDM } from '@system-dynamics/core/datamodel';
-import { Project as Engine2Project } from '@system-dynamics/engine2';
-import type { JsonProject } from '@system-dynamics/engine2';
+import { Project as ProjectDM } from '@simlin/core/datamodel';
+import { Project as EngineProject } from '@simlin/engine';
+import type { JsonProject } from '@simlin/engine';
 
 import styles from './NewProject.module.css';
 import typography from './typography.module.css';
@@ -146,16 +146,16 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
     const file = event.target.files[0];
     const contents = await readFile(file);
     try {
-      let engine2Project: Engine2Project;
+      let engineProject: EngineProject;
 
       if (file.name.endsWith('.mdl')) {
-        engine2Project = await Engine2Project.openVensim(contents);
+        engineProject = await EngineProject.openVensim(contents);
       } else {
-        engine2Project = await Engine2Project.open(contents);
+        engineProject = await EngineProject.open(contents);
       }
 
-      const projectPB = engine2Project.serializeProtobuf();
-      const json = JSON.parse(engine2Project.serializeJson()) as JsonProject;
+      const projectPB = engineProject.serializeProtobuf();
+      const json = JSON.parse(engineProject.serializeJson()) as JsonProject;
       const activeProject = ProjectDM.fromJson(json);
       const views = activeProject.models.get('main')?.views;
       if (!views || views.isEmpty()) {

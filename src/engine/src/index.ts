@@ -10,7 +10,7 @@
  *
  * @example
  * // Load a model and run simulation
- * import { Project } from '@system-dynamics/engine2';
+ * import { Project } from '@simlin/engine';
  *
  * const project = await Project.open(xmileData);
  * const model = project.mainModel;
@@ -55,5 +55,5 @@ export {
   ensureInitialized as ready,
   isInitialized as isReady,
   reset as resetWasm,
-} from '@system-dynamics/engine2/internal/wasm';
-export type { WasmConfig, WasmSource, WasmSourceProvider } from '@system-dynamics/engine2/internal/wasm';
+} from '@simlin/engine/internal/wasm';
+export type { WasmConfig, WasmSource, WasmSourceProvider } from '@simlin/engine/internal/wasm';

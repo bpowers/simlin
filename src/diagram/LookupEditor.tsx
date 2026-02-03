@@ -8,14 +8,14 @@ import { List } from 'immutable';
 import Button from './components/Button';
 import TextField from './components/TextField';
 
-import { defined } from '@system-dynamics/core/common';
-import { at } from '@system-dynamics/core/collections';
+import { defined } from '@simlin/core/common';
+import { at } from '@simlin/core/collections';
 import {
   Variable,
   GraphicalFunction,
   GraphicalFunctionScale,
   GraphicalFunctionKind,
-} from '@system-dynamics/core/datamodel';
+} from '@simlin/core/datamodel';
 
 import { LineChart } from './LineChart';
 

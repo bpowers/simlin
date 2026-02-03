@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import { GroupViewElement } from '@system-dynamics/core/datamodel';
+import { GroupViewElement } from '@simlin/core/datamodel';
 
 import { displayName, Rect } from './common';
 

@@ -2,23 +2,23 @@ import { readFileSync, createWriteStream } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 
-import { Project as Engine2Project } from '@system-dynamics/engine2';
-import { Project } from '@system-dynamics/core/datamodel';
-import { renderSvgToString } from '@system-dynamics/diagram/render-common';
+import { Project as EngineProject } from '@simlin/engine';
+import { Project } from '@simlin/core/datamodel';
+import { renderSvgToString } from '@simlin/diagram/render-common';
 
-// Compute the WASM path relative to the engine2 package
+// Compute the WASM path relative to the engine package
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const wasmPath = resolve(__dirname, '../src/engine2/core/libsimlin.wasm');
+const wasmPath = resolve(__dirname, '../src/engine/core/libsimlin.wasm');
 
 const args = process.argv.slice(2);
 const inputFile = args[0];
 let contents = readFileSync(args[0], 'utf-8');
 
-const engine2Project = inputFile.endsWith('.mdl')
-  ? await Engine2Project.openVensim(contents, { wasm: wasmPath })
-  : await Engine2Project.open(contents, { wasm: wasmPath });
-const pb = engine2Project.serializeProtobuf();
+const engineProject = inputFile.endsWith('.mdl')
+  ? await EngineProject.openVensim(contents, { wasm: wasmPath })
+  : await EngineProject.open(contents, { wasm: wasmPath });
+const pb = engineProject.serializeProtobuf();
 const project = Project.deserializeBinary(pb);
 
 

@@ -4,7 +4,7 @@
 
 import { List } from 'immutable';
 
-import { Point, FlowViewElement, StockViewElement, AuxViewElement } from '@system-dynamics/core/datamodel';
+import { Point, FlowViewElement, StockViewElement, AuxViewElement } from '@simlin/core/datamodel';
 
 import { StockWidth } from '../drawing/Stock';
 

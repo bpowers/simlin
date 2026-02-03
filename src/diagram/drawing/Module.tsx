@@ -4,8 +4,8 @@
 
 import * as React from 'react';
 
-import { ModuleViewElement } from '@system-dynamics/core/datamodel';
-import { defined } from '@system-dynamics/core/common';
+import { ModuleViewElement } from '@simlin/core/datamodel';
+import { defined } from '@simlin/core/common';
 
 import { displayName, Rect } from './common';
 import { ModuleRadius } from './default';

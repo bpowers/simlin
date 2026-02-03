@@ -2,8 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { CloudViewElement, FlowViewElement } from '@system-dynamics/core/datamodel';
-import { first, last } from '@system-dynamics/core/collections';
+import { CloudViewElement, FlowViewElement } from '@simlin/core/datamodel';
+import { first, last } from '@simlin/core/collections';
 
 /**
  * Determines if a cloud is on the source side (first point) of a flow.

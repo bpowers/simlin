@@ -4,7 +4,7 @@
 
 import { List } from 'immutable';
 
-import { Point, FlowViewElement, StockViewElement, CloudViewElement } from '@system-dynamics/core/datamodel';
+import { Point, FlowViewElement, StockViewElement, CloudViewElement } from '@simlin/core/datamodel';
 
 import {
   computeFlowRoute,

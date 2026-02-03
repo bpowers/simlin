@@ -9,8 +9,8 @@ import { File as DbFilePb } from './schemas/file_pb';
 import { Project as DbProjectPb } from './schemas/project_pb';
 import { User as UserPb } from './schemas/user_pb';
 
-import { Project as Engine2Project } from '@system-dynamics/engine2';
-import type { JsonProject } from '@system-dynamics/engine2';
+import { Project as Project } from '@simlin/engine';
+import type { JsonProject } from '@simlin/engine';
 
 export async function emptyProject(name: string, _userName: string): Promise<Uint8Array> {
   const emptyJson: JsonProject = {
@@ -31,9 +31,9 @@ export async function emptyProject(name: string, _userName: string): Promise<Uin
     ],
   };
 
-  const engine2Project = await Engine2Project.openJson(JSON.stringify(emptyJson));
-  const protobuf = engine2Project.serializeProtobuf();
-  engine2Project.dispose();
+  const engineProject = await Project.openJson(JSON.stringify(emptyJson));
+  const protobuf = engineProject.serializeProtobuf();
+  engineProject.dispose();
 
   return protobuf;
 }

@@ -72,9 +72,9 @@ export default defineConfig({
   builderConfig: {
     resolve: {
       alias: {
-        '@system-dynamics/core': path.resolve(__dirname, '../src/core'),
-        '@system-dynamics/diagram': path.resolve(__dirname, '../src/diagram'),
-        '@system-dynamics/engine2': path.resolve(__dirname, '../src/engine2'),
+        '@simlin/core': path.resolve(__dirname, '../src/core'),
+        '@simlin/diagram': path.resolve(__dirname, '../src/diagram'),
+        '@simlin/engine': path.resolve(__dirname, '../src/engine'),
         '@': path.resolve(__dirname, 'src'),
       },
     },

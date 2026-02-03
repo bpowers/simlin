@@ -4906,7 +4906,7 @@ mod tests {
     #[test]
     fn test_interactive_set_get() {
         // Load the SIR project fixture
-        let pb_path = std::path::Path::new("../../src/engine2/testdata/SIR_project.pb");
+        let pb_path = std::path::Path::new("../../src/engine/testdata/SIR_project.pb");
         if !pb_path.exists() {
             eprintln!("missing SIR_project.pb fixture; skipping");
             return;
@@ -5100,7 +5100,7 @@ mod tests {
     #[test]
     fn test_set_value_phases() {
         // Load the SIR project fixture
-        let pb_path = std::path::Path::new("../../src/engine2/testdata/SIR_project.pb");
+        let pb_path = std::path::Path::new("../../src/engine/testdata/SIR_project.pb");
         if !pb_path.exists() {
             eprintln!("missing SIR_project.pb fixture; skipping");
             return;

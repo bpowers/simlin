@@ -2,8 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { Project as Engine2Project } from '@system-dynamics/engine2';
-import type { JsonProject } from '@system-dynamics/engine2';
+import { Project as Project } from '@simlin/engine';
+import type { JsonProject } from '@simlin/engine';
 import { emptyProject } from '../project-creation';
 
 describe('emptyProject', () => {
@@ -14,7 +14,7 @@ describe('emptyProject', () => {
     expect(protobuf).toBeInstanceOf(Uint8Array);
     expect(protobuf.length).toBeGreaterThan(0);
 
-    const project = await Engine2Project.openProtobuf(protobuf);
+    const project = await Project.openProtobuf(protobuf);
     const json = JSON.parse(project.serializeJson()) as JsonProject;
     project.dispose();
 
@@ -24,8 +24,8 @@ describe('emptyProject', () => {
   it('creates a project with correct simulation specs', async () => {
     const protobuf = await emptyProject('SimSpecs Test', 'testuser');
 
-    // Verify the round-trip: protobuf -> engine2 -> JSON produces expected structure
-    const project = await Engine2Project.openProtobuf(protobuf);
+    // Verify the round-trip: protobuf -> engine -> JSON produces expected structure
+    const project = await Project.openProtobuf(protobuf);
     const json = JSON.parse(project.serializeJson()) as JsonProject;
     project.dispose();
 
@@ -39,7 +39,7 @@ describe('emptyProject', () => {
   it('creates a project with a main model', async () => {
     const protobuf = await emptyProject('Model Test', 'testuser');
 
-    const project = await Engine2Project.openProtobuf(protobuf);
+    const project = await Project.openProtobuf(protobuf);
     const json = JSON.parse(project.serializeJson()) as JsonProject;
     project.dispose();
 
@@ -50,7 +50,7 @@ describe('emptyProject', () => {
   it('creates a main model with empty variables', async () => {
     const protobuf = await emptyProject('Variables Test', 'testuser');
 
-    const project = await Engine2Project.openProtobuf(protobuf);
+    const project = await Project.openProtobuf(protobuf);
     const json = JSON.parse(project.serializeJson()) as JsonProject;
     project.dispose();
 
@@ -65,7 +65,7 @@ describe('emptyProject', () => {
   it('creates a main model with a stock-flow view', async () => {
     const protobuf = await emptyProject('View Test', 'testuser');
 
-    const project = await Engine2Project.openProtobuf(protobuf);
+    const project = await Project.openProtobuf(protobuf);
     const json = JSON.parse(project.serializeJson()) as JsonProject;
     project.dispose();
 
