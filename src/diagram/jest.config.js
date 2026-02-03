@@ -11,6 +11,10 @@ const config = {
   moduleNameMapper: {
     '\\.css$': '<rootDir>/tests/css-module-stub.ts',
     '^@simlin/engine/internal/wasm$': '<rootDir>/../engine/src/internal/wasm.node.ts',
+    '^@simlin/engine$': '<rootDir>/../engine/src/index.ts',
+    '^@simlin/core/datamodel$': '<rootDir>/../core/datamodel.ts',
+    '^@simlin/core/common$': '<rootDir>/../core/common.ts',
+    '^@simlin/core/collections$': '<rootDir>/../core/collections.ts',
   },
 };
 
