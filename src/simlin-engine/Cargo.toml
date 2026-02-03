@@ -17,7 +17,6 @@ ai_info = ["dep:ed25519", "dep:base64"]
 [dependencies]
 simlin-core = { version = "0.1", path = "../simlin-core" }
 lazy_static = "1"
-regex = "1"
 unicode-xid = "0.2"
 prost = "0.14"
 float-cmp = "0.10"

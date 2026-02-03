@@ -9,5 +9,3 @@ edition = "2024"
 crate-type = ["rlib"]
 
 [dependencies]
-lazy_static = "1"
-regex = "1"
