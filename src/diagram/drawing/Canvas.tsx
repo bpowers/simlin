@@ -957,10 +957,21 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, { x: 0, y: 0 });
             otherUpdates = otherUpdates.concat(updatedFlows);
           } else if (endpoint instanceof CloudViewElement) {
-            // Clouds only have one flow, so process individually
+            // For clouds, directly update the flow endpoint to match the cloud's new position
+            // (UpdateCloudAndFlow uses delta to adjust points, not the cloud's current position)
             for (const flow of flows) {
-              const [, updatedFlow] = UpdateCloudAndFlow(endpoint, flow, { x: 0, y: 0 });
-              otherUpdates = otherUpdates.push(updatedFlow);
+              const pts = flow.points;
+              const newPoints = pts.map((p, idx) => {
+                if (idx === 0 && p.attachedToUid === endpointUid) {
+                  return p.merge({ x: endpoint.cx, y: endpoint.cy });
+                }
+                return p;
+              });
+              otherUpdates = otherUpdates.push(
+                flow.merge({
+                  points: newPoints,
+                }),
+              );
             }
           }
         }
@@ -972,10 +983,21 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             const [, updatedFlows] = UpdateStockAndFlows(endpoint, flows, { x: 0, y: 0 });
             otherUpdates = otherUpdates.concat(updatedFlows);
           } else if (endpoint instanceof CloudViewElement) {
-            // Clouds only have one flow, so process individually
+            // For clouds, directly update the flow endpoint to match the cloud's new position
+            // (UpdateCloudAndFlow uses delta to adjust points, not the cloud's current position)
             for (const flow of flows) {
-              const [, updatedFlow] = UpdateCloudAndFlow(endpoint, flow, { x: 0, y: 0 });
-              otherUpdates = otherUpdates.push(updatedFlow);
+              const pts = flow.points;
+              const newPoints = pts.map((p, idx) => {
+                if (idx === pts.size - 1 && p.attachedToUid === endpointUid) {
+                  return p.merge({ x: endpoint.cx, y: endpoint.cy });
+                }
+                return p;
+              });
+              otherUpdates = otherUpdates.push(
+                flow.merge({
+                  points: newPoints,
+                }),
+              );
             }
           }
         }

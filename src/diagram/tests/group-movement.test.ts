@@ -320,9 +320,21 @@ export function applyGroupMovement(
         result = result.set(updatedFlow.uid, updatedFlow);
       }
     } else if (endpoint instanceof CloudViewElement) {
+      // For clouds, directly update the flow endpoint to match the cloud's new position
       for (const flow of flows) {
-        const [, updatedFlow] = UpdateCloudAndFlow(endpoint, flow, { x: 0, y: 0 });
-        result = result.set(updatedFlow.uid, updatedFlow);
+        const pts = flow.points;
+        const newPoints = pts.map((p, i) => {
+          if (i === 0 && p.attachedToUid === endpointUid) {
+            return p.merge({ x: endpoint.cx, y: endpoint.cy });
+          }
+          return p;
+        });
+        result = result.set(
+          flow.uid,
+          flow.merge({
+            points: newPoints,
+          }),
+        );
       }
     }
   }
@@ -336,9 +348,21 @@ export function applyGroupMovement(
         result = result.set(updatedFlow.uid, updatedFlow);
       }
     } else if (endpoint instanceof CloudViewElement) {
+      // For clouds, directly update the flow endpoint to match the cloud's new position
       for (const flow of flows) {
-        const [, updatedFlow] = UpdateCloudAndFlow(endpoint, flow, { x: 0, y: 0 });
-        result = result.set(updatedFlow.uid, updatedFlow);
+        const pts = flow.points;
+        const newPoints = pts.map((p, i) => {
+          if (i === pts.size - 1 && p.attachedToUid === endpointUid) {
+            return p.merge({ x: endpoint.cx, y: endpoint.cy });
+          }
+          return p;
+        });
+        result = result.set(
+          flow.uid,
+          flow.merge({
+            points: newPoints,
+          }),
+        );
       }
     }
   }
