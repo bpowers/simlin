@@ -1327,10 +1327,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       }
     }
 
-    // Update links connected to moved elements
+    // Update links connected to moved elements (but not links already processed in group movement)
     elements = elements.map((element: ViewElement) => {
       if (!(element instanceof LinkViewElement)) {
         return element.isNamed() ? getOrThrow(namedElements, defined(element.ident)) : element;
+      }
+      // Skip links that were already processed in the group movement pass
+      if (selection.has(element.uid)) {
+        return element;
       }
       // If it hasn't been updated, nothing to do
       if (

@@ -1083,4 +1083,27 @@ describe('Link arc adjustment during group movement', () => {
     // Arc should have been adjusted to preserve curve shape
     expect(Math.abs(newLink.arc - (-45))).toBeLessThan(1);
   });
+
+  it('should not double-adjust arc when link is selected with one endpoint', () => {
+    // This test verifies that when a link is selected along with one of its endpoints,
+    // the arc is only adjusted once (not twice from two separate passes).
+    // The expected arc adjustment is -45 degrees, not -90 degrees (which would be double).
+    const auxA = makeAux(1, 100, 100);
+    const auxB = makeAux(2, 200, 100);
+    const link = makeLink(3, 1, 2, 0);
+
+    let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+
+    // Select Aux A and the link (but not Aux B)
+    const selection = Set<UID>([1, 3]);
+    const delta = { x: 0, y: -100 }; // Move down
+
+    const result = applyGroupMovement(elements, selection, delta);
+
+    const newLink = result.get(3) as LinkViewElement;
+    // Arc should be adjusted once (-45 degrees), not twice (-90 degrees)
+    // If double-adjusted, arc would be around -90 instead of -45
+    expect(Math.abs(newLink.arc - (-45))).toBeLessThan(1);
+    expect(Math.abs(newLink.arc - (-90))).toBeGreaterThan(40); // Verify it's not -90
+  });
 });
