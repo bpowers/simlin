@@ -837,9 +837,10 @@ export function applyGroupMovement(input: GroupMovementInput): GroupMovementOutp
   }
 
   // Pre-compute flow offsets for all flows attached to moved stocks.
+  // This applies even for single-stock selection to preserve multi-flow spacing.
   // Note: We use originalElements.values() since the input `elements` iterator was already consumed.
   const preComputedOffsets =
-    selection.size > 1
+    selectedStockUids.size > 0
       ? computePreRoutedOffsets(originalElements.values(), selectedStockUids, delta, isInSelection)
       : new globalThis.Map<UID, number>();
 
