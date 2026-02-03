@@ -12,7 +12,14 @@
 
 import { List, Set } from 'immutable';
 import { first, last } from '@system-dynamics/core/collections';
-import { ViewElement, FlowViewElement, StockViewElement, CloudViewElement, UID } from '@system-dynamics/core/datamodel';
+import {
+  ViewElement,
+  FlowViewElement,
+  StockViewElement,
+  CloudViewElement,
+  UID,
+  Point,
+} from '@system-dynamics/core/datamodel';
 import {
   clampToSegment,
   computeFlowOffsets,
@@ -212,20 +219,34 @@ export function processSelectedFlow(
       const sourceEndpoint = getElementByUid(sourceUid);
       if (sourceEndpoint instanceof CloudViewElement) {
         const [, routedFlow] = UpdateCloudAndFlow(sourceEndpoint, flow, delta);
-        // Move cloud by full delta (not clamped) and update flow endpoint to match
+        // Move cloud by full delta (not clamped) and update flow with proper orthogonal geometry
         const newCloudX = sourceEndpoint.cx - delta.x;
         const newCloudY = sourceEndpoint.cy - delta.y;
         const movedCloud = sourceEndpoint.merge({ x: newCloudX, y: newCloudY });
-        // Update the flow's cloud endpoint to match the full-delta cloud position
         const cloudPointIndex = 0; // source is first point
         const cloudPoint = routedFlow.points.get(cloudPointIndex);
+        const otherPointIndex = routedFlow.points.size - 1;
+        const otherPoint = routedFlow.points.get(otherPointIndex);
         let updatedFlow = routedFlow;
-        if (cloudPoint) {
-          const updatedPoints = routedFlow.points.set(
-            cloudPointIndex,
-            cloudPoint.merge({ x: newCloudX, y: newCloudY }),
-          );
-          updatedFlow = routedFlow.set('points', updatedPoints);
+        if (cloudPoint && otherPoint) {
+          // Check if the flow is 2-point straight and we'd create a diagonal
+          const needsLShape =
+            routedFlow.points.size === 2 &&
+            Math.abs(newCloudX - otherPoint.x) > 1 &&
+            Math.abs(newCloudY - otherPoint.y) > 1;
+          if (needsLShape) {
+            // Add intermediate point to create L-shape (horizontal then vertical)
+            const intermediatePoint = new Point({ x: newCloudX, y: otherPoint.y, attachedToUid: undefined });
+            const newCloudPoint = cloudPoint.merge({ x: newCloudX, y: newCloudY });
+            const newPoints = List([newCloudPoint, intermediatePoint, otherPoint]);
+            updatedFlow = routedFlow.set('points', newPoints);
+          } else if (cloudPoint) {
+            const updatedPoints = routedFlow.points.set(
+              cloudPointIndex,
+              cloudPoint.merge({ x: newCloudX, y: newCloudY }),
+            );
+            updatedFlow = routedFlow.set('points', updatedPoints);
+          }
         }
         sideEffects = sideEffects.push(movedCloud);
         return [updatedFlow, sideEffects];
@@ -234,20 +255,34 @@ export function processSelectedFlow(
       const sinkEndpoint = getElementByUid(sinkUid);
       if (sinkEndpoint instanceof CloudViewElement) {
         const [, routedFlow] = UpdateCloudAndFlow(sinkEndpoint, flow, delta);
-        // Move cloud by full delta (not clamped) and update flow endpoint to match
+        // Move cloud by full delta (not clamped) and update flow with proper orthogonal geometry
         const newCloudX = sinkEndpoint.cx - delta.x;
         const newCloudY = sinkEndpoint.cy - delta.y;
         const movedCloud = sinkEndpoint.merge({ x: newCloudX, y: newCloudY });
-        // Update the flow's cloud endpoint to match the full-delta cloud position
         const cloudPointIndex = routedFlow.points.size - 1; // sink is last point
         const cloudPoint = routedFlow.points.get(cloudPointIndex);
+        const otherPointIndex = 0;
+        const otherPoint = routedFlow.points.get(otherPointIndex);
         let updatedFlow = routedFlow;
-        if (cloudPoint) {
-          const updatedPoints = routedFlow.points.set(
-            cloudPointIndex,
-            cloudPoint.merge({ x: newCloudX, y: newCloudY }),
-          );
-          updatedFlow = routedFlow.set('points', updatedPoints);
+        if (cloudPoint && otherPoint) {
+          // Check if the flow is 2-point straight and we'd create a diagonal
+          const needsLShape =
+            routedFlow.points.size === 2 &&
+            Math.abs(newCloudX - otherPoint.x) > 1 &&
+            Math.abs(newCloudY - otherPoint.y) > 1;
+          if (needsLShape) {
+            // Add intermediate point to create L-shape (horizontal then vertical)
+            const intermediatePoint = new Point({ x: newCloudX, y: otherPoint.y, attachedToUid: undefined });
+            const newCloudPoint = cloudPoint.merge({ x: newCloudX, y: newCloudY });
+            const newPoints = List([otherPoint, intermediatePoint, newCloudPoint]);
+            updatedFlow = routedFlow.set('points', newPoints);
+          } else if (cloudPoint) {
+            const updatedPoints = routedFlow.points.set(
+              cloudPointIndex,
+              cloudPoint.merge({ x: newCloudX, y: newCloudY }),
+            );
+            updatedFlow = routedFlow.set('points', updatedPoints);
+          }
         }
         sideEffects = sideEffects.push(movedCloud);
         return [updatedFlow, sideEffects];
@@ -391,17 +426,39 @@ export function routeUnselectedFlows(
         const newCloudY = originalCloud.cy - delta.y;
         for (const flow of flows) {
           let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
-          // If cloud is selected, ensure flow endpoint matches full delta position
+          // If cloud is selected, ensure flow matches full delta position with proper orthogonal geometry
           if (cloudIsSelected) {
             const cloudPointIndex =
               first(updatedFlow.points).attachedToUid === endpointUid ? 0 : updatedFlow.points.size - 1;
             const cloudPoint = updatedFlow.points.get(cloudPointIndex);
-            if (cloudPoint) {
-              const updatedPoints = updatedFlow.points.set(
-                cloudPointIndex,
-                cloudPoint.merge({ x: newCloudX, y: newCloudY }),
-              );
-              updatedFlow = updatedFlow.set('points', updatedPoints);
+            const otherPointIndex = cloudPointIndex === 0 ? updatedFlow.points.size - 1 : 0;
+            const otherPoint = updatedFlow.points.get(otherPointIndex);
+            if (cloudPoint && otherPoint) {
+              // Check if the flow is 2-point straight and we'd create a diagonal
+              const needsLShape =
+                updatedFlow.points.size === 2 &&
+                Math.abs(newCloudX - otherPoint.x) > 1 &&
+                Math.abs(newCloudY - otherPoint.y) > 1;
+              if (needsLShape) {
+                // Add intermediate point to create L-shape (horizontal then vertical)
+                const intermediateX = newCloudX;
+                const intermediateY = otherPoint.y;
+                const intermediatePoint = new Point({ x: intermediateX, y: intermediateY, attachedToUid: undefined });
+                const newCloudPoint = cloudPoint.merge({ x: newCloudX, y: newCloudY });
+                // Cloud is source (index 0): cloud -> intermediate -> other
+                // Cloud is sink (index size-1): other -> intermediate -> cloud
+                const newPoints =
+                  cloudPointIndex === 0
+                    ? List([newCloudPoint, intermediatePoint, otherPoint])
+                    : List([otherPoint, intermediatePoint, newCloudPoint]);
+                updatedFlow = updatedFlow.set('points', newPoints);
+              } else {
+                const updatedPoints = updatedFlow.points.set(
+                  cloudPointIndex,
+                  cloudPoint.merge({ x: newCloudX, y: newCloudY }),
+                );
+                updatedFlow = updatedFlow.set('points', updatedPoints);
+              }
             }
           }
           updatedFlows = updatedFlows.push(updatedFlow);
@@ -439,17 +496,39 @@ export function routeUnselectedFlows(
         const newCloudY = originalCloud.cy - delta.y;
         for (const flow of flows) {
           let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
-          // If cloud is selected, ensure flow endpoint matches full delta position
+          // If cloud is selected, ensure flow matches full delta position with proper orthogonal geometry
           if (cloudIsSelected) {
             const cloudPointIndex =
               last(updatedFlow.points).attachedToUid === endpointUid ? updatedFlow.points.size - 1 : 0;
             const cloudPoint = updatedFlow.points.get(cloudPointIndex);
-            if (cloudPoint) {
-              const updatedPoints = updatedFlow.points.set(
-                cloudPointIndex,
-                cloudPoint.merge({ x: newCloudX, y: newCloudY }),
-              );
-              updatedFlow = updatedFlow.set('points', updatedPoints);
+            const otherPointIndex = cloudPointIndex === 0 ? updatedFlow.points.size - 1 : 0;
+            const otherPoint = updatedFlow.points.get(otherPointIndex);
+            if (cloudPoint && otherPoint) {
+              // Check if the flow is 2-point straight and we'd create a diagonal
+              const needsLShape =
+                updatedFlow.points.size === 2 &&
+                Math.abs(newCloudX - otherPoint.x) > 1 &&
+                Math.abs(newCloudY - otherPoint.y) > 1;
+              if (needsLShape) {
+                // Add intermediate point to create L-shape (horizontal then vertical)
+                const intermediateX = newCloudX;
+                const intermediateY = otherPoint.y;
+                const intermediatePoint = new Point({ x: intermediateX, y: intermediateY, attachedToUid: undefined });
+                const newCloudPoint = cloudPoint.merge({ x: newCloudX, y: newCloudY });
+                // Cloud is source (index 0): cloud -> intermediate -> other
+                // Cloud is sink (index size-1): other -> intermediate -> cloud
+                const newPoints =
+                  cloudPointIndex === 0
+                    ? List([newCloudPoint, intermediatePoint, otherPoint])
+                    : List([otherPoint, intermediatePoint, newCloudPoint]);
+                updatedFlow = updatedFlow.set('points', newPoints);
+              } else {
+                const updatedPoints = updatedFlow.points.set(
+                  cloudPointIndex,
+                  cloudPoint.merge({ x: newCloudX, y: newCloudY }),
+                );
+                updatedFlow = updatedFlow.set('points', updatedPoints);
+              }
             }
           }
           updatedFlows = updatedFlows.push(updatedFlow);
