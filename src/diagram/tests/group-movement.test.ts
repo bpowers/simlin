@@ -10,6 +10,7 @@ import {
   StockViewElement,
   CloudViewElement,
   AuxViewElement,
+  LinkViewElement,
   ViewElement,
   UID,
 } from '@system-dynamics/core/datamodel';
@@ -23,6 +24,8 @@ import {
   getSegments,
   UpdateCloudAndFlow,
 } from '../drawing/Flow';
+import { updateArcAngle, radToDeg } from '../arc-utils';
+import { getVisualCenter } from '../drawing/Connector';
 
 // Helper functions to create test elements
 function makeStock(
@@ -88,6 +91,16 @@ function makeAux(uid: number, x: number, y: number): AuxViewElement {
   });
 }
 
+function makeLink(uid: number, fromUid: number, toUid: number, arc: number = 0): LinkViewElement {
+  return new LinkViewElement({
+    uid,
+    fromUid,
+    toUid,
+    arc,
+    multiPoint: undefined,
+  });
+}
+
 interface Point2D {
   x: number;
   y: number;
@@ -122,6 +135,7 @@ export function applyGroupMovement(
   const selectedFlowUids = new globalThis.Set<UID>();
   const selectedCloudUids = new globalThis.Set<UID>();
   const selectedAuxUids = new globalThis.Set<UID>();
+  const selectedLinkUids = new globalThis.Set<UID>();
 
   for (const uid of selection) {
     const element = elements.get(uid);
@@ -134,8 +148,22 @@ export function applyGroupMovement(
       selectedCloudUids.add(uid);
     } else if (element instanceof AuxViewElement) {
       selectedAuxUids.add(uid);
+    } else if (element instanceof LinkViewElement) {
+      selectedLinkUids.add(uid);
     }
   }
+
+  // Helper to check if an element is in the selection
+  const isInSelection = (uid: UID | undefined): boolean => {
+    if (uid === undefined) return false;
+    return (
+      selectedStockUids.has(uid) ||
+      selectedFlowUids.has(uid) ||
+      selectedCloudUids.has(uid) ||
+      selectedAuxUids.has(uid) ||
+      selectedLinkUids.has(uid)
+    );
+  };
 
   let result = elements;
 
@@ -161,6 +189,43 @@ export function applyGroupMovement(
         y: aux.cy - delta.y,
       }),
     );
+  }
+
+  // Process links: preserve arc shape when endpoints move
+  for (const uid of selectedLinkUids) {
+    const link = elements.get(uid) as LinkViewElement;
+    const fromInSelection = isInSelection(link.fromUid);
+    const toInSelection = isInSelection(link.toUid);
+
+    if (fromInSelection && toInSelection) {
+      // Both endpoints moving together - translate multiPoint if present, keep arc
+      if (link.multiPoint) {
+        const translatedMultiPoint = link.multiPoint.map((p) =>
+          p.merge({
+            x: p.x - delta.x,
+            y: p.y - delta.y,
+          }),
+        );
+        result = result.set(uid, link.merge({ multiPoint: translatedMultiPoint }));
+      }
+      // arc is preserved
+    } else {
+      // One endpoint fixed - preserve arc shape by adjusting arc angle
+      const from = elements.get(link.fromUid);
+      const to = elements.get(link.toUid);
+      if (from && to) {
+        const oldFromVisual = getVisualCenter(from);
+        const oldToVisual = getVisualCenter(to);
+        const newFromCx = fromInSelection ? from.cx - delta.x : from.cx;
+        const newFromCy = fromInSelection ? from.cy - delta.y : from.cy;
+        const newToCx = toInSelection ? to.cx - delta.x : to.cx;
+        const newToCy = toInSelection ? to.cy - delta.y : to.cy;
+        const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
+        const newθ = Math.atan2(newToCy - newFromCy, newToCx - newFromCx);
+        const diffθ = oldθ - newθ;
+        result = result.set(uid, link.merge({ arc: updateArcAngle(link.arc, radToDeg(diffθ)) }));
+      }
+    }
   }
 
   // Pre-compute flow offsets for all flows attached to moved stocks.
@@ -933,7 +998,89 @@ describe('Group Movement', () => {
 });
 
 describe('Link arc adjustment during group movement', () => {
-  // Note: Link arc adjustment tests would go here
-  // These require the arc calculation utilities which are tested separately
-  // in arc-utils.test.ts
+  it('should preserve arc when both link endpoints move together', () => {
+    // Setup: Aux A -> Link (with arc) -> Aux B, both selected
+    const auxA = makeAux(1, 100, 100);
+    const auxB = makeAux(2, 200, 100);
+    const link = makeLink(3, 1, 2, 30); // Arc of 30 degrees
+
+    let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+
+    // Select both auxes and the link
+    const selection = Set<UID>([1, 2, 3]);
+    const delta = { x: -50, y: -25 }; // Move everything right 50, down 25
+
+    const result = applyGroupMovement(elements, selection, delta);
+
+    // Auxes should move
+    expect((result.get(1) as AuxViewElement).cx).toBe(150);
+    expect((result.get(1) as AuxViewElement).cy).toBe(125);
+    expect((result.get(2) as AuxViewElement).cx).toBe(250);
+    expect((result.get(2) as AuxViewElement).cy).toBe(125);
+
+    // Link arc should be preserved since both endpoints moved together
+    const newLink = result.get(3) as LinkViewElement;
+    expect(newLink.arc).toBe(30);
+  });
+
+  it('should adjust arc angle when only one endpoint moves', () => {
+    // Setup: Aux A (selected) -> Link (selected) -> Aux B (not selected)
+    // Moving Aux A will change the link direction, so arc should be adjusted
+    // to preserve the curve shape
+    const auxA = makeAux(1, 100, 100);
+    const auxB = makeAux(2, 200, 100);
+    const link = makeLink(3, 1, 2, 30);
+
+    let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+
+    // Select only Aux A and the link (not Aux B)
+    const selection = Set<UID>([1, 3]);
+    const delta = { x: -50, y: 0 }; // Move Aux A right 50, keeping horizontal
+
+    const result = applyGroupMovement(elements, selection, delta);
+
+    // Aux A should move
+    expect((result.get(1) as AuxViewElement).cx).toBe(150);
+    expect((result.get(1) as AuxViewElement).cy).toBe(100);
+
+    // Aux B should stay
+    expect((result.get(2) as AuxViewElement).cx).toBe(200);
+
+    // Link arc should be adjusted to preserve curve shape.
+    // Original line: (100, 100) -> (200, 100), angle = 0
+    // New line: (150, 100) -> (200, 100), angle = 0
+    // Angle difference is 0, so arc should stay the same in this case
+    const newLink = result.get(3) as LinkViewElement;
+    expect(newLink.arc).toBeCloseTo(30, 5);
+  });
+
+  it('should adjust arc angle for rotational movement of one endpoint', () => {
+    // Setup: Aux A (selected) -> Link (selected) -> Aux B (not selected)
+    // Move Aux A perpendicular to the original link direction, causing rotation
+    const auxA = makeAux(1, 100, 100);
+    const auxB = makeAux(2, 200, 100);
+    const link = makeLink(3, 1, 2, 0); // No initial arc
+
+    let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+
+    // Select only Aux A and the link
+    const selection = Set<UID>([1, 3]);
+    // Move Aux A down, causing rotation
+    const delta = { x: 0, y: -100 };
+
+    const result = applyGroupMovement(elements, selection, delta);
+
+    // Aux A should move down
+    expect((result.get(1) as AuxViewElement).cx).toBe(100);
+    expect((result.get(1) as AuxViewElement).cy).toBe(200);
+
+    // Link arc should be adjusted for the rotation
+    // Original line: (100, 100) -> (200, 100), angle = 0
+    // New line: (100, 200) -> (200, 100), angle = atan2(100-200, 200-100) = atan2(-100, 100) = -45 degrees
+    // Angle difference = 0 - (-45) = 45 degrees
+    // newArc = originalArc - angleDiff = 0 - 45 = -45 degrees
+    const newLink = result.get(3) as LinkViewElement;
+    // Arc should have been adjusted to preserve curve shape
+    expect(Math.abs(newLink.arc - (-45))).toBeLessThan(1);
+  });
 });

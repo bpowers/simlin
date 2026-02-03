@@ -72,7 +72,7 @@ import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point, searchableName } from './drawing/common';
-import { takeoffθ, getVisualCenter } from './drawing/Connector';
+import { getVisualCenter } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
 import {
   computePreRoutedOffsets,
@@ -1268,13 +1268,24 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           }
           return element;
         } else {
-          // One endpoint fixed - arc needs adjustment
+          // One endpoint fixed - preserve arc shape by adjusting arc angle based on
+          // the rotation of the line between endpoints. This ensures the arc shape
+          // follows the endpoint movement naturally, rather than jumping to a new
+          // curvature based on drag position.
           const from = getUid(element.fromUid);
           const to = getUid(element.toUid);
-          const newTakeoffθ = takeoffθ({ element, from, to, arcPoint: defined(arcPoint) });
-          const newTakeoff = radToDeg(newTakeoffθ);
+          const oldFromVisual = getVisualCenter(from);
+          const oldToVisual = getVisualCenter(to);
+          // Calculate new positions: if endpoint is in selection, it moved by delta
+          const newFromCx = fromInSelection ? from.cx - delta.x : from.cx;
+          const newFromCy = fromInSelection ? from.cy - delta.y : from.cy;
+          const newToCx = toInSelection ? to.cx - delta.x : to.cx;
+          const newToCy = toInSelection ? to.cy - delta.y : to.cy;
+          const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
+          const newθ = Math.atan2(newToCy - newFromCy, newToCx - newFromCx);
+          const diffθ = oldθ - newθ;
           return element.merge({
-            arc: newTakeoff,
+            arc: updateArcAngle(element.arc, radToDeg(diffθ)),
           });
         }
       } else {
