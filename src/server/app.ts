@@ -27,6 +27,8 @@ import { requestLogger } from './request-logger';
 import { createProjectRouteHandler } from './route-handlers';
 import { initializeServerDependencies } from './server-init';
 import { getStaticDirectory, validateStaticDirectory } from './static-config';
+import { createAuthRouter } from './auth/auth-router';
+import { createFirebaseRestClient } from './auth/firebase-rest-client';
 
 // redefinition from Helmet, as they don't export it
 interface ContentSecurityPolicyDirectiveValueFunction {
@@ -161,12 +163,7 @@ class App {
       'frame-src': ["'self'", 'https://simlin.firebaseapp.com', 'https://auth.simlin.com'],
       'base-uri': ["'self'"],
       'block-all-mixed-content': [],
-      'connect-src': [
-        "'self'",
-        'https://www.googleapis.com',
-        'https://securetoken.googleapis.com',
-        'https://identitytoolkit.googleapis.com',
-      ],
+      'connect-src': ["'self'"],
       'font-src': ["'self'", 'data:', 'https://fonts.gstatic.com'],
       'frame-ancestors': ["'self'"],
       'img-src': ["'self'", 'data:', 'blob:', 'https://*.googleusercontent.com', 'https://www.gstatic.com'],
@@ -214,6 +211,55 @@ class App {
     this.app.use(favicon(path.join(staticDir, 'favicon.ico')));
 
     authn(this.app, this.authn);
+
+    // Server-side auth endpoints (email/password, OAuth)
+    const firebaseRestClient = createFirebaseRestClient({
+      apiKey: 'AIzaSyConH72HQl9xOtjmYJO9o2kQ9nZZzl96G8',
+      emulatorHost: process.env.FIREBASE_AUTH_EMULATOR_HOST,
+    });
+
+    const host = this.app.get('host') as string;
+    const port = this.app.get('port') as number;
+    const baseUrl = host === 'localhost' ? `http://localhost:${port}` : `https://${host}`;
+
+    const authConfig = this.app.get('authentication') as Record<string, unknown>;
+    const googleAuthConfig = authConfig?.google as Record<string, string> | undefined;
+    const appleAuthConfig = authConfig?.apple as Record<string, string> | undefined;
+
+    const authRouter = createAuthRouter({
+      firebaseRestClient,
+      firebaseAdmin: this.authn,
+      users: this.app.db.user,
+      baseUrl,
+      firestore: this.app.db.firestore,
+      googleConfig:
+        googleAuthConfig?.clientID && googleAuthConfig?.clientSecret
+          ? {
+              clientId: googleAuthConfig.clientID,
+              clientSecret: googleAuthConfig.clientSecret,
+              authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+              tokenUrl: 'https://oauth2.googleapis.com/token',
+              scopes: ['openid', 'email', 'profile'],
+              callbackPath: '/auth/google/callback',
+            }
+          : undefined,
+      appleConfig:
+        appleAuthConfig?.clientID && appleAuthConfig?.teamID && appleAuthConfig?.keyID && appleAuthConfig?.privateKey
+          ? {
+              clientId: appleAuthConfig.clientID,
+              clientSecret: '', // Generated dynamically
+              teamId: appleAuthConfig.teamID,
+              keyId: appleAuthConfig.keyID,
+              privateKey: appleAuthConfig.privateKey,
+              authorizationUrl: 'https://appleid.apple.com/auth/authorize',
+              tokenUrl: 'https://appleid.apple.com/auth/token',
+              scopes: ['name', 'email'],
+              callbackPath: '/auth/apple/callback',
+            }
+          : undefined,
+    });
+
+    this.app.use('/auth', authRouter);
 
     // authenticated:
     // /api is for API requests

@@ -34,6 +34,9 @@ export class User extends jspb.Message {
   getCanCreateProjects(): boolean;
   setCanCreateProjects(value: boolean): void;
 
+  getProviderUserId(): string;
+  setProviderUserId(value: string): void;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): User.AsObject;
   static toObject(includeInstance: boolean, msg: User): User.AsObject;
@@ -55,5 +58,6 @@ export namespace User {
     isAdmin: boolean;
     isDeactivated: boolean;
     canCreateProjects: boolean;
+    providerUserId: string;
   };
 }

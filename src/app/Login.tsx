@@ -4,17 +4,6 @@
 
 import * as React from 'react';
 
-import {
-  signInWithRedirect,
-  GoogleAuthProvider,
-  OAuthProvider,
-  Auth as FirebaseAuth,
-  fetchSignInMethodsForEmail,
-  createUserWithEmailAndPassword,
-  updateProfile,
-  sendPasswordResetEmail,
-  signInWithEmailAndPassword,
-} from '@firebase/auth';
 import clsx from 'clsx';
 
 import {
@@ -38,7 +27,7 @@ type EmailLoginStates = 'showEmail' | 'showPassword' | 'showSignup' | 'showProvi
 
 export interface LoginProps {
   disabled: boolean;
-  auth: FirebaseAuth;
+  onLoginSuccess?: () => void;
 }
 
 interface LoginState {
@@ -50,13 +39,6 @@ interface LoginState {
   fullName: string;
   fullNameError: string | undefined;
   provider: 'google.com' | 'apple.com' | undefined;
-}
-
-function appleProvider(): OAuthProvider {
-  const provider = new OAuthProvider('apple.com');
-  provider.addScope('email');
-  provider.addScope('name');
-  return provider;
 }
 
 export const GoogleIcon: React.FunctionComponent = (props) => {
@@ -86,17 +68,14 @@ export class Login extends React.Component<LoginProps, LoginState> {
   }
 
   appleLoginClick = () => {
-    const provider = appleProvider();
-    setTimeout(async () => {
-      await signInWithRedirect(this.props.auth, provider);
-    });
+    const currentPath = window.location.pathname + window.location.search;
+    const returnUrl = encodeURIComponent(currentPath);
+    window.location.href = `/auth/apple?returnUrl=${returnUrl}`;
   };
   googleLoginClick = () => {
-    const provider = new GoogleAuthProvider();
-    provider.addScope('profile');
-    setTimeout(async () => {
-      await signInWithRedirect(this.props.auth, provider);
-    });
+    const currentPath = window.location.pathname + window.location.search;
+    const returnUrl = encodeURIComponent(currentPath);
+    window.location.href = `/auth/google?returnUrl=${returnUrl}`;
   };
   emailLoginClick = () => {
     this.setState({ emailLoginFlow: 'showEmail' });
@@ -120,24 +99,32 @@ export class Login extends React.Component<LoginProps, LoginState> {
       return;
     }
 
-    const methods = await fetchSignInMethodsForEmail(this.props.auth, email);
-    if (methods.includes('password')) {
-      this.setState({ emailLoginFlow: 'showPassword' });
-    } else if (methods.length === 0) {
-      this.setState({ emailLoginFlow: 'showSignup' });
-    } else {
-      // we only allow 1 method
-      const method = methods[0];
-      if (method === 'google.com' || method === 'apple.com') {
-        this.setState({
-          emailLoginFlow: 'showProviderRedirect',
-          provider: methods[0] as 'google.com' | 'apple.com',
-        });
+    try {
+      const response = await fetch('/auth/providers', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+
+      const { providers, registered } = await response.json();
+
+      if (providers.includes('password')) {
+        this.setState({ emailLoginFlow: 'showPassword' });
+      } else if (!registered) {
+        this.setState({ emailLoginFlow: 'showSignup' });
+      } else if (providers.includes('google.com')) {
+        this.setState({ emailLoginFlow: 'showProviderRedirect', provider: 'google.com' });
+      } else if (providers.includes('apple.com')) {
+        this.setState({ emailLoginFlow: 'showProviderRedirect', provider: 'apple.com' });
       } else {
         this.setState({
           emailError: 'an unknown error occurred; try a different email address',
         });
       }
+    } catch (err) {
+      console.log(err);
+      this.setState({ emailError: 'Failed to check email. Please try again.' });
     }
   };
   onSubmitRecovery = async () => {
@@ -147,7 +134,16 @@ export class Login extends React.Component<LoginProps, LoginState> {
       return;
     }
 
-    await sendPasswordResetEmail(this.props.auth, email);
+    try {
+      await fetch('/auth/reset-password', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+    } catch (err) {
+      console.log(err);
+    }
 
     this.setState({
       emailLoginFlow: 'showPassword',
@@ -175,8 +171,23 @@ export class Login extends React.Component<LoginProps, LoginState> {
     }
 
     try {
-      const userCred = await createUserWithEmailAndPassword(this.props.auth, email, password);
-      await updateProfile(userCred.user, { displayName: fullName });
+      const response = await fetch('/auth/signup', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          password,
+          displayName: fullName,
+        }),
+      });
+
+      if (response.ok) {
+        this.props.onLoginSuccess?.();
+      } else {
+        const { error } = await response.json();
+        this.setState({ passwordError: error || 'Something went wrong' });
+      }
     } catch (err) {
       console.log(err);
       if (err instanceof Error) {
@@ -202,12 +213,24 @@ export class Login extends React.Component<LoginProps, LoginState> {
 
     const password = this.state.password.trim();
     if (!password) {
-      this.setState({ passwordError: 'Enter your email address to continue' });
+      this.setState({ passwordError: 'Enter your password to continue' });
       return;
     }
 
     try {
-      await signInWithEmailAndPassword(this.props.auth, email, password);
+      const response = await fetch('/auth/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+
+      if (response.ok) {
+        this.props.onLoginSuccess?.();
+      } else {
+        const { error } = await response.json();
+        this.setState({ passwordError: error || 'Incorrect password' });
+      }
     } catch (err) {
       console.log(err);
       if (err instanceof Error) {
