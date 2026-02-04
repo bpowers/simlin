@@ -22,6 +22,8 @@ use simlin_engine::{
 };
 use simlin_engine::{load_csv, load_dat, open_vensim, open_xmile, to_xmile};
 
+mod gen_stdlib;
+
 const VERSION: &str = "1.0";
 const EXIT_FAILURE: i32 = 1;
 
@@ -55,12 +57,14 @@ fn usage() -> ! {
             "    --reference FILE reference TSV for debug subcommand\n",
             "    --no-output      don't print the output (for benchmarking)\n",
             "    --ltm            enable Loops That Matter analysis\n",
+            "    --stdlib-dir DIR directory containing stdlib/*.stmx files\n",
             "\n\
          SUBCOMMANDS:\n",
             "    simulate         Simulate a model and display output\n",
             "    convert          Convert an XMILE or Vensim model to protobuf\n",
             "    equations        Print the equations out\n",
             "    debug            Output model equations interleaved with a reference run\n",
+            "    gen-stdlib       Generate Rust code for stdlib models\n",
         ),
         VERSION,
         argv0
@@ -72,6 +76,7 @@ struct Args {
     path: Option<String>,
     output: Option<String>,
     reference: Option<String>,
+    stdlib_dir: Option<String>,
     is_vensim: bool,
     is_pb_input: bool,
     is_to_xmile: bool,
@@ -81,6 +86,7 @@ struct Args {
     is_equations: bool,
     is_debug: bool,
     is_ltm: bool,
+    is_gen_stdlib: bool,
 }
 
 fn parse_args() -> StdResult<Args, Box<dyn std::error::Error>> {
@@ -105,6 +111,8 @@ fn parse_args() -> StdResult<Args, Box<dyn std::error::Error>> {
         args.is_equations = true;
     } else if subcommand == "debug" {
         args.is_debug = true;
+    } else if subcommand == "gen-stdlib" {
+        args.is_gen_stdlib = true;
     } else {
         eprintln!("error: unknown subcommand {}", subcommand);
         usage();
@@ -112,6 +120,7 @@ fn parse_args() -> StdResult<Args, Box<dyn std::error::Error>> {
 
     args.output = parsed.value_from_str("--output").ok();
     args.reference = parsed.value_from_str("--reference").ok();
+    args.stdlib_dir = parsed.value_from_str("--stdlib-dir").ok();
     args.is_no_output = parsed.contains("--no-output");
     args.is_model_only = parsed.contains("--model-only");
     args.is_to_xmile = parsed.contains("--to-xmile");
@@ -120,12 +129,14 @@ fn parse_args() -> StdResult<Args, Box<dyn std::error::Error>> {
     args.is_ltm = parsed.contains("--ltm");
 
     let free_arguments = parsed.finish();
-    if free_arguments.is_empty() {
+    if free_arguments.is_empty() && !args.is_gen_stdlib {
         eprintln!("error: input path required");
         usage();
     }
 
-    args.path = free_arguments[0].to_str().map(|s| s.to_owned());
+    args.path = free_arguments
+        .first()
+        .and_then(|s| s.to_str().map(|s| s.to_owned()));
 
     Ok(args)
 }
@@ -258,6 +269,18 @@ fn main() {
             usage();
         }
     };
+
+    if args.is_gen_stdlib {
+        let stdlib_dir = args.stdlib_dir.unwrap_or_else(|| "stdlib".to_string());
+        let output_path = args
+            .output
+            .unwrap_or_else(|| "src/simlin-engine/src/stdlib.gen.rs".to_string());
+        if let Err(err) = gen_stdlib::generate(&stdlib_dir, &output_path) {
+            die!("gen-stdlib failed: {}", err);
+        }
+        return;
+    }
+
     let file_path = args.path.unwrap_or_else(|| "/dev/stdin".to_string());
 
     let project = if args.is_vensim {

@@ -32,7 +32,7 @@
     "start:backend": "pnpm --filter @simlin/server start:backend",
     "start:frontend": "pnpm --filter @simlin/app start:frontend",
     "build:gen-protobufs": "protoc --plugin='protoc-gen-ts=node_modules/.bin/protoc-gen-ts' --js_out='import_style=commonjs_strict,binary:.' --ts_out=. $(find src/server -name '*.proto') && scripts/gen-rust-protobufs.sh && pnpm format",
-    "rebuild-stdlib": "cargo build && for input in stdlib/*.stmx; do model=\"$(basename $input | cut -d '.' -f 1)\"; target/debug/simlin convert --model-only \"$input\" --output src/simlin-engine/src/stdlib/\"$model\".pb; done",
+    "rebuild-stdlib": "./scripts/gen-stdlib.sh",
     "build": "pnpm -r run build",
     "clean": "pnpm -r run clean",
     "deploy": "export NODE_ENV=production && pnpm clean && pnpm build && pnpm --filter @simlin/app deploy && gcloud app deploy ./.app.prod.yaml && pnpm --filter @simlin/app deploy-clean",
