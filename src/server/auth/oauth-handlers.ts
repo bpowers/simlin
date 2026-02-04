@@ -67,6 +67,9 @@ export function createGoogleOAuthInitiateHandler(deps: GoogleOAuthHandlerDeps): 
       const returnUrl = typeof req.query.returnUrl === 'string' ? req.query.returnUrl : undefined;
       const state = await deps.stateStore.create(returnUrl);
 
+      // Store state in session to prevent login CSRF attacks
+      (req.session as Record<string, unknown>).oauthState = state;
+
       const redirectUri = `${deps.baseUrl}${deps.config.callbackPath}`;
       const params = new URLSearchParams({
         client_id: deps.config.clientId,
@@ -113,7 +116,17 @@ export function createGoogleOAuthCallbackHandler(deps: GoogleOAuthHandlerDeps): 
         return;
       }
 
+      // Verify state matches what was stored in session to prevent login CSRF
+      const sessionState = (req.session as Record<string, unknown>)?.oauthState;
+      if (sessionState !== state) {
+        res.status(400).json({ error: 'State mismatch - possible CSRF attack' });
+        return;
+      }
+
       const returnUrl = validateReturnUrl(stateResult.returnUrl, deps.baseUrl);
+
+      // Clear oauthState from session after successful validation
+      delete (req.session as Record<string, unknown>).oauthState;
 
       await deps.stateStore.invalidate(state);
 
@@ -175,6 +188,9 @@ export function createAppleOAuthInitiateHandler(deps: AppleOAuthHandlerDeps): Re
       const returnUrl = typeof req.query.returnUrl === 'string' ? req.query.returnUrl : undefined;
       const state = await deps.stateStore.create(returnUrl);
 
+      // Store state in session to prevent login CSRF attacks
+      (req.session as Record<string, unknown>).oauthState = state;
+
       const redirectUri = `${deps.baseUrl}${deps.config.callbackPath}`;
       const params = new URLSearchParams({
         client_id: deps.config.clientId,
@@ -220,7 +236,17 @@ export function createAppleOAuthCallbackHandler(deps: AppleOAuthHandlerDeps): Re
         return;
       }
 
+      // Verify state matches what was stored in session to prevent login CSRF
+      const sessionState = (req.session as Record<string, unknown>)?.oauthState;
+      if (sessionState !== state) {
+        res.status(400).json({ error: 'State mismatch - possible CSRF attack' });
+        return;
+      }
+
       const returnUrl = validateReturnUrl(stateResult.returnUrl, deps.baseUrl);
+
+      // Clear oauthState from session after successful validation
+      delete (req.session as Record<string, unknown>).oauthState;
 
       await deps.stateStore.invalidate(state);
 
