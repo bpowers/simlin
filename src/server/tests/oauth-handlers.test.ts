@@ -694,8 +694,8 @@ describe('createAppleOAuthCallbackHandler', () => {
 
       await handler(req as Request, res as Response, jest.fn());
 
-      // Should find user by providerUserId
-      expect(deps.users.findOneByScan).toHaveBeenCalledWith({ providerUserId: 'apple-user-123' });
+      // Should find user by providerUserId AND provider (prevents cross-provider collisions)
+      expect(deps.users.findOneByScan).toHaveBeenCalledWith({ providerUserId: 'apple-user-123', provider: 'apple' });
 
       // Should login the existing user
       expect(req.login).toHaveBeenCalledWith(existingUser, expect.any(Function));
@@ -736,8 +736,8 @@ describe('createAppleOAuthCallbackHandler', () => {
 
       await handler(req as Request, res as Response, jest.fn());
 
-      // Should try to find user by providerUserId
-      expect(deps.users.findOneByScan).toHaveBeenCalledWith({ providerUserId: 'apple-user-unknown' });
+      // Should try to find user by providerUserId AND provider
+      expect(deps.users.findOneByScan).toHaveBeenCalledWith({ providerUserId: 'apple-user-unknown', provider: 'apple' });
 
       // Should redirect with error since user not found and no email to create one
       expect(getRedirectUrl()).toBe('/?error=apple_no_email');

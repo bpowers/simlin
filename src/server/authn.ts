@@ -186,7 +186,8 @@ export async function getOrCreateUserFromVerifiedInfo(
   let matchedByEmail = false;
   try {
     if (info.providerUserId) {
-      user = await users.findOneByScan({ providerUserId: info.providerUserId });
+      // Include provider in lookup to prevent cross-provider collisions
+      user = await users.findOneByScan({ providerUserId: info.providerUserId, provider: info.provider });
     }
     if (!user && info.email) {
       user = await users.findOneByScan({ email: info.email });
