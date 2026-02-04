@@ -527,6 +527,55 @@ describe('createGoogleOAuthCallbackHandler', () => {
 
       expect(getRedirectUrl()).toBe('/?error=oauth_denied');
     });
+
+    it('should reject disabled Firebase users', async () => {
+      const deps = createMockDeps();
+      const handler = createGoogleOAuthCallbackHandler(deps);
+
+      (deps.stateStore as jest.Mocked<OAuthStateStore>).validate.mockResolvedValue({
+        valid: true,
+        returnUrl: '/',
+      });
+      (deps.stateStore as jest.Mocked<OAuthStateStore>).invalidate.mockResolvedValue();
+
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            access_token: 'test-access-token',
+            id_token: 'test-id-token',
+            expires_in: 3600,
+            token_type: 'Bearer',
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            sub: 'google-123',
+            email: 'disabled@example.com',
+            email_verified: true,
+            name: 'Disabled User',
+          }),
+        });
+
+      // Return a disabled Firebase user
+      (deps.firebaseAdmin as jest.Mocked<admin.auth.Auth>).getUserByEmail.mockResolvedValue({
+        uid: 'fb-uid-123',
+        email: 'disabled@example.com',
+        disabled: true,
+      } as admin.auth.UserRecord);
+
+      const req = createMockRequest({ code: 'test-code', state: 'valid-state' });
+      const { res, getRedirectUrl } = createMockResponse();
+
+      await handler(req as Request, res as Response, jest.fn());
+
+      // Should redirect with account disabled error
+      expect(getRedirectUrl()).toBe('/?error=account_disabled');
+
+      // Should NOT have called login
+      expect(req.login).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -558,6 +607,51 @@ describe('createAppleOAuthCallbackHandler', () => {
   beforeEach(() => {
     mockFetch.mockReset();
     jest.clearAllMocks();
+  });
+
+  describe('disabled user handling', () => {
+    it('should reject disabled Firebase users', async () => {
+      const deps = createAppleMockDeps();
+      const handler = createAppleOAuthCallbackHandler(deps);
+
+      (deps.stateStore as jest.Mocked<OAuthStateStore>).validate.mockResolvedValue({
+        valid: true,
+        returnUrl: '/',
+      });
+      (deps.stateStore as jest.Mocked<OAuthStateStore>).invalidate.mockResolvedValue();
+
+      // Mock Apple token exchange
+      (exchangeAppleCode as jest.Mock).mockResolvedValue({
+        access_token: 'test-access-token',
+        id_token: 'test-id-token',
+        expires_in: 3600,
+        token_type: 'Bearer',
+      });
+
+      // Mock verifyAppleIdToken
+      (verifyAppleIdToken as jest.Mock).mockResolvedValue({
+        sub: 'apple-123',
+        email: 'disabled@example.com',
+      });
+
+      // Return a disabled Firebase user
+      (deps.firebaseAdmin as jest.Mocked<admin.auth.Auth>).getUserByEmail.mockResolvedValue({
+        uid: 'fb-uid-123',
+        email: 'disabled@example.com',
+        disabled: true,
+      } as admin.auth.UserRecord);
+
+      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' });
+      const { res, getRedirectUrl } = createMockResponse();
+
+      await handler(req as Request, res as Response, jest.fn());
+
+      // Should redirect with account disabled error
+      expect(getRedirectUrl()).toBe('/?error=account_disabled');
+
+      // Should NOT have called login
+      expect(req.login).not.toHaveBeenCalled();
+    });
   });
 
   describe('returning user without email', () => {
