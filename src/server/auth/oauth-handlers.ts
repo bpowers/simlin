@@ -259,7 +259,8 @@ export function createAppleOAuthCallbackHandler(deps: AppleOAuthHandlerDeps): Re
 
       if (!email) {
         // Apple omits email on subsequent logins. Look up user by providerUserId.
-        let existingUser = await deps.users.findOneByScan({ providerUserId: claims.sub });
+        // Include provider to prevent cross-provider collisions.
+        let existingUser = await deps.users.findOneByScan({ providerUserId: claims.sub, provider: 'apple' });
         if (existingUser) {
           await loginUser(req, existingUser);
           res.redirect(returnUrl);

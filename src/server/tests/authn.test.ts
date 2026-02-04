@@ -47,7 +47,8 @@ describe('getOrCreateUserFromVerifiedInfo', () => {
 
       expect(err).toBeUndefined();
       expect(user).toBe(existingUser);
-      expect(users.findOneByScan).toHaveBeenCalledWith({ providerUserId: 'google-123' });
+      // Should include provider in lookup to prevent cross-provider collisions
+      expect(users.findOneByScan).toHaveBeenCalledWith({ providerUserId: 'google-123', provider: 'google' });
     });
   });
 
@@ -79,8 +80,8 @@ describe('getOrCreateUserFromVerifiedInfo', () => {
       expect(err).toBeUndefined();
       expect(user).toBeDefined();
 
-      // Should have searched by providerUserId first
-      expect(users.findOneByScan).toHaveBeenNthCalledWith(1, { providerUserId: 'apple-sub-456' });
+      // Should have searched by providerUserId AND provider first
+      expect(users.findOneByScan).toHaveBeenNthCalledWith(1, { providerUserId: 'apple-sub-456', provider: 'apple' });
       // Then by email
       expect(users.findOneByScan).toHaveBeenNthCalledWith(2, { email: 'test@example.com' });
 
