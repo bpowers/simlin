@@ -195,15 +195,18 @@ export async function getOrCreateUserFromVerifiedInfo(
         matchedByEmail = true;
       }
     }
-    if (user && matchedByEmail && info.providerUserId && !user.getProviderUserId()) {
-      // User was found by email but has no providerUserId set.
-      // Update to use the new provider info so future logins without email work.
-      // Only do this if the user doesn't already have a providerUserId - we don't
-      // want to overwrite an existing provider link as that would break re-login
-      // via the original provider (e.g., Apple often omits email on re-login).
-      user.setProviderUserId(info.providerUserId);
-      user.setProvider(info.provider);
-      await users.update(user.getId(), {}, user);
+    if (user && matchedByEmail && info.providerUserId) {
+      const existingProvider = user.getProvider();
+      // Update if: user has no providerUserId, OR existing provider is 'password'
+      // (password provider uses Firebase UID as providerUserId, not useful for lookups).
+      // DON'T update if existing provider is an OAuth provider (google/apple) -
+      // that would break re-login via the original OAuth provider since they
+      // often omit email on subsequent logins.
+      if (!user.getProviderUserId() || existingProvider === 'password') {
+        user.setProviderUserId(info.providerUserId);
+        user.setProvider(info.provider);
+        await users.update(user.getId(), {}, user);
+      }
     }
     if (!user) {
       const created = new Timestamp();

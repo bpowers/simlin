@@ -121,10 +121,10 @@ describe('getOrCreateUserFromVerifiedInfo', () => {
       expect(users.update).not.toHaveBeenCalled();
     });
 
-    it('should preserve existing providerUserId when signing in with different provider', async () => {
+    it('should preserve existing providerUserId when signing in with different OAuth provider', async () => {
       const users = createMockUsers();
 
-      // User originally signed up with Apple
+      // User originally signed up with Apple (OAuth provider)
       const existingUser = new User();
       existingUser.setId('user-123');
       existingUser.setEmail('test@example.com');
@@ -153,6 +153,40 @@ describe('getOrCreateUserFromVerifiedInfo', () => {
       // User should still have original Apple provider info
       expect(existingUser.getProviderUserId()).toBe('apple-sub-original');
       expect(existingUser.getProvider()).toBe('apple');
+    });
+
+    it('should update providerUserId when password user signs in with OAuth', async () => {
+      const users = createMockUsers();
+
+      // User originally signed up with password (providerUserId is Firebase UID)
+      const existingUser = new User();
+      existingUser.setId('user-123');
+      existingUser.setEmail('test@example.com');
+      existingUser.setProvider('password');
+      existingUser.setProviderUserId('firebase-uid-123');
+
+      // First lookup by providerUserId+provider fails (different provider)
+      // Second lookup by email succeeds
+      users.findOneByScan.mockResolvedValueOnce(undefined).mockResolvedValueOnce(existingUser);
+      users.update.mockResolvedValue(existingUser);
+
+      const info: VerifiedUserInfo = {
+        email: 'test@example.com',
+        displayName: 'Test User',
+        provider: 'apple',
+        providerUserId: 'apple-sub-123',
+      };
+
+      const [user, err] = await getOrCreateUserFromVerifiedInfo(users, info);
+
+      expect(err).toBeUndefined();
+      expect(user).toBeDefined();
+
+      // Should have updated since existing provider is 'password'
+      expect(users.update).toHaveBeenCalledWith('user-123', {}, expect.any(User));
+      const updatedUser = users.update.mock.calls[0][2] as User;
+      expect(updatedUser.getProviderUserId()).toBe('apple-sub-123');
+      expect(updatedUser.getProvider()).toBe('apple');
     });
   });
 
