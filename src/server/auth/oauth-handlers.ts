@@ -259,11 +259,35 @@ export function createAppleOAuthCallbackHandler(deps: AppleOAuthHandlerDeps): Re
 
       if (!email) {
         // Apple omits email on subsequent logins. Look up user by providerUserId.
-        const existingUser = await deps.users.findOneByScan({ providerUserId: claims.sub });
+        let existingUser = await deps.users.findOneByScan({ providerUserId: claims.sub });
         if (existingUser) {
           await loginUser(req, existingUser);
           res.redirect(returnUrl);
           return;
+        }
+
+        // Fallback for users created before providerUserId migration: try to find via Firebase
+        // provider link. This handles users who signed in with Apple before we started storing
+        // the Apple sub as providerUserId.
+        try {
+          const fbUser = await deps.firebaseAdmin.getUserByProviderUid('apple.com', claims.sub);
+          if (fbUser && !fbUser.disabled && fbUser.email) {
+            // Found Firebase user with this Apple ID - look up local user by email
+            existingUser = await deps.users.findOneByScan({ email: fbUser.email });
+            if (existingUser) {
+              // Update providerUserId so future logins work directly
+              existingUser.setProviderUserId(claims.sub);
+              existingUser.setProvider('apple');
+              await deps.users.update(existingUser.getId(), {}, existingUser);
+
+              await loginUser(req, existingUser);
+              res.redirect(returnUrl);
+              return;
+            }
+          }
+        } catch (err) {
+          // getUserByProviderUid throws if user not found - that's expected
+          logger.debug('No Firebase user found with Apple provider:', err);
         }
 
         // No email and no existing user - we can't create a new account
