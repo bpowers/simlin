@@ -32,7 +32,7 @@ git push --force-with-lease
 
 Run with a 20-minute timeout:
 ```bash
-timeout 1200 codex review --base origin/main 2>/dev/null
+codex --model 'gpt-5.2-codex-xhigh' review --base origin/main 2>/dev/null
 ```
 
 Parse the output. If the output is empty or explicitly states something like "no problems detected", proceed to Step 2.
