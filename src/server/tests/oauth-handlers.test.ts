@@ -68,16 +68,11 @@ function createMockUsers(): jest.Mocked<Table<User>> {
   };
 }
 
-function createMockRequest(
-  query: Record<string, string> = {},
-  body: Record<string, unknown> = {},
-  session: Record<string, unknown> = {},
-): Partial<Request> {
+function createMockRequest(query: Record<string, string> = {}, body: Record<string, unknown> = {}): Partial<Request> {
   const loginFn = jest.fn((user: unknown, cb: (err?: Error) => void) => cb());
   return {
     query,
     body,
-    session: session as Request['session'],
     login: loginFn as unknown as Request['login'],
   };
 }
@@ -218,20 +213,6 @@ describe('createGoogleOAuthInitiateHandler', () => {
     expect(redirectUrl).toContain('redirect_uri=https%3A%2F%2Fapp.simlin.com%2Fauth%2Fgoogle%2Fcallback');
   });
 
-  it('should store state in session to prevent login CSRF', async () => {
-    const deps = createMockDeps();
-    const handler = createGoogleOAuthInitiateHandler(deps);
-
-    (deps.stateStore as jest.Mocked<OAuthStateStore>).create.mockResolvedValue('test-state-csrf');
-
-    const session: Record<string, unknown> = {};
-    const req = createMockRequest({}, {}, session);
-    const { res } = createMockResponse();
-
-    await handler(req as Request, res as Response, jest.fn());
-
-    expect(session.oauthState).toBe('test-state-csrf');
-  });
 });
 
 describe('createGoogleOAuthCallbackHandler', () => {
@@ -266,38 +247,6 @@ describe('createGoogleOAuthCallbackHandler', () => {
 
       expect(getStatus()).toBe(400);
       expect(getBody()).toEqual({ error: 'Invalid or expired state' });
-    });
-
-    it('should return 400 when session state does not match to prevent login CSRF', async () => {
-      const deps = createMockDeps();
-      const handler = createGoogleOAuthCallbackHandler(deps);
-
-      (deps.stateStore as jest.Mocked<OAuthStateStore>).validate.mockResolvedValue({ valid: true });
-
-      const session = { oauthState: 'different-state' };
-      const req = createMockRequest({ code: 'test-code', state: 'attacker-state' }, {}, session);
-      const { res, getStatus, getBody } = createMockResponse();
-
-      await handler(req as Request, res as Response, jest.fn());
-
-      expect(getStatus()).toBe(400);
-      expect(getBody()).toEqual({ error: 'State mismatch - possible CSRF attack' });
-    });
-
-    it('should return 400 when session has no oauthState', async () => {
-      const deps = createMockDeps();
-      const handler = createGoogleOAuthCallbackHandler(deps);
-
-      (deps.stateStore as jest.Mocked<OAuthStateStore>).validate.mockResolvedValue({ valid: true });
-
-      const session: Record<string, unknown> = {};
-      const req = createMockRequest({ code: 'test-code', state: 'test-state' }, {}, session);
-      const { res, getStatus, getBody } = createMockResponse();
-
-      await handler(req as Request, res as Response, jest.fn());
-
-      expect(getStatus()).toBe(400);
-      expect(getBody()).toEqual({ error: 'State mismatch - possible CSRF attack' });
     });
 
     it('should invalidate state after successful use', async () => {
@@ -339,7 +288,7 @@ describe('createGoogleOAuthCallbackHandler', () => {
       (deps.users as jest.Mocked<Table<User>>).findOneByScan.mockResolvedValue(undefined);
       (deps.users as jest.Mocked<Table<User>>).create.mockResolvedValue();
 
-      const req = createMockRequest({ code: 'test-code', state: 'valid-state' }, {}, { oauthState: 'valid-state' });
+      const req = createMockRequest({ code: 'test-code', state: 'valid-state' });
       const { res } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
@@ -387,7 +336,7 @@ describe('createGoogleOAuthCallbackHandler', () => {
       (deps.users as jest.Mocked<Table<User>>).findOneByScan.mockResolvedValue(undefined);
       (deps.users as jest.Mocked<Table<User>>).create.mockResolvedValue();
 
-      const req = createMockRequest({ code: 'test-code', state: 'valid-state' }, {}, { oauthState: 'valid-state' });
+      const req = createMockRequest({ code: 'test-code', state: 'valid-state' });
       const { res, getRedirectUrl } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
@@ -433,7 +382,7 @@ describe('createGoogleOAuthCallbackHandler', () => {
       (deps.users as jest.Mocked<Table<User>>).findOneByScan.mockResolvedValue(undefined);
       (deps.users as jest.Mocked<Table<User>>).create.mockResolvedValue();
 
-      const req = createMockRequest({ code: 'test-code', state: 'valid-state' }, {}, { oauthState: 'valid-state' });
+      const req = createMockRequest({ code: 'test-code', state: 'valid-state' });
       const { res, getRedirectUrl } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
@@ -481,7 +430,7 @@ describe('createGoogleOAuthCallbackHandler', () => {
       (deps.users as jest.Mocked<Table<User>>).findOneByScan.mockResolvedValue(undefined);
       (deps.users as jest.Mocked<Table<User>>).create.mockResolvedValue();
 
-      const req = createMockRequest({ code: 'test-code', state: 'valid-state' }, {}, { oauthState: 'valid-state' });
+      const req = createMockRequest({ code: 'test-code', state: 'valid-state' });
       const { res } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
@@ -530,7 +479,7 @@ describe('createGoogleOAuthCallbackHandler', () => {
         createdUser = user;
       });
 
-      const req = createMockRequest({ code: 'test-code', state: 'valid-state' }, {}, { oauthState: 'valid-state' });
+      const req = createMockRequest({ code: 'test-code', state: 'valid-state' });
       const { res } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
@@ -557,7 +506,7 @@ describe('createGoogleOAuthCallbackHandler', () => {
         text: async () => 'Invalid code',
       });
 
-      const req = createMockRequest({ code: 'invalid-code', state: 'valid-state' }, {}, { oauthState: 'valid-state' });
+      const req = createMockRequest({ code: 'invalid-code', state: 'valid-state' });
       const { res, getRedirectUrl } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
@@ -618,7 +567,7 @@ describe('createGoogleOAuthCallbackHandler', () => {
         disabled: true,
       } as admin.auth.UserRecord);
 
-      const req = createMockRequest({ code: 'test-code', state: 'valid-state' }, {}, { oauthState: 'valid-state' });
+      const req = createMockRequest({ code: 'test-code', state: 'valid-state' });
       const { res, getRedirectUrl } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
@@ -655,25 +604,6 @@ function createAppleMockDeps(): AppleOAuthHandlerDeps {
     baseUrl: 'https://app.simlin.com',
   };
 }
-
-describe('createAppleOAuthInitiateHandler', () => {
-  it('should store state in session to prevent login CSRF', async () => {
-    const { createAppleOAuthInitiateHandler } = await import('../auth/oauth-handlers');
-
-    const deps = createAppleMockDeps();
-    const handler = createAppleOAuthInitiateHandler(deps);
-
-    (deps.stateStore as jest.Mocked<OAuthStateStore>).create.mockResolvedValue('apple-state-csrf');
-
-    const session: Record<string, unknown> = {};
-    const req = createMockRequest({}, {}, session);
-    const { res } = createMockResponse();
-
-    await handler(req as Request, res as Response, jest.fn());
-
-    expect(session.oauthState).toBe('apple-state-csrf');
-  });
-});
 
 describe('createAppleOAuthCallbackHandler', () => {
   beforeEach(() => {
@@ -713,7 +643,7 @@ describe('createAppleOAuthCallbackHandler', () => {
         disabled: true,
       } as admin.auth.UserRecord);
 
-      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' }, { oauthState: 'valid-state' });
+      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' });
       const { res, getRedirectUrl } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
@@ -766,7 +696,7 @@ describe('createAppleOAuthCallbackHandler', () => {
         disabled: true,
       } as admin.auth.UserRecord);
 
-      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' }, { oauthState: 'valid-state' });
+      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' });
       const { res, getRedirectUrl } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
@@ -820,7 +750,7 @@ describe('createAppleOAuthCallbackHandler', () => {
         disabled: false,
       } as admin.auth.UserRecord);
 
-      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' }, { oauthState: 'valid-state' });
+      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' });
       const { res, getRedirectUrl } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
@@ -862,7 +792,7 @@ describe('createAppleOAuthCallbackHandler', () => {
       // User does NOT exist in local database
       (deps.users as jest.Mocked<Table<User>>).findOneByScan.mockResolvedValue(undefined);
 
-      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' }, { oauthState: 'valid-state' });
+      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' });
       const { res, getRedirectUrl } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
@@ -921,7 +851,7 @@ describe('createAppleOAuthCallbackHandler', () => {
 
       (deps.users as jest.Mocked<Table<User>>).update.mockResolvedValue(existingUser);
 
-      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' }, { oauthState: 'valid-state' });
+      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' });
       const { res, getRedirectUrl } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
