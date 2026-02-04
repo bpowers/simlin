@@ -263,15 +263,25 @@ export function createAppleOAuthCallbackHandler(deps: AppleOAuthHandlerDeps): Re
         let existingUser = await deps.users.findOneByScan({ providerUserId: claims.sub, provider: 'apple' });
         if (existingUser) {
           // Check if Firebase account is disabled before logging in
+          let isDisabled = false;
           try {
             const fbUser = await deps.firebaseAdmin.getUserByProviderUid('apple.com', claims.sub);
-            if (fbUser?.disabled) {
-              res.redirect('/?error=account_disabled');
-              return;
-            }
+            isDisabled = fbUser?.disabled ?? false;
           } catch {
-            // If we can't find the Firebase user, proceed with login
-            // (the user might not have been created via Firebase)
+            // If provider lookup fails, fallback to email lookup
+            if (existingUser.getEmail()) {
+              try {
+                const fbUser = await deps.firebaseAdmin.getUserByEmail(existingUser.getEmail());
+                isDisabled = fbUser?.disabled ?? false;
+              } catch {
+                // If neither lookup works, proceed with login
+              }
+            }
+          }
+
+          if (isDisabled) {
+            res.redirect('/?error=account_disabled');
+            return;
           }
 
           await loginUser(req, existingUser);
