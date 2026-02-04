@@ -27,7 +27,7 @@
     "lint": "pnpm rust-lint && pnpm -r run lint",
     "tsc": "pnpm --filter @simlin/core exec tsc --noEmit && pnpm --filter @simlin/diagram exec tsc --noEmit && pnpm --filter @simlin/server exec tsc --noEmit && pnpm --filter @simlin/app exec tsc --noEmit",
     "rust-lint": "cargo clippy",
-    "start:firestore": "(gcloud beta emulators firestore start --host-port=127.0.0.1:8092 &) && pnpm --filter @simlin/app run firebase emulators:start",
+    "start:firestore": "./scripts/start-emulators.sh",
     "start:backend": "pnpm --filter @simlin/server start:backend",
     "start:frontend": "pnpm --filter @simlin/app start:frontend",
     "build:gen-protobufs": "protoc --plugin='protoc-gen-ts=node_modules/.bin/protoc-gen-ts' --js_out='import_style=commonjs_strict,binary:.' --ts_out=. $(find src/server -name '*.proto') && scripts/gen-rust-protobufs.sh && pnpm format",
