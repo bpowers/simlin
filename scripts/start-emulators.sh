@@ -102,8 +102,10 @@ kill_process_on_port() {
 
 wait_for_port() {
     local port="$1"
-    local max_attempts="${2:-30}"
+    local timeout_secs="${2:-30}"
     local attempt=0
+    # Each iteration sleeps 0.5 seconds, so we need 2x timeout_secs iterations
+    local max_attempts=$((timeout_secs * 2))
 
     while [ $attempt -lt $max_attempts ]; do
         if get_pids_on_port "$port" | grep -q .; then
@@ -154,7 +156,7 @@ main() {
     FIRESTORE_PID=$!
 
     echo "Waiting for Firestore emulator to be ready..."
-    if ! wait_for_port "$FIRESTORE_PORT" 60; then
+    if ! wait_for_port "$FIRESTORE_PORT" 30; then
         echo "Error: Firestore emulator failed to start within 30 seconds."
         EXIT_STATUS=1
         exit 1
@@ -164,15 +166,16 @@ main() {
     echo "Starting Firebase Auth emulator on port $AUTH_PORT..."
     # Firebase CLI is in @simlin/server, but firebase.json config is in src/app
     # We need to run from src/app to pick up the config
-    (cd "$PROJECT_DIR/src/app" && "$PROJECT_DIR/src/server/node_modules/.bin/firebase" emulators:start --only auth) &
+    (cd "$PROJECT_DIR/src/app" && pnpm --filter @simlin/server exec firebase emulators:start --only auth) &
     FIREBASE_PID=$!
 
     echo "Waiting for Firebase Auth emulator to be ready..."
-    if ! wait_for_port "$AUTH_PORT" 60; then
-        echo "Warning: Firebase Auth emulator may not have started properly."
-    else
-        echo "Firebase Auth emulator ready."
+    if ! wait_for_port "$AUTH_PORT" 30; then
+        echo "Error: Firebase Auth emulator failed to start within 30 seconds."
+        EXIT_STATUS=1
+        exit 1
     fi
+    echo "Firebase Auth emulator ready."
 
     echo ""
     echo "============================================"
@@ -200,8 +203,6 @@ main() {
         fi
         sleep 1
     done
-
-    cleanup
 }
 
 main "$@"
