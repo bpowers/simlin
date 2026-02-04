@@ -48,6 +48,7 @@ function createMockStateStore(): jest.Mocked<OAuthStateStore> {
 function createMockFirebaseAdmin(): jest.Mocked<admin.auth.Auth> {
   return {
     getUserByEmail: jest.fn(),
+    getUserByProviderUid: jest.fn(),
     createUser: jest.fn(),
     updateUser: jest.fn(),
     listUsers: jest.fn(),
@@ -740,6 +741,74 @@ describe('createAppleOAuthCallbackHandler', () => {
 
       // Should redirect with error since user not found and no email to create one
       expect(getRedirectUrl()).toBe('/?error=apple_no_email');
+    });
+
+    it('should fall back to Firebase provider lookup for pre-migration users without email', async () => {
+      const deps = createAppleMockDeps();
+      const handler = createAppleOAuthCallbackHandler(deps);
+
+      (deps.stateStore as jest.Mocked<OAuthStateStore>).validate.mockResolvedValue({
+        valid: true,
+        returnUrl: '/projects/migrated',
+      });
+      (deps.stateStore as jest.Mocked<OAuthStateStore>).invalidate.mockResolvedValue();
+
+      // Mock Apple token exchange
+      (exchangeAppleCode as jest.Mock).mockResolvedValue({
+        access_token: 'test-access-token',
+        id_token: 'test-id-token',
+        expires_in: 3600,
+        token_type: 'Bearer',
+      });
+
+      // Mock verifyAppleIdToken to return claims WITHOUT email (returning user)
+      (verifyAppleIdToken as jest.Mock).mockResolvedValue({
+        sub: 'apple-pre-migration-user',
+        // no email - common for returning Apple users
+      });
+
+      // User does NOT exist by providerUserId (wasn't stored before migration)
+      // But DOES exist by email (found via Firebase provider lookup)
+      const existingUser = new User();
+      existingUser.setId('user-legacy-456');
+      existingUser.setEmail('legacy@example.com');
+      existingUser.setProvider('password'); // Was originally password user who added Apple
+      existingUser.setProviderUserId(''); // No providerUserId before migration
+
+      // First findOneByScan (by providerUserId) returns nothing
+      // Second findOneByScan (by email) returns the user
+      (deps.users as jest.Mocked<Table<User>>).findOneByScan
+        .mockResolvedValueOnce(undefined) // providerUserId lookup
+        .mockResolvedValueOnce(existingUser); // email lookup
+
+      // Firebase has this user with Apple provider linked
+      (deps.firebaseAdmin as jest.Mocked<admin.auth.Auth>).getUserByProviderUid.mockResolvedValue({
+        uid: 'fb-legacy-user',
+        email: 'legacy@example.com',
+        disabled: false,
+      } as admin.auth.UserRecord);
+
+      (deps.users as jest.Mocked<Table<User>>).update.mockResolvedValue(existingUser);
+
+      const req = createMockRequest({}, { code: 'test-code', state: 'valid-state' });
+      const { res, getRedirectUrl } = createMockResponse();
+
+      await handler(req as Request, res as Response, jest.fn());
+
+      // Should have looked up Firebase user by Apple provider
+      expect(deps.firebaseAdmin.getUserByProviderUid).toHaveBeenCalledWith('apple.com', 'apple-pre-migration-user');
+
+      // Should have updated the user's providerUserId for future logins
+      expect(deps.users.update).toHaveBeenCalled();
+      const updateCall = (deps.users.update as jest.Mock).mock.calls[0];
+      expect(updateCall[0]).toBe('user-legacy-456');
+      const updatedUser = updateCall[2] as User;
+      expect(updatedUser.getProviderUserId()).toBe('apple-pre-migration-user');
+      expect(updatedUser.getProvider()).toBe('apple');
+
+      // Should login and redirect
+      expect(req.login).toHaveBeenCalled();
+      expect(getRedirectUrl()).toBe('/projects/migrated');
     });
   });
 });
