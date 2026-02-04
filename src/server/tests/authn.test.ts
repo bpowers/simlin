@@ -120,6 +120,40 @@ describe('getOrCreateUserFromVerifiedInfo', () => {
       // Should NOT have updated since providerUserId already matches
       expect(users.update).not.toHaveBeenCalled();
     });
+
+    it('should preserve existing providerUserId when signing in with different provider', async () => {
+      const users = createMockUsers();
+
+      // User originally signed up with Apple
+      const existingUser = new User();
+      existingUser.setId('user-123');
+      existingUser.setEmail('test@example.com');
+      existingUser.setProvider('apple');
+      existingUser.setProviderUserId('apple-sub-original');
+
+      // First lookup by providerUserId+provider fails (different provider)
+      // Second lookup by email succeeds
+      users.findOneByScan.mockResolvedValueOnce(undefined).mockResolvedValueOnce(existingUser);
+
+      const info: VerifiedUserInfo = {
+        email: 'test@example.com',
+        displayName: 'Test User',
+        provider: 'google',
+        providerUserId: 'google-sub-new',
+      };
+
+      const [user, err] = await getOrCreateUserFromVerifiedInfo(users, info);
+
+      expect(err).toBeUndefined();
+      expect(user).toBeDefined();
+
+      // Should NOT have updated - preserving Apple providerUserId for re-login
+      expect(users.update).not.toHaveBeenCalled();
+
+      // User should still have original Apple provider info
+      expect(existingUser.getProviderUserId()).toBe('apple-sub-original');
+      expect(existingUser.getProvider()).toBe('apple');
+    });
   });
 
   describe('when no user exists', () => {

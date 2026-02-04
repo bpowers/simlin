@@ -195,9 +195,12 @@ export async function getOrCreateUserFromVerifiedInfo(
         matchedByEmail = true;
       }
     }
-    if (user && matchedByEmail && info.providerUserId && user.getProviderUserId() !== info.providerUserId) {
-      // User was found by email but has different (or no) providerUserId.
+    if (user && matchedByEmail && info.providerUserId && !user.getProviderUserId()) {
+      // User was found by email but has no providerUserId set.
       // Update to use the new provider info so future logins without email work.
+      // Only do this if the user doesn't already have a providerUserId - we don't
+      // want to overwrite an existing provider link as that would break re-login
+      // via the original provider (e.g., Apple often omits email on re-login).
       user.setProviderUserId(info.providerUserId);
       user.setProvider(info.provider);
       await users.update(user.getId(), {}, user);
