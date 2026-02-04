@@ -12,5 +12,6 @@ path = "src/main.rs"
 [dependencies]
 pico-args = "0.5"
 stringreader = "0.1"
+sha2 = "0.10"
 simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["file_io"] }
 simlin = { version = "0.1", path = "../libsimlin" }
