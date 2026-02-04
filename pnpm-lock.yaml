@@ -53,7 +53,7 @@ importers:
         version: 0.14.9
       '@firebase/auth':
         specifier: ^1.12.0
-        version: 1.12.0(@firebase/app@0.14.9)
+        version: 1.12.1(@firebase/app@0.14.9)
       '@rsbuild/core':
         specifier: ^1.7.3
         version: 1.7.3
@@ -357,8 +357,8 @@ importers:
         specifier: ^8.1.0
         version: 8.1.0
       jose:
-        specifier: ^6.1.3
-        version: 6.1.3
+        specifier: ^4.15.9
+        version: 4.15.9
       node-fetch:
         specifier: ^3.3.2
         version: 3.3.2
@@ -782,8 +782,8 @@ packages:
   '@firebase/auth-interop-types@0.2.4':
     resolution: {integrity: sha512-JPgcXKCuO+CWqGDnigBtvo09HeBs5u/Ktc2GaFj2m01hLarbxthLNm7Fk8iOP1aqAtXV+fnnGj7U28xmk7IwVA==}
 
-  '@firebase/auth@1.12.0':
-    resolution: {integrity: sha512-zkvLpsrxynWHk07qGrUDfCSqKf4AvfZGEqJ7mVCtYGjNNDbGE71k0Yn84rg8QEZu4hQw1BC0qDEHzpNVBcSVmA==}
+  '@firebase/auth@1.12.1':
+    resolution: {integrity: sha512-nXKj7d5bMBlnq6XpcQQpmnSVwEeHBkoVbY/+Wk0P1ebLSICoH4XPtvKOFlXKfIHmcS84mLQ99fk3njlDGKSDtw==}
     engines: {node: '>=20.0.0'}
     peerDependencies:
       '@firebase/app': 0.x
@@ -5077,8 +5077,8 @@ packages:
   jose@4.15.9:
     resolution: {integrity: sha512-1vUQX+IdDMVPj4k8kOxgUqlcK518yluMuGZwqlr44FS1ppZB/5GWh4rZG89erpOBOJjU/OBsnCVFfapsRz6nEA==}
 
-  jose@6.1.3:
-    resolution: {integrity: sha512-0TpaTfihd4QMNwrz/ob2Bp7X04yuxJkjRGi4aKmOqwhov54i6u79oCv7T+C7lo70MKH6BesI3vscD1yb/yzKXQ==}
+  jose@6.2.0:
+    resolution: {integrity: sha512-xsfE1TcSCbUdo6U07tR0mvhg0flGxU8tPLbF03mirl2ukGQENhUg4ubGYQnhVH0b5stLlPM+WOqDkEl1R1y5sQ==}
 
   js-base64@3.7.8:
     resolution: {integrity: sha512-hNngCeKxIUQiEUN3GPJOkz4wF/YvdUdbNL9hsBcMQTkKzboD7T/q3OYOuuPZLUE6dBxSGpwhk5mwuDud7JVAow==}
@@ -8126,12 +8126,12 @@ snapshots:
 
   '@firebase/auth-interop-types@0.2.4': {}
 
-  '@firebase/auth@1.12.0(@firebase/app@0.14.9)':
+  '@firebase/auth@1.12.1(@firebase/app@0.14.9)':
     dependencies:
       '@firebase/app': 0.14.9
-      '@firebase/component': 0.7.0
+      '@firebase/component': 0.7.1
       '@firebase/logger': 0.5.0
-      '@firebase/util': 1.13.0
+      '@firebase/util': 1.14.0
       tslib: 2.8.1
 
   '@firebase/component@0.7.0':
@@ -8931,7 +8931,7 @@ snapshots:
       express: 5.2.1
       express-rate-limit: 8.3.0(express@5.2.1)
       hono: 4.12.5
-      jose: 6.1.3
+      jose: 6.2.0
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
@@ -13489,7 +13489,7 @@ snapshots:
 
   jose@4.15.9: {}
 
-  jose@6.1.3: {}
+  jose@6.2.0: {}
 
   js-base64@3.7.8: {}
 
