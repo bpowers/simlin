@@ -1,7 +1,7 @@
 // @generated from stdlib/*.stmx
 // DO NOT EDIT - regenerate with: pnpm rebuild-stdlib
 //
-// Stdlib SHA256: e908491ac8ec639ba3274566d1a19c23ef4f055ffc4ad11b7dbac2489d4ac8ae
+// Stdlib SHA256: 7fb58d5c90732144633cb1210aa061b00667f84e6cf762eb0a4d3557fbaecf0c
 
 #![allow(
     clippy::approx_constant,

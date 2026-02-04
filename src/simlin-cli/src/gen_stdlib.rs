@@ -569,9 +569,13 @@ pub fn generate(stdlib_dir: &str, output_path: &str) -> Result<(), Box<dyn std::
     entries.sort_by_key(|e| e.path());
 
     // Compute hash of all .stmx files for staleness detection
+    // Include filenames to detect renames even when content stays the same
     let mut hasher = Sha256::new();
     for entry in &entries {
-        hasher.update(fs::read(entry.path())?);
+        let path = entry.path();
+        let file_stem = path.file_stem().unwrap().to_string_lossy();
+        hasher.update(file_stem.as_bytes());
+        hasher.update(fs::read(&path)?);
     }
     let hash = format!("{:x}", hasher.finalize());
 
