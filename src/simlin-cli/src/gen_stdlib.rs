@@ -563,7 +563,8 @@ pub fn generate(stdlib_dir: &str, output_path: &str) -> Result<(), Box<dyn std::
     let stdlib_path = Path::new(stdlib_dir);
 
     let mut entries: Vec<_> = fs::read_dir(stdlib_path)?
-        .filter_map(|e| e.ok())
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "stmx"))
         .collect();
     entries.sort_by_key(|e| e.path());
@@ -605,7 +606,14 @@ pub fn generate(stdlib_dir: &str, output_path: &str) -> Result<(), Box<dyn std::
             .into());
         }
 
-        models.push((file_stem, project.models.into_iter().next().unwrap()));
+        models.push((
+            file_stem,
+            project
+                .models
+                .into_iter()
+                .next()
+                .expect("already verified exactly 1 model"),
+        ));
     }
 
     // Generate Rust code

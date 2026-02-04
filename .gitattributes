@@ -1,2 +1,4 @@
 src/app/scripts/* linguist-vendored
 src/app/config/* linguist-vendored
+src/simlin-engine/src/stdlib.gen.rs linguist-generated=true
+src/simlin-engine/src/project_io.gen.rs linguist-generated=true

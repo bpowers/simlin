@@ -139,7 +139,9 @@ mod stdlib_freshness_tests {
         let mut hasher = Sha256::new();
         let mut entries: Vec<_> = fs::read_dir(STDLIB_DIR)
             .expect("failed to read stdlib directory")
-            .filter_map(|e| e.ok())
+            .collect::<Result<Vec<_>, _>>()
+            .expect("failed to read directory entry")
+            .into_iter()
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "stmx"))
             .collect();
         entries.sort_by_key(|e| e.path());
