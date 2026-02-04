@@ -10,12 +10,7 @@ import TextField from './components/TextField';
 
 import { defined } from '@simlin/core/common';
 import { at } from '@simlin/core/collections';
-import {
-  Variable,
-  GraphicalFunction,
-  GraphicalFunctionScale,
-  GraphicalFunctionKind,
-} from '@simlin/core/datamodel';
+import { Variable, GraphicalFunction, GraphicalFunctionScale, GraphicalFunctionKind } from '@simlin/core/datamodel';
 
 import { LineChart } from './LineChart';
 

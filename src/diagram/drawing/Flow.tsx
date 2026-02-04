@@ -7,13 +7,7 @@ import * as React from 'react';
 import { List } from 'immutable';
 import clsx from 'clsx';
 
-import {
-  Point,
-  FlowViewElement,
-  ViewElement,
-  StockViewElement,
-  CloudViewElement,
-} from '@simlin/core/datamodel';
+import { Point, FlowViewElement, ViewElement, StockViewElement, CloudViewElement } from '@simlin/core/datamodel';
 import { defined, Series } from '@simlin/core/common';
 import { at, first, last } from '@simlin/core/collections';
 
