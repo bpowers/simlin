@@ -9,7 +9,7 @@ jest.mock('jose', () => ({
 
 import * as crypto from 'crypto';
 
-import { generateAppleClientSecret } from '../auth/oauth-token-exchange';
+import { generateAppleClientSecret, verifyAppleIdToken, clearJwksCache } from '../auth/oauth-token-exchange';
 
 describe('generateAppleClientSecret', () => {
   let testPrivateKey: string;
@@ -94,5 +94,101 @@ describe('generateAppleClientSecret', () => {
 
     // ES256 signature in ieee-p1363 format is exactly 64 bytes (32 bytes r + 32 bytes s)
     expect(signature.length).toBe(64);
+  });
+});
+
+describe('verifyAppleIdToken', () => {
+  const jose = require('jose');
+
+  beforeEach(() => {
+    clearJwksCache();
+    jest.clearAllMocks();
+  });
+
+  it('should convert email_verified string "true" to boolean true', async () => {
+    // Mock fetch for JWKS
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ keys: [] }),
+    });
+
+    // Mock jose functions
+    jose.createLocalJWKSet.mockReturnValue(jest.fn());
+    jose.jwtVerify.mockResolvedValue({
+      payload: {
+        sub: 'apple-user-123',
+        email: 'test@example.com',
+        email_verified: 'true', // Apple sends string, not boolean
+      },
+    });
+
+    const result = await verifyAppleIdToken('mock-token', { clientId: 'test-client-id' });
+
+    expect(result.sub).toBe('apple-user-123');
+    expect(result.email).toBe('test@example.com');
+    expect(result.email_verified).toBe(true); // Should be boolean, not string
+    expect(typeof result.email_verified).toBe('boolean');
+  });
+
+  it('should convert email_verified string "false" to boolean false', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ keys: [] }),
+    });
+
+    jose.createLocalJWKSet.mockReturnValue(jest.fn());
+    jose.jwtVerify.mockResolvedValue({
+      payload: {
+        sub: 'apple-user-456',
+        email: 'test@example.com',
+        email_verified: 'false', // Apple sends string, not boolean
+      },
+    });
+
+    const result = await verifyAppleIdToken('mock-token', { clientId: 'test-client-id' });
+
+    expect(result.email_verified).toBe(false);
+    expect(typeof result.email_verified).toBe('boolean');
+  });
+
+  it('should handle boolean email_verified values', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ keys: [] }),
+    });
+
+    jose.createLocalJWKSet.mockReturnValue(jest.fn());
+    jose.jwtVerify.mockResolvedValue({
+      payload: {
+        sub: 'apple-user-789',
+        email: 'test@example.com',
+        email_verified: true, // In case Apple sends actual boolean
+      },
+    });
+
+    const result = await verifyAppleIdToken('mock-token', { clientId: 'test-client-id' });
+
+    expect(result.email_verified).toBe(true);
+    expect(typeof result.email_verified).toBe('boolean');
+  });
+
+  it('should handle missing email_verified', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ keys: [] }),
+    });
+
+    jose.createLocalJWKSet.mockReturnValue(jest.fn());
+    jose.jwtVerify.mockResolvedValue({
+      payload: {
+        sub: 'apple-user-000',
+        email: 'test@example.com',
+        // no email_verified
+      },
+    });
+
+    const result = await verifyAppleIdToken('mock-token', { clientId: 'test-client-id' });
+
+    expect(result.email_verified).toBeUndefined();
   });
 });

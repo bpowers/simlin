@@ -161,10 +161,19 @@ export async function verifyAppleIdToken(idToken: string, options: { clientId: s
     audience: options.clientId,
   });
 
+  // Apple may send email_verified as a string "true"/"false" instead of boolean
+  const rawEmailVerified = payload.email_verified;
+  let emailVerified: boolean | undefined;
+  if (rawEmailVerified === 'true' || rawEmailVerified === true) {
+    emailVerified = true;
+  } else if (rawEmailVerified === 'false' || rawEmailVerified === false) {
+    emailVerified = false;
+  }
+
   return {
     sub: payload.sub as string,
     email: payload.email as string | undefined,
-    email_verified: payload.email_verified as boolean | undefined,
+    email_verified: emailVerified,
     name: (payload as { name?: string }).name,
   };
 }
