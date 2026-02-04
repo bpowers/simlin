@@ -3,7 +3,7 @@ name: address-feedback-local
 description: Improve the current branch's changes by getting code reviews in a loop until all feedback is addressed
 ---
 
-You are performing iterative code review and improvement using local review tools.
+You are performing iterative code review and improvement using local review tools.  This skill takes no arguments (if any were given, ignore).  You are operating on the local checkout.  If the current branch is `main`, your task is reviewing the changes between `origin/main..HEAD`.
 
 ## Prerequisites (verify before starting)
 
