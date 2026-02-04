@@ -122,12 +122,13 @@ export function createGoogleOAuthCallbackHandler(deps: GoogleOAuthHandlerDeps): 
 
       const userInfo = await fetchGoogleUserInfo(tokens.access_token);
 
+      let fbUser: admin.auth.UserRecord | undefined;
       try {
-        await deps.firebaseAdmin.getUserByEmail(userInfo.email);
+        fbUser = await deps.firebaseAdmin.getUserByEmail(userInfo.email);
       } catch (err: unknown) {
         const adminErr = err as { code?: string };
         if (adminErr.code === 'auth/user-not-found') {
-          await deps.firebaseAdmin.createUser({
+          fbUser = await deps.firebaseAdmin.createUser({
             email: userInfo.email,
             displayName: userInfo.name,
             photoURL: userInfo.picture,
@@ -136,6 +137,11 @@ export function createGoogleOAuthCallbackHandler(deps: GoogleOAuthHandlerDeps): 
         } else {
           throw err;
         }
+      }
+
+      if (fbUser?.disabled) {
+        res.redirect('/?error=account_disabled');
+        return;
       }
 
       const [user, userErr] = await getOrCreateUserFromVerifiedInfo(deps.users, {
@@ -266,12 +272,13 @@ export function createAppleOAuthCallbackHandler(deps: AppleOAuthHandlerDeps): Re
         return;
       }
 
+      let fbUser: admin.auth.UserRecord | undefined;
       try {
-        await deps.firebaseAdmin.getUserByEmail(email);
+        fbUser = await deps.firebaseAdmin.getUserByEmail(email);
       } catch (err: unknown) {
         const adminErr = err as { code?: string };
         if (adminErr.code === 'auth/user-not-found') {
-          await deps.firebaseAdmin.createUser({
+          fbUser = await deps.firebaseAdmin.createUser({
             email,
             displayName,
             emailVerified: claims.email_verified ?? false,
@@ -279,6 +286,11 @@ export function createAppleOAuthCallbackHandler(deps: AppleOAuthHandlerDeps): Re
         } else {
           throw err;
         }
+      }
+
+      if (fbUser?.disabled) {
+        res.redirect('/?error=account_disabled');
+        return;
       }
 
       const [user, userErr] = await getOrCreateUserFromVerifiedInfo(deps.users, {
