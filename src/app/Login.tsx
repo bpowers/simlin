@@ -68,10 +68,14 @@ export class Login extends React.Component<LoginProps, LoginState> {
   }
 
   appleLoginClick = () => {
-    window.location.href = '/auth/apple';
+    const currentPath = window.location.pathname + window.location.search;
+    const returnUrl = encodeURIComponent(currentPath);
+    window.location.href = `/auth/apple?returnUrl=${returnUrl}`;
   };
   googleLoginClick = () => {
-    window.location.href = '/auth/google';
+    const currentPath = window.location.pathname + window.location.search;
+    const returnUrl = encodeURIComponent(currentPath);
+    window.location.href = `/auth/google?returnUrl=${returnUrl}`;
   };
   emailLoginClick = () => {
     this.setState({ emailLoginFlow: 'showEmail' });
