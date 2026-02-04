@@ -146,7 +146,7 @@ describe('createLoginHandler', () => {
       expect(getBody()).toEqual({ error: 'Email is required' });
     });
 
-    it('should trim whitespace from email and password', async () => {
+    it('should trim whitespace from email but not password', async () => {
       const deps = createMockDeps();
       const handler = createLoginHandler(deps);
 
@@ -178,12 +178,15 @@ describe('createLoginHandler', () => {
       } as admin.auth.UserRecord);
       deps.users.findOneByScan.mockResolvedValue(createMockUser('testuser', 'test@example.com', 'Test User'));
 
+      // Email should be trimmed, but password should NOT be trimmed
+      // (Firebase treats leading/trailing spaces in passwords as significant)
       const req = createMockRequest({ email: '  test@example.com  ', password: '  password123  ' });
       const { res } = createMockResponse();
 
       await handler(req as Request, res as Response, jest.fn());
 
-      expect(deps.firebaseRestClient.signInWithPassword).toHaveBeenCalledWith('test@example.com', 'password123');
+      // Email trimmed, password preserved with spaces
+      expect(deps.firebaseRestClient.signInWithPassword).toHaveBeenCalledWith('test@example.com', '  password123  ');
     });
   });
 
