@@ -30,7 +30,7 @@ git push --force-with-lease
 
 ### Step 1: Codex Review
 
-Run with a 20-minute timeout:
+Run with a 30-minute timeout:
 ```bash
 codex --model 'gpt-5.2-codex-xhigh' review --base origin/main 2>/dev/null
 ```
@@ -50,7 +50,7 @@ If codex provides ANY suggestions or identifies ANY issues:
 
 ### Step 2: Claude Review
 
-Run claude review using the PR number (from system-reminder or from when you created the PR):
+Run claude review using the PR number (from system-reminder or from when you created the PR), running again with a 30-minute timeout:
 ```bash
 claude --dangerously-skip-permissions --model 'claude-opus-4-5-20251101' -p '/review <PR_NUMBER>'
 ```
