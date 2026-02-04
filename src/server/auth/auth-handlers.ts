@@ -52,7 +52,7 @@ function loginUser(req: Request, user: User): Promise<void> {
 export function createLoginHandler(deps: AuthHandlerDeps): RequestHandler {
   return async (req: Request, res: Response): Promise<void> => {
     const email = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
-    const password = typeof req.body?.password === 'string' ? req.body.password.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
 
     if (!email) {
       res.status(400).json({ error: 'Email is required' });
@@ -104,7 +104,7 @@ export function createLoginHandler(deps: AuthHandlerDeps): RequestHandler {
 export function createSignupHandler(deps: AuthHandlerDeps): RequestHandler {
   return async (req: Request, res: Response): Promise<void> => {
     const email = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
-    const password = typeof req.body?.password === 'string' ? req.body.password.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
 
     if (!email) {
