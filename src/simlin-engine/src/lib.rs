@@ -146,7 +146,10 @@ mod stdlib_freshness_tests {
 
         for entry in entries {
             let path = entry.path();
-            let file_stem = path.file_stem().unwrap().to_string_lossy();
+            let file_stem = path
+                .file_stem()
+                .expect("stmx file should have a file stem")
+                .to_string_lossy();
             hasher.update(file_stem.as_bytes());
             hasher.update(fs::read(&path).expect("failed to read stmx file"));
         }

@@ -573,7 +573,10 @@ pub fn generate(stdlib_dir: &str, output_path: &str) -> Result<(), Box<dyn std::
     let mut hasher = Sha256::new();
     for entry in &entries {
         let path = entry.path();
-        let file_stem = path.file_stem().unwrap().to_string_lossy();
+        let file_stem = path
+            .file_stem()
+            .expect("stmx file should have a file stem")
+            .to_string_lossy();
         hasher.update(file_stem.as_bytes());
         hasher.update(fs::read(&path)?);
     }
@@ -583,7 +586,11 @@ pub fn generate(stdlib_dir: &str, output_path: &str) -> Result<(), Box<dyn std::
     let mut models: Vec<(String, Model)> = Vec::new();
     for entry in &entries {
         let path = entry.path();
-        let file_stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let file_stem = path
+            .file_stem()
+            .expect("stmx file should have a file stem")
+            .to_string_lossy()
+            .into_owned();
 
         let file = File::open(&path)?;
         let mut reader = BufReader::new(file);
