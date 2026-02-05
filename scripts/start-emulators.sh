@@ -164,9 +164,12 @@ main() {
     echo "Firestore emulator ready."
 
     echo "Starting Firebase Auth emulator on port $AUTH_PORT..."
-    # Firebase CLI is in @simlin/server, but firebase.json config is in src/app
-    # We need to run from src/app to pick up the config
-    (cd "$PROJECT_DIR/src/app" && pnpm --filter @simlin/server exec firebase emulators:start --only auth) &
+    # Firebase CLI is installed in @simlin/server, but firebase.json is in src/app.
+    # pnpm --filter overrides the working directory, so we pass --project and
+    # --config explicitly instead of relying on cwd-based config discovery.
+    pnpm --filter @simlin/server exec firebase emulators:start --only auth \
+        --project simlin \
+        --config "$PROJECT_DIR/src/app/firebase.json" &
     FIREBASE_PID=$!
 
     echo "Waiting for Firebase Auth emulator to be ready..."
