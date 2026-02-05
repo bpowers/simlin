@@ -9,7 +9,8 @@ use std::iter::Iterator;
 use crate::canonicalize;
 use crate::common::{DimensionName, ElementName};
 
-#[derive(Debug, Default, Eq, Clone)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Default, Eq, Clone)]
 pub struct UnitMap {
     pub map: BTreeMap<String, i32>,
     pub ctx: Option<Vec<String>>,
@@ -161,20 +162,23 @@ impl FromIterator<(String, i32)> for UnitMap {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum GraphicalFunctionKind {
     Continuous,
     Extrapolate,
     Discrete,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct GraphicalFunction {
     pub kind: GraphicalFunctionKind,
     pub x_points: Option<Vec<f64>>,
@@ -183,7 +187,8 @@ pub struct GraphicalFunction {
     pub y_scale: GraphicalFunctionScale,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum Equation {
     Scalar(String, Option<String>),
     ApplyToAll(Vec<DimensionName>, String, Option<String>),
@@ -198,13 +203,15 @@ pub enum Equation {
     ),
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum Visibility {
     Private,
     Public,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum AiState {
     A, // No information
     B, // Human created. Will only occur when a modeler adds content using AI to an existing model. (Depending on the software implementation these may always be reported as F).
@@ -216,7 +223,8 @@ pub enum AiState {
     H, // Created and edited by a person and also edited by AI.
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct Stock {
     pub ident: String,
     pub equation: Equation,
@@ -231,7 +239,8 @@ pub struct Stock {
     pub uid: Option<i32>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct Flow {
     pub ident: String,
     pub equation: Equation,
@@ -245,7 +254,8 @@ pub struct Flow {
     pub uid: Option<i32>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct Aux {
     pub ident: String,
     pub equation: Equation,
@@ -258,13 +268,14 @@ pub struct Aux {
     pub uid: Option<i32>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleReference {
     pub src: String,
     pub dst: String,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Module {
     pub ident: String,
     pub model_name: String,
@@ -277,7 +288,8 @@ pub struct Module {
     pub uid: Option<i32>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum Variable {
     Stock(Stock),
     Flow(Flow),
@@ -392,7 +404,8 @@ impl Variable {
 }
 
 pub mod view_element {
-    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Copy, Clone, PartialEq, Eq)]
     pub enum LabelSide {
         Top,
         Left,
@@ -401,7 +414,8 @@ pub mod view_element {
         Right,
     }
 
-    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
     pub struct Aux {
         pub name: String,
         pub uid: i32,
@@ -410,7 +424,8 @@ pub mod view_element {
         pub label_side: LabelSide,
     }
 
-    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
     pub struct Stock {
         pub name: String,
         pub uid: i32,
@@ -419,14 +434,16 @@ pub mod view_element {
         pub label_side: LabelSide,
     }
 
-    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
     pub struct FlowPoint {
         pub x: f64,
         pub y: f64,
         pub attached_to_uid: Option<i32>,
     }
 
-    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
     pub struct Flow {
         pub name: String,
         pub uid: i32,
@@ -438,20 +455,23 @@ pub mod view_element {
         pub points: Vec<FlowPoint>,
     }
 
-    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
     pub enum LinkShape {
         Straight,
         Arc(f64), // angle in [0, 360)
         MultiPoint(Vec<FlowPoint>),
     }
 
-    #[derive(Clone, Copy, PartialEq, Debug)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, Copy, PartialEq)]
     pub enum LinkPolarity {
         Positive,
         Negative,
     }
 
-    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
     pub struct Link {
         pub uid: i32,
         pub from_uid: i32,
@@ -460,7 +480,8 @@ pub mod view_element {
         pub polarity: Option<LinkPolarity>,
     }
 
-    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
     pub struct Module {
         pub name: String,
         pub uid: i32,
@@ -469,7 +490,8 @@ pub mod view_element {
         pub label_side: LabelSide,
     }
 
-    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
     pub struct Alias {
         pub uid: i32,
         pub alias_of_uid: i32,
@@ -478,7 +500,8 @@ pub mod view_element {
         pub label_side: LabelSide,
     }
 
-    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
     pub struct Cloud {
         pub uid: i32,
         pub flow_uid: i32,
@@ -491,7 +514,8 @@ pub mod view_element {
     /// Unlike other view elements, x/y represent the center of the group
     /// (matching the internal convention) rather than the XMILE top-left.
     /// Conversion to/from JSON handles the coordinate transformation.
-    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
     pub struct Group {
         pub uid: i32,
         pub name: String,
@@ -502,7 +526,8 @@ pub mod view_element {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum ViewElement {
     Aux(view_element::Aux),
     Stock(view_element::Stock),
@@ -543,7 +568,8 @@ impl ViewElement {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Default)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Default)]
 pub struct Rect {
     pub x: f64,
     pub y: f64,
@@ -551,7 +577,8 @@ pub struct Rect {
     pub height: f64,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct StockFlow {
     pub elements: Vec<ViewElement>,
     pub view_box: Rect,
@@ -574,12 +601,14 @@ impl StockFlow {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum View {
     StockFlow(StockFlow),
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LoopMetadata {
     pub uids: Vec<i32>,
     pub deleted: bool,
@@ -590,7 +619,8 @@ pub struct LoopMetadata {
 /// Semantic/organizational group for categorizing model variables.
 /// This is distinct from visual diagram groups (ViewElement::Group).
 /// In Vensim, these are called "sectors".
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct ModelGroup {
     /// Group name (unique, normalized - dots become dashes)
     pub name: String,
@@ -604,7 +634,8 @@ pub struct ModelGroup {
     pub run_enabled: bool,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct Model {
     pub name: String,
     pub sim_specs: Option<SimSpecs>,
@@ -630,7 +661,8 @@ impl Model {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum SimMethod {
     Euler,
     RungeKutta2,
@@ -646,7 +678,8 @@ impl Default for SimMethod {
 
 /// Dt is a UI thing: it can be nice to specify exact
 /// fractions that don't display neatly in the UI, like 1/3
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum Dt {
     Dt(f64),
     Reciprocal(f64),
@@ -659,7 +692,8 @@ impl Default for Dt {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Default)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Default)]
 pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,
@@ -670,7 +704,8 @@ pub struct SimSpecs {
 }
 
 /// The elements of a dimension: either indexed (numeric) or named.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub enum DimensionElements {
     /// Indexed dimension with size (e.g., `Periods(5)` has indices 1-5)
     Indexed(u32),
@@ -683,7 +718,8 @@ pub enum DimensionElements {
 /// Vensim allows specifying dimension mappings like `DimA: A1, A2, A3 -> DimB`
 /// which means elements of DimA correspond positionally to elements of DimB.
 /// This is used when a variable indexed by DimB references variables indexed by DimA.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Dimension {
     pub name: String,
     pub elements: DimensionElements,
@@ -765,7 +801,8 @@ impl Dimension {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Unit {
     pub name: String,
     pub equation: Option<String>,
@@ -773,20 +810,23 @@ pub struct Unit {
     pub aliases: Vec<String>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Extension {
     Unspecified,
     Xmile,
     Vensim,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Source {
     pub extension: Extension,
     pub content: String,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct Project {
     pub name: String,
     pub sim_specs: SimSpecs,
@@ -797,7 +837,8 @@ pub struct Project {
     pub ai_information: Option<AiInformation>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AiInformation {
     pub status: AiStatus,
     pub testing: Option<AiTesting>,
@@ -805,7 +846,8 @@ pub struct AiInformation {
     // TODO: settings
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AiStatus {
     pub key_url: String,
     pub algorithm: String,
@@ -813,7 +855,8 @@ pub struct AiStatus {
     pub tags: HashMap<String, String>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AiTesting {
     pub signed_message_body: String,
 }

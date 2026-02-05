@@ -29,7 +29,8 @@ pub type NameId = u16; // Index into names table
 
 /// Lookup interpolation mode for graphical function tables.
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LookupMode {
     /// Linear interpolation between points (standard LOOKUP behavior)
     Interpolate = 0,
@@ -45,7 +46,8 @@ pub enum LookupMode {
 
 /// Runtime dimension information stored in ByteCodeContext.
 /// Used for dynamic array operations like star ranges and broadcasting.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct DimensionInfo {
     /// Index into names table for this dimension's name
     pub name_id: NameId,
@@ -84,7 +86,8 @@ impl DimensionInfo {
 
 /// Subdimension relationship for star ranges like `*:SubDim`.
 /// Describes which parent indices a subdimension maps to.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct SubdimensionRelation {
     /// Index of parent dimension in dimensions table
     pub parent_dim_id: DimId,
@@ -134,7 +137,8 @@ impl SubdimensionRelation {
 
 /// Sparse mapping for a single dimension in a RuntimeView.
 /// Used when iterating over non-contiguous elements.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RuntimeSparseMapping {
     /// Which dimension (0-indexed) in the view is sparse
     pub dim_index: u8,
@@ -144,7 +148,8 @@ pub struct RuntimeSparseMapping {
 
 /// A runtime array view used during VM execution.
 /// More dynamic than compile-time ArrayView - supports incremental building.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct RuntimeView {
     /// Base offset: either variable offset in curr[] or temp_id for temps
     pub base_off: u32,
@@ -463,7 +468,8 @@ impl RuntimeView {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Copy, Clone)]
 pub(crate) enum BuiltinId {
     Abs,
     Arccos,
@@ -488,7 +494,8 @@ pub(crate) enum BuiltinId {
     Tan,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Copy, Clone)]
 pub(crate) enum Op2 {
     Add,
     Sub,
@@ -521,7 +528,8 @@ pub(crate) enum Op2 {
 /// - Array view stack operations (PushVarView, ViewSubscript*, etc.)
 /// - Array iteration (BeginIter, LoadIterElement, etc.)
 /// - Array reductions (ArraySum, ArrayMax, etc.)
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 #[allow(dead_code)] // Array opcodes not yet emitted by compiler
 pub(crate) enum Opcode {
     // === ARITHMETIC & LOGIC ===
@@ -781,7 +789,8 @@ pub(crate) enum Opcode {
 // Module and Array Declarations
 // ============================================================================
 
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct ModuleDeclaration {
     pub(crate) model_name: Ident<Canonical>,
     /// The set of input names for this module instantiation.
@@ -791,7 +800,8 @@ pub struct ModuleDeclaration {
     pub(crate) off: usize, // offset within the parent module
 }
 
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct ArrayDefinition {
     pub(crate) dimensions: Vec<usize>,
@@ -799,7 +809,8 @@ pub struct ArrayDefinition {
 
 /// A static array view for compile-time known subscripts.
 /// Stored in ByteCodeContext and referenced by ViewId.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct StaticArrayView {
     /// Base variable offset in curr[]
     pub base_off: u32,
@@ -839,7 +850,8 @@ impl StaticArrayView {
 
 /// Context data shared across all bytecode runlists in a module.
 /// Contains tables that opcodes reference by index.
-#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Default)]
 pub struct ByteCodeContext {
     // === Existing fields ===
     /// Graphical function lookup tables
@@ -932,13 +944,15 @@ impl ByteCodeContext {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Default)]
 pub struct ByteCode {
     pub(crate) literals: Vec<f64>,
     pub(crate) code: Vec<Opcode>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Default)]
 pub struct ByteCodeBuilder {
     bytecode: ByteCode,
     interned_literals: HashMap<OrderedFloat<f64>, LiteralId>,
@@ -1665,7 +1679,8 @@ mod tests {
     }
 }
 
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct CompiledModule {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) n_slots: usize,

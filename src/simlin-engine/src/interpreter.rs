@@ -606,7 +606,7 @@ impl ModuleEvaluator<'_> {
                 Some((ident, offset))
             }
             _ => {
-                eprintln!("unsupported expression type for lookup table reference: {table_expr:?}");
+                eprintln!("unsupported expression type for lookup table reference");
                 None
             }
         }
@@ -1283,7 +1283,7 @@ impl ModuleEvaluator<'_> {
                         | Expr::AssignNext(_, _)
                         | Expr::AssignTemp(_, _, _)
                         | Expr::TempArrayElement(_, _, _, _) => {
-                            panic!("Unexpected assignment expression in AssignTemp RHS: {expr:?}")
+                            unreachable!()
                         }
                     }
                 }
@@ -1314,7 +1314,7 @@ impl ModuleEvaluator<'_> {
     }
 }
 
-#[derive(Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 pub struct Simulation {
     pub(crate) modules: HashMap<ModuleKey, Module>,
     specs: Specs,
@@ -1440,7 +1440,8 @@ impl Simulation {
         let mut module_keys: Vec<_> = self.modules.keys().collect();
         module_keys.sort_unstable();
         for module_key in module_keys {
-            eprintln!("\n\nMODULE: {:?}", module_key);
+            let dims: Vec<_> = module_key.1.iter().map(|d| d.to_string()).collect();
+            eprintln!("\n\nMODULE: ({}, [{}])", module_key.0, dims.join(", "));
             let module = &self.modules[module_key];
             let model_ident = &module_key.0;
             let offsets = &module.offsets[model_ident];

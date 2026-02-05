@@ -57,7 +57,8 @@ impl From<crate::mdl::view::ViewError> for ConvertError {
 }
 
 /// Type of variable determined during conversion.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum VariableType {
     Stock,
     Flow,
@@ -65,7 +66,7 @@ pub enum VariableType {
 }
 
 /// Information about a symbol collected during the first pass.
-#[derive(Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 pub struct SymbolInfo<'input> {
     /// The parsed equation(s) for this symbol
     pub equations: Vec<FullEquation<'input>>,

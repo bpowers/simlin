@@ -40,7 +40,8 @@ pub struct SimlinError {
 
 /// Loop polarity for C API
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SimlinLoopPolarity {
     Reinforcing = 0,
     Balancing = 1,
@@ -58,7 +59,8 @@ pub enum SimlinLinkPolarity {
 
 /// JSON format specifier for C API
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SimlinJsonFormat {
     Native = 0,
     Sdai = 1,

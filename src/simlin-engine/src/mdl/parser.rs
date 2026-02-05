@@ -8,6 +8,7 @@
 //! It replaces the previous LALRPOP grammar with identical behavior.
 
 use std::borrow::Cow;
+use std::fmt;
 
 use crate::mdl::ast::{
     BinaryOp, CallKind, Equation, ExceptList, Expr, ExprListResult, InterpMode, Lhs, Loc,
@@ -23,7 +24,7 @@ use crate::mdl::normalizer::Token;
 // ============================================================================
 
 /// Parse error with source location.
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 pub struct ParseError {
     pub start: usize,
     pub end: usize,
@@ -54,7 +55,7 @@ fn parse_number(s: &str, start: usize, end: usize) -> Result<f64, ParseError> {
     s.parse().map_err(|_| ParseError {
         start,
         end,
-        message: format!("lexer emitted invalid number token: {:?}", s),
+        message: format!("lexer emitted invalid number token: '{s}'"),
     })
 }
 
@@ -108,7 +109,8 @@ fn make_equation<'input>(
 // ============================================================================
 
 /// Discriminant-only token kind for peek comparisons.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TokenKind {
     Plus,
     Minus,
@@ -159,6 +161,63 @@ enum TokenKind {
     Function,
     WithLookup,
     TabbedArray,
+}
+
+impl fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            TokenKind::Plus => "+",
+            TokenKind::Minus => "-",
+            TokenKind::Mul => "*",
+            TokenKind::Div => "/",
+            TokenKind::Exp => "^",
+            TokenKind::Lt => "<",
+            TokenKind::Gt => ">",
+            TokenKind::Eq => "=",
+            TokenKind::Lte => "<=",
+            TokenKind::Gte => ">=",
+            TokenKind::Neq => "<>",
+            TokenKind::LParen => "(",
+            TokenKind::RParen => ")",
+            TokenKind::LBracket => "[",
+            TokenKind::RBracket => "]",
+            TokenKind::Comma => ",",
+            TokenKind::Semicolon => ";",
+            TokenKind::Colon => ":",
+            TokenKind::Pipe => "|",
+            TokenKind::Tilde => "~",
+            TokenKind::Dot => ".",
+            TokenKind::Bang => "!",
+            TokenKind::DataEquals => ":=",
+            TokenKind::Equiv => "<->",
+            TokenKind::MapArrow => "->",
+            TokenKind::Number => "Number",
+            TokenKind::Symbol => "Symbol",
+            TokenKind::Literal => "Literal",
+            TokenKind::And => ":AND:",
+            TokenKind::Or => ":OR:",
+            TokenKind::Not => ":NOT:",
+            TokenKind::Na => ":NA:",
+            TokenKind::Macro => ":MACRO:",
+            TokenKind::EndOfMacro => ":END OF MACRO:",
+            TokenKind::Except => ":EXCEPT:",
+            TokenKind::Interpolate => ":INTERPOLATE:",
+            TokenKind::Raw => ":RAW:",
+            TokenKind::HoldBackward => ":HOLD BACKWARD:",
+            TokenKind::LookForward => ":LOOK FORWARD:",
+            TokenKind::Implies => ":IMPLIES:",
+            TokenKind::TestInput => ":TEST INPUT:",
+            TokenKind::TheCondition => ":THE CONDITION:",
+            TokenKind::EqEnd => "EqEnd",
+            TokenKind::GroupStar => "GroupStar",
+            TokenKind::Question => "?",
+            TokenKind::UnitsSymbol => "UnitsSymbol",
+            TokenKind::Function => "Function",
+            TokenKind::WithLookup => "WITH LOOKUP",
+            TokenKind::TabbedArray => "TABBED ARRAY",
+        };
+        f.write_str(name)
+    }
 }
 
 fn token_kind(tok: &Token<'_>) -> TokenKind {
@@ -316,7 +375,7 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
             Err(ParseError {
                 start: *start,
                 end: *end,
-                message: format!("expected {}, found {:?}", what, token_kind(tok)),
+                message: format!("expected {}, found {}", what, token_kind(tok)),
             })
         } else {
             let pos = self.end_pos();
@@ -340,7 +399,7 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
             Err(ParseError {
                 start: *start,
                 end: *end,
-                message: format!("expected {}, found {:?}", what, token_kind(tok)),
+                message: format!("expected {}, found {}", what, token_kind(tok)),
             })
         } else {
             let pos = self.end_pos();
@@ -390,7 +449,7 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
             ParseError {
                 start: *start,
                 end: *end,
-                message: format!("unexpected {:?} while parsing {}", token_kind(tok), what),
+                message: format!("unexpected {} while parsing {}", token_kind(tok), what),
             }
         } else {
             self.eof_error(what)
@@ -1560,7 +1619,7 @@ pub fn parse<'input>(
         return Err(ParseError {
             start: *start,
             end: *end,
-            message: format!("unexpected trailing token: {:?}", token_kind(tok)),
+            message: format!("unexpected trailing token: {}", token_kind(tok)),
         });
     }
 

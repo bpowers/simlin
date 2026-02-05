@@ -7,7 +7,8 @@ use crate::common::{EquationError, RawIdent};
 use crate::lexer::LexerType;
 use std::result::Result as StdResult;
 
-#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Eq, Hash, Copy, Clone)]
 pub enum UnaryOp {
     Positive,
     Negative,
@@ -17,7 +18,8 @@ pub enum UnaryOp {
 
 /// BinaryOp enumerates the different operators supported in
 /// system dynamics equations.
-#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Eq, Hash, Copy, Clone)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -61,7 +63,8 @@ impl BinaryOp {
 
 /// Expr0 represents a parsed equation, before any calls to
 /// builtin functions have been checked/resolved.
-#[derive(PartialEq, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Clone)]
 pub enum Expr0 {
     Const(String, f64, Loc),
     Var(RawIdent, Loc),
@@ -72,7 +75,8 @@ pub enum Expr0 {
     If(Box<Expr0>, Box<Expr0>, Box<Expr0>, Loc),
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Clone)]
 pub enum IndexExpr0 {
     Wildcard(Loc),
     StarRange(RawIdent, Loc),

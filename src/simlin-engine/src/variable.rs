@@ -21,7 +21,8 @@ use crate::model::ScopeStage0;
 use crate::units::parse_units;
 use crate::{ErrorCode, eqn_err, units};
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct Table {
     pub x: Vec<f64>,
     pub y: Vec<f64>,
@@ -62,7 +63,7 @@ impl Table {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleInput {
     // the Variable identifier in the current model we will use for input
     pub src: Ident<Canonical>,
@@ -70,7 +71,8 @@ pub struct ModuleInput {
     pub dst: Ident<Canonical>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum Variable<MI = ModuleInput, E = Expr2> {
     Stock {
         ident: Ident<Canonical>,

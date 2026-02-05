@@ -14,7 +14,8 @@ use crate::units::Context;
 use crate::variable::Variable;
 use std::sync::Arc;
 
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct Project {
     pub datamodel: datamodel::Project,
     // these are Arcs so that multiple Modules created by the compiler can

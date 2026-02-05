@@ -10,7 +10,8 @@ use smallvec::SmallVec;
 use crate::common::{CanonicalDimensionName, CanonicalElementName};
 use crate::datamodel;
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NamedDimension {
     pub elements: Vec<CanonicalElementName>,
     pub indexed_elements: HashMap<CanonicalElementName, usize>,
@@ -35,7 +36,8 @@ impl NamedDimension {
 /// Relationship between a subdimension and parent dimension.
 /// Maps each subdim element index to its offset in the parent.
 #[allow(dead_code)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SubdimensionRelation {
     /// Maps subdim element index -> parent offset (0-based).
     /// For SubA=[A2,A3] from DimA=[A1,A2,A3]: parent_offsets=[1,2]
@@ -67,7 +69,8 @@ impl SubdimensionRelation {
 /// The cache key is (child_name, parent_name), and the value is the relation if child is
 /// a subdimension of parent, or None if we've determined it's not a subdimension.
 #[allow(dead_code)]
-#[derive(Debug, Default)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Default)]
 struct RelationshipCache {
     cache: Mutex<
         HashMap<(CanonicalDimensionName, CanonicalDimensionName), Option<SubdimensionRelation>>,
@@ -82,7 +85,8 @@ impl Clone for RelationshipCache {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Dimension {
     Indexed(CanonicalDimensionName, u32),
     Named(CanonicalDimensionName, NamedDimension),
@@ -176,7 +180,8 @@ impl From<datamodel::Dimension> for Dimension {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Default)]
 pub struct DimensionsContext {
     dimensions: HashMap<CanonicalDimensionName, Dimension>,
     relationship_cache: RelationshipCache,
@@ -390,7 +395,8 @@ impl DimensionsContext {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DimensionRange {
     dim: Option<Dimension>,
     start: u32,
@@ -415,7 +421,8 @@ impl DimensionRange {
 /// DimensionInfo represents the array dimensions of an expression.
 /// It uses the existing Dimension enum which already encapsulates
 /// both name and size together.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DimensionVec {
     dims: Vec<DimensionRange>,
 }
@@ -455,7 +462,8 @@ impl DimensionVec {
 /// - To move by 1 in the first dimension: skip 12 elements (3*4)
 /// - To move by 1 in the second dimension: skip 4 elements (4)
 /// - To move by 1 in the third dimension: skip 1 element
-#[derive(PartialEq, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Clone)]
 #[allow(dead_code)]
 pub struct StridedDimension {
     pub dimension: Dimension,

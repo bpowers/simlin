@@ -36,7 +36,8 @@ pub fn make_module_key(
 // ============================================================================
 
 /// State for array iteration within the VM.
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 struct IterState {
     /// Index into view_stack for the source view
     view_stack_idx: usize,
@@ -51,7 +52,8 @@ struct IterState {
 }
 
 /// Info about how one source maps to the broadcast result dimensions.
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 struct BroadcastSourceInfo {
     /// Index into view_stack for this source
     view_stack_idx: usize,
@@ -61,7 +63,8 @@ struct BroadcastSourceInfo {
 }
 
 /// State for broadcast iteration over multiple sources.
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 struct BroadcastState {
     /// Info for each source
     sources: SmallVec<[BroadcastSourceInfo; 2]>,
@@ -88,7 +91,8 @@ pub(crate) fn is_truthy(n: f64) -> bool {
     !is_false
 }
 
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct CompiledSimulation {
     pub(crate) modules: HashMap<ModuleKey, CompiledModule>,
     pub(crate) specs: Specs,
@@ -96,14 +100,16 @@ pub struct CompiledSimulation {
     pub(crate) offsets: HashMap<Ident<Canonical>, usize>,
 }
 
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 struct CompiledSlicedSimulation {
     initial_modules: HashMap<ModuleKey, CompiledModuleSlice>,
     flow_modules: HashMap<ModuleKey, CompiledModuleSlice>,
     stock_modules: HashMap<ModuleKey, CompiledModuleSlice>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StepPart {
     Initials,
     Flows,
@@ -120,7 +126,8 @@ fn borrow_two(buf: &mut [f64], n_slots: usize, a: usize, b: usize) -> (&mut [f64
     if !flip { (left, right) } else { (right, left) }
 }
 
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct Vm {
     specs: Specs,
     root: ModuleKey,
@@ -142,7 +149,7 @@ pub struct Vm {
     temp_storage: Vec<f64>,
 }
 
-#[derive(Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 struct Stack {
     stack: Vec<f64>,
 }
@@ -163,7 +170,8 @@ impl Stack {
     }
 }
 
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 struct CompiledModuleSlice {
     #[allow(dead_code)]
     ident: Ident<Canonical>,

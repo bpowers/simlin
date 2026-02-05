@@ -270,7 +270,8 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 ///
 /// Used by the normalizer to classify a symbol in a single `to_lower_space`
 /// call rather than checking each category separately.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SymbolClass {
     /// "WITH LOOKUP" keyword
     WithLookup,

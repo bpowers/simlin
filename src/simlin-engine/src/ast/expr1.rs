@@ -11,7 +11,8 @@ use crate::model::ScopeStage0;
 
 /// IndexExpr1 represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
-#[derive(PartialEq, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Clone)]
 pub enum IndexExpr1 {
     Wildcard(Loc),
     // *:dimension_name
@@ -53,7 +54,8 @@ impl IndexExpr1 {
 
 /// Expr represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
-#[derive(PartialEq, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Clone)]
 pub enum Expr1 {
     Const(String, f64, Loc),
     Var(Ident<Canonical>, Loc),

@@ -42,7 +42,8 @@ const PRODUCT_VERSION: &str = "0.1.0";
 const PRODUCT_NAME: &str = "Simlin";
 const PRODUCT_LANG: &str = "en";
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename = "xmile")]
 pub struct File {
     #[serde(default)]
@@ -234,7 +235,8 @@ impl From<datamodel::Project> for File {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AiInformation {
     pub status: AiStatus,
     pub testing: Option<AiTesting>,
@@ -242,7 +244,8 @@ pub struct AiInformation {
     // TODO: settings
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct AiStatus {
     pub key_url: String,
     pub algorithm: String,
@@ -304,29 +307,34 @@ impl<'de> Deserialize<'de> for AiStatus {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AiTesting {
     #[serde(rename = "@signed_message_body")]
     pub signed_message_body: String,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Data {
     // TODO
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Macro {
     // TODO
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct VarDimensions {
     #[serde(rename = "dim")]
     pub dimensions: Option<Vec<VarDimension>>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct VarDimension {
     #[serde(rename = "@name")]
     pub name: String,
@@ -339,13 +347,15 @@ impl ToXml<XmlWriter> for VarDimension {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Dimensions {
     #[serde(rename = "dim")]
     pub dimensions: Option<Vec<Dimension>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Header {
     pub vendor: String,
     pub product: Product,
@@ -449,19 +459,23 @@ impl ToXml<XmlWriter> for Header {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Caption {}
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Includes {}
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Image {
     #[serde(default)]
     pub resource: String, // "JPG, GIF, TIF, or PNG" path, URL, or image embedded in base64 data URI
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Product {
     #[serde(rename = "$value")]
     pub name: Option<String>,
@@ -470,7 +484,8 @@ pub struct Product {
     pub version: Option<String>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize, Hash)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
     UsesArrays {
@@ -505,14 +520,16 @@ pub enum Feature {
     UsesAnnotation,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Options {
     pub namespace: Option<String>, // string of comma separated namespaces
     #[serde(rename = "$value")]
     pub features: Option<Vec<Feature>>,
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,
@@ -607,7 +624,8 @@ impl From<datamodel::SimSpecs> for SimSpecs {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Dt {
     #[serde(rename = "$value")]
     pub value: f64,
@@ -640,7 +658,8 @@ impl From<datamodel::Dt> for Dt {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Dimension {
     #[serde(rename = "@name")]
     pub name: String,
@@ -726,13 +745,15 @@ impl From<datamodel::Dimension> for Dimension {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Index {
     #[serde(rename = "@name")]
     pub name: String,
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct GraphicalFunctionScale {
     #[serde(rename = "@min")]
     pub min: f64,
@@ -758,7 +779,8 @@ impl From<datamodel::GraphicalFunctionScale> for GraphicalFunctionScale {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphicalFunctionKind {
     Continuous,
@@ -786,7 +808,8 @@ impl From<datamodel::GraphicalFunctionKind> for GraphicalFunctionKind {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Gf {
     pub name: Option<String>,
     #[serde(rename = "type")]
@@ -940,21 +963,25 @@ impl From<datamodel::GraphicalFunction> for Gf {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Behavior {
     // TODO
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Style {
     // TODO
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Units {
     pub unit: Option<Vec<Unit>>,
 }
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Unit {
     #[serde(rename = "@name")]
     pub name: String,
@@ -1034,7 +1061,8 @@ fn test_unit_roundtrip() {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Model {
     #[serde(rename = "@name", default)]
     pub name: Option<String>,
@@ -1217,7 +1245,8 @@ impl From<datamodel::Model> for Model {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct Variables {
     #[serde(rename = "$value", default)]
     pub variables: Vec<Var>,
@@ -1226,7 +1255,8 @@ pub struct Variables {
 /// Semantic group in <views> section (no geometry, just membership).
 /// Used when there are no actual diagram views.
 /// In Vensim, these are called "sectors".
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct SemanticGroup {
     #[serde(rename = "@name")]
     pub name: String,
@@ -1239,7 +1269,8 @@ pub struct SemanticGroup {
     pub vars: Vec<String>,
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Views {
     pub view: Option<Vec<View>>,
     /// Semantic groups appear in views section when there are no diagram views
@@ -1268,7 +1299,8 @@ impl Model {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Copy, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewType {
     StockFlow,
@@ -1409,7 +1441,8 @@ pub mod view_element {
         }
     }
 
-    #[derive(Copy, Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Copy, Clone, PartialEq, Eq, Deserialize, Serialize)]
     #[serde(rename_all = "snake_case")]
     pub enum LabelSide {
         Top,
@@ -1471,7 +1504,8 @@ pub mod view_element {
         }
     }
 
-    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Deserialize, Serialize)]
     pub struct Aux {
         #[serde(rename = "@name")]
         pub name: String,
@@ -1554,7 +1588,8 @@ pub mod view_element {
         }
     }
 
-    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Deserialize, Serialize)]
     pub struct Stock {
         #[serde(rename = "@name")]
         pub name: String,
@@ -1661,7 +1696,8 @@ pub mod view_element {
         }
     }
 
-    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Deserialize, Serialize)]
     pub struct Point {
         #[serde(rename = "@x")]
         pub x: f64,
@@ -1712,13 +1748,15 @@ pub mod view_element {
         }
     }
 
-    #[derive(Clone, PartialEq, Debug, Default, Deserialize, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Default, Deserialize, Serialize)]
     pub struct Points {
         #[serde(rename = "pt")]
         pub points: Vec<Point>,
     }
 
-    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Deserialize, Serialize)]
     pub struct Flow {
         #[serde(rename = "@name")]
         pub name: String,
@@ -1952,13 +1990,15 @@ pub mod view_element {
         assert_eq!(expected_h, actual_h);
     }
 
-    #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
     pub struct AliasLinkEnd {
         #[serde(rename = "@uid")]
         pub uid: i32,
     }
 
-    #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Eq, Serialize)]
     pub enum LinkEnd {
         #[serde(rename = "$value")]
         Named(String),
@@ -1966,7 +2006,8 @@ pub mod view_element {
         Alias(AliasLinkEnd),
     }
 
-    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Deserialize, Serialize)]
     pub struct Link {
         #[serde(rename = "@uid")]
         pub uid: Option<i32>,
@@ -2549,7 +2590,8 @@ pub mod view_element {
         }
     }
 
-    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Deserialize, Serialize)]
     pub struct Module {
         #[serde(rename = "@name")]
         pub name: String,
@@ -2623,7 +2665,8 @@ pub mod view_element {
         }
     }
 
-    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Deserialize, Serialize)]
     pub struct Alias {
         pub of: String,
         #[serde(rename = "@of_uid")]
@@ -2712,7 +2755,8 @@ pub mod view_element {
         }
     }
 
-    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Deserialize, Serialize)]
     pub struct Cloud {
         pub uid: i32,
         pub flow_uid: i32,
@@ -2759,7 +2803,8 @@ pub mod view_element {
 
     /// Visual container for grouping related model elements.
     /// In XMILE, x/y are top-left coordinates.
-    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Deserialize, Serialize)]
     pub struct Group {
         #[serde(rename = "@name")]
         pub name: String,
@@ -2839,7 +2884,8 @@ pub mod view_element {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewObject {
     Aux(view_element::Aux),
@@ -2990,7 +3036,8 @@ impl ViewObject {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct View {
     #[serde(rename = "@next_uid")]
     pub next_uid: Option<i32>, // used internally
@@ -3445,7 +3492,8 @@ fn test_view_roundtrip() {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Module {
     #[serde(rename = "@name")]
     pub name: String,
@@ -3595,7 +3643,8 @@ impl From<datamodel::Module> for Module {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reference {
     // these only differ in the semantics of their contents
@@ -3603,7 +3652,8 @@ pub enum Reference {
     Connect2(Connect),
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Connect {
     #[serde(rename = "@from")]
     pub src: String,
@@ -3611,10 +3661,12 @@ pub struct Connect {
     pub dst: String,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct NonNegative {}
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct VarElement {
     #[serde(rename = "@subscript")]
     pub subscript: String,
@@ -3639,7 +3691,8 @@ impl ToXml<XmlWriter> for VarElement {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Stock {
     #[serde(rename = "@name")]
     pub name: String,
@@ -3890,7 +3943,8 @@ impl From<datamodel::Stock> for Stock {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Flow {
     #[serde(rename = "@name")]
     pub name: String,
@@ -4057,7 +4111,8 @@ impl From<datamodel::Flow> for Flow {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Aux {
     #[serde(rename = "@name")]
     pub name: String,
@@ -4214,7 +4269,8 @@ impl From<datamodel::Aux> for Aux {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Var {
     Stock(Stock),

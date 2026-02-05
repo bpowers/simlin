@@ -9,7 +9,8 @@ edition = "2024"
 crate-type = ["rlib"]
 
 [features]
-default = ["schema", "ai_info"]
+default = ["schema", "ai_info", "debug-derive"]
+debug-derive = []
 schema = ["dep:schemars"]
 ai_info = ["dep:ed25519", "dep:base64"]
 file_io = ["dep:csv"]

@@ -6,7 +6,7 @@ use std::fmt;
 
 /// Loc describes a location in an equation by the starting point and ending point.
 /// Equations are strings typed by humans for a single variable -- u16 is long enough.
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, Hash)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Hash)]
 pub struct Loc {
     pub start: u16,
     pub end: u16,
@@ -48,10 +48,12 @@ fn test_loc_basics() {
     assert_eq!(Loc::new(1, 7), a.union(&c));
 }
 
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Eq, Clone)]
 pub struct UntypedBuiltinFn<Expr>(pub String, pub Vec<Expr>);
 
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Eq, Clone)]
 pub enum BuiltinFn<Expr> {
     Lookup(Box<Expr>, Box<Expr>, Loc),
     LookupForward(Box<Expr>, Box<Expr>, Loc),
