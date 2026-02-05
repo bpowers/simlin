@@ -1,0 +1,73 @@
+// Copyright 2025 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+import { Set } from 'immutable';
+
+import { computeMouseDownSelection, computeMouseUpSelection } from '../selection-logic';
+
+describe('computeMouseDownSelection', () => {
+  it('click unselected element without modifier replaces selection', () => {
+    const result = computeMouseDownSelection(Set([1, 2, 3]), 5, false);
+    expect(result.newSelection).toEqual(Set([5]));
+    expect(result.deferSingleSelect).toBeUndefined();
+  });
+
+  it('click unselected element with modifier adds to selection', () => {
+    const result = computeMouseDownSelection(Set([1, 2]), 3, true);
+    expect(result.newSelection).toEqual(Set([1, 2, 3]));
+    expect(result.deferSingleSelect).toBeUndefined();
+  });
+
+  it('click selected element with modifier removes from selection', () => {
+    const result = computeMouseDownSelection(Set([1, 2, 3]), 2, true);
+    expect(result.newSelection).toEqual(Set([1, 3]));
+    expect(result.deferSingleSelect).toBeUndefined();
+  });
+
+  it('click element already in multi-selection without modifier defers', () => {
+    const result = computeMouseDownSelection(Set([1, 2, 3]), 2, false);
+    expect(result.newSelection).toBeUndefined();
+    expect(result.deferSingleSelect).toBe(2);
+  });
+
+  it('click sole selected element without modifier defers', () => {
+    const result = computeMouseDownSelection(Set([5]), 5, false);
+    expect(result.newSelection).toBeUndefined();
+    expect(result.deferSingleSelect).toBe(5);
+  });
+
+  it('click with empty selection without modifier selects it', () => {
+    const result = computeMouseDownSelection(Set(), 1, false);
+    expect(result.newSelection).toEqual(Set([1]));
+    expect(result.deferSingleSelect).toBeUndefined();
+  });
+
+  it('modifier click on only element in selection removes it', () => {
+    const result = computeMouseDownSelection(Set([1]), 1, true);
+    expect(result.newSelection).toEqual(Set());
+    expect(result.deferSingleSelect).toBeUndefined();
+  });
+});
+
+describe('computeMouseUpSelection', () => {
+  it('deferred + no drag collapses to single element', () => {
+    const result = computeMouseUpSelection(2, false);
+    expect(result).toEqual(Set([2]));
+  });
+
+  it('deferred + drag occurred returns undefined', () => {
+    const result = computeMouseUpSelection(2, true);
+    expect(result).toBeUndefined();
+  });
+
+  it('no deferred UID + no drag returns undefined', () => {
+    const result = computeMouseUpSelection(undefined, false);
+    expect(result).toBeUndefined();
+  });
+
+  it('no deferred UID + drag returns undefined', () => {
+    const result = computeMouseUpSelection(undefined, true);
+    expect(result).toBeUndefined();
+  });
+});

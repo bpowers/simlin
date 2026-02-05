@@ -4,7 +4,7 @@
 
 import { List } from 'immutable';
 
-import { Point, FlowViewElement, StockViewElement, AuxViewElement } from '@simlin/core/datamodel';
+import { Point, FlowViewElement, StockViewElement, AuxViewElement, CloudViewElement } from '@simlin/core/datamodel';
 
 import { StockWidth } from '../drawing/Stock';
 
@@ -58,6 +58,16 @@ function makeAux(uid: number, x: number, y: number): AuxViewElement {
     x,
     y,
     labelSide: 'center',
+    isZeroRadius: false,
+  });
+}
+
+function makeCloud(uid: number, flowUid: number, x: number, y: number): CloudViewElement {
+  return new CloudViewElement({
+    uid,
+    flowUid,
+    x,
+    y,
     isZeroRadius: false,
   });
 }
@@ -162,6 +172,23 @@ describe('Group Selection', () => {
     });
   });
 
+  describe('Drag selection should include clouds', () => {
+    it('should select a cloud when its center is within the drag rectangle', () => {
+      const cloud = makeCloud(10, 2, 100, 100);
+      expect(isInSelectionRect(cloud, 50, 150, 50, 150)).toBe(true);
+    });
+
+    it('should not select a cloud when its center is outside the drag rectangle', () => {
+      const cloud = makeCloud(10, 2, 200, 200);
+      expect(isInSelectionRect(cloud, 50, 150, 50, 150)).toBe(false);
+    });
+
+    it('should select a cloud on the edge of the rectangle', () => {
+      const cloud = makeCloud(10, 2, 150, 100);
+      expect(isInSelectionRect(cloud, 50, 150, 50, 150)).toBe(true);
+    });
+  });
+
   describe('Mixed element selection', () => {
     it('should select stocks, flows, and auxes all within the same drag rectangle', () => {
       const stock = makeStock(1, 100, 100);
@@ -184,6 +211,48 @@ describe('Group Selection', () => {
       }
 
       expect(selectedUids).toEqual([1, 2, 4]);
+    });
+
+    it('should select stocks, flows, clouds, and auxes in the same drag rectangle', () => {
+      const stock = makeStock(1, 100, 100);
+      const flow = makeFlow(2, 150, 100, [
+        { x: 100 + StockWidth / 2, y: 100, attachedToUid: 1 },
+        { x: 200, y: 100, attachedToUid: 3 },
+      ]);
+      const cloud = makeCloud(10, 2, 80, 100);
+      const aux = makeAux(4, 120, 80);
+
+      const selectedUids: number[] = [];
+      for (const element of [stock, flow, cloud, aux]) {
+        if (isInSelectionRect(element, 50, 200, 50, 150)) {
+          selectedUids.push(element.uid);
+        }
+      }
+
+      expect(selectedUids).toEqual([1, 2, 10, 4]);
+    });
+
+    it('should select inline chain: cloud, flow, stock, flow, cloud all in rectangle', () => {
+      const cloudA = makeCloud(10, 20, 50, 100);
+      const stock = makeStock(1, 150, 100);
+      const cloudB = makeCloud(11, 21, 250, 100);
+      const flowIn = makeFlow(20, 100, 100, [
+        { x: 50, y: 100, attachedToUid: 10 },
+        { x: 127.5, y: 100, attachedToUid: 1 },
+      ]);
+      const flowOut = makeFlow(21, 200, 100, [
+        { x: 172.5, y: 100, attachedToUid: 1 },
+        { x: 250, y: 100, attachedToUid: 11 },
+      ]);
+
+      const selectedUids: number[] = [];
+      for (const element of [cloudA, stock, cloudB, flowIn, flowOut]) {
+        if (isInSelectionRect(element, 25, 275, 50, 150)) {
+          selectedUids.push(element.uid);
+        }
+      }
+
+      expect(selectedUids).toEqual([10, 1, 11, 20, 21]);
     });
   });
 });
