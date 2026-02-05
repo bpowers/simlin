@@ -168,7 +168,7 @@ fi
 CODEX_WORKS=false
 if [ "$CLAUDE_WORKS" = "false" ] && command -v codex >/dev/null 2>&1; then
     CODEX_OUTPUT=$(mktemp)
-    if timeout -k 2 30 codex exec -m gpt-5.2 "respond with the single word: yes" > "$CODEX_OUTPUT" 2>&1; then
+    if timeout -k 2 30 codex exec -m gpt-5.3-codex-xhigh "respond with the single word: yes" > "$CODEX_OUTPUT" 2>&1; then
         if grep -qi "yes" "$CODEX_OUTPUT"; then
             CODEX_WORKS=true
         fi
