@@ -134,6 +134,23 @@ class App {
     this.app.use(cookieParser());
     this.app.use(seshcookie(this.app.get('authentication').seshcookie));
 
+    // Passport 0.7.0 requires session.regenerate() and session.save()
+    // that seshcookie's plain-object sessions don't provide.
+    this.app.use((req: express.Request, _res: express.Response, next: express.NextFunction) => {
+      const addSessionMethods = (session: Record<string, any>): void => {
+        session.regenerate = (cb: (err?: any) => void) => {
+          req.session = {};
+          addSessionMethods(req.session);
+          cb();
+        };
+        session.save = (cb: (err?: any) => void) => {
+          cb();
+        };
+      };
+      addSessionMethods(req.session);
+      next();
+    });
+
     // etags don't work well on Google App Engine, and we don't have
     // the type of content that is really amenable to etags anyway.
     this.app.set('etag', false);
