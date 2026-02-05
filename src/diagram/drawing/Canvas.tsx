@@ -52,6 +52,7 @@ import { shouldShowVariableDetails } from './pointer-utils';
 import {
   computeMouseDownSelection,
   computeMouseUpSelection,
+  pointerStateReset,
   resolveSelectionForReattachment,
 } from '../selection-logic';
 
@@ -806,19 +807,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     this.deferredSingleSelectUid = undefined;
     this.deferredIsText = undefined;
 
-    this.setState({
-      isMovingCanvas: false,
-      isMovingArrow: false,
-      isMovingSource: false,
-      isEditingName: false,
-      isDragSelecting: false,
-      isMovingLabel: false,
-      labelSide: undefined,
-      dragSelectionPoint: undefined,
-      inCreation: undefined,
-      inCreationCloud: undefined,
-      draggingSegmentIndex: undefined,
-    });
+    this.setState(pointerStateReset());
 
     if (clearSelection) {
       this.props.onSetSelection(Set());
@@ -886,6 +875,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           if (!el.isNamed()) {
             // Clouds and other non-named elements can't enter text editing
             this.selectionCenterOffset = undefined;
+            this.setState(pointerStateReset());
             return;
           }
           const editingName = plainDeserialize('label', displayName(defined((el as NamedViewElement).name)));

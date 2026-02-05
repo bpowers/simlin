@@ -61,6 +61,44 @@ export function resolveSelectionForReattachment(
 }
 
 /**
+ * State fields that must be cleared when pointer interactions end. Used by
+ * clearPointerState and the deferred-click early-return for non-named
+ * elements (clouds) to ensure no stale pointer state leaks into subsequent
+ * renders or interactions.
+ */
+export interface PointerStateReset {
+  moveDelta: undefined;
+  isMovingArrow: false;
+  isMovingSource: false;
+  isMovingLabel: false;
+  labelSide: undefined;
+  isDragSelecting: false;
+  isMovingCanvas: false;
+  isEditingName: false;
+  dragSelectionPoint: undefined;
+  inCreation: undefined;
+  inCreationCloud: undefined;
+  draggingSegmentIndex: undefined;
+}
+
+export function pointerStateReset(): PointerStateReset {
+  return {
+    moveDelta: undefined,
+    isMovingArrow: false,
+    isMovingSource: false,
+    isMovingLabel: false,
+    labelSide: undefined,
+    isDragSelecting: false,
+    isMovingCanvas: false,
+    isEditingName: false,
+    dragSelectionPoint: undefined,
+    inCreation: undefined,
+    inCreationCloud: undefined,
+    draggingSegmentIndex: undefined,
+  };
+}
+
+/**
  * Resolves deferred selection on mouseUp.
  *
  * If a deferred UID was set on mouseDown and no drag occurred,

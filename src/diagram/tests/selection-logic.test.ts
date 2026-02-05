@@ -7,6 +7,7 @@ import { Set } from 'immutable';
 import {
   computeMouseDownSelection,
   computeMouseUpSelection,
+  pointerStateReset,
   resolveSelectionForReattachment,
 } from '../selection-logic';
 
@@ -95,5 +96,37 @@ describe('computeMouseUpSelection', () => {
   it('no deferred UID + drag returns undefined', () => {
     const result = computeMouseUpSelection(undefined, true);
     expect(result).toBeUndefined();
+  });
+});
+
+describe('pointerStateReset', () => {
+  it('clears moveDelta', () => {
+    const reset = pointerStateReset();
+    expect(reset.moveDelta).toBeUndefined();
+  });
+
+  it('clears all movement flags', () => {
+    const reset = pointerStateReset();
+    expect(reset.isMovingArrow).toBe(false);
+    expect(reset.isMovingSource).toBe(false);
+    expect(reset.isMovingLabel).toBe(false);
+    expect(reset.isMovingCanvas).toBe(false);
+  });
+
+  it('clears all interaction state', () => {
+    const reset = pointerStateReset();
+    expect(reset.isDragSelecting).toBe(false);
+    expect(reset.isEditingName).toBe(false);
+    expect(reset.labelSide).toBeUndefined();
+    expect(reset.dragSelectionPoint).toBeUndefined();
+    expect(reset.inCreation).toBeUndefined();
+    expect(reset.inCreationCloud).toBeUndefined();
+    expect(reset.draggingSegmentIndex).toBeUndefined();
+  });
+
+  it('returns consistent values across calls', () => {
+    const a = pointerStateReset();
+    const b = pointerStateReset();
+    expect(a).toEqual(b);
   });
 });
