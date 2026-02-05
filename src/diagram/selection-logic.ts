@@ -44,6 +44,23 @@ export function computeMouseDownSelection(
 }
 
 /**
+ * When cloud re-attachment is activated (clicking a cloud triggers flow
+ * source/sink drag mode), the selection must contain the flow UID -- not
+ * the cloud UID. Downstream mouseUp handlers read `only(selection)` and
+ * expect a FlowViewElement for attachment handling.
+ */
+export function resolveSelectionForReattachment(
+  newSelection: Set<UID>,
+  enteredReattachmentMode: boolean,
+  reattachFlowUid: UID,
+): Set<UID> {
+  if (enteredReattachmentMode) {
+    return Set([reattachFlowUid]);
+  }
+  return newSelection;
+}
+
+/**
  * Resolves deferred selection on mouseUp.
  *
  * If a deferred UID was set on mouseDown and no drag occurred,

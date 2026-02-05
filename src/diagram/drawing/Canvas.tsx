@@ -49,7 +49,11 @@ import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
 import { updateArcAngle } from '../arc-utils';
 import { shouldShowVariableDetails } from './pointer-utils';
-import { computeMouseDownSelection, computeMouseUpSelection } from '../selection-logic';
+import {
+  computeMouseDownSelection,
+  computeMouseUpSelection,
+  resolveSelectionForReattachment,
+} from '../selection-logic';
 
 import styles from './Canvas.module.css';
 
@@ -1965,7 +1969,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       }
 
       if (newSelection !== undefined) {
-        this.props.onSetSelection(newSelection);
+        const enteredReattachment = isMovingSource || isMovingArrow;
+        this.props.onSetSelection(resolveSelectionForReattachment(newSelection, enteredReattachment, element.uid));
       }
     }
 

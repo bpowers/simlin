@@ -4,7 +4,11 @@
 
 import { Set } from 'immutable';
 
-import { computeMouseDownSelection, computeMouseUpSelection } from '../selection-logic';
+import {
+  computeMouseDownSelection,
+  computeMouseUpSelection,
+  resolveSelectionForReattachment,
+} from '../selection-logic';
 
 describe('computeMouseDownSelection', () => {
   it('click unselected element without modifier replaces selection', () => {
@@ -47,6 +51,28 @@ describe('computeMouseDownSelection', () => {
     const result = computeMouseDownSelection(Set([1]), 1, true);
     expect(result.newSelection).toEqual(Set());
     expect(result.deferSingleSelect).toBeUndefined();
+  });
+});
+
+describe('resolveSelectionForReattachment', () => {
+  it('overrides selection with flow UID when re-attachment is activated', () => {
+    // When clicking a cloud triggers flow re-attachment, the selection must
+    // contain the flow UID -- mouseUp reads only(selection) and expects a
+    // FlowViewElement for attachment handling.
+    const cloudUid = 10;
+    const flowUid = 20;
+    const result = resolveSelectionForReattachment(Set([cloudUid]), true, flowUid);
+    expect(result).toEqual(Set([flowUid]));
+  });
+
+  it('preserves original selection when re-attachment is not activated', () => {
+    const result = resolveSelectionForReattachment(Set([10]), false, 20);
+    expect(result).toEqual(Set([10]));
+  });
+
+  it('preserves multi-element selection when re-attachment is not activated', () => {
+    const result = resolveSelectionForReattachment(Set([1, 2, 3]), false, 20);
+    expect(result).toEqual(Set([1, 2, 3]));
   });
 });
 
