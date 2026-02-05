@@ -1013,6 +1013,102 @@ describe('Group Movement', () => {
     });
   });
 
+  describe('Inline chain: cloud-flow-stock-flow-cloud, all selected', () => {
+    it('should translate entire inline chain uniformly', () => {
+      const cloudA = makeCloud(10, 20, 50, 100);
+      const stock = makeStock(1, 150, 100, [20], [21]);
+      const cloudB = makeCloud(11, 21, 250, 100);
+      const flowIn = makeFlow(20, 100, 100, [
+        { x: 50, y: 100, attachedToUid: 10 },
+        { x: 150 - StockWidth / 2, y: 100, attachedToUid: 1 },
+      ]);
+      const flowOut = makeFlow(21, 200, 100, [
+        { x: 150 + StockWidth / 2, y: 100, attachedToUid: 1 },
+        { x: 250, y: 100, attachedToUid: 11 },
+      ]);
+
+      const elements = Map<UID, ViewElement>()
+        .set(10, cloudA)
+        .set(20, flowIn)
+        .set(1, stock)
+        .set(21, flowOut)
+        .set(11, cloudB);
+
+      const selection = Set<UID>([10, 20, 1, 21, 11]);
+      // delta is subtracted from viewBox coords, so negative = elements move in positive direction
+      const delta = { x: -60, y: -40 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // All elements should shift by (60, 40)
+      expect((result.get(10) as CloudViewElement).cx).toBe(110);
+      expect((result.get(10) as CloudViewElement).cy).toBe(140);
+      expect((result.get(11) as CloudViewElement).cx).toBe(310);
+      expect((result.get(11) as CloudViewElement).cy).toBe(140);
+      expect((result.get(1) as StockViewElement).cx).toBe(210);
+      expect((result.get(1) as StockViewElement).cy).toBe(140);
+
+      const newFlowIn = result.get(20) as FlowViewElement;
+      expect(newFlowIn.cx).toBe(160);
+      expect(newFlowIn.cy).toBe(140);
+      expect(newFlowIn.points.first()!.x).toBe(110);
+      expect(newFlowIn.points.first()!.y).toBe(140);
+      expect(newFlowIn.points.last()!.x).toBe(150 - StockWidth / 2 + 60);
+      expect(newFlowIn.points.last()!.y).toBe(140);
+      expect(newFlowIn.points.size).toBe(2);
+
+      const newFlowOut = result.get(21) as FlowViewElement;
+      expect(newFlowOut.cx).toBe(260);
+      expect(newFlowOut.cy).toBe(140);
+      expect(newFlowOut.points.first()!.x).toBe(150 + StockWidth / 2 + 60);
+      expect(newFlowOut.points.first()!.y).toBe(140);
+      expect(newFlowOut.points.last()!.x).toBe(310);
+      expect(newFlowOut.points.last()!.y).toBe(140);
+      expect(newFlowOut.points.size).toBe(2);
+    });
+
+    it('should re-route flows when only clouds and stock are selected', () => {
+      const cloudA = makeCloud(10, 20, 50, 100);
+      const stock = makeStock(1, 150, 100, [20], [21]);
+      const cloudB = makeCloud(11, 21, 250, 100);
+      const flowIn = makeFlow(20, 100, 100, [
+        { x: 50, y: 100, attachedToUid: 10 },
+        { x: 150 - StockWidth / 2, y: 100, attachedToUid: 1 },
+      ]);
+      const flowOut = makeFlow(21, 200, 100, [
+        { x: 150 + StockWidth / 2, y: 100, attachedToUid: 1 },
+        { x: 250, y: 100, attachedToUid: 11 },
+      ]);
+
+      const elements = Map<UID, ViewElement>()
+        .set(10, cloudA)
+        .set(20, flowIn)
+        .set(1, stock)
+        .set(21, flowOut)
+        .set(11, cloudB);
+
+      // Select only clouds + stock, not flows
+      const selection = Set<UID>([10, 1, 11]);
+      const delta = { x: -60, y: 0 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Clouds and stock move
+      expect((result.get(10) as CloudViewElement).cx).toBe(110);
+      expect((result.get(1) as StockViewElement).cx).toBe(210);
+      expect((result.get(11) as CloudViewElement).cx).toBe(310);
+
+      // Flows are re-routed between new positions
+      const newFlowIn = result.get(20) as FlowViewElement;
+      expect(newFlowIn.points.first()!.x).toBe(110);
+      expect(newFlowIn.points.last()!.x).toBe(210 - StockWidth / 2);
+
+      const newFlowOut = result.get(21) as FlowViewElement;
+      expect(newFlowOut.points.first()!.x).toBe(210 + StockWidth / 2);
+      expect(newFlowOut.points.last()!.x).toBe(310);
+    });
+  });
+
   describe('Cloud in selection, attached flow not in selection', () => {
     it('should adjust flow when cloud moves parallel to flow direction', () => {
       // Setup: Cloud -> Flow (not selected) -> Stock, horizontal flow

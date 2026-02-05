@@ -49,6 +49,12 @@ import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
 import { updateArcAngle } from '../arc-utils';
 import { shouldShowVariableDetails } from './pointer-utils';
+import {
+  computeMouseDownSelection,
+  computeMouseUpSelection,
+  pointerStateReset,
+  resolveSelectionForReattachment,
+} from '../selection-logic';
 
 import styles from './Canvas.module.css';
 
@@ -204,6 +210,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   momentumStartTime: number | undefined;
   momentumInitialVelocity: Point | undefined;
   momentumStartOffset: Point | undefined;
+
+  // Deferred selection state for click-in-group-then-drag behavior.
+  // Set on mouseDown when clicking an already-selected element without modifier;
+  // resolved on mouseUp based on whether a drag occurred.
+  deferredSingleSelectUid: UID | undefined;
+  deferredIsText: boolean | undefined;
 
   constructor(props: CanvasProps) {
     super(props);
@@ -792,20 +804,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     this.pointerId = undefined;
     this.mouseDownPoint = undefined;
     this.selectionCenterOffset = undefined;
+    this.deferredSingleSelectUid = undefined;
+    this.deferredIsText = undefined;
 
-    this.setState({
-      isMovingCanvas: false,
-      isMovingArrow: false,
-      isMovingSource: false,
-      isEditingName: false,
-      isDragSelecting: false,
-      isMovingLabel: false,
-      labelSide: undefined,
-      dragSelectionPoint: undefined,
-      inCreation: undefined,
-      inCreationCloud: undefined,
-      draggingSegmentIndex: undefined,
-    });
+    this.setState(pointerStateReset());
 
     if (clearSelection) {
       this.props.onSetSelection(Set());
@@ -854,6 +856,41 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     );
 
     this.pointerId = undefined;
+
+    // Resolve deferred selection: if user clicked an already-selected element
+    // without modifier, we deferred the selection change to allow group drag.
+    // Now on mouseUp, if no drag occurred, collapse to the single element.
+    if (this.deferredSingleSelectUid !== undefined) {
+      const didDrag =
+        this.state.moveDelta !== undefined && (this.state.moveDelta.x !== 0 || this.state.moveDelta.y !== 0);
+      const newSel = computeMouseUpSelection(this.deferredSingleSelectUid, didDrag);
+      const wasDeferredText = this.deferredIsText;
+      this.deferredSingleSelectUid = undefined;
+      this.deferredIsText = undefined;
+      if (newSel) {
+        this.props.onSetSelection(newSel);
+        if (wasDeferredText && newSel.size === 1) {
+          const uid = only(newSel);
+          const el = this.getElementByUid(uid);
+          if (!el.isNamed()) {
+            // Clouds and other non-named elements can't enter text editing
+            this.selectionCenterOffset = undefined;
+            this.setState(pointerStateReset());
+            return;
+          }
+          const editingName = plainDeserialize('label', displayName(defined((el as NamedViewElement).name)));
+          this.setState({
+            isEditingName: true,
+            editingName,
+            moveDelta: undefined,
+            isMovingArrow: false,
+            isMovingSource: false,
+          });
+          this.selectionCenterOffset = undefined;
+          return;
+        }
+      }
+    }
 
     if (this.state.isMovingLabel && this.state.labelSide) {
       const selected = only(this.props.selection);
@@ -1000,13 +1037,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       // Find all elements within the selection rectangle
       let selectedElements = Set<UID>();
       for (const element of this.cachedElements) {
-        // Skip clouds since they're tied to flows
+        // Clouds use center-point containment (no visible bounds to intersect with rect corners)
         if (element instanceof CloudViewElement) {
-          continue;
-        }
-
-        // Check if element is within selection rectangle
-        if (element instanceof AuxViewElement) {
+          if (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom) {
+            selectedElements = selectedElements.add(element.uid);
+          }
+        } else if (element instanceof AuxViewElement) {
           if (
             auxContains(element, { x: left, y: top }) ||
             auxContains(element, { x: right, y: top }) ||
@@ -1860,56 +1896,71 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         isZeroRadius: false,
       });
       element = inCreation;
-    } else if (element instanceof CloudViewElement && element.flowUid !== undefined) {
-      // Handle cloud drag to attach flow to stock
-      let flow: FlowViewElement | undefined;
-      try {
-        const flowElement = this.getElementByUid(element.flowUid);
-        if (flowElement instanceof FlowViewElement) {
-          flow = flowElement;
-        }
-      } catch (e) {
-        console.warn(`Cloud ${element.uid} references invalid flow ${element.flowUid}:`, e);
-      }
-      if (flow) {
-        if (isCloudOnSourceSide(element, flow)) {
-          isMovingSource = true;
-          element = flow;
-        } else if (isCloudOnSinkSide(element, flow)) {
-          isMovingArrow = true;
-          element = flow;
-        }
-        // If cloud is attached to flow but not at source or sink, select the cloud normally
-      }
     } else {
-      // not an action we recognize, deselect the tool and continue on
+      // Not a link/flow tool action -- compute selection and handle clouds
       this.props.onClearSelectedTool();
 
-      // Check for modifier keys to determine selection behavior
       const isMultiSelect = e.ctrlKey || e.metaKey || e.shiftKey;
-      let selection: Set<UID>;
+      const { newSelection, deferSingleSelect } = computeMouseDownSelection(
+        this.props.selection,
+        element.uid,
+        isMultiSelect,
+      );
 
-      if (isMultiSelect) {
-        // Add to or remove from existing selection
-        if (this.props.selection.has(element.uid)) {
-          // Remove from selection
-          selection = this.props.selection.delete(element.uid);
-        } else {
-          // Add to selection
-          selection = this.props.selection.add(element.uid);
-        }
-      } else {
-        // Replace selection (single element)
-        selection = Set([element.uid]);
+      if (deferSingleSelect !== undefined) {
+        // Element is already in the selection and no modifier -- defer selection
+        // change to mouseUp so that group drag works without dissolving selection
+        this.deferredSingleSelectUid = deferSingleSelect;
+        this.deferredIsText = isText;
+        isEditingName = false;
+
+        this.setState({
+          isEditingName: false,
+          editingName,
+          isMovingArrow: false,
+          isMovingSource: false,
+          inCreation,
+          moveDelta: { x: 0, y: 0 },
+          draggingSegmentIndex: segmentIndex,
+        });
+        return;
       }
 
-      // Only allow editing name if single selection
-      if (isEditingName && selection.size === 1) {
-        const uid = only(selection);
+      // Cloud re-attachment only when the cloud will be the sole selection
+      const willBeSoleSelection = newSelection !== undefined && newSelection.size === 1;
+      if (element instanceof CloudViewElement && element.flowUid !== undefined && willBeSoleSelection) {
+        let flow: FlowViewElement | undefined;
+        try {
+          const flowElement = this.getElementByUid(element.flowUid);
+          if (flowElement instanceof FlowViewElement) {
+            flow = flowElement;
+          }
+        } catch (e) {
+          console.warn(`Cloud ${element.uid} references invalid flow ${element.flowUid}:`, e);
+        }
+        if (flow) {
+          if (isCloudOnSourceSide(element, flow)) {
+            isMovingSource = true;
+            element = flow;
+          } else if (isCloudOnSinkSide(element, flow)) {
+            isMovingArrow = true;
+            element = flow;
+          }
+        }
+      }
+
+      // Only allow editing name if single selection of a named element
+      if (isEditingName && newSelection !== undefined && newSelection.size === 1) {
+        const uid = only(newSelection);
         const editingElement = this.getElementByUid(uid) as NamedViewElement;
         editingName = plainDeserialize('label', displayName(defined(editingElement.name)));
       } else {
         isEditingName = false;
+      }
+
+      if (newSelection !== undefined) {
+        const enteredReattachment = isMovingSource || isMovingArrow;
+        this.props.onSetSelection(resolveSelectionForReattachment(newSelection, enteredReattachment, element.uid));
       }
     }
 
@@ -1919,28 +1970,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       isMovingArrow,
       isMovingSource,
       inCreation,
-      moveDelta: {
-        x: 0,
-        y: 0,
-      },
+      moveDelta: { x: 0, y: 0 },
       draggingSegmentIndex: segmentIndex,
     });
 
-    // Use the calculated selection instead of always single element
     if (selectedTool === 'link' || selectedTool === 'flow') {
       this.props.onSetSelection(Set([element.uid]));
-    } else {
-      const isMultiSelect = e.ctrlKey || e.metaKey || e.shiftKey;
-      if (isMultiSelect) {
-        // Add to or remove from existing selection
-        if (this.props.selection.has(element.uid)) {
-          this.props.onSetSelection(this.props.selection.delete(element.uid));
-        } else {
-          this.props.onSetSelection(this.props.selection.add(element.uid));
-        }
-      } else {
-        this.props.onSetSelection(Set([element.uid]));
-      }
     }
   };
 

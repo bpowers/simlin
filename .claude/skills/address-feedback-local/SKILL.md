@@ -32,7 +32,7 @@ git push --force-with-lease
 
 Run with a 30-minute timeout:
 ```bash
-codex --model 'gpt-5.2-codex-xhigh' review --base origin/main 2>/dev/null
+codex --model 'gpt-5.3-codex-xhigh' review --base origin/main 2>/dev/null
 ```
 
 Parse the output. If the output is empty or explicitly states something like "no problems detected", proceed to Step 2.
@@ -52,7 +52,7 @@ If codex provides ANY suggestions or identifies ANY issues:
 
 Run claude review using the PR number (from system-reminder or from when you created the PR), running again with a 30-minute timeout:
 ```bash
-claude --dangerously-skip-permissions --model 'claude-opus-4-5-20251101' -p '/review <PR_NUMBER>'
+claude --dangerously-skip-permissions --model 'claude-opus-4-6' -p '/review <PR_NUMBER>'
 ```
 
 Think CRITICALLY about the output. Claude's response will include:
