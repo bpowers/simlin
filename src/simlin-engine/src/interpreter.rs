@@ -605,8 +605,11 @@ impl ModuleEvaluator<'_> {
                 }
                 Some((ident, offset))
             }
-            _ => {
-                eprintln!("unsupported expression type for lookup table reference");
+            other => {
+                eprintln!(
+                    "unsupported expression type for lookup table reference: {:?}",
+                    std::mem::discriminant(other),
+                );
                 None
             }
         }
@@ -1283,7 +1286,7 @@ impl ModuleEvaluator<'_> {
                         | Expr::AssignNext(_, _)
                         | Expr::AssignTemp(_, _, _)
                         | Expr::TempArrayElement(_, _, _, _) => {
-                            unreachable!()
+                            unreachable!("assignment expression in AssignTemp RHS")
                         }
                     }
                 }
