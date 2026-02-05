@@ -878,8 +878,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         this.props.onSetSelection(newSel);
         if (wasDeferredText && newSel.size === 1) {
           const uid = only(newSel);
-          const el = this.getElementByUid(uid) as NamedViewElement;
-          const editingName = plainDeserialize('label', displayName(defined(el.name)));
+          const el = this.getElementByUid(uid);
+          if (!el.isNamed()) {
+            // Clouds and other non-named elements can't enter text editing
+            this.selectionCenterOffset = undefined;
+            return;
+          }
+          const editingName = plainDeserialize('label', displayName(defined((el as NamedViewElement).name)));
           this.setState({
             isEditingName: true,
             editingName,
@@ -1038,7 +1043,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       // Find all elements within the selection rectangle
       let selectedElements = Set<UID>();
       for (const element of this.cachedElements) {
-        // Check if element is within selection rectangle
+        // Clouds use center-point containment (no visible bounds to intersect with rect corners)
         if (element instanceof CloudViewElement) {
           if (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom) {
             selectedElements = selectedElements.add(element.uid);

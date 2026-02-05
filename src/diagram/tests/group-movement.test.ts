@@ -1035,6 +1035,7 @@ describe('Group Movement', () => {
         .set(11, cloudB);
 
       const selection = Set<UID>([10, 20, 1, 21, 11]);
+      // delta is subtracted from viewBox coords, so negative = elements move in positive direction
       const delta = { x: -60, y: -40 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
