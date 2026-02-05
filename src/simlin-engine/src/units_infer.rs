@@ -16,7 +16,8 @@ use crate::variable::Variable;
 
 /// Source of a constraint for error reporting.
 /// Tracks which variable a constraint relates to and optionally where in that variable's equation.
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 struct ConstraintSource {
     /// Variable identifier with module prefix (e.g., "module1·varname")
     var: String,
@@ -26,7 +27,8 @@ struct ConstraintSource {
 
 /// A constraint with source tracking for error reporting.
 /// Each constraint represents an equation of the form `1 == unit_map`.
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 struct LocatedConstraint {
     /// The unit map representing the constraint
     unit_map: UnitMap,

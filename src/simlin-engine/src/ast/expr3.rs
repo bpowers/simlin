@@ -17,7 +17,8 @@ use crate::eqn_err;
 /// Unlike IndexExpr2, this type does NOT have a Wildcard variant.
 /// During the expr2 → expr3 lowering pass, all wildcards are resolved
 /// to explicit StarRange expressions based on the variable's dimensions.
-#[derive(PartialEq, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Clone)]
 pub enum IndexExpr3 {
     /// Star range (*:dim or dim.*) - preserves dimension for iteration.
     /// This includes both user-specified star ranges AND wildcards that
@@ -86,7 +87,8 @@ impl IndexExpr3 {
 /// - Keeps string representation in Const for debugging
 /// - No module-specific variants (EvalModule, ModuleInput)
 /// - No assignment variants (AssignCurr, AssignNext)
-#[derive(PartialEq, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Clone)]
 pub enum Expr3 {
     // Core variants (similar to Expr2)
     Const(String, f64, Loc),

@@ -3108,7 +3108,8 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
     );
 }
 
-#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 enum JsonProjectOperation {
     SetSimSpecs {
@@ -3117,7 +3118,8 @@ enum JsonProjectOperation {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JsonProjectPatch {
     #[serde(default)]
@@ -3126,14 +3128,16 @@ struct JsonProjectPatch {
     models: Vec<JsonModelPatch>,
 }
 
-#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Deserialize)]
 struct JsonModelPatch {
     name: String,
     #[serde(default)]
     ops: Vec<JsonModelOperation>,
 }
 
-#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 enum JsonModelOperation {
     UpsertAux {

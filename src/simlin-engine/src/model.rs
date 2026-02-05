@@ -28,7 +28,8 @@ pub type VariableStage0 = Variable<datamodel::ModuleReference, Expr0>;
 
 /// ModelStage0 converts a datamodel::Model to one with a map of canonicalized
 /// identifiers to Variables where module dependencies haven't been resolved.
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct ModelStage0 {
     pub ident: Ident<Canonical>,
     pub display_name: String,
@@ -39,7 +40,8 @@ pub struct ModelStage0 {
     pub implicit: bool,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct ModelStage1 {
     pub name: Ident<Canonical>,
     pub display_name: String,
@@ -57,7 +59,8 @@ pub struct ModelStage1 {
     pub implicit: bool,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ModuleStage2 {
     pub model_ident: Ident<Canonical>,
     /// inputs is the set of variables overridden (provided as input) in this

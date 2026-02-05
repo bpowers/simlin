@@ -25,7 +25,8 @@ pub use expr2::{ArrayBounds, Expr2, Expr2Context, IndexExpr2};
 #[allow(unused_imports)]
 pub use expr3::{Expr3, Expr3LowerContext, IndexExpr3, Pass1Context};
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Ast<Expr> {
     Scalar(Expr),
     ApplyToAll(Vec<Dimension>, Expr),

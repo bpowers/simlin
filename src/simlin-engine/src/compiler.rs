@@ -32,7 +32,8 @@ use smallvec::SmallVec;
 // Type alias to reduce complexity
 type VariableOffsetMap = HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (usize, usize)>>;
 
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct Table {
     pub data: Vec<(f64, f64)>,
 }
@@ -54,7 +55,8 @@ pub(crate) type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
 /// Represents a subscript operation after parsing but before view construction.
 /// Used to normalize different subscript syntaxes into a uniform representation
 /// that can be processed by build_view_from_ops.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 enum IndexOp {
     /// Range subscript with start and end (0-based, end exclusive).
     /// Example: `arr[2:5]` becomes `Range(1, 5)` (converted from 1-based)
@@ -489,7 +491,8 @@ fn build_view_from_ops(
 /// Represents a single subscript index in a dynamic Subscript expression.
 /// This enum distinguishes between single-element access and range access,
 /// enabling proper bytecode generation for dynamic ranges.
-#[derive(PartialEq, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Clone)]
 pub enum SubscriptIndex {
     /// Single element access - evaluates to a 1-based index
     Single(Expr),
@@ -510,7 +513,8 @@ impl SubscriptIndex {
     }
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Clone)]
 #[allow(dead_code)]
 pub enum Expr {
     Const(f64, Loc),
@@ -679,7 +683,8 @@ fn decompose_array_temps(expr: Expr, next_temp_id: usize) -> Result<(Expr, Vec<E
     Ok((expr, vec![], next_temp_id))
 }
 
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub(crate) struct VariableMetadata {
     pub(crate) offset: usize,
     pub(crate) size: usize,
@@ -687,7 +692,8 @@ pub(crate) struct VariableMetadata {
     pub(crate) var: Variable,
 }
 
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub(crate) struct Context<'a> {
     pub(crate) dimensions: Vec<Dimension>,
     #[allow(dead_code)]
@@ -2769,7 +2775,8 @@ fn test_lower() {
     assert_eq!(expected, output_exprs.pop().unwrap());
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct Var {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) ast: Vec<Expr>,
@@ -3244,7 +3251,8 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct Module {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) inputs: HashSet<Ident<Canonical>>,
@@ -5141,7 +5149,8 @@ pub fn pretty(expr: &Expr) -> String {
 /// For each target dimension, provides either:
 /// - Some(source_idx): which source dimension maps here
 /// - None: no source dimension (broadcast with stride 0)
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 #[allow(dead_code)] // Scaffolding for future broadcast_view usage
 pub struct DimensionMapping {
     /// mapping[target_idx] = Some(source_idx) or None
@@ -5388,7 +5397,8 @@ pub fn find_dimension_reordering(
 }
 
 // simplified/lowered from ast::UnaryOp version
-#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Eq, Hash, Copy, Clone)]
 pub enum UnaryOp {
     Not,
     Transpose,

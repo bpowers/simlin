@@ -23,26 +23,31 @@ pub type ElementName = String;
 /// - Properly handles quoted sections
 ///
 /// A raw, non-canonicalized identifier as it appears in source.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RawIdent(String);
 
 /// A canonicalized dimension name
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CanonicalDimensionName(String);
 
 /// A raw dimension name as it appears in source
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RawDimensionName(String);
 
 /// A canonicalized element name (dimension element)
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CanonicalElementName(String);
 
 /// A raw element name as it appears in source
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RawElementName(String);
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     NoError,      // will never be produced
     DoesNotExist, // the named entity doesn't exist
@@ -158,7 +163,7 @@ impl fmt::Display for ErrorCode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EquationError {
     pub start: u16,
     pub end: u16,
@@ -181,7 +186,7 @@ impl From<Error> for EquationError {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
     Import,
     Model,
@@ -800,7 +805,7 @@ pub struct Canonical;
 pub struct Raw;
 
 /// An owned identifier with state tracking (canonical or raw)
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ident<State = Canonical> {
     inner: String,
     _phantom: PhantomData<State>,
@@ -808,7 +813,8 @@ pub struct Ident<State = Canonical> {
 
 /// A borrowed identifier reference with state tracking
 /// This is the key type that enables zero-copy substring operations
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct IdentRef<'a, State = Canonical> {
     inner: &'a str,
     _phantom: PhantomData<State>,
@@ -816,7 +822,8 @@ pub struct IdentRef<'a, State = Canonical> {
 
 /// A borrowed canonical string slice wrapper
 /// This type guarantees the string is in canonical form
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Eq, Hash)]
 pub struct CanonicalStr<'a> {
     inner: &'a str,
 }
@@ -1300,7 +1307,7 @@ mod identifier_part_iterator_tests {
 
 // ===== Engine-specific additions =====
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum UnitError {
     DefinitionError(EquationError, Option<String>),
     ConsistencyError(ErrorCode, Loc, Option<String>),

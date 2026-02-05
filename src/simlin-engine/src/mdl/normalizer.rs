@@ -17,7 +17,8 @@ use crate::mdl::lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
 /// Normalized tokens ready for parsing.
 ///
 /// These tokens have been transformed based on context (equation/units/comment section).
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum Token<'input> {
     // Pass-through from RawToken
     Plus,
@@ -78,7 +79,7 @@ pub enum Token<'input> {
 }
 
 /// Normalizer error codes for context-sensitive validation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NormalizerErrorCode {
     /// $ symbol found outside units section
     DollarSymbolOutsideUnits,
@@ -95,7 +96,7 @@ pub enum NormalizerErrorCode {
 }
 
 /// Error from the normalizer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizerError {
     pub start: usize,
     pub end: usize,
@@ -150,7 +151,8 @@ impl From<LexError> for NormalizerError {
 }
 
 /// Tracks which section of an equation we're in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
     /// Before first ~ (the equation itself)
     Equation,

@@ -9,7 +9,7 @@ use simlin_engine::datamodel::{Equation, Project as DatamodelProject, Variable};
 use simlin_engine::{self as engine};
 
 /// Categorisation of the formatted error used for presentation purposes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormattedErrorKind {
     Project,
     Model,
@@ -19,7 +19,8 @@ pub enum FormattedErrorKind {
 }
 
 /// Unit error kind for distinguishing types of unit-related errors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum UnitErrorKind {
     /// Syntax error in unit string definition
     Definition,
@@ -30,7 +31,8 @@ pub enum UnitErrorKind {
 }
 
 /// A formatted error containing a human readable message and associated metadata.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct FormattedError {
     pub code: ErrorCode,
     pub message: Option<String>,
@@ -46,7 +48,8 @@ pub struct FormattedError {
 
 /// Collection of formatted errors plus bookkeeping flags that mirror previous CLI output
 /// decisions.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct FormattedErrors {
     pub errors: Vec<FormattedError>,
     pub has_model_errors: bool,

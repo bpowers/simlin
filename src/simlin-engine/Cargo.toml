@@ -9,7 +9,11 @@ edition = "2024"
 crate-type = ["rlib"]
 
 [features]
-default = ["schema", "ai_info"]
+default = ["schema", "ai_info", "debug-derive"]
+# Gates derive(Debug) on most types. Types that implement std::error::Error,
+# are used with .unwrap(), or appear in assert_eq!() keep unconditional Debug.
+# New types should use: #[cfg_attr(feature = "debug-derive", derive(Debug))]
+debug-derive = []
 schema = ["dep:schemars"]
 ai_info = ["dep:ed25519", "dep:base64"]
 file_io = ["dep:csv"]

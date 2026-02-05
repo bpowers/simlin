@@ -17,7 +17,8 @@ use crate::{canonicalize, eqn_err};
 /// Units is used to distinguish between explicit units (and explicit
 /// dimensionless-ness) and dimensionless-ness that comes from computing
 /// on constants.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Eq, Clone)]
 pub enum Units {
     Explicit(UnitMap),
     Constant,
@@ -42,7 +43,8 @@ impl Units {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum UnitOp {
     Mul,
     Div,
@@ -61,7 +63,8 @@ pub(crate) fn combine(op: UnitOp, l: UnitMap, r: UnitMap) -> UnitMap {
     l
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Default, PartialEq)]
 pub struct Context {
     pub sim_specs: SimSpecs,
     aliases: HashMap<String, String>,

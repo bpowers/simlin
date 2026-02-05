@@ -8,14 +8,16 @@
 //! to `datamodel::View` structures.
 
 /// Version of the Vensim sketch format.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ViewVersion {
     V300,
     V364,
 }
 
 /// Header information for a view.
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct ViewHeader {
     pub version: ViewVersion,
     pub title: String,
@@ -23,7 +25,8 @@ pub struct ViewHeader {
 
 /// A variable element in the view (type 10).
 /// Represents stocks, flows, and auxiliaries.
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct VensimVariable {
     pub uid: i32,
     pub name: String,
@@ -42,7 +45,8 @@ pub struct VensimVariable {
 /// A valve element in the view (type 11).
 /// Valves represent the flow control point and always precede their
 /// associated flow variable in the element list.
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct VensimValve {
     pub uid: i32,
     pub name: String,
@@ -56,7 +60,8 @@ pub struct VensimValve {
 
 /// A comment element in the view (type 12).
 /// Comments include text annotations and clouds (flow boundaries).
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct VensimComment {
     pub uid: i32,
     pub text: String,
@@ -71,7 +76,8 @@ pub struct VensimComment {
 
 /// A connector element in the view (type 1).
 /// Connectors represent causal links between variables.
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct VensimConnector {
     pub uid: i32,
     pub from_uid: i32,
@@ -87,7 +93,8 @@ pub struct VensimConnector {
 }
 
 /// A parsed view element.
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub enum VensimElement {
     Variable(VensimVariable),
     Valve(VensimValve),
@@ -188,7 +195,8 @@ impl VensimElement {
 }
 
 /// A parsed Vensim view with all its elements.
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct VensimView {
     pub header: ViewHeader,
     /// Elements indexed by UID. None entries represent missing UIDs.

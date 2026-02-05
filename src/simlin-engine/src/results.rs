@@ -9,12 +9,14 @@ use crate::datamodel::{Dt, SimMethod, SimSpecs};
 
 pub(crate) const TIME_OFF: usize = 0;
 
-#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(PartialEq, Eq, Hash, Copy, Clone)]
 pub enum Method {
     Euler,
 }
 
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct Specs {
     pub start: f64,
     pub stop: f64,
@@ -60,7 +62,7 @@ impl Specs {
     }
 }
 
-#[derive(Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 pub struct Results {
     pub offsets: HashMap<Ident<Canonical>, usize>,
     // one large allocation

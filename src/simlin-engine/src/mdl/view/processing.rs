@@ -258,7 +258,7 @@ pub fn compose_views(views: &mut [VensimView]) -> Vec<i32> {
 }
 
 /// Result of computing flow endpoints.
-#[derive(Debug)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 pub struct FlowEndpoints {
     /// "From" endpoint coordinates
     pub from_x: i32,

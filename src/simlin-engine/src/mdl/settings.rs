@@ -14,7 +14,8 @@
 use crate::datamodel::{SimMethod, Unit};
 
 /// Parsed settings from an MDL file's settings section.
-#[derive(Debug, Default)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Default)]
 pub struct MdlSettings {
     /// Integration method extracted from type 15 line
     pub integration_method: SimMethod,

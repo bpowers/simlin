@@ -18,7 +18,7 @@ use crate::mdl::normalizer::{NormalizerError, Token, TokenNormalizer};
 use crate::mdl::parser;
 
 /// Error from the equation reader.
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 pub enum ReaderError {
     /// Parser error
     Parse(String),

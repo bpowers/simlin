@@ -13,7 +13,8 @@ use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
 
 /// Polarity of a causal link
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LinkPolarity {
     Positive, // Increase in 'from' causes increase in 'to'
     Negative, // Increase in 'from' causes decrease in 'to'
@@ -21,7 +22,8 @@ pub enum LinkPolarity {
 }
 
 /// Represents a causal link between two variables
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Link {
     pub from: Ident<Canonical>,
     pub to: Ident<Canonical>,
@@ -29,7 +31,8 @@ pub struct Link {
 }
 
 /// Represents a feedback loop
-#[derive(Debug, Clone)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct Loop {
     pub id: String,
     pub links: Vec<Link>,
@@ -66,7 +69,8 @@ impl Loop {
 ///
 /// At runtime, if the loop score changes sign during simulation, the polarity
 /// is also classified as Undetermined.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub enum LoopPolarity {
     /// R loop - amplifies changes (positive loop score)
     /// Structurally: even number of negative links

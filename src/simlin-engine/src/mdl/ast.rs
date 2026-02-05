@@ -10,7 +10,8 @@
 use std::borrow::Cow;
 
 /// Byte span in source text for error reporting.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct Loc {
     pub start: u32,
     pub end: u32,
@@ -33,7 +34,8 @@ impl Loc {
 }
 
 /// Unary operators.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     /// `+x`
     Positive,
@@ -44,7 +46,8 @@ pub enum UnaryOp {
 }
 
 /// Binary operators.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     /// `+`
     Add,
@@ -75,7 +78,8 @@ pub enum BinaryOp {
 }
 
 /// Subscript expression (inside `[...]`).
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum Subscript<'input> {
     /// Simple element or dimension name: `DimA`, `elem1`
     Element(Cow<'input, str>, Loc),
@@ -91,7 +95,8 @@ pub enum Subscript<'input> {
 /// - `Symbol`: Symbol-based call parsed from `Token::Symbol`, could be:
 ///   - Lookup invocation (1 arg): `table(x)`
 ///   - Unknown function (multiple args): treated as error or macro call
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CallKind {
     /// Known builtin function (from `Token::Function`)
     Builtin,
@@ -105,7 +110,8 @@ pub enum CallKind {
 /// Expression AST.
 ///
 /// The lifetime `'input` ties string references to the source text for zero-copy parsing.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum Expr<'input> {
     /// Numeric literal: `1.5`, `1e-6`
     Const(f64, Loc),
@@ -151,7 +157,8 @@ pub enum Expr<'input> {
 /// - Legacy XY vector format: `x1, x2, ..., xN, y1, y2, ..., yN` (flat vector split in half)
 ///
 /// The legacy format must be transformed during conversion via `transform_legacy()`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum TableFormat {
     /// Modern pairs format: `(x1,y1), (x2,y2), ...`
     #[default]
@@ -168,7 +175,8 @@ pub enum TableFormat {
 }
 
 /// Inline lookup table definition: `[(xmin,ymin)-(xmax,ymax)], (x1,y1), ...`
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct LookupTable {
     pub x_vals: Vec<f64>,
     pub y_vals: Vec<f64>,
@@ -253,7 +261,8 @@ impl LookupTable {
 }
 
 /// Interpolation mode for data equations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum InterpMode {
     Interpolate,
     Raw,
@@ -262,14 +271,16 @@ pub enum InterpMode {
 }
 
 /// Exception clause: `:EXCEPT: [elem1, elem2], [elem3]`
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct ExceptList<'input> {
     pub subscripts: Vec<Vec<Subscript<'input>>>,
     pub loc: Loc,
 }
 
 /// Left-hand side of an equation.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct Lhs<'input> {
     /// Variable name
     pub name: Cow<'input, str>,
@@ -296,7 +307,8 @@ impl<'input> Lhs<'input> {
 }
 
 /// Subscript/dimension definition element.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum SubscriptElement<'input> {
     /// Single element name
     Element(Cow<'input, str>, Loc),
@@ -310,7 +322,8 @@ pub enum SubscriptElement<'input> {
 /// - Simple symbol names: `DimB`
 /// - Dimension with explicit element list: `(DimB: b1, b2, b3)`
 /// - Nested symbol lists (represented as List variant)
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum MappingEntry<'input> {
     /// Simple symbol name
     Name(Cow<'input, str>, Loc),
@@ -331,7 +344,8 @@ pub enum MappingEntry<'input> {
 /// The mapping list can contain multiple entries, each of which may be
 /// a simple symbol, a bang-marked symbol, a dimension mapping with elements,
 /// or a nested list.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct SubscriptMapping<'input> {
     /// Mapping entries
     pub entries: Vec<MappingEntry<'input>>,
@@ -339,7 +353,8 @@ pub struct SubscriptMapping<'input> {
 }
 
 /// Subscript/dimension definition: `DimA: elem1, elem2, ...`
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct SubscriptDef<'input> {
     /// Elements: `elem1, elem2, (A1-A10)`
     pub elements: Vec<SubscriptElement<'input>>,
@@ -351,7 +366,8 @@ pub struct SubscriptDef<'input> {
 /// Different equation types in Vensim MDL.
 ///
 /// Each variant includes enough location info for error reporting.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum Equation<'input> {
     /// Regular equation: `lhs = expr`
     Regular(Lhs<'input>, Expr<'input>),
@@ -401,7 +417,8 @@ pub enum Equation<'input> {
 }
 
 /// Unit expression in units section.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum UnitExpr<'input> {
     /// Simple unit name: `Year`, `Widgets`
     Unit(Cow<'input, str>, Loc),
@@ -414,7 +431,8 @@ pub enum UnitExpr<'input> {
 /// Optional range on units: `[min, max]` or `[min, max, step]`
 ///
 /// The `?` character in Vensim maps to `None` for the corresponding field.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq)]
 pub struct UnitRange {
     pub min: Option<f64>,
     pub max: Option<f64>,
@@ -422,7 +440,8 @@ pub struct UnitRange {
 }
 
 /// Units with optional range.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct Units<'input> {
     pub expr: Option<UnitExpr<'input>>,
     pub range: Option<UnitRange>,
@@ -430,7 +449,8 @@ pub struct Units<'input> {
 }
 
 /// Complete equation with units and comment.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct FullEquation<'input> {
     pub equation: Equation<'input>,
     pub units: Option<Units<'input>>,
@@ -446,7 +466,8 @@ pub struct FullEquation<'input> {
 /// The full group name is preserved, including any numeric prefix that
 /// indicates hierarchy (e.g., "1 Control", "2 Data"). Hierarchy reconstruction
 /// is performed during conversion by examining these prefixes.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct Group<'input> {
     pub name: Cow<'input, str>,
     pub loc: Loc,
@@ -457,7 +478,8 @@ pub struct Group<'input> {
 /// Note: The grammar parses macro arguments as `exprlist`, which allows
 /// arbitrary expressions. In valid macros, these should be simple variable
 /// references (parameter names). Validation happens during conversion.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub struct MacroDef<'input> {
     pub name: Cow<'input, str>,
     /// Macro parameters as parsed expressions.
@@ -471,7 +493,8 @@ pub struct MacroDef<'input> {
 }
 
 /// Top-level parsed item from MDL file.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum MdlItem<'input> {
     Equation(Box<FullEquation<'input>>),
     Group(Group<'input>),
@@ -486,7 +509,8 @@ pub enum MdlItem<'input> {
 ///
 /// This is returned by the parser to indicate what terminal was seen,
 /// allowing the reader to determine whether to capture a comment.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum SectionEnd<'input> {
     /// Second `~` seen - comment section follows
     Tilde,
@@ -506,7 +530,8 @@ pub enum SectionEnd<'input> {
 ///
 /// Used by the parser to determine whether to create a Regular equation
 /// (single expression) or NumberList equation (multiple numeric literals).
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum ExprListResult<'input> {
     Single(Expr<'input>),
     Multiple(Vec<Expr<'input>>),

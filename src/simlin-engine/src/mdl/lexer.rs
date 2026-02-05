@@ -14,7 +14,8 @@ use self::RawToken::*;
 /// These tokens are produced by RawLexer without any context-sensitive
 /// transformations. The TokenNormalizer will transform these into the
 /// final Token enum based on section state (equation/units/comment).
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub enum RawToken<'input> {
     // Arithmetic operators
     Plus,
@@ -81,14 +82,14 @@ pub enum RawToken<'input> {
     Newline,                     // \n or \r\n, used by normalizer for tabbed arrays
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LexError {
     pub start: usize,
     pub end: usize,
     pub code: LexErrorCode,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LexErrorCode {
     UnrecognizedToken,
     UnclosedComment,
