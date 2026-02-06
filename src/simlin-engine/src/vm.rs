@@ -100,6 +100,12 @@ pub struct CompiledSimulation {
     pub(crate) offsets: HashMap<Ident<Canonical>, usize>,
 }
 
+impl CompiledSimulation {
+    pub fn get_offset(&self, ident: &Ident<Canonical>) -> Option<usize> {
+        self.offsets.get(ident).copied()
+    }
+}
+
 /// Per-module compiled initials with the shared ByteCodeContext needed to eval them.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]

@@ -430,6 +430,47 @@ void simlin_sim_get_stepcount(SimlinSim *sim, uintptr_t *out_count, SimlinError 
 // - `sim` must be a valid pointer to a SimlinSim
 void simlin_sim_reset(SimlinSim *sim, SimlinError **out_error);
 
+// Runs just the initial-value evaluation phase of the simulation.
+//
+// After calling this, `simlin_sim_get_value` can read the t=0 values.
+// Calling this multiple times is safe (it is idempotent).
+//
+// # Safety
+// - `sim` must be a valid pointer to a SimlinSim
+void simlin_sim_run_initials(SimlinSim *sim, SimlinError **out_error);
+
+// Sets a persistent override for a variable by name.
+//
+// The override is applied during initials evaluation (evaluate-then-patch).
+// Overrides persist across `simlin_sim_reset`. Call `simlin_sim_clear_overrides`
+// to remove them.
+//
+// Can be called even when the VM has been consumed by `simlin_sim_run_to_end`;
+// the override will be stored and applied to the next VM created on reset.
+//
+// # Safety
+// - `sim` must be a valid pointer to a SimlinSim
+// - `name` must be a valid C string
+void simlin_sim_set_override(SimlinSim *sim,
+                             const char *name,
+                             double value,
+                             SimlinError **out_error);
+
+// Sets a persistent override for a variable by data-buffer offset.
+//
+// # Safety
+// - `sim` must be a valid pointer to a SimlinSim
+void simlin_sim_set_override_by_offset(SimlinSim *sim,
+                                       uintptr_t offset,
+                                       double value,
+                                       SimlinError **out_error);
+
+// Clears all persistent overrides.
+//
+// # Safety
+// - `sim` must be a valid pointer to a SimlinSim
+void simlin_sim_clear_overrides(SimlinSim *sim, SimlinError **out_error);
+
 // Gets a single value from the simulation
 //
 // # Safety

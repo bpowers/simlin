@@ -6,8 +6,9 @@ use prost::Message;
 use serde::Deserialize;
 use simlin_engine::common::ErrorCode;
 use simlin_engine::ltm::{detect_loops, LoopPolarity};
-use simlin_engine::{self as engine, canonicalize, serde as engine_serde, Vm};
+use simlin_engine::{self as engine, canonicalize, serde as engine_serde, CompiledSimulation, Vm};
 use std::alloc::{alloc, dealloc, Layout};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::BufReader;
 use std::mem::{align_of, size_of};
@@ -226,12 +227,16 @@ pub struct SimlinModel {
 
 /// Internal state for SimlinSim
 struct SimState {
+    compiled: Option<CompiledSimulation>,
     vm: Option<Vm>,
     /// Stores the error from VM creation if it failed.
     /// This allows us to surface the actual error when users try to run
     /// the simulation, instead of a generic "VM not initialized" message.
     vm_error: Option<engine::Error>,
     results: Option<engine::Results>,
+    /// Overrides survive VM consumption (run_to_end consumes the VM).
+    /// Re-applied to new VMs created on reset.
+    overrides: HashMap<usize, f64>,
 }
 
 /// Opaque simulation structure
@@ -1442,11 +1447,13 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
     }
 }
 
-/// Helper function to create a VM for a given project and model
-fn create_vm(project: &engine::Project, model_name: &str) -> Result<Vm, engine::Error> {
+/// Helper function to compile a project and model into a CompiledSimulation.
+fn compile_simulation(
+    project: &engine::Project,
+    model_name: &str,
+) -> Result<CompiledSimulation, engine::Error> {
     let compiler = engine::Simulation::new(project, model_name)?;
-    let compiled = compiler.compile()?;
-    Vm::new(compiled)
+    compiler.compile()
 }
 
 /// Creates a new simulation context
@@ -1489,20 +1496,24 @@ pub unsafe extern "C" fn simlin_sim_new(
 
     simlin_model_ref(model);
 
-    // Capture both the VM and any error from creation.
-    // This allows us to surface the actual error when users try to run
-    // the simulation, instead of a generic "VM not initialized" message.
-    let (vm, vm_error) = match create_vm(&project_variant, &model_ref.model_name) {
-        Ok(vm) => (Some(vm), None),
-        Err(err) => (None, Some(err)),
+    // Compile the simulation and cache the CompiledSimulation for reset reuse.
+    let (compiled, vm, vm_error) = match compile_simulation(&project_variant, &model_ref.model_name)
+    {
+        Ok(compiled) => match Vm::new(compiled.clone()) {
+            Ok(vm) => (Some(compiled), Some(vm), None),
+            Err(err) => (Some(compiled), None, Some(err)),
+        },
+        Err(err) => (None, None, Some(err)),
     };
     let sim = Box::new(SimlinSim {
         model: model_ref as *const _,
         enable_ltm,
         state: Mutex::new(SimState {
+            compiled,
             vm,
             vm_error,
             results: None,
+            overrides: HashMap::new(),
         }),
         ref_count: AtomicUsize::new(1),
     });
@@ -1640,36 +1651,185 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
     clear_out_error(out_error);
     let sim_ref = ffi_try!(out_error, require_sim(sim));
 
-    let model = &*sim_ref.model;
-    let project = &*model.project;
+    let mut state = sim_ref.state.lock().unwrap();
+    state.results = None;
 
-    let project_variant = {
-        let project_locked = project.project.lock().unwrap();
-        if sim_ref.enable_ltm {
-            match project_locked.clone().with_ltm() {
-                Ok(proj) => proj,
-                Err(err) => {
-                    store_ffi_error(out_error, ffi_error_from_engine(&err));
-                    return;
+    if let Some(ref mut vm) = state.vm {
+        // Fast path: reuse existing VM allocation
+        vm.reset();
+    } else if let Some(ref compiled) = state.compiled {
+        // Recreate VM from cached compiled simulation
+        match Vm::new(compiled.clone()) {
+            Ok(mut new_vm) => {
+                for (&off, &val) in &state.overrides {
+                    if let Err(err) = new_vm.set_override_by_offset(off, val) {
+                        store_ffi_error(out_error, ffi_error_from_engine(&err));
+                        return;
+                    }
                 }
+                state.vm = Some(new_vm);
+                state.vm_error = None;
             }
-        } else {
-            project_locked.clone()
+            Err(err) => {
+                store_ffi_error(out_error, ffi_error_from_engine(&err));
+            }
         }
-    };
-
-    let new_vm = match create_vm(&project_variant, &model.model_name) {
-        Ok(vm) => vm,
-        Err(err) => {
+    } else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("simulation was never successfully compiled"),
+        );
+    }
+}
+/// Runs just the initial-value evaluation phase of the simulation.
+///
+/// After calling this, `simlin_sim_get_value` can read the t=0 values.
+/// Calling this multiple times is safe (it is idempotent).
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim
+#[no_mangle]
+pub unsafe extern "C" fn simlin_sim_run_initials(
+    sim: *mut SimlinSim,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    let sim_ref = ffi_try!(out_error, require_sim(sim));
+    let mut state = sim_ref.state.lock().unwrap();
+    if let Some(ref mut vm) = state.vm {
+        if let Err(err) = vm.run_initials() {
             store_ffi_error(out_error, ffi_error_from_engine(&err));
+        }
+    } else if let Some(ref err) = state.vm_error {
+        store_ffi_error(out_error, ffi_error_from_engine(err));
+    } else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("simulation has not been initialised with a VM"),
+        );
+    }
+}
+/// Sets a persistent override for a variable by name.
+///
+/// The override is applied during initials evaluation (evaluate-then-patch).
+/// Overrides persist across `simlin_sim_reset`. Call `simlin_sim_clear_overrides`
+/// to remove them.
+///
+/// Can be called even when the VM has been consumed by `simlin_sim_run_to_end`;
+/// the override will be stored and applied to the next VM created on reset.
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim
+/// - `name` must be a valid C string
+#[no_mangle]
+pub unsafe extern "C" fn simlin_sim_set_override(
+    sim: *mut SimlinSim,
+    name: *const c_char,
+    value: c_double,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if name.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("variable name pointer must not be NULL"),
+        );
+        return;
+    }
+
+    let sim_ref = ffi_try!(out_error, require_sim(sim));
+    let canon_name = match CStr::from_ptr(name).to_str() {
+        Ok(s) => canonicalize(s),
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("variable name is not valid UTF-8"),
+            );
             return;
         }
     };
 
     let mut state = sim_ref.state.lock().unwrap();
-    state.results = None;
-    state.vm = Some(new_vm);
-    state.vm_error = None; // Clear any previous VM creation error
+    if let Some(ref mut vm) = state.vm {
+        match vm.set_override(&canon_name, value) {
+            Ok(()) => {
+                let off = vm.get_offset(&canon_name).unwrap();
+                state.overrides.insert(off, value);
+            }
+            Err(err) => {
+                store_ffi_error(out_error, ffi_error_from_engine(&err));
+            }
+        }
+    } else if let Some(ref compiled) = state.compiled {
+        // No VM present (consumed by run_to_end). Resolve the offset from
+        // the compiled simulation's offsets map and store for later.
+        if let Some(off) = compiled.get_offset(&canon_name) {
+            state.overrides.insert(off, value);
+        } else {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                    "variable '{}' not found in compiled simulation",
+                    canon_name
+                )),
+            );
+        }
+    } else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("simulation was never successfully compiled"),
+        );
+    }
+}
+/// Sets a persistent override for a variable by data-buffer offset.
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim
+#[no_mangle]
+pub unsafe extern "C" fn simlin_sim_set_override_by_offset(
+    sim: *mut SimlinSim,
+    offset: usize,
+    value: c_double,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    let sim_ref = ffi_try!(out_error, require_sim(sim));
+    let mut state = sim_ref.state.lock().unwrap();
+    if let Some(ref mut vm) = state.vm {
+        match vm.set_override_by_offset(offset, value) {
+            Ok(()) => {
+                state.overrides.insert(offset, value);
+            }
+            Err(err) => {
+                store_ffi_error(out_error, ffi_error_from_engine(&err));
+            }
+        }
+    } else {
+        // Store for later application on reset
+        state.overrides.insert(offset, value);
+    }
+}
+/// Clears all persistent overrides.
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim
+#[no_mangle]
+pub unsafe extern "C" fn simlin_sim_clear_overrides(
+    sim: *mut SimlinSim,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    let sim_ref = ffi_try!(out_error, require_sim(sim));
+    let mut state = sim_ref.state.lock().unwrap();
+    state.overrides.clear();
+    if let Some(ref mut vm) = state.vm {
+        vm.clear_overrides();
+    }
 }
 /// Gets a single value from the simulation
 ///
@@ -1982,7 +2142,22 @@ pub unsafe extern "C" fn simlin_sim_get_series(
     };
 
     let state = sim_ref.state.lock().unwrap();
-    if let Some(ref results) = state.results {
+    if let Some(ref vm) = state.vm {
+        // VM is still alive -- extract series from its live data buffer
+        if let Some(series) = vm.get_series(&name) {
+            let count = std::cmp::min(series.len(), len);
+            for (i, &val) in series.iter().take(count).enumerate() {
+                *results_ptr.add(i) = val;
+            }
+            *out_written = count;
+        } else {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::DoesNotExist)
+                    .with_message(format!("series '{}' not found in VM", name)),
+            );
+        }
+    } else if let Some(ref results) = state.results {
         if let Some(&offset) = results.offsets.get(&name) {
             let count = std::cmp::min(results.step_count, len);
             for (i, row) in results.iter().take(count).enumerate() {
@@ -3516,7 +3691,7 @@ fn gather_error_details(
     project: &engine::Project,
 ) -> (Vec<ErrorDetailData>, Option<engine::Error>) {
     let mut all_errors = collect_project_errors(project);
-    let sim_error = create_vm(project, "main").err();
+    let sim_error = compile_simulation(project, "main").and_then(Vm::new).err();
 
     if let Some(error) = sim_error.clone() {
         let formatted = errors::format_simulation_error("main", &error);
@@ -3619,7 +3794,9 @@ pub unsafe extern "C" fn simlin_project_is_simulatable(
     };
 
     let project_locked = proj.project.lock().unwrap();
-    create_vm(&project_locked, model_name).is_ok()
+    compile_simulation(&project_locked, model_name)
+        .and_then(Vm::new)
+        .is_ok()
 }
 
 /// Get all errors in a project including static analysis and compilation errors
@@ -9983,6 +10160,418 @@ mod tests {
             assert_eq!(out_len, 0);
 
             simlin_error_free(err);
+            simlin_project_unref(proj);
+        }
+    }
+
+    /// Helper: create a project + model + sim from a TestProject datamodel.
+    /// Returns (proj, model, sim) — caller is responsible for unref'ing all three.
+    unsafe fn create_test_sim(
+        datamodel: &engine::datamodel::Project,
+    ) -> (*mut SimlinProject, *mut SimlinModel, *mut SimlinSim) {
+        let proj = open_project_from_datamodel(datamodel);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "get_model failed");
+        assert!(!model.is_null());
+
+        err = ptr::null_mut();
+        let sim = simlin_sim_new(model, false, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "sim_new failed");
+        assert!(!sim.is_null());
+
+        (proj, model, sim)
+    }
+
+    /// Helper: assert that `simlin_sim_get_value` returns `expected` for `name`.
+    unsafe fn assert_sim_value(sim: *mut SimlinSim, name: &str, expected: f64, tol: f64) {
+        let c_name = CString::new(name).unwrap();
+        let mut out: c_double = 0.0;
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_get_value(
+            sim,
+            c_name.as_ptr(),
+            &mut out,
+            &mut err as *mut *mut SimlinError,
+        );
+        if !err.is_null() {
+            let msg_ptr = simlin_error_get_message(err);
+            let msg = if !msg_ptr.is_null() {
+                CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
+            } else {
+                ""
+            };
+            simlin_error_free(err);
+            panic!("get_value('{}') failed: {}", name, msg);
+        }
+        assert!(
+            (out - expected).abs() <= tol,
+            "get_value('{}') = {}, expected {} (tol={})",
+            name,
+            out,
+            expected,
+            tol,
+        );
+    }
+
+    /// Helper: run sim to end and assert success.
+    unsafe fn run_to_end(sim: *mut SimlinSim) {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err as *mut *mut SimlinError);
+        if !err.is_null() {
+            let msg_ptr = simlin_error_get_message(err);
+            let msg = if !msg_ptr.is_null() {
+                CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
+            } else {
+                ""
+            };
+            simlin_error_free(err);
+            panic!("run_to_end failed: {}", msg);
+        }
+    }
+
+    /// Helper: reset the sim and assert success.
+    unsafe fn reset_sim(sim: *mut SimlinSim) {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_reset(sim, &mut err as *mut *mut SimlinError);
+        if !err.is_null() {
+            let msg_ptr = simlin_error_get_message(err);
+            let msg = if !msg_ptr.is_null() {
+                CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
+            } else {
+                ""
+            };
+            simlin_error_free(err);
+            panic!("reset failed: {}", msg);
+        }
+    }
+
+    /// Helper: get the time series for a variable, returning a Vec<f64>.
+    unsafe fn get_series_vec(sim: *mut SimlinSim, name: &str, max_len: usize) -> Vec<f64> {
+        let c_name = CString::new(name).unwrap();
+        let mut buf = vec![0.0f64; max_len];
+        let mut written: usize = 0;
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_get_series(
+            sim,
+            c_name.as_ptr(),
+            buf.as_mut_ptr(),
+            max_len,
+            &mut written,
+            &mut err as *mut *mut SimlinError,
+        );
+        if !err.is_null() {
+            let msg_ptr = simlin_error_get_message(err);
+            let msg = if !msg_ptr.is_null() {
+                CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
+            } else {
+                ""
+            };
+            simlin_error_free(err);
+            panic!("get_series('{}') failed: {}", name, msg);
+        }
+        buf.truncate(written);
+        buf
+    }
+
+    fn build_population_datamodel() -> engine::datamodel::Project {
+        // birth_rate and lifespan feed into initial_pop, which is the stock
+        // initial, so all three are "initial variables" and can be overridden.
+        TestProject::new("pop_test")
+            .with_sim_time(0.0, 100.0, 1.0)
+            .aux("birth_rate", "0.1", None)
+            .aux("lifespan", "80", None)
+            .aux("initial_pop", "1000 * birth_rate", None)
+            .stock("population", "initial_pop", &["births"], &["deaths"], None)
+            .flow("births", "population * birth_rate", None)
+            .flow("deaths", "population / lifespan", None)
+            .build_datamodel()
+    }
+
+    #[test]
+    fn test_libsimlin_reset_preserves_compilation() {
+        let dm = build_population_datamodel();
+        unsafe {
+            let (proj, model, sim) = create_test_sim(&dm);
+
+            // First run
+            run_to_end(sim);
+            let series1 = get_series_vec(sim, "population", 200);
+            assert!(!series1.is_empty());
+
+            // Reset and run again
+            reset_sim(sim);
+            run_to_end(sim);
+            let series2 = get_series_vec(sim, "population", 200);
+
+            assert_eq!(series1.len(), series2.len());
+            for (a, b) in series1.iter().zip(series2.iter()) {
+                assert!((a - b).abs() < 1e-9, "mismatch: {} vs {}", a, b,);
+            }
+
+            simlin_sim_unref(sim);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_libsimlin_override_survives_run_to_end() {
+        let dm = build_population_datamodel();
+        unsafe {
+            let (proj, model, sim) = create_test_sim(&dm);
+
+            // Set override
+            let c_name = CString::new("birth_rate").unwrap();
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_sim_set_override(sim, c_name.as_ptr(), 0.2, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null(), "set_override failed");
+
+            // run_to_end consumes the VM
+            run_to_end(sim);
+            let series_overridden = get_series_vec(sim, "population", 200);
+
+            // Reset — recreates VM from cached compiled, re-applies overrides
+            reset_sim(sim);
+            run_to_end(sim);
+            let series_after_reset = get_series_vec(sim, "population", 200);
+
+            assert_eq!(series_overridden.len(), series_after_reset.len());
+            for (a, b) in series_overridden.iter().zip(series_after_reset.iter()) {
+                assert!(
+                    (a - b).abs() < 1e-9,
+                    "override not re-applied after reset: {} vs {}",
+                    a,
+                    b,
+                );
+            }
+
+            simlin_sim_unref(sim);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_libsimlin_set_override_when_vm_is_none() {
+        let dm = build_population_datamodel();
+        unsafe {
+            let (proj, model, sim) = create_test_sim(&dm);
+
+            // Consume the VM
+            run_to_end(sim);
+
+            // Set override while VM is None
+            let c_name = CString::new("birth_rate").unwrap();
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_sim_set_override(sim, c_name.as_ptr(), 0.3, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null(), "set_override with no VM should succeed");
+
+            // Reset creates a new VM with the override applied
+            reset_sim(sim);
+            run_to_end(sim);
+
+            // Verify the override took effect by comparing against default
+            let series_overridden = get_series_vec(sim, "population", 200);
+
+            // Reset with no override to get baseline
+            err = ptr::null_mut();
+            simlin_sim_clear_overrides(sim, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null());
+            reset_sim(sim);
+            run_to_end(sim);
+            let series_default = get_series_vec(sim, "population", 200);
+
+            // With birth_rate=0.3 vs 0.1, population should grow much faster
+            let final_overridden = *series_overridden.last().unwrap();
+            let final_default = *series_default.last().unwrap();
+            assert!(
+                final_overridden > final_default,
+                "override should increase final population: {} vs {}",
+                final_overridden,
+                final_default,
+            );
+
+            simlin_sim_unref(sim);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_libsimlin_run_initials() {
+        let dm = build_population_datamodel();
+        unsafe {
+            let (proj, model, sim) = create_test_sim(&dm);
+
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_sim_run_initials(sim, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null(), "run_initials failed");
+
+            // initial_pop = 1000 * 0.1 = 100
+            assert_sim_value(sim, "population", 100.0, 1e-9);
+
+            simlin_sim_unref(sim);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_libsimlin_get_series_after_partial_run() {
+        let dm = build_population_datamodel();
+        unsafe {
+            let (proj, model, sim) = create_test_sim(&dm);
+
+            // Run to t=50
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_sim_run_to(sim, 50.0, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null(), "run_to(50) failed");
+
+            let series = get_series_vec(sim, "population", 200);
+            // Should have 51 points (t=0..50 inclusive with dt=1, save_step=1)
+            assert_eq!(series.len(), 51);
+            assert!((series[0] - 100.0).abs() < 1e-9);
+
+            // Continue to end
+            run_to_end(sim);
+            let full_series = get_series_vec(sim, "population", 200);
+            // Should have 101 points (t=0..100 with dt=1)
+            assert_eq!(full_series.len(), 101);
+
+            simlin_sim_unref(sim);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_libsimlin_override_flows_through_dependents() {
+        let dm = TestProject::new("override_flow")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("population", "scaled_rate", &["growth"], &[], None)
+            .flow("growth", "population * 0.01", None)
+            .aux("rate", "5", None)
+            .aux("scaled_rate", "rate * 10", None)
+            .build_datamodel();
+        unsafe {
+            let (proj, model, sim) = create_test_sim(&dm);
+
+            // Override rate from 5 to 20
+            let c_name = CString::new("rate").unwrap();
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_sim_set_override(
+                sim,
+                c_name.as_ptr(),
+                20.0,
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(err.is_null(), "set_override failed");
+
+            simlin_sim_run_initials(sim, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null(), "run_initials failed");
+
+            // scaled_rate should be 20*10=200, and population initial = scaled_rate = 200
+            assert_sim_value(sim, "rate", 20.0, 1e-9);
+            assert_sim_value(sim, "scaled_rate", 200.0, 1e-9);
+            assert_sim_value(sim, "population", 200.0, 1e-9);
+
+            simlin_sim_unref(sim);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_libsimlin_clear_overrides_restores_defaults() {
+        let dm = build_population_datamodel();
+        unsafe {
+            let (proj, model, sim) = create_test_sim(&dm);
+
+            // Get default series
+            run_to_end(sim);
+            let series_default = get_series_vec(sim, "population", 200);
+
+            // Override, reset, run
+            let c_name = CString::new("birth_rate").unwrap();
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_sim_set_override(sim, c_name.as_ptr(), 0.5, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null());
+            reset_sim(sim);
+            run_to_end(sim);
+            let series_overridden = get_series_vec(sim, "population", 200);
+
+            // Clear overrides, reset, run — should match default
+            err = ptr::null_mut();
+            simlin_sim_clear_overrides(sim, &mut err as *mut *mut SimlinError);
+            assert!(err.is_null());
+            reset_sim(sim);
+            run_to_end(sim);
+            let series_restored = get_series_vec(sim, "population", 200);
+
+            // Overridden should differ from default
+            let final_default = *series_default.last().unwrap();
+            let final_overridden = *series_overridden.last().unwrap();
+            assert!(
+                (final_default - final_overridden).abs() > 1.0,
+                "override should have changed results",
+            );
+
+            // Restored should match default
+            assert_eq!(series_default.len(), series_restored.len());
+            for (a, b) in series_default.iter().zip(series_restored.iter()) {
+                assert!(
+                    (a - b).abs() < 1e-9,
+                    "restored should match default: {} vs {}",
+                    a,
+                    b,
+                );
+            }
+
+            simlin_sim_unref(sim);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_libsimlin_multiple_reset_override_cycles() {
+        let dm = build_population_datamodel();
+        unsafe {
+            let (proj, model, sim) = create_test_sim(&dm);
+            let c_name = CString::new("birth_rate").unwrap();
+
+            let mut prev_final = 0.0;
+            for i in 1..=10 {
+                let rate = i as f64 * 0.02;
+                let mut err: *mut SimlinError = ptr::null_mut();
+                simlin_sim_set_override(
+                    sim,
+                    c_name.as_ptr(),
+                    rate,
+                    &mut err as *mut *mut SimlinError,
+                );
+                assert!(err.is_null());
+
+                reset_sim(sim);
+                run_to_end(sim);
+
+                let series = get_series_vec(sim, "population", 200);
+                let final_val = *series.last().unwrap();
+                if i > 1 {
+                    assert!(
+                        final_val > prev_final,
+                        "final population should increase with birth_rate: rate={}, final={}, prev={}",
+                        rate,
+                        final_val,
+                        prev_final,
+                    );
+                }
+                prev_final = final_val;
+            }
+
+            simlin_sim_unref(sim);
+            simlin_model_unref(model);
             simlin_project_unref(proj);
         }
     }
