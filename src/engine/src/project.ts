@@ -26,6 +26,7 @@ import {
   simlin_project_open_xmile,
   simlin_project_open_vensim,
   simlin_project_serialize_xmile,
+  simlin_project_render_svg,
 } from './internal/import-export';
 import { simlin_analyze_get_loops, readLoops, simlin_free_loops } from './internal/analysis';
 import { SimlinProjectPtr, SimlinJsonFormat, ErrorDetail } from './internal/types';
@@ -293,6 +294,25 @@ export class Project {
    */
   toXmileString(): string {
     return new TextDecoder().decode(this.toXmile());
+  }
+
+  /**
+   * Render a model's stock-and-flow diagram as SVG.
+   * @param modelName Model name
+   * @returns SVG data as UTF-8 bytes
+   */
+  renderSvg(modelName: string): Uint8Array {
+    this.checkDisposed();
+    return simlin_project_render_svg(this._ptr, modelName);
+  }
+
+  /**
+   * Render a model's stock-and-flow diagram as an SVG string.
+   * @param modelName Model name
+   * @returns SVG string
+   */
+  renderSvgString(modelName: string): string {
+    return new TextDecoder().decode(this.renderSvg(modelName));
   }
 
   /**

@@ -2712,6 +2712,102 @@ pub unsafe extern "C" fn simlin_project_serialize_xmile(
     }
 }
 
+/// Render a project model's diagram as SVG
+///
+/// Renders the stock-and-flow diagram for the named model to a standalone
+/// SVG document (UTF-8 encoded). The output includes embedded CSS styles
+/// and is suitable for display or export.
+///
+/// Caller must free output with `simlin_free`.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `model_name` must be a valid null-terminated UTF-8 string
+/// - `out_buffer` and `out_len` must be valid pointers
+/// - `out_error` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_render_svg(
+    project: *mut SimlinProject,
+    model_name: *const c_char,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let proj = ffi_try!(out_error, require_project(project));
+
+    if model_name.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("model name pointer must not be NULL"),
+        );
+        return;
+    }
+
+    let model_name_str = match CStr::from_ptr(model_name).to_str() {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("model name must not be empty"),
+            );
+            return;
+        }
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("model name is not valid UTF-8"),
+            );
+            return;
+        }
+    };
+
+    let project_locked = proj.project.lock().unwrap();
+    match simlin_engine::diagram::render_svg(&project_locked.datamodel, model_name_str) {
+        Ok(svg_str) => {
+            let bytes = svg_str.into_bytes();
+            let len = bytes.len();
+
+            let buf = simlin_malloc(len);
+            if buf.is_null() {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("allocation failed while rendering SVG"),
+                );
+                return;
+            }
+
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+
+            *out_buffer = buf;
+            *out_len = len;
+        }
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to render SVG: {err}")),
+            );
+        }
+    }
+}
+
 /// Serialize a project to binary protobuf format
 ///
 /// Serializes the project's datamodel to Simlin's native protobuf format.
@@ -9751,6 +9847,142 @@ mod tests {
 
             simlin_error_free(out_error);
             simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_render_svg() {
+        let xmile_path = std::path::Path::new("testdata/SIR.stmx");
+        if !xmile_path.exists() {
+            panic!("missing SIR.stmx fixture");
+        }
+        let data = std::fs::read(xmile_path).unwrap();
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let proj = simlin_project_open_xmile(
+                data.as_ptr(),
+                data.len(),
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(err.is_null(), "project_open_xmile failed");
+            assert!(!proj.is_null());
+
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let model_name = CString::new("main").unwrap();
+            simlin_project_render_svg(
+                proj,
+                model_name.as_ptr(),
+                &mut out_buffer as *mut *mut u8,
+                &mut out_len as *mut usize,
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(err.is_null(), "render_svg failed");
+            assert!(!out_buffer.is_null());
+            assert!(out_len > 0);
+
+            let svg = std::str::from_utf8(std::slice::from_raw_parts(out_buffer, out_len)).unwrap();
+            assert!(svg.starts_with("<svg "));
+            assert!(svg.contains("viewBox="));
+            assert!(svg.contains("</svg>"));
+
+            simlin_free(out_buffer);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_render_svg_null_project() {
+        unsafe {
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let model_name = CString::new("main").unwrap();
+            simlin_project_render_svg(
+                ptr::null_mut(),
+                model_name.as_ptr(),
+                &mut out_buffer as *mut *mut u8,
+                &mut out_len as *mut usize,
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(!err.is_null());
+            assert!(out_buffer.is_null());
+            assert_eq!(out_len, 0);
+            simlin_error_free(err);
+        }
+    }
+
+    #[test]
+    fn test_render_svg_null_model_name() {
+        let xmile_path = std::path::Path::new("testdata/SIR.stmx");
+        if !xmile_path.exists() {
+            panic!("missing SIR.stmx fixture");
+        }
+        let data = std::fs::read(xmile_path).unwrap();
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let proj = simlin_project_open_xmile(
+                data.as_ptr(),
+                data.len(),
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(err.is_null());
+            assert!(!proj.is_null());
+
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            simlin_project_render_svg(
+                proj,
+                ptr::null(),
+                &mut out_buffer as *mut *mut u8,
+                &mut out_len as *mut usize,
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(!err.is_null());
+            assert!(out_buffer.is_null());
+            assert_eq!(out_len, 0);
+
+            simlin_error_free(err);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_render_svg_nonexistent_model() {
+        let xmile_path = std::path::Path::new("testdata/SIR.stmx");
+        if !xmile_path.exists() {
+            panic!("missing SIR.stmx fixture");
+        }
+        let data = std::fs::read(xmile_path).unwrap();
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let proj = simlin_project_open_xmile(
+                data.as_ptr(),
+                data.len(),
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(err.is_null());
+            assert!(!proj.is_null());
+
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let model_name = CString::new("nonexistent_model").unwrap();
+            simlin_project_render_svg(
+                proj,
+                model_name.as_ptr(),
+                &mut out_buffer as *mut *mut u8,
+                &mut out_len as *mut usize,
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(!err.is_null());
+            assert!(out_buffer.is_null());
+            assert_eq!(out_len, 0);
+
+            simlin_error_free(err);
             simlin_project_unref(proj);
         }
     }

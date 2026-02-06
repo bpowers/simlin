@@ -91,5 +91,20 @@ export function renderSvgToString(project: Project, modelName: string): [string,
   const styles = `<style>\n${renderStyles}\n</style>\n<defs>\n`;
   svg = svg.replace(/<defs[^>]*>/, styles);
 
+  // Strip CSS module class names (keep only simlin-* classes), deduplicate
+  svg = svg.replace(/class="([^"]*)"/g, (_match: string, classes: string) => {
+    const filtered = classes.split(' ').filter((c: string) => c.startsWith('simlin-'));
+    const seen: Record<string, boolean> = {};
+    const unique = filtered.filter((c: string) => {
+      if (seen[c]) return false;
+      seen[c] = true;
+      return true;
+    });
+    const simlinClasses = unique.join(' ');
+    return simlinClasses ? `class="${simlinClasses}"` : '';
+  });
+  // Remove empty class attributes left over from stripping
+  svg = svg.replace(/ class=""/g, '');
+
   return [svg, { width, height }];
 }

@@ -634,6 +634,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         series={series}
         source={source}
         sink={sink}
+        embedded={this.props.embedded}
         isSelected={isSelected}
         hasWarning={hasWarning}
         isMovingArrow={isSelected && isMovingArrow}

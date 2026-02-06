@@ -609,6 +609,25 @@ void simlin_project_serialize_xmile(SimlinProject *project,
                                     uintptr_t *out_len,
                                     SimlinError **out_error);
 
+// Render a project model's diagram as SVG
+//
+// Renders the stock-and-flow diagram for the named model to a standalone
+// SVG document (UTF-8 encoded). The output includes embedded CSS styles
+// and is suitable for display or export.
+//
+// Caller must free output with `simlin_free`.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `model_name` must be a valid null-terminated UTF-8 string
+// - `out_buffer` and `out_len` must be valid pointers
+// - `out_error` may be null
+void simlin_project_render_svg(SimlinProject *project,
+                               const char *model_name,
+                               uint8_t **out_buffer,
+                               uintptr_t *out_len,
+                               SimlinError **out_error);
+
 // Serialize a project to binary protobuf format
 //
 // Serializes the project's datamodel to Simlin's native protobuf format.
