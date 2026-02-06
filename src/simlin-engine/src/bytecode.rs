@@ -1679,13 +1679,29 @@ mod tests {
     }
 }
 
+/// A single variable's compiled initial-value bytecode, along with the
+/// data-buffer offsets it writes to (from AssignCurr nodes).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
+pub struct CompiledInitial {
+    // Used in override validation (Phase B/C) and debug_print_bytecode
+    #[allow(dead_code)]
+    pub(crate) ident: Ident<Canonical>,
+    /// Sorted, deduplicated offsets of all AssignCurr targets in this variable's
+    /// initials bytecode.
+    // Used in override validation (Phase B/C) and debug_print_bytecode
+    #[allow(dead_code)]
+    pub(crate) offsets: Vec<usize>,
+    pub(crate) bytecode: ByteCode,
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct CompiledModule {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) n_slots: usize,
     pub(crate) context: Arc<ByteCodeContext>,
-    pub(crate) compiled_initials: Arc<ByteCode>,
+    pub(crate) compiled_initials: Arc<Vec<CompiledInitial>>,
     pub(crate) compiled_flows: Arc<ByteCode>,
     pub(crate) compiled_stocks: Arc<ByteCode>,
 }

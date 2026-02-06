@@ -9,8 +9,8 @@ use float_cmp::approx_eq;
 use smallvec::SmallVec;
 
 use crate::bytecode::{
-    BuiltinId, ByteCode, ByteCodeContext, CompiledModule, DimId, LookupMode, ModuleId, Op2, Opcode,
-    RuntimeView, TempId,
+    BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, LookupMode,
+    ModuleId, Op2, Opcode, RuntimeView, TempId,
 };
 use crate::common::{Canonical, Ident, Result};
 use crate::dimensions::{Dimension, match_dimensions_two_pass};
@@ -100,10 +100,20 @@ pub struct CompiledSimulation {
     pub(crate) offsets: HashMap<Ident<Canonical>, usize>,
 }
 
+/// Per-module compiled initials with the shared ByteCodeContext needed to eval them.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
+struct CompiledModuleInitials {
+    #[allow(dead_code)]
+    ident: Ident<Canonical>,
+    context: Arc<ByteCodeContext>,
+    initials: Arc<Vec<CompiledInitial>>,
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 struct CompiledSlicedSimulation {
-    initial_modules: HashMap<ModuleKey, CompiledModuleSlice>,
+    initial_modules: HashMap<ModuleKey, CompiledModuleInitials>,
     flow_modules: HashMap<ModuleKey, CompiledModuleSlice>,
     stock_modules: HashMap<ModuleKey, CompiledModuleSlice>,
 }
@@ -186,9 +196,9 @@ impl CompiledModuleSlice {
             ident: module.ident.clone(),
             context: module.context.clone(),
             bytecode: match part {
-                StepPart::Initials => module.compiled_initials.clone(),
                 StepPart::Flows => module.compiled_flows.clone(),
                 StepPart::Stocks => module.compiled_stocks.clone(),
+                StepPart::Initials => unreachable!("initials use CompiledModuleInitials"),
             },
             part,
         }
@@ -229,7 +239,16 @@ impl Vm {
                 initial_modules: sim
                     .modules
                     .iter()
-                    .map(|(id, m)| (id.clone(), CompiledModuleSlice::new(m, StepPart::Initials)))
+                    .map(|(id, m)| {
+                        (
+                            id.clone(),
+                            CompiledModuleInitials {
+                                ident: m.ident.clone(),
+                                context: m.context.clone(),
+                                initials: m.compiled_initials.clone(),
+                            },
+                        )
+                    })
                     .collect(),
                 flow_modules: sim
                     .modules
@@ -283,11 +302,10 @@ impl Vm {
             curr[INITIAL_TIME_OFF] = spec_start;
             curr[FINAL_TIME_OFF] = spec_stop;
 
-            let module_initials = &self.sliced_sim.initial_modules[&self.root];
-            Self::eval(
+            Self::eval_initials(
                 &self.sliced_sim,
                 &mut self.temp_storage,
-                module_initials,
+                &self.root,
                 0,
                 module_inputs,
                 curr,
@@ -388,12 +406,13 @@ impl Vm {
         self.offsets.get(ident).copied()
     }
 
+    /// Evaluate a submodule's initials (all per-variable CompiledInitials).
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
-    fn eval_module(
+    fn eval_module_initials(
         sliced_sim: &CompiledSlicedSimulation,
         temp_storage: &mut [f64],
-        parent_module: &CompiledModuleSlice,
+        parent_context: &ByteCodeContext,
         parent_module_off: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
@@ -401,20 +420,73 @@ impl Vm {
         stack: &mut Stack,
         id: ModuleId,
     ) {
-        let new_module_decl = &parent_module.context.modules[id as usize];
+        let new_module_decl = &parent_context.modules[id as usize];
         let module_key = make_module_key(&new_module_decl.model_name, &new_module_decl.input_set);
         let module_off = parent_module_off + new_module_decl.off;
 
-        let module = match parent_module.part {
-            StepPart::Initials => &sliced_sim.initial_modules[&module_key],
-            StepPart::Flows => &sliced_sim.flow_modules[&module_key],
-            StepPart::Stocks => &sliced_sim.stock_modules[&module_key],
-        };
-
-        Self::eval(
+        Self::eval_initials(
             sliced_sim,
             temp_storage,
-            module,
+            &module_key,
+            module_off,
+            module_inputs,
+            curr,
+            next,
+            stack,
+        );
+    }
+
+    /// Run all per-variable initials for a module (in dependency order).
+    #[allow(clippy::too_many_arguments)]
+    fn eval_initials(
+        sliced_sim: &CompiledSlicedSimulation,
+        temp_storage: &mut [f64],
+        module_key: &ModuleKey,
+        module_off: usize,
+        module_inputs: &[f64],
+        curr: &mut [f64],
+        next: &mut [f64],
+        stack: &mut Stack,
+    ) {
+        let module_initials = &sliced_sim.initial_modules[module_key];
+        let context = &module_initials.context;
+        for compiled_initial in module_initials.initials.iter() {
+            Self::eval_single_initial(
+                sliced_sim,
+                temp_storage,
+                context,
+                &compiled_initial.bytecode,
+                module_off,
+                module_inputs,
+                curr,
+                next,
+                stack,
+            );
+        }
+    }
+
+    /// Evaluate a single variable's initial bytecode.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_single_initial(
+        sliced_sim: &CompiledSlicedSimulation,
+        temp_storage: &mut [f64],
+        context: &ByteCodeContext,
+        bytecode: &ByteCode,
+        module_off: usize,
+        module_inputs: &[f64],
+        curr: &mut [f64],
+        next: &mut [f64],
+        stack: &mut Stack,
+    ) {
+        // This is the same eval loop as Self::eval but uses a context+bytecode pair
+        // instead of a CompiledModuleSlice, and dispatches EvalModule to
+        // eval_module_initials.
+        Self::eval_bytecode(
+            sliced_sim,
+            temp_storage,
+            context,
+            bytecode,
+            StepPart::Initials,
             module_off,
             module_inputs,
             curr,
@@ -434,9 +506,33 @@ impl Vm {
         next: &mut [f64],
         stack: &mut Stack,
     ) {
-        let bytecode = &module.bytecode;
-        let context = &module.context;
+        Self::eval_bytecode(
+            sliced_sim,
+            temp_storage,
+            &module.context,
+            &module.bytecode,
+            module.part,
+            module_off,
+            module_inputs,
+            curr,
+            next,
+            stack,
+        );
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn eval_bytecode(
+        sliced_sim: &CompiledSlicedSimulation,
+        temp_storage: &mut [f64],
+        context: &ByteCodeContext,
+        bytecode: &ByteCode,
+        part: StepPart,
+        module_off: usize,
+        module_inputs: &[f64],
+        curr: &mut [f64],
+        next: &mut [f64],
+        stack: &mut Stack,
+    ) {
         // Existing state
         let mut condition = false;
         let mut subscript_index: SmallVec<[(u16, u16); 4]> = SmallVec::new();
@@ -531,17 +627,44 @@ impl Vm {
                     for j in (0..(*n_inputs as usize)).rev() {
                         module_inputs[j] = stack.pop();
                     }
-                    Self::eval_module(
-                        sliced_sim,
-                        temp_storage,
-                        module,
-                        module_off,
-                        &module_inputs,
-                        curr,
-                        next,
-                        stack,
-                        *id,
-                    );
+                    match part {
+                        StepPart::Initials => {
+                            Self::eval_module_initials(
+                                sliced_sim,
+                                temp_storage,
+                                context,
+                                module_off,
+                                &module_inputs,
+                                curr,
+                                next,
+                                stack,
+                                *id,
+                            );
+                        }
+                        StepPart::Flows | StepPart::Stocks => {
+                            let new_module_decl = &context.modules[*id as usize];
+                            let module_key = make_module_key(
+                                &new_module_decl.model_name,
+                                &new_module_decl.input_set,
+                            );
+                            let child_module_off = module_off + new_module_decl.off;
+                            let child_module = match part {
+                                StepPart::Flows => &sliced_sim.flow_modules[&module_key],
+                                StepPart::Stocks => &sliced_sim.stock_modules[&module_key],
+                                StepPart::Initials => unreachable!(),
+                            };
+                            Self::eval(
+                                sliced_sim,
+                                temp_storage,
+                                child_module,
+                                child_module_off,
+                                &module_inputs,
+                                curr,
+                                next,
+                                stack,
+                            );
+                        }
+                    }
                 }
                 Opcode::AssignCurr { off } => {
                     curr[module_off + *off as usize] = stack.pop();
@@ -1341,18 +1464,22 @@ impl Vm {
         for module_key in module_keys {
             eprintln!("\n\nCOMPILED MODULE: {:?}", module_key);
 
-            let initial_bc = &self.sliced_sim.initial_modules[module_key].bytecode;
+            let module_initials = &self.sliced_sim.initial_modules[module_key];
             let flows_bc = &self.sliced_sim.flow_modules[module_key].bytecode;
             let stocks_bc = &self.sliced_sim.stock_modules[module_key].bytecode;
 
-            eprintln!("\ninitial literals:");
-            for (i, lit) in initial_bc.literals.iter().enumerate() {
-                eprintln!("\t{i}: {lit}");
-            }
-
-            eprintln!("\ninital bytecode:");
-            for op in initial_bc.code.iter() {
-                eprintln!("\t{op:?}");
+            for ci in module_initials.initials.iter() {
+                eprintln!("\ninitial '{}' literals:", ci.ident);
+                for (i, lit) in ci.bytecode.literals.iter().enumerate() {
+                    eprintln!("\t{i}: {lit}");
+                }
+                eprintln!(
+                    "initial '{}' bytecode (offsets {:?}):",
+                    ci.ident, ci.offsets
+                );
+                for op in ci.bytecode.code.iter() {
+                    eprintln!("\t{op:?}");
+                }
             }
 
             eprintln!("\nflows literals:");
@@ -1891,5 +2018,229 @@ mod lookup_tests {
         // Regular lookup should interpolate
         assert_eq!(0.5, lookup(&table, 0.5));
         assert_eq!(1.5, lookup(&table, 1.5));
+    }
+}
+
+#[cfg(test)]
+mod per_variable_initials_tests {
+    use super::*;
+    use crate::test_common::TestProject;
+
+    /// Helper: build a Simulation and CompiledSimulation from a TestProject
+    fn build_compiled(tp: &TestProject) -> (crate::interpreter::Simulation, CompiledSimulation) {
+        let sim = tp.build_sim().expect("build_sim failed");
+        let compiled = sim.compile().expect("compile failed");
+        (sim, compiled)
+    }
+
+    #[test]
+    fn test_per_var_initials_matches_interpreter() {
+        let tp = TestProject::new("per_var_test")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("rate", "0.1", None)
+            .aux("scaled_rate", "rate * 10", None)
+            .flow("births", "population * rate", None)
+            .flow("deaths", "population / 80", None)
+            .stock("population", "100", &["births"], &["deaths"], None);
+
+        let interp_results = tp
+            .run_interpreter()
+            .expect("interpreter should run successfully");
+        let vm_results = tp.run_vm().expect("VM should run successfully");
+
+        let pop_ident = "population";
+        let interp_pop = &interp_results[pop_ident];
+        let vm_pop = &vm_results[pop_ident];
+
+        assert_eq!(
+            interp_pop.len(),
+            vm_pop.len(),
+            "step count should match between interpreter and VM"
+        );
+        for (i, (interp_val, vm_val)) in interp_pop.iter().zip(vm_pop.iter()).enumerate() {
+            assert!(
+                (interp_val - vm_val).abs() < 1e-10,
+                "population mismatch at step {i}: interpreter={interp_val}, vm={vm_val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_per_var_initials_dependency_order() {
+        // a = 5, b = a * 2, c = b + 1, stock initial = c
+        let tp = TestProject::new("dep_order_test")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "5", None)
+            .aux("b", "a * 2", None)
+            .aux("c", "b + 1", None)
+            .flow("inflow", "0", None)
+            .stock("s", "c", &["inflow"], &[], None);
+
+        let vm_results = tp.run_vm().expect("VM should succeed");
+        let interp_results = tp.run_interpreter().expect("interpreter should succeed");
+
+        // Check initial values (step 0)
+        let s_vm = &vm_results["s"];
+        let s_interp = &interp_results["s"];
+        assert_eq!(s_vm[0], 11.0, "stock initial = c = b+1 = a*2+1 = 11 (VM)");
+        assert_eq!(
+            s_interp[0], 11.0,
+            "stock initial = c = b+1 = a*2+1 = 11 (interpreter)"
+        );
+    }
+
+    #[test]
+    fn test_per_var_initials_with_module() {
+        let test_file = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx"
+        );
+        let file_bytes =
+            std::fs::read(test_file).expect("modules_hares_and_foxes test fixture must exist");
+        let mut cursor = std::io::Cursor::new(file_bytes);
+        let project_datamodel = crate::open_xmile(&mut cursor).unwrap();
+        let project = std::sync::Arc::new(crate::project::Project::from(project_datamodel));
+        let sim =
+            crate::interpreter::Simulation::new(&project, "main").expect("Simulation should build");
+
+        let interp_results = sim.run_to_end().expect("interpreter run should succeed");
+        let compiled = sim.compile().expect("compile should succeed");
+        let mut vm = Vm::new(compiled).expect("VM creation should succeed");
+        vm.run_to_end().expect("VM run should succeed");
+        let vm_results = vm.into_results();
+
+        // Compare all offsets between interpreter and VM at every timestep
+        for (name, &offset) in &interp_results.offsets {
+            for step in 0..std::cmp::min(interp_results.step_count, vm_results.step_count) {
+                let idx = step * interp_results.step_size + offset;
+                let interp_val = interp_results.data[idx];
+                let vm_val = vm_results.data[idx];
+                assert!(
+                    (interp_val - vm_val).abs() < 1e-10 || (interp_val.is_nan() && vm_val.is_nan()),
+                    "mismatch for {name} at step {step}: interpreter={interp_val}, vm={vm_val}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_compiled_initial_offsets_sorted_deduped() {
+        // Use a model where auxiliary 'rate' is a stock dependency so it
+        // appears in the initials runlist.
+        let tp = TestProject::new("offsets_test")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("rate", "0.1", None)
+            .flow("inflow", "0", None)
+            .stock("pop", "rate * 1000", &["inflow"], &[], None);
+
+        let (_, compiled) = build_compiled(&tp);
+        let root_key = &compiled.root;
+        let root_module = &compiled.modules[root_key];
+
+        // Verify that CompiledInitial offsets are sorted and unique
+        for ci in root_module.compiled_initials.iter() {
+            let offsets = &ci.offsets;
+            for window in offsets.windows(2) {
+                assert!(
+                    window[0] < window[1],
+                    "offsets for '{}' should be sorted and unique: {:?}",
+                    ci.ident,
+                    offsets
+                );
+            }
+        }
+
+        // Verify that each CompiledInitial has a non-empty ident
+        for ci in root_module.compiled_initials.iter() {
+            assert!(
+                !ci.ident.as_str().is_empty(),
+                "CompiledInitial should have a non-empty ident"
+            );
+        }
+
+        // The initials should include 'rate' (stock depends on it) and 'pop'
+        let idents: Vec<&str> = root_module
+            .compiled_initials
+            .iter()
+            .map(|ci| ci.ident.as_str())
+            .collect();
+        assert!(
+            idents.contains(&"rate"),
+            "should have 'rate' initial (stock depends on it), got: {:?}",
+            idents
+        );
+        assert!(
+            idents.contains(&"pop"),
+            "should have 'pop' initial, got: {:?}",
+            idents
+        );
+
+        // Verify the stock's initial value is correct: rate * 1000 = 100
+        let vm_results = tp.run_vm().expect("VM should succeed");
+        let pop_vm = &vm_results["pop"];
+        assert_eq!(pop_vm[0], 100.0, "population initial should be 100");
+    }
+
+    #[test]
+    fn test_per_var_initials_with_array() {
+        let tp = TestProject::new("array_init_test")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("Dim", &["A", "B", "C"])
+            .array_with_ranges("arr[Dim]", vec![("A", "1"), ("B", "2"), ("C", "3")])
+            .flow("inflow", "0", None)
+            .stock("s", "arr[A] + arr[B] + arr[C]", &["inflow"], &[], None);
+
+        let interp_results = tp.run_interpreter().expect("interpreter should succeed");
+        let vm_results = tp.run_vm().expect("VM should succeed");
+
+        // arr[A]=1, arr[B]=2, arr[C]=3, so s = 1+2+3 = 6
+        let s_interp = interp_results
+            .get("s")
+            .expect("s should exist in interpreter");
+        let s_vm = vm_results.get("s").expect("s should exist in VM");
+        assert_eq!(s_interp[0], 6.0, "s initial = 6 in interpreter");
+        assert_eq!(s_vm[0], 6.0, "s initial = 6 in VM");
+
+        // Verify individual array elements match (names are canonicalized to lowercase)
+        for element in &["arr[a]", "arr[b]", "arr[c]"] {
+            let interp_val = interp_results
+                .get(*element)
+                .unwrap_or_else(|| panic!("{element} should exist in interpreter results"));
+            let vm_val = vm_results
+                .get(*element)
+                .unwrap_or_else(|| panic!("{element} should exist in VM results"));
+            assert!(
+                (interp_val[0] - vm_val[0]).abs() < 1e-10,
+                "{element}: interpreter={}, vm={}",
+                interp_val[0],
+                vm_val[0]
+            );
+        }
+
+        // Verify CompiledInitial offsets for the array variable
+        let (_, compiled) = build_compiled(&tp);
+        let root_module = &compiled.modules[&compiled.root];
+        let arr_initial = root_module
+            .compiled_initials
+            .iter()
+            .find(|ci| ci.ident.as_str() == "arr")
+            .expect("should have 'arr' CompiledInitial");
+
+        assert_eq!(
+            arr_initial.offsets.len(),
+            3,
+            "arr should have 3 offsets (one per element)"
+        );
+        // Offsets should be contiguous
+        assert_eq!(
+            arr_initial.offsets[1] - arr_initial.offsets[0],
+            1,
+            "array offsets should be contiguous"
+        );
+        assert_eq!(
+            arr_initial.offsets[2] - arr_initial.offsets[1],
+            1,
+            "array offsets should be contiguous"
+        );
     }
 }

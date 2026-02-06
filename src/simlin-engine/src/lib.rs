@@ -65,7 +65,7 @@ pub use self::patch::apply_patch;
 pub use self::project::Project;
 pub use self::results::{Method, Results, Specs as SimSpecs};
 pub use self::variable::{Variable, identifier_set};
-pub use self::vm::Vm;
+pub use self::vm::{CompiledSimulation, Vm};
 
 // Re-export compat functions at the crate root for convenience
 #[cfg(feature = "xmutil")]
