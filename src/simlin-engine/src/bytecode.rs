@@ -1684,13 +1684,11 @@ mod tests {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct CompiledInitial {
-    // Used in override validation (Phase B/C) and debug_print_bytecode
+    // Used for diagnostics in debug_print_bytecode and set_override error messages
     #[allow(dead_code)]
     pub(crate) ident: Ident<Canonical>,
     /// Sorted, deduplicated offsets of all AssignCurr targets in this variable's
     /// initials bytecode.
-    // Used in override validation (Phase B/C) and debug_print_bytecode
-    #[allow(dead_code)]
     pub(crate) offsets: Vec<usize>,
     pub(crate) bytecode: ByteCode,
 }

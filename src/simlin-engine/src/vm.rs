@@ -157,6 +157,12 @@ pub struct Vm {
     // Temp array storage (allocated once, reused across evals)
     // Indexed by temp_offsets from ByteCodeContext
     temp_storage: Vec<f64>,
+    // Override values: offset -> value. Applied after each variable's
+    // initial bytecode executes (evaluate-then-patch).
+    overrides: HashMap<usize, f64>,
+    // All absolute data-buffer offsets that are written during initials
+    // (precomputed from the module tree for fast override validation).
+    initial_offsets: std::collections::HashSet<usize>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -231,6 +237,9 @@ impl Vm {
         let temp_total_size = root_module.context.temp_total_size;
         let temp_storage = vec![0.0; temp_total_size];
 
+        // Precompute all absolute initial offsets by walking the module tree
+        let initial_offsets = Self::collect_initial_offsets(&sim.modules, &sim.root, 0);
+
         Ok(Vm {
             specs: sim.specs,
             root: sim.root,
@@ -269,8 +278,39 @@ impl Vm {
             did_initials: false,
             step_accum: 0,
             temp_storage,
+            overrides: HashMap::new(),
+            initial_offsets,
         })
     }
+
+    /// Recursively collect all absolute initial offsets from a module and its submodules.
+    fn collect_initial_offsets(
+        modules: &HashMap<ModuleKey, CompiledModule>,
+        module_key: &ModuleKey,
+        base_off: usize,
+    ) -> std::collections::HashSet<usize> {
+        let mut result = std::collections::HashSet::new();
+        let module = &modules[module_key];
+
+        // Add this module's initial offsets, translated to absolute
+        for ci in module.compiled_initials.iter() {
+            for &off in &ci.offsets {
+                result.insert(base_off + off);
+            }
+        }
+
+        // Recurse into submodules
+        for module_decl in &module.context.modules {
+            let child_key = make_module_key(&module_decl.model_name, &module_decl.input_set);
+            let child_base = base_off + module_decl.off;
+            result.extend(Self::collect_initial_offsets(
+                modules, &child_key, child_base,
+            ));
+        }
+
+        result
+    }
+
     pub fn run_to_end(&mut self) -> Result<()> {
         let end = self.specs.stop;
         self.run_to(end)
@@ -278,9 +318,9 @@ impl Vm {
 
     #[inline(never)]
     pub fn run_to(&mut self, end: f64) -> Result<()> {
-        // Copy spec values to avoid holding borrows across eval calls
+        self.run_initials()?;
+
         let spec_start = self.specs.start;
-        let spec_stop = self.specs.stop;
         let dt = self.specs.dt;
         let save_step = self.specs.save_step;
         let n_slots = self.n_slots;
@@ -293,28 +333,6 @@ impl Vm {
         let mut data = None;
         std::mem::swap(&mut data, &mut self.data);
         let mut data = data.unwrap();
-
-        // Initialize initials once
-        if !self.did_initials {
-            let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
-            curr[TIME_OFF] = spec_start;
-            curr[DT_OFF] = dt;
-            curr[INITIAL_TIME_OFF] = spec_start;
-            curr[FINAL_TIME_OFF] = spec_stop;
-
-            Self::eval_initials(
-                &self.sliced_sim,
-                &mut self.temp_storage,
-                &self.root,
-                0,
-                module_inputs,
-                curr,
-                next,
-                &mut stack,
-            );
-            self.did_initials = true;
-            self.step_accum = 0;
-        }
 
         loop {
             let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
@@ -406,10 +424,144 @@ impl Vm {
         self.offsets.get(ident).copied()
     }
 
-    /// Evaluate a submodule's initials (all per-variable CompiledInitials).
+    /// Returns whether a given absolute data-buffer offset is written during
+    /// initials evaluation (O(1) lookup against precomputed set).
+    fn is_initial_offset(&self, off: usize) -> bool {
+        self.initial_offsets.contains(&off)
+    }
+
+    /// Reset the VM to its pre-simulation state, reusing the data buffer allocation.
+    /// Overrides are preserved across reset.
+    pub fn reset(&mut self) {
+        if let Some(ref mut data) = self.data {
+            data.fill(0.0);
+        }
+        self.curr_chunk = 0;
+        self.next_chunk = 1;
+        self.did_initials = false;
+        self.step_accum = 0;
+        self.temp_storage.fill(0.0);
+    }
+
+    /// Set an override by canonical variable name. The override value will be
+    /// patched into the data buffer after the variable's initial bytecode executes.
+    pub fn set_override(&mut self, ident: &Ident<Canonical>, value: f64) -> Result<()> {
+        let off = match self.offsets.get(ident) {
+            Some(&off) => off,
+            None => {
+                return sim_err!(
+                    DoesNotExist,
+                    format!("variable '{}' not found in offsets map", ident.as_str())
+                );
+            }
+        };
+        if !self.is_initial_offset(off) {
+            return sim_err!(
+                BadSimSpecs,
+                format!(
+                    "cannot override '{}': not an initial variable",
+                    ident.as_str()
+                )
+            );
+        }
+        self.overrides.insert(off, value);
+        Ok(())
+    }
+
+    /// Set an override by raw data-buffer offset.
+    pub fn set_override_by_offset(&mut self, off: usize, value: f64) -> Result<()> {
+        if off >= self.n_slots {
+            return sim_err!(
+                BadSimSpecs,
+                format!("offset {} out of bounds (n_slots={})", off, self.n_slots)
+            );
+        }
+        if !self.is_initial_offset(off) {
+            return sim_err!(
+                BadSimSpecs,
+                format!("cannot override offset {}: not an initial variable", off)
+            );
+        }
+        self.overrides.insert(off, value);
+        Ok(())
+    }
+
+    /// Remove all overrides.
+    pub fn clear_overrides(&mut self) {
+        self.overrides.clear();
+    }
+
+    /// Run only the initials phase (idempotent: no-op if already done).
+    /// After this call, chunk 0 contains the t=0 state.
+    pub fn run_initials(&mut self) -> Result<()> {
+        if self.did_initials {
+            return Ok(());
+        }
+
+        let spec_start = self.specs.start;
+        let spec_stop = self.specs.stop;
+        let dt = self.specs.dt;
+
+        let mut stack = Stack::new();
+        let module_inputs: &[f64] = &[0.0; 0];
+        let mut data = None;
+        std::mem::swap(&mut data, &mut self.data);
+        let mut data = data.unwrap();
+
+        let (curr, next) = borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
+        curr[TIME_OFF] = spec_start;
+        curr[DT_OFF] = dt;
+        curr[INITIAL_TIME_OFF] = spec_start;
+        curr[FINAL_TIME_OFF] = spec_stop;
+
+        Self::eval_initials_with_overrides(
+            &self.sliced_sim,
+            &mut self.temp_storage,
+            &self.root,
+            0,
+            module_inputs,
+            curr,
+            next,
+            &mut stack,
+            &self.overrides,
+        );
+        self.did_initials = true;
+        self.step_accum = 0;
+
+        self.data = Some(data);
+        Ok(())
+    }
+
+    /// Extract the time series for a variable after simulation.
+    /// Returns None if the ident is not found.
+    /// The returned vector has one element per saved step (including t=0).
+    pub fn get_series(&self, ident: &Ident<Canonical>) -> Option<Vec<f64>> {
+        let &off = self.offsets.get(ident)?;
+        let data = self.data.as_ref()?;
+        if !self.did_initials {
+            return Some(vec![]);
+        }
+        // After the main loop, curr_chunk equals the number of valid
+        // saved steps (e.g. 101 for a 0..100 run).  After run_initials()
+        // alone, curr_chunk is still 0 but chunk 0 is valid (1 step).
+        let n_steps = if self.curr_chunk == 0 {
+            1
+        } else {
+            std::cmp::min(self.curr_chunk, self.n_chunks)
+        };
+        let mut series = Vec::with_capacity(n_steps);
+        for chunk_idx in 0..n_steps {
+            let base = chunk_idx * self.n_slots;
+            series.push(data[base + off]);
+        }
+        Some(series)
+    }
+
+    /// Evaluate a submodule's initials (all per-variable CompiledInitials),
+    /// applying overrides after each variable.
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
-    fn eval_module_initials(
+    fn eval_module_initials_with_overrides(
         sliced_sim: &CompiledSlicedSimulation,
         temp_storage: &mut [f64],
         parent_context: &ByteCodeContext,
@@ -419,12 +571,13 @@ impl Vm {
         next: &mut [f64],
         stack: &mut Stack,
         id: ModuleId,
+        overrides: &HashMap<usize, f64>,
     ) {
         let new_module_decl = &parent_context.modules[id as usize];
         let module_key = make_module_key(&new_module_decl.model_name, &new_module_decl.input_set);
         let module_off = parent_module_off + new_module_decl.off;
 
-        Self::eval_initials(
+        Self::eval_initials_with_overrides(
             sliced_sim,
             temp_storage,
             &module_key,
@@ -433,12 +586,14 @@ impl Vm {
             curr,
             next,
             stack,
+            overrides,
         );
     }
 
-    /// Run all per-variable initials for a module (in dependency order).
+    /// Run all per-variable initials for a module (in dependency order),
+    /// applying overrides after each variable's bytecode completes.
     #[allow(clippy::too_many_arguments)]
-    fn eval_initials(
+    fn eval_initials_with_overrides(
         sliced_sim: &CompiledSlicedSimulation,
         temp_storage: &mut [f64],
         module_key: &ModuleKey,
@@ -447,6 +602,7 @@ impl Vm {
         curr: &mut [f64],
         next: &mut [f64],
         stack: &mut Stack,
+        overrides: &HashMap<usize, f64>,
     ) {
         let module_initials = &sliced_sim.initial_modules[module_key];
         let context = &module_initials.context;
@@ -461,7 +617,17 @@ impl Vm {
                 curr,
                 next,
                 stack,
+                overrides,
             );
+            // Evaluate-then-patch: apply overrides after bytecode completes.
+            // CompiledInitial offsets are module-relative; add module_off
+            // to get the absolute position in the flattened data buffer.
+            for &off in &compiled_initial.offsets {
+                let abs_off = module_off + off;
+                if let Some(&val) = overrides.get(&abs_off) {
+                    curr[abs_off] = val;
+                }
+            }
         }
     }
 
@@ -477,10 +643,8 @@ impl Vm {
         curr: &mut [f64],
         next: &mut [f64],
         stack: &mut Stack,
+        overrides: &HashMap<usize, f64>,
     ) {
-        // This is the same eval loop as Self::eval but uses a context+bytecode pair
-        // instead of a CompiledModuleSlice, and dispatches EvalModule to
-        // eval_module_initials.
         Self::eval_bytecode(
             sliced_sim,
             temp_storage,
@@ -492,6 +656,7 @@ impl Vm {
             curr,
             next,
             stack,
+            overrides,
         );
     }
 
@@ -506,6 +671,8 @@ impl Vm {
         next: &mut [f64],
         stack: &mut Stack,
     ) {
+        static EMPTY_OVERRIDES: std::sync::LazyLock<HashMap<usize, f64>> =
+            std::sync::LazyLock::new(HashMap::new);
         Self::eval_bytecode(
             sliced_sim,
             temp_storage,
@@ -517,6 +684,7 @@ impl Vm {
             curr,
             next,
             stack,
+            &EMPTY_OVERRIDES,
         );
     }
 
@@ -532,6 +700,7 @@ impl Vm {
         curr: &mut [f64],
         next: &mut [f64],
         stack: &mut Stack,
+        overrides: &HashMap<usize, f64>,
     ) {
         // Existing state
         let mut condition = false;
@@ -629,7 +798,7 @@ impl Vm {
                     }
                     match part {
                         StepPart::Initials => {
-                            Self::eval_module_initials(
+                            Self::eval_module_initials_with_overrides(
                                 sliced_sim,
                                 temp_storage,
                                 context,
@@ -639,6 +808,7 @@ impl Vm {
                                 next,
                                 stack,
                                 *id,
+                                overrides,
                             );
                         }
                         StepPart::Flows | StepPart::Stocks => {
@@ -2241,6 +2411,613 @@ mod per_variable_initials_tests {
             arr_initial.offsets[2] - arr_initial.offsets[1],
             1,
             "array offsets should be contiguous"
+        );
+    }
+}
+
+#[cfg(test)]
+mod vm_reset_and_run_initials_tests {
+    use super::*;
+    use crate::canonicalize;
+    use crate::test_common::TestProject;
+
+    fn pop_model() -> TestProject {
+        TestProject::new("pop_model")
+            .with_sim_time(0.0, 100.0, 1.0)
+            .aux("birth_rate", "0.1", None)
+            .flow("births", "population * birth_rate", None)
+            .flow("deaths", "population / 80", None)
+            .stock("population", "100", &["births"], &["deaths"], None)
+    }
+
+    fn build_compiled(tp: &TestProject) -> (crate::interpreter::Simulation, CompiledSimulation) {
+        let sim = tp.build_sim().unwrap();
+        let compiled = sim.compile().unwrap();
+        (sim, compiled)
+    }
+
+    #[test]
+    fn test_vm_reset_produces_identical_results() {
+        let tp = pop_model();
+        let (_, compiled) = build_compiled(&tp);
+
+        // First run
+        let mut vm1 = Vm::new(compiled.clone()).unwrap();
+        vm1.run_to_end().unwrap();
+        let results1 = vm1.into_results();
+
+        // Second fresh VM from same compiled
+        let mut vm2 = Vm::new(compiled.clone()).unwrap();
+        vm2.run_to_end().unwrap();
+        let results2 = vm2.into_results();
+
+        // Third: run, reset, run again
+        let mut vm3 = Vm::new(compiled).unwrap();
+        vm3.run_to_end().unwrap();
+        vm3.reset();
+        vm3.run_to_end().unwrap();
+        let results3 = vm3.into_results();
+
+        let pop_off = *results1.offsets.get(&canonicalize("population")).unwrap();
+        for step in 0..results1.step_count {
+            let idx = step * results1.step_size + pop_off;
+            let v1 = results1.data[idx];
+            let v2 = results2.data[idx];
+            let v3 = results3.data[idx];
+            assert!(
+                (v1 - v2).abs() < 1e-10,
+                "fresh VMs should match at step {step}: {v1} vs {v2}"
+            );
+            assert!(
+                (v1 - v3).abs() < 1e-10,
+                "reset VM should match fresh at step {step}: {v1} vs {v3}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_vm_reset_after_partial_run() {
+        let tp = pop_model();
+        let (_, compiled) = build_compiled(&tp);
+
+        // Full run for reference
+        let mut vm_ref = Vm::new(compiled.clone()).unwrap();
+        vm_ref.run_to_end().unwrap();
+        let ref_results = vm_ref.into_results();
+
+        // Partial run, then reset and full run
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to(50.0).unwrap();
+        vm.reset();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+
+        let pop_off = *ref_results
+            .offsets
+            .get(&canonicalize("population"))
+            .unwrap();
+        for step in 0..ref_results.step_count {
+            let idx = step * ref_results.step_size + pop_off;
+            let v_ref = ref_results.data[idx];
+            let v = results.data[idx];
+            assert!(
+                (v_ref - v).abs() < 1e-10,
+                "reset-after-partial should match fresh at step {step}: {v_ref} vs {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compiled_simulation_clone_produces_equivalent_vm() {
+        let tp = pop_model();
+        let (_, compiled) = build_compiled(&tp);
+        let compiled_clone = compiled.clone();
+
+        let mut vm1 = Vm::new(compiled).unwrap();
+        vm1.run_to_end().unwrap();
+        let results1 = vm1.into_results();
+
+        let mut vm2 = Vm::new(compiled_clone).unwrap();
+        vm2.run_to_end().unwrap();
+        let results2 = vm2.into_results();
+
+        let pop_off = *results1.offsets.get(&canonicalize("population")).unwrap();
+        for step in 0..results1.step_count {
+            let idx = step * results1.step_size + pop_off;
+            assert!(
+                (results1.data[idx] - results2.data[idx]).abs() < 1e-10,
+                "cloned compiled should produce identical results at step {step}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_initials_then_run_to_end_matches_single_call() {
+        let tp = pop_model();
+        let (_, compiled) = build_compiled(&tp);
+
+        // VM A: single run_to_end
+        let mut vm_a = Vm::new(compiled.clone()).unwrap();
+        vm_a.run_to_end().unwrap();
+        let results_a = vm_a.into_results();
+
+        // VM B: run_initials then run_to_end
+        let mut vm_b = Vm::new(compiled).unwrap();
+        vm_b.run_initials().unwrap();
+        vm_b.run_to_end().unwrap();
+        let results_b = vm_b.into_results();
+
+        let pop_off = *results_a.offsets.get(&canonicalize("population")).unwrap();
+        for step in 0..results_a.step_count {
+            let idx = step * results_a.step_size + pop_off;
+            assert!(
+                (results_a.data[idx] - results_b.data[idx]).abs() < 1e-10,
+                "run_initials+run_to_end should match single run_to_end at step {step}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_initials_is_idempotent() {
+        let tp = pop_model();
+        let (_, compiled) = build_compiled(&tp);
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_initials().unwrap();
+        vm.run_initials().unwrap(); // second call should be no-op
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+
+        let pop_off = *results.offsets.get(&canonicalize("population")).unwrap();
+        let initial_pop = results.data[pop_off];
+        assert_eq!(initial_pop, 100.0, "population initial should be 100");
+    }
+
+    #[test]
+    fn test_run_initials_sets_correct_values() {
+        // Use a model where the aux is a stock dependency so it's in initials
+        let tp = TestProject::new("initials_check")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("rate", "0.1", None)
+            .flow("inflow", "0", None)
+            .stock("s", "rate * 1000", &["inflow"], &[], None);
+
+        let (_, compiled) = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_initials().unwrap();
+
+        let s_off = vm.get_offset(&canonicalize("s")).unwrap();
+        let rate_off = vm.get_offset(&canonicalize("rate")).unwrap();
+
+        assert_eq!(
+            vm.get_value_now(s_off),
+            100.0,
+            "stock initial = rate*1000 = 100"
+        );
+        assert_eq!(
+            vm.get_value_now(rate_off),
+            0.1,
+            "rate is a stock dependency, so it's in initials"
+        );
+        assert_eq!(
+            vm.get_value_now(TIME_OFF),
+            0.0,
+            "time should be 0 after initials"
+        );
+    }
+
+    #[test]
+    fn test_get_series_after_run_to_end() {
+        let tp = pop_model();
+        let (_, compiled) = build_compiled(&tp);
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+
+        let series = vm.get_series(&canonicalize("population")).unwrap();
+        // With start=0, stop=100, save_step=1: 101 steps (0,1,...,100)
+        assert_eq!(series.len(), 101, "should have 101 data points");
+        assert_eq!(series[0], 100.0, "initial population should be 100");
+        // Population should grow (birth_rate > death_rate for pop=100)
+        assert!(
+            series[100] > series[0],
+            "population should grow: final={} > initial={}",
+            series[100],
+            series[0]
+        );
+    }
+
+    #[test]
+    fn test_get_series_after_partial_run() {
+        let tp = pop_model();
+        let (_, compiled) = build_compiled(&tp);
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to(50.0).unwrap();
+
+        let series = vm.get_series(&canonicalize("population")).unwrap();
+        // With start=0, stop=100 but run_to(50): should have 51 steps (0..=50)
+        assert_eq!(
+            series.len(),
+            51,
+            "should have 51 data points for run_to(50)"
+        );
+        assert_eq!(series[0], 100.0, "initial population should be 100");
+
+        // After reset, the VM should still work
+        vm.reset();
+        vm.run_to_end().unwrap();
+        let full_series = vm.get_series(&canonicalize("population")).unwrap();
+        assert_eq!(
+            full_series.len(),
+            101,
+            "full run after reset should have 101 points"
+        );
+    }
+
+    #[test]
+    fn test_get_series_after_run_initials_only() {
+        let tp = pop_model();
+        let (_, compiled) = build_compiled(&tp);
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_initials().unwrap();
+
+        let series = vm.get_series(&canonicalize("population")).unwrap();
+        assert_eq!(
+            series.len(),
+            1,
+            "after run_initials only, series should have 1 element"
+        );
+        assert_eq!(
+            series[0], 100.0,
+            "the single element should be the initial value"
+        );
+    }
+
+    #[test]
+    fn test_get_series_unknown_variable() {
+        let tp = pop_model();
+        let (_, compiled) = build_compiled(&tp);
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+
+        assert!(
+            vm.get_series(&canonicalize("nonexistent_var")).is_none(),
+            "unknown variable should return None"
+        );
+    }
+
+    #[test]
+    fn test_get_series_before_any_run() {
+        let tp = pop_model();
+        let (_, compiled) = build_compiled(&tp);
+
+        let vm = Vm::new(compiled).unwrap();
+        let series = vm.get_series(&canonicalize("population")).unwrap();
+        assert!(series.is_empty(), "before any run, series should be empty");
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+    use crate::canonicalize;
+    use crate::test_common::TestProject;
+
+    /// Model: rate=0.1, scaled_rate=rate*10, stock initial=scaled_rate.
+    /// `rate` and `scaled_rate` are both stock dependencies in the initials.
+    fn rate_model() -> TestProject {
+        TestProject::new("rate_model")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("rate", "0.1", None)
+            .aux("scaled_rate", "rate * 10", None)
+            .flow("inflow", "population * rate", None)
+            .flow("outflow", "population / 80", None)
+            .stock("population", "scaled_rate", &["inflow"], &["outflow"], None)
+    }
+
+    fn build_compiled(tp: &TestProject) -> CompiledSimulation {
+        let sim = tp.build_sim().unwrap();
+        sim.compile().unwrap()
+    }
+
+    #[test]
+    fn test_override_constant_flows_through_dependent_initials() {
+        let compiled = build_compiled(&rate_model());
+        let mut vm = Vm::new(compiled).unwrap();
+
+        // Override rate from 0.1 to 0.2
+        vm.set_override(&canonicalize("rate"), 0.2).unwrap();
+        vm.run_initials().unwrap();
+
+        let rate_off = vm.get_offset(&canonicalize("rate")).unwrap();
+        let sr_off = vm.get_offset(&canonicalize("scaled_rate")).unwrap();
+        let pop_off = vm.get_offset(&canonicalize("population")).unwrap();
+
+        assert_eq!(
+            vm.get_value_now(rate_off),
+            0.2,
+            "rate should be overridden to 0.2"
+        );
+        assert_eq!(
+            vm.get_value_now(sr_off),
+            2.0,
+            "scaled_rate = rate*10 = 0.2*10 = 2.0"
+        );
+        assert_eq!(
+            vm.get_value_now(pop_off),
+            2.0,
+            "population initial = scaled_rate = 2.0"
+        );
+    }
+
+    #[test]
+    fn test_override_affects_simulation_results() {
+        let compiled = build_compiled(&rate_model());
+
+        // Run without override
+        let mut vm1 = Vm::new(compiled.clone()).unwrap();
+        vm1.run_to_end().unwrap();
+        let series1 = vm1.get_series(&canonicalize("population")).unwrap();
+
+        // Run with override: higher rate means more growth
+        let mut vm2 = Vm::new(compiled).unwrap();
+        vm2.set_override(&canonicalize("rate"), 0.2).unwrap();
+        vm2.run_to_end().unwrap();
+        let series2 = vm2.get_series(&canonicalize("population")).unwrap();
+
+        assert!(
+            series2.last().unwrap() > series1.last().unwrap(),
+            "higher rate should produce higher final population: {} vs {}",
+            series2.last().unwrap(),
+            series1.last().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_override_persists_across_reset() {
+        let compiled = build_compiled(&rate_model());
+        let mut vm = Vm::new(compiled).unwrap();
+
+        vm.set_override(&canonicalize("rate"), 0.2).unwrap();
+        vm.run_to_end().unwrap();
+        let series_before = vm.get_series(&canonicalize("population")).unwrap();
+
+        vm.reset();
+        vm.run_to_end().unwrap();
+        let series_after = vm.get_series(&canonicalize("population")).unwrap();
+
+        for (i, (a, b)) in series_before.iter().zip(series_after.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-10,
+                "override should persist across reset: step {i}: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_clear_overrides_restores_defaults() {
+        let compiled = build_compiled(&rate_model());
+
+        // Baseline run
+        let mut vm_baseline = Vm::new(compiled.clone()).unwrap();
+        vm_baseline.run_to_end().unwrap();
+        let baseline = vm_baseline.get_series(&canonicalize("population")).unwrap();
+
+        // Run with override
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.set_override(&canonicalize("rate"), 0.5).unwrap();
+        vm.run_to_end().unwrap();
+        let overridden = vm.get_series(&canonicalize("population")).unwrap();
+
+        // Clear and re-run
+        vm.clear_overrides();
+        vm.reset();
+        vm.run_to_end().unwrap();
+        let restored = vm.get_series(&canonicalize("population")).unwrap();
+
+        // Overridden should differ from baseline
+        assert!(
+            (overridden.last().unwrap() - baseline.last().unwrap()).abs() > 1.0,
+            "overridden should differ from baseline"
+        );
+        // Restored should match baseline
+        for (i, (b, r)) in baseline.iter().zip(restored.iter()).enumerate() {
+            assert!(
+                (b - r).abs() < 1e-10,
+                "after clear_overrides, should match baseline: step {i}: {b} vs {r}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiple_reset_override_cycles() {
+        let compiled = build_compiled(&rate_model());
+        let mut vm = Vm::new(compiled).unwrap();
+
+        let mut prev_final = 0.0;
+        for i in 1..=10 {
+            let rate_val = i as f64 * 0.01;
+            vm.set_override(&canonicalize("rate"), rate_val).unwrap();
+            vm.reset();
+            vm.run_to_end().unwrap();
+            let series = vm.get_series(&canonicalize("population")).unwrap();
+            let final_val = *series.last().unwrap();
+            if i > 1 {
+                assert!(
+                    final_val > prev_final,
+                    "final pop should increase with rate: rate={rate_val}, final={final_val}, prev={prev_final}"
+                );
+            }
+            prev_final = final_val;
+        }
+    }
+
+    #[test]
+    fn test_override_nonexistent_variable_returns_error() {
+        let compiled = build_compiled(&rate_model());
+        let mut vm = Vm::new(compiled).unwrap();
+        let result = vm.set_override(&canonicalize("nonexistent_var"), 1.0);
+        assert!(
+            result.is_err(),
+            "overriding nonexistent variable should fail"
+        );
+    }
+
+    #[test]
+    fn test_override_by_offset_out_of_bounds_returns_error() {
+        let compiled = build_compiled(&rate_model());
+        let mut vm = Vm::new(compiled).unwrap();
+        let result = vm.set_override_by_offset(99999, 1.0);
+        assert!(result.is_err(), "out-of-bounds offset should fail");
+    }
+
+    #[test]
+    fn test_override_non_initial_variable_returns_error() {
+        // birth_rate is not a stock dependency in this model (stock init = "100")
+        let tp = TestProject::new("non_initial_override")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("birth_rate", "0.1", None)
+            .flow("births", "pop * birth_rate", None)
+            .stock("pop", "100", &["births"], &[], None);
+
+        let sim = tp.build_sim().unwrap();
+        let compiled = sim.compile().unwrap();
+        let mut vm = Vm::new(compiled).unwrap();
+
+        // birth_rate is only used in flows, not in initials
+        // It shouldn't be overridable via set_override
+        let result = vm.set_override(&canonicalize("birth_rate"), 0.5);
+        assert!(
+            result.is_err(),
+            "overriding a non-initial variable should fail"
+        );
+    }
+
+    #[test]
+    fn test_override_after_initials_requires_reset() {
+        let compiled = build_compiled(&rate_model());
+        let mut vm = Vm::new(compiled).unwrap();
+
+        // Run initials first
+        vm.run_initials().unwrap();
+
+        // Set override AFTER initials
+        vm.set_override(&canonicalize("rate"), 0.5).unwrap();
+
+        // Run to end - override did NOT take effect (initials already done)
+        vm.run_to_end().unwrap();
+        let series1 = vm.get_series(&canonicalize("population")).unwrap();
+
+        // Now reset and run - override takes effect
+        vm.reset();
+        vm.run_to_end().unwrap();
+        let series2 = vm.get_series(&canonicalize("population")).unwrap();
+
+        // series1 used default rate=0.1, series2 used override rate=0.5
+        assert!(
+            (series1.last().unwrap() - series2.last().unwrap()).abs() > 1.0,
+            "override should take effect only after reset: first={}, second={}",
+            series1.last().unwrap(),
+            series2.last().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_conflicting_writes_to_same_offset() {
+        let compiled = build_compiled(&rate_model());
+        let mut vm = Vm::new(compiled).unwrap();
+
+        let rate_off = vm.get_offset(&canonicalize("rate")).unwrap();
+
+        // Two writes to the same offset - last one wins
+        vm.set_override_by_offset(rate_off, 0.1).unwrap();
+        vm.set_override_by_offset(rate_off, 0.3).unwrap();
+
+        vm.run_initials().unwrap();
+        assert_eq!(vm.get_value_now(rate_off), 0.3, "last override should win");
+    }
+
+    #[test]
+    fn test_override_module_variable() {
+        let test_file = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx"
+        );
+        let file_bytes =
+            std::fs::read(test_file).expect("modules_hares_and_foxes test fixture must exist");
+        let mut cursor = std::io::Cursor::new(file_bytes);
+        let project_datamodel = crate::open_xmile(&mut cursor).unwrap();
+        let project = std::sync::Arc::new(crate::project::Project::from(project_datamodel));
+        let sim =
+            crate::interpreter::Simulation::new(&project, "main").expect("Simulation should build");
+        let compiled = sim.compile().unwrap();
+
+        // Run baseline
+        let mut vm1 = Vm::new(compiled.clone()).unwrap();
+        vm1.run_to_end().unwrap();
+
+        let mut vm2 = Vm::new(compiled).unwrap();
+        // calc_flattened_offsets uses from_unchecked with dot separators
+        let hares_ident = Ident::<Canonical>::from_unchecked("hares.hares".to_string());
+        assert!(
+            vm2.get_offset(&hares_ident).is_some(),
+            "hares.hares should exist in offsets"
+        );
+        assert!(
+            vm2.is_initial_offset(vm2.offsets[&hares_ident]),
+            "hares.hares should be an initial offset"
+        );
+        vm2.set_override(&hares_ident, 500.0).unwrap();
+        vm2.run_to_end().unwrap();
+        let s1 = vm1.get_series(&hares_ident).unwrap();
+        let s2 = vm2.get_series(&hares_ident).unwrap();
+        assert!(
+            (s2[0] - 500.0).abs() < 1e-10,
+            "overridden initial should be 500, got {}",
+            s2[0]
+        );
+        assert!(
+            (s1[0] - s2[0]).abs() > 1.0,
+            "override should change initial value: baseline={}, overridden={}",
+            s1[0],
+            s2[0]
+        );
+    }
+
+    #[test]
+    fn test_override_partial_array() {
+        let tp = TestProject::new("array_override")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("Dim", &["A", "B", "C"])
+            .array_with_ranges("arr[Dim]", vec![("A", "1"), ("B", "2"), ("C", "3")])
+            .aux("total", "arr[A] + arr[B] + arr[C]", None)
+            .flow("inflow", "0", None)
+            .stock("s", "total", &["inflow"], &[], None);
+
+        let sim = tp.build_sim().unwrap();
+        let compiled = sim.compile().unwrap();
+        let mut vm = Vm::new(compiled).unwrap();
+
+        let arr_b_ident = canonicalize("arr[b]");
+        let arr_b_off = vm
+            .get_offset(&arr_b_ident)
+            .expect("arr[b] should exist in offsets");
+        vm.set_override_by_offset(arr_b_off, 99.0).unwrap();
+        vm.run_initials().unwrap();
+        assert_eq!(
+            vm.get_value_now(arr_b_off),
+            99.0,
+            "arr[b] should be overridden to 99"
+        );
+        let s_off = vm.get_offset(&canonicalize("s")).unwrap();
+        // total = arr[A]+arr[B]+arr[C] = 1+99+3 = 103
+        assert_eq!(
+            vm.get_value_now(s_off),
+            103.0,
+            "stock should reflect overridden array element: 1+99+3=103"
         );
     }
 }
