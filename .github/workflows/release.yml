@@ -29,7 +29,7 @@ jobs:
           python-version: '3.13'
 
       - name: Build wheels with cibuildwheel
-        uses: pypa/cibuildwheel@v2.21.3
+        uses: pypa/cibuildwheel@v3.3.1
         env:
           CIBW_BUILD: cp311-* cp312-* cp313-* cp314-*
           CIBW_SKIP: pp* *-musllinux*
