@@ -419,7 +419,7 @@ export class WorkerServer {
       default: {
         // TypeScript exhaustiveness check
         const _exhaustive: never = request;
-        throw new Error(`Unknown request type: ${(_exhaustive as WorkerRequest).type}`);
+        throw new Error(`Unknown request type: ${(_exhaustive as { type: string }).type}`);
       }
     }
   }

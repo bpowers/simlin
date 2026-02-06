@@ -76,6 +76,17 @@ describe('WorkerBackend', () => {
       expect(backend.isInitialized()).toBe(true);
     });
 
+    test('concurrent init calls do not double-initialize', async () => {
+      const { backend, transfers } = createTestPair();
+      // Fire two init calls concurrently — the second should be a no-op
+      const [, result2] = await Promise.all([backend.init(loadWasmSource()), backend.init(loadWasmSource())]);
+      expect(result2).toBeUndefined();
+      expect(backend.isInitialized()).toBe(true);
+      // Only one init message should have been sent (only one transfer)
+      const initTransfers = transfers.filter((t) => t !== undefined && t.length > 0);
+      expect(initTransfers.length).toBe(1);
+    });
+
     test('reset returns to uninitialized', async () => {
       const { backend } = createTestPair();
       await backend.init(loadWasmSource());

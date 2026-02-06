@@ -123,6 +123,7 @@ interface HandleEntry {
 export class DirectBackend implements EngineBackend {
   private _nextHandle = 1;
   private _handles = new Map<number, HandleEntry>();
+  private _projectChildren = new Map<number, Set<number>>();
 
   private allocHandle(
     kind: HandleKind,
@@ -137,6 +138,11 @@ export class DirectBackend implements EngineBackend {
       projectHandle: extra?.projectHandle,
       modelPtr: extra?.modelPtr,
     });
+    if (kind === 'project') {
+      this._projectChildren.set(handle, new Set());
+    } else if (extra?.projectHandle !== undefined) {
+      this._projectChildren.get(extra.projectHandle)?.add(handle);
+    }
     return handle;
   }
 
@@ -182,6 +188,7 @@ export class DirectBackend implements EngineBackend {
       entry.disposed = true;
     }
     this._handles.clear();
+    this._projectChildren.clear();
     this._nextHandle = 1;
     wasmReset();
   }
@@ -220,15 +227,20 @@ export class DirectBackend implements EngineBackend {
       return; // idempotent
     }
     // Dispose all child handles (models and sims) belonging to this project
-    for (const [, childEntry] of this._handles) {
-      if (childEntry.projectHandle === (handle as number) && !childEntry.disposed) {
-        childEntry.disposed = true;
-        if (childEntry.kind === 'sim') {
-          simlin_sim_unref(childEntry.ptr);
-        } else if (childEntry.kind === 'model') {
-          simlin_model_unref(childEntry.ptr);
+    const children = this._projectChildren.get(handle as number);
+    if (children) {
+      for (const childHandle of children) {
+        const childEntry = this._handles.get(childHandle);
+        if (childEntry && !childEntry.disposed) {
+          childEntry.disposed = true;
+          if (childEntry.kind === 'sim') {
+            simlin_sim_unref(childEntry.ptr);
+          } else if (childEntry.kind === 'model') {
+            simlin_model_unref(childEntry.ptr);
+          }
         }
       }
+      this._projectChildren.delete(handle as number);
     }
     entry.disposed = true;
     simlin_project_unref(entry.ptr);
@@ -324,6 +336,9 @@ export class DirectBackend implements EngineBackend {
       return; // idempotent
     }
     entry.disposed = true;
+    if (entry.projectHandle !== undefined) {
+      this._projectChildren.get(entry.projectHandle)?.delete(handle as number);
+    }
     simlin_model_unref(entry.ptr);
   }
 
@@ -357,6 +372,9 @@ export class DirectBackend implements EngineBackend {
       return; // idempotent
     }
     entry.disposed = true;
+    if (entry.projectHandle !== undefined) {
+      this._projectChildren.get(entry.projectHandle)?.delete(handle as number);
+    }
     simlin_sim_unref(entry.ptr);
   }
 

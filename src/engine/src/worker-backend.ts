@@ -153,7 +153,7 @@ export class WorkerBackend implements EngineBackend {
   }
 
   async init(wasmSource?: WasmSourceProvider): Promise<void> {
-    if (this._initialized) {
+    if (this._initialized || this._initializing) {
       return;
     }
 
