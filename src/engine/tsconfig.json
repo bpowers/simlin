@@ -14,5 +14,5 @@
     }
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["lib", "lib.browser", "src/internal/wasm.browser.ts", "src/backend-factory.browser.ts", "tests", "eslint.config.js"]
+  "exclude": ["lib", "lib.browser", "src/internal/wasm.browser.ts", "src/backend-factory.browser.ts", "src/engine-worker.ts", "tests", "eslint.config.js"]
 }
