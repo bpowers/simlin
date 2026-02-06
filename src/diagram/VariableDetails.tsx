@@ -128,6 +128,8 @@ function highlightErrors(
 const passthroughLatex = (s: string) => s;
 
 export class VariableDetails extends React.PureComponent<VariableDetailsProps, VariableDetailsState> {
+  private _latexRequestId = 0;
+
   constructor(props: VariableDetailsProps) {
     super(props);
 
@@ -171,11 +173,14 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     const ident = viewElement.ident;
     if (!ident) return;
 
+    const requestId = ++this._latexRequestId;
     this.setState({ latexLoading: true });
     try {
       const latex = await getLatexEquation(ident);
+      if (requestId !== this._latexRequestId) return;
       this.setState({ latexEquation: latex, latexLoading: false });
     } catch {
+      if (requestId !== this._latexRequestId) return;
       this.setState({ latexEquation: undefined, latexLoading: false });
     }
   }
