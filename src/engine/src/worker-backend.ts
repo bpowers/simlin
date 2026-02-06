@@ -31,10 +31,11 @@ interface PendingRequest<T = unknown> {
 
 /**
  * A FIFO queue entry: a function that sends the request and returns
- * a promise for the result.
+ * a promise for the result, with a reject hook for termination.
  */
 interface QueueEntry {
   execute: () => void;
+  reject: (error: Error) => void;
 }
 
 export class WorkerBackend implements EngineBackend {
@@ -43,6 +44,7 @@ export class WorkerBackend implements EngineBackend {
   private _pending = new Map<number, PendingRequest>();
   private _initialized = false;
   private _initializing = false;
+  private _terminated = false;
   private _storedWasmConfig: WasmConfig | null = null;
 
   // FIFO queue for strict serialization
@@ -73,6 +75,9 @@ export class WorkerBackend implements EngineBackend {
    * The request is enqueued and executed in FIFO order.
    */
   private sendRequest<T>(buildMessage: (requestId: number) => WorkerRequest): Promise<T> {
+    if (this._terminated) {
+      return Promise.reject(new Error('WorkerBackend terminated'));
+    }
     return new Promise<T>((resolve, reject) => {
       this._queue.push({
         execute: () => {
@@ -90,6 +95,7 @@ export class WorkerBackend implements EngineBackend {
           const msg = buildMessage(requestId);
           this._post(msg);
         },
+        reject,
       });
 
       // Start processing if not already
@@ -177,6 +183,33 @@ export class WorkerBackend implements EngineBackend {
       requestId,
     }));
     this._initialized = false;
+  }
+
+  /**
+   * Terminate this backend, rejecting all pending and queued requests.
+   * After termination, all new requests will be immediately rejected.
+   * Call this before terminating the underlying Worker to prevent
+   * promise leaks.
+   */
+  terminate(): void {
+    this._terminated = true;
+    this._initialized = false;
+    this._initializing = false;
+    this._processing = false;
+
+    const error = new Error('WorkerBackend terminated');
+
+    // Reject all pending requests (sent to worker, awaiting response)
+    for (const [, pending] of this._pending) {
+      pending.reject(error);
+    }
+    this._pending.clear();
+
+    // Reject all queued requests (not yet sent to worker)
+    for (const entry of this._queue) {
+      entry.reject(error);
+    }
+    this._queue = [];
   }
 
   configureWasm(config: WasmConfig): void {

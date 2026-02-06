@@ -94,7 +94,6 @@ export enum WorkerState {
   INITIALIZING = 'INITIALIZING',
   READY = 'READY',
   FAILED = 'FAILED',
-  TERMINATED = 'TERMINATED',
 }
 
 /**

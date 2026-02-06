@@ -45,9 +45,14 @@ export function getBackend(): EngineBackend {
 }
 
 export function resetBackend(): void {
+  if (sharedBackend) {
+    // Reject all pending/queued requests before terminating the worker
+    // to prevent promise leaks.
+    (sharedBackend as WorkerBackend).terminate();
+    sharedBackend = null;
+  }
   if (sharedWorker) {
     sharedWorker.terminate();
     sharedWorker = null;
   }
-  sharedBackend = null;
 }

@@ -363,4 +363,46 @@ describe('WorkerBackend', () => {
       await expect(backend.projectOpenXmile(new Uint8Array([]))).rejects.toThrow(/not ready/i);
     });
   });
+
+  describe('terminate', () => {
+    test('terminate rejects pending requests', async () => {
+      const { backend } = createTestPair();
+      await backend.init(loadWasmSource());
+
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+
+      // Fire an operation and terminate before it resolves
+      const pendingOp = backend.projectGetModelCount(handle);
+      backend.terminate();
+
+      await expect(pendingOp).rejects.toThrow(/terminated/i);
+    });
+
+    test('terminate rejects queued requests', async () => {
+      const { backend } = createTestPair();
+      await backend.init(loadWasmSource());
+
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+
+      // Queue up multiple operations to ensure some are queued (not yet sent)
+      const op1 = backend.projectGetModelCount(handle);
+      const op2 = backend.projectGetModelNames(handle);
+      const op3 = backend.projectGetErrors(handle);
+      backend.terminate();
+
+      await expect(op1).rejects.toThrow(/terminated/i);
+      await expect(op2).rejects.toThrow(/terminated/i);
+      await expect(op3).rejects.toThrow(/terminated/i);
+    });
+
+    test('operations after terminate are rejected', async () => {
+      const { backend } = createTestPair();
+      await backend.init(loadWasmSource());
+      backend.terminate();
+
+      await expect(backend.projectOpenXmile(loadTestXmile())).rejects.toThrow(/terminated/i);
+    });
+  });
 });
