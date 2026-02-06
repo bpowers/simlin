@@ -158,6 +158,12 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     this.loadLatex();
   }
 
+  componentDidUpdate(prevProps: VariableDetailsProps) {
+    if (prevProps.viewElement.ident !== this.props.viewElement.ident) {
+      this.loadLatex();
+    }
+  }
+
   private async loadLatex() {
     const { getLatexEquation, viewElement } = this.props;
     if (!getLatexEquation) return;

@@ -345,9 +345,10 @@ export class Project {
     this._models.clear();
     this._mainModel = null;
 
-    // Fire-and-forget: the backend call may return a Promise
-    // but we can't await in a synchronous dispose.
-    this._backend.projectDispose(this._handle);
+    const result = this._backend.projectDispose(this._handle);
+    if (result instanceof Promise) {
+      result.catch(() => {});
+    }
     this._disposed = true;
   }
 }

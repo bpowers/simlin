@@ -247,7 +247,10 @@ export class Sim {
       return;
     }
 
-    this.backend.simDispose(this._handle);
+    const result = this.backend.simDispose(this._handle);
+    if (result instanceof Promise) {
+      result.catch(() => {});
+    }
     this._disposed = true;
   }
 }

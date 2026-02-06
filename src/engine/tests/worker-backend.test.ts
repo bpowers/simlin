@@ -74,6 +74,56 @@ describe('WorkerBackend', () => {
       await backend.reset();
       expect(backend.isInitialized()).toBe(false);
     });
+
+    test('init with string path forwards to worker', async () => {
+      const { backend } = createTestPair();
+      await backend.init(wasmPath);
+      expect(backend.isInitialized()).toBe(true);
+
+      // Verify it actually works by opening a project
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+      const count = await backend.projectGetModelCount(handle);
+      expect(count).toBe(1);
+    });
+
+    test('init with URL object forwards to worker', async () => {
+      const { backend } = createTestPair();
+      const url = new URL(`file://${wasmPath}`);
+      await backend.init(url);
+      expect(backend.isInitialized()).toBe(true);
+
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+      const count = await backend.projectGetModelCount(handle);
+      expect(count).toBe(1);
+    });
+
+    test('configureWasm with string path is forwarded during init', async () => {
+      const { backend } = createTestPair();
+      // Reset to clear global WASM state from prior tests, since
+      // configureWasm requires WASM to not yet be initialized.
+      await backend.reset();
+      backend.configureWasm({ source: wasmPath });
+      await backend.init();
+      expect(backend.isInitialized()).toBe(true);
+
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+      const count = await backend.projectGetModelCount(handle);
+      expect(count).toBe(1);
+    });
+
+    test('init with provider function returning string path', async () => {
+      const { backend } = createTestPair();
+      await backend.init(() => wasmPath);
+      expect(backend.isInitialized()).toBe(true);
+
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+      const count = await backend.projectGetModelCount(handle);
+      expect(count).toBe(1);
+    });
   });
 
   describe('project operations', () => {

@@ -110,7 +110,9 @@ export class WorkerBackend implements EngineBackend {
 
   // ---- Lifecycle ----
 
-  private async resolveWasmSource(source?: WasmSourceProvider): Promise<ArrayBuffer | undefined> {
+  private async resolveWasmSource(
+    source?: WasmSourceProvider,
+  ): Promise<{ buffer?: ArrayBuffer; url?: string } | undefined> {
     if (source === undefined) {
       return undefined;
     }
@@ -119,13 +121,16 @@ export class WorkerBackend implements EngineBackend {
       return this.resolveWasmSource(resolved);
     }
     if (source instanceof Uint8Array) {
-      return source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength) as ArrayBuffer;
+      return { buffer: source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength) as ArrayBuffer };
     }
     if (source instanceof ArrayBuffer) {
-      return source;
+      return { buffer: source };
     }
-    // string or URL -- pass as-is and let the worker handle it
-    return undefined;
+    if (source instanceof URL) {
+      return { url: source.toString() };
+    }
+    // string path or URL
+    return { url: source };
   }
 
   async init(wasmSource?: WasmSourceProvider): Promise<void> {
@@ -140,17 +145,18 @@ export class WorkerBackend implements EngineBackend {
         await this.sendRequest<void>((requestId) => ({
           type: 'configureWasm',
           requestId,
-          config: { source: resolved },
+          config: { source: resolved.buffer, url: resolved.url },
         }));
       }
       this._storedWasmConfig = null;
     }
 
-    const wasmSourceBuf = await this.resolveWasmSource(wasmSource);
+    const resolved = await this.resolveWasmSource(wasmSource);
     await this.sendRequest<void>((requestId) => ({
       type: 'init',
       requestId,
-      wasmSource: wasmSourceBuf,
+      wasmSource: resolved?.buffer,
+      wasmUrl: resolved?.url,
     }));
     this._initialized = true;
   }

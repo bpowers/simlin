@@ -152,7 +152,11 @@ export class WorkerServer {
           return;
         }
         this.state = WorkerState.INITIALIZING;
-        const wasmSource = request.wasmSource ? new Uint8Array(request.wasmSource) : undefined;
+        const wasmSource = request.wasmSource
+          ? new Uint8Array(request.wasmSource)
+          : request.wasmUrl
+            ? request.wasmUrl
+            : undefined;
         this.backend
           .init(wasmSource)
           .then(() => {
@@ -209,14 +213,10 @@ export class WorkerServer {
 
   private handleConfigureWasm(request: Extract<WorkerRequest, { type: 'configureWasm' }>): void {
     const { requestId, config } = request;
-    const wasmConfig: { source?: Uint8Array; url?: string } = {};
-    if (config.source) {
-      wasmConfig.source = new Uint8Array(config.source);
-    }
-    if (config.url) {
-      wasmConfig.url = config.url;
-    }
-    this.backend.configureWasm(wasmConfig);
+    // Reconstruct a WasmConfig with source field from either buffer or URL.
+    // The DirectBackend.configureWasm expects { source: WasmSourceProvider }.
+    const source = config.source ? new Uint8Array(config.source) : config.url;
+    this.backend.configureWasm(source !== undefined ? { source } : {});
     this.sendSuccess(requestId, undefined);
   }
 

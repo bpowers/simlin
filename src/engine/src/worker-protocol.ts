@@ -33,7 +33,7 @@ export interface SerializedError {
 
 export type WorkerRequest =
   // Lifecycle
-  | { type: 'init'; requestId: number; wasmSource?: ArrayBuffer }
+  | { type: 'init'; requestId: number; wasmSource?: ArrayBuffer; wasmUrl?: string }
   | { type: 'isInitialized'; requestId: number }
   | { type: 'reset'; requestId: number }
   | { type: 'configureWasm'; requestId: number; config: { source?: ArrayBuffer; url?: string } }

@@ -539,7 +539,10 @@ export class Model {
       return;
     }
 
-    this.backend.modelDispose(this._handle);
+    const result = this.backend.modelDispose(this._handle);
+    if (result instanceof Promise) {
+      result.catch(() => {});
+    }
     this._disposed = true;
   }
 }
