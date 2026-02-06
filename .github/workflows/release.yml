@@ -31,7 +31,7 @@ jobs:
       - name: Build wheels with cibuildwheel
         uses: pypa/cibuildwheel@v2.21.3
         env:
-          CIBW_BUILD: cp311-* cp312-* cp313-*
+          CIBW_BUILD: cp311-* cp312-* cp313-* cp314-*
           CIBW_SKIP: pp* *-musllinux*
           CIBW_ARCHS_MACOS: arm64
           CIBW_ARCHS_LINUX: x86_64 aarch64
@@ -79,7 +79,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14]
-        python-version: ['3.11', '3.12', '3.13']
+        python-version: ['3.11', '3.12', '3.13', '3.14']
 
     steps:
       - uses: actions/checkout@v4
