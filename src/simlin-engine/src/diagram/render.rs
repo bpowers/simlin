@@ -348,9 +348,9 @@ pub fn render_svg(project: &datamodel::Project, model_name: &str) -> Result<Stri
     );
     svg.push_str("<feMorphology operator=\"dilate\" radius=\"4\"></feMorphology>");
     svg.push_str("<feGaussianBlur stdDeviation=\"2\"></feGaussianBlur>");
-    svg.push_str("<feColorMatrix type=\"matrix\" values=\"0 0 0 0 1\n                    0 0 0 0 1\n                    0 0 0 0 1\n                    0 0 0 0.85 0\"></feColorMatrix>");
+    svg.push_str("<feColorMatrix type=\"matrix\" values=\"0 0 0 0 1\n                          0 0 0 0 1\n                          0 0 0 0 1\n                          0 0 0 0.85 0\"></feColorMatrix>");
     svg.push_str("<feComposite operator=\"over\" in=\"SourceGraphic\"></feComposite>");
-    svg.push_str("</filter>\n");
+    svg.push_str("</filter>");
     svg.push_str("</defs>");
     svg.push_str("<g>");
 

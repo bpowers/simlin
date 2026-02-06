@@ -37,9 +37,9 @@ pub fn render_arrowhead(x: f64, y: f64, angle: f64, size: f64, typ: ArrowheadTyp
         js_format_number(y - bg_r / 2.0)
     );
 
-    let (path_class, static_class) = match typ {
-        ArrowheadType::Flow => ("simlin-arrowhead-flow", "simlin-arrowhead-flow"),
-        ArrowheadType::Connector => ("simlin-arrowhead-link", "simlin-arrowhead-link"),
+    let path_class = match typ {
+        ArrowheadType::Flow => "simlin-arrowhead-flow",
+        ArrowheadType::Connector => "simlin-arrowhead-link",
     };
 
     let transform = format!(
@@ -57,10 +57,9 @@ pub fn render_arrowhead(x: f64, y: f64, angle: f64, size: f64, typ: ArrowheadTyp
         escape_xml_attr(&transform)
     ));
     svg.push_str(&format!(
-        "<path d=\"{}\" class=\"{} {}\" transform=\"{}\"></path>",
+        "<path d=\"{}\" class=\"{}\" transform=\"{}\"></path>",
         escape_xml_attr(&path),
         path_class,
-        static_class,
         escape_xml_attr(&transform)
     ));
     svg.push_str("</g>");

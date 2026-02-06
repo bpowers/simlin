@@ -114,7 +114,8 @@ fn intersect_element_arc(
     }
 
     let (cx, cy) = get_visual_center(element, is_arrayed_fn);
-    let off_theta = (r / circ.r).atan();
+    // Matches TypeScript: Math.tan(r / circ.r), not atan
+    let off_theta = (r / circ.r).tan();
     let element_center_theta = (cy - circ.y).atan2(cx - circ.x);
 
     Point {
