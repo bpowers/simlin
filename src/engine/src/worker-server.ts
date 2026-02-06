@@ -136,6 +136,7 @@ export class WorkerServer {
     const workerHandle = this.allocHandle() as WorkerModelHandle;
     this.modelHandles.set(workerHandle, backendHandle);
     this.projectChildren.get(parentProject)?.add(workerHandle);
+    this.modelToProject.set(workerHandle, parentProject);
     return workerHandle;
   }
 
@@ -261,7 +262,6 @@ export class WorkerServer {
         const handle = this.getProjectHandle(request.handle);
         const backendModelHandle = this.backend.projectGetModel(handle, request.name);
         const workerModelHandle = this.registerModelHandle(backendModelHandle, request.handle);
-        this.modelToProject.set(workerModelHandle, request.handle);
         this.sendSuccess(requestId, workerModelHandle);
         return;
       }

@@ -199,17 +199,14 @@ export class Sim {
     this.checkDisposed();
 
     const varNames = await this.getVarNames();
+
+    // Fetch all series in parallel to avoid sequential round-trips
+    // through the FIFO queue when using WorkerBackend.
+    const allNames = varNames.includes('time') ? varNames : [...varNames, 'time'];
+    const seriesArrays = await Promise.all(allNames.map((name) => this.getSeries(name)));
     const results = new Map<string, Float64Array>();
-
-    for (const name of varNames) {
-      const series = await this.getSeries(name);
-      results.set(name, series);
-    }
-
-    // Add time series if not already present
-    if (!results.has('time')) {
-      const timeSeries = await this.getSeries('time');
-      results.set('time', timeSeries);
+    for (let i = 0; i < allNames.length; i++) {
+      results.set(allNames[i], seriesArrays[i]);
     }
 
     const loops = await this._model.loops();
