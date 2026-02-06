@@ -401,10 +401,12 @@ describe('WorkerServer', () => {
   });
 
   describe('handle disposal', () => {
+    let server: ReturnType<typeof createTestServer>['server'];
     let sendAndWait: ReturnType<typeof createTestServer>['sendAndWait'];
 
     beforeEach(async () => {
       const test = createTestServer();
+      server = test.server;
       sendAndWait = test.sendAndWait;
 
       const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
@@ -503,6 +505,87 @@ describe('WorkerServer', () => {
       if (linksResp.type === 'error') {
         expect(linksResp.error.message).toContain('Invalid or disposed');
       }
+    });
+
+    it('individual model dispose removes handle from projectChildren', async () => {
+      const xmile = loadTestXmile();
+      const openResp = await sendAndWait({
+        type: 'projectOpenXmile',
+        requestId: nextRequestId(),
+        data: xmile,
+      });
+      const projectHandle = (openResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
+
+      // Get model handle
+      const modelResp = await sendAndWait({
+        type: 'projectGetModel',
+        requestId: nextRequestId(),
+        handle: projectHandle,
+        name: null,
+      });
+      const modelHandle = (modelResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
+
+      // Project should have 1 child
+      expect(server.getProjectChildCount(projectHandle)).toBe(1);
+
+      // Dispose model individually (not via projectDispose)
+      await sendAndWait({
+        type: 'modelDispose',
+        requestId: nextRequestId(),
+        handle: modelHandle,
+      });
+
+      // projectChildren should be updated - stale handle should be removed
+      expect(server.getProjectChildCount(projectHandle)).toBe(0);
+    });
+
+    it('individual sim dispose removes handle from projectChildren', async () => {
+      const xmile = loadTestXmile();
+      const openResp = await sendAndWait({
+        type: 'projectOpenXmile',
+        requestId: nextRequestId(),
+        data: xmile,
+      });
+      const projectHandle = (openResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
+
+      const modelResp = await sendAndWait({
+        type: 'projectGetModel',
+        requestId: nextRequestId(),
+        handle: projectHandle,
+        name: null,
+      });
+      const modelHandle = (modelResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
+
+      const simResp = await sendAndWait({
+        type: 'simNew',
+        requestId: nextRequestId(),
+        modelHandle,
+        enableLtm: false,
+      });
+      const simHandle = (simResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
+
+      // Project should have 2 children (model + sim)
+      expect(server.getProjectChildCount(projectHandle)).toBe(2);
+
+      // Dispose sim individually
+      await sendAndWait({
+        type: 'simDispose',
+        requestId: nextRequestId(),
+        handle: simHandle,
+      });
+
+      // Should have 1 child remaining (model only)
+      expect(server.getProjectChildCount(projectHandle)).toBe(1);
+
+      // Dispose model individually
+      await sendAndWait({
+        type: 'modelDispose',
+        requestId: nextRequestId(),
+        handle: modelHandle,
+      });
+
+      // Should have 0 children
+      expect(server.getProjectChildCount(projectHandle)).toBe(0);
     });
 
     it('project dispose invalidates child sim handles', async () => {

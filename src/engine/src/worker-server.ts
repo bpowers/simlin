@@ -53,6 +53,14 @@ export class WorkerServer {
   }
 
   /**
+   * Number of child handles tracked for a project, for testing.
+   * Returns undefined if the project handle doesn't exist.
+   */
+  getProjectChildCount(projectHandle: WorkerProjectHandle): number | undefined {
+    return this.projectChildren.get(projectHandle)?.size;
+  }
+
+  /**
    * Handle an incoming message. This is the main entry point called from
    * the worker's onmessage handler.
    */
@@ -135,11 +143,13 @@ export class WorkerServer {
     const workerHandle = this.allocHandle() as WorkerSimHandle;
     this.simHandles.set(workerHandle, backendHandle);
     this.projectChildren.get(parentProject)?.add(workerHandle);
+    this.simToProject.set(workerHandle, parentProject);
     return workerHandle;
   }
 
-  // Track which project a model belongs to (for simNew which takes a model handle)
+  // Track which project a model/sim belongs to, for cleanup on individual dispose
   private modelToProject = new Map<WorkerModelHandle, WorkerProjectHandle>();
+  private simToProject = new Map<WorkerSimHandle, WorkerProjectHandle>();
 
   private handleLifecycle(request: WorkerRequest): void {
     const { requestId } = request;
@@ -181,6 +191,7 @@ export class WorkerServer {
         this.projectHandles.clear();
         this.projectChildren.clear();
         this.modelToProject.clear();
+        this.simToProject.clear();
         this.nextHandle = 1;
 
         this.backend.reset();
@@ -441,6 +452,10 @@ export class WorkerServer {
       this.backend.modelDispose(backendHandle);
       this.modelHandles.delete(workerHandle);
     }
+    const parentProject = this.modelToProject.get(workerHandle);
+    if (parentProject !== undefined) {
+      this.projectChildren.get(parentProject)?.delete(workerHandle);
+    }
     this.modelToProject.delete(workerHandle);
   }
 
@@ -450,6 +465,11 @@ export class WorkerServer {
       this.backend.simDispose(backendHandle);
       this.simHandles.delete(workerHandle);
     }
+    const parentProject = this.simToProject.get(workerHandle);
+    if (parentProject !== undefined) {
+      this.projectChildren.get(parentProject)?.delete(workerHandle);
+    }
+    this.simToProject.delete(workerHandle);
   }
 
   private sendSuccess(requestId: number, result: unknown): void {
