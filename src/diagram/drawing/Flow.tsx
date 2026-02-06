@@ -1551,6 +1551,7 @@ export interface FlowProps {
   isMovingArrow: boolean;
   isMovingSource: boolean;
   hasWarning?: boolean;
+  embedded?: boolean;
   series: Readonly<Array<Series>> | undefined;
   onSelection: (
     el: ViewElement,
@@ -1784,8 +1785,8 @@ export class Flow extends React.PureComponent<FlowProps> {
       sourceHitY = firstPt.y + segDy * offsetRatio;
     }
 
-    // Only show the source hit area when not already moving the source
-    const sourceHitArea = !isMovingSource ? (
+    // Only show the source hit area when not in embedded/export mode and not already moving the source
+    const sourceHitArea = !this.props.embedded && !isMovingSource ? (
       <rect
         x={sourceHitX - sourceHitSize / 2}
         y={sourceHitY - sourceHitSize / 2}
