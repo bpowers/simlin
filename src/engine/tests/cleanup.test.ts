@@ -18,7 +18,7 @@ import { Project, configureWasm, ready, resetWasm } from '../src';
 async function loadWasm(): Promise<void> {
   const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
   const wasmBuffer = fs.readFileSync(wasmPath);
-  resetWasm();
+  await resetWasm();
   configureWasm({ source: wasmBuffer });
   await ready();
 }

@@ -83,6 +83,6 @@ export function isReady(): boolean {
 /**
  * Reset the engine state (for testing).
  */
-export function resetWasm(): void {
-  getBackend().reset();
+export async function resetWasm(): Promise<void> {
+  await getBackend().reset();
 }

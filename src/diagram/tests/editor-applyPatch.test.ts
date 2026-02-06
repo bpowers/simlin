@@ -15,7 +15,7 @@ import { JsonProjectPatch } from '../json-types';
 async function loadWasm(): Promise<void> {
   const wasmPath = path.join(__dirname, '..', '..', 'engine', 'core', 'libsimlin.wasm');
   const wasmBuffer = fs.readFileSync(wasmPath);
-  resetWasm();
+  await resetWasm();
   configureWasm({ source: wasmBuffer });
   await ready();
 }

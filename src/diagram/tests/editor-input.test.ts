@@ -16,7 +16,7 @@ import type { EditorProps, ProtobufProjectData, JsonProjectData, ProjectData } f
 async function loadWasm(): Promise<void> {
   const wasmPath = path.join(__dirname, '..', '..', 'engine', 'core', 'libsimlin.wasm');
   const wasmBuffer = fs.readFileSync(wasmPath);
-  resetWasm();
+  await resetWasm();
   configureWasm({ source: wasmBuffer });
   await ready();
 }
