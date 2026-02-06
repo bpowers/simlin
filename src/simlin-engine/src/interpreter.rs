@@ -1427,12 +1427,12 @@ impl Simulation {
             .map(|(key, module)| module.compile().map(|module| (key.clone(), module)))
             .collect();
 
-        Ok(CompiledSimulation {
-            modules: modules?,
-            specs: self.specs.clone(),
-            root: self.root.clone(),
-            offsets: self.offsets.clone(),
-        })
+        Ok(CompiledSimulation::new(
+            modules?,
+            self.specs.clone(),
+            self.root.clone(),
+            self.offsets.clone(),
+        ))
     }
 
     pub fn runlist_order(&self) -> Vec<Ident<Canonical>> {

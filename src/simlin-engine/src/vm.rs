@@ -98,9 +98,26 @@ pub struct CompiledSimulation {
     pub(crate) specs: Specs,
     pub(crate) root: ModuleKey,
     pub(crate) offsets: HashMap<Ident<Canonical>, usize>,
+    cached_initial_offsets: HashSet<usize>,
 }
 
 impl CompiledSimulation {
+    pub(crate) fn new(
+        modules: HashMap<ModuleKey, CompiledModule>,
+        specs: Specs,
+        root: ModuleKey,
+        offsets: HashMap<Ident<Canonical>, usize>,
+    ) -> Self {
+        let cached_initial_offsets = collect_initial_offsets(&modules, &root, 0);
+        CompiledSimulation {
+            modules,
+            specs,
+            root,
+            offsets,
+            cached_initial_offsets,
+        }
+    }
+
     pub fn get_offset(&self, ident: &Ident<Canonical>) -> Option<usize> {
         self.offsets.get(ident).copied()
     }
@@ -109,8 +126,8 @@ impl CompiledSimulation {
         self.modules[&self.root].n_slots
     }
 
-    pub fn initial_offsets(&self) -> HashSet<usize> {
-        collect_initial_offsets(&self.modules, &self.root, 0)
+    pub fn initial_offsets(&self) -> &HashSet<usize> {
+        &self.cached_initial_offsets
     }
 }
 
@@ -275,9 +292,6 @@ impl Vm {
         let temp_total_size = root_module.context.temp_total_size;
         let temp_storage = vec![0.0; temp_total_size];
 
-        // Precompute all absolute initial offsets by walking the module tree
-        let initial_offsets = collect_initial_offsets(&sim.modules, &sim.root, 0);
-
         Ok(Vm {
             specs: sim.specs,
             root: sim.root,
@@ -317,7 +331,7 @@ impl Vm {
             step_accum: 0,
             temp_storage,
             overrides: HashMap::new(),
-            initial_offsets,
+            initial_offsets: sim.cached_initial_offsets,
         })
     }
 

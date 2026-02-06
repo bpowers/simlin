@@ -1686,6 +1686,7 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
         );
     }
 }
+
 /// Runs just the initial-value evaluation phase of the simulation.
 ///
 /// After calling this, `simlin_sim_get_value` can read the t=0 values.
@@ -1715,6 +1716,7 @@ pub unsafe extern "C" fn simlin_sim_run_initials(
         );
     }
 }
+
 /// Sets a persistent override for a variable by name.
 ///
 /// The override is applied during initials evaluation (evaluate-then-patch).
@@ -1790,6 +1792,7 @@ pub unsafe extern "C" fn simlin_sim_set_override(
         );
     }
 }
+
 /// Sets a persistent override for a variable by data-buffer offset.
 ///
 /// # Safety
@@ -1850,6 +1853,7 @@ pub unsafe extern "C" fn simlin_sim_set_override_by_offset(
         store_ffi_error(out_error, ffi_error_from_engine(&err));
     }
 }
+
 /// Clears all persistent overrides.
 ///
 /// # Safety
