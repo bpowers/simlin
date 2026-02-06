@@ -58,7 +58,7 @@ mod variable;
 mod vm;
 pub mod xmile;
 
-pub use self::common::{Error, ErrorCode, Result, canonicalize};
+pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
 pub use self::interpreter::Simulation;
 pub use self::model::{ModelStage1, resolve_non_private_dependencies};
 pub use self::patch::apply_patch;

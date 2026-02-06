@@ -65,6 +65,7 @@ pub enum SimlinErrorCode {
     UnitDefinitionErrors = 31,
     Generic = 32,
     UnitMismatch = 33,
+    BadOverride = 34,
 }
 
 impl TryFrom<u32> for SimlinErrorCode {
@@ -106,6 +107,7 @@ impl TryFrom<u32> for SimlinErrorCode {
             31 => Ok(SimlinErrorCode::UnitDefinitionErrors),
             32 => Ok(SimlinErrorCode::Generic),
             33 => Ok(SimlinErrorCode::UnitMismatch),
+            34 => Ok(SimlinErrorCode::BadOverride),
             _ => Err(()),
         }
     }
@@ -209,6 +211,7 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::TodoArrayBuiltin => SimlinErrorCode::Generic,
             engine::ErrorCode::CantSubscriptScalar => SimlinErrorCode::Generic,
             engine::ErrorCode::DimensionInScalarContext => SimlinErrorCode::Generic,
+            engine::ErrorCode::BadOverride => SimlinErrorCode::BadOverride,
         }
     }
 }
@@ -438,6 +441,7 @@ pub extern "C" fn simlin_error_str(err: u32) -> *const c_char {
         Ok(SimlinErrorCode::UnitDefinitionErrors) => "unit_definition_errors\0",
         Ok(SimlinErrorCode::Generic) => "generic\0",
         Ok(SimlinErrorCode::UnitMismatch) => "unit_mismatch\0",
+        Ok(SimlinErrorCode::BadOverride) => "bad_override\0",
         Err(()) => "unknown_error\0",
     };
     s.as_ptr() as *const c_char
@@ -1809,9 +1813,41 @@ pub unsafe extern "C" fn simlin_sim_set_override_by_offset(
                 store_ffi_error(out_error, ffi_error_from_engine(&err));
             }
         }
-    } else {
-        // Store for later application on reset
+    } else if let Some(ref compiled) = state.compiled {
+        let n_slots = compiled.n_slots();
+        if offset >= n_slots {
+            let err = engine::Error {
+                code: engine::ErrorCode::BadOverride,
+                kind: engine::ErrorKind::Simulation,
+                details: Some(format!(
+                    "offset {} out of bounds (n_slots={})",
+                    offset, n_slots
+                )),
+            };
+            store_ffi_error(out_error, ffi_error_from_engine(&err));
+            return;
+        }
+        let initial_offsets = compiled.initial_offsets();
+        if !initial_offsets.contains(&offset) {
+            let err = engine::Error {
+                code: engine::ErrorCode::BadOverride,
+                kind: engine::ErrorKind::Simulation,
+                details: Some(format!(
+                    "cannot override offset {}: not an initial variable",
+                    offset
+                )),
+            };
+            store_ffi_error(out_error, ffi_error_from_engine(&err));
+            return;
+        }
         state.overrides.insert(offset, value);
+    } else {
+        let err = engine::Error {
+            code: engine::ErrorCode::BadOverride,
+            kind: engine::ErrorKind::Simulation,
+            details: Some("no compiled simulation available for offset validation".to_string()),
+        };
+        store_ffi_error(out_error, ffi_error_from_engine(&err));
     }
 }
 /// Clears all persistent overrides.
@@ -10527,6 +10563,59 @@ mod tests {
                     b,
                 );
             }
+
+            simlin_sim_unref(sim);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_libsimlin_set_override_by_offset_validates_without_vm() {
+        let dm = build_population_datamodel();
+        unsafe {
+            let (proj, model, sim) = create_test_sim(&dm);
+
+            // Look up the offset of "births" (a flow, not an initial variable)
+            // while the VM still exists.
+            let c_births = CString::new("births").unwrap();
+            let mut flow_offset: usize = 0;
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_sim_get_offset(
+                sim,
+                c_births.as_ptr(),
+                &mut flow_offset,
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(err.is_null(), "get_offset for births should succeed");
+
+            // Consume the VM so we exercise the no-VM validation path
+            run_to_end(sim);
+
+            // Out-of-bounds offset should fail
+            err = ptr::null_mut();
+            simlin_sim_set_override_by_offset(sim, 99999, 42.0, &mut err as *mut *mut SimlinError);
+            assert!(
+                !err.is_null(),
+                "out-of-bounds offset should fail even without a VM"
+            );
+            assert_eq!(simlin_error_get_code(err), SimlinErrorCode::BadOverride);
+            simlin_error_free(err);
+
+            // In-bounds offset for a non-initial variable (flow) should also fail
+            err = ptr::null_mut();
+            simlin_sim_set_override_by_offset(
+                sim,
+                flow_offset,
+                42.0,
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(
+                !err.is_null(),
+                "non-initial offset should fail even without a VM"
+            );
+            assert_eq!(simlin_error_get_code(err), SimlinErrorCode::BadOverride);
+            simlin_error_free(err);
 
             simlin_sim_unref(sim);
             simlin_model_unref(model);

@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use float_cmp::approx_eq;
@@ -104,6 +104,14 @@ impl CompiledSimulation {
     pub fn get_offset(&self, ident: &Ident<Canonical>) -> Option<usize> {
         self.offsets.get(ident).copied()
     }
+
+    pub fn n_slots(&self) -> usize {
+        self.modules[&self.root].n_slots
+    }
+
+    pub fn initial_offsets(&self) -> HashSet<usize> {
+        collect_initial_offsets(&self.modules, &self.root, 0)
+    }
 }
 
 /// Per-module compiled initials with the shared ByteCodeContext needed to eval them.
@@ -168,7 +176,7 @@ pub struct Vm {
     overrides: HashMap<usize, f64>,
     // All absolute data-buffer offsets that are written during initials
     // (precomputed from the module tree for fast override validation).
-    initial_offsets: std::collections::HashSet<usize>,
+    initial_offsets: HashSet<usize>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -217,6 +225,30 @@ impl CompiledModuleSlice {
     }
 }
 
+/// Recursively collect all absolute initial offsets from a module and its submodules.
+fn collect_initial_offsets(
+    modules: &HashMap<ModuleKey, CompiledModule>,
+    module_key: &ModuleKey,
+    base_off: usize,
+) -> HashSet<usize> {
+    let mut result = HashSet::new();
+    let module = &modules[module_key];
+
+    for ci in module.compiled_initials.iter() {
+        for &off in &ci.offsets {
+            result.insert(base_off + off);
+        }
+    }
+
+    for module_decl in &module.context.modules {
+        let child_key = make_module_key(&module_decl.model_name, &module_decl.input_set);
+        let child_base = base_off + module_decl.off;
+        result.extend(collect_initial_offsets(modules, &child_key, child_base));
+    }
+
+    result
+}
+
 impl Vm {
     pub fn new(sim: CompiledSimulation) -> Result<Vm> {
         if sim.specs.stop < sim.specs.start {
@@ -244,7 +276,7 @@ impl Vm {
         let temp_storage = vec![0.0; temp_total_size];
 
         // Precompute all absolute initial offsets by walking the module tree
-        let initial_offsets = Self::collect_initial_offsets(&sim.modules, &sim.root, 0);
+        let initial_offsets = collect_initial_offsets(&sim.modules, &sim.root, 0);
 
         Ok(Vm {
             specs: sim.specs,
@@ -287,34 +319,6 @@ impl Vm {
             overrides: HashMap::new(),
             initial_offsets,
         })
-    }
-
-    /// Recursively collect all absolute initial offsets from a module and its submodules.
-    fn collect_initial_offsets(
-        modules: &HashMap<ModuleKey, CompiledModule>,
-        module_key: &ModuleKey,
-        base_off: usize,
-    ) -> std::collections::HashSet<usize> {
-        let mut result = std::collections::HashSet::new();
-        let module = &modules[module_key];
-
-        // Add this module's initial offsets, translated to absolute
-        for ci in module.compiled_initials.iter() {
-            for &off in &ci.offsets {
-                result.insert(base_off + off);
-            }
-        }
-
-        // Recurse into submodules
-        for module_decl in &module.context.modules {
-            let child_key = make_module_key(&module_decl.model_name, &module_decl.input_set);
-            let child_base = base_off + module_decl.off;
-            result.extend(Self::collect_initial_offsets(
-                modules, &child_key, child_base,
-            ));
-        }
-
-        result
     }
 
     pub fn run_to_end(&mut self) -> Result<()> {
@@ -463,7 +467,7 @@ impl Vm {
         };
         if !self.is_initial_offset(off) {
             return sim_err!(
-                BadSimSpecs,
+                BadOverride,
                 format!(
                     "cannot override '{}': not an initial variable",
                     ident.as_str()
@@ -478,13 +482,13 @@ impl Vm {
     pub fn set_override_by_offset(&mut self, off: usize, value: f64) -> Result<()> {
         if off >= self.n_slots {
             return sim_err!(
-                BadSimSpecs,
+                BadOverride,
                 format!("offset {} out of bounds (n_slots={})", off, self.n_slots)
             );
         }
         if !self.is_initial_offset(off) {
             return sim_err!(
-                BadSimSpecs,
+                BadOverride,
                 format!("cannot override offset {}: not an initial variable", off)
             );
         }
@@ -677,8 +681,7 @@ impl Vm {
         next: &mut [f64],
         stack: &mut Stack,
     ) {
-        static EMPTY_OVERRIDES: std::sync::LazyLock<HashMap<usize, f64>> =
-            std::sync::LazyLock::new(HashMap::new);
+        let empty = HashMap::new();
         Self::eval_bytecode(
             sliced_sim,
             temp_storage,
@@ -690,7 +693,7 @@ impl Vm {
             curr,
             next,
             stack,
-            &EMPTY_OVERRIDES,
+            &empty,
         );
     }
 
@@ -2876,8 +2879,8 @@ mod override_tests {
     fn test_override_by_offset_out_of_bounds_returns_error() {
         let compiled = build_compiled(&rate_model());
         let mut vm = Vm::new(compiled).unwrap();
-        let result = vm.set_override_by_offset(99999, 1.0);
-        assert!(result.is_err(), "out-of-bounds offset should fail");
+        let err = vm.set_override_by_offset(99999, 1.0).unwrap_err();
+        assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
     }
 
     #[test]
@@ -2893,13 +2896,10 @@ mod override_tests {
         let compiled = sim.compile().unwrap();
         let mut vm = Vm::new(compiled).unwrap();
 
-        // birth_rate is only used in flows, not in initials
-        // It shouldn't be overridable via set_override
-        let result = vm.set_override(&canonicalize("birth_rate"), 0.5);
-        assert!(
-            result.is_err(),
-            "overriding a non-initial variable should fail"
-        );
+        let err = vm
+            .set_override(&canonicalize("birth_rate"), 0.5)
+            .unwrap_err();
+        assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
     }
 
     #[test]
