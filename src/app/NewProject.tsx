@@ -154,8 +154,8 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
         engineProject = await EngineProject.open(contents);
       }
 
-      const projectPB = engineProject.serializeProtobuf();
-      const json = JSON.parse(engineProject.serializeJson()) as JsonProject;
+      const projectPB = await engineProject.serializeProtobuf();
+      const json = JSON.parse(await engineProject.serializeJson()) as JsonProject;
       const activeProject = ProjectDM.fromJson(json);
       const views = activeProject.models.get('main')?.views;
       if (!views || views.isEmpty()) {

@@ -9,14 +9,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project as Project, configureWasm, ready } from '@simlin/engine';
-import { reset } from '@simlin/engine/internal/wasm';
+import { Project as Project, configureWasm, ready, resetWasm } from '@simlin/engine';
 import { JsonProjectPatch } from '../json-types';
 
 async function loadWasm(): Promise<void> {
   const wasmPath = path.join(__dirname, '..', '..', 'engine', 'core', 'libsimlin.wasm');
   const wasmBuffer = fs.readFileSync(wasmPath);
-  reset();
+  await resetWasm();
   configureWasm({ source: wasmBuffer });
   await ready();
 }
@@ -52,9 +51,9 @@ describe('applyPatch with variable creation', () => {
     };
 
     // Default behavior (allowErrors: false): throws when project has errors
-    expect(() => project.applyPatch(patch)).toThrow();
+    await expect(project.applyPatch(patch)).rejects.toThrow();
 
-    project.dispose();
+    await project.dispose();
   });
 
   it('should accept patch with empty equation when allowErrors is true', async () => {
@@ -75,17 +74,18 @@ describe('applyPatch with variable creation', () => {
     };
 
     // With allowErrors: true, the patch should succeed
-    const errors = project.applyPatch(patch, { allowErrors: true });
+    const errors = await project.applyPatch(patch, { allowErrors: true });
 
     // Variable should be created
-    const vars = project.mainModel.variables.map((v) => v.name);
+    const model = await project.mainModel();
+    const vars = (await model.variables()).map((v) => v.name);
     expect(vars).toContain('new_var');
 
     // Should return collected errors (empty equation warning)
     expect(errors.length).toBeGreaterThan(0);
     expect(errors.some((e) => e.variableName === 'new_var')).toBe(true);
 
-    project.dispose();
+    await project.dispose();
   });
 
   it('should provide descriptive error message when patch is rejected', async () => {
@@ -106,7 +106,7 @@ describe('applyPatch with variable creation', () => {
     };
 
     try {
-      project.applyPatch(patch); // allowErrors: false
+      await project.applyPatch(patch); // allowErrors: false
       throw new Error('Should have thrown');
     } catch (e: unknown) {
       const error = e as { message?: string; details?: Array<{ variableName?: string }> };
@@ -122,6 +122,6 @@ describe('applyPatch with variable creation', () => {
       expect(error.details!.length).toBeGreaterThan(0);
     }
 
-    project.dispose();
+    await project.dispose();
   });
 });

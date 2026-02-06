@@ -7,5 +7,7 @@ module.exports = createConfig({
     'lib.browser/',
     'core/',
     'src/internal/wasm.browser.ts',
+    'src/backend-factory.browser.ts',
+    'src/engine-worker.ts',
   ],
 });

@@ -5,47 +5,64 @@
 /**
  * Run class for completed simulation results.
  *
- * A Run contains the results of a completed simulation, including
- * time series data for all variables, overrides used, and loop analysis.
+ * A Run is a pure data holder containing the results of a completed
+ * simulation, including time series data for all variables, overrides
+ * used, and loop/link analysis. It has no WASM references.
  */
 
 import { Link, Loop } from './types';
-import { Sim } from './sim';
+
+/**
+ * Data needed to construct a Run.
+ */
+export interface RunData {
+  varNames: string[];
+  results: Map<string, Float64Array>;
+  loops: readonly Loop[];
+  links: readonly Link[];
+  stepCount: number;
+  overrides: Record<string, number>;
+}
 
 /**
  * Results of a completed simulation run.
  *
- * Run provides access to simulation results as a Map of variable names
- * to Float64Array time series, plus metadata about the simulation.
+ * Run is a pure data holder with no WASM access. All data is
+ * pre-collected during Sim.getRun() or Model.run().
  */
 export class Run {
-  private _sim: Sim;
-  private _cachedResults: Map<string, Float64Array> | null = null;
-  private _cachedVarNames: string[] | null = null;
+  private _varNames: string[];
+  private _results: Map<string, Float64Array>;
+  private _loops: readonly Loop[];
+  private _links: readonly Link[];
+  private _stepCount: number;
+  private _overrides: Record<string, number>;
 
   /**
-   * Create a Run from a completed Sim.
+   * Create a Run from pre-collected simulation data.
    * This is internal - use Sim.getRun() or Model.run() instead.
    */
-  constructor(sim: Sim) {
-    this._sim = sim;
+  constructor(data: RunData) {
+    this._varNames = data.varNames;
+    this._results = data.results;
+    this._loops = data.loops;
+    this._links = data.links;
+    this._stepCount = data.stepCount;
+    this._overrides = { ...data.overrides };
   }
 
   /**
    * The overrides applied to this simulation run.
    */
   get overrides(): Record<string, number> {
-    return this._sim.overrides;
+    return { ...this._overrides };
   }
 
   /**
    * Variable names in this run.
    */
   get varNames(): readonly string[] {
-    if (this._cachedVarNames === null) {
-      this._cachedVarNames = this._sim.getVarNames();
-    }
-    return this._cachedVarNames;
+    return this._varNames;
   }
 
   /**
@@ -53,26 +70,7 @@ export class Run {
    * @returns Map of variable name to Float64Array
    */
   get results(): ReadonlyMap<string, Float64Array> {
-    if (this._cachedResults !== null) {
-      return this._cachedResults;
-    }
-
-    const results = new Map<string, Float64Array>();
-    const varNames = this.varNames;
-
-    for (const name of varNames) {
-      const series = this._sim.getSeries(name);
-      results.set(name, series);
-    }
-
-    // Add time series if not already present
-    if (!results.has('time')) {
-      const timeSeries = this._sim.getSeries('time');
-      results.set('time', timeSeries);
-    }
-
-    this._cachedResults = results;
-    return results;
+    return this._results;
   }
 
   /**
@@ -81,7 +79,11 @@ export class Run {
    * @returns Float64Array with time series data
    */
   getSeries(name: string): Float64Array {
-    return this.results.get(name) ?? this._sim.getSeries(name);
+    const series = this._results.get(name);
+    if (!series) {
+      throw new Error(`Variable '${name}' not found in run results`);
+    }
+    return series;
   }
 
   /**
@@ -93,25 +95,22 @@ export class Run {
 
   /**
    * Get feedback loops with behavior data.
-   *
-   * Returns the structural loops from the model. For loop scores,
-   * use the links with LTM enabled.
    */
   get loops(): readonly Loop[] {
-    return this._sim.model.loops;
+    return this._loops;
   }
 
   /**
    * Get causal links, potentially with LTM scores.
    */
   get links(): readonly Link[] {
-    return this._sim.getLinks();
+    return this._links;
   }
 
   /**
    * Get the number of simulation steps.
    */
   get stepCount(): number {
-    return this._sim.getStepCount();
+    return this._stepCount;
   }
 }

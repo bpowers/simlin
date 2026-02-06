@@ -10,38 +10,13 @@
  * Sim instances.
  */
 
-import {
-  simlin_model_unref,
-  simlin_model_get_incoming_links,
-  simlin_model_get_links,
-  simlin_model_get_latex_equation,
-} from './internal/model';
-import { readLinks, simlin_free_links } from './internal/analysis';
-import { SimlinModelPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types';
-import { registerFinalizer, unregisterFinalizer } from './internal/dispose';
-import { Stock, Flow, Aux, Variable, TimeSpec, Link, Loop, LinkPolarity, ModelIssue, GraphicalFunction } from './types';
+import { EngineBackend, ModelHandle } from './backend';
+import { Stock, Flow, Aux, Variable, TimeSpec, Link, Loop, ModelIssue, GraphicalFunction } from './types';
 import { JsonModel, JsonStock, JsonFlow, JsonAuxiliary, JsonGraphicalFunction, JsonProjectPatch } from './json-types';
 import { Project } from './project';
 import { Sim } from './sim';
 import { Run } from './run';
 import { ModelPatchBuilder } from './patch';
-
-/**
- * Convert low-level link polarity to high-level type with validation.
- * Validates that the polarity value is within expected range.
- */
-function convertLinkPolarity(rawPolarity: SimlinLinkPolarity): LinkPolarity {
-  switch (rawPolarity) {
-    case SimlinLinkPolarity.Positive:
-      return LinkPolarity.Positive;
-    case SimlinLinkPolarity.Negative:
-      return LinkPolarity.Negative;
-    case SimlinLinkPolarity.Unknown:
-      return LinkPolarity.Unknown;
-    default:
-      throw new Error(`Invalid link polarity value: ${rawPolarity}`);
-  }
-}
 
 /**
  * Parse a DT string to a number.
@@ -73,11 +48,11 @@ function parseDt(dt: string): number {
 /**
  * A system dynamics model.
  *
- * Models are obtained from Project.getModel() or Project.mainModel.
+ * Models are obtained from Project.getModel() or Project.mainModel().
  * They provide access to variables, structure, and simulation capabilities.
  */
 export class Model {
-  private _ptr: SimlinModelPtr;
+  private _handle: ModelHandle;
   private _project: Project | null;
   private _name: string | null;
   private _disposed: boolean = false;
@@ -91,27 +66,17 @@ export class Model {
   private _cachedBaseCase: Run | null = null;
   private _cachedVariables: Variable[] | null = null;
 
-  /**
-   * Create a Model from a WASM pointer.
-   * This is internal - use Project.getModel() or Project.mainModel instead.
-   */
-  constructor(ptr: SimlinModelPtr, project: Project | null, name: string | null) {
-    if (ptr === 0) {
-      throw new Error('Cannot create Model from null pointer');
-    }
-    this._ptr = ptr;
+  /** @internal */
+  constructor(handle: ModelHandle, project: Project | null, name: string | null) {
+    this._handle = handle;
     this._project = project;
     this._name = name;
-
-    registerFinalizer(this, ptr, simlin_model_unref);
   }
 
-  /**
-   * Get the internal WASM pointer. For internal use only.
-   */
-  get ptr(): SimlinModelPtr {
+  /** @internal */
+  get handle(): ModelHandle {
     this.checkDisposed();
-    return this._ptr;
+    return this._handle;
   }
 
   /**
@@ -126,6 +91,13 @@ export class Model {
    */
   get name(): string | null {
     return this._name;
+  }
+
+  private get backend(): EngineBackend {
+    if (this._project === null) {
+      throw new Error('Model is not attached to a Project');
+    }
+    return this._project.backend;
   }
 
   private checkDisposed(): void {
@@ -147,7 +119,7 @@ export class Model {
     this._cachedVariables = null;
   }
 
-  private getModelJson(): JsonModel {
+  private async getModelJson(): Promise<JsonModel> {
     if (this._cachedModelJson !== null) {
       return this._cachedModelJson;
     }
@@ -156,7 +128,7 @@ export class Model {
       throw new Error('Model is not attached to a Project');
     }
 
-    const projectJson = JSON.parse(this._project.serializeJson());
+    const projectJson = JSON.parse(await this._project.serializeJson());
     for (const modelDict of projectJson.models || []) {
       if (modelDict.name === this._name || !this._name) {
         this._cachedModelJson = modelDict as JsonModel;
@@ -185,15 +157,12 @@ export class Model {
   }
 
   private parseJsonGraphicalFunction(gf: JsonGraphicalFunction): GraphicalFunction {
-    // Convert to the schema format with points as [x, y] tuples
     let points: [number, number][] | undefined;
     let yPoints: number[] | undefined;
 
     if (gf.points && gf.points.length > 0) {
-      // Already in [x, y] format
       points = gf.points;
     } else if (gf.yPoints && gf.yPoints.length > 0) {
-      // y_points only format
       yPoints = gf.yPoints;
     }
 
@@ -207,15 +176,15 @@ export class Model {
   }
 
   /**
-   * Stock variables in the model (immutable array).
+   * Stock variables in the model.
    */
-  get stocks(): readonly Stock[] {
+  async stocks(): Promise<readonly Stock[]> {
     this.checkDisposed();
     if (this._cachedStocks !== null) {
       return this._cachedStocks;
     }
 
-    const model = this.getModelJson();
+    const model = await this.getModelJson();
     this._cachedStocks = (model.stocks || []).map((s: JsonStock) => ({
       type: 'stock' as const,
       name: s.name,
@@ -232,15 +201,15 @@ export class Model {
   }
 
   /**
-   * Flow variables in the model (immutable array).
+   * Flow variables in the model.
    */
-  get flows(): readonly Flow[] {
+  async flows(): Promise<readonly Flow[]> {
     this.checkDisposed();
     if (this._cachedFlows !== null) {
       return this._cachedFlows;
     }
 
-    const model = this.getModelJson();
+    const model = await this.getModelJson();
     this._cachedFlows = (model.flows || []).map((f: JsonFlow) => {
       let gf: GraphicalFunction | undefined;
       if (f.graphicalFunction) {
@@ -263,15 +232,15 @@ export class Model {
   }
 
   /**
-   * Auxiliary variables in the model (immutable array).
+   * Auxiliary variables in the model.
    */
-  get auxs(): readonly Aux[] {
+  async auxs(): Promise<readonly Aux[]> {
     this.checkDisposed();
     if (this._cachedAuxs !== null) {
       return this._cachedAuxs;
     }
 
-    const model = this.getModelJson();
+    const model = await this.getModelJson();
     this._cachedAuxs = (model.auxiliaries || []).map((a: JsonAuxiliary) => {
       let gf: GraphicalFunction | undefined;
       if (a.graphicalFunction) {
@@ -299,13 +268,13 @@ export class Model {
   /**
    * All variables in the model (stocks + flows + auxs).
    */
-  get variables(): readonly Variable[] {
+  async variables(): Promise<readonly Variable[]> {
     this.checkDisposed();
     if (this._cachedVariables !== null) {
       return this._cachedVariables;
     }
 
-    this._cachedVariables = [...this.stocks, ...this.flows, ...this.auxs];
+    this._cachedVariables = [...(await this.stocks()), ...(await this.flows()), ...(await this.auxs())];
     return this._cachedVariables;
   }
 
@@ -313,7 +282,7 @@ export class Model {
    * Time specification for simulation.
    * Uses model-level sim_specs if present, otherwise falls back to project-level.
    */
-  get timeSpec(): TimeSpec {
+  async timeSpec(): Promise<TimeSpec> {
     this.checkDisposed();
     if (this._cachedTimeSpec !== null) {
       return this._cachedTimeSpec;
@@ -323,8 +292,8 @@ export class Model {
       throw new Error('Model is not attached to a Project');
     }
 
-    const projectJson = JSON.parse(this._project.serializeJson());
-    const modelJson = this.getModelJson();
+    const projectJson = JSON.parse(await this._project.serializeJson());
+    const modelJson = await this.getModelJson();
 
     // Use model-level sim_specs if present, otherwise fall back to project-level
     const simSpecs = modelJson.simSpecs ?? projectJson.simSpecs;
@@ -342,7 +311,7 @@ export class Model {
   /**
    * Structural feedback loops (no behavior data).
    */
-  get loops(): readonly Loop[] {
+  async loops(): Promise<readonly Loop[]> {
     this.checkDisposed();
     if (this._project === null) {
       return [];
@@ -355,44 +324,26 @@ export class Model {
    * @param varName The name of the variable to query
    * @returns List of variable names that this variable depends on
    */
-  getIncomingLinks(varName: string): string[] {
+  async getIncomingLinks(varName: string): Promise<string[]> {
     this.checkDisposed();
 
     // Validate variable exists
-    const varNames = this.variables.map((v) => v.name);
+    const vars = await this.variables();
+    const varNames = vars.map((v) => v.name);
     if (!varNames.includes(varName)) {
       throw new Error(`Variable not found: ${varName}`);
     }
 
-    return simlin_model_get_incoming_links(this._ptr, varName);
+    return await this.backend.modelGetIncomingLinks(this._handle, varName);
   }
 
   /**
    * Get all causal links in the model (static analysis).
    * @returns List of Link objects representing causal relationships
    */
-  getLinks(): Link[] {
+  async getLinks(): Promise<Link[]> {
     this.checkDisposed();
-
-    const linksPtr = simlin_model_get_links(this._ptr);
-    if (linksPtr === 0) {
-      return [];
-    }
-
-    let links: Link[] = [];
-    try {
-      const rawLinks = readLinks(linksPtr);
-      links = rawLinks.map((link: LowLevelLink) => ({
-        from: link.from,
-        to: link.to,
-        polarity: convertLinkPolarity(link.polarity),
-        score: link.score || undefined,
-      }));
-    } finally {
-      simlin_free_links(linksPtr);
-    }
-
-    return links;
+    return await this.backend.modelGetLinks(this._handle);
   }
 
   /**
@@ -400,10 +351,10 @@ export class Model {
    * @param variable Variable name
    * @returns Textual description of what defines/drives this variable
    */
-  explain(variable: string): string {
+  async explain(variable: string): Promise<string> {
     this.checkDisposed();
 
-    for (const stock of this.stocks) {
+    for (const stock of await this.stocks()) {
       if (stock.name === variable) {
         const inflowsStr = stock.inflows.length > 0 ? stock.inflows.join(', ') : 'no inflows';
         const outflowsStr = stock.outflows.length > 0 ? stock.outflows.join(', ') : 'no outflows';
@@ -411,13 +362,13 @@ export class Model {
       }
     }
 
-    for (const flow of this.flows) {
+    for (const flow of await this.flows()) {
       if (flow.name === variable) {
         return `${flow.name} is a flow computed as ${flow.equation}`;
       }
     }
 
-    for (const aux of this.auxs) {
+    for (const aux of await this.auxs()) {
       if (aux.name === variable) {
         if (aux.initialEquation) {
           return `${aux.name} is an auxiliary variable computed as ${aux.equation} with initial value ${aux.initialEquation}`;
@@ -434,35 +385,33 @@ export class Model {
    * @param ident Variable identifier
    * @returns LaTeX string, or null if not found
    */
-  getLatexEquation(ident: string): string | null {
+  async getLatexEquation(ident: string): Promise<string | null> {
     this.checkDisposed();
-    return simlin_model_get_latex_equation(this._ptr, ident);
+    return await this.backend.modelGetLatexEquation(this._handle, ident);
   }
 
   /**
    * Check model for common issues.
    * @returns Array of ModelIssue objects, or empty array if no issues
    */
-  check(): ModelIssue[] {
+  async check(): Promise<ModelIssue[]> {
     this.checkDisposed();
     if (this._project === null) {
       return [];
     }
 
-    const errorDetails = this._project.getErrors();
+    const errorDetails = await this._project.getErrors();
 
     // Get the actual model name from JSON for comparison
     // (handles case where _name is null for main model)
-    const modelJson = this.getModelJson();
+    const modelJson = await this.getModelJson();
     const actualModelName = modelJson.name;
 
     // Filter to errors for this model only
     const modelErrors = errorDetails.filter((detail) => {
-      // If no model name on error, it's a project-level error - exclude
       if (!detail.modelName) {
         return false;
       }
-      // Compare against the actual model name from JSON
       return detail.modelName === actualModelName;
     });
 
@@ -480,10 +429,10 @@ export class Model {
    * @param options Simulation options
    * @returns Sim instance for step-by-step execution
    */
-  simulate(overrides: Record<string, number> = {}, options: { enableLtm?: boolean } = {}): Sim {
+  async simulate(overrides: Record<string, number> = {}, options: { enableLtm?: boolean } = {}): Promise<Sim> {
     this.checkDisposed();
     const { enableLtm = false } = options;
-    return new Sim(this, overrides, enableLtm);
+    return Sim.create(this, overrides, enableLtm);
   }
 
   /**
@@ -492,23 +441,23 @@ export class Model {
    * @param options Run options
    * @returns Run object with results and analysis
    */
-  run(overrides: Record<string, number> = {}, options: { analyzeLtm?: boolean } = {}): Run {
+  async run(overrides: Record<string, number> = {}, options: { analyzeLtm?: boolean } = {}): Promise<Run> {
     this.checkDisposed();
     const { analyzeLtm = true } = options;
 
-    const sim = this.simulate(overrides, { enableLtm: analyzeLtm });
-    sim.runToEnd();
+    const sim = await this.simulate(overrides, { enableLtm: analyzeLtm });
+    await sim.runToEnd();
 
-    return sim.getRun();
+    return await sim.getRun();
   }
 
   /**
    * Simulation results with default parameters (cached).
    */
-  get baseCase(): Run {
+  async baseCase(): Promise<Run> {
     this.checkDisposed();
     if (this._cachedBaseCase === null) {
-      this._cachedBaseCase = this.run();
+      this._cachedBaseCase = await this.run();
     }
     return this._cachedBaseCase;
   }
@@ -518,10 +467,10 @@ export class Model {
    * @param callback Function that receives current variables and a patch builder
    * @param options Edit options (dryRun, allowErrors)
    */
-  edit(
+  async edit(
     callback: (currentVars: Record<string, JsonStock | JsonFlow | JsonAuxiliary>, patch: ModelPatchBuilder) => void,
     options: { dryRun?: boolean; allowErrors?: boolean } = {},
-  ): void {
+  ): Promise<void> {
     this.checkDisposed();
     if (this._project === null) {
       throw new Error('Model is not attached to a Project');
@@ -530,7 +479,7 @@ export class Model {
     const { dryRun = false, allowErrors = false } = options;
 
     // Get current model state as JSON
-    const modelJson = this.getModelJson();
+    const modelJson = await this.getModelJson();
     const modelName = modelJson.name;
 
     // Build current variables map
@@ -548,8 +497,7 @@ export class Model {
     // Create patch builder
     const patch = new ModelPatchBuilder(modelName);
 
-    // Call user callback - if it throws, the patch won't be applied
-    // and model state remains unchanged
+    // Call user callback
     callback(currentVars, patch);
 
     // If no operations, return early
@@ -562,7 +510,7 @@ export class Model {
       models: [patch.build()],
     };
 
-    this._project.applyPatch(projectPatch, { dryRun, allowErrors });
+    await this._project.applyPatch(projectPatch, { dryRun, allowErrors });
 
     // Invalidate caches if not dry run
     if (!dryRun) {
@@ -573,21 +521,28 @@ export class Model {
   /**
    * Dispose this model and free WASM resources.
    */
-  dispose(): void {
+  async dispose(): Promise<void> {
     if (this._disposed) {
       return;
     }
 
-    unregisterFinalizer(this);
-    simlin_model_unref(this._ptr);
-    this._ptr = 0;
+    await this.backend.modelDispose(this._handle);
     this._disposed = true;
   }
 
   /**
    * Symbol.dispose support for using statement.
+   * Fire-and-forget for async backends.
    */
   [Symbol.dispose](): void {
-    this.dispose();
+    if (this._disposed) {
+      return;
+    }
+
+    const result = this.backend.modelDispose(this._handle);
+    if (result instanceof Promise) {
+      result.catch((e) => console.warn('Model dispose failed:', e));
+    }
+    this._disposed = true;
   }
 }

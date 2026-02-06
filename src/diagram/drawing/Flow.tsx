@@ -1786,17 +1786,18 @@ export class Flow extends React.PureComponent<FlowProps> {
     }
 
     // Only show the source hit area when not in embedded/export mode and not already moving the source
-    const sourceHitArea = !this.props.embedded && !isMovingSource ? (
-      <rect
-        x={sourceHitX - sourceHitSize / 2}
-        y={sourceHitY - sourceHitSize / 2}
-        width={sourceHitSize}
-        height={sourceHitSize}
-        fill="transparent"
-        style={{ cursor: 'grab' }}
-        onPointerDown={this.handlePointerDownSource}
-      />
-    ) : null;
+    const sourceHitArea =
+      !this.props.embedded && !isMovingSource ? (
+        <rect
+          x={sourceHitX - sourceHitSize / 2}
+          y={sourceHitY - sourceHitSize / 2}
+          width={sourceHitSize}
+          height={sourceHitSize}
+          fill="transparent"
+          style={{ cursor: 'grab' }}
+          onPointerDown={this.handlePointerDownSource}
+        />
+      ) : null;
 
     return (
       <g className={groupClassName}>

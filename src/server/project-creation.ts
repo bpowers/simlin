@@ -32,8 +32,8 @@ export async function emptyProject(name: string, _userName: string): Promise<Uin
   };
 
   const engineProject = await Project.openJson(JSON.stringify(emptyJson));
-  const protobuf = engineProject.serializeProtobuf();
-  engineProject.dispose();
+  const protobuf = await engineProject.serializeProtobuf();
+  await engineProject.dispose();
 
   return protobuf;
 }

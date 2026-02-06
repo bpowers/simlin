@@ -15,7 +15,8 @@ import { Project as Project } from '@simlin/engine';
 
 async function fileFromXmile(files: Table<File>, projectId: string, userId: string, xmile: string): Promise<File> {
   const project = await Project.open(xmile);
-  const sdPB = project.serializeProtobuf();
+  const sdPB = await project.serializeProtobuf();
+  await project.dispose();
 
   const file = createFile(projectId, userId, undefined, sdPB);
   await files.create(file.getId(), file);

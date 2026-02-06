@@ -9,31 +9,11 @@
  * error checking, and loop analysis at the project level.
  */
 
-import {
-  simlin_project_open_protobuf,
-  simlin_project_open_json,
-  simlin_project_unref,
-  simlin_project_get_model_count,
-  simlin_project_get_model_names,
-  simlin_project_get_model,
-  simlin_project_serialize_protobuf,
-  simlin_project_serialize_json,
-  simlin_project_is_simulatable,
-  simlin_project_get_errors,
-  simlin_project_apply_patch,
-} from './internal/project';
-import {
-  simlin_project_open_xmile,
-  simlin_project_open_vensim,
-  simlin_project_serialize_xmile,
-  simlin_project_render_svg,
-} from './internal/import-export';
-import { simlin_analyze_get_loops, readLoops, simlin_free_loops } from './internal/analysis';
-import { SimlinProjectPtr, SimlinJsonFormat, ErrorDetail } from './internal/types';
-import { readAllErrorDetails, simlin_error_free } from './internal/error';
-import { registerFinalizer, unregisterFinalizer } from './internal/dispose';
-import { ensureInitialized, WasmSourceProvider } from '@simlin/engine/internal/wasm';
-import { Loop, LoopPolarity } from './types';
+import { EngineBackend, ProjectHandle } from './backend';
+import { getBackend } from '@simlin/engine/internal/backend-factory';
+import { SimlinJsonFormat, ErrorDetail } from './internal/types';
+import { WasmSourceProvider } from '@simlin/engine/internal/wasm';
+import { Loop } from './types';
 import { Model } from './model';
 import { JsonProjectPatch } from './json-types';
 
@@ -52,63 +32,16 @@ type ProjectOpenJsonOptions = ProjectOpenOptions & {
  * access to models, serialization, and project-level analysis.
  */
 export class Project {
-  private _ptr: SimlinProjectPtr;
+  private _handle: ProjectHandle;
+  private _backend: EngineBackend;
   private _disposed: boolean = false;
   private _models: Map<string, Model> = new Map();
   private _mainModel: Model | null = null;
 
-  private constructor(ptr: SimlinProjectPtr) {
-    if (ptr === 0) {
-      throw new Error('Cannot create Project from null pointer');
-    }
-    this._ptr = ptr;
-    registerFinalizer(this, ptr, simlin_project_unref);
-  }
-
-  /**
-   * Create a project from XMILE data.
-   * @param data XMILE XML data as Uint8Array
-   * @returns New Project instance
-   * @throws SimlinError if the XMILE data is invalid
-   */
-  private static fromXmile(data: Uint8Array): Project {
-    const ptr = simlin_project_open_xmile(data);
-    return new Project(ptr);
-  }
-
-  /**
-   * Create a project from protobuf data.
-   * @param data Protobuf-encoded project data
-   * @returns New Project instance
-   * @throws SimlinError if the protobuf data is invalid
-   */
-  private static fromProtobuf(data: Uint8Array): Project {
-    const ptr = simlin_project_open_protobuf(data);
-    return new Project(ptr);
-  }
-
-  /**
-   * Create a project from JSON data.
-   * @param data JSON string or Uint8Array
-   * @param format JSON format (Native or SDAI)
-   * @returns New Project instance
-   * @throws SimlinError if the JSON data is invalid
-   */
-  private static fromJson(data: string | Uint8Array, format: SimlinJsonFormat = SimlinJsonFormat.Native): Project {
-    const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-    const ptr = simlin_project_open_json(bytes, format);
-    return new Project(ptr);
-  }
-
-  /**
-   * Create a project from Vensim MDL data.
-   * @param data MDL file data as Uint8Array
-   * @returns New Project instance
-   * @throws SimlinError if the MDL data is invalid
-   */
-  private static fromVensim(data: Uint8Array): Project {
-    const ptr = simlin_project_open_vensim(data);
-    return new Project(ptr);
+  /** @internal */
+  constructor(handle: ProjectHandle, backend: EngineBackend) {
+    this._handle = handle;
+    this._backend = backend;
   }
 
   /**
@@ -120,9 +53,11 @@ export class Project {
    * @throws SimlinError if the XMILE data is invalid
    */
   static async open(xmile: string | Uint8Array, options: ProjectOpenOptions = {}): Promise<Project> {
-    await ensureInitialized(options.wasm);
+    const backend = getBackend();
+    await backend.init(options.wasm);
     const data = typeof xmile === 'string' ? new TextEncoder().encode(xmile) : xmile;
-    return Project.fromXmile(data);
+    const handle = await backend.projectOpenXmile(data);
+    return new Project(handle, backend);
   }
 
   /**
@@ -134,8 +69,10 @@ export class Project {
    * @throws SimlinError if the protobuf data is invalid
    */
   static async openProtobuf(data: Uint8Array, options: ProjectOpenOptions = {}): Promise<Project> {
-    await ensureInitialized(options.wasm);
-    return Project.fromProtobuf(data);
+    const backend = getBackend();
+    await backend.init(options.wasm);
+    const handle = await backend.projectOpenProtobuf(data);
+    return new Project(handle, backend);
   }
 
   /**
@@ -147,9 +84,12 @@ export class Project {
    * @throws SimlinError if the JSON data is invalid
    */
   static async openJson(data: string | Uint8Array, options: ProjectOpenJsonOptions = {}): Promise<Project> {
-    await ensureInitialized(options.wasm);
+    const backend = getBackend();
+    await backend.init(options.wasm);
     const format = options.format ?? SimlinJsonFormat.Native;
-    return Project.fromJson(data, format);
+    const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+    const handle = await backend.projectOpenJson(bytes, format);
+    return new Project(handle, backend);
   }
 
   /**
@@ -162,17 +102,22 @@ export class Project {
    * @throws SimlinError if the MDL data is invalid
    */
   static async openVensim(data: string | Uint8Array, options: ProjectOpenOptions = {}): Promise<Project> {
-    await ensureInitialized(options.wasm);
+    const backend = getBackend();
+    await backend.init(options.wasm);
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-    return Project.fromVensim(bytes);
+    const handle = await backend.projectOpenVensim(bytes);
+    return new Project(handle, backend);
   }
 
-  /**
-   * Get the internal WASM pointer. For internal use only.
-   */
-  get ptr(): SimlinProjectPtr {
+  /** @internal */
+  get handle(): ProjectHandle {
     this.checkDisposed();
-    return this._ptr;
+    return this._handle;
+  }
+
+  /** @internal */
+  get backend(): EngineBackend {
+    return this._backend;
   }
 
   /**
@@ -191,18 +136,18 @@ export class Project {
   /**
    * Get the number of models in this project.
    */
-  get modelCount(): number {
+  async modelCount(): Promise<number> {
     this.checkDisposed();
-    return simlin_project_get_model_count(this._ptr);
+    return await this._backend.projectGetModelCount(this._handle);
   }
 
   /**
    * Get names of all models in this project.
    * @returns Array of model names
    */
-  getModelNames(): string[] {
+  async getModelNames(): Promise<string[]> {
     this.checkDisposed();
-    return simlin_project_get_model_names(this._ptr);
+    return await this._backend.projectGetModelNames(this._handle);
   }
 
   /**
@@ -210,10 +155,10 @@ export class Project {
    * The main model is typically the first model or the one that is simulatable.
    * @returns The main Model instance
    */
-  get mainModel(): Model {
+  async mainModel(): Promise<Model> {
     this.checkDisposed();
     if (this._mainModel === null) {
-      this._mainModel = this.getModel(null);
+      this._mainModel = await this.getModel(null);
     }
     return this._mainModel;
   }
@@ -224,7 +169,7 @@ export class Project {
    * @returns The Model instance
    * @throws SimlinError if model not found
    */
-  getModel(name: string | null): Model {
+  async getModel(name: string | null): Promise<Model> {
     this.checkDisposed();
 
     // Check cache first
@@ -234,8 +179,8 @@ export class Project {
       return cached;
     }
 
-    const modelPtr = simlin_project_get_model(this._ptr, name);
-    const model = new Model(modelPtr, this, name);
+    const modelHandle = await this._backend.projectGetModel(this._handle, name);
+    const model = new Model(modelHandle, this, name);
     this._models.set(cacheKey, model);
     return model;
   }
@@ -244,9 +189,14 @@ export class Project {
    * Get all models in this project.
    * @returns Array of Model instances
    */
-  get models(): readonly Model[] {
+  async models(): Promise<readonly Model[]> {
     this.checkDisposed();
-    return this.getModelNames().map((name) => this.getModel(name));
+    const names = await this.getModelNames();
+    const models: Model[] = [];
+    for (const name of names) {
+      models.push(await this.getModel(name));
+    }
+    return models;
   }
 
   /**
@@ -254,18 +204,18 @@ export class Project {
    * @param modelName Optional model name to check, or null for main model
    * @returns true if simulatable
    */
-  isSimulatable(modelName: string | null = null): boolean {
+  async isSimulatable(modelName: string | null = null): Promise<boolean> {
     this.checkDisposed();
-    return simlin_project_is_simulatable(this._ptr, modelName);
+    return await this._backend.projectIsSimulatable(this._handle, modelName);
   }
 
   /**
    * Serialize this project to protobuf format.
    * @returns Protobuf-encoded data
    */
-  serializeProtobuf(): Uint8Array {
+  async serializeProtobuf(): Promise<Uint8Array> {
     this.checkDisposed();
-    return simlin_project_serialize_protobuf(this._ptr);
+    return await this._backend.projectSerializeProtobuf(this._handle);
   }
 
   /**
@@ -273,9 +223,9 @@ export class Project {
    * @param format JSON format (Native or SDAI)
    * @returns JSON string
    */
-  serializeJson(format: SimlinJsonFormat = SimlinJsonFormat.Native): string {
+  async serializeJson(format: SimlinJsonFormat = SimlinJsonFormat.Native): Promise<string> {
     this.checkDisposed();
-    const bytes = simlin_project_serialize_json(this._ptr, format);
+    const bytes = await this._backend.projectSerializeJson(this._handle, format);
     return new TextDecoder().decode(bytes);
   }
 
@@ -283,17 +233,17 @@ export class Project {
    * Export this project to XMILE format.
    * @returns XMILE XML data
    */
-  toXmile(): Uint8Array {
+  async toXmile(): Promise<Uint8Array> {
     this.checkDisposed();
-    return simlin_project_serialize_xmile(this._ptr);
+    return await this._backend.projectSerializeXmile(this._handle);
   }
 
   /**
    * Export this project to XMILE format as a string.
    * @returns XMILE XML string
    */
-  toXmileString(): string {
-    return new TextDecoder().decode(this.toXmile());
+  async toXmileString(): Promise<string> {
+    return new TextDecoder().decode(await this.toXmile());
   }
 
   /**
@@ -301,9 +251,9 @@ export class Project {
    * @param modelName Model name
    * @returns SVG data as UTF-8 bytes
    */
-  renderSvg(modelName: string): Uint8Array {
+  async renderSvg(modelName: string): Promise<Uint8Array> {
     this.checkDisposed();
-    return simlin_project_render_svg(this._ptr, modelName);
+    return await this._backend.projectRenderSvg(this._handle, modelName);
   }
 
   /**
@@ -311,47 +261,26 @@ export class Project {
    * @param modelName Model name
    * @returns SVG string
    */
-  renderSvgString(modelName: string): string {
-    return new TextDecoder().decode(this.renderSvg(modelName));
+  async renderSvgString(modelName: string): Promise<string> {
+    return new TextDecoder().decode(await this.renderSvg(modelName));
   }
 
   /**
    * Get all feedback loops in this project.
    * @returns Array of Loop objects
    */
-  getLoops(): Loop[] {
+  async getLoops(): Promise<Loop[]> {
     this.checkDisposed();
-    const loopsPtr = simlin_analyze_get_loops(this._ptr);
-    if (loopsPtr === 0) {
-      return [];
-    }
-    let loops: Loop[] = [];
-    try {
-      const rawLoops = readLoops(loopsPtr);
-      loops = rawLoops.map((loop) => ({
-        id: loop.id,
-        variables: loop.variables,
-        polarity: loop.polarity as unknown as LoopPolarity,
-      }));
-    } finally {
-      simlin_free_loops(loopsPtr);
-    }
-    return loops;
+    return await this._backend.projectGetLoops(this._handle);
   }
 
   /**
    * Get all errors in this project.
    * @returns Array of ErrorDetail objects
    */
-  getErrors(): ErrorDetail[] {
+  async getErrors(): Promise<ErrorDetail[]> {
     this.checkDisposed();
-    const errPtr = simlin_project_get_errors(this._ptr);
-    if (errPtr === 0) {
-      return [];
-    }
-    const details = readAllErrorDetails(errPtr);
-    simlin_error_free(errPtr);
-    return details;
+    return await this._backend.projectGetErrors(this._handle);
   }
 
   /**
@@ -361,14 +290,14 @@ export class Project {
    * @returns Array of collected errors (if allowErrors is true)
    * @throws SimlinError if patch fails and allowErrors is false
    */
-  applyPatch(patch: JsonProjectPatch, options: { dryRun?: boolean; allowErrors?: boolean } = {}): ErrorDetail[] {
+  async applyPatch(
+    patch: JsonProjectPatch,
+    options: { dryRun?: boolean; allowErrors?: boolean } = {},
+  ): Promise<ErrorDetail[]> {
     this.checkDisposed();
     const { dryRun = false, allowErrors = false } = options;
 
-    const patchJson = JSON.stringify(patch);
-    const patchBytes = new TextEncoder().encode(patchJson);
-
-    const collectedPtr = simlin_project_apply_patch(this._ptr, patchBytes, dryRun, allowErrors);
+    const errors = await this._backend.projectApplyPatch(this._handle, patch, dryRun, allowErrors);
 
     // Invalidate all model caches since the project state changed
     if (!dryRun) {
@@ -377,43 +306,49 @@ export class Project {
       }
     }
 
-    if (collectedPtr === 0) {
-      return [];
-    }
-
-    const details = readAllErrorDetails(collectedPtr);
-    simlin_error_free(collectedPtr);
-    return details;
+    return errors;
   }
 
   /**
    * Dispose this project and free WASM resources.
    * After disposal, the project cannot be used.
    */
-  dispose(): void {
+  async dispose(): Promise<void> {
     if (this._disposed) {
       return;
     }
 
-    unregisterFinalizer(this);
-
     // Dispose all cached models first (includes main model if accessed)
     for (const model of this._models.values()) {
-      model.dispose();
+      await model.dispose();
     }
     this._models.clear();
     this._mainModel = null;
 
-    // Free the WASM pointer
-    simlin_project_unref(this._ptr);
-    this._ptr = 0;
+    await this._backend.projectDispose(this._handle);
     this._disposed = true;
   }
 
   /**
    * Symbol.dispose support for using statement.
+   * Fires dispose but cannot await; for WorkerBackend the message
+   * is enqueued and will complete asynchronously.
    */
   [Symbol.dispose](): void {
-    this.dispose();
+    if (this._disposed) {
+      return;
+    }
+
+    for (const model of this._models.values()) {
+      model[Symbol.dispose]();
+    }
+    this._models.clear();
+    this._mainModel = null;
+
+    const result = this._backend.projectDispose(this._handle);
+    if (result instanceof Promise) {
+      result.catch((e) => console.warn('Project dispose failed:', e));
+    }
+    this._disposed = true;
   }
 }

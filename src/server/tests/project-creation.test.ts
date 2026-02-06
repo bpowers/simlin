@@ -15,8 +15,8 @@ describe('emptyProject', () => {
     expect(protobuf.length).toBeGreaterThan(0);
 
     const project = await Project.openProtobuf(protobuf);
-    const json = JSON.parse(project.serializeJson()) as JsonProject;
-    project.dispose();
+    const json = JSON.parse(await project.serializeJson()) as JsonProject;
+    await project.dispose();
 
     expect(json.name).toBe(projectName);
   });
@@ -26,8 +26,8 @@ describe('emptyProject', () => {
 
     // Verify the round-trip: protobuf -> engine -> JSON produces expected structure
     const project = await Project.openProtobuf(protobuf);
-    const json = JSON.parse(project.serializeJson()) as JsonProject;
-    project.dispose();
+    const json = JSON.parse(await project.serializeJson()) as JsonProject;
+    await project.dispose();
 
     expect(json.simSpecs.startTime).toBe(0);
     expect(json.simSpecs.endTime).toBe(100);
@@ -40,8 +40,8 @@ describe('emptyProject', () => {
     const protobuf = await emptyProject('Model Test', 'testuser');
 
     const project = await Project.openProtobuf(protobuf);
-    const json = JSON.parse(project.serializeJson()) as JsonProject;
-    project.dispose();
+    const json = JSON.parse(await project.serializeJson()) as JsonProject;
+    await project.dispose();
 
     expect(json.models).toHaveLength(1);
     expect(json.models[0].name).toBe('main');
@@ -51,8 +51,8 @@ describe('emptyProject', () => {
     const protobuf = await emptyProject('Variables Test', 'testuser');
 
     const project = await Project.openProtobuf(protobuf);
-    const json = JSON.parse(project.serializeJson()) as JsonProject;
-    project.dispose();
+    const json = JSON.parse(await project.serializeJson()) as JsonProject;
+    await project.dispose();
 
     // The engine's JSON serializer omits empty arrays, so these are undefined
     // rather than []. Verify no variables are present either way.
@@ -66,8 +66,8 @@ describe('emptyProject', () => {
     const protobuf = await emptyProject('View Test', 'testuser');
 
     const project = await Project.openProtobuf(protobuf);
-    const json = JSON.parse(project.serializeJson()) as JsonProject;
-    project.dispose();
+    const json = JSON.parse(await project.serializeJson()) as JsonProject;
+    await project.dispose();
 
     const mainModel = json.models[0];
     expect(mainModel.views).toBeDefined();

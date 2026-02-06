@@ -20,6 +20,10 @@
       "module": "./lib.browser/internal/wasm.browser.js",
       "node": "./lib/internal/wasm.node.js"
     },
+    "./internal/backend-factory": {
+      "module": "./lib.browser/backend-factory.browser.js",
+      "node": "./lib/backend-factory.node.js"
+    },
     "./*": {
       "module": "./lib.browser/*.js",
       "node": "./lib/*.js"

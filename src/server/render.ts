@@ -12,9 +12,9 @@ import { File } from './schemas/file_pb';
 
 export async function renderToPNG(fileDoc: File): Promise<Uint8Array> {
   const engineProject = await EngineProject.openProtobuf(fileDoc.getProjectContents_asU8());
-  const json = JSON.parse(engineProject.serializeJson()) as JsonProject;
+  const json = JSON.parse(await engineProject.serializeJson()) as JsonProject;
   const project = DmProject.fromJson(json);
-  engineProject.dispose();
+  await engineProject.dispose();
 
   const [svgString, viewbox] = renderSvgToString(project, 'main');
 
