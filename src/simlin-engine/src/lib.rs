@@ -18,6 +18,7 @@ pub mod common;
 pub mod compat;
 mod compiler;
 pub mod datamodel;
+pub mod diagram;
 mod dimensions;
 pub mod interpreter;
 pub mod json;
