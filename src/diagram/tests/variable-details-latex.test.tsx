@@ -259,4 +259,64 @@ describe('VariableDetails latex loading', () => {
     });
     expect(ref.current!.state.latexEquation).toBe('latex_v3'); // current, accepted
   });
+
+  test('switching variables clears stale latexEquation while new request is in flight', async () => {
+    const calls: Array<{ ident: string; deferred: Deferred<string | undefined> }> = [];
+
+    const getLatexEquation = jest.fn((ident: string) => {
+      const deferred = createDeferred<string | undefined>();
+      calls.push({ ident, deferred });
+      return deferred.promise;
+    });
+
+    const ref = React.createRef<VariableDetails>();
+    const noop = () => {};
+
+    const { rerender } = render(
+      <VariableDetails
+        ref={ref}
+        variable={makeAux('var_a')}
+        viewElement={makeViewElement('var_a')}
+        getLatexEquation={getLatexEquation}
+        onDelete={noop}
+        onEquationChange={noop}
+        onTableChange={noop}
+        activeTab={0}
+        onActiveTabChange={noop}
+      />,
+    );
+
+    // Resolve var_a's LaTeX
+    await act(async () => {
+      calls[0].deferred.resolve('\\text{var\\_a}');
+    });
+    expect(ref.current!.state.latexEquation).toBe('\\text{var\\_a}');
+    expect(ref.current!.state.latexLoading).toBe(false);
+
+    // Switch to var_b
+    rerender(
+      <VariableDetails
+        ref={ref}
+        variable={makeAux('var_b')}
+        viewElement={makeViewElement('var_b')}
+        getLatexEquation={getLatexEquation}
+        onDelete={noop}
+        onEquationChange={noop}
+        onTableChange={noop}
+        activeTab={0}
+        onActiveTabChange={noop}
+      />,
+    );
+
+    // While var_b's request is in flight, the old LaTeX should be cleared
+    expect(ref.current!.state.latexEquation).toBeUndefined();
+    expect(ref.current!.state.latexLoading).toBe(true);
+
+    // Resolve var_b
+    await act(async () => {
+      calls[1].deferred.resolve('\\text{var\\_b}');
+    });
+    expect(ref.current!.state.latexEquation).toBe('\\text{var\\_b}');
+    expect(ref.current!.state.latexLoading).toBe(false);
+  });
 });

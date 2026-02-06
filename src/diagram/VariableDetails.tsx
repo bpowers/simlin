@@ -180,7 +180,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     if (!ident) return;
 
     const requestId = ++this._latexRequestId;
-    this.setState({ latexLoading: true });
+    this.setState({ latexLoading: true, latexEquation: undefined });
     try {
       const latex = await getLatexEquation(ident);
       if (requestId !== this._latexRequestId || !this._mounted) return;
