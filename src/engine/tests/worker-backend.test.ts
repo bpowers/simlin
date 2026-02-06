@@ -1,0 +1,301 @@
+// Copyright 2025 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+import { WorkerBackend } from '../src/worker-backend';
+import { WorkerServer } from '../src/worker-server';
+import type { WorkerRequest, WorkerResponse } from '../src/worker-protocol';
+import type { ProjectHandle, ModelHandle, SimHandle } from '../src/backend';
+
+const wasmPath = join(__dirname, '..', 'core', 'libsimlin.wasm');
+
+function loadTestXmile(): Uint8Array {
+  const xmilePath = join(__dirname, '..', '..', 'pysimlin', 'tests', 'fixtures', 'teacup.stmx');
+  return readFileSync(xmilePath);
+}
+
+function loadWasmSource(): Uint8Array {
+  return readFileSync(wasmPath);
+}
+
+/**
+ * Create a WorkerBackend connected to a WorkerServer via direct function calls
+ * (no actual Worker thread). This simulates the postMessage channel.
+ */
+function createTestPair(): { backend: WorkerBackend; server: WorkerServer } {
+  let backendOnMessage: ((msg: WorkerResponse) => void) | null = null;
+
+  const server = new WorkerServer((msg: WorkerResponse) => {
+    // Server -> Backend: simulate worker posting back
+    if (backendOnMessage) {
+      // Use setTimeout to simulate async message delivery
+      setTimeout(() => backendOnMessage!(msg), 0);
+    }
+  });
+
+  const backend = new WorkerBackend(
+    // Backend -> Server: simulate main thread posting to worker
+    (msg: WorkerRequest) => {
+      // Deliver to server asynchronously to match real Worker behavior
+      setTimeout(() => server.handleMessage(msg), 0);
+    },
+    // Register the callback for receiving messages from the server
+    (callback: (msg: WorkerResponse) => void) => {
+      backendOnMessage = callback;
+    },
+  );
+
+  return { backend, server };
+}
+
+describe('WorkerBackend', () => {
+  describe('lifecycle', () => {
+    test('init -> isInitialized returns true', async () => {
+      const { backend } = createTestPair();
+      expect(backend.isInitialized()).toBe(false);
+      await backend.init(loadWasmSource());
+      expect(backend.isInitialized()).toBe(true);
+    });
+
+    test('double init is idempotent', async () => {
+      const { backend } = createTestPair();
+      await backend.init(loadWasmSource());
+      await backend.init(loadWasmSource());
+      expect(backend.isInitialized()).toBe(true);
+    });
+
+    test('reset returns to uninitialized', async () => {
+      const { backend } = createTestPair();
+      await backend.init(loadWasmSource());
+      expect(backend.isInitialized()).toBe(true);
+      await backend.reset();
+      expect(backend.isInitialized()).toBe(false);
+    });
+  });
+
+  describe('project operations', () => {
+    let backend: WorkerBackend;
+
+    beforeEach(async () => {
+      const pair = createTestPair();
+      backend = pair.backend;
+      await backend.init(loadWasmSource());
+    });
+
+    test('open XMILE project and get model count', async () => {
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+      expect(handle).toBeDefined();
+      const count = await backend.projectGetModelCount(handle);
+      expect(count).toBe(1);
+    });
+
+    test('open protobuf project and serialize roundtrip', async () => {
+      const xmileData = loadTestXmile();
+      const handle1 = await backend.projectOpenXmile(xmileData);
+      const pbData = await backend.projectSerializeProtobuf(handle1);
+      expect(pbData).toBeInstanceOf(Uint8Array);
+      expect(pbData.length).toBeGreaterThan(0);
+
+      // Round-trip through protobuf
+      const handle2 = await backend.projectOpenProtobuf(pbData);
+      const count = await backend.projectGetModelCount(handle2);
+      expect(count).toBe(1);
+    });
+
+    test('get model names', async () => {
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+      const names = await backend.projectGetModelNames(handle);
+      expect(names).toBeInstanceOf(Array);
+      expect(names.length).toBeGreaterThan(0);
+    });
+
+    test('get model handle', async () => {
+      const data = loadTestXmile();
+      const projHandle = await backend.projectOpenXmile(data);
+      const modelHandle = await backend.projectGetModel(projHandle, null);
+      expect(modelHandle).toBeDefined();
+    });
+
+    test('isSimulatable returns true for valid model', async () => {
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+      const result = await backend.projectIsSimulatable(handle, null);
+      expect(result).toBe(true);
+    });
+
+    test('getErrors returns array', async () => {
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+      const errors = await backend.projectGetErrors(handle);
+      expect(errors).toBeInstanceOf(Array);
+    });
+
+    test('getLoops returns array', async () => {
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+      const loops = await backend.projectGetLoops(handle);
+      expect(loops).toBeInstanceOf(Array);
+    });
+
+    test('dispose is idempotent', async () => {
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+      await backend.projectDispose(handle);
+      // Second dispose should not throw
+      await backend.projectDispose(handle);
+    });
+
+    test('operations on disposed handle throw', async () => {
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+      await backend.projectDispose(handle);
+      await expect(backend.projectGetModelCount(handle)).rejects.toThrow();
+    });
+  });
+
+  describe('model operations', () => {
+    let backend: WorkerBackend;
+    let projHandle: ProjectHandle;
+    let modelHandle: ModelHandle;
+
+    beforeEach(async () => {
+      const pair = createTestPair();
+      backend = pair.backend;
+      await backend.init(loadWasmSource());
+      const data = loadTestXmile();
+      projHandle = await backend.projectOpenXmile(data);
+      modelHandle = await backend.projectGetModel(projHandle, null);
+    });
+
+    test('getLinks returns array', async () => {
+      const links = await backend.modelGetLinks(modelHandle);
+      expect(links).toBeInstanceOf(Array);
+      expect(links.length).toBeGreaterThan(0);
+    });
+
+    test('getIncomingLinks returns array', async () => {
+      const links = await backend.modelGetIncomingLinks(modelHandle, 'teacup_temperature');
+      expect(links).toBeInstanceOf(Array);
+    });
+
+    test('getLatexEquation returns string or null', async () => {
+      const result = await backend.modelGetLatexEquation(modelHandle, 'teacup_temperature');
+      // May be null or string depending on the model
+      expect(result === null || typeof result === 'string').toBe(true);
+    });
+
+    test('dispose model is idempotent', async () => {
+      await backend.modelDispose(modelHandle);
+      await backend.modelDispose(modelHandle);
+    });
+  });
+
+  describe('sim operations', () => {
+    let backend: WorkerBackend;
+    let projHandle: ProjectHandle;
+    let modelHandle: ModelHandle;
+
+    beforeEach(async () => {
+      const pair = createTestPair();
+      backend = pair.backend;
+      await backend.init(loadWasmSource());
+      const data = loadTestXmile();
+      projHandle = await backend.projectOpenXmile(data);
+      modelHandle = await backend.projectGetModel(projHandle, null);
+    });
+
+    test('create sim and run to end', async () => {
+      const simHandle = await backend.simNew(modelHandle, false);
+      expect(simHandle).toBeDefined();
+      await backend.simRunToEnd(simHandle);
+      const stepCount = await backend.simGetStepCount(simHandle);
+      expect(stepCount).toBeGreaterThan(0);
+    });
+
+    test('get and set value', async () => {
+      const simHandle = await backend.simNew(modelHandle, false);
+      const time = await backend.simGetTime(simHandle);
+      expect(typeof time).toBe('number');
+
+      // Set a value and verify
+      await backend.simSetValue(simHandle, 'teacup_temperature', 100);
+      const value = await backend.simGetValue(simHandle, 'teacup_temperature');
+      expect(value).toBe(100);
+    });
+
+    test('get series after run', async () => {
+      const simHandle = await backend.simNew(modelHandle, false);
+      await backend.simRunToEnd(simHandle);
+      const series = await backend.simGetSeries(simHandle, 'teacup_temperature');
+      expect(series).toBeInstanceOf(Float64Array);
+      expect(series.length).toBeGreaterThan(0);
+    });
+
+    test('getVarNames returns array', async () => {
+      const simHandle = await backend.simNew(modelHandle, false);
+      const names = await backend.simGetVarNames(simHandle);
+      expect(names).toBeInstanceOf(Array);
+      expect(names.length).toBeGreaterThan(0);
+    });
+
+    test('getLinks returns array', async () => {
+      const simHandle = await backend.simNew(modelHandle, false);
+      await backend.simRunToEnd(simHandle);
+      const links = await backend.simGetLinks(simHandle);
+      expect(links).toBeInstanceOf(Array);
+    });
+
+    test('sim reset restores initial state', async () => {
+      const simHandle = await backend.simNew(modelHandle, false);
+      await backend.simRunToEnd(simHandle);
+      const timeAfterRun = await backend.simGetTime(simHandle);
+      expect(timeAfterRun).toBeGreaterThan(0);
+
+      await backend.simReset(simHandle);
+      const timeAfterReset = await backend.simGetTime(simHandle);
+      expect(timeAfterReset).toBe(0);
+    });
+
+    test('dispose sim is idempotent', async () => {
+      const simHandle = await backend.simNew(modelHandle, false);
+      await backend.simDispose(simHandle);
+      await backend.simDispose(simHandle);
+    });
+  });
+
+  describe('strict serialization', () => {
+    test('concurrent operations are serialized', async () => {
+      const { backend } = createTestPair();
+      await backend.init(loadWasmSource());
+
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+
+      // Fire multiple operations concurrently - they should all complete
+      const [count, names, simulatable, errors] = await Promise.all([
+        backend.projectGetModelCount(handle),
+        backend.projectGetModelNames(handle),
+        backend.projectIsSimulatable(handle, null),
+        backend.projectGetErrors(handle),
+      ]);
+
+      expect(count).toBe(1);
+      expect(names.length).toBeGreaterThan(0);
+      expect(simulatable).toBe(true);
+      expect(errors).toBeInstanceOf(Array);
+    });
+  });
+
+  describe('error propagation', () => {
+    test('operations before init are rejected', async () => {
+      const { backend } = createTestPair();
+      // Don't init
+      await expect(backend.projectOpenXmile(new Uint8Array([]))).rejects.toThrow(/not ready/i);
+    });
+  });
+});

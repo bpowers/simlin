@@ -334,7 +334,7 @@ export class Model {
       throw new Error(`Variable not found: ${varName}`);
     }
 
-    return this.backend.modelGetIncomingLinks(this._handle, varName);
+    return await this.backend.modelGetIncomingLinks(this._handle, varName);
   }
 
   /**
@@ -343,7 +343,7 @@ export class Model {
    */
   async getLinks(): Promise<Link[]> {
     this.checkDisposed();
-    return this.backend.modelGetLinks(this._handle);
+    return await this.backend.modelGetLinks(this._handle);
   }
 
   /**
@@ -387,7 +387,7 @@ export class Model {
    */
   async getLatexEquation(ident: string): Promise<string | null> {
     this.checkDisposed();
-    return this.backend.modelGetLatexEquation(this._handle, ident);
+    return await this.backend.modelGetLatexEquation(this._handle, ident);
   }
 
   /**
@@ -432,7 +432,7 @@ export class Model {
   async simulate(overrides: Record<string, number> = {}, options: { enableLtm?: boolean } = {}): Promise<Sim> {
     this.checkDisposed();
     const { enableLtm = false } = options;
-    return new Sim(this, overrides, enableLtm);
+    return Sim.create(this, overrides, enableLtm);
   }
 
   /**
@@ -522,23 +522,24 @@ export class Model {
    * Dispose this model and free WASM resources.
    */
   async dispose(): Promise<void> {
-    this.disposeSync();
+    if (this._disposed) {
+      return;
+    }
+
+    await this.backend.modelDispose(this._handle);
+    this._disposed = true;
   }
 
-  /** @internal Synchronous dispose for Symbol.dispose and internal use */
-  disposeSync(): void {
+  /**
+   * Symbol.dispose support for using statement.
+   * Fire-and-forget for async backends.
+   */
+  [Symbol.dispose](): void {
     if (this._disposed) {
       return;
     }
 
     this.backend.modelDispose(this._handle);
     this._disposed = true;
-  }
-
-  /**
-   * Symbol.dispose support for using statement.
-   */
-  [Symbol.dispose](): void {
-    this.disposeSync();
   }
 }

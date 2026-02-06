@@ -29,25 +29,31 @@ export class Sim {
   private _disposed: boolean = false;
   private _enableLtm: boolean;
 
-  /**
-   * Create a Sim from a Model.
-   * This is internal - use Model.simulate() instead.
-   */
-  constructor(model: Model, overrides: Record<string, number> = {}, enableLtm: boolean = false) {
-    if (model.project === null) {
-      throw new Error('Model is not attached to a Project');
-    }
-    const backend = model.project.backend;
-    const handle = backend.simNew(model.handle, enableLtm);
+  /** @internal Use Sim.create() instead. */
+  private constructor(handle: SimHandle, model: Model, overrides: Record<string, number>, enableLtm: boolean) {
     this._handle = handle;
     this._model = model;
     this._overrides = { ...overrides };
     this._enableLtm = enableLtm;
+  }
+
+  /**
+   * Create a Sim from a Model.
+   * This is internal - use Model.simulate() instead.
+   */
+  static async create(model: Model, overrides: Record<string, number> = {}, enableLtm: boolean = false): Promise<Sim> {
+    if (model.project === null) {
+      throw new Error('Model is not attached to a Project');
+    }
+    const backend = model.project.backend;
+    const handle = await backend.simNew(model.handle, enableLtm);
 
     // Apply any overrides
     for (const [name, value] of Object.entries(overrides)) {
-      backend.simSetValue(handle, name, value);
+      await backend.simSetValue(handle, name, value);
     }
+
+    return new Sim(handle, model, overrides, enableLtm);
   }
 
   /** @internal */
@@ -95,7 +101,7 @@ export class Sim {
    */
   async time(): Promise<number> {
     this.checkDisposed();
-    return this.backend.simGetTime(this._handle);
+    return await this.backend.simGetTime(this._handle);
   }
 
   /**
@@ -104,7 +110,7 @@ export class Sim {
    */
   async runTo(time: number): Promise<void> {
     this.checkDisposed();
-    this.backend.simRunTo(this._handle, time);
+    await this.backend.simRunTo(this._handle, time);
   }
 
   /**
@@ -112,7 +118,7 @@ export class Sim {
    */
   async runToEnd(): Promise<void> {
     this.checkDisposed();
-    this.backend.simRunToEnd(this._handle);
+    await this.backend.simRunToEnd(this._handle);
   }
 
   /**
@@ -120,11 +126,11 @@ export class Sim {
    */
   async reset(): Promise<void> {
     this.checkDisposed();
-    this.backend.simReset(this._handle);
+    await this.backend.simReset(this._handle);
 
     // Re-apply overrides after reset
     for (const [name, value] of Object.entries(this._overrides)) {
-      this.backend.simSetValue(this._handle, name, value);
+      await this.backend.simSetValue(this._handle, name, value);
     }
   }
 
@@ -133,7 +139,7 @@ export class Sim {
    */
   async getStepCount(): Promise<number> {
     this.checkDisposed();
-    return this.backend.simGetStepCount(this._handle);
+    return await this.backend.simGetStepCount(this._handle);
   }
 
   /**
@@ -143,7 +149,7 @@ export class Sim {
    */
   async getValue(name: string): Promise<number> {
     this.checkDisposed();
-    return this.backend.simGetValue(this._handle, name);
+    return await this.backend.simGetValue(this._handle, name);
   }
 
   /**
@@ -153,7 +159,7 @@ export class Sim {
    */
   async setValue(name: string, value: number): Promise<void> {
     this.checkDisposed();
-    this.backend.simSetValue(this._handle, name, value);
+    await this.backend.simSetValue(this._handle, name, value);
   }
 
   /**
@@ -163,7 +169,7 @@ export class Sim {
    */
   async getSeries(name: string): Promise<Float64Array> {
     this.checkDisposed();
-    return this.backend.simGetSeries(this._handle, name);
+    return await this.backend.simGetSeries(this._handle, name);
   }
 
   /**
@@ -172,7 +178,7 @@ export class Sim {
    */
   async getVarNames(): Promise<string[]> {
     this.checkDisposed();
-    return this.backend.simGetVarNames(this._handle);
+    return await this.backend.simGetVarNames(this._handle);
   }
 
   /**
@@ -181,7 +187,7 @@ export class Sim {
    */
   async getLinks(): Promise<Link[]> {
     this.checkDisposed();
-    return this.backend.simGetLinks(this._handle);
+    return await this.backend.simGetLinks(this._handle);
   }
 
   /**
@@ -224,23 +230,24 @@ export class Sim {
    * Dispose this simulation and free WASM resources.
    */
   async dispose(): Promise<void> {
-    this.disposeSync();
+    if (this._disposed) {
+      return;
+    }
+
+    await this.backend.simDispose(this._handle);
+    this._disposed = true;
   }
 
-  /** @internal Synchronous dispose for Symbol.dispose and internal use */
-  disposeSync(): void {
+  /**
+   * Symbol.dispose support for using statement.
+   * Fire-and-forget for async backends.
+   */
+  [Symbol.dispose](): void {
     if (this._disposed) {
       return;
     }
 
     this.backend.simDispose(this._handle);
     this._disposed = true;
-  }
-
-  /**
-   * Symbol.dispose support for using statement.
-   */
-  [Symbol.dispose](): void {
-    this.disposeSync();
   }
 }

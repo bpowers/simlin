@@ -56,7 +56,7 @@ export class Project {
     const backend = getBackend();
     await backend.init(options.wasm);
     const data = typeof xmile === 'string' ? new TextEncoder().encode(xmile) : xmile;
-    const handle = backend.projectOpenXmile(data);
+    const handle = await backend.projectOpenXmile(data);
     return new Project(handle, backend);
   }
 
@@ -71,7 +71,7 @@ export class Project {
   static async openProtobuf(data: Uint8Array, options: ProjectOpenOptions = {}): Promise<Project> {
     const backend = getBackend();
     await backend.init(options.wasm);
-    const handle = backend.projectOpenProtobuf(data);
+    const handle = await backend.projectOpenProtobuf(data);
     return new Project(handle, backend);
   }
 
@@ -88,7 +88,7 @@ export class Project {
     await backend.init(options.wasm);
     const format = options.format ?? SimlinJsonFormat.Native;
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-    const handle = backend.projectOpenJson(bytes, format);
+    const handle = await backend.projectOpenJson(bytes, format);
     return new Project(handle, backend);
   }
 
@@ -105,7 +105,7 @@ export class Project {
     const backend = getBackend();
     await backend.init(options.wasm);
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-    const handle = backend.projectOpenVensim(bytes);
+    const handle = await backend.projectOpenVensim(bytes);
     return new Project(handle, backend);
   }
 
@@ -138,7 +138,7 @@ export class Project {
    */
   async modelCount(): Promise<number> {
     this.checkDisposed();
-    return this._backend.projectGetModelCount(this._handle);
+    return await this._backend.projectGetModelCount(this._handle);
   }
 
   /**
@@ -147,7 +147,7 @@ export class Project {
    */
   async getModelNames(): Promise<string[]> {
     this.checkDisposed();
-    return this._backend.projectGetModelNames(this._handle);
+    return await this._backend.projectGetModelNames(this._handle);
   }
 
   /**
@@ -179,7 +179,7 @@ export class Project {
       return cached;
     }
 
-    const modelHandle = this._backend.projectGetModel(this._handle, name);
+    const modelHandle = await this._backend.projectGetModel(this._handle, name);
     const model = new Model(modelHandle, this, name);
     this._models.set(cacheKey, model);
     return model;
@@ -206,7 +206,7 @@ export class Project {
    */
   async isSimulatable(modelName: string | null = null): Promise<boolean> {
     this.checkDisposed();
-    return this._backend.projectIsSimulatable(this._handle, modelName);
+    return await this._backend.projectIsSimulatable(this._handle, modelName);
   }
 
   /**
@@ -215,7 +215,7 @@ export class Project {
    */
   async serializeProtobuf(): Promise<Uint8Array> {
     this.checkDisposed();
-    return this._backend.projectSerializeProtobuf(this._handle);
+    return await this._backend.projectSerializeProtobuf(this._handle);
   }
 
   /**
@@ -225,7 +225,7 @@ export class Project {
    */
   async serializeJson(format: SimlinJsonFormat = SimlinJsonFormat.Native): Promise<string> {
     this.checkDisposed();
-    const bytes = this._backend.projectSerializeJson(this._handle, format);
+    const bytes = await this._backend.projectSerializeJson(this._handle, format);
     return new TextDecoder().decode(bytes);
   }
 
@@ -235,7 +235,7 @@ export class Project {
    */
   async toXmile(): Promise<Uint8Array> {
     this.checkDisposed();
-    return this._backend.projectSerializeXmile(this._handle);
+    return await this._backend.projectSerializeXmile(this._handle);
   }
 
   /**
@@ -253,7 +253,7 @@ export class Project {
    */
   async renderSvg(modelName: string): Promise<Uint8Array> {
     this.checkDisposed();
-    return this._backend.projectRenderSvg(this._handle, modelName);
+    return await this._backend.projectRenderSvg(this._handle, modelName);
   }
 
   /**
@@ -271,7 +271,7 @@ export class Project {
    */
   async getLoops(): Promise<Loop[]> {
     this.checkDisposed();
-    return this._backend.projectGetLoops(this._handle);
+    return await this._backend.projectGetLoops(this._handle);
   }
 
   /**
@@ -280,7 +280,7 @@ export class Project {
    */
   async getErrors(): Promise<ErrorDetail[]> {
     this.checkDisposed();
-    return this._backend.projectGetErrors(this._handle);
+    return await this._backend.projectGetErrors(this._handle);
   }
 
   /**
@@ -297,7 +297,7 @@ export class Project {
     this.checkDisposed();
     const { dryRun = false, allowErrors = false } = options;
 
-    const errors = this._backend.projectApplyPatch(this._handle, patch, dryRun, allowErrors);
+    const errors = await this._backend.projectApplyPatch(this._handle, patch, dryRun, allowErrors);
 
     // Invalidate all model caches since the project state changed
     if (!dryRun) {
@@ -314,30 +314,40 @@ export class Project {
    * After disposal, the project cannot be used.
    */
   async dispose(): Promise<void> {
-    this.disposeSync();
-  }
-
-  /** @internal Synchronous dispose for Symbol.dispose and internal use */
-  disposeSync(): void {
     if (this._disposed) {
       return;
     }
 
     // Dispose all cached models first (includes main model if accessed)
     for (const model of this._models.values()) {
-      model.disposeSync();
+      await model.dispose();
     }
     this._models.clear();
     this._mainModel = null;
 
-    this._backend.projectDispose(this._handle);
+    await this._backend.projectDispose(this._handle);
     this._disposed = true;
   }
 
   /**
    * Symbol.dispose support for using statement.
+   * Fires dispose but cannot await; for WorkerBackend the message
+   * is enqueued and will complete asynchronously.
    */
   [Symbol.dispose](): void {
-    this.disposeSync();
+    if (this._disposed) {
+      return;
+    }
+
+    for (const model of this._models.values()) {
+      model[Symbol.dispose]();
+    }
+    this._models.clear();
+    this._mainModel = null;
+
+    // Fire-and-forget: the backend call may return a Promise
+    // but we can't await in a synchronous dispose.
+    this._backend.projectDispose(this._handle);
+    this._disposed = true;
   }
 }
