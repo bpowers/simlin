@@ -42,6 +42,7 @@ export class WorkerBackend implements EngineBackend {
   private _nextRequestId = 1;
   private _pending = new Map<number, PendingRequest>();
   private _initialized = false;
+  private _initializing = false;
   private _storedWasmConfig: WasmConfig | null = null;
 
   // FIFO queue for strict serialization
@@ -138,27 +139,32 @@ export class WorkerBackend implements EngineBackend {
       return;
     }
 
-    // Send stored wasm config to worker if any
-    if (this._storedWasmConfig) {
-      const resolved = await this.resolveWasmSource(this._storedWasmConfig.source);
-      if (resolved) {
-        await this.sendRequest<void>((requestId) => ({
-          type: 'configureWasm',
-          requestId,
-          config: { source: resolved.buffer, url: resolved.url },
-        }));
+    this._initializing = true;
+    try {
+      // Send stored wasm config to worker if any
+      if (this._storedWasmConfig) {
+        const resolved = await this.resolveWasmSource(this._storedWasmConfig.source);
+        if (resolved) {
+          await this.sendRequest<void>((requestId) => ({
+            type: 'configureWasm',
+            requestId,
+            config: { source: resolved.buffer, url: resolved.url },
+          }));
+        }
+        this._storedWasmConfig = null;
       }
-      this._storedWasmConfig = null;
-    }
 
-    const resolved = await this.resolveWasmSource(wasmSource);
-    await this.sendRequest<void>((requestId) => ({
-      type: 'init',
-      requestId,
-      wasmSource: resolved?.buffer,
-      wasmUrl: resolved?.url,
-    }));
-    this._initialized = true;
+      const resolved = await this.resolveWasmSource(wasmSource);
+      await this.sendRequest<void>((requestId) => ({
+        type: 'init',
+        requestId,
+        wasmSource: resolved?.buffer,
+        wasmUrl: resolved?.url,
+      }));
+      this._initialized = true;
+    } finally {
+      this._initializing = false;
+    }
   }
 
   isInitialized(): boolean {
@@ -174,7 +180,7 @@ export class WorkerBackend implements EngineBackend {
   }
 
   configureWasm(config: WasmConfig): void {
-    if (this._initialized) {
+    if (this._initialized || this._initializing) {
       throw new Error('WASM already initialized');
     }
     // Store config locally; it will be sent to the worker during init().

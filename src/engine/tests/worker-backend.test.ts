@@ -81,6 +81,15 @@ describe('WorkerBackend', () => {
       expect(() => backend.configureWasm({ source: loadWasmSource() })).toThrow(/already initialized/i);
     });
 
+    test('configureWasm during init throws', async () => {
+      const { backend } = createTestPair();
+      // Start init but don't await it yet
+      const initPromise = backend.init(loadWasmSource());
+      // configureWasm should reject because init is in progress
+      expect(() => backend.configureWasm({ source: loadWasmSource() })).toThrow(/already initialized/i);
+      await initPromise;
+    });
+
     test('init with string path forwards to worker', async () => {
       const { backend } = createTestPair();
       await backend.init(wasmPath);
