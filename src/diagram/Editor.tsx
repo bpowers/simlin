@@ -334,6 +334,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         modelErrors: this.state.modelErrors.push(e as Error),
       });
     }
+    // Refresh cached errors after simulation so the error panel reflects
+    // any new simulation errors (e.g. runtime divide-by-zero).
+    await this.refreshCachedErrors();
   }
 
   async updateProject(serializedProject: Readonly<Uint8Array>, scheduleSave = true) {
@@ -1943,6 +1946,46 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       selectedTool: 'link',
     });
   };
+
+  async refreshCachedErrors(): Promise<void> {
+    const engine = this.engine();
+    if (!engine) {
+      return;
+    }
+
+    const modelName = this.state.modelName;
+    const errors = await engine.getErrors();
+    const { varErrors, unitErrors } = convertErrorDetails(errors, modelName);
+
+    let simError: SimError | undefined;
+    let cachedModelErrors = List<ModelError>();
+    for (const err of errors) {
+      if (err.modelName && err.modelName !== modelName) {
+        continue;
+      }
+      if (err.kind === SimlinErrorKind.Simulation) {
+        simError = new SimError({
+          code: err.code as unknown as ErrorCode,
+          details: err.message ?? undefined,
+        });
+      } else if (!err.variableName) {
+        cachedModelErrors = cachedModelErrors.push(
+          new ModelError({
+            code: err.code as unknown as ErrorCode,
+            details: err.message ?? undefined,
+          }),
+        );
+      }
+    }
+    this.setState({
+      cachedErrors: {
+        varErrors,
+        unitErrors,
+        simError,
+        modelErrors: cachedModelErrors,
+      },
+    });
+  }
 
   async updateVariableErrors(project: Project): Promise<Project> {
     const engine = this.engine();

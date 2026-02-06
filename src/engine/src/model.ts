@@ -541,7 +541,7 @@ export class Model {
 
     const result = this.backend.modelDispose(this._handle);
     if (result instanceof Promise) {
-      result.catch(() => {});
+      result.catch((e) => console.warn('Model dispose failed:', e));
     }
     this._disposed = true;
   }

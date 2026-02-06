@@ -12,7 +12,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project, configureWasm, ready, resetWasm } from '../src';
+import { Project, Model, Sim, configureWasm, ready, resetWasm } from '../src';
+import type { EngineBackend, ProjectHandle, ModelHandle, SimHandle } from '../src/backend';
 
 // Helper to load the WASM module
 async function loadWasm(): Promise<void> {
@@ -31,6 +32,106 @@ function loadTestXmile(): Uint8Array {
   }
   return fs.readFileSync(xmilePath);
 }
+
+// Minimal mock backend that rejects on dispose operations
+function createRejectingBackend(): EngineBackend {
+  return {
+    init: () => Promise.resolve(),
+    isInitialized: () => true,
+    reset: () => Promise.resolve(),
+    configureWasm: () => {},
+    projectOpenXmile: () => Promise.reject(new Error('not implemented')),
+    projectOpenProtobuf: () => Promise.reject(new Error('not implemented')),
+    projectOpenJson: () => Promise.reject(new Error('not implemented')),
+    projectOpenVensim: () => Promise.reject(new Error('not implemented')),
+    projectDispose: () => Promise.reject(new Error('project dispose failed')),
+    projectGetModelCount: () => Promise.reject(new Error('not implemented')),
+    projectGetModelNames: () => Promise.reject(new Error('not implemented')),
+    projectGetModel: () => Promise.reject(new Error('not implemented')),
+    projectIsSimulatable: () => Promise.reject(new Error('not implemented')),
+    projectSerializeProtobuf: () => Promise.reject(new Error('not implemented')),
+    projectSerializeJson: () => Promise.reject(new Error('not implemented')),
+    projectSerializeXmile: () => Promise.reject(new Error('not implemented')),
+    projectRenderSvg: () => Promise.reject(new Error('not implemented')),
+    projectGetLoops: () => Promise.reject(new Error('not implemented')),
+    projectGetErrors: () => Promise.reject(new Error('not implemented')),
+    projectApplyPatch: () => Promise.reject(new Error('not implemented')),
+    modelDispose: () => Promise.reject(new Error('model dispose failed')),
+    modelGetIncomingLinks: () => Promise.reject(new Error('not implemented')),
+    modelGetLinks: () => Promise.reject(new Error('not implemented')),
+    modelGetLatexEquation: () => Promise.reject(new Error('not implemented')),
+    simNew: () => Promise.resolve(99 as SimHandle),
+    simDispose: () => Promise.reject(new Error('sim dispose failed')),
+    simRunTo: () => Promise.reject(new Error('not implemented')),
+    simRunToEnd: () => Promise.reject(new Error('not implemented')),
+    simReset: () => Promise.reject(new Error('not implemented')),
+    simGetTime: () => Promise.reject(new Error('not implemented')),
+    simGetStepCount: () => Promise.reject(new Error('not implemented')),
+    simGetValue: () => Promise.reject(new Error('not implemented')),
+    simSetValue: () => Promise.reject(new Error('not implemented')),
+    simGetSeries: () => Promise.reject(new Error('not implemented')),
+    simGetVarNames: () => Promise.reject(new Error('not implemented')),
+    simGetLinks: () => Promise.reject(new Error('not implemented')),
+  };
+}
+
+describe('dispose warns on async backend errors', () => {
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('Project Symbol.dispose warns when backend rejects', async () => {
+    const backend = createRejectingBackend();
+    const project = new Project(1 as ProjectHandle, backend);
+
+    project[Symbol.dispose]();
+
+    // Wait for the promise rejection to be handled
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Project'),
+      expect.any(Error),
+    );
+  });
+
+  it('Model Symbol.dispose warns when backend rejects', async () => {
+    const backend = createRejectingBackend();
+    const project = new Project(1 as ProjectHandle, backend);
+    const model = new Model(2 as ModelHandle, project, 'main');
+
+    model[Symbol.dispose]();
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Model'),
+      expect.any(Error),
+    );
+  });
+
+  it('Sim Symbol.dispose warns when backend rejects', async () => {
+    const backend = createRejectingBackend();
+    const project = new Project(1 as ProjectHandle, backend);
+    const model = new Model(2 as ModelHandle, project, 'main');
+    const sim = await Sim.create(model);
+
+    sim[Symbol.dispose]();
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Sim'),
+      expect.any(Error),
+    );
+  });
+});
 
 describe('cleanup on dispose', () => {
   beforeAll(async () => {

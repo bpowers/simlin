@@ -249,7 +249,7 @@ export class Sim {
 
     const result = this.backend.simDispose(this._handle);
     if (result instanceof Promise) {
-      result.catch(() => {});
+      result.catch((e) => console.warn('Sim dispose failed:', e));
     }
     this._disposed = true;
   }

@@ -347,7 +347,7 @@ export class Project {
 
     const result = this._backend.projectDispose(this._handle);
     if (result instanceof Promise) {
-      result.catch(() => {});
+      result.catch((e) => console.warn('Project dispose failed:', e));
     }
     this._disposed = true;
   }
