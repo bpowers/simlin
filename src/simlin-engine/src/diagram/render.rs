@@ -1,4 +1,4 @@
-// Copyright 2024 The Simlin Authors. All rights reserved.
+// Copyright 2025 The Simlin Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -13,6 +13,7 @@ use crate::diagram::elements::{
 };
 use crate::diagram::flow::{flow_bounds, render_flow};
 
+// Keep in sync with the TypeScript source of truth: src/diagram/drawing/render-styles.ts
 const RENDER_STYLES: &str = r#"
 /* Canvas */
 .simlin-canvas text {
@@ -266,11 +267,12 @@ pub fn render_svg(project: &datamodel::Project, model_name: &str) -> Result<Stri
                 let source_uid = flow.points.first().and_then(|p| p.attached_to_uid);
                 let sink_uid = flow.points.last().and_then(|p| p.attached_to_uid);
                 if let (Some(source_uid), Some(sink_uid)) = (source_uid, sink_uid) {
-                    let source = uid_to_element.get(&source_uid);
-                    let sink = uid_to_element.get(&sink_uid);
-                    if let (Some(source), Some(sink)) = (source, sink) {
+                    if !uid_to_element.contains_key(&source_uid) {
+                        continue;
+                    }
+                    if let Some(sink) = uid_to_element.get(&sink_uid) {
                         let arrayed = is_arrayed(model, &flow.name);
-                        let svg = render_flow(flow, source, sink, arrayed);
+                        let svg = render_flow(flow, sink, arrayed);
                         let b = flow_bounds(flow);
                         (svg, Some(b), 3)
                     } else {

@@ -1,4 +1,4 @@
-// Copyright 2024 The Simlin Authors. All rights reserved.
+// Copyright 2025 The Simlin Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -21,10 +21,6 @@ const fn element_radius(element: &ViewElement) -> f64 {
     }
 }
 
-fn is_element_zero_radius(_element: &ViewElement) -> bool {
-    false
-}
-
 fn is_element_arrayed(element: &ViewElement, is_arrayed_fn: &dyn Fn(&str) -> bool) -> bool {
     match element {
         ViewElement::Aux(a) => is_arrayed_fn(&a.name),
@@ -44,10 +40,6 @@ fn get_visual_center(element: &ViewElement, is_arrayed_fn: &dyn Fn(&str) -> bool
         ViewElement::Cloud(c) => (c.x, c.y),
         ViewElement::Link(_) | ViewElement::Group(_) => (0.0, 0.0),
     };
-
-    if is_element_zero_radius(element) {
-        return (cx, cy);
-    }
 
     let offset = if is_element_arrayed(element, is_arrayed_fn) {
         ARRAYED_OFFSET
@@ -90,10 +82,7 @@ fn intersect_element_straight(
     theta: f64,
     is_arrayed_fn: &dyn Fn(&str) -> bool,
 ) -> Point {
-    let mut r = element_radius(element);
-    if is_element_zero_radius(element) {
-        r = 0.0;
-    }
+    let r = element_radius(element);
 
     let (cx, cy) = get_visual_center(element, is_arrayed_fn);
     Point {
@@ -108,10 +97,7 @@ fn intersect_element_arc(
     inv: bool,
     is_arrayed_fn: &dyn Fn(&str) -> bool,
 ) -> Point {
-    let mut r = element_radius(element);
-    if is_element_zero_radius(element) {
-        r = 0.0;
-    }
+    let r = element_radius(element);
 
     let (cx, cy) = get_visual_center(element, is_arrayed_fn);
     // Matches TypeScript: Math.tan(r / circ.r), not atan

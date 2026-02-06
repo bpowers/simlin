@@ -1,4 +1,4 @@
-// Copyright 2024 The Simlin Authors. All rights reserved.
+// Copyright 2025 The Simlin Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -78,13 +78,7 @@ pub fn js_format_number(n: f64) -> String {
         return format!("{}", n as i64);
     }
 
-    // For most numbers, Rust's default Display matches JS well enough.
-    // We need to handle edge cases where Rust uses more precision than JS.
-    let s = format!("{}", n);
-
-    // JS uses exponential notation for very large/small numbers differently
-    // but for the values we'll encounter in SVG coordinates, standard formatting works
-    s
+    format!("{}", n)
 }
 
 pub fn merge_bounds(a: Rect, b: Rect) -> Rect {

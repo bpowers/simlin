@@ -1,4 +1,4 @@
-// Copyright 2024 The Simlin Authors. All rights reserved.
+// Copyright 2025 The Simlin Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -11,12 +11,7 @@ use crate::diagram::common::{Rect, display_name, js_format_number, merge_bounds}
 use crate::diagram::constants::*;
 use crate::diagram::label::{LabelProps, label_bounds, render_label};
 
-pub fn render_flow(
-    element: &view_element::Flow,
-    _source: &ViewElement,
-    sink: &ViewElement,
-    is_arrayed: bool,
-) -> String {
+pub fn render_flow(element: &view_element::Flow, sink: &ViewElement, is_arrayed: bool) -> String {
     let arrayed_offset = if is_arrayed { ARRAYED_OFFSET } else { 0.0 };
 
     let mut pts: Vec<(f64, f64)> = element.points.iter().map(|p| (p.x, p.y)).collect();
@@ -230,10 +225,9 @@ mod tests {
             "flow1",
             vec![(100.0, 100.0, Some(1)), (200.0, 100.0, Some(2))],
         );
-        let source = make_stock_ve(100.0, 100.0, 1);
         let sink = make_cloud(200.0, 100.0, 2);
 
-        let svg = render_flow(&flow, &source, &sink, false);
+        let svg = render_flow(&flow, &sink, false);
         assert!(svg.contains("simlin-flow"));
         assert!(svg.contains("simlin-outer"));
         assert!(svg.contains("simlin-inner"));
@@ -249,10 +243,9 @@ mod tests {
             "flow1",
             vec![(100.0, 100.0, Some(1)), (200.0, 100.0, Some(2))],
         );
-        let source = make_stock_ve(100.0, 100.0, 1);
         let sink = make_stock_ve(200.0, 100.0, 2);
 
-        let svg = render_flow(&flow, &source, &sink, true);
+        let svg = render_flow(&flow, &sink, true);
         // 3 valve circles for arrayed
         let circle_count = svg.matches("<circle").count();
         assert_eq!(circle_count, 3);
@@ -295,10 +288,9 @@ mod tests {
             "flow1",
             vec![(100.0, 100.0, Some(1)), (200.0, 100.0, Some(2))],
         );
-        let source = make_stock_ve(100.0, 100.0, 1);
         let sink = make_stock_ve(200.0, 100.0, 2);
 
-        let svg = render_flow(&flow, &source, &sink, false);
+        let svg = render_flow(&flow, &sink, false);
         // Should NOT contain a sourceHitArea rect with cursor:grab
         assert!(!svg.contains("cursor:grab"));
         assert!(!svg.contains("fill=\"transparent\""));
@@ -307,10 +299,9 @@ mod tests {
     #[test]
     fn test_render_flow_empty_points() {
         let flow = make_flow(150.0, 100.0, "flow1", vec![]);
-        let source = make_stock_ve(100.0, 100.0, 1);
         let sink = make_stock_ve(200.0, 100.0, 2);
 
-        let svg = render_flow(&flow, &source, &sink, false);
+        let svg = render_flow(&flow, &sink, false);
         assert!(svg.is_empty());
     }
 }
