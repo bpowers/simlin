@@ -10,6 +10,7 @@ const config = {
   moduleFileExtensions: ['ts', 'js'],
   moduleNameMapper: {
     '^@simlin/engine/internal/wasm$': '<rootDir>/src/internal/wasm.node.ts',
+    '^@simlin/engine/internal/backend-factory$': '<rootDir>/src/backend-factory.node.ts',
   },
 };
 

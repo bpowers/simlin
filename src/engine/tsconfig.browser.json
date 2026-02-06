@@ -6,8 +6,9 @@
     "module": "esnext",
     "paths": {
       "@simlin/engine/internal/wasm": ["src/internal/wasm.browser.ts"],
+      "@simlin/engine/internal/backend-factory": ["src/backend-factory.browser.ts"],
       "@simlin/engine/*": ["src/*"]
     }
   },
-  "exclude": ["lib", "lib.browser", "src/internal/wasm.node.ts", "tests", "eslint.config.js"]
+  "exclude": ["lib", "lib.browser", "src/internal/wasm.node.ts", "src/backend-factory.node.ts", "tests", "eslint.config.js"]
 }

@@ -2,91 +2,125 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-jest.mock('../src/internal/analysis', () => ({
-  simlin_analyze_get_loops: jest.fn(),
-  simlin_free_loops: jest.fn(),
-  readLoops: jest.fn(),
-  simlin_analyze_get_links: jest.fn(),
-  simlin_free_links: jest.fn(),
-  readLinks: jest.fn(),
-}));
+/**
+ * Tests for resource cleanup behavior.
+ *
+ * These tests verify that WASM resources are properly cleaned up
+ * when dispose is called on Project, Model, and Sim objects.
+ */
 
-jest.mock('../src/internal/model', () => ({
-  simlin_model_unref: jest.fn(),
-  simlin_model_get_incoming_links: jest.fn(),
-  simlin_model_get_links: jest.fn(),
-  simlin_model_get_latex_equation: jest.fn(),
-}));
+import * as fs from 'fs';
+import * as path from 'path';
 
-jest.mock('../src/internal/sim', () => ({
-  simlin_sim_new: jest.fn(),
-  simlin_sim_unref: jest.fn(),
-  simlin_sim_run_to: jest.fn(),
-  simlin_sim_run_to_end: jest.fn(),
-  simlin_sim_reset: jest.fn(),
-  simlin_sim_get_stepcount: jest.fn(),
-  simlin_sim_get_value: jest.fn(),
-  simlin_sim_set_value: jest.fn(),
-  simlin_sim_get_series: jest.fn(),
-}));
+import { Project, configureWasm, ready, resetWasm } from '../src';
 
-jest.mock('../src/internal/dispose', () => ({
-  registerFinalizer: jest.fn(),
-  unregisterFinalizer: jest.fn(),
-}));
+// Helper to load the WASM module
+async function loadWasm(): Promise<void> {
+  const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
+  const wasmBuffer = fs.readFileSync(wasmPath);
+  resetWasm();
+  configureWasm({ source: wasmBuffer });
+  await ready();
+}
 
-import { Project } from '../src/project';
-import { Model } from '../src/model';
-import { Sim } from '../src/sim';
-import * as analysis from '../src/internal/analysis';
-import * as modelInternal from '../src/internal/model';
-import * as simInternal from '../src/internal/sim';
+// Load the teacup test model in XMILE format
+function loadTestXmile(): Uint8Array {
+  const xmilePath = path.join(__dirname, '..', '..', 'pysimlin', 'tests', 'fixtures', 'teacup.stmx');
+  if (!fs.existsSync(xmilePath)) {
+    throw new Error('Required test XMILE model not found: ' + xmilePath);
+  }
+  return fs.readFileSync(xmilePath);
+}
 
-const mockedAnalysis = jest.mocked(analysis);
-const mockedModel = jest.mocked(modelInternal);
-const mockedSim = jest.mocked(simInternal);
-
-describe('cleanup on read errors', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
+describe('cleanup on dispose', () => {
+  beforeAll(async () => {
+    await loadWasm();
   });
 
-  it('frees loops when Project.getLoops throws during decoding', () => {
-    mockedAnalysis.simlin_analyze_get_loops.mockReturnValue(123);
-    mockedAnalysis.readLoops.mockImplementation(() => {
-      throw new Error('decode failed');
-    });
+  it('project dispose is idempotent', async () => {
+    const project = await Project.open(loadTestXmile());
 
-    const ProjectCtor = Project as unknown as new (ptr: number) => Project;
-    const project = new ProjectCtor(1);
+    // First dispose should succeed
+    await project.dispose();
 
-    expect(() => project.getLoops()).toThrow('decode failed');
-    expect(mockedAnalysis.simlin_free_loops).toHaveBeenCalledWith(123);
+    // Second dispose should also succeed (idempotent)
+    await project.dispose();
   });
 
-  it('frees links when Model.getLinks throws during decoding', () => {
-    mockedModel.simlin_model_get_links.mockReturnValue(456);
-    mockedAnalysis.readLinks.mockImplementation(() => {
-      throw new Error('decode failed');
-    });
+  it('model dispose is idempotent', async () => {
+    const project = await Project.open(loadTestXmile());
+    const model = await project.mainModel();
 
-    const model = new Model(1, null, null);
+    // First dispose should succeed
+    await model.dispose();
 
-    expect(() => model.getLinks()).toThrow('decode failed');
-    expect(mockedAnalysis.simlin_free_links).toHaveBeenCalledWith(456);
+    // Second dispose should also succeed (idempotent)
+    await model.dispose();
+
+    await project.dispose();
   });
 
-  it('frees links when Sim.getLinks throws during decoding', () => {
-    mockedSim.simlin_sim_new.mockReturnValue(7);
-    mockedAnalysis.simlin_analyze_get_links.mockReturnValue(789);
-    mockedAnalysis.readLinks.mockImplementation(() => {
-      throw new Error('decode failed');
-    });
+  it('sim dispose is idempotent', async () => {
+    const project = await Project.open(loadTestXmile());
+    const model = await project.mainModel();
+    const sim = await model.simulate();
 
-    const model = new Model(1, null, null);
-    const sim = new Sim(model, {}, false);
+    // First dispose should succeed
+    await sim.dispose();
 
-    expect(() => sim.getLinks()).toThrow('decode failed');
-    expect(mockedAnalysis.simlin_free_links).toHaveBeenCalledWith(789);
+    // Second dispose should also succeed (idempotent)
+    await sim.dispose();
+
+    await project.dispose();
+  });
+
+  it('project dispose cascades to models', async () => {
+    const project = await Project.open(loadTestXmile());
+    const model = await project.mainModel();
+
+    // Verify model works before dispose
+    expect((await model.stocks()).length).toBeGreaterThan(0);
+
+    // Dispose project
+    await project.dispose();
+
+    // Model should be disposed (throws on use)
+    await expect(model.stocks()).rejects.toThrow();
+  });
+
+  it('operations on disposed project throw', async () => {
+    const project = await Project.open(loadTestXmile());
+    await project.dispose();
+
+    await expect(project.getModelNames()).rejects.toThrow();
+    await expect(project.mainModel()).rejects.toThrow();
+    await expect(project.serializeJson()).rejects.toThrow();
+    await expect(project.serializeProtobuf()).rejects.toThrow();
+  });
+
+  it('operations on disposed model throw', async () => {
+    const project = await Project.open(loadTestXmile());
+    const model = await project.mainModel();
+    await model.dispose();
+
+    await expect(model.stocks()).rejects.toThrow();
+    await expect(model.flows()).rejects.toThrow();
+    await expect(model.variables()).rejects.toThrow();
+    await expect(model.getLinks()).rejects.toThrow();
+
+    await project.dispose();
+  });
+
+  it('operations on disposed sim throw', async () => {
+    const project = await Project.open(loadTestXmile());
+    const model = await project.mainModel();
+    const sim = await model.simulate();
+    await sim.dispose();
+
+    await expect(sim.time()).rejects.toThrow();
+    await expect(sim.getValue('teacup temperature')).rejects.toThrow();
+    await expect(sim.runToEnd()).rejects.toThrow();
+
+    await project.dispose();
   });
 });

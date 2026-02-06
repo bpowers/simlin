@@ -53,9 +53,9 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
   async loadProject() {
     const serializedProject = toUint8Array(this.props.projectPbBase64);
     const engineProject = await EngineProject.openProtobuf(serializedProject);
-    const json = JSON.parse(engineProject.serializeJson()) as JsonProject;
+    const json = JSON.parse(await engineProject.serializeJson()) as JsonProject;
     let project = Project.fromJson(json);
-    engineProject.dispose();
+    await engineProject.dispose();
 
     if (this.props.data !== undefined) {
       project = project.attachData(this.props.data, 'main');

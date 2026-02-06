@@ -9,9 +9,10 @@
     "lib": ["es2020", "dom"],
     "paths": {
       "@simlin/engine/internal/wasm": ["src/internal/wasm.node.ts"],
+      "@simlin/engine/internal/backend-factory": ["src/backend-factory.node.ts"],
       "@simlin/engine/*": ["src/*"]
     }
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["lib", "lib.browser", "src/internal/wasm.browser.ts", "tests", "eslint.config.js"]
+  "exclude": ["lib", "lib.browser", "src/internal/wasm.browser.ts", "src/backend-factory.browser.ts", "tests", "eslint.config.js"]
 }

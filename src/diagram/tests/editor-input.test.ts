@@ -9,15 +9,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project as Project, configureWasm, ready } from '@simlin/engine';
-import { reset } from '@simlin/engine/internal/wasm';
+import { Project as Project, configureWasm, ready, resetWasm } from '@simlin/engine';
 
 import type { EditorProps, ProtobufProjectData, JsonProjectData, ProjectData } from '../Editor';
 
 async function loadWasm(): Promise<void> {
   const wasmPath = path.join(__dirname, '..', '..', 'engine', 'core', 'libsimlin.wasm');
   const wasmBuffer = fs.readFileSync(wasmPath);
-  reset();
+  resetWasm();
   configureWasm({ source: wasmBuffer });
   await ready();
 }
@@ -76,51 +75,53 @@ describe('Editor input format types', () => {
       const xmileData = loadTestXmile();
       const project = await Project.open(xmileData);
 
-      const protobuf = project.serializeProtobuf();
+      const protobuf = await project.serializeProtobuf();
       expect(protobuf).toBeInstanceOf(Uint8Array);
       expect(protobuf.length).toBeGreaterThan(0);
 
       const project2 = await Project.openProtobuf(protobuf);
-      expect(project2.getModelNames()).toEqual(project.getModelNames());
+      expect(await project2.getModelNames()).toEqual(await project.getModelNames());
 
-      project.dispose();
-      project2.dispose();
+      await project.dispose();
+      await project2.dispose();
     });
 
     it('should roundtrip project from XMILE to JSON and back', async () => {
       const xmileData = loadTestXmile();
       const project = await Project.open(xmileData);
 
-      const json = project.serializeJson();
+      const json = await project.serializeJson();
       expect(typeof json).toBe('string');
       expect(json.length).toBeGreaterThan(0);
 
       const project2 = await Project.openJson(json);
-      expect(project2.getModelNames()).toEqual(project.getModelNames());
+      expect(await project2.getModelNames()).toEqual(await project.getModelNames());
 
-      project.dispose();
-      project2.dispose();
+      await project.dispose();
+      await project2.dispose();
     });
 
     it('should produce equivalent projects from protobuf and JSON formats', async () => {
       const xmileData = loadTestXmile();
       const originalProject = await Project.open(xmileData);
 
-      const protobuf = originalProject.serializeProtobuf();
-      const json = originalProject.serializeJson();
+      const protobuf = await originalProject.serializeProtobuf();
+      const json = await originalProject.serializeJson();
 
       const projectFromProtobuf = await Project.openProtobuf(protobuf);
       const projectFromJson = await Project.openJson(json);
 
-      expect(projectFromProtobuf.getModelNames()).toEqual(projectFromJson.getModelNames());
+      expect(await projectFromProtobuf.getModelNames()).toEqual(await projectFromJson.getModelNames());
 
-      const protobufVars = projectFromProtobuf.mainModel.variables.map((v) => v.name).sort();
-      const jsonVars = projectFromJson.mainModel.variables.map((v) => v.name).sort();
+      const protobufModel = await projectFromProtobuf.mainModel();
+      const jsonModel = await projectFromJson.mainModel();
+      const protobufVars = (await protobufModel.variables()).map((v) => v.name).sort();
+      const jsonVars = (await jsonModel.variables()).map((v) => v.name).sort();
       expect(protobufVars).toEqual(jsonVars);
 
-      originalProject.dispose();
-      projectFromProtobuf.dispose();
-      projectFromJson.dispose();
+      await originalProject.dispose();
+      await projectFromProtobuf.dispose();
+      await projectFromJson.dispose();
     });
   });
 
@@ -128,7 +129,7 @@ describe('Editor input format types', () => {
     it('should discriminate ProtobufProjectData by format field', async () => {
       const xmileData = loadTestXmile();
       const project = await Project.open(xmileData);
-      const protobuf = project.serializeProtobuf();
+      const protobuf = await project.serializeProtobuf();
 
       const data: ProjectData = {
         format: 'protobuf',
@@ -138,19 +139,19 @@ describe('Editor input format types', () => {
       if (data.format === 'protobuf') {
         expect(data.data).toBeInstanceOf(Uint8Array);
         const reopenedProject = await Project.openProtobuf(data.data as Uint8Array);
-        expect(reopenedProject.isSimulatable()).toBe(true);
-        reopenedProject.dispose();
+        expect(await reopenedProject.isSimulatable()).toBe(true);
+        await reopenedProject.dispose();
       } else {
         throw new Error('Should have discriminated as protobuf');
       }
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should discriminate JsonProjectData by format field', async () => {
       const xmileData = loadTestXmile();
       const project = await Project.open(xmileData);
-      const json = project.serializeJson();
+      const json = await project.serializeJson();
 
       const data: ProjectData = {
         format: 'json',
@@ -160,13 +161,13 @@ describe('Editor input format types', () => {
       if (data.format === 'json') {
         expect(typeof data.data).toBe('string');
         const reopenedProject = await Project.openJson(data.data);
-        expect(reopenedProject.isSimulatable()).toBe(true);
-        reopenedProject.dispose();
+        expect(await reopenedProject.isSimulatable()).toBe(true);
+        await reopenedProject.dispose();
       } else {
         throw new Error('Should have discriminated as json');
       }
 
-      project.dispose();
+      await project.dispose();
     });
   });
 
@@ -179,16 +180,16 @@ describe('Editor input format types', () => {
       let result: ProjectData;
 
       if (inputFormat === 'json') {
-        result = { format: 'json', data: project.serializeJson() };
+        result = { format: 'json', data: await project.serializeJson() };
       } else {
-        result = { format: 'protobuf', data: project.serializeProtobuf() };
+        result = { format: 'protobuf', data: await project.serializeProtobuf() };
       }
 
       expect(result.format).toBe('protobuf');
       expect(result.data).toBeInstanceOf(Uint8Array);
       expect((result.data as Uint8Array).length).toBeGreaterThan(0);
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should return JSON format when inputFormat is json', async () => {
@@ -199,9 +200,9 @@ describe('Editor input format types', () => {
       let result: ProjectData;
 
       if (inputFormat === 'json') {
-        result = { format: 'json', data: project.serializeJson() };
+        result = { format: 'json', data: await project.serializeJson() };
       } else {
-        result = { format: 'protobuf', data: project.serializeProtobuf() };
+        result = { format: 'protobuf', data: await project.serializeProtobuf() };
       }
 
       expect(result.format).toBe('json');
@@ -209,7 +210,7 @@ describe('Editor input format types', () => {
       const parsed = JSON.parse(result.data as string);
       expect(parsed).toHaveProperty('models');
 
-      project.dispose();
+      await project.dispose();
     });
   });
 
@@ -217,8 +218,8 @@ describe('Editor input format types', () => {
     it('should open project from protobuf when inputFormat is protobuf', async () => {
       const xmileData = loadTestXmile();
       const originalProject = await Project.open(xmileData);
-      const protobuf = originalProject.serializeProtobuf();
-      originalProject.dispose();
+      const protobuf = await originalProject.serializeProtobuf();
+      await originalProject.dispose();
 
       const inputFormat: 'protobuf' | 'json' = 'protobuf';
       let project: Project;
@@ -230,17 +231,18 @@ describe('Editor input format types', () => {
       }
 
       expect(project).toBeDefined();
-      expect(project.isSimulatable()).toBe(true);
-      expect(project.mainModel.variables.length).toBeGreaterThan(0);
+      expect(await project.isSimulatable()).toBe(true);
+      const model = await project.mainModel();
+      expect((await model.variables()).length).toBeGreaterThan(0);
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should open project from JSON when inputFormat is json', async () => {
       const xmileData = loadTestXmile();
       const originalProject = await Project.open(xmileData);
-      const json = originalProject.serializeJson();
-      originalProject.dispose();
+      const json = await originalProject.serializeJson();
+      await originalProject.dispose();
 
       const inputFormat: 'protobuf' | 'json' = 'json';
       let project: Project;
@@ -252,10 +254,11 @@ describe('Editor input format types', () => {
       }
 
       expect(project).toBeDefined();
-      expect(project.isSimulatable()).toBe(true);
-      expect(project.mainModel.variables.length).toBeGreaterThan(0);
+      expect(await project.isSimulatable()).toBe(true);
+      const model = await project.mainModel();
+      expect((await model.variables()).length).toBeGreaterThan(0);
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should throw error for invalid JSON input', async () => {
@@ -274,34 +277,37 @@ describe('Editor input format types', () => {
       const xmileData = loadTestXmile();
       const originalProject = await Project.open(xmileData);
 
-      const originalVars = originalProject.mainModel.variables.map((v) => v.name).sort();
-      const originalStocks = originalProject.mainModel.stocks.map((s) => s.name).sort();
-      const originalFlows = originalProject.mainModel.flows.map((f) => f.name).sort();
+      const origModel = await originalProject.mainModel();
+      const originalVars = (await origModel.variables()).map((v) => v.name).sort();
+      const originalStocks = (await origModel.stocks()).map((s) => s.name).sort();
+      const originalFlows = (await origModel.flows()).map((f) => f.name).sort();
 
-      const protobuf = originalProject.serializeProtobuf();
-      const json = originalProject.serializeJson();
+      const protobuf = await originalProject.serializeProtobuf();
+      const json = await originalProject.serializeJson();
 
       const projectFromProtobuf = await Project.openProtobuf(protobuf);
-      const varsFromProtobuf = projectFromProtobuf.mainModel.variables.map((v) => v.name).sort();
-      const stocksFromProtobuf = projectFromProtobuf.mainModel.stocks.map((s) => s.name).sort();
-      const flowsFromProtobuf = projectFromProtobuf.mainModel.flows.map((f) => f.name).sort();
+      const pbModel = await projectFromProtobuf.mainModel();
+      const varsFromProtobuf = (await pbModel.variables()).map((v) => v.name).sort();
+      const stocksFromProtobuf = (await pbModel.stocks()).map((s) => s.name).sort();
+      const flowsFromProtobuf = (await pbModel.flows()).map((f) => f.name).sort();
 
       expect(varsFromProtobuf).toEqual(originalVars);
       expect(stocksFromProtobuf).toEqual(originalStocks);
       expect(flowsFromProtobuf).toEqual(originalFlows);
 
       const projectFromJson = await Project.openJson(json);
-      const varsFromJson = projectFromJson.mainModel.variables.map((v) => v.name).sort();
-      const stocksFromJson = projectFromJson.mainModel.stocks.map((s) => s.name).sort();
-      const flowsFromJson = projectFromJson.mainModel.flows.map((f) => f.name).sort();
+      const jsonModel = await projectFromJson.mainModel();
+      const varsFromJson = (await jsonModel.variables()).map((v) => v.name).sort();
+      const stocksFromJson = (await jsonModel.stocks()).map((s) => s.name).sort();
+      const flowsFromJson = (await jsonModel.flows()).map((f) => f.name).sort();
 
       expect(varsFromJson).toEqual(originalVars);
       expect(stocksFromJson).toEqual(originalStocks);
       expect(flowsFromJson).toEqual(originalFlows);
 
-      originalProject.dispose();
-      projectFromProtobuf.dispose();
-      projectFromJson.dispose();
+      await originalProject.dispose();
+      await projectFromProtobuf.dispose();
+      await projectFromJson.dispose();
     });
   });
 
@@ -309,7 +315,7 @@ describe('Editor input format types', () => {
     it('should enforce protobuf callback receives ProtobufProjectData', async () => {
       const xmileData = loadTestXmile();
       const project = await Project.open(xmileData);
-      const protobuf = project.serializeProtobuf();
+      const protobuf = await project.serializeProtobuf();
 
       const receivedData: ProtobufProjectData[] = [];
       const mockOnSave = async (data: ProtobufProjectData, _currVersion: number): Promise<number | undefined> => {
@@ -325,16 +331,16 @@ describe('Editor input format types', () => {
       expect(receivedData[0].data).toBeInstanceOf(Uint8Array);
 
       const reopened = await Project.openProtobuf(receivedData[0].data as Uint8Array);
-      expect(reopened.isSimulatable()).toBe(true);
-      reopened.dispose();
+      expect(await reopened.isSimulatable()).toBe(true);
+      await reopened.dispose();
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should enforce JSON callback receives JsonProjectData', async () => {
       const xmileData = loadTestXmile();
       const project = await Project.open(xmileData);
-      const json = project.serializeJson();
+      const json = await project.serializeJson();
 
       const receivedData: JsonProjectData[] = [];
       const mockOnSave = async (data: JsonProjectData, _currVersion: number): Promise<number | undefined> => {
@@ -350,10 +356,10 @@ describe('Editor input format types', () => {
       expect(typeof receivedData[0].data).toBe('string');
 
       const reopened = await Project.openJson(receivedData[0].data);
-      expect(reopened.isSimulatable()).toBe(true);
-      reopened.dispose();
+      expect(await reopened.isSimulatable()).toBe(true);
+      await reopened.dispose();
 
-      project.dispose();
+      await project.dispose();
     });
   });
 });

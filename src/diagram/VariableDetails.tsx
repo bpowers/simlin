@@ -38,7 +38,7 @@ import styles from './VariableDetails.module.css';
 interface VariableDetailsProps {
   variable: Variable;
   viewElement: ViewElement;
-  getLatexEquation?: (ident: string) => string | undefined;
+  getLatexEquation?: (ident: string) => Promise<string | undefined>;
   onDelete: (ident: string) => void;
   onEquationChange: (
     ident: string,
@@ -59,6 +59,8 @@ interface VariableDetailsState {
   notesContents: Descendant[];
   notesEditor: CustomEditor;
   editingEquation: boolean;
+  latexEquation: string | undefined;
+  latexLoading: boolean;
 }
 
 function stringFromDescendants(children: Descendant[]): string {
@@ -147,7 +149,29 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
       notesEditor: withHistory(withReact(createEditor())) as unknown as CustomEditor,
       notesContents: descendantsFromString(props.variable.documentation),
       editingEquation: !!(props.variable.errors && props.variable.errors.size > 0),
+      latexEquation: undefined,
+      latexLoading: false,
     };
+  }
+
+  componentDidMount() {
+    this.loadLatex();
+  }
+
+  private async loadLatex() {
+    const { getLatexEquation, viewElement } = this.props;
+    if (!getLatexEquation) return;
+
+    const ident = viewElement.ident;
+    if (!ident) return;
+
+    this.setState({ latexLoading: true });
+    try {
+      const latex = await getLatexEquation(ident);
+      this.setState({ latexEquation: latex, latexLoading: false });
+    } catch {
+      this.setState({ latexEquation: undefined, latexLoading: false });
+    }
   }
 
   handleEquationChange = (equation: Descendant[]): void => {
@@ -297,10 +321,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     let latexHTML = '';
     if (showPreview) {
       try {
-        const ident = defined(this.props.viewElement.ident);
-        let latex = this.props.getLatexEquation
-          ? (this.props.getLatexEquation(ident) ?? passthroughLatex(equationStr))
-          : passthroughLatex(equationStr);
+        let latex = this.state.latexEquation ?? passthroughLatex(equationStr);
         // Hint line breaks after common binary operators and commas for nicer wrapping
         const insertBreaks = (s: string): string =>
           s

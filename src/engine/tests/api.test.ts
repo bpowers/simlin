@@ -12,15 +12,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder, configureWasm, ready } from '../src';
+import { Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder, configureWasm, ready, resetWasm } from '../src';
 import { JsonStock, JsonFlow, JsonAuxiliary } from '../src/json-types';
-import { reset } from '@simlin/engine/internal/wasm';
 
 // Helper to load the WASM module
 async function loadWasm(): Promise<void> {
   const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
   const wasmBuffer = fs.readFileSync(wasmPath);
-  reset();
+  resetWasm();
   configureWasm({ source: wasmBuffer });
   await ready();
 }
@@ -56,93 +55,93 @@ describe('High-Level API', () => {
     it('should load from XMILE data', async () => {
       const project = await openTestProject();
       expect(project).toBeInstanceOf(Project);
-      project.dispose();
+      await project.dispose();
     });
 
     it('should get model names', async () => {
       const project = await openTestProject();
 
-      const modelNames = project.getModelNames();
+      const modelNames = await project.getModelNames();
       expect(Array.isArray(modelNames)).toBe(true);
       expect(modelNames.length).toBeGreaterThan(0);
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should get the main model', async () => {
       const project = await openTestProject();
 
-      const model = project.mainModel;
+      const model = await project.mainModel();
       expect(model).toBeInstanceOf(Model);
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should get a model by name', async () => {
       const project = await openTestProject();
 
-      const modelNames = project.getModelNames();
-      const model = project.getModel(modelNames[0]);
+      const modelNames = await project.getModelNames();
+      const model = await project.getModel(modelNames[0]);
       expect(model).toBeInstanceOf(Model);
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should check if project is simulatable', async () => {
       const project = await openTestProject();
 
-      const isSimulatable = project.isSimulatable();
+      const isSimulatable = await project.isSimulatable();
       expect(isSimulatable).toBe(true);
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should serialize to protobuf and back', async () => {
       const project1 = await openTestProject();
 
-      const protobuf = project1.serializeProtobuf();
+      const protobuf = await project1.serializeProtobuf();
       expect(protobuf).toBeInstanceOf(Uint8Array);
       expect(protobuf.length).toBeGreaterThan(0);
 
       const project2 = await Project.openProtobuf(protobuf);
-      expect(project2.getModelNames()).toEqual(project1.getModelNames());
+      expect(await project2.getModelNames()).toEqual(await project1.getModelNames());
 
-      project1.dispose();
-      project2.dispose();
+      await project1.dispose();
+      await project2.dispose();
     });
 
     it('should serialize to JSON', async () => {
       const project = await openTestProject();
 
-      const json = project.serializeJson();
+      const json = await project.serializeJson();
       expect(typeof json).toBe('string');
 
       const parsed = JSON.parse(json);
       expect(parsed).toHaveProperty('models');
       expect(parsed).toHaveProperty('simSpecs');
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should get loops', async () => {
       const project = await openTestProject();
 
-      const loops = project.getLoops();
+      const loops = await project.getLoops();
       expect(Array.isArray(loops)).toBe(true);
       // The teacup model may or may not have feedback loops
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should get errors', async () => {
       const project = await openTestProject();
 
       // The teacup model should have no errors
-      const errors = project.getErrors();
+      const errors = await project.getErrors();
       expect(Array.isArray(errors)).toBe(true);
       expect(errors.length).toBe(0);
 
-      project.dispose();
+      await project.dispose();
     });
   });
 
@@ -153,18 +152,18 @@ describe('High-Level API', () => {
       project = await openTestProject();
     });
 
-    afterAll(() => {
-      project.dispose();
+    afterAll(async () => {
+      await project.dispose();
     });
 
-    it('should have a reference to its project', () => {
-      const model = project.mainModel;
+    it('should have a reference to its project', async () => {
+      const model = await project.mainModel();
       expect(model.project).toBe(project);
     });
 
-    it('should get stocks', () => {
-      const model = project.mainModel;
-      const stocks = model.stocks;
+    it('should get stocks', async () => {
+      const model = await project.mainModel();
+      const stocks = await model.stocks();
 
       expect(Array.isArray(stocks)).toBe(true);
       // teacup model has at least one stock (teacup temperature)
@@ -178,9 +177,9 @@ describe('High-Level API', () => {
       expect(Array.isArray(stock.outflows)).toBe(true);
     });
 
-    it('should get flows', () => {
-      const model = project.mainModel;
-      const flows = model.flows;
+    it('should get flows', async () => {
+      const model = await project.mainModel();
+      const flows = await model.flows();
 
       expect(Array.isArray(flows)).toBe(true);
       // teacup model has flows
@@ -192,9 +191,9 @@ describe('High-Level API', () => {
       }
     });
 
-    it('should get auxiliaries', () => {
-      const model = project.mainModel;
-      const auxs = model.auxs;
+    it('should get auxiliaries', async () => {
+      const model = await project.mainModel();
+      const auxs = await model.auxs();
 
       expect(Array.isArray(auxs)).toBe(true);
 
@@ -205,26 +204,29 @@ describe('High-Level API', () => {
       }
     });
 
-    it('should get all variables', () => {
-      const model = project.mainModel;
-      const variables = model.variables;
+    it('should get all variables', async () => {
+      const model = await project.mainModel();
+      const variables = await model.variables();
+      const stocks = await model.stocks();
+      const flows = await model.flows();
+      const auxs = await model.auxs();
 
       expect(Array.isArray(variables)).toBe(true);
-      expect(variables.length).toBe(model.stocks.length + model.flows.length + model.auxs.length);
+      expect(variables.length).toBe(stocks.length + flows.length + auxs.length);
     });
 
-    it('should include teacup temperature variable', () => {
-      const model = project.mainModel;
-      const variables = model.variables;
+    it('should include teacup temperature variable', async () => {
+      const model = await project.mainModel();
+      const variables = await model.variables();
 
       const teacupTemp = variables.find((v) => v.name === 'teacup temperature');
       expect(teacupTemp).toBeDefined();
       expect(teacupTemp!.type).toBe('stock');
     });
 
-    it('should get time spec', () => {
-      const model = project.mainModel;
-      const timeSpec = model.timeSpec;
+    it('should get time spec', async () => {
+      const model = await project.mainModel();
+      const timeSpec = await model.timeSpec();
 
       expect(typeof timeSpec.start).toBe('number');
       expect(typeof timeSpec.stop).toBe('number');
@@ -233,27 +235,28 @@ describe('High-Level API', () => {
       expect(timeSpec.dt).toBeGreaterThan(0);
     });
 
-    it('should get structural loops', () => {
-      const model = project.mainModel;
-      const loops = model.loops;
+    it('should get structural loops', async () => {
+      const model = await project.mainModel();
+      const loops = await model.loops();
 
       expect(Array.isArray(loops)).toBe(true);
     });
 
-    it('should get incoming links for a variable', () => {
-      const model = project.mainModel;
+    it('should get incoming links for a variable', async () => {
+      const model = await project.mainModel();
+      const flows = await model.flows();
 
       // Find a flow that has dependencies
-      const flow = model.flows[0];
+      const flow = flows[0];
       if (flow) {
-        const incomingLinks = model.getIncomingLinks(flow.name);
+        const incomingLinks = await model.getIncomingLinks(flow.name);
         expect(Array.isArray(incomingLinks)).toBe(true);
       }
     });
 
-    it('should get all causal links', () => {
-      const model = project.mainModel;
-      const links = model.getLinks();
+    it('should get all causal links', async () => {
+      const model = await project.mainModel();
+      const links = await model.getLinks();
 
       expect(Array.isArray(links)).toBe(true);
       for (const link of links) {
@@ -263,18 +266,18 @@ describe('High-Level API', () => {
       }
     });
 
-    it('should explain a variable', () => {
-      const model = project.mainModel;
-      const explanation = model.explain('teacup temperature');
+    it('should explain a variable', async () => {
+      const model = await project.mainModel();
+      const explanation = await model.explain('teacup temperature');
 
       expect(typeof explanation).toBe('string');
       expect(explanation.length).toBeGreaterThan(0);
       expect(explanation).toContain('teacup temperature');
     });
 
-    it('should check model for issues', () => {
-      const model = project.mainModel;
-      const issues = model.check();
+    it('should check model for issues', async () => {
+      const model = await project.mainModel();
+      const issues = await model.check();
 
       expect(Array.isArray(issues)).toBe(true);
       // teacup model should have no issues
@@ -289,171 +292,176 @@ describe('High-Level API', () => {
       project = await openTestProject();
     });
 
-    afterAll(() => {
-      project.dispose();
+    afterAll(async () => {
+      await project.dispose();
     });
 
-    it('should create a simulation from a model', () => {
-      const model = project.mainModel;
-      const sim = model.simulate();
+    it('should create a simulation from a model', async () => {
+      const model = await project.mainModel();
+      const sim = await model.simulate();
 
       expect(sim).toBeInstanceOf(Sim);
-      sim.dispose();
+      await sim.dispose();
     });
 
-    it('should get current time', () => {
-      const model = project.mainModel;
-      const sim = model.simulate();
+    it('should get current time', async () => {
+      const model = await project.mainModel();
+      const sim = await model.simulate();
+      const timeSpec = await model.timeSpec();
 
-      const time = sim.time;
+      const time = await sim.time();
       expect(typeof time).toBe('number');
-      expect(time).toBe(model.timeSpec.start);
+      expect(time).toBe(timeSpec.start);
 
-      sim.dispose();
+      await sim.dispose();
     });
 
-    it('should run to a specific time', () => {
-      const model = project.mainModel;
-      const sim = model.simulate();
+    it('should run to a specific time', async () => {
+      const model = await project.mainModel();
+      const sim = await model.simulate();
+      const timeSpec = await model.timeSpec();
 
-      const targetTime = model.timeSpec.start + 5;
-      sim.runTo(targetTime);
+      const targetTime = timeSpec.start + 5;
+      await sim.runTo(targetTime);
 
       // Time should be at or past the target
-      expect(sim.time).toBeGreaterThanOrEqual(targetTime);
+      expect(await sim.time()).toBeGreaterThanOrEqual(targetTime);
 
-      sim.dispose();
+      await sim.dispose();
     });
 
-    it('should run to end', () => {
-      const model = project.mainModel;
-      const sim = model.simulate();
+    it('should run to end', async () => {
+      const model = await project.mainModel();
+      const sim = await model.simulate();
+      const timeSpec = await model.timeSpec();
 
-      sim.runToEnd();
+      await sim.runToEnd();
 
       // Time should be at the end
-      expect(sim.time).toBe(model.timeSpec.stop);
+      expect(await sim.time()).toBe(timeSpec.stop);
 
-      sim.dispose();
+      await sim.dispose();
     });
 
-    it('should reset simulation', () => {
-      const model = project.mainModel;
-      const sim = model.simulate();
+    it('should reset simulation', async () => {
+      const model = await project.mainModel();
+      const sim = await model.simulate();
+      const timeSpec = await model.timeSpec();
 
-      sim.runToEnd();
-      sim.reset();
+      await sim.runToEnd();
+      await sim.reset();
 
-      expect(sim.time).toBe(model.timeSpec.start);
+      expect(await sim.time()).toBe(timeSpec.start);
 
-      sim.dispose();
+      await sim.dispose();
     });
 
-    it('should get step count', () => {
-      const model = project.mainModel;
-      const sim = model.simulate();
+    it('should get step count', async () => {
+      const model = await project.mainModel();
+      const sim = await model.simulate();
 
-      sim.runToEnd();
+      await sim.runToEnd();
 
-      const stepCount = sim.getStepCount();
+      const stepCount = await sim.getStepCount();
       expect(stepCount).toBeGreaterThan(0);
 
-      sim.dispose();
+      await sim.dispose();
     });
 
-    it('should get variable value', () => {
-      const model = project.mainModel;
-      const sim = model.simulate();
+    it('should get variable value', async () => {
+      const model = await project.mainModel();
+      const sim = await model.simulate();
+      const timeSpec = await model.timeSpec();
 
-      sim.runTo(model.timeSpec.start + 1);
+      await sim.runTo(timeSpec.start + 1);
 
-      const value = sim.getValue('teacup temperature');
+      const value = await sim.getValue('teacup temperature');
       expect(typeof value).toBe('number');
       expect(isFinite(value)).toBe(true);
 
-      sim.dispose();
+      await sim.dispose();
     });
 
-    it('should set variable value', () => {
-      const model = project.mainModel;
-      const sim = model.simulate();
+    it('should set variable value', async () => {
+      const model = await project.mainModel();
+      const sim = await model.simulate();
 
       const newValue = 100;
-      sim.setValue('teacup temperature', newValue);
+      await sim.setValue('teacup temperature', newValue);
 
-      const value = sim.getValue('teacup temperature');
+      const value = await sim.getValue('teacup temperature');
       expect(value).toBe(newValue);
 
-      sim.dispose();
+      await sim.dispose();
     });
 
-    it('should get time series for a variable', () => {
-      const model = project.mainModel;
-      const sim = model.simulate();
+    it('should get time series for a variable', async () => {
+      const model = await project.mainModel();
+      const sim = await model.simulate();
 
-      sim.runToEnd();
-      const series = sim.getSeries('teacup temperature');
+      await sim.runToEnd();
+      const series = await sim.getSeries('teacup temperature');
 
       expect(series).toBeInstanceOf(Float64Array);
-      expect(series.length).toBe(sim.getStepCount());
+      expect(series.length).toBe(await sim.getStepCount());
 
       // Verify temperature decreases over time (cooling)
       expect(series[0]).toBeGreaterThan(series[series.length - 1]);
 
-      sim.dispose();
+      await sim.dispose();
     });
 
-    it('should get variable names', () => {
-      const model = project.mainModel;
-      const sim = model.simulate();
+    it('should get variable names', async () => {
+      const model = await project.mainModel();
+      const sim = await model.simulate();
 
-      const varNames = sim.getVarNames();
+      const varNames = await sim.getVarNames();
       expect(Array.isArray(varNames)).toBe(true);
       // Simulation uses canonical names (underscores)
       expect(varNames).toContain('teacup_temperature');
 
-      sim.dispose();
+      await sim.dispose();
     });
 
-    it('should convert to a Run object', () => {
-      const model = project.mainModel;
-      const sim = model.simulate();
+    it('should convert to a Run object', async () => {
+      const model = await project.mainModel();
+      const sim = await model.simulate();
 
-      sim.runToEnd();
-      const run = sim.getRun();
+      await sim.runToEnd();
+      const run = await sim.getRun();
 
       expect(run).toBeInstanceOf(Run);
 
-      sim.dispose();
+      await sim.dispose();
     });
 
-    it('should create simulation with overrides', () => {
-      const model = project.mainModel;
+    it('should create simulation with overrides', async () => {
+      const model = await project.mainModel();
       // Simulation uses canonical names (underscores)
       // Note: room_temperature is a constant aux, so it can be overridden
-      const sim = model.simulate({ room_temperature: 30 });
+      const sim = await model.simulate({ room_temperature: 30 });
 
       // Override should be tracked
       expect(sim.overrides).toEqual({ room_temperature: 30 });
 
       // Override should affect initial state
-      const initialRoomTemp = sim.getValue('room_temperature');
+      const initialRoomTemp = await sim.getValue('room_temperature');
       expect(initialRoomTemp).toBe(30);
 
-      sim.dispose();
+      await sim.dispose();
     });
 
-    it('should create simulation with LTM enabled', () => {
-      const model = project.mainModel;
-      const sim = model.simulate({}, { enableLtm: true });
+    it('should create simulation with LTM enabled', async () => {
+      const model = await project.mainModel();
+      const sim = await model.simulate({}, { enableLtm: true });
 
-      sim.runToEnd();
+      await sim.runToEnd();
 
       // Should be able to get links with LTM scores
-      const links = sim.getLinks();
+      const links = await sim.getLinks();
       expect(Array.isArray(links)).toBe(true);
 
-      sim.dispose();
+      await sim.dispose();
     });
   });
 
@@ -464,20 +472,20 @@ describe('High-Level API', () => {
       project = await openTestProject();
     });
 
-    afterAll(() => {
-      project.dispose();
+    afterAll(async () => {
+      await project.dispose();
     });
 
-    it('should run a simulation and get Run object', () => {
-      const model = project.mainModel;
-      const run = model.run();
+    it('should run a simulation and get Run object', async () => {
+      const model = await project.mainModel();
+      const run = await model.run();
 
       expect(run).toBeInstanceOf(Run);
     });
 
-    it('should get results as a map of series', () => {
-      const model = project.mainModel;
-      const run = model.run();
+    it('should get results as a map of series', async () => {
+      const model = await project.mainModel();
+      const run = await model.run();
 
       const results = run.results;
       expect(results).toBeInstanceOf(Map);
@@ -489,9 +497,9 @@ describe('High-Level API', () => {
       expect(tempSeries).toBeInstanceOf(Float64Array);
     });
 
-    it('should get series for a specific variable', () => {
-      const model = project.mainModel;
-      const run = model.run();
+    it('should get series for a specific variable', async () => {
+      const model = await project.mainModel();
+      const run = await model.run();
 
       // Results use canonical names (underscores)
       const series = run.getSeries('teacup_temperature');
@@ -499,36 +507,37 @@ describe('High-Level API', () => {
       expect(series.length).toBeGreaterThan(0);
     });
 
-    it('should get time series', () => {
-      const model = project.mainModel;
-      const run = model.run();
+    it('should get time series', async () => {
+      const model = await project.mainModel();
+      const run = await model.run();
+      const timeSpec = await model.timeSpec();
 
       const time = run.time;
       expect(time).toBeInstanceOf(Float64Array);
-      expect(time[0]).toBe(model.timeSpec.start);
-      expect(time[time.length - 1]).toBe(model.timeSpec.stop);
+      expect(time[0]).toBe(timeSpec.start);
+      expect(time[time.length - 1]).toBe(timeSpec.stop);
     });
 
-    it('should get overrides', () => {
-      const model = project.mainModel;
+    it('should get overrides', async () => {
+      const model = await project.mainModel();
       // Overrides use canonical names (underscores)
       const overrides = { room_temperature: 25 };
-      const run = model.run(overrides);
+      const run = await model.run(overrides);
 
       expect(run.overrides).toEqual(overrides);
     });
 
-    it('should get loops with behavior data', () => {
-      const model = project.mainModel;
-      const run = model.run();
+    it('should get loops with behavior data', async () => {
+      const model = await project.mainModel();
+      const run = await model.run();
 
       const loops = run.loops;
       expect(Array.isArray(loops)).toBe(true);
     });
 
-    it('should get variable names', () => {
-      const model = project.mainModel;
-      const run = model.run();
+    it('should get variable names', async () => {
+      const model = await project.mainModel();
+      const run = await model.run();
 
       const varNames = run.varNames;
       expect(Array.isArray(varNames)).toBe(true);
@@ -544,22 +553,22 @@ describe('High-Level API', () => {
       project = await openTestProject();
     });
 
-    afterAll(() => {
-      project.dispose();
+    afterAll(async () => {
+      await project.dispose();
     });
 
-    it('should compute base case on first access', () => {
-      const model = project.mainModel;
-      const baseCase = model.baseCase;
+    it('should compute base case on first access', async () => {
+      const model = await project.mainModel();
+      const baseCase = await model.baseCase();
 
       expect(baseCase).toBeInstanceOf(Run);
       expect(baseCase.overrides).toEqual({});
     });
 
-    it('should cache base case', () => {
-      const model = project.mainModel;
-      const baseCase1 = model.baseCase;
-      const baseCase2 = model.baseCase;
+    it('should cache base case', async () => {
+      const model = await project.mainModel();
+      const baseCase1 = await model.baseCase();
+      const baseCase2 = await model.baseCase();
 
       // Should be the same instance (cached)
       expect(baseCase1).toBe(baseCase2);
@@ -655,14 +664,14 @@ describe('High-Level API', () => {
       project = await openTestProject();
     });
 
-    afterEach(() => {
-      project.dispose();
+    afterEach(async () => {
+      await project.dispose();
     });
 
-    it('should provide current variables and patch builder', () => {
-      const model = project.mainModel;
+    it('should provide current variables and patch builder', async () => {
+      const model = await project.mainModel();
 
-      model.edit((currentVars, patch) => {
+      await model.edit((currentVars, patch) => {
         expect(typeof currentVars).toBe('object');
         expect(patch).toBeInstanceOf(ModelPatchBuilder);
 
@@ -671,11 +680,11 @@ describe('High-Level API', () => {
       });
     });
 
-    it('should apply patch after edit completes', () => {
-      const model = project.mainModel;
+    it('should apply patch after edit completes', async () => {
+      const model = await project.mainModel();
 
       // Add a new auxiliary variable
-      model.edit((currentVars, patch) => {
+      await model.edit((currentVars, patch) => {
         patch.upsertAux({
           name: 'new_constant',
           equation: '42',
@@ -683,29 +692,29 @@ describe('High-Level API', () => {
       });
 
       // After edit, the model should have the new variable
-      const auxs = model.auxs;
+      const auxs = await model.auxs();
       const newConst = auxs.find((a) => a.name === 'new_constant');
       expect(newConst).toBeDefined();
       expect(newConst!.equation).toBe('42');
     });
 
-    it('should not apply patch if no operations added', () => {
-      const model = project.mainModel;
-      const originalAuxCount = model.auxs.length;
+    it('should not apply patch if no operations added', async () => {
+      const model = await project.mainModel();
+      const originalAuxCount = (await model.auxs()).length;
 
-      model.edit((currentVars, patch) => {
+      await model.edit(() => {
         // Don't add any operations
       });
 
       // No change should occur
-      expect(model.auxs.length).toBe(originalAuxCount);
+      expect((await model.auxs()).length).toBe(originalAuxCount);
     });
 
-    it('should support dry run mode', () => {
-      const model = project.mainModel;
-      const originalAuxCount = model.auxs.length;
+    it('should support dry run mode', async () => {
+      const model = await project.mainModel();
+      const originalAuxCount = (await model.auxs()).length;
 
-      model.edit(
+      await model.edit(
         (currentVars, patch) => {
           patch.upsertAux({
             name: 'dry_run_aux',
@@ -716,19 +725,19 @@ describe('High-Level API', () => {
       );
 
       // In dry run mode, changes should NOT be applied
-      expect(model.auxs.length).toBe(originalAuxCount);
-      expect(model.auxs.find((a) => a.name === 'dry_run_aux')).toBeUndefined();
+      expect((await model.auxs()).length).toBe(originalAuxCount);
+      expect((await model.auxs()).find((a) => a.name === 'dry_run_aux')).toBeUndefined();
     });
 
-    it('should invalidate caches after edit', () => {
-      const model = project.mainModel;
+    it('should invalidate caches after edit', async () => {
+      const model = await project.mainModel();
 
       // Access stocks to populate cache
-      const stocksBefore = model.stocks;
+      const stocksBefore = await model.stocks();
       expect(stocksBefore.length).toBeGreaterThan(0);
 
       // Add a new stock
-      model.edit((currentVars, patch) => {
+      await model.edit((currentVars, patch) => {
         patch.upsertStock({
           name: 'new_stock',
           initialEquation: '50',
@@ -738,7 +747,7 @@ describe('High-Level API', () => {
       });
 
       // Cache should be invalidated, stocks should include new stock
-      const stocksAfter = model.stocks;
+      const stocksAfter = await model.stocks();
       expect(stocksAfter.length).toBe(stocksBefore.length + 1);
       expect(stocksAfter.find((s) => s.name === 'new_stock')).toBeDefined();
     });
@@ -747,24 +756,24 @@ describe('High-Level API', () => {
   describe('Project.open* factory methods', () => {
     it('should load from XMILE data and access mainModel', async () => {
       const project = await openTestProject();
-      const model = project.mainModel;
+      const model = await project.mainModel();
 
       expect(model).toBeInstanceOf(Model);
-      expect(model.variables.find((v) => v.name === 'teacup temperature')).toBeDefined();
+      expect((await model.variables()).find((v) => v.name === 'teacup temperature')).toBeDefined();
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should load from JSON string and access mainModel', async () => {
       const project1 = await openTestProject();
-      const json = project1.serializeJson();
-      project1.dispose();
+      const json = await project1.serializeJson();
+      await project1.dispose();
 
       const project2 = await Project.openJson(json);
-      const model = project2.mainModel;
+      const model = await project2.mainModel();
       expect(model).toBeInstanceOf(Model);
 
-      project2.dispose();
+      await project2.dispose();
     });
   });
 
@@ -773,37 +782,37 @@ describe('High-Level API', () => {
       const project = await openTestProject();
 
       // Access model before dispose
-      const model = project.mainModel;
+      const model = await project.mainModel();
       expect(model).toBeInstanceOf(Model);
 
       // Dispose should not throw
-      project.dispose();
+      await project.dispose();
 
       // Accessing disposed project should throw or return invalid state
-      expect(() => project.getModelNames()).toThrow();
+      await expect(project.getModelNames()).rejects.toThrow();
     });
 
     it('should properly dispose simulation', async () => {
       const project = await openTestProject();
-      const model = project.mainModel;
-      const sim = model.simulate();
+      const model = await project.mainModel();
+      const sim = await model.simulate();
 
-      sim.runToEnd();
+      await sim.runToEnd();
 
       // Dispose should not throw
-      sim.dispose();
+      await sim.dispose();
 
       // Accessing disposed sim should throw
-      expect(() => sim.getValue('teacup temperature')).toThrow();
+      await expect(sim.getValue('teacup temperature')).rejects.toThrow();
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should support using statement pattern (Symbol.dispose)', async () => {
       // Test that dispose method exists and can be called
       const project = await openTestProject();
       expect(typeof project.dispose).toBe('function');
-      project.dispose();
+      await project.dispose();
     });
   });
 
@@ -844,18 +853,20 @@ describe('High-Level API', () => {
       const project = await Project.openJson(JSON.stringify(projectJson));
 
       // Model with override should use model-level sim_specs
-      const modelWithOverride = project.getModel('model_with_override');
-      expect(modelWithOverride.timeSpec.start).toBe(10);
-      expect(modelWithOverride.timeSpec.stop).toBe(50);
-      expect(modelWithOverride.timeSpec.dt).toBe(0.5);
+      const modelWithOverride = await project.getModel('model_with_override');
+      const overrideTimeSpec = await modelWithOverride.timeSpec();
+      expect(overrideTimeSpec.start).toBe(10);
+      expect(overrideTimeSpec.stop).toBe(50);
+      expect(overrideTimeSpec.dt).toBe(0.5);
 
       // Model without override should use project-level sim_specs
-      const modelWithoutOverride = project.getModel('model_without_override');
-      expect(modelWithoutOverride.timeSpec.start).toBe(0);
-      expect(modelWithoutOverride.timeSpec.stop).toBe(100);
-      expect(modelWithoutOverride.timeSpec.dt).toBe(1);
+      const modelWithoutOverride = await project.getModel('model_without_override');
+      const defaultTimeSpec = await modelWithoutOverride.timeSpec();
+      expect(defaultTimeSpec.start).toBe(0);
+      expect(defaultTimeSpec.stop).toBe(100);
+      expect(defaultTimeSpec.dt).toBe(1);
 
-      project.dispose();
+      await project.dispose();
     });
 
     // Test for: Stock initialEquation should read from arrayedEquation.initialEquation
@@ -889,14 +900,15 @@ describe('High-Level API', () => {
       };
 
       const project = await Project.openJson(JSON.stringify(projectJson));
-      const model = project.mainModel;
+      const model = await project.mainModel();
 
-      const stock = model.stocks.find((s) => s.name === 'population');
+      const stocks = await model.stocks();
+      const stock = stocks.find((s) => s.name === 'population');
       expect(stock).toBeDefined();
       expect(stock!.initialEquation).toBe('1000');
       expect(stock!.dimensions).toEqual(['Region']);
 
-      project.dispose();
+      await project.dispose();
     });
 
     // Test for: Model.check() should filter results to this model only
@@ -918,20 +930,20 @@ describe('High-Level API', () => {
       const project = await Project.open(xmileData);
 
       // This project has multiple models (main, 'a', 'b')
-      const modelNames = project.getModelNames();
+      const modelNames = await project.getModelNames();
       expect(modelNames.length).toBeGreaterThan(1);
 
       // Get all project errors to understand what we're filtering
-      const allProjectErrors = project.getErrors();
+      const allProjectErrors = await project.getErrors();
 
       // For each model, check() should only return errors for THAT model
       for (const modelName of modelNames) {
-        const model = project.getModel(modelName);
-        const modelIssues = model.check();
+        const model = await project.getModel(modelName);
+        const modelIssues = await model.check();
 
         // Get the actual model name from JSON for comparison
         // (since modelName could be null for main model)
-        const projectJson = JSON.parse(project.serializeJson());
+        const projectJson = JSON.parse(await project.serializeJson());
         const modelJson = projectJson.models.find(
           (m: { name: string }) => m.name === modelName || (modelName === null && m.name),
         );
@@ -944,7 +956,7 @@ describe('High-Level API', () => {
         expect(modelIssues.length).toBe(expectedErrorsForModel.length);
       }
 
-      project.dispose();
+      await project.dispose();
     });
 
     // Test that main model errors don't leak to other models
@@ -970,11 +982,11 @@ describe('High-Level API', () => {
       const project = await Project.openJson(JSON.stringify(projectJson));
 
       // Get all project errors
-      const allErrors = project.getErrors();
+      const allErrors = await project.getErrors();
 
       // main model should report the error
-      const mainModel = project.mainModel;
-      const mainIssues = mainModel.check();
+      const mainModel = await project.mainModel();
+      const mainIssues = await mainModel.check();
 
       // If project reports errors for 'main', main model should report them
       const mainErrors = allErrors.filter((e) => e.modelName === 'main');
@@ -985,7 +997,7 @@ describe('High-Level API', () => {
         expect(mainIssues[0].message).toContain('unknown_reference');
       }
 
-      project.dispose();
+      await project.dispose();
     });
 
     // Test filtering with actual multi-model errors
@@ -1004,8 +1016,8 @@ describe('High-Level API', () => {
       const project = await Project.open(xmileData);
 
       // Get errors per model
-      const allErrors = project.getErrors();
-      const modelNames = project.getModelNames();
+      const allErrors = await project.getErrors();
+      const modelNames = await project.getModelNames();
 
       // Count errors per model name
       const errorCountByModel = new Map<string, number>();
@@ -1018,32 +1030,32 @@ describe('High-Level API', () => {
 
       // Verify each model's check() returns correct count
       for (const modelName of modelNames) {
-        const model = project.getModel(modelName);
-        const issues = model.check();
+        const model = await project.getModel(modelName);
+        const issues = await model.check();
         const expectedCount = errorCountByModel.get(modelName) || 0;
         expect(issues.length).toBe(expectedCount);
       }
 
-      project.dispose();
+      await project.dispose();
     });
 
     // Test for: Edit callback should not crash if callback throws
     it('should handle errors in edit callback gracefully', async () => {
       const project = await openTestProject();
-      const model = project.mainModel;
+      const model = await project.mainModel();
 
       // Callback that throws an error
-      expect(() => {
-        model.edit((currentVars, patch) => {
+      await expect(
+        model.edit(() => {
           throw new Error('Simulated user error');
-        });
-      }).toThrow('Simulated user error');
+        }),
+      ).rejects.toThrow('Simulated user error');
 
       // Model should still be usable after failed edit
-      expect(model.stocks.length).toBeGreaterThan(0);
-      expect(() => model.variables).not.toThrow();
+      expect((await model.stocks()).length).toBeGreaterThan(0);
+      await expect(model.variables()).resolves.toBeDefined();
 
-      project.dispose();
+      await project.dispose();
     });
 
     // Test for: Project.dispose() should dispose cached models
@@ -1051,29 +1063,29 @@ describe('High-Level API', () => {
       const project = await openTestProject();
 
       // Access the main model to cache it
-      const model = project.mainModel;
+      const model = await project.mainModel();
       expect(model).toBeDefined();
 
       // Dispose project
-      project.dispose();
+      await project.dispose();
 
       // Accessing the model after project disposal should throw
       // (because the model was disposed along with the project)
-      expect(() => model.variables).toThrow();
+      await expect(model.variables()).rejects.toThrow();
     });
 
     // Test for: Link polarity should be validated at runtime
     it('should have valid link polarity values', async () => {
       const project = await openTestProject();
-      const model = project.mainModel;
+      const model = await project.mainModel();
 
-      const links = model.getLinks();
+      const links = await model.getLinks();
 
       for (const link of links) {
         expect([LinkPolarity.Positive, LinkPolarity.Negative, LinkPolarity.Unknown]).toContain(link.polarity);
       }
 
-      project.dispose();
+      await project.dispose();
     });
 
     // Test for: Link view polarity and useLetteredPolarity should round-trip through JSON
@@ -1109,7 +1121,7 @@ describe('High-Level API', () => {
       };
 
       const project = await Project.openJson(JSON.stringify(projectJson));
-      const json = project.serializeJson();
+      const json = await project.serializeJson();
       const parsed = JSON.parse(json);
 
       const view = parsed.models[0].views[0];
@@ -1119,7 +1131,7 @@ describe('High-Level API', () => {
       expect(linkElem).toBeDefined();
       expect(linkElem.polarity).toBe('+');
 
-      project.dispose();
+      await project.dispose();
     });
   });
 
@@ -1129,14 +1141,15 @@ describe('High-Level API', () => {
       const project = await Project.openVensim(mdlData);
 
       expect(project).toBeInstanceOf(Project);
-      expect(project.modelCount).toBeGreaterThan(0);
+      expect(await project.modelCount()).toBeGreaterThan(0);
 
       // The teacup model should have the expected variables
-      const model = project.mainModel;
-      const varNames = model.variables.map((v) => v.name.toLowerCase());
+      const model = await project.mainModel();
+      const variables = await model.variables();
+      const varNames = variables.map((v) => v.name.toLowerCase());
       expect(varNames).toContain('teacup_temperature');
 
-      project.dispose();
+      await project.dispose();
     });
 
     it('should accept MDL data as string', async () => {
@@ -1145,16 +1158,16 @@ describe('High-Level API', () => {
       const project = await Project.openVensim(mdlString);
 
       expect(project).toBeInstanceOf(Project);
-      project.dispose();
+      await project.dispose();
     });
 
     it('should simulate models loaded from MDL', async () => {
       const mdlData = loadTestMdl();
       const project = await Project.openVensim(mdlData);
-      const model = project.mainModel;
+      const model = await project.mainModel();
 
       // Run simulation
-      const run = model.run();
+      const run = await model.run();
       expect(run).toBeInstanceOf(Run);
 
       // Get results
@@ -1168,7 +1181,7 @@ describe('High-Level API', () => {
         expect(tempSeries[0]).toBeGreaterThan(tempSeries[tempSeries.length - 1]);
       }
 
-      project.dispose();
+      await project.dispose();
     });
   });
 });

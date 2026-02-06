@@ -10,38 +10,8 @@
  * For batch analysis, use Model.run() instead.
  */
 
-import {
-  simlin_sim_new,
-  simlin_sim_unref,
-  simlin_sim_run_to,
-  simlin_sim_run_to_end,
-  simlin_sim_reset,
-  simlin_sim_get_stepcount,
-  simlin_sim_get_value,
-  simlin_sim_set_value,
-  simlin_sim_get_series,
-} from './internal/sim';
-import { simlin_model_get_var_names } from './internal/model';
-import { simlin_analyze_get_links, simlin_free_links, readLinks } from './internal/analysis';
-import { SimlinSimPtr, SimlinLinkPolarity, Link as LowLevelLink } from './internal/types';
-import { Link, LinkPolarity } from './types';
-import { registerFinalizer, unregisterFinalizer } from './internal/dispose';
-
-/**
- * Convert low-level link polarity to high-level type with validation.
- */
-function convertLinkPolarity(rawPolarity: SimlinLinkPolarity): LinkPolarity {
-  switch (rawPolarity) {
-    case SimlinLinkPolarity.Positive:
-      return LinkPolarity.Positive;
-    case SimlinLinkPolarity.Negative:
-      return LinkPolarity.Negative;
-    case SimlinLinkPolarity.Unknown:
-      return LinkPolarity.Unknown;
-    default:
-      throw new Error(`Invalid link polarity value: ${rawPolarity}`);
-  }
-}
+import { EngineBackend, SimHandle } from './backend';
+import { Link } from './types';
 import { Model } from './model';
 import { Run } from './run';
 
@@ -53,7 +23,7 @@ import { Run } from './run';
  * and get time series data.
  */
 export class Sim {
-  private _ptr: SimlinSimPtr;
+  private _handle: SimHandle;
   private _model: Model;
   private _overrides: Record<string, number>;
   private _disposed: boolean = false;
@@ -64,25 +34,26 @@ export class Sim {
    * This is internal - use Model.simulate() instead.
    */
   constructor(model: Model, overrides: Record<string, number> = {}, enableLtm: boolean = false) {
-    const ptr = simlin_sim_new(model.ptr, enableLtm);
-    this._ptr = ptr;
+    if (model.project === null) {
+      throw new Error('Model is not attached to a Project');
+    }
+    const backend = model.project.backend;
+    const handle = backend.simNew(model.handle, enableLtm);
+    this._handle = handle;
     this._model = model;
     this._overrides = { ...overrides };
     this._enableLtm = enableLtm;
-    registerFinalizer(this, ptr, simlin_sim_unref);
 
     // Apply any overrides
     for (const [name, value] of Object.entries(overrides)) {
-      simlin_sim_set_value(ptr, name, value);
+      backend.simSetValue(handle, name, value);
     }
   }
 
-  /**
-   * Get the internal WASM pointer. For internal use only.
-   */
-  get ptr(): SimlinSimPtr {
+  /** @internal */
+  get handle(): SimHandle {
     this.checkDisposed();
-    return this._ptr;
+    return this._handle;
   }
 
   /**
@@ -106,6 +77,13 @@ export class Sim {
     return this._enableLtm;
   }
 
+  private get backend(): EngineBackend {
+    if (this._model.project === null) {
+      throw new Error('Model is not attached to a Project');
+    }
+    return this._model.project.backend;
+  }
+
   private checkDisposed(): void {
     if (this._disposed) {
       throw new Error('Sim has been disposed');
@@ -115,47 +93,47 @@ export class Sim {
   /**
    * Get the current simulation time.
    */
-  get time(): number {
+  async time(): Promise<number> {
     this.checkDisposed();
-    return simlin_sim_get_value(this._ptr, 'time');
+    return this.backend.simGetTime(this._handle);
   }
 
   /**
    * Run the simulation to a specific time.
    * @param time Target time
    */
-  runTo(time: number): void {
+  async runTo(time: number): Promise<void> {
     this.checkDisposed();
-    simlin_sim_run_to(this._ptr, time);
+    this.backend.simRunTo(this._handle, time);
   }
 
   /**
    * Run the simulation to the end.
    */
-  runToEnd(): void {
+  async runToEnd(): Promise<void> {
     this.checkDisposed();
-    simlin_sim_run_to_end(this._ptr);
+    this.backend.simRunToEnd(this._handle);
   }
 
   /**
    * Reset the simulation to initial state.
    */
-  reset(): void {
+  async reset(): Promise<void> {
     this.checkDisposed();
-    simlin_sim_reset(this._ptr);
+    this.backend.simReset(this._handle);
 
     // Re-apply overrides after reset
     for (const [name, value] of Object.entries(this._overrides)) {
-      simlin_sim_set_value(this._ptr, name, value);
+      this.backend.simSetValue(this._handle, name, value);
     }
   }
 
   /**
    * Get the number of simulation steps completed.
    */
-  getStepCount(): number {
+  async getStepCount(): Promise<number> {
     this.checkDisposed();
-    return simlin_sim_get_stepcount(this._ptr);
+    return this.backend.simGetStepCount(this._handle);
   }
 
   /**
@@ -163,9 +141,9 @@ export class Sim {
    * @param name Variable name
    * @returns Current value
    */
-  getValue(name: string): number {
+  async getValue(name: string): Promise<number> {
     this.checkDisposed();
-    return simlin_sim_get_value(this._ptr, name);
+    return this.backend.simGetValue(this._handle, name);
   }
 
   /**
@@ -173,9 +151,9 @@ export class Sim {
    * @param name Variable name
    * @param value New value
    */
-  setValue(name: string, value: number): void {
+  async setValue(name: string, value: number): Promise<void> {
     this.checkDisposed();
-    simlin_sim_set_value(this._ptr, name, value);
+    this.backend.simSetValue(this._handle, name, value);
   }
 
   /**
@@ -183,69 +161,79 @@ export class Sim {
    * @param name Variable name
    * @returns Float64Array with time series data
    */
-  getSeries(name: string): Float64Array {
+  async getSeries(name: string): Promise<Float64Array> {
     this.checkDisposed();
-    const stepCount = this.getStepCount();
-    return simlin_sim_get_series(this._ptr, name, stepCount);
+    return this.backend.simGetSeries(this._handle, name);
   }
 
   /**
    * Get variable names available in this simulation.
    * @returns Array of variable names
    */
-  getVarNames(): string[] {
+  async getVarNames(): Promise<string[]> {
     this.checkDisposed();
-    return simlin_model_get_var_names(this._model.ptr);
+    return this.backend.simGetVarNames(this._handle);
   }
 
   /**
    * Get causal links with LTM scores (if enabled).
    * @returns Array of Link objects
    */
-  getLinks(): Link[] {
+  async getLinks(): Promise<Link[]> {
     this.checkDisposed();
-
-    const linksPtr = simlin_analyze_get_links(this._ptr);
-    if (linksPtr === 0) {
-      return [];
-    }
-
-    let links: Link[] = [];
-    try {
-      const rawLinks = readLinks(linksPtr);
-      links = rawLinks.map((link: LowLevelLink) => ({
-        from: link.from,
-        to: link.to,
-        polarity: convertLinkPolarity(link.polarity),
-        score: link.score || undefined,
-      }));
-    } finally {
-      simlin_free_links(linksPtr);
-    }
-
-    return links;
+    return this.backend.simGetLinks(this._handle);
   }
 
   /**
    * Convert this simulation to a Run object.
+   * Collects all data from the simulation into a pure data holder.
    * @returns Run object with results and analysis
    */
-  getRun(): Run {
+  async getRun(): Promise<Run> {
     this.checkDisposed();
-    return new Run(this);
+
+    const varNames = await this.getVarNames();
+    const results = new Map<string, Float64Array>();
+
+    for (const name of varNames) {
+      const series = await this.getSeries(name);
+      results.set(name, series);
+    }
+
+    // Add time series if not already present
+    if (!results.has('time')) {
+      const timeSeries = await this.getSeries('time');
+      results.set('time', timeSeries);
+    }
+
+    const loops = await this._model.loops();
+    const links = await this.getLinks();
+    const stepCount = await this.getStepCount();
+
+    return new Run({
+      varNames,
+      results,
+      loops,
+      links,
+      stepCount,
+      overrides: this.overrides,
+    });
   }
 
   /**
    * Dispose this simulation and free WASM resources.
    */
-  dispose(): void {
+  async dispose(): Promise<void> {
+    this.disposeSync();
+  }
+
+  /** @internal Synchronous dispose for Symbol.dispose and internal use */
+  disposeSync(): void {
     if (this._disposed) {
       return;
     }
 
-    unregisterFinalizer(this);
-    simlin_sim_unref(this._ptr);
-    this._ptr = 0;
+    this.backend.simDispose(this._handle);
     this._disposed = true;
   }
 
@@ -253,6 +241,6 @@ export class Sim {
    * Symbol.dispose support for using statement.
    */
   [Symbol.dispose](): void {
-    this.dispose();
+    this.disposeSync();
   }
 }
