@@ -5,18 +5,39 @@
 /**
  * Browser backend factory.
  *
- * Uses DirectBackend, which calls WASM directly on the main thread.
+ * Creates a WorkerBackend that spawns a Web Worker for WASM execution,
+ * keeping the main thread free for UI interaction. The Worker is created
+ * lazily on first access and reused for all subsequent operations.
+ *
  * This is selected at build time via tsconfig path mapping for browser builds.
  */
 
 import { EngineBackend } from './backend';
-import { DirectBackend } from './direct-backend';
+import { WorkerBackend } from './worker-backend';
+import type { WorkerRequest, WorkerResponse } from './worker-protocol';
 
 let sharedBackend: EngineBackend | null = null;
 
+function createWorkerBackend(): WorkerBackend {
+  const worker = new Worker(new URL('./engine-worker.ts', import.meta.url), {
+    type: 'module',
+  });
+
+  return new WorkerBackend(
+    (msg: WorkerRequest) => {
+      worker.postMessage(msg);
+    },
+    (callback: (msg: WorkerResponse) => void) => {
+      worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+        callback(event.data);
+      };
+    },
+  );
+}
+
 export function getBackend(): EngineBackend {
   if (!sharedBackend) {
-    sharedBackend = new DirectBackend();
+    sharedBackend = createWorkerBackend();
   }
   return sharedBackend;
 }
