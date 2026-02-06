@@ -26,8 +26,12 @@ function createWorkerBackend(): WorkerBackend {
   sharedWorker = worker;
 
   return new WorkerBackend(
-    (msg: WorkerRequest) => {
-      worker.postMessage(msg);
+    (msg: WorkerRequest, transfer?: Transferable[]) => {
+      if (transfer && transfer.length > 0) {
+        worker.postMessage(msg, transfer);
+      } else {
+        worker.postMessage(msg);
+      }
     },
     (callback: (msg: WorkerResponse) => void) => {
       worker.onmessage = (event: MessageEvent<WorkerResponse>) => {

@@ -21,12 +21,20 @@ function loadWasmSource(): Uint8Array {
   return readFileSync(wasmPath);
 }
 
+interface TestPair {
+  backend: WorkerBackend;
+  server: WorkerServer;
+  /** All transfer lists passed to postMessage, in order. */
+  transfers: (Transferable[] | undefined)[];
+}
+
 /**
  * Create a WorkerBackend connected to a WorkerServer via direct function calls
  * (no actual Worker thread). This simulates the postMessage channel.
  */
-function createTestPair(): { backend: WorkerBackend; server: WorkerServer } {
+function createTestPair(): TestPair {
   let backendOnMessage: ((msg: WorkerResponse) => void) | null = null;
+  const transfers: (Transferable[] | undefined)[] = [];
 
   const server = new WorkerServer((msg: WorkerResponse) => {
     // Server -> Backend: simulate worker posting back
@@ -38,7 +46,8 @@ function createTestPair(): { backend: WorkerBackend; server: WorkerServer } {
 
   const backend = new WorkerBackend(
     // Backend -> Server: simulate main thread posting to worker
-    (msg: WorkerRequest) => {
+    (msg: WorkerRequest, transfer?: Transferable[]) => {
+      transfers.push(transfer);
       // Deliver to server asynchronously to match real Worker behavior
       setTimeout(() => server.handleMessage(msg), 0);
     },
@@ -48,7 +57,7 @@ function createTestPair(): { backend: WorkerBackend; server: WorkerServer } {
     },
   );
 
-  return { backend, server };
+  return { backend, server, transfers };
 }
 
 describe('WorkerBackend', () => {
@@ -138,6 +147,59 @@ describe('WorkerBackend', () => {
       const handle = await backend.projectOpenXmile(data);
       const count = await backend.projectGetModelCount(handle);
       expect(count).toBe(1);
+    });
+  });
+
+  describe('WASM buffer transfer', () => {
+    test('init with Uint8Array transfers the buffer', async () => {
+      const { backend, transfers } = createTestPair();
+      const wasmBuffer = loadWasmSource();
+      await backend.init(wasmBuffer);
+
+      // The init message should have a transfer list with the buffer
+      const initTransfer = transfers.find((t) => t !== undefined && t.length > 0);
+      expect(initTransfer).toBeDefined();
+      expect(initTransfer![0]).toBeInstanceOf(ArrayBuffer);
+    });
+
+    test('init with partial Uint8Array view slices instead of transferring', async () => {
+      const { backend, transfers } = createTestPair();
+      const wasmBuffer = loadWasmSource();
+      // Create a view that is offset into a larger buffer
+      const largerBuffer = new ArrayBuffer(wasmBuffer.byteLength + 16);
+      new Uint8Array(largerBuffer).set(wasmBuffer, 8);
+      const partialView = new Uint8Array(largerBuffer, 8, wasmBuffer.byteLength);
+
+      await backend.init(partialView);
+
+      // The init message should still have a transfer list (with the sliced buffer)
+      const initTransfer = transfers.find((t) => t !== undefined && t.length > 0);
+      expect(initTransfer).toBeDefined();
+      // The transferred buffer should be the sliced copy, not the original larger buffer
+      const transferredBuffer = initTransfer![0] as ArrayBuffer;
+      expect(transferredBuffer.byteLength).toBe(wasmBuffer.byteLength);
+      // The original larger buffer should NOT be neutered/detached
+      expect(largerBuffer.byteLength).toBe(wasmBuffer.byteLength + 16);
+    });
+
+    test('init with string path does not transfer', async () => {
+      const { backend, transfers } = createTestPair();
+      await backend.init(wasmPath);
+
+      // No buffer to transfer for string paths
+      const initTransfer = transfers.find((t) => t !== undefined && t.length > 0);
+      expect(initTransfer).toBeUndefined();
+    });
+
+    test('configureWasm with buffer transfers during init', async () => {
+      const { backend, transfers } = createTestPair();
+      await backend.reset();
+      backend.configureWasm({ source: loadWasmSource() });
+      await backend.init();
+
+      // configureWasm message should have transferred the buffer
+      const bufferTransfers = transfers.filter((t) => t !== undefined && t.length > 0);
+      expect(bufferTransfers.length).toBeGreaterThanOrEqual(1);
     });
   });
 

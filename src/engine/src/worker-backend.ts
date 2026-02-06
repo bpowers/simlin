@@ -9,8 +9,10 @@
  * Operations are strictly serialized via a FIFO queue to match WASM's
  * single-threaded execution model.
  *
- * Input buffers are structured-cloned (never transferred) to preserve
- * caller data. Output buffers from the worker are transferred for zero-copy.
+ * Most input buffers are structured-cloned to preserve caller data.
+ * WASM source buffers are transferred (zero-copy) during init since
+ * they are large and used only once. Output buffers from the worker
+ * are transferred for zero-copy.
  */
 
 import type { EngineBackend, ProjectHandle, ModelHandle, SimHandle } from './backend';
@@ -21,7 +23,7 @@ import type { WasmConfig, WasmSourceProvider } from '@simlin/engine/internal/was
 import type { WorkerRequest, WorkerResponse } from './worker-protocol';
 import { deserializeError } from './worker-protocol';
 
-type PostFn = (msg: WorkerRequest) => void;
+type PostFn = (msg: WorkerRequest, transfer?: Transferable[]) => void;
 type OnMessageFn = (callback: (msg: WorkerResponse) => void) => void;
 
 interface PendingRequest<T = unknown> {
@@ -74,7 +76,10 @@ export class WorkerBackend implements EngineBackend {
    * Send a request and return a promise for the result.
    * The request is enqueued and executed in FIFO order.
    */
-  private sendRequest<T>(buildMessage: (requestId: number) => WorkerRequest): Promise<T> {
+  private sendRequest<T>(
+    buildMessage: (requestId: number) => WorkerRequest,
+    transfer?: Transferable[],
+  ): Promise<T> {
     if (this._terminated) {
       return Promise.reject(new Error('WorkerBackend terminated'));
     }
@@ -93,7 +98,7 @@ export class WorkerBackend implements EngineBackend {
             },
           });
           const msg = buildMessage(requestId);
-          this._post(msg);
+          this._post(msg, transfer);
         },
         reject,
       });
@@ -128,6 +133,13 @@ export class WorkerBackend implements EngineBackend {
       return this.resolveWasmSource(resolved);
     }
     if (source instanceof Uint8Array) {
+      // Extract the underlying ArrayBuffer region. For WASM sources this
+      // avoids an extra multi-MB copy -- the buffer will be transferred
+      // to the worker via postMessage transfer list instead of being
+      // structured-cloned.
+      if (source.buffer instanceof ArrayBuffer && source.byteOffset === 0 && source.byteLength === source.buffer.byteLength) {
+        return { buffer: source.buffer };
+      }
       return { buffer: source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength) as ArrayBuffer };
     }
     if (source instanceof ArrayBuffer) {
@@ -151,22 +163,30 @@ export class WorkerBackend implements EngineBackend {
       if (this._storedWasmConfig) {
         const resolved = await this.resolveWasmSource(this._storedWasmConfig.source);
         if (resolved) {
-          await this.sendRequest<void>((requestId) => ({
-            type: 'configureWasm',
-            requestId,
-            config: { source: resolved.buffer, url: resolved.url },
-          }));
+          const transfer = resolved.buffer ? [resolved.buffer] : undefined;
+          await this.sendRequest<void>(
+            (requestId) => ({
+              type: 'configureWasm',
+              requestId,
+              config: { source: resolved.buffer, url: resolved.url },
+            }),
+            transfer,
+          );
         }
         this._storedWasmConfig = null;
       }
 
       const resolved = await this.resolveWasmSource(wasmSource);
-      await this.sendRequest<void>((requestId) => ({
-        type: 'init',
-        requestId,
-        wasmSource: resolved?.buffer,
-        wasmUrl: resolved?.url,
-      }));
+      const transfer = resolved?.buffer ? [resolved.buffer] : undefined;
+      await this.sendRequest<void>(
+        (requestId) => ({
+          type: 'init',
+          requestId,
+          wasmSource: resolved?.buffer,
+          wasmUrl: resolved?.url,
+        }),
+        transfer,
+      );
       this._initialized = true;
     } finally {
       this._initializing = false;
