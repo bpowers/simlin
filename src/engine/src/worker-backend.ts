@@ -174,6 +174,9 @@ export class WorkerBackend implements EngineBackend {
   }
 
   configureWasm(config: WasmConfig): void {
+    if (this._initialized) {
+      throw new Error('WASM already initialized');
+    }
     // Store config locally; it will be sent to the worker during init().
     // We can't resolve async sources here (sync method), so we defer.
     this._storedWasmConfig = config;
