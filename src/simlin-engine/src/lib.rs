@@ -58,14 +58,14 @@ mod variable;
 mod vm;
 pub mod xmile;
 
-pub use self::common::{Error, ErrorCode, Result, canonicalize};
+pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
 pub use self::interpreter::Simulation;
 pub use self::model::{ModelStage1, resolve_non_private_dependencies};
 pub use self::patch::apply_patch;
 pub use self::project::Project;
 pub use self::results::{Method, Results, Specs as SimSpecs};
 pub use self::variable::{Variable, identifier_set};
-pub use self::vm::Vm;
+pub use self::vm::{CompiledSimulation, Vm};
 
 // Re-export compat functions at the crate root for convenience
 #[cfg(feature = "xmutil")]

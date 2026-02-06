@@ -10,10 +10,10 @@ use crate::ast::{
     SparseInfo,
 };
 use crate::bytecode::{
-    BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, DimId, DimensionInfo,
-    GraphicalFunctionId, LookupMode, ModuleDeclaration, ModuleId, ModuleInputOffset, NameId, Op2,
-    Opcode, RuntimeSparseMapping, StaticArrayView, SubdimensionRelation, TempId, VariableOffset,
-    ViewId,
+    BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledInitial, CompiledModule, DimId,
+    DimensionInfo, GraphicalFunctionId, LookupMode, ModuleDeclaration, ModuleId, ModuleInputOffset,
+    NameId, Op2, Opcode, RuntimeSparseMapping, StaticArrayView, SubdimensionRelation, TempId,
+    VariableOffset, ViewId,
 };
 use crate::common::{
     Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize,
@@ -3251,8 +3251,18 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
     }
 }
 
+/// Per-variable initial expressions, kept alongside the flat runlist for
+/// interpreter compatibility.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
+pub(crate) struct VarInitial {
+    pub(crate) ident: Ident<Canonical>,
+    /// Sorted, deduplicated offsets extracted from AssignCurr nodes.
+    pub(crate) offsets: Vec<usize>,
+    pub(crate) ast: Vec<Expr>,
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 pub struct Module {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) inputs: HashSet<Ident<Canonical>>,
@@ -3260,6 +3270,7 @@ pub struct Module {
     pub(crate) n_temps: usize,         // number of temporary arrays
     pub(crate) temp_sizes: Vec<usize>, // size of each temporary array
     pub(crate) runlist_initials: Vec<Expr>,
+    pub(crate) runlist_initials_by_var: Vec<VarInitial>,
     pub(crate) runlist_flows: Vec<Expr>,
     pub(crate) runlist_stocks: Vec<Expr>,
     pub(crate) offsets: VariableOffsetMap,
@@ -3529,31 +3540,55 @@ impl Module {
             )
         };
 
-        let runlist_initials = instantiation
+        let initial_vars = instantiation
             .runlist_initials
             .iter()
             .map(|ident| build_var(ident, true))
             .collect::<Result<Vec<Var>>>()?;
-        let runlist_flows = instantiation
+        let flow_vars = instantiation
             .runlist_flows
             .iter()
             .map(|ident| build_var(ident, false))
             .collect::<Result<Vec<Var>>>()?;
-        let runlist_stocks = instantiation
+        let stock_vars = instantiation
             .runlist_stocks
             .iter()
             .map(|ident| build_var(ident, false))
             .collect::<Result<Vec<Var>>>()?;
 
-        let mut runlist_order = Vec::with_capacity(runlist_flows.len() + runlist_stocks.len());
-        runlist_order.extend(runlist_flows.iter().map(|v| v.ident.clone()));
-        runlist_order.extend(runlist_stocks.iter().map(|v| v.ident.clone()));
+        let mut runlist_order = Vec::with_capacity(flow_vars.len() + stock_vars.len());
+        runlist_order.extend(flow_vars.iter().map(|v| v.ident.clone()));
+        runlist_order.extend(stock_vars.iter().map(|v| v.ident.clone()));
 
-        // flatten out the variables so that we're just dealing with lists of expressions
-        let runlist_initials: Vec<Expr> =
-            runlist_initials.into_iter().flat_map(|v| v.ast).collect();
-        let runlist_flows: Vec<Expr> = runlist_flows.into_iter().flat_map(|v| v.ast).collect();
-        let runlist_stocks: Vec<Expr> = runlist_stocks.into_iter().flat_map(|v| v.ast).collect();
+        // Build per-variable initials before flattening
+        let runlist_initials_by_var: Vec<VarInitial> = initial_vars
+            .iter()
+            .map(|v| {
+                let mut offsets: Vec<usize> = v
+                    .ast
+                    .iter()
+                    .filter_map(|expr| {
+                        if let Expr::AssignCurr(off, _) = expr {
+                            Some(*off)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                offsets.sort_unstable();
+                offsets.dedup();
+                VarInitial {
+                    ident: v.ident.clone(),
+                    offsets,
+                    ast: v.ast.clone(),
+                }
+            })
+            .collect();
+
+        // Flatten out the variables so that we're just dealing with lists of expressions
+        let runlist_initials: Vec<Expr> = initial_vars.into_iter().flat_map(|v| v.ast).collect();
+        let runlist_flows: Vec<Expr> = flow_vars.into_iter().flat_map(|v| v.ast).collect();
+        let runlist_stocks: Vec<Expr> = stock_vars.into_iter().flat_map(|v| v.ast).collect();
 
         // Extract temp array information from all runlists
         let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
@@ -3610,6 +3645,7 @@ impl Module {
             n_temps,
             temp_sizes,
             runlist_initials,
+            runlist_initials_by_var,
             runlist_flows,
             runlist_stocks,
             offsets,
@@ -4873,7 +4909,22 @@ impl<'module> Compiler<'module> {
     }
 
     fn compile(mut self) -> Result<CompiledModule> {
-        let compiled_initials = Arc::new(self.walk(&self.module.runlist_initials)?);
+        // Compile each variable's initials separately
+        let compiled_initials: Vec<CompiledInitial> = self
+            .module
+            .runlist_initials_by_var
+            .iter()
+            .map(|var_init| {
+                let bytecode = self.walk(&var_init.ast)?;
+                Ok(CompiledInitial {
+                    ident: var_init.ident.clone(),
+                    offsets: var_init.offsets.clone(),
+                    bytecode,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let compiled_initials = Arc::new(compiled_initials);
+
         let compiled_flows = Arc::new(self.walk(&self.module.runlist_flows)?);
         let compiled_stocks = Arc::new(self.walk(&self.module.runlist_stocks)?);
 
@@ -4893,7 +4944,6 @@ impl<'module> Compiler<'module> {
                 graphical_functions: self.graphical_functions,
                 modules: self.module_decls,
                 arrays: vec![],
-                // Array support fields populated during compilation
                 dimensions: self.dimensions,
                 subdim_relations: self.subdim_relations,
                 names: self.names,
