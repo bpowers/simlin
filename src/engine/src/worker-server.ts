@@ -174,28 +174,8 @@ export class WorkerServer {
         return;
       }
       case 'reset': {
-        // Dispose all handles
-        for (const [, handle] of this.simHandles) {
-          try {
-            this.backend.simDispose(handle);
-          } catch {
-            // ignore errors during reset
-          }
-        }
-        for (const [, handle] of this.modelHandles) {
-          try {
-            this.backend.modelDispose(handle);
-          } catch {
-            // ignore errors during reset
-          }
-        }
-        for (const [, handle] of this.projectHandles) {
-          try {
-            this.backend.projectDispose(handle);
-          } catch {
-            // ignore errors during reset
-          }
-        }
+        // backend.reset() invalidates all WASM pointers, so we just need
+        // to clear our local handle maps without individually disposing each.
         this.simHandles.clear();
         this.modelHandles.clear();
         this.projectHandles.clear();

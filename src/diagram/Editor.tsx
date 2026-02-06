@@ -1947,10 +1947,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   };
 
-  async refreshCachedErrors(): Promise<void> {
+  async refreshCachedErrors(): Promise<CachedErrorDetails | undefined> {
     const engine = this.engine();
     if (!engine) {
-      return;
+      return undefined;
     }
 
     const modelName = this.state.modelName;
@@ -1958,7 +1958,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const { varErrors, unitErrors } = convertErrorDetails(errors, modelName);
 
     let simError: SimError | undefined;
-    let cachedModelErrors = List<ModelError>();
+    let modelErrors = List<ModelError>();
     for (const err of errors) {
       if (err.modelName && err.modelName !== modelName) {
         continue;
@@ -1969,7 +1969,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           details: err.message ?? undefined,
         });
       } else if (!err.variableName) {
-        cachedModelErrors = cachedModelErrors.push(
+        modelErrors = modelErrors.push(
           new ModelError({
             code: err.code as unknown as ErrorCode,
             details: err.message ?? undefined,
@@ -1977,55 +1977,19 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         );
       }
     }
-    this.setState({
-      cachedErrors: {
-        varErrors,
-        unitErrors,
-        simError,
-        modelErrors: cachedModelErrors,
-      },
-    });
+    const cachedErrors: CachedErrorDetails = { varErrors, unitErrors, simError, modelErrors };
+    this.setState({ cachedErrors });
+    return cachedErrors;
   }
 
   async updateVariableErrors(project: Project): Promise<Project> {
-    const engine = this.engine();
-    if (!engine) {
+    const cached = await this.refreshCachedErrors();
+    if (!cached) {
       return project;
     }
 
     const modelName = this.state.modelName;
-    const errors = await engine.getErrors();
-    const { varErrors, unitErrors } = convertErrorDetails(errors, modelName);
-
-    // Update cached errors for rendering in getErrorDetails()
-    let simError: SimError | undefined;
-    let cachedModelErrors = List<ModelError>();
-    for (const err of errors) {
-      if (err.modelName && err.modelName !== modelName) {
-        continue;
-      }
-      if (err.kind === SimlinErrorKind.Simulation) {
-        simError = new SimError({
-          code: err.code as unknown as ErrorCode,
-          details: err.message ?? undefined,
-        });
-      } else if (!err.variableName) {
-        cachedModelErrors = cachedModelErrors.push(
-          new ModelError({
-            code: err.code as unknown as ErrorCode,
-            details: err.message ?? undefined,
-          }),
-        );
-      }
-    }
-    this.setState({
-      cachedErrors: {
-        varErrors,
-        unitErrors,
-        simError,
-        modelErrors: cachedModelErrors,
-      },
-    });
+    const { varErrors, unitErrors } = cached;
 
     if (varErrors.size > 0) {
       const model = getOrThrow(project.models, modelName);

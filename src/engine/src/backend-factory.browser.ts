@@ -17,11 +17,13 @@ import { WorkerBackend } from './worker-backend';
 import type { WorkerRequest, WorkerResponse } from './worker-protocol';
 
 let sharedBackend: EngineBackend | null = null;
+let sharedWorker: Worker | null = null;
 
 function createWorkerBackend(): WorkerBackend {
   const worker = new Worker(new URL('./engine-worker.ts', import.meta.url), {
     type: 'module',
   });
+  sharedWorker = worker;
 
   return new WorkerBackend(
     (msg: WorkerRequest) => {
@@ -43,5 +45,9 @@ export function getBackend(): EngineBackend {
 }
 
 export function resetBackend(): void {
+  if (sharedWorker) {
+    sharedWorker.terminate();
+    sharedWorker = null;
+  }
   sharedBackend = null;
 }
