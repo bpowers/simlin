@@ -209,9 +209,7 @@ export class Sim {
       results.set(allNames[i], seriesArrays[i]);
     }
 
-    const loops = await this._model.loops();
-    const links = await this.getLinks();
-    const stepCount = await this.getStepCount();
+    const [loops, links, stepCount] = await Promise.all([this._model.loops(), this.getLinks(), this.getStepCount()]);
 
     return new Run({
       varNames,

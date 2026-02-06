@@ -129,6 +129,7 @@ const passthroughLatex = (s: string) => s;
 
 export class VariableDetails extends React.PureComponent<VariableDetailsProps, VariableDetailsState> {
   private _latexRequestId = 0;
+  private _mounted = false;
 
   constructor(props: VariableDetailsProps) {
     super(props);
@@ -157,7 +158,12 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
   }
 
   componentDidMount() {
+    this._mounted = true;
     this.loadLatex();
+  }
+
+  componentWillUnmount() {
+    this._mounted = false;
   }
 
   componentDidUpdate(prevProps: VariableDetailsProps) {
@@ -177,10 +183,10 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     this.setState({ latexLoading: true });
     try {
       const latex = await getLatexEquation(ident);
-      if (requestId !== this._latexRequestId) return;
+      if (requestId !== this._latexRequestId || !this._mounted) return;
       this.setState({ latexEquation: latex, latexLoading: false });
     } catch {
-      if (requestId !== this._latexRequestId) return;
+      if (requestId !== this._latexRequestId || !this._mounted) return;
       this.setState({ latexEquation: undefined, latexLoading: false });
     }
   }
