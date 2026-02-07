@@ -3095,23 +3095,14 @@ pub unsafe extern "C" fn simlin_project_serialize_protobuf(
     *out_len = len;
 }
 
-/// Applies a patch to the project datamodel.
-///
-/// The patch is encoded as a `project_io.Patch` protobuf message. The caller can
-/// request a dry run (which performs validation without committing) and control
-/// whether errors are permitted. When `allow_errors` is false, any static or
-/// simulation error will cause the patch to be rejected.
-///
-/// On success returns `SimlinErrorCode::NoError`. On failure returns an error
-/// code describing why the patch could not be applied. When `out_errors` is not
 /// Internal helper that applies a ProjectPatch to a project.
 ///
-/// This is the core patch application logic shared by both protobuf and JSON entry points.
-/// It handles datamodel cloning, patch application, error gathering, validation, and
-/// committing changes (unless dry_run is true).
+/// This is the core patch application logic. It handles datamodel cloning,
+/// patch application, error gathering, validation, and committing changes
+/// (unless dry_run is true).
 unsafe fn apply_project_patch_internal(
     project_ref: &SimlinProject,
-    patch: engine::project_io::ProjectPatch,
+    patch: engine::ProjectPatch,
     dry_run: bool,
     allow_errors: bool,
     out_collected_errors: *mut *mut SimlinError,
@@ -3129,7 +3120,7 @@ unsafe fn apply_project_patch_internal(
         project_locked.datamodel.clone()
     };
 
-    if let Err(err) = engine::apply_patch(&mut staged_datamodel, &patch) {
+    if let Err(err) = engine::apply_patch(&mut staged_datamodel, patch) {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::from(err.code))
@@ -3393,7 +3384,7 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
         }
     };
 
-    let patch_proto = match convert_json_project_patch(json_patch) {
+    let patch = match convert_json_project_patch(json_patch) {
         Ok(patch) => patch,
         Err(err) => {
             store_ffi_error(out_error, err);
@@ -3411,7 +3402,7 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
 
     apply_project_patch_internal(
         project_ref,
-        patch_proto,
+        patch,
         dry_run,
         allow_errors,
         out_collected_errors,
@@ -3426,6 +3417,9 @@ enum JsonProjectOperation {
     SetSimSpecs {
         #[serde(rename = "simSpecs")]
         sim_specs: engine::json::SimSpecs,
+    },
+    AddModel {
+        name: String,
     },
 }
 
@@ -3486,134 +3480,75 @@ enum JsonModelOperation {
 
 fn convert_json_project_patch(
     patch: JsonProjectPatch,
-) -> Result<engine::project_io::ProjectPatch, FfiError> {
+) -> std::result::Result<engine::ProjectPatch, FfiError> {
     let mut project_ops = Vec::with_capacity(patch.project_ops.len());
     for op in patch.project_ops {
-        let converted = convert_json_project_operation(op)?;
-        project_ops.push(engine::project_io::ProjectOperation {
-            op: Some(converted),
-        });
+        project_ops.push(convert_json_project_operation(op)?);
     }
 
-    let mut model_patches = Vec::with_capacity(patch.models.len());
+    let mut models = Vec::with_capacity(patch.models.len());
     for model in patch.models {
         let mut ops = Vec::with_capacity(model.ops.len());
         for op in model.ops {
-            let converted = convert_json_model_operation(op)?;
-            ops.push(engine::project_io::ModelOperation {
-                op: Some(converted),
-            });
+            ops.push(convert_json_model_operation(op)?);
         }
-        model_patches.push(engine::project_io::ModelPatch {
+        models.push(engine::ModelPatch {
             name: model.name,
             ops,
         });
     }
 
-    Ok(engine::project_io::ProjectPatch {
+    Ok(engine::ProjectPatch {
         project_ops,
-        models: model_patches,
+        models,
     })
 }
 
 fn convert_json_project_operation(
     op: JsonProjectOperation,
-) -> Result<engine::project_io::project_operation::Op, FfiError> {
-    use engine::datamodel;
-    use engine::project_io;
-    use engine::project_io::project_operation;
-
+) -> std::result::Result<engine::ProjectOperation, FfiError> {
     let result = match op {
         JsonProjectOperation::SetSimSpecs { sim_specs } => {
-            let dm_sim_specs: datamodel::SimSpecs = sim_specs.into();
-            let sim_specs_pb: project_io::SimSpecs = dm_sim_specs.into();
-            project_operation::Op::SetSimSpecs(project_io::SetSimSpecsOp {
-                sim_specs: Some(sim_specs_pb),
-            })
+            engine::ProjectOperation::SetSimSpecs(sim_specs.into())
         }
+        JsonProjectOperation::AddModel { name } => engine::ProjectOperation::AddModel { name },
     };
-
     Ok(result)
 }
 
 fn convert_json_model_operation(
     op: JsonModelOperation,
-) -> Result<engine::project_io::model_operation::Op, FfiError> {
-    use engine::datamodel;
-    use engine::project_io;
-    use engine::project_io::model_operation;
-
+) -> std::result::Result<engine::ModelOperation, FfiError> {
     let result = match op {
-        JsonModelOperation::UpsertAux { aux } => {
-            let dm_aux: datamodel::Aux = aux.into();
-            let variable_pb = project_io::Variable::from(datamodel::Variable::Aux(dm_aux));
-            let aux_pb = match variable_pb.v {
-                Some(project_io::variable::V::Aux(aux)) => aux,
-                _ => unreachable!(),
-            };
-            model_operation::Op::UpsertAux(project_io::UpsertAuxOp { aux: Some(aux_pb) })
-        }
+        JsonModelOperation::UpsertAux { aux } => engine::ModelOperation::UpsertAux(aux.into()),
         JsonModelOperation::UpsertStock { stock } => {
-            let dm_stock: datamodel::Stock = stock.into();
-            let variable_pb = project_io::Variable::from(datamodel::Variable::Stock(dm_stock));
-            let stock_pb = match variable_pb.v {
-                Some(project_io::variable::V::Stock(stock)) => stock,
-                _ => unreachable!(),
-            };
-            model_operation::Op::UpsertStock(project_io::UpsertStockOp {
-                stock: Some(stock_pb),
-            })
+            engine::ModelOperation::UpsertStock(stock.into())
         }
-        JsonModelOperation::UpsertFlow { flow } => {
-            let dm_flow: datamodel::Flow = flow.into();
-            let variable_pb = project_io::Variable::from(datamodel::Variable::Flow(dm_flow));
-            let flow_pb = match variable_pb.v {
-                Some(project_io::variable::V::Flow(flow)) => flow,
-                _ => unreachable!(),
-            };
-            model_operation::Op::UpsertFlow(project_io::UpsertFlowOp {
-                flow: Some(flow_pb),
-            })
-        }
+        JsonModelOperation::UpsertFlow { flow } => engine::ModelOperation::UpsertFlow(flow.into()),
         JsonModelOperation::UpsertModule { module } => {
-            let dm_module: datamodel::Module = module.into();
-            let variable_pb = project_io::Variable::from(datamodel::Variable::Module(dm_module));
-            let module_pb = match variable_pb.v {
-                Some(project_io::variable::V::Module(module)) => module,
-                _ => unreachable!(),
-            };
-            model_operation::Op::UpsertModule(project_io::UpsertModuleOp {
-                module: Some(module_pb),
-            })
+            engine::ModelOperation::UpsertModule(module.into())
         }
         JsonModelOperation::DeleteVariable { ident } => {
-            model_operation::Op::DeleteVariable(project_io::DeleteVariableOp { ident })
+            engine::ModelOperation::DeleteVariable { ident }
         }
         JsonModelOperation::RenameVariable { from, to } => {
-            model_operation::Op::RenameVariable(project_io::RenameVariableOp { from, to })
+            engine::ModelOperation::RenameVariable { from, to }
         }
-        JsonModelOperation::UpsertView { index, view } => {
-            let dm_view: datamodel::View = view.into();
-            let view_pb = project_io::View::from(dm_view);
-            model_operation::Op::UpsertView(project_io::UpsertViewOp {
-                index,
-                view: Some(view_pb),
-            })
-        }
-        JsonModelOperation::DeleteView { index } => {
-            model_operation::Op::DeleteView(project_io::DeleteViewOp { index })
-        }
+        JsonModelOperation::UpsertView { index, view } => engine::ModelOperation::UpsertView {
+            index,
+            view: view.into(),
+        },
+        JsonModelOperation::DeleteView { index } => engine::ModelOperation::DeleteView { index },
         JsonModelOperation::UpdateStockFlows {
             ident,
             inflows,
             outflows,
-        } => model_operation::Op::UpdateStockFlows(project_io::UpdateStockFlowsOp {
+        } => engine::ModelOperation::UpdateStockFlows {
             ident,
             inflows,
             outflows,
-        }),
+        },
     };
-
     Ok(result)
 }
 
