@@ -28,6 +28,20 @@ pub type PcOffset = i16; // Relative PC offset for jumps (signed for backward ju
 pub type NameId = u16; // Index into names table
 pub type DimListId = u16; // Index into dim_lists table (for [DimId; 4] or [u16; 4])
 
+/// Fixed capacity for the VM arithmetic stack.
+///
+/// 64 is generous for system dynamics expressions: the stack depth equals the
+/// maximum nesting depth of an expression tree. Even complex equations like
+/// `IF(a > b AND c < d, MAX(e, f) * g + h, MIN(i, j) / k - l)` use ~5 slots.
+/// The stack resets to 0 after every assignment opcode, so depth depends only on
+/// expression complexity, not on model size.
+///
+/// `ByteCodeBuilder::finish()` validates at compile time that no bytecode
+/// sequence exceeds this capacity, making the VM's unsafe unchecked stack
+/// access provably safe. The `#![deny(unsafe_code)]` crate attribute ensures
+/// no other unsafe code can be added without explicit opt-in.
+pub(crate) const STACK_CAPACITY: usize = 64;
+
 /// Lookup interpolation mode for graphical function tables.
 #[repr(u8)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -830,6 +844,100 @@ impl Opcode {
             _ => None,
         }
     }
+
+    /// Returns (pops, pushes) describing this opcode's effect on the arithmetic stack.
+    /// Used by `ByteCode::max_stack_depth` to statically validate that compiled
+    /// bytecode cannot overflow the fixed-size VM stack.
+    ///
+    /// Opcodes that only affect the view stack, iter stack, or broadcast stack
+    /// return (0, 0) since they don't touch the arithmetic stack.
+    fn stack_effect(&self) -> (u8, u8) {
+        match self {
+            // Arithmetic: pop 2, push 1
+            Opcode::Op2 { .. } => (2, 1),
+            // Logic: pop 1, push 1
+            Opcode::Not {} => (1, 1),
+
+            // Constants/variables: push 1
+            Opcode::LoadConstant { .. }
+            | Opcode::LoadVar { .. }
+            | Opcode::LoadGlobalVar { .. }
+            | Opcode::LoadModuleInput { .. } => (0, 1),
+
+            // Legacy subscript: PushSubscriptIndex pops the index value
+            Opcode::PushSubscriptIndex { .. } => (1, 0),
+            // LoadSubscript pushes the looked-up value
+            Opcode::LoadSubscript { .. } => (0, 1),
+
+            // Control flow
+            Opcode::SetCond {} => (1, 0),       // pops condition
+            Opcode::If {} => (2, 1),             // pops true+false branches, pushes result
+            Opcode::Ret => (0, 0),
+
+            // Module eval: pops n_inputs, pushes 0
+            Opcode::EvalModule { n_inputs, .. } => (*n_inputs, 0),
+
+            // Assignment: pops 1 (the value to assign)
+            Opcode::AssignCurr { .. } | Opcode::AssignNext { .. } => (1, 0),
+
+            // Builtins always take 3 args (actual + padding), push 1 result
+            Opcode::Apply { .. } => (3, 1),
+            // Lookup pops element_offset and lookup_index, pushes result
+            Opcode::Lookup { .. } => (2, 1),
+
+            // Superinstructions
+            Opcode::AssignConstCurr { .. } => (0, 0),   // reads literal directly
+            Opcode::BinOpAssignCurr { .. } => (2, 0),    // pops 2, assigns directly
+            Opcode::BinOpAssignNext { .. } => (2, 0),    // pops 2, assigns directly
+
+            // View stack ops don't touch arithmetic stack
+            Opcode::PushVarView { .. }
+            | Opcode::PushTempView { .. }
+            | Opcode::PushStaticView { .. }
+            | Opcode::PushVarViewDirect { .. }
+            | Opcode::ViewSubscriptConst { .. }
+            | Opcode::ViewRange { .. }
+            | Opcode::ViewStarRange { .. }
+            | Opcode::ViewWildcard { .. }
+            | Opcode::ViewTranspose {}
+            | Opcode::PopView {}
+            | Opcode::DupView {} => (0, 0),
+
+            // Dynamic subscript/range ops pop from arithmetic stack
+            Opcode::ViewSubscriptDynamic { .. } => (1, 0),
+            Opcode::ViewRangeDynamic { .. } => (2, 0),
+
+            // Temp array access
+            Opcode::LoadTempConst { .. } => (0, 1),
+            Opcode::LoadTempDynamic { .. } => (1, 1),  // pops index, pushes value
+
+            // Iteration: BeginIter/EndIter don't touch arithmetic stack
+            Opcode::BeginIter { .. } | Opcode::EndIter {} => (0, 0),
+            // LoadIter* push 1 element
+            Opcode::LoadIterElement {}
+            | Opcode::LoadIterTempElement { .. }
+            | Opcode::LoadIterViewTop {}
+            | Opcode::LoadIterViewAt { .. } => (0, 1),
+            // StoreIterElement pops 1 value
+            Opcode::StoreIterElement {} => (1, 0),
+            // NextIter doesn't touch arithmetic stack
+            Opcode::NextIterOrJump { .. } => (0, 0),
+
+            // Array reductions push 1 result
+            Opcode::ArraySum {}
+            | Opcode::ArrayMax {}
+            | Opcode::ArrayMin {}
+            | Opcode::ArrayMean {}
+            | Opcode::ArrayStddev {}
+            | Opcode::ArraySize {} => (0, 1),
+
+            // Broadcasting
+            Opcode::BeginBroadcastIter { .. } | Opcode::EndBroadcastIter {} => (0, 0),
+            Opcode::LoadBroadcastElement { .. } => (0, 1),
+            Opcode::StoreBroadcastElement {} => (1, 0),
+            Opcode::NextBroadcastOrJump { .. } => (0, 0),
+        }
+    }
 }
 
 // ============================================================================
@@ -1002,6 +1110,11 @@ impl ByteCodeContext {
     }
 
     /// Get a dim list entry by ID.
+    ///
+    /// Panics on out-of-bounds ID, which is intentional: IDs are only produced
+    /// by `add_dim_list` during compilation, so an invalid ID indicates a
+    /// compiler bug that should surface immediately rather than be silently
+    /// converted to a default value.
     pub fn get_dim_list(&self, id: DimListId) -> (u8, &[u16; 4]) {
         let (n, ref ids) = self.dim_lists[id as usize];
         (n, ids)
@@ -1013,6 +1126,26 @@ impl ByteCodeContext {
 pub struct ByteCode {
     pub(crate) literals: Vec<f64>,
     pub(crate) code: Vec<Opcode>,
+}
+
+impl ByteCode {
+    /// Statically compute the maximum arithmetic stack depth reached by this bytecode.
+    ///
+    /// Walks the opcode stream applying each instruction's stack effect. Because
+    /// SD expressions are straight-line (no conditional jumps that could create
+    /// divergent stack depths -- backward jumps from iteration opcodes always
+    /// return to the same stack depth), a single linear pass is sufficient.
+    pub(crate) fn max_stack_depth(&self) -> usize {
+        let mut depth: usize = 0;
+        let mut max_depth: usize = 0;
+        for op in &self.code {
+            let (pops, pushes) = op.stack_effect();
+            depth = depth.saturating_sub(pops as usize);
+            depth += pushes as usize;
+            max_depth = max_depth.max(depth);
+        }
+        max_depth
+    }
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -1046,6 +1179,16 @@ impl ByteCodeBuilder {
     pub(crate) fn finish(self) -> ByteCode {
         let mut bc = self.bytecode;
         bc.peephole_optimize();
+
+        // Validate that the compiled bytecode cannot overflow the VM's
+        // fixed-size stack. This makes the unsafe unchecked stack access
+        // in the VM provably safe for this bytecode.
+        let depth = bc.max_stack_depth();
+        assert!(
+            depth < STACK_CAPACITY,
+            "compiled bytecode requires stack depth {depth}, exceeding VM capacity {STACK_CAPACITY}"
+        );
+
         bc
     }
 }
@@ -1165,6 +1308,320 @@ mod tests {
         let bytecode = bytecode.finish();
         assert_eq!(2, bytecode.literals.len());
     }
+
+    // =========================================================================
+    // Stack Effect Tests
+    // =========================================================================
+
+    #[test]
+    fn test_stack_effect_arithmetic_ops() {
+        // Binary ops: pop 2, push 1
+        assert_eq!((Opcode::Op2 { op: Op2::Add }).stack_effect(), (2, 1));
+        assert_eq!((Opcode::Op2 { op: Op2::Mul }).stack_effect(), (2, 1));
+        assert_eq!((Opcode::Op2 { op: Op2::Gt }).stack_effect(), (2, 1));
+
+        // Unary not: pop 1, push 1
+        assert_eq!((Opcode::Not {}).stack_effect(), (1, 1));
+    }
+
+    #[test]
+    fn test_stack_effect_loads() {
+        assert_eq!((Opcode::LoadConstant { id: 0 }).stack_effect(), (0, 1));
+        assert_eq!((Opcode::LoadVar { off: 0 }).stack_effect(), (0, 1));
+        assert_eq!((Opcode::LoadGlobalVar { off: 0 }).stack_effect(), (0, 1));
+        assert_eq!((Opcode::LoadModuleInput { input: 0 }).stack_effect(), (0, 1));
+    }
+
+    #[test]
+    fn test_stack_effect_assignments() {
+        assert_eq!((Opcode::AssignCurr { off: 0 }).stack_effect(), (1, 0));
+        assert_eq!((Opcode::AssignNext { off: 0 }).stack_effect(), (1, 0));
+    }
+
+    #[test]
+    fn test_stack_effect_superinstructions() {
+        assert_eq!(
+            (Opcode::AssignConstCurr {
+                off: 0,
+                literal_id: 0
+            })
+            .stack_effect(),
+            (0, 0)
+        );
+        assert_eq!(
+            (Opcode::BinOpAssignCurr {
+                op: Op2::Add,
+                off: 0
+            })
+            .stack_effect(),
+            (2, 0)
+        );
+        assert_eq!(
+            (Opcode::BinOpAssignNext {
+                op: Op2::Add,
+                off: 0
+            })
+            .stack_effect(),
+            (2, 0)
+        );
+    }
+
+    #[test]
+    fn test_stack_effect_builtins() {
+        assert_eq!((Opcode::Apply { func: BuiltinId::Abs }).stack_effect(), (3, 1));
+        assert_eq!(
+            (Opcode::Lookup {
+                base_gf: 0,
+                table_count: 1,
+                mode: LookupMode::Interpolate,
+            })
+            .stack_effect(),
+            (2, 1)
+        );
+    }
+
+    #[test]
+    fn test_stack_effect_control_flow() {
+        assert_eq!((Opcode::SetCond {}).stack_effect(), (1, 0));
+        assert_eq!((Opcode::If {}).stack_effect(), (2, 1));
+        assert_eq!(Opcode::Ret.stack_effect(), (0, 0));
+    }
+
+    #[test]
+    fn test_stack_effect_eval_module() {
+        assert_eq!(
+            (Opcode::EvalModule {
+                id: 0,
+                n_inputs: 3,
+            })
+            .stack_effect(),
+            (3, 0)
+        );
+        assert_eq!(
+            (Opcode::EvalModule {
+                id: 0,
+                n_inputs: 0,
+            })
+            .stack_effect(),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn test_stack_effect_view_ops_dont_affect_arithmetic_stack() {
+        assert_eq!(
+            (Opcode::PushVarView {
+                base_off: 0,
+                dim_list_id: 0,
+            })
+            .stack_effect(),
+            (0, 0)
+        );
+        assert_eq!((Opcode::PopView {}).stack_effect(), (0, 0));
+        assert_eq!((Opcode::DupView {}).stack_effect(), (0, 0));
+        assert_eq!(
+            (Opcode::ViewSubscriptConst {
+                dim_idx: 0,
+                index: 0,
+            })
+            .stack_effect(),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn test_stack_effect_dynamic_view_ops_pop_from_arithmetic_stack() {
+        assert_eq!(
+            (Opcode::ViewSubscriptDynamic { dim_idx: 0 }).stack_effect(),
+            (1, 0)
+        );
+        assert_eq!(
+            (Opcode::ViewRangeDynamic { dim_idx: 0 }).stack_effect(),
+            (2, 0)
+        );
+    }
+
+    #[test]
+    fn test_stack_effect_iteration() {
+        assert_eq!(
+            (Opcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: false,
+            })
+            .stack_effect(),
+            (0, 0)
+        );
+        assert_eq!((Opcode::LoadIterElement {}).stack_effect(), (0, 1));
+        assert_eq!((Opcode::StoreIterElement {}).stack_effect(), (1, 0));
+        assert_eq!((Opcode::EndIter {}).stack_effect(), (0, 0));
+    }
+
+    #[test]
+    fn test_stack_effect_array_reductions() {
+        assert_eq!((Opcode::ArraySum {}).stack_effect(), (0, 1));
+        assert_eq!((Opcode::ArrayMax {}).stack_effect(), (0, 1));
+        assert_eq!((Opcode::ArrayMin {}).stack_effect(), (0, 1));
+        assert_eq!((Opcode::ArrayMean {}).stack_effect(), (0, 1));
+        assert_eq!((Opcode::ArrayStddev {}).stack_effect(), (0, 1));
+        assert_eq!((Opcode::ArraySize {}).stack_effect(), (0, 1));
+    }
+
+    // =========================================================================
+    // Max Stack Depth Tests
+    // =========================================================================
+
+    #[test]
+    fn test_max_stack_depth_empty() {
+        let bc = ByteCode::default();
+        assert_eq!(bc.max_stack_depth(), 0);
+    }
+
+    #[test]
+    fn test_max_stack_depth_simple_assignment() {
+        // x = 42.0: LoadConstant(42.0), AssignCurr(x)
+        let bc = ByteCode {
+            literals: vec![42.0],
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::AssignCurr { off: 0 },
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 1);
+    }
+
+    #[test]
+    fn test_max_stack_depth_binary_expression() {
+        // x = a + b: LoadVar(a), LoadVar(b), Op2(Add), AssignCurr(x)
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::Op2 { op: Op2::Add },
+                Opcode::AssignCurr { off: 2 },
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 2);
+    }
+
+    #[test]
+    fn test_max_stack_depth_nested_expression() {
+        // x = (a + b) * (c + d):
+        // LoadVar(a), LoadVar(b), Op2(Add), LoadVar(c), LoadVar(d), Op2(Add), Op2(Mul), AssignCurr
+        // Peak depth is 3: after loading c while (a+b) result is still on stack
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },     // depth: 1
+                Opcode::LoadVar { off: 1 },     // depth: 2
+                Opcode::Op2 { op: Op2::Add },   // depth: 1
+                Opcode::LoadVar { off: 2 },     // depth: 2
+                Opcode::LoadVar { off: 3 },     // depth: 3 (peak)
+                Opcode::Op2 { op: Op2::Add },   // depth: 2
+                Opcode::Op2 { op: Op2::Mul },   // depth: 1
+                Opcode::AssignCurr { off: 4 },  // depth: 0
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 3);
+    }
+
+    #[test]
+    fn test_max_stack_depth_builtin_function() {
+        // x = ABS(a): LoadVar(a), LoadConstant(0), LoadConstant(0), Apply(Abs), AssignCurr
+        let bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::Apply { func: BuiltinId::Abs },
+                Opcode::AssignCurr { off: 1 },
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 3);
+    }
+
+    #[test]
+    fn test_max_stack_depth_if_expression() {
+        // IF(cond, a, b): LoadVar(cond), SetCond, LoadVar(a), LoadVar(b), If, AssignCurr
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },     // depth: 1
+                Opcode::SetCond {},              // depth: 0
+                Opcode::LoadVar { off: 1 },     // depth: 1
+                Opcode::LoadVar { off: 2 },     // depth: 2
+                Opcode::If {},                   // depth: 1
+                Opcode::AssignCurr { off: 3 },  // depth: 0
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 2);
+    }
+
+    #[test]
+    fn test_max_stack_depth_superinstruction_const_assign() {
+        // AssignConstCurr doesn't use the stack at all
+        let bc = ByteCode {
+            literals: vec![42.0],
+            code: vec![Opcode::AssignConstCurr {
+                off: 0,
+                literal_id: 0,
+            }],
+        };
+        assert_eq!(bc.max_stack_depth(), 0);
+    }
+
+    #[test]
+    fn test_max_stack_depth_multiple_assignments() {
+        // x = a; y = b + c
+        // Stack resets to 0 after each assignment, so peak is max of individual expressions
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::AssignCurr { off: 3 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::Op2 { op: Op2::Add },
+                Opcode::AssignCurr { off: 4 },
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 2);
+    }
+
+    #[test]
+    fn test_max_stack_depth_with_iteration() {
+        // Iteration body: LoadIterElement, StoreIterElement -- each iteration
+        // pushes 1 and pops 1, so peak depth within loop is 1
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::BeginIter {
+                    write_temp_id: 0,
+                    has_write_temp: true,
+                },
+                Opcode::LoadIterElement {},
+                Opcode::StoreIterElement {},
+                Opcode::NextIterOrJump { jump_back: -2 },
+                Opcode::EndIter {},
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 1);
+    }
+
+    #[test]
+    fn test_finish_validates_stack_depth() {
+        // Build bytecode that fits within STACK_CAPACITY -- should succeed
+        let mut builder = ByteCodeBuilder::default();
+        let id = builder.intern_literal(1.0);
+        builder.push_opcode(Opcode::LoadConstant { id });
+        builder.push_opcode(Opcode::AssignCurr { off: 0 });
+        let _bc = builder.finish(); // should not panic
+    }
+
+    // =========================================================================
+    // Jump Offset Tests
+    // =========================================================================
 
     #[test]
     fn test_jump_offset_returns_offset_for_jump_opcodes() {

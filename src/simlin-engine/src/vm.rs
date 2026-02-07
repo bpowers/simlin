@@ -222,18 +222,7 @@ pub struct Vm {
     initial_offsets: HashSet<usize>,
 }
 
-/// Fixed capacity for the VM arithmetic stack.
-///
-/// 64 is generous for system dynamics expressions: the stack depth equals the
-/// maximum nesting depth of an expression tree. Even complex equations like
-/// `IF(a > b AND c < d, MAX(e, f) * g + h, MIN(i, j) / k - l)` use ~5 slots.
-/// The stack resets to 0 after every assignment opcode, so depth depends only on
-/// expression complexity, not on model size.
-///
-/// Using unsafe unchecked access (guarded by debug_assert) eliminates bounds
-/// checks from the hot dispatch loop, giving ~17% speedup. The `#![deny(unsafe_code)]`
-/// crate attribute ensures no other unsafe code can be added without explicit opt-in.
-const STACK_CAPACITY: usize = 64;
+use crate::bytecode::STACK_CAPACITY;
 
 #[derive(Clone)]
 struct Stack {
@@ -262,9 +251,10 @@ impl Stack {
     #[inline(always)]
     fn push(&mut self, value: f64) {
         debug_assert!(self.top < STACK_CAPACITY, "stack overflow");
-        // SAFETY: debug_assert above guards that top < STACK_CAPACITY (= data.len()).
-        // The invariant holds because push increments top by 1 and pop decrements by 1,
-        // so top is always in [0, STACK_CAPACITY).
+        // SAFETY: ByteCodeBuilder::finish() statically validates that the max
+        // stack depth of all compiled bytecode is < STACK_CAPACITY, so this
+        // bound cannot be exceeded at runtime. The debug_assert serves as a
+        // belt-and-suspenders check during development.
         unsafe {
             *self.data.get_unchecked_mut(self.top) = value;
         }
@@ -551,9 +541,11 @@ impl Vm {
     /// Reset the VM to its pre-simulation state, reusing the data buffer allocation.
     /// Overrides are preserved across reset.
     ///
-    /// The data buffer is NOT zeroed here because `run_initials()` (which must be
-    /// called before `run_to()`) fully reinitializes all variable slots and pre-fills
-    /// DT/INITIAL_TIME/FINAL_TIME across all chunk slots.
+    /// The data buffer is NOT zeroed here because `run_initials()` fully
+    /// reinitializes all variable slots and pre-fills DT/INITIAL_TIME/FINAL_TIME
+    /// across all chunk slots. The `did_initials` flag (reset to false here)
+    /// prevents `run_to()` from executing on stale data -- it returns early
+    /// if `run_initials()` has not been called since the last reset.
     pub fn reset(&mut self) {
         self.curr_chunk = 0;
         self.next_chunk = 1;
