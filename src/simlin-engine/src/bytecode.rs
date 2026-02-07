@@ -1244,7 +1244,10 @@ impl ByteCode {
             let new_pc = optimized.len();
             pc_map.push(new_pc);
 
-            // Only try fusion if next instruction is not a jump target
+            // Only try fusion if the next instruction is not a jump target.
+            // We intentionally don't check whether instruction i itself is a
+            // jump target: the fused instruction replaces both i and i+1 at the
+            // same PC, so jumps to i still land on the correct (fused) opcode.
             let can_fuse = i + 1 < self.code.len() && !jump_targets[i + 1];
 
             if can_fuse {

@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, LookupMode,
-    ModuleId, Op2, Opcode, RuntimeView, TempId,
+    ModuleId, Op2, Opcode, RuntimeView, STACK_CAPACITY, TempId,
 };
 use crate::common::{Canonical, Ident, Result};
 use crate::dimensions::{Dimension, match_dimensions_two_pass};
@@ -222,8 +222,6 @@ pub struct Vm {
     initial_offsets: HashSet<usize>,
 }
 
-use crate::bytecode::STACK_CAPACITY;
-
 #[derive(Clone)]
 struct Stack {
     data: [f64; STACK_CAPACITY],
@@ -264,8 +262,10 @@ impl Stack {
     fn pop(&mut self) -> f64 {
         debug_assert!(self.top > 0, "stack underflow");
         self.top -= 1;
-        // SAFETY: top was > 0 before decrement (debug_assert above), so top is now
-        // in [0, STACK_CAPACITY - 1], which is a valid index into data.
+        // SAFETY: ByteCodeBuilder::finish() validates via checked_sub that no
+        // opcode sequence pops more values than have been pushed (i.e. the stack
+        // depth never goes negative). This guarantees top > 0 before every pop
+        // at runtime. The debug_assert is a belt-and-suspenders check.
         unsafe { *self.data.get_unchecked(self.top) }
     }
     #[inline(always)]
