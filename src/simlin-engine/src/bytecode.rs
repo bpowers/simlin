@@ -875,8 +875,8 @@ impl Opcode {
             Opcode::LoadSubscript { .. } => (0, 1),
 
             // Control flow
-            Opcode::SetCond {} => (1, 0),       // pops condition
-            Opcode::If {} => (2, 1),             // pops true+false branches, pushes result
+            Opcode::SetCond {} => (1, 0), // pops condition
+            Opcode::If {} => (2, 1),      // pops true+false branches, pushes result
             Opcode::Ret => (0, 0),
 
             // Module eval: pops n_inputs from the caller's arithmetic stack.
@@ -894,9 +894,9 @@ impl Opcode {
             Opcode::Lookup { .. } => (2, 1),
 
             // Superinstructions
-            Opcode::AssignConstCurr { .. } => (0, 0),   // reads literal directly
-            Opcode::BinOpAssignCurr { .. } => (2, 0),    // pops 2, assigns directly
-            Opcode::BinOpAssignNext { .. } => (2, 0),    // pops 2, assigns directly
+            Opcode::AssignConstCurr { .. } => (0, 0), // reads literal directly
+            Opcode::BinOpAssignCurr { .. } => (2, 0), // pops 2, assigns directly
+            Opcode::BinOpAssignNext { .. } => (2, 0), // pops 2, assigns directly
 
             // View stack ops don't touch arithmetic stack
             Opcode::PushVarView { .. }
@@ -917,7 +917,7 @@ impl Opcode {
 
             // Temp array access
             Opcode::LoadTempConst { .. } => (0, 1),
-            Opcode::LoadTempDynamic { .. } => (1, 1),  // pops index, pushes value
+            Opcode::LoadTempDynamic { .. } => (1, 1), // pops index, pushes value
 
             // Iteration: BeginIter/EndIter don't touch arithmetic stack
             Opcode::BeginIter { .. } | Opcode::EndIter {} => (0, 0),
@@ -1153,9 +1153,7 @@ impl ByteCode {
             // would silently invalidate our safety proof. Panicking surfaces
             // the bug immediately in tests.
             depth = depth.checked_sub(pops as usize).unwrap_or_else(|| {
-                panic!(
-                    "stack_effect underflow at pc {pc}: {pops} pops but depth is {depth}"
-                )
+                panic!("stack_effect underflow at pc {pc}: {pops} pops but depth is {depth}")
             });
             depth += pushes as usize;
             max_depth = max_depth.max(depth);
@@ -1351,7 +1349,10 @@ mod tests {
         assert_eq!((Opcode::LoadConstant { id: 0 }).stack_effect(), (0, 1));
         assert_eq!((Opcode::LoadVar { off: 0 }).stack_effect(), (0, 1));
         assert_eq!((Opcode::LoadGlobalVar { off: 0 }).stack_effect(), (0, 1));
-        assert_eq!((Opcode::LoadModuleInput { input: 0 }).stack_effect(), (0, 1));
+        assert_eq!(
+            (Opcode::LoadModuleInput { input: 0 }).stack_effect(),
+            (0, 1)
+        );
     }
 
     #[test]
@@ -1390,7 +1391,13 @@ mod tests {
 
     #[test]
     fn test_stack_effect_builtins() {
-        assert_eq!((Opcode::Apply { func: BuiltinId::Abs }).stack_effect(), (3, 1));
+        assert_eq!(
+            (Opcode::Apply {
+                func: BuiltinId::Abs
+            })
+            .stack_effect(),
+            (3, 1)
+        );
         assert_eq!(
             (Opcode::Lookup {
                 base_gf: 0,
@@ -1412,19 +1419,11 @@ mod tests {
     #[test]
     fn test_stack_effect_eval_module() {
         assert_eq!(
-            (Opcode::EvalModule {
-                id: 0,
-                n_inputs: 3,
-            })
-            .stack_effect(),
+            (Opcode::EvalModule { id: 0, n_inputs: 3 }).stack_effect(),
             (3, 0)
         );
         assert_eq!(
-            (Opcode::EvalModule {
-                id: 0,
-                n_inputs: 0,
-            })
-            .stack_effect(),
+            (Opcode::EvalModule { id: 0, n_inputs: 0 }).stack_effect(),
             (0, 0)
         );
     }
@@ -1534,14 +1533,14 @@ mod tests {
         let bc = ByteCode {
             literals: vec![],
             code: vec![
-                Opcode::LoadVar { off: 0 },     // depth: 1
-                Opcode::LoadVar { off: 1 },     // depth: 2
-                Opcode::Op2 { op: Op2::Add },   // depth: 1
-                Opcode::LoadVar { off: 2 },     // depth: 2
-                Opcode::LoadVar { off: 3 },     // depth: 3 (peak)
-                Opcode::Op2 { op: Op2::Add },   // depth: 2
-                Opcode::Op2 { op: Op2::Mul },   // depth: 1
-                Opcode::AssignCurr { off: 4 },  // depth: 0
+                Opcode::LoadVar { off: 0 },    // depth: 1
+                Opcode::LoadVar { off: 1 },    // depth: 2
+                Opcode::Op2 { op: Op2::Add },  // depth: 1
+                Opcode::LoadVar { off: 2 },    // depth: 2
+                Opcode::LoadVar { off: 3 },    // depth: 3 (peak)
+                Opcode::Op2 { op: Op2::Add },  // depth: 2
+                Opcode::Op2 { op: Op2::Mul },  // depth: 1
+                Opcode::AssignCurr { off: 4 }, // depth: 0
             ],
         };
         assert_eq!(bc.max_stack_depth(), 3);
@@ -1556,7 +1555,9 @@ mod tests {
                 Opcode::LoadVar { off: 0 },
                 Opcode::LoadConstant { id: 0 },
                 Opcode::LoadConstant { id: 0 },
-                Opcode::Apply { func: BuiltinId::Abs },
+                Opcode::Apply {
+                    func: BuiltinId::Abs,
+                },
                 Opcode::AssignCurr { off: 1 },
             ],
         };
@@ -1569,12 +1570,12 @@ mod tests {
         let bc = ByteCode {
             literals: vec![],
             code: vec![
-                Opcode::LoadVar { off: 0 },     // depth: 1
-                Opcode::SetCond {},              // depth: 0
-                Opcode::LoadVar { off: 1 },     // depth: 1
-                Opcode::LoadVar { off: 2 },     // depth: 2
-                Opcode::If {},                   // depth: 1
-                Opcode::AssignCurr { off: 3 },  // depth: 0
+                Opcode::LoadVar { off: 0 },    // depth: 1
+                Opcode::SetCond {},            // depth: 0
+                Opcode::LoadVar { off: 1 },    // depth: 1
+                Opcode::LoadVar { off: 2 },    // depth: 2
+                Opcode::If {},                 // depth: 1
+                Opcode::AssignCurr { off: 3 }, // depth: 0
             ],
         };
         assert_eq!(bc.max_stack_depth(), 2);
@@ -1640,12 +1641,12 @@ mod tests {
         let bc = ByteCode {
             literals: vec![],
             code: vec![
-                Opcode::LoadVar { off: 0 },           // depth: 1 (load index i)
+                Opcode::LoadVar { off: 0 },               // depth: 1 (load index i)
                 Opcode::PushSubscriptIndex { bounds: 3 }, // depth: 0 (pop i)
-                Opcode::LoadVar { off: 1 },           // depth: 1 (load index j)
+                Opcode::LoadVar { off: 1 },               // depth: 1 (load index j)
                 Opcode::PushSubscriptIndex { bounds: 4 }, // depth: 0 (pop j)
-                Opcode::LoadSubscript { off: 10 },     // depth: 1 (push result)
-                Opcode::AssignCurr { off: 20 },        // depth: 0
+                Opcode::LoadSubscript { off: 10 },        // depth: 1 (push result)
+                Opcode::AssignCurr { off: 20 },           // depth: 0
             ],
         };
         assert_eq!(bc.max_stack_depth(), 1);
