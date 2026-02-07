@@ -1632,6 +1632,26 @@ mod tests {
     }
 
     #[test]
+    fn test_max_stack_depth_multidimensional_subscript() {
+        // a[i, j]: two PushSubscriptIndex (each pops 1 index from the arithmetic
+        // stack, writing to a separate subscript_index SmallVec), then LoadSubscript
+        // pushes the result. The indices must be loaded before being popped.
+        // LoadVar(i), PushSubscriptIndex, LoadVar(j), PushSubscriptIndex, LoadSubscript, Assign
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },           // depth: 1 (load index i)
+                Opcode::PushSubscriptIndex { bounds: 3 }, // depth: 0 (pop i)
+                Opcode::LoadVar { off: 1 },           // depth: 1 (load index j)
+                Opcode::PushSubscriptIndex { bounds: 4 }, // depth: 0 (pop j)
+                Opcode::LoadSubscript { off: 10 },     // depth: 1 (push result)
+                Opcode::AssignCurr { off: 20 },        // depth: 0
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 1);
+    }
+
+    #[test]
     fn test_finish_validates_stack_depth() {
         // Build bytecode that fits within STACK_CAPACITY -- should succeed
         let mut builder = ByteCodeBuilder::default();
