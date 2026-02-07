@@ -879,7 +879,10 @@ impl Opcode {
             Opcode::If {} => (2, 1),             // pops true+false branches, pushes result
             Opcode::Ret => (0, 0),
 
-            // Module eval: pops n_inputs, pushes 0
+            // Module eval: pops n_inputs from the caller's arithmetic stack.
+            // The child module executes with its own stack context (via EvalState)
+            // and writes results directly to curr/next, not back to the caller's
+            // arithmetic stack, so pushes = 0 from the caller's perspective.
             Opcode::EvalModule { n_inputs, .. } => (*n_inputs, 0),
 
             // Assignment: pops 1 (the value to assign)
@@ -1222,9 +1225,12 @@ impl ByteCode {
         for (pc, op) in self.code.iter().enumerate() {
             if let Some(offset) = op.jump_offset() {
                 let target = (pc as isize + offset as isize) as usize;
-                if target < jump_targets.len() {
-                    jump_targets[target] = true;
-                }
+                assert!(
+                    target < jump_targets.len(),
+                    "jump at pc {pc} targets {target}, which is out of bounds (code length: {})",
+                    self.code.len()
+                );
+                jump_targets[target] = true;
             }
         }
 
@@ -1642,6 +1648,17 @@ mod tests {
             code: vec![Opcode::Op2 { op: Op2::Add }],
         };
         bc.max_stack_depth();
+    }
+
+    #[test]
+    #[should_panic(expected = "jump at pc 0 targets")]
+    fn test_peephole_panics_on_out_of_bounds_jump_target() {
+        // A jump that targets beyond the code length indicates a compiler bug
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![Opcode::NextIterOrJump { jump_back: 10 }],
+        };
+        bc.peephole_optimize();
     }
 
     // =========================================================================

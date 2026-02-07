@@ -522,6 +522,10 @@ impl Vm {
     /// `reset()`. After `reset()` but before `run_initials()`, the data buffer
     /// may contain stale values from the previous simulation run.
     pub fn get_value_now(&self, off: usize) -> f64 {
+        debug_assert!(
+            self.did_initials,
+            "get_value_now called before run_initials; data buffer may contain stale values"
+        );
         let start = self.curr_chunk * self.n_slots;
         self.data.as_ref().unwrap()[start + off]
     }
