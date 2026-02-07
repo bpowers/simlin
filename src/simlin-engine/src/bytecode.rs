@@ -864,9 +864,14 @@ impl Opcode {
             | Opcode::LoadGlobalVar { .. }
             | Opcode::LoadModuleInput { .. } => (0, 1),
 
-            // Legacy subscript: PushSubscriptIndex pops the index value
+            // Legacy subscript: PushSubscriptIndex pops an index from the
+            // arithmetic stack and appends it to a separate subscript_index
+            // SmallVec (not the arithmetic stack). Multiple PushSubscriptIndex
+            // ops may precede a single LoadSubscript for multi-dimensional
+            // access, but each only pops 1 from the arithmetic stack.
             Opcode::PushSubscriptIndex { .. } => (1, 0),
-            // LoadSubscript pushes the looked-up value
+            // LoadSubscript consumes the accumulated subscript_index entries
+            // and pushes the looked-up value onto the arithmetic stack.
             Opcode::LoadSubscript { .. } => (0, 1),
 
             // Control flow

@@ -516,6 +516,11 @@ impl Vm {
         data[start + off] = val;
     }
 
+    /// Read the current value of a variable by its data buffer offset.
+    ///
+    /// Precondition: `run_initials()` must have been called since the last
+    /// `reset()`. After `reset()` but before `run_initials()`, the data buffer
+    /// may contain stale values from the previous simulation run.
     pub fn get_value_now(&self, off: usize) -> f64 {
         let start = self.curr_chunk * self.n_slots;
         self.data.as_ref().unwrap()[start + off]
