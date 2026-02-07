@@ -598,6 +598,28 @@ pub(crate) enum Opcode {
         mode: LookupMode,
     },
 
+    // === SUPERINSTRUCTIONS (fused opcodes for common patterns) ===
+    /// Fused LoadConstant + AssignCurr.
+    /// curr[module_off + off] = literals[literal_id]; stack unchanged.
+    AssignConstCurr {
+        off: VariableOffset,
+        literal_id: LiteralId,
+    },
+
+    /// Fused Op2 + AssignCurr.
+    /// Pops two values, applies binary op, assigns result to curr[module_off + off].
+    BinOpAssignCurr {
+        op: Op2,
+        off: VariableOffset,
+    },
+
+    /// Fused Op2 + AssignNext.
+    /// Pops two values, applies binary op, assigns result to next[module_off + off].
+    BinOpAssignNext {
+        op: Op2,
+        off: VariableOffset,
+    },
+
     // =========================================================================
     // ARRAY SUPPORT (new)
     // =========================================================================
@@ -998,7 +1020,116 @@ impl ByteCodeBuilder {
     }
 
     pub(crate) fn finish(self) -> ByteCode {
-        self.bytecode
+        let mut bc = self.bytecode;
+        bc.peephole_optimize();
+        bc
+    }
+}
+
+impl ByteCode {
+    /// Peephole optimization pass: fuse common opcode sequences into
+    /// superinstructions to reduce dispatch overhead.
+    ///
+    /// Only fuses adjacent instructions when neither is a jump target.
+    /// Jump offsets are recalculated after fusion using an old->new PC map.
+    fn peephole_optimize(&mut self) {
+        if self.code.is_empty() {
+            return;
+        }
+
+        // 1. Build set of PCs that are jump targets
+        let mut jump_targets = vec![false; self.code.len()];
+        for (pc, op) in self.code.iter().enumerate() {
+            match op {
+                Opcode::NextIterOrJump { jump_back } => {
+                    let target = (pc as isize + *jump_back as isize) as usize;
+                    if target < jump_targets.len() {
+                        jump_targets[target] = true;
+                    }
+                }
+                Opcode::NextBroadcastOrJump { jump_back } => {
+                    let target = (pc as isize + *jump_back as isize) as usize;
+                    if target < jump_targets.len() {
+                        jump_targets[target] = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 2. Build old_pc -> new_pc mapping and fused output
+        let mut optimized: Vec<Opcode> = Vec::with_capacity(self.code.len());
+        let mut pc_map: Vec<usize> = Vec::with_capacity(self.code.len());
+        let mut i = 0;
+        while i < self.code.len() {
+            pc_map.push(optimized.len());
+
+            // Only try fusion if next instruction is not a jump target
+            let can_fuse = i + 1 < self.code.len() && !jump_targets[i + 1];
+
+            if can_fuse {
+                // Pattern: LoadConstant + AssignCurr -> AssignConstCurr
+                if let (Opcode::LoadConstant { id }, Opcode::AssignCurr { off }) =
+                    (&self.code[i], &self.code[i + 1])
+                {
+                    optimized.push(Opcode::AssignConstCurr {
+                        off: *off,
+                        literal_id: *id,
+                    });
+                    i += 2;
+                    continue;
+                }
+
+                // Pattern: Op2 + AssignCurr -> BinOpAssignCurr
+                if let (Opcode::Op2 { op }, Opcode::AssignCurr { off }) =
+                    (&self.code[i], &self.code[i + 1])
+                {
+                    optimized.push(Opcode::BinOpAssignCurr { op: *op, off: *off });
+                    i += 2;
+                    continue;
+                }
+
+                // Pattern: Op2 + AssignNext -> BinOpAssignNext
+                if let (Opcode::Op2 { op }, Opcode::AssignNext { off }) =
+                    (&self.code[i], &self.code[i + 1])
+                {
+                    optimized.push(Opcode::BinOpAssignNext { op: *op, off: *off });
+                    i += 2;
+                    continue;
+                }
+            }
+
+            // No pattern matched - copy opcode as-is
+            optimized.push(self.code[i].clone());
+            i += 1;
+        }
+        // Sentinel for instructions past the end
+        pc_map.push(optimized.len());
+
+        // 3. Fix up jump offsets using the pc_map
+        for (new_pc, op) in optimized.iter_mut().enumerate() {
+            match op {
+                Opcode::NextIterOrJump { jump_back } => {
+                    // Find the original PC for this instruction
+                    // The original PC is the one that maps to new_pc
+                    if let Some(old_pc) = pc_map.iter().position(|&np| np == new_pc) {
+                        let old_target = (old_pc as isize + *jump_back as isize) as usize;
+                        let new_target = pc_map[old_target];
+                        *jump_back = (new_target as isize - new_pc as isize) as PcOffset;
+                    }
+                }
+                Opcode::NextBroadcastOrJump { jump_back } => {
+                    if let Some(old_pc) = pc_map.iter().position(|&np| np == new_pc) {
+                        let old_target = (old_pc as isize + *jump_back as isize) as usize;
+                        let new_target = pc_map[old_target];
+                        *jump_back = (new_target as isize - new_pc as isize) as PcOffset;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.code = optimized;
     }
 }
 

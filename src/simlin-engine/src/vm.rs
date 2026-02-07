@@ -950,6 +950,53 @@ impl Vm {
                     next[module_off + *off as usize] = stack.pop();
                     debug_assert_eq!(0, stack.len());
                 }
+                // === SUPERINSTRUCTIONS ===
+                Opcode::AssignConstCurr { off, literal_id } => {
+                    curr[module_off + *off as usize] = bytecode.literals[*literal_id as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::BinOpAssignCurr { op, off } => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    let result = match op {
+                        Op2::Add => l + r,
+                        Op2::Sub => l - r,
+                        Op2::Exp => l.powf(r),
+                        Op2::Mul => l * r,
+                        Op2::Div => l / r,
+                        Op2::Mod => l.rem_euclid(r),
+                        Op2::Gt => (l > r) as i8 as f64,
+                        Op2::Gte => (l >= r) as i8 as f64,
+                        Op2::Lt => (l < r) as i8 as f64,
+                        Op2::Lte => (l <= r) as i8 as f64,
+                        Op2::Eq => approx_eq!(f64, l, r) as i8 as f64,
+                        Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
+                        Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
+                    };
+                    curr[module_off + *off as usize] = result;
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::BinOpAssignNext { op, off } => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    let result = match op {
+                        Op2::Add => l + r,
+                        Op2::Sub => l - r,
+                        Op2::Exp => l.powf(r),
+                        Op2::Mul => l * r,
+                        Op2::Div => l / r,
+                        Op2::Mod => l.rem_euclid(r),
+                        Op2::Gt => (l > r) as i8 as f64,
+                        Op2::Gte => (l >= r) as i8 as f64,
+                        Op2::Lt => (l < r) as i8 as f64,
+                        Op2::Lte => (l <= r) as i8 as f64,
+                        Op2::Eq => approx_eq!(f64, l, r) as i8 as f64,
+                        Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
+                        Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
+                    };
+                    next[module_off + *off as usize] = result;
+                    debug_assert_eq!(0, stack.len());
+                }
                 Opcode::Apply { func } => {
                     let time = curr[TIME_OFF];
                     let dt = curr[DT_OFF];
