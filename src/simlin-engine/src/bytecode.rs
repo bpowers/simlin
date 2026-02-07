@@ -26,6 +26,7 @@ pub type DimId = u16; // Index into dimensions table
 pub type TempId = u8; // Temp array ID (max 256 temps per module)
 pub type PcOffset = i16; // Relative PC offset for jumps (signed for backward jumps)
 pub type NameId = u16; // Index into names table
+pub type DimListId = u16; // Index into dim_lists table (for [DimId; 4] or [u16; 4])
 
 /// Lookup interpolation mode for graphical function tables.
 #[repr(u8)]
@@ -604,17 +605,17 @@ pub(crate) enum Opcode {
     // === VIEW STACK: Building views dynamically ===
     /// Push a view for a variable's full array onto the view stack.
     /// Looks up dimension info to compute strides.
+    /// The dim_list_id references a (n_dims, [DimId; 4]) entry in ByteCodeContext.dim_lists.
     PushVarView {
-        base_off: VariableOffset, // Variable offset in curr[]
-        n_dims: u8,               // Number of dimensions (1-4)
-        dim_ids: [DimId; 4],      // Dimension IDs (padded with 0 if < 4)
+        base_off: VariableOffset,
+        dim_list_id: DimListId,
     },
 
     /// Push a view for a temp array onto the view stack.
+    /// The dim_list_id references a (n_dims, [DimId; 4]) entry in ByteCodeContext.dim_lists.
     PushTempView {
         temp_id: TempId,
-        n_dims: u8,
-        dim_ids: [DimId; 4],
+        dim_list_id: DimListId,
     },
 
     /// Push a pre-computed static view onto the view stack.
@@ -624,10 +625,10 @@ pub(crate) enum Opcode {
 
     /// Push a view for a variable with explicit dimension sizes.
     /// Used when we have bounds but not dim_ids (e.g., dynamic subscripts).
+    /// The dim_list_id references a (n_dims, [u16; 4]) entry in ByteCodeContext.dim_lists.
     PushVarViewDirect {
-        base_off: VariableOffset, // Variable offset in curr[]
-        n_dims: u8,               // Number of dimensions (1-4)
-        dims: [u16; 4],           // Explicit dimension sizes (padded with 0 if < 4)
+        base_off: VariableOffset,
+        dim_list_id: DimListId,
     },
 
     /// Apply single-element subscript with constant index to top view.
@@ -878,6 +879,11 @@ pub struct ByteCodeContext {
     pub(crate) temp_offsets: Vec<usize>,
     /// Total size needed for temp_storage
     pub(crate) temp_total_size: usize,
+
+    // === Dim list side table ===
+    /// Packed (n_dims, [DimId or u16; 4]) entries referenced by DimListId.
+    /// Each entry stores the dimension count and up to 4 IDs.
+    pub(crate) dim_lists: Vec<(u8, [u16; 4])>,
 }
 
 #[allow(dead_code)] // Methods used by array bytecode not yet emitted
@@ -941,6 +947,18 @@ impl ByteCodeContext {
             }
         }
         None
+    }
+
+    /// Add a dim list entry (n_dims + up to 4 IDs) and return its DimListId.
+    pub fn add_dim_list(&mut self, n_dims: u8, ids: [u16; 4]) -> DimListId {
+        self.dim_lists.push((n_dims, ids));
+        (self.dim_lists.len() - 1) as DimListId
+    }
+
+    /// Get a dim list entry by ID.
+    pub fn get_dim_list(&self, id: DimListId) -> (u8, &[u16; 4]) {
+        let (n, ref ids) = self.dim_lists[id as usize];
+        (n, ids)
     }
 }
 
@@ -1015,11 +1033,11 @@ mod tests {
     #[test]
     fn test_opcode_size() {
         use std::mem::size_of;
-        // With array support opcodes (PushVarView has [DimId; 4] = 8 bytes),
-        // the opcode size increases. We accept up to 16 bytes.
+        // Large inline arrays ([DimId; 4]) moved to a side table, so
+        // the largest variant payload is now ViewRange (u8 + u16 + u16 = 5 bytes)
+        // or Lookup (u8 + u16 + u8 = 4 bytes). With discriminant, expect 8 bytes.
         let size = size_of::<Opcode>();
-        assert!(size <= 16, "Opcode size {} exceeds 16 bytes", size);
-        // Print actual size for documentation
+        assert!(size <= 8, "Opcode size {} exceeds 8 bytes", size);
         eprintln!("Opcode size: {} bytes", size);
     }
 

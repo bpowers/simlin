@@ -11,9 +11,9 @@ use crate::ast::{
 };
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledInitial, CompiledModule, DimId,
-    DimensionInfo, GraphicalFunctionId, LookupMode, ModuleDeclaration, ModuleId, ModuleInputOffset,
-    NameId, Op2, Opcode, RuntimeSparseMapping, StaticArrayView, SubdimensionRelation, TempId,
-    VariableOffset, ViewId,
+    DimListId, DimensionInfo, GraphicalFunctionId, LookupMode, ModuleDeclaration, ModuleId,
+    ModuleInputOffset, NameId, Op2, Opcode, RuntimeSparseMapping, StaticArrayView,
+    SubdimensionRelation, TempId, VariableOffset, ViewId,
 };
 use crate::common::{
     Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize,
@@ -3734,6 +3734,7 @@ struct Compiler<'module> {
     subdim_relations: Vec<SubdimensionRelation>,
     names: Vec<String>,
     static_views: Vec<StaticArrayView>,
+    dim_lists: Vec<(u8, [u16; 4])>,
     // Iteration context - set when compiling inside AssignTemp
     in_iteration: bool,
     /// When in optimized iteration mode, maps pre-pushed views to their stack offset.
@@ -3766,6 +3767,7 @@ impl<'module> Compiler<'module> {
             subdim_relations: vec![],
             names: vec![],
             static_views: vec![],
+            dim_lists: Vec::new(),
             in_iteration: false,
             iter_source_views: None,
         };
@@ -4009,10 +4011,11 @@ impl<'module> Compiler<'module> {
                 for (i, &bound) in bounds.iter().take(4).enumerate() {
                     dims[i] = bound as u16;
                 }
+                let dim_list_id = self.dim_lists.len() as DimListId;
+                self.dim_lists.push((n_dims, dims));
                 self.push(Opcode::PushVarViewDirect {
                     base_off: *off as u16,
-                    n_dims,
-                    dims,
+                    dim_list_id,
                 });
 
                 // Apply each subscript index to the view.
@@ -4950,6 +4953,7 @@ impl<'module> Compiler<'module> {
                 static_views: self.static_views,
                 temp_offsets,
                 temp_total_size,
+                dim_lists: self.dim_lists,
             }),
             compiled_initials,
             compiled_flows,

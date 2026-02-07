@@ -988,11 +988,10 @@ impl Vm {
                 // =========================================================
                 Opcode::PushVarView {
                     base_off,
-                    n_dims,
-                    dim_ids,
+                    dim_list_id,
                 } => {
-                    // Build a view for a variable with given dimensions
-                    let n = *n_dims as usize;
+                    let (n_dims, dim_ids) = context.get_dim_list(*dim_list_id);
+                    let n = n_dims as usize;
                     let dims: SmallVec<[u16; 4]> = (0..n)
                         .map(|i| context.dimensions[dim_ids[i] as usize].size)
                         .collect();
@@ -1007,10 +1006,10 @@ impl Vm {
 
                 Opcode::PushTempView {
                     temp_id,
-                    n_dims,
-                    dim_ids,
+                    dim_list_id,
                 } => {
-                    let n = *n_dims as usize;
+                    let (n_dims, dim_ids) = context.get_dim_list(*dim_list_id);
+                    let n = n_dims as usize;
                     let dims: SmallVec<[u16; 4]> = (0..n)
                         .map(|i| context.dimensions[dim_ids[i] as usize].size)
                         .collect();
@@ -1026,13 +1025,11 @@ impl Vm {
 
                 Opcode::PushVarViewDirect {
                     base_off,
-                    n_dims,
-                    dims,
+                    dim_list_id,
                 } => {
-                    // Build a view with explicit dimension sizes (no dim_id lookup needed)
-                    let n = *n_dims as usize;
+                    let (n_dims, dims) = context.get_dim_list(*dim_list_id);
+                    let n = n_dims as usize;
                     let dims_vec: SmallVec<[u16; 4]> = dims[..n].iter().copied().collect();
-                    // Use 0 as dim_id since we don't have dimension metadata
                     let dim_ids: SmallVec<[DimId; 4]> = (0..n).map(|_| 0 as DimId).collect();
                     let view = RuntimeView::for_var(
                         (module_off + *base_off as usize) as u32,
