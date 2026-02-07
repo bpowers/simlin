@@ -94,7 +94,7 @@ pub(crate) fn is_truthy(n: f64) -> bool {
 }
 
 #[inline(always)]
-fn eval_op2(op: &Op2, l: f64, r: f64) -> f64 {
+fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
     match op {
         Op2::Add => l + r,
         Op2::Sub => l - r,
@@ -251,6 +251,9 @@ impl Stack {
     #[inline(always)]
     fn push(&mut self, value: f64) {
         debug_assert!(self.top < STACK_CAPACITY, "stack overflow");
+        // SAFETY: debug_assert above guards that top < STACK_CAPACITY (= data.len()).
+        // The invariant holds because push increments top by 1 and pop decrements by 1,
+        // so top is always in [0, STACK_CAPACITY).
         unsafe {
             *self.data.get_unchecked_mut(self.top) = value;
         }
@@ -260,6 +263,8 @@ impl Stack {
     fn pop(&mut self) -> f64 {
         debug_assert!(self.top > 0, "stack underflow");
         self.top -= 1;
+        // SAFETY: top was > 0 before decrement (debug_assert above), so top is now
+        // in [0, STACK_CAPACITY - 1], which is a valid index into data.
         unsafe { *self.data.get_unchecked(self.top) }
     }
     #[inline(always)]
@@ -834,7 +839,7 @@ impl Vm {
                 Opcode::Op2 { op } => {
                     let r = stack.pop();
                     let l = stack.pop();
-                    stack.push(eval_op2(op, l, r));
+                    stack.push(eval_op2(*op, l, r));
                 }
                 Opcode::Not {} => {
                     let r = stack.pop();
@@ -968,13 +973,13 @@ impl Vm {
                 Opcode::BinOpAssignCurr { op, off } => {
                     let r = stack.pop();
                     let l = stack.pop();
-                    curr[module_off + *off as usize] = eval_op2(op, l, r);
+                    curr[module_off + *off as usize] = eval_op2(*op, l, r);
                     debug_assert_eq!(0, stack.len());
                 }
                 Opcode::BinOpAssignNext { op, off } => {
                     let r = stack.pop();
                     let l = stack.pop();
-                    next[module_off + *off as usize] = eval_op2(op, l, r);
+                    next[module_off + *off as usize] = eval_op2(*op, l, r);
                     debug_assert_eq!(0, stack.len());
                 }
                 Opcode::Apply { func } => {
@@ -2243,31 +2248,31 @@ mod eval_op2_tests {
 
     #[test]
     fn test_eval_op2_arithmetic() {
-        assert_eq!(eval_op2(&Op2::Add, 3.0, 4.0), 7.0);
-        assert_eq!(eval_op2(&Op2::Sub, 10.0, 3.0), 7.0);
-        assert_eq!(eval_op2(&Op2::Mul, 3.0, 4.0), 12.0);
-        assert_eq!(eval_op2(&Op2::Div, 10.0, 4.0), 2.5);
-        assert_eq!(eval_op2(&Op2::Exp, 2.0, 3.0), 8.0);
-        assert_eq!(eval_op2(&Op2::Mod, 7.0, 3.0), 1.0);
+        assert_eq!(eval_op2(Op2::Add, 3.0, 4.0), 7.0);
+        assert_eq!(eval_op2(Op2::Sub, 10.0, 3.0), 7.0);
+        assert_eq!(eval_op2(Op2::Mul, 3.0, 4.0), 12.0);
+        assert_eq!(eval_op2(Op2::Div, 10.0, 4.0), 2.5);
+        assert_eq!(eval_op2(Op2::Exp, 2.0, 3.0), 8.0);
+        assert_eq!(eval_op2(Op2::Mod, 7.0, 3.0), 1.0);
     }
 
     #[test]
     fn test_eval_op2_comparisons() {
-        assert_eq!(eval_op2(&Op2::Gt, 5.0, 3.0), 1.0);
-        assert_eq!(eval_op2(&Op2::Gt, 3.0, 5.0), 0.0);
-        assert_eq!(eval_op2(&Op2::Gte, 5.0, 5.0), 1.0);
-        assert_eq!(eval_op2(&Op2::Lt, 3.0, 5.0), 1.0);
-        assert_eq!(eval_op2(&Op2::Lte, 5.0, 5.0), 1.0);
-        assert_eq!(eval_op2(&Op2::Eq, 5.0, 5.0), 1.0);
-        assert_eq!(eval_op2(&Op2::Eq, 5.0, 5.1), 0.0);
+        assert_eq!(eval_op2(Op2::Gt, 5.0, 3.0), 1.0);
+        assert_eq!(eval_op2(Op2::Gt, 3.0, 5.0), 0.0);
+        assert_eq!(eval_op2(Op2::Gte, 5.0, 5.0), 1.0);
+        assert_eq!(eval_op2(Op2::Lt, 3.0, 5.0), 1.0);
+        assert_eq!(eval_op2(Op2::Lte, 5.0, 5.0), 1.0);
+        assert_eq!(eval_op2(Op2::Eq, 5.0, 5.0), 1.0);
+        assert_eq!(eval_op2(Op2::Eq, 5.0, 5.1), 0.0);
     }
 
     #[test]
     fn test_eval_op2_logical() {
-        assert_eq!(eval_op2(&Op2::And, 1.0, 1.0), 1.0);
-        assert_eq!(eval_op2(&Op2::And, 1.0, 0.0), 0.0);
-        assert_eq!(eval_op2(&Op2::Or, 0.0, 1.0), 1.0);
-        assert_eq!(eval_op2(&Op2::Or, 0.0, 0.0), 0.0);
+        assert_eq!(eval_op2(Op2::And, 1.0, 1.0), 1.0);
+        assert_eq!(eval_op2(Op2::And, 1.0, 0.0), 0.0);
+        assert_eq!(eval_op2(Op2::Or, 0.0, 1.0), 1.0);
+        assert_eq!(eval_op2(Op2::Or, 0.0, 0.0), 0.0);
     }
 }
 
