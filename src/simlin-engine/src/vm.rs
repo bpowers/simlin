@@ -253,6 +253,16 @@ impl Stack {
     }
 }
 
+/// Mutable evaluation state grouped to reduce argument count in eval functions.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+struct EvalState<'a> {
+    stack: &'a mut Stack,
+    temp_storage: &'a mut [f64],
+    view_stack: &'a mut Vec<RuntimeView>,
+    iter_stack: &'a mut Vec<IterState>,
+    broadcast_stack: &'a mut Vec<BroadcastState>,
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 struct CompiledModuleSlice {
@@ -405,6 +415,14 @@ impl Vm {
         self.iter_stack.clear();
         self.broadcast_stack.clear();
 
+        let mut state = EvalState {
+            stack: &mut self.stack,
+            temp_storage: &mut self.temp_storage,
+            view_stack: &mut self.view_stack,
+            iter_stack: &mut self.iter_stack,
+            broadcast_stack: &mut self.broadcast_stack,
+        };
+
         loop {
             let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
             if curr[TIME_OFF] > end {
@@ -413,29 +431,21 @@ impl Vm {
 
             Self::eval(
                 &self.sliced_sim,
-                &mut self.temp_storage,
+                &mut state,
                 module_flows,
                 0,
                 module_inputs,
                 curr,
                 next,
-                &mut self.stack,
-                &mut self.view_stack,
-                &mut self.iter_stack,
-                &mut self.broadcast_stack,
             );
             Self::eval(
                 &self.sliced_sim,
-                &mut self.temp_storage,
+                &mut state,
                 module_stocks,
                 0,
                 module_inputs,
                 curr,
                 next,
-                &mut self.stack,
-                &mut self.view_stack,
-                &mut self.iter_stack,
-                &mut self.broadcast_stack,
             );
             next[TIME_OFF] = curr[TIME_OFF] + dt;
             next[DT_OFF] = curr[DT_OFF];
@@ -596,19 +606,23 @@ impl Vm {
         self.iter_stack.clear();
         self.broadcast_stack.clear();
 
+        let mut state = EvalState {
+            stack: &mut self.stack,
+            temp_storage: &mut self.temp_storage,
+            view_stack: &mut self.view_stack,
+            iter_stack: &mut self.iter_stack,
+            broadcast_stack: &mut self.broadcast_stack,
+        };
+
         Self::eval_initials_with_overrides(
             &self.sliced_sim,
-            &mut self.temp_storage,
+            &mut state,
             &self.root,
             0,
             module_inputs,
             curr,
             next,
-            &mut self.stack,
             &self.overrides,
-            &mut self.view_stack,
-            &mut self.iter_stack,
-            &mut self.broadcast_stack,
         );
         self.did_initials = true;
         self.step_accum = 0;
@@ -648,18 +662,14 @@ impl Vm {
     #[inline(never)]
     fn eval_module_initials_with_overrides(
         sliced_sim: &CompiledSlicedSimulation,
-        temp_storage: &mut [f64],
+        state: &mut EvalState<'_>,
         parent_context: &ByteCodeContext,
         parent_module_off: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        stack: &mut Stack,
         id: ModuleId,
         overrides: &HashMap<usize, f64>,
-        view_stack: &mut Vec<RuntimeView>,
-        iter_stack: &mut Vec<IterState>,
-        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
         let new_module_decl = &parent_context.modules[id as usize];
         let module_key = make_module_key(&new_module_decl.model_name, &new_module_decl.input_set);
@@ -667,17 +677,13 @@ impl Vm {
 
         Self::eval_initials_with_overrides(
             sliced_sim,
-            temp_storage,
+            state,
             &module_key,
             module_off,
             module_inputs,
             curr,
             next,
-            stack,
             overrides,
-            view_stack,
-            iter_stack,
-            broadcast_stack,
         );
     }
 
@@ -686,39 +692,28 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     fn eval_initials_with_overrides(
         sliced_sim: &CompiledSlicedSimulation,
-        temp_storage: &mut [f64],
+        state: &mut EvalState<'_>,
         module_key: &ModuleKey,
         module_off: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        stack: &mut Stack,
         overrides: &HashMap<usize, f64>,
-        view_stack: &mut Vec<RuntimeView>,
-        iter_stack: &mut Vec<IterState>,
-        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
         let module_initials = &sliced_sim.initial_modules[module_key];
         let context = &module_initials.context;
         for compiled_initial in module_initials.initials.iter() {
             Self::eval_single_initial(
                 sliced_sim,
-                temp_storage,
+                state,
                 context,
                 &compiled_initial.bytecode,
                 module_off,
                 module_inputs,
                 curr,
                 next,
-                stack,
                 overrides,
-                view_stack,
-                iter_stack,
-                broadcast_stack,
             );
-            // Evaluate-then-patch: apply overrides after bytecode completes.
-            // CompiledInitial offsets are module-relative; add module_off
-            // to get the absolute position in the flattened data buffer.
             for &off in &compiled_initial.offsets {
                 let abs_off = module_off + off;
                 if let Some(&val) = overrides.get(&abs_off) {
@@ -732,22 +727,18 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     fn eval_single_initial(
         sliced_sim: &CompiledSlicedSimulation,
-        temp_storage: &mut [f64],
+        state: &mut EvalState<'_>,
         context: &ByteCodeContext,
         bytecode: &ByteCode,
         module_off: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        stack: &mut Stack,
         overrides: &HashMap<usize, f64>,
-        view_stack: &mut Vec<RuntimeView>,
-        iter_stack: &mut Vec<IterState>,
-        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
         Self::eval_bytecode(
             sliced_sim,
-            temp_storage,
+            state,
             context,
             bytecode,
             StepPart::Initials,
@@ -755,31 +746,22 @@ impl Vm {
             module_inputs,
             curr,
             next,
-            stack,
             overrides,
-            view_stack,
-            iter_stack,
-            broadcast_stack,
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn eval(
         sliced_sim: &CompiledSlicedSimulation,
-        temp_storage: &mut [f64],
+        state: &mut EvalState<'_>,
         module: &CompiledModuleSlice,
         module_off: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        stack: &mut Stack,
-        view_stack: &mut Vec<RuntimeView>,
-        iter_stack: &mut Vec<IterState>,
-        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
         Self::eval_bytecode(
             sliced_sim,
-            temp_storage,
+            state,
             &module.context,
             &module.bytecode,
             module.part,
@@ -787,18 +769,14 @@ impl Vm {
             module_inputs,
             curr,
             next,
-            stack,
             &EMPTY_OVERRIDES,
-            view_stack,
-            iter_stack,
-            broadcast_stack,
         );
     }
 
     #[allow(clippy::too_many_arguments)]
     fn eval_bytecode(
         sliced_sim: &CompiledSlicedSimulation,
-        temp_storage: &mut [f64],
+        state: &mut EvalState<'_>,
         context: &ByteCodeContext,
         bytecode: &ByteCode,
         part: StepPart,
@@ -806,13 +784,16 @@ impl Vm {
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        stack: &mut Stack,
         overrides: &HashMap<usize, f64>,
-        view_stack: &mut Vec<RuntimeView>,
-        iter_stack: &mut Vec<IterState>,
-        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
-        // Existing state
+        // Destructure into local mutable references for ergonomic access in the opcode loop.
+        // For recursive calls (EvalModule), we re-pack these into a temporary EvalState.
+        let mut stack = &mut *state.stack;
+        let mut temp_storage = &mut *state.temp_storage;
+        let mut view_stack = &mut *state.view_stack;
+        let mut iter_stack = &mut *state.iter_stack;
+        let mut broadcast_stack = &mut *state.broadcast_stack;
+
         let mut condition = false;
         let mut subscript_index: SmallVec<[(u16, u16); 4]> = SmallVec::new();
         let mut subscript_index_valid = true;
@@ -901,22 +882,25 @@ impl Vm {
                     for j in (0..(*n_inputs as usize)).rev() {
                         module_inputs[j] = stack.pop();
                     }
+                    let mut child_state = EvalState {
+                        stack,
+                        temp_storage,
+                        view_stack,
+                        iter_stack,
+                        broadcast_stack,
+                    };
                     match part {
                         StepPart::Initials => {
                             Self::eval_module_initials_with_overrides(
                                 sliced_sim,
-                                temp_storage,
+                                &mut child_state,
                                 context,
                                 module_off,
                                 &module_inputs,
                                 curr,
                                 next,
-                                stack,
                                 *id,
                                 overrides,
-                                view_stack,
-                                iter_stack,
-                                broadcast_stack,
                             );
                         }
                         StepPart::Flows | StepPart::Stocks => {
@@ -933,19 +917,28 @@ impl Vm {
                             };
                             Self::eval(
                                 sliced_sim,
-                                temp_storage,
+                                &mut child_state,
                                 child_module,
                                 child_module_off,
                                 &module_inputs,
                                 curr,
                                 next,
-                                stack,
-                                view_stack,
-                                iter_stack,
-                                broadcast_stack,
                             );
                         }
                     }
+                    // Recover mutable references from child_state
+                    let EvalState {
+                        stack: s,
+                        temp_storage: ts,
+                        view_stack: vs,
+                        iter_stack: is_,
+                        broadcast_stack: bs,
+                    } = child_state;
+                    stack = s;
+                    temp_storage = ts;
+                    view_stack = vs;
+                    iter_stack = is_;
+                    broadcast_stack = bs;
                 }
                 Opcode::AssignCurr { off } => {
                     curr[module_off + *off as usize] = stack.pop();
