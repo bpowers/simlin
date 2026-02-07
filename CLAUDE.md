@@ -11,7 +11,7 @@ It is a crucial resource to consult when adding functionality to the simulation 
 The engine for simulating system dynamics stock and flow models is written in Rust, and the interactive model editor targets evergreen browsers and is written in TypeScript.
 Additional components like the server and higher-level app functionality are written in TypeScript as well.
 
-This as a monorepo without external users -- breaking changes and API changes are OK as long as tests + the pre-commit hook passes with only 1 exception: changes to protobuf files must follow standard best practices, as those as we have a DB with serialized protobuf instances in it.
+This is a monorepo without external users -- breaking changes and API changes are OK as long as tests + the pre-commit hook passes with only 1 exception: changes to protobuf files must follow standard best practices, as we have a DB with serialized protobuf instances in it.
 
 ## Architecture Overview
 
@@ -23,7 +23,7 @@ Rust components are standard cargo projects in a cargo workspace, and TypeScript
 - Projects consist of 1 or more models, and are type-checked and compiled to a simple bytecode format (`compiler.rs`)
 - Equation text is parsed into an AST using a recursive descent parser (`parser/mod.rs`)
 - Simulations are run/evaluated using a bytecode-based virtual machine (`vm.rs`)
-- We have a a simple AST-walking `interpreter.rs` serving as a "spec" to verify the VM produces the same/correct results.
+- We have a simple AST-walking `interpreter.rs` serving as a "spec" to verify the VM produces the same/correct results.
 - Contains (`builtins.rs`) "stdlib" of _models_ that implement stateful, standard SD "functions" like TREND and SMOOTH3
 
 **`src/libsimlin` (Rust)**: Flat "C" FFI to simlin-engine
@@ -41,8 +41,7 @@ Rust components are standard cargo projects in a cargo workspace, and TypeScript
 **`src/diagram` (TypeScript)**: React components for model visualization and editing
 - designed as a general purpose SD model editor component and toolkit, without dependencies on the Simlin app or server API
 - `Editor.tsx` is the model editor, handling user interaction, state, and tool selection
-- `Canvas.tsx` handles overall visual layout
-- Drawing components in `drawing/` subdirectory
+- Drawing components in `drawing/` subdirectory, including `Canvas.tsx` for overall visual layout
 
 **`src/app` (TypeScript)**: Full featured system dynamics application
 - Browse existing models, create or import new models, login/logout, etc.
@@ -56,6 +55,12 @@ Rust components are standard cargo projects in a cargo workspace, and TypeScript
 
 **`src/simlin-cli` (Rust)**: CLI for simulating and converting models, mostly for testing/debugging
 
+**`src/pysimlin` (Python/Rust)**: Python bindings for the simulation engine
+- aims to expose the full engine functionality in idiomatic Python, with the target users being AI agents analyzing model behavior, calibrating models, etc.
+
+### Test Models
+
+The `test/` directory contains an extensive suite of model files (XMILE, Vensim `.mdl`) with expected simulation outputs. These integration tests ensure engine behavior matches known-good results from other software and are critical when working on engine functionality.
 
 ### Initial Environment Setup
 
@@ -75,8 +80,10 @@ The pre-commit hook (`scripts/pre-commit`) runs automatically before each commit
 3. Rust tests
 4. TypeScript/JavaScript linting
 5. TypeScript type checking
-6. Python bindings tests
-7. Test quality verification
+6. WASM build
+7. TypeScript tests
+8. Python bindings tests
+9. Test quality verification
 
 If any check fails, the commit is rejected. Fix the issues and try again.
 
@@ -120,7 +127,7 @@ IMPORTANT: lean on the pre-commit hook - if you are getting ready to commit, jus
 It is CRITICAL that you NEVER use the `--no-verify` flag with `git commit`.
 
 IMPORTANT: It is MUCH better to have simple, general, testable and maintainable code than to avoid changing an interface or abstraction.  Take the time to do it right.
-There are NO places where the VM bytecode is serialized to disk, the ONLY place where there is a need for compatabilty is around protobufs, where we should follow standard protobuf versioning and change standards.
+There are NO places where the VM bytecode is serialized to disk, the ONLY place where there is a need for compatibility is around protobufs, where we should follow standard protobuf versioning and change standards.
 
 **CRITICAL**: ALL work should follow test-driven development and target 95+% code coverage for all new code, both in Rust and TypeScript.  This should be straightforward for Rust code, for TypeScript it often means following the functional core, imperative shell pattern to ensure as much of the logic and functionality is in easily testable pure functions.  Parts of the Editor and TypeScript components didn't follow this practice historically: when planning new work, if necessary take your time, think deeply and where necessary have initial phase(s) of the plan refactor the code to be more modular and testable, with tests validating the current behavior (remember: TDD).
 
@@ -128,16 +135,16 @@ IMPORTANT: If you get feedback on code that you don't think is actionable, it at
 
 When working on this codebase, follow this systematic approach:
 
-### 0. Problem-Solving Philosophy
+### Problem-Solving Philosophy
 
 - **Write high-quality, general-purpose solutions**: Implement solutions that work correctly for all valid inputs, not just test cases. Do not hard-code values or create solutions that only work for specific test inputs.
-- **Prioritize the right approach over the first approach**: Research the proper way to implement features rather than implementing workarounds. For example, check if an API provides token usage directly before implementing token counting. If you are not sure, explore several approaches and then choose the most promising one (or ask the user for their input if one isn't clearly best).
+- **Prioritize the right approach over the first approach**: Research the proper way to implement features rather than implementing workarounds. If you are not sure, explore several approaches and then choose the most promising one (or ask the user for their input if one isn't clearly best).
 - **Keep implementations simple and maintainable**: Start with the simplest solution that meets requirements. Only add complexity when the simple approach demonstrably fails.
 - **No special casing in tests**: Tests should hold all implementations to the same standard. Never add conditional logic in tests that allows certain implementations to skip requirements.
-- **No compatability shims or fallback paths**: Remember there are no external users of this codebase, and at this point we have a comprehensive test suite.  Fully complete migrations.
+- **No compatibility shims or fallback paths**: Remember there are no external users of this codebase, and at this point we have a comprehensive test suite.  Fully complete migrations.
 - **Test-driven Development (TDD)**: Follow TDD best practices, ensure tests actually assert the behavior we're expecting AND have high code coverage.
 
-### 1. Understanding Requirements
+### Understanding Requirements
 - Read relevant code and documentation (including for libraries) and build a plan based on the user's task.
 - If there are important and ambiguous high-level architecture decisions or "trapdoor" choices, stop and ask the user.
 - Start by adding tests to validate assumptions before making changes.
