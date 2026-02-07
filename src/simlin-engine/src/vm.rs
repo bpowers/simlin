@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use float_cmp::approx_eq;
 use smallvec::SmallVec;
@@ -17,6 +17,8 @@ use crate::dimensions::{Dimension, match_dimensions_two_pass};
 #[allow(unused_imports)]
 pub use crate::results::{Method, Results, Specs};
 use crate::sim_err;
+
+static EMPTY_OVERRIDES: LazyLock<HashMap<usize, f64>> = LazyLock::new(HashMap::new);
 
 /// Key for looking up compiled modules.
 /// A model can have multiple instantiations with different input sets,
@@ -188,6 +190,10 @@ pub struct Vm {
     // Temp array storage (allocated once, reused across evals)
     // Indexed by temp_offsets from ByteCodeContext
     temp_storage: Vec<f64>,
+    // Reusable stacks for eval_bytecode (allocated once, cleared before each top-level call)
+    view_stack: Vec<RuntimeView>,
+    iter_stack: Vec<IterState>,
+    broadcast_stack: Vec<BroadcastState>,
     // Override values: offset -> value. Applied after each variable's
     // initial bytecode executes (evaluate-then-patch).
     overrides: HashMap<usize, f64>,
@@ -330,6 +336,9 @@ impl Vm {
             did_initials: false,
             step_accum: 0,
             temp_storage,
+            view_stack: Vec::with_capacity(4),
+            iter_stack: Vec::with_capacity(2),
+            broadcast_stack: Vec::with_capacity(1),
             overrides: HashMap::new(),
             initial_offsets: sim.cached_initial_offsets,
         })
@@ -358,14 +367,18 @@ impl Vm {
         std::mem::swap(&mut data, &mut self.data);
         let mut data = data.unwrap();
 
+        let module_flows = &self.sliced_sim.flow_modules[&self.root];
+        let module_stocks = &self.sliced_sim.stock_modules[&self.root];
+
+        self.view_stack.clear();
+        self.iter_stack.clear();
+        self.broadcast_stack.clear();
+
         loop {
             let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
             if curr[TIME_OFF] > end {
                 break;
             }
-
-            let module_flows = &self.sliced_sim.flow_modules[&self.root];
-            let module_stocks = &self.sliced_sim.stock_modules[&self.root];
 
             Self::eval(
                 &self.sliced_sim,
@@ -376,6 +389,9 @@ impl Vm {
                 curr,
                 next,
                 &mut stack,
+                &mut self.view_stack,
+                &mut self.iter_stack,
+                &mut self.broadcast_stack,
             );
             Self::eval(
                 &self.sliced_sim,
@@ -386,6 +402,9 @@ impl Vm {
                 curr,
                 next,
                 &mut stack,
+                &mut self.view_stack,
+                &mut self.iter_stack,
+                &mut self.broadcast_stack,
             );
             next[TIME_OFF] = curr[TIME_OFF] + dt;
             next[DT_OFF] = curr[DT_OFF];
@@ -465,6 +484,9 @@ impl Vm {
         self.did_initials = false;
         self.step_accum = 0;
         self.temp_storage.fill(0.0);
+        self.view_stack.clear();
+        self.iter_stack.clear();
+        self.broadcast_stack.clear();
     }
 
     /// Set an override by canonical variable name. The override value will be
@@ -538,6 +560,10 @@ impl Vm {
         curr[INITIAL_TIME_OFF] = spec_start;
         curr[FINAL_TIME_OFF] = spec_stop;
 
+        self.view_stack.clear();
+        self.iter_stack.clear();
+        self.broadcast_stack.clear();
+
         Self::eval_initials_with_overrides(
             &self.sliced_sim,
             &mut self.temp_storage,
@@ -548,6 +574,9 @@ impl Vm {
             next,
             &mut stack,
             &self.overrides,
+            &mut self.view_stack,
+            &mut self.iter_stack,
+            &mut self.broadcast_stack,
         );
         self.did_initials = true;
         self.step_accum = 0;
@@ -596,6 +625,9 @@ impl Vm {
         stack: &mut Stack,
         id: ModuleId,
         overrides: &HashMap<usize, f64>,
+        view_stack: &mut Vec<RuntimeView>,
+        iter_stack: &mut Vec<IterState>,
+        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
         let new_module_decl = &parent_context.modules[id as usize];
         let module_key = make_module_key(&new_module_decl.model_name, &new_module_decl.input_set);
@@ -611,6 +643,9 @@ impl Vm {
             next,
             stack,
             overrides,
+            view_stack,
+            iter_stack,
+            broadcast_stack,
         );
     }
 
@@ -627,6 +662,9 @@ impl Vm {
         next: &mut [f64],
         stack: &mut Stack,
         overrides: &HashMap<usize, f64>,
+        view_stack: &mut Vec<RuntimeView>,
+        iter_stack: &mut Vec<IterState>,
+        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
         let module_initials = &sliced_sim.initial_modules[module_key];
         let context = &module_initials.context;
@@ -642,6 +680,9 @@ impl Vm {
                 next,
                 stack,
                 overrides,
+                view_stack,
+                iter_stack,
+                broadcast_stack,
             );
             // Evaluate-then-patch: apply overrides after bytecode completes.
             // CompiledInitial offsets are module-relative; add module_off
@@ -668,6 +709,9 @@ impl Vm {
         next: &mut [f64],
         stack: &mut Stack,
         overrides: &HashMap<usize, f64>,
+        view_stack: &mut Vec<RuntimeView>,
+        iter_stack: &mut Vec<IterState>,
+        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
         Self::eval_bytecode(
             sliced_sim,
@@ -681,6 +725,9 @@ impl Vm {
             next,
             stack,
             overrides,
+            view_stack,
+            iter_stack,
+            broadcast_stack,
         );
     }
 
@@ -694,8 +741,10 @@ impl Vm {
         curr: &mut [f64],
         next: &mut [f64],
         stack: &mut Stack,
+        view_stack: &mut Vec<RuntimeView>,
+        iter_stack: &mut Vec<IterState>,
+        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
-        let empty = HashMap::new();
         Self::eval_bytecode(
             sliced_sim,
             temp_storage,
@@ -707,7 +756,10 @@ impl Vm {
             curr,
             next,
             stack,
-            &empty,
+            &EMPTY_OVERRIDES,
+            view_stack,
+            iter_stack,
+            broadcast_stack,
         );
     }
 
@@ -724,16 +776,14 @@ impl Vm {
         next: &mut [f64],
         stack: &mut Stack,
         overrides: &HashMap<usize, f64>,
+        view_stack: &mut Vec<RuntimeView>,
+        iter_stack: &mut Vec<IterState>,
+        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
         // Existing state
         let mut condition = false;
         let mut subscript_index: SmallVec<[(u16, u16); 4]> = SmallVec::new();
         let mut subscript_index_valid = true;
-
-        // Array support: view stack, iteration stack, broadcast stack (local to this eval)
-        let mut view_stack: Vec<RuntimeView> = Vec::with_capacity(4);
-        let mut iter_stack: Vec<IterState> = Vec::with_capacity(2);
-        let mut broadcast_stack: Vec<BroadcastState> = Vec::with_capacity(1);
 
         let code = &bytecode.code;
 
@@ -832,6 +882,9 @@ impl Vm {
                                 stack,
                                 *id,
                                 overrides,
+                                view_stack,
+                                iter_stack,
+                                broadcast_stack,
                             );
                         }
                         StepPart::Flows | StepPart::Stocks => {
@@ -855,6 +908,9 @@ impl Vm {
                                 curr,
                                 next,
                                 stack,
+                                view_stack,
+                                iter_stack,
+                                broadcast_stack,
                             );
                         }
                     }
