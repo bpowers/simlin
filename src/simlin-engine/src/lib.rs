@@ -2,6 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// deny (not forbid) so that vm.rs Stack can use targeted #[allow(unsafe_code)]
+// for unchecked array access in the hot dispatch loop. All other modules remain
+// unsafe-free; adding unsafe anywhere else requires an explicit allow annotation.
 #![deny(unsafe_code)]
 
 pub use prost;
