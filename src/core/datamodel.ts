@@ -238,7 +238,7 @@ function stockEquationFromJson(
   arrayedEquation: JsonArrayedEquation | undefined,
 ): Equation {
   if (arrayedEquation) {
-    const dimensionNames = List(arrayedEquation.dimensions ?? []);
+    const dimensionNames = List<string>(arrayedEquation.dimensions ?? []);
     if (arrayedEquation.elements && arrayedEquation.elements.length > 0) {
       return new ArrayedEquation({
         dimensionNames,
@@ -265,7 +265,7 @@ function auxEquationFromJson(
   }
 
   if (arrayedEquation) {
-    const dimensionNames = List(arrayedEquation.dimensions ?? []);
+    const dimensionNames = List<string>(arrayedEquation.dimensions ?? []);
     if (arrayedEquation.elements && arrayedEquation.elements.length > 0) {
       return {
         equation: new ArrayedEquation({
