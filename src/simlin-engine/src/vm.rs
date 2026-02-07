@@ -93,6 +93,25 @@ pub(crate) fn is_truthy(n: f64) -> bool {
     !is_false
 }
 
+#[inline(always)]
+fn eval_op2(op: &Op2, l: f64, r: f64) -> f64 {
+    match op {
+        Op2::Add => l + r,
+        Op2::Sub => l - r,
+        Op2::Exp => l.powf(r),
+        Op2::Mul => l * r,
+        Op2::Div => l / r,
+        Op2::Mod => l.rem_euclid(r),
+        Op2::Gt => (l > r) as i8 as f64,
+        Op2::Gte => (l >= r) as i8 as f64,
+        Op2::Lt => (l < r) as i8 as f64,
+        Op2::Lte => (l <= r) as i8 as f64,
+        Op2::Eq => approx_eq!(f64, l, r) as i8 as f64,
+        Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
+        Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
+    }
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct CompiledSimulation {
@@ -510,6 +529,10 @@ impl Vm {
 
     /// Reset the VM to its pre-simulation state, reusing the data buffer allocation.
     /// Overrides are preserved across reset.
+    ///
+    /// The data buffer is NOT zeroed here because `run_initials()` (which must be
+    /// called before `run_to()`) fully reinitializes all variable slots and pre-fills
+    /// DT/INITIAL_TIME/FINAL_TIME across all chunk slots.
     pub fn reset(&mut self) {
         self.curr_chunk = 0;
         self.next_chunk = 1;
@@ -788,8 +811,10 @@ impl Vm {
         next: &mut [f64],
         overrides: &HashMap<usize, f64>,
     ) {
-        // Destructure into local mutable references for ergonomic access in the opcode loop.
-        // For recursive calls (EvalModule), we re-pack these into a temporary EvalState.
+        // Destructure EvalState into local reborrows so the opcode loop can use
+        // them directly.  For recursive EvalModule calls we must re-pack into a
+        // temporary EvalState (and destructure again afterward) because holding
+        // individual &mut borrows from the struct would prevent passing &mut EvalState.
         let mut stack = &mut *state.stack;
         let mut temp_storage = &mut *state.temp_storage;
         let mut view_stack = &mut *state.view_stack;
@@ -809,22 +834,7 @@ impl Vm {
                 Opcode::Op2 { op } => {
                     let r = stack.pop();
                     let l = stack.pop();
-                    let result = match op {
-                        Op2::Add => l + r,
-                        Op2::Sub => l - r,
-                        Op2::Exp => l.powf(r),
-                        Op2::Mul => l * r,
-                        Op2::Div => l / r,
-                        Op2::Mod => l.rem_euclid(r),
-                        Op2::Gt => (l > r) as i8 as f64,
-                        Op2::Gte => (l >= r) as i8 as f64,
-                        Op2::Lt => (l < r) as i8 as f64,
-                        Op2::Lte => (l <= r) as i8 as f64,
-                        Op2::Eq => approx_eq!(f64, l, r) as i8 as f64,
-                        Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
-                        Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
-                    };
-                    stack.push(result);
+                    stack.push(eval_op2(op, l, r));
                 }
                 Opcode::Not {} => {
                     let r = stack.pop();
@@ -958,43 +968,13 @@ impl Vm {
                 Opcode::BinOpAssignCurr { op, off } => {
                     let r = stack.pop();
                     let l = stack.pop();
-                    let result = match op {
-                        Op2::Add => l + r,
-                        Op2::Sub => l - r,
-                        Op2::Exp => l.powf(r),
-                        Op2::Mul => l * r,
-                        Op2::Div => l / r,
-                        Op2::Mod => l.rem_euclid(r),
-                        Op2::Gt => (l > r) as i8 as f64,
-                        Op2::Gte => (l >= r) as i8 as f64,
-                        Op2::Lt => (l < r) as i8 as f64,
-                        Op2::Lte => (l <= r) as i8 as f64,
-                        Op2::Eq => approx_eq!(f64, l, r) as i8 as f64,
-                        Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
-                        Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
-                    };
-                    curr[module_off + *off as usize] = result;
+                    curr[module_off + *off as usize] = eval_op2(op, l, r);
                     debug_assert_eq!(0, stack.len());
                 }
                 Opcode::BinOpAssignNext { op, off } => {
                     let r = stack.pop();
                     let l = stack.pop();
-                    let result = match op {
-                        Op2::Add => l + r,
-                        Op2::Sub => l - r,
-                        Op2::Exp => l.powf(r),
-                        Op2::Mul => l * r,
-                        Op2::Div => l / r,
-                        Op2::Mod => l.rem_euclid(r),
-                        Op2::Gt => (l > r) as i8 as f64,
-                        Op2::Gte => (l >= r) as i8 as f64,
-                        Op2::Lt => (l < r) as i8 as f64,
-                        Op2::Lte => (l <= r) as i8 as f64,
-                        Op2::Eq => approx_eq!(f64, l, r) as i8 as f64,
-                        Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
-                        Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
-                    };
-                    next[module_off + *off as usize] = result;
+                    next[module_off + *off as usize] = eval_op2(op, l, r);
                     debug_assert_eq!(0, stack.len());
                 }
                 Opcode::Apply { func } => {
@@ -2255,6 +2235,40 @@ fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
     // low now points to the first element > index
     // We want the element just before it (the last element <= index)
     table[low - 1].1
+}
+
+#[cfg(test)]
+mod eval_op2_tests {
+    use super::*;
+
+    #[test]
+    fn test_eval_op2_arithmetic() {
+        assert_eq!(eval_op2(&Op2::Add, 3.0, 4.0), 7.0);
+        assert_eq!(eval_op2(&Op2::Sub, 10.0, 3.0), 7.0);
+        assert_eq!(eval_op2(&Op2::Mul, 3.0, 4.0), 12.0);
+        assert_eq!(eval_op2(&Op2::Div, 10.0, 4.0), 2.5);
+        assert_eq!(eval_op2(&Op2::Exp, 2.0, 3.0), 8.0);
+        assert_eq!(eval_op2(&Op2::Mod, 7.0, 3.0), 1.0);
+    }
+
+    #[test]
+    fn test_eval_op2_comparisons() {
+        assert_eq!(eval_op2(&Op2::Gt, 5.0, 3.0), 1.0);
+        assert_eq!(eval_op2(&Op2::Gt, 3.0, 5.0), 0.0);
+        assert_eq!(eval_op2(&Op2::Gte, 5.0, 5.0), 1.0);
+        assert_eq!(eval_op2(&Op2::Lt, 3.0, 5.0), 1.0);
+        assert_eq!(eval_op2(&Op2::Lte, 5.0, 5.0), 1.0);
+        assert_eq!(eval_op2(&Op2::Eq, 5.0, 5.0), 1.0);
+        assert_eq!(eval_op2(&Op2::Eq, 5.0, 5.1), 0.0);
+    }
+
+    #[test]
+    fn test_eval_op2_logical() {
+        assert_eq!(eval_op2(&Op2::And, 1.0, 1.0), 1.0);
+        assert_eq!(eval_op2(&Op2::And, 1.0, 0.0), 0.0);
+        assert_eq!(eval_op2(&Op2::Or, 0.0, 1.0), 1.0);
+        assert_eq!(eval_op2(&Op2::Or, 0.0, 0.0), 0.0);
+    }
 }
 
 #[cfg(test)]

@@ -1057,43 +1057,43 @@ impl ByteCode {
             }
         }
 
-        // 2. Build old_pc -> new_pc mapping and fused output
+        // 2. Build old_pc -> new_pc mapping and fused output.
+        // pc_map has one entry per original instruction so that jump fixup
+        // can index by the original PC directly.
         let mut optimized: Vec<Opcode> = Vec::with_capacity(self.code.len());
-        let mut pc_map: Vec<usize> = Vec::with_capacity(self.code.len());
+        let mut pc_map: Vec<usize> = Vec::with_capacity(self.code.len() + 1);
         let mut i = 0;
         while i < self.code.len() {
-            pc_map.push(optimized.len());
+            let new_pc = optimized.len();
+            pc_map.push(new_pc);
 
             // Only try fusion if next instruction is not a jump target
             let can_fuse = i + 1 < self.code.len() && !jump_targets[i + 1];
 
             if can_fuse {
-                // Pattern: LoadConstant + AssignCurr -> AssignConstCurr
-                if let (Opcode::LoadConstant { id }, Opcode::AssignCurr { off }) =
-                    (&self.code[i], &self.code[i + 1])
-                {
-                    optimized.push(Opcode::AssignConstCurr {
-                        off: *off,
-                        literal_id: *id,
-                    });
-                    i += 2;
-                    continue;
-                }
+                let fused = match (&self.code[i], &self.code[i + 1]) {
+                    // Pattern: LoadConstant + AssignCurr -> AssignConstCurr
+                    (Opcode::LoadConstant { id }, Opcode::AssignCurr { off }) => {
+                        Some(Opcode::AssignConstCurr {
+                            off: *off,
+                            literal_id: *id,
+                        })
+                    }
+                    // Pattern: Op2 + AssignCurr -> BinOpAssignCurr
+                    (Opcode::Op2 { op }, Opcode::AssignCurr { off }) => {
+                        Some(Opcode::BinOpAssignCurr { op: *op, off: *off })
+                    }
+                    // Pattern: Op2 + AssignNext -> BinOpAssignNext
+                    (Opcode::Op2 { op }, Opcode::AssignNext { off }) => {
+                        Some(Opcode::BinOpAssignNext { op: *op, off: *off })
+                    }
+                    _ => None,
+                };
 
-                // Pattern: Op2 + AssignCurr -> BinOpAssignCurr
-                if let (Opcode::Op2 { op }, Opcode::AssignCurr { off }) =
-                    (&self.code[i], &self.code[i + 1])
-                {
-                    optimized.push(Opcode::BinOpAssignCurr { op: *op, off: *off });
-                    i += 2;
-                    continue;
-                }
-
-                // Pattern: Op2 + AssignNext -> BinOpAssignNext
-                if let (Opcode::Op2 { op }, Opcode::AssignNext { off }) =
-                    (&self.code[i], &self.code[i + 1])
-                {
-                    optimized.push(Opcode::BinOpAssignNext { op: *op, off: *off });
+                if let Some(op) = fused {
+                    optimized.push(op);
+                    // Both old PCs map to the same new PC
+                    pc_map.push(new_pc);
                     i += 2;
                     continue;
                 }
@@ -1106,26 +1106,24 @@ impl ByteCode {
         // Sentinel for instructions past the end
         pc_map.push(optimized.len());
 
-        // 3. Fix up jump offsets using the pc_map
-        for (new_pc, op) in optimized.iter_mut().enumerate() {
-            match op {
-                Opcode::NextIterOrJump { jump_back } => {
-                    // Find the original PC for this instruction
-                    // The original PC is the one that maps to new_pc
-                    if let Some(old_pc) = pc_map.iter().position(|&np| np == new_pc) {
-                        let old_target = (old_pc as isize + *jump_back as isize) as usize;
-                        let new_target = pc_map[old_target];
-                        *jump_back = (new_target as isize - new_pc as isize) as PcOffset;
-                    }
+        // 3. Fix up jump offsets.  Iterate original code to find jumps,
+        // then use pc_map (indexed by old_pc) for O(1) translation.
+        for (old_pc, op) in self.code.iter().enumerate() {
+            let jump_back = match op {
+                Opcode::NextIterOrJump { jump_back }
+                | Opcode::NextBroadcastOrJump { jump_back } => *jump_back,
+                _ => continue,
+            };
+            let new_pc = pc_map[old_pc];
+            let old_target = (old_pc as isize + jump_back as isize) as usize;
+            let new_target = pc_map[old_target];
+            let new_jump_back = (new_target as isize - new_pc as isize) as PcOffset;
+            match &mut optimized[new_pc] {
+                Opcode::NextIterOrJump { jump_back }
+                | Opcode::NextBroadcastOrJump { jump_back } => {
+                    *jump_back = new_jump_back;
                 }
-                Opcode::NextBroadcastOrJump { jump_back } => {
-                    if let Some(old_pc) = pc_map.iter().position(|&np| np == new_pc) {
-                        let old_target = (old_pc as isize + *jump_back as isize) as usize;
-                        let new_target = pc_map[old_target];
-                        *jump_back = (new_target as isize - new_pc as isize) as PcOffset;
-                    }
-                }
-                _ => {}
+                _ => unreachable!(),
             }
         }
 
@@ -2153,16 +2151,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "index out of bounds")]
-    fn test_peephole_jump_fixup_panics_when_fusion_inside_loop_body() {
-        // Known limitation: the pc_map is indexed by visit-order, not by
-        // original PC. When fusions occur INSIDE a loop body (between the
-        // jump target and the jump instruction), the recovered "old_pc" is
-        // wrong, causing an out-of-bounds index when computing old_target.
-        //
-        // This doesn't happen in practice because the compiler currently
-        // never generates fusible pairs inside loop bodies, but it's worth
-        // documenting the constraint.
+    fn test_peephole_fusion_inside_loop_body() {
         let mut bc = ByteCode {
             code: vec![
                 Opcode::LoadVar { off: 0 },               // 0 (jump target)
@@ -2174,6 +2163,29 @@ mod tests {
             literals: vec![],
         };
         bc.peephole_optimize();
+
+        // 1+2 fuse -> BinOpAssignCurr
+        // Result: [LoadVar, BinOpAssignCurr, NextIterOrJump, Ret]
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::BinOpAssignCurr {
+                op: Op2::Add,
+                off: 1
+            }
+        ));
+        match &bc.code[2] {
+            Opcode::NextIterOrJump { jump_back } => {
+                // new PC 2, target should be new PC 0 -> jump_back = -2
+                assert_eq!(*jump_back, -2);
+            }
+            other => panic!(
+                "expected NextIterOrJump, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        assert!(matches!(bc.code[3], Opcode::Ret));
     }
 
     #[test]
