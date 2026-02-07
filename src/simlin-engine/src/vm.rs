@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, LookupMode,
-    ModuleId, Op2, Opcode, RuntimeView, TempId,
+    ModuleId, Op2, Opcode, RuntimeView, STACK_CAPACITY, TempId,
 };
 use crate::common::{Canonical, Ident, Result};
 use crate::dimensions::{Dimension, match_dimensions_two_pass};
@@ -91,6 +91,25 @@ pub(crate) const IMPLICIT_VAR_COUNT: usize = 4;
 pub(crate) fn is_truthy(n: f64) -> bool {
     let is_false = approx_eq!(f64, n, 0.0);
     !is_false
+}
+
+#[inline(always)]
+fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
+    match op {
+        Op2::Add => l + r,
+        Op2::Sub => l - r,
+        Op2::Exp => l.powf(r),
+        Op2::Mul => l * r,
+        Op2::Div => l / r,
+        Op2::Mod => l.rem_euclid(r),
+        Op2::Gt => (l > r) as i8 as f64,
+        Op2::Gte => (l >= r) as i8 as f64,
+        Op2::Lt => (l < r) as i8 as f64,
+        Op2::Lte => (l <= r) as i8 as f64,
+        Op2::Eq => approx_eq!(f64, l, r) as i8 as f64,
+        Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
+        Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
+    }
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -203,26 +222,75 @@ pub struct Vm {
     initial_offsets: HashSet<usize>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 struct Stack {
-    stack: Vec<f64>,
+    data: [f64; STACK_CAPACITY],
+    top: usize,
 }
 
+#[cfg(feature = "debug-derive")]
+impl std::fmt::Debug for Stack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stack")
+            .field("top", &self.top)
+            .field("data", &&self.data[..self.top])
+            .finish()
+    }
+}
+
+#[allow(unsafe_code)]
 impl Stack {
     fn new() -> Self {
         Stack {
-            stack: Vec::with_capacity(32),
+            data: [0.0; STACK_CAPACITY],
+            top: 0,
         }
     }
     #[inline(always)]
     fn push(&mut self, value: f64) {
-        self.stack.push(value)
+        debug_assert!(self.top < STACK_CAPACITY, "stack overflow");
+        // SAFETY: ByteCodeBuilder::finish() statically validates that the max
+        // stack depth of all compiled bytecode is < STACK_CAPACITY, so this
+        // bound cannot be exceeded at runtime. The debug_assert serves as a
+        // belt-and-suspenders check during development.
+        unsafe {
+            *self.data.get_unchecked_mut(self.top) = value;
+        }
+        self.top += 1;
     }
     #[inline(always)]
     fn pop(&mut self) -> f64 {
-        self.stack.pop().unwrap()
+        debug_assert!(self.top > 0, "stack underflow");
+        self.top -= 1;
+        // SAFETY: ByteCodeBuilder::finish() validates via checked_sub that no
+        // opcode sequence pops more values than have been pushed (i.e. the stack
+        // depth never goes negative). This guarantees top > 0 before every pop
+        // at runtime. The debug_assert is a belt-and-suspenders check.
+        unsafe { *self.data.get_unchecked(self.top) }
     }
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.top
+    }
+    #[inline(always)]
+    fn clear(&mut self) {
+        self.top = 0;
+    }
+}
+
+/// Mutable evaluation state grouped into a single struct to reduce argument
+/// count in eval functions (was 11-14 args, now 6-10).  In `eval_bytecode`,
+/// the fields are destructured into local reborrows for ergonomic access;
+/// for recursive `EvalModule` calls they must be re-packed into a temporary
+/// `EvalState` because the borrow checker cannot split the struct across the
+/// call boundary.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+struct EvalState<'a> {
+    stack: &'a mut Stack,
+    temp_storage: &'a mut [f64],
+    view_stack: &'a mut Vec<RuntimeView>,
+    iter_stack: &'a mut Vec<IterState>,
+    broadcast_stack: &'a mut Vec<BroadcastState>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -364,11 +432,9 @@ impl Vm {
 
         let save_every = std::cmp::max(1, (save_step / dt + 0.5).floor() as usize);
 
-        self.stack.stack.clear();
+        self.stack.clear();
         let module_inputs: &[f64] = &[0.0; 0];
-        let mut data = None;
-        std::mem::swap(&mut data, &mut self.data);
-        let mut data = data.unwrap();
+        let mut data = self.data.take().unwrap();
 
         let module_flows = &self.sliced_sim.flow_modules[&self.root];
         let module_stocks = &self.sliced_sim.stock_modules[&self.root];
@@ -376,6 +442,14 @@ impl Vm {
         self.view_stack.clear();
         self.iter_stack.clear();
         self.broadcast_stack.clear();
+
+        let mut state = EvalState {
+            stack: &mut self.stack,
+            temp_storage: &mut self.temp_storage,
+            view_stack: &mut self.view_stack,
+            iter_stack: &mut self.iter_stack,
+            broadcast_stack: &mut self.broadcast_stack,
+        };
 
         loop {
             let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
@@ -385,34 +459,25 @@ impl Vm {
 
             Self::eval(
                 &self.sliced_sim,
-                &mut self.temp_storage,
+                &mut state,
                 module_flows,
                 0,
                 module_inputs,
                 curr,
                 next,
-                &mut self.stack,
-                &mut self.view_stack,
-                &mut self.iter_stack,
-                &mut self.broadcast_stack,
             );
             Self::eval(
                 &self.sliced_sim,
-                &mut self.temp_storage,
+                &mut state,
                 module_stocks,
                 0,
                 module_inputs,
                 curr,
                 next,
-                &mut self.stack,
-                &mut self.view_stack,
-                &mut self.iter_stack,
-                &mut self.broadcast_stack,
             );
+            // Only TIME changes per step; DT, INITIAL_TIME, FINAL_TIME are
+            // invariant and already set in every chunk slot during initials.
             next[TIME_OFF] = curr[TIME_OFF] + dt;
-            next[DT_OFF] = curr[DT_OFF];
-            next[INITIAL_TIME_OFF] = curr[INITIAL_TIME_OFF];
-            next[FINAL_TIME_OFF] = curr[FINAL_TIME_OFF];
 
             self.step_accum += 1;
             let is_initial_timestep = (self.curr_chunk == 0) && (curr[TIME_OFF] == spec_start);
@@ -447,14 +512,20 @@ impl Vm {
 
     pub fn set_value_now(&mut self, off: usize, val: f64) {
         let start = self.curr_chunk * self.n_slots;
-        let mut data = None;
-        std::mem::swap(&mut data, &mut self.data);
-        let mut data = data.unwrap();
+        let data = self.data.as_mut().unwrap();
         data[start + off] = val;
-        self.data = Some(data);
     }
 
+    /// Read the current value of a variable by its data buffer offset.
+    ///
+    /// Precondition: `run_initials()` must have been called since the last
+    /// `reset()`. After `reset()` but before `run_initials()`, the data buffer
+    /// may contain stale values from the previous simulation run.
     pub fn get_value_now(&self, off: usize) -> f64 {
+        debug_assert!(
+            self.did_initials,
+            "get_value_now called before run_initials; data buffer may contain stale values"
+        );
         let start = self.curr_chunk * self.n_slots;
         self.data.as_ref().unwrap()[start + off]
     }
@@ -478,16 +549,19 @@ impl Vm {
 
     /// Reset the VM to its pre-simulation state, reusing the data buffer allocation.
     /// Overrides are preserved across reset.
+    ///
+    /// The data buffer is NOT zeroed here because `run_initials()` fully
+    /// reinitializes all variable slots and pre-fills DT/INITIAL_TIME/FINAL_TIME
+    /// across all chunk slots. The `did_initials` flag (reset to false here)
+    /// prevents `run_to()` from executing on stale data -- it returns early
+    /// if `run_initials()` has not been called since the last reset.
     pub fn reset(&mut self) {
-        if let Some(ref mut data) = self.data {
-            data.fill(0.0);
-        }
         self.curr_chunk = 0;
         self.next_chunk = 1;
         self.did_initials = false;
         self.step_accum = 0;
         self.temp_storage.fill(0.0);
-        self.stack.stack.clear();
+        self.stack.clear();
         self.view_stack.clear();
         self.iter_stack.clear();
         self.broadcast_stack.clear();
@@ -552,11 +626,9 @@ impl Vm {
         let spec_stop = self.specs.stop;
         let dt = self.specs.dt;
 
-        self.stack.stack.clear();
+        self.stack.clear();
         let module_inputs: &[f64] = &[0.0; 0];
-        let mut data = None;
-        std::mem::swap(&mut data, &mut self.data);
-        let mut data = data.unwrap();
+        let mut data = self.data.take().unwrap();
 
         let (curr, next) = borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
         curr[TIME_OFF] = spec_start;
@@ -568,20 +640,36 @@ impl Vm {
         self.iter_stack.clear();
         self.broadcast_stack.clear();
 
+        let mut state = EvalState {
+            stack: &mut self.stack,
+            temp_storage: &mut self.temp_storage,
+            view_stack: &mut self.view_stack,
+            iter_stack: &mut self.iter_stack,
+            broadcast_stack: &mut self.broadcast_stack,
+        };
+
         Self::eval_initials_with_overrides(
             &self.sliced_sim,
-            &mut self.temp_storage,
+            &mut state,
             &self.root,
             0,
             module_inputs,
             curr,
             next,
-            &mut self.stack,
             &self.overrides,
-            &mut self.view_stack,
-            &mut self.iter_stack,
-            &mut self.broadcast_stack,
         );
+
+        // Pre-fill DT, INITIAL_TIME, and FINAL_TIME across all chunk slots so
+        // run_to only needs to advance TIME per step.
+        let n_slots = self.n_slots;
+        let total_chunks = self.n_chunks + 2;
+        for chunk in 0..total_chunks {
+            let base = chunk * n_slots;
+            data[base + DT_OFF] = dt;
+            data[base + INITIAL_TIME_OFF] = spec_start;
+            data[base + FINAL_TIME_OFF] = spec_stop;
+        }
+
         self.did_initials = true;
         self.step_accum = 0;
 
@@ -620,18 +708,14 @@ impl Vm {
     #[inline(never)]
     fn eval_module_initials_with_overrides(
         sliced_sim: &CompiledSlicedSimulation,
-        temp_storage: &mut [f64],
+        state: &mut EvalState<'_>,
         parent_context: &ByteCodeContext,
         parent_module_off: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        stack: &mut Stack,
         id: ModuleId,
         overrides: &HashMap<usize, f64>,
-        view_stack: &mut Vec<RuntimeView>,
-        iter_stack: &mut Vec<IterState>,
-        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
         let new_module_decl = &parent_context.modules[id as usize];
         let module_key = make_module_key(&new_module_decl.model_name, &new_module_decl.input_set);
@@ -639,17 +723,13 @@ impl Vm {
 
         Self::eval_initials_with_overrides(
             sliced_sim,
-            temp_storage,
+            state,
             &module_key,
             module_off,
             module_inputs,
             curr,
             next,
-            stack,
             overrides,
-            view_stack,
-            iter_stack,
-            broadcast_stack,
         );
     }
 
@@ -658,39 +738,28 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     fn eval_initials_with_overrides(
         sliced_sim: &CompiledSlicedSimulation,
-        temp_storage: &mut [f64],
+        state: &mut EvalState<'_>,
         module_key: &ModuleKey,
         module_off: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        stack: &mut Stack,
         overrides: &HashMap<usize, f64>,
-        view_stack: &mut Vec<RuntimeView>,
-        iter_stack: &mut Vec<IterState>,
-        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
         let module_initials = &sliced_sim.initial_modules[module_key];
         let context = &module_initials.context;
         for compiled_initial in module_initials.initials.iter() {
             Self::eval_single_initial(
                 sliced_sim,
-                temp_storage,
+                state,
                 context,
                 &compiled_initial.bytecode,
                 module_off,
                 module_inputs,
                 curr,
                 next,
-                stack,
                 overrides,
-                view_stack,
-                iter_stack,
-                broadcast_stack,
             );
-            // Evaluate-then-patch: apply overrides after bytecode completes.
-            // CompiledInitial offsets are module-relative; add module_off
-            // to get the absolute position in the flattened data buffer.
             for &off in &compiled_initial.offsets {
                 let abs_off = module_off + off;
                 if let Some(&val) = overrides.get(&abs_off) {
@@ -704,22 +773,18 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     fn eval_single_initial(
         sliced_sim: &CompiledSlicedSimulation,
-        temp_storage: &mut [f64],
+        state: &mut EvalState<'_>,
         context: &ByteCodeContext,
         bytecode: &ByteCode,
         module_off: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        stack: &mut Stack,
         overrides: &HashMap<usize, f64>,
-        view_stack: &mut Vec<RuntimeView>,
-        iter_stack: &mut Vec<IterState>,
-        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
         Self::eval_bytecode(
             sliced_sim,
-            temp_storage,
+            state,
             context,
             bytecode,
             StepPart::Initials,
@@ -727,31 +792,23 @@ impl Vm {
             module_inputs,
             curr,
             next,
-            stack,
             overrides,
-            view_stack,
-            iter_stack,
-            broadcast_stack,
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
     fn eval(
         sliced_sim: &CompiledSlicedSimulation,
-        temp_storage: &mut [f64],
+        state: &mut EvalState<'_>,
         module: &CompiledModuleSlice,
         module_off: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        stack: &mut Stack,
-        view_stack: &mut Vec<RuntimeView>,
-        iter_stack: &mut Vec<IterState>,
-        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
         Self::eval_bytecode(
             sliced_sim,
-            temp_storage,
+            state,
             &module.context,
             &module.bytecode,
             module.part,
@@ -759,18 +816,14 @@ impl Vm {
             module_inputs,
             curr,
             next,
-            stack,
             &EMPTY_OVERRIDES,
-            view_stack,
-            iter_stack,
-            broadcast_stack,
         );
     }
 
     #[allow(clippy::too_many_arguments)]
     fn eval_bytecode(
         sliced_sim: &CompiledSlicedSimulation,
-        temp_storage: &mut [f64],
+        state: &mut EvalState<'_>,
         context: &ByteCodeContext,
         bytecode: &ByteCode,
         part: StepPart,
@@ -778,13 +831,18 @@ impl Vm {
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        stack: &mut Stack,
         overrides: &HashMap<usize, f64>,
-        view_stack: &mut Vec<RuntimeView>,
-        iter_stack: &mut Vec<IterState>,
-        broadcast_stack: &mut Vec<BroadcastState>,
     ) {
-        // Existing state
+        // Destructure EvalState into local reborrows so the opcode loop can use
+        // them directly.  For recursive EvalModule calls we must re-pack into a
+        // temporary EvalState (and destructure again afterward) because holding
+        // individual &mut borrows from the struct would prevent passing &mut EvalState.
+        let mut stack = &mut *state.stack;
+        let mut temp_storage = &mut *state.temp_storage;
+        let mut view_stack = &mut *state.view_stack;
+        let mut iter_stack = &mut *state.iter_stack;
+        let mut broadcast_stack = &mut *state.broadcast_stack;
+
         let mut condition = false;
         let mut subscript_index: SmallVec<[(u16, u16); 4]> = SmallVec::new();
         let mut subscript_index_valid = true;
@@ -798,22 +856,7 @@ impl Vm {
                 Opcode::Op2 { op } => {
                     let r = stack.pop();
                     let l = stack.pop();
-                    let result = match op {
-                        Op2::Add => l + r,
-                        Op2::Sub => l - r,
-                        Op2::Exp => l.powf(r),
-                        Op2::Mul => l * r,
-                        Op2::Div => l / r,
-                        Op2::Mod => l.rem_euclid(r),
-                        Op2::Gt => (l > r) as i8 as f64,
-                        Op2::Gte => (l >= r) as i8 as f64,
-                        Op2::Lt => (l < r) as i8 as f64,
-                        Op2::Lte => (l <= r) as i8 as f64,
-                        Op2::Eq => approx_eq!(f64, l, r) as i8 as f64,
-                        Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
-                        Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
-                    };
-                    stack.push(result);
+                    stack.push(eval_op2(*op, l, r));
                 }
                 Opcode::Not {} => {
                     let r = stack.pop();
@@ -873,22 +916,25 @@ impl Vm {
                     for j in (0..(*n_inputs as usize)).rev() {
                         module_inputs[j] = stack.pop();
                     }
+                    let mut child_state = EvalState {
+                        stack,
+                        temp_storage,
+                        view_stack,
+                        iter_stack,
+                        broadcast_stack,
+                    };
                     match part {
                         StepPart::Initials => {
                             Self::eval_module_initials_with_overrides(
                                 sliced_sim,
-                                temp_storage,
+                                &mut child_state,
                                 context,
                                 module_off,
                                 &module_inputs,
                                 curr,
                                 next,
-                                stack,
                                 *id,
                                 overrides,
-                                view_stack,
-                                iter_stack,
-                                broadcast_stack,
                             );
                         }
                         StepPart::Flows | StepPart::Stocks => {
@@ -905,27 +951,53 @@ impl Vm {
                             };
                             Self::eval(
                                 sliced_sim,
-                                temp_storage,
+                                &mut child_state,
                                 child_module,
                                 child_module_off,
                                 &module_inputs,
                                 curr,
                                 next,
-                                stack,
-                                view_stack,
-                                iter_stack,
-                                broadcast_stack,
                             );
                         }
                     }
+                    // Recover mutable references from child_state
+                    let EvalState {
+                        stack: s,
+                        temp_storage: ts,
+                        view_stack: vs,
+                        iter_stack: is_,
+                        broadcast_stack: bs,
+                    } = child_state;
+                    stack = s;
+                    temp_storage = ts;
+                    view_stack = vs;
+                    iter_stack = is_;
+                    broadcast_stack = bs;
                 }
                 Opcode::AssignCurr { off } => {
                     curr[module_off + *off as usize] = stack.pop();
-                    assert_eq!(0, stack.stack.len());
+                    debug_assert_eq!(0, stack.len());
                 }
                 Opcode::AssignNext { off } => {
                     next[module_off + *off as usize] = stack.pop();
-                    assert_eq!(0, stack.stack.len());
+                    debug_assert_eq!(0, stack.len());
+                }
+                // === SUPERINSTRUCTIONS ===
+                Opcode::AssignConstCurr { off, literal_id } => {
+                    curr[module_off + *off as usize] = bytecode.literals[*literal_id as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::BinOpAssignCurr { op, off } => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    curr[module_off + *off as usize] = eval_op2(*op, l, r);
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::BinOpAssignNext { op, off } => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    next[module_off + *off as usize] = eval_op2(*op, l, r);
+                    debug_assert_eq!(0, stack.len());
                 }
                 Opcode::Apply { func } => {
                     let time = curr[TIME_OFF];
@@ -967,11 +1039,10 @@ impl Vm {
                 // =========================================================
                 Opcode::PushVarView {
                     base_off,
-                    n_dims,
-                    dim_ids,
+                    dim_list_id,
                 } => {
-                    // Build a view for a variable with given dimensions
-                    let n = *n_dims as usize;
+                    let (n_dims, dim_ids) = context.get_dim_list(*dim_list_id);
+                    let n = n_dims as usize;
                     let dims: SmallVec<[u16; 4]> = (0..n)
                         .map(|i| context.dimensions[dim_ids[i] as usize].size)
                         .collect();
@@ -986,10 +1057,10 @@ impl Vm {
 
                 Opcode::PushTempView {
                     temp_id,
-                    n_dims,
-                    dim_ids,
+                    dim_list_id,
                 } => {
-                    let n = *n_dims as usize;
+                    let (n_dims, dim_ids) = context.get_dim_list(*dim_list_id);
+                    let n = n_dims as usize;
                     let dims: SmallVec<[u16; 4]> = (0..n)
                         .map(|i| context.dimensions[dim_ids[i] as usize].size)
                         .collect();
@@ -1005,13 +1076,11 @@ impl Vm {
 
                 Opcode::PushVarViewDirect {
                     base_off,
-                    n_dims,
-                    dims,
+                    dim_list_id,
                 } => {
-                    // Build a view with explicit dimension sizes (no dim_id lookup needed)
-                    let n = *n_dims as usize;
+                    let (n_dims, dims) = context.get_dim_list(*dim_list_id);
+                    let n = n_dims as usize;
                     let dims_vec: SmallVec<[u16; 4]> = dims[..n].iter().copied().collect();
-                    // Use 0 as dim_id since we don't have dimension metadata
                     let dim_ids: SmallVec<[DimId; 4]> = (0..n).map(|_| 0 as DimId).collect();
                     let view = RuntimeView::for_var(
                         (module_off + *base_off as usize) as u32,
@@ -2191,6 +2260,40 @@ fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
 }
 
 #[cfg(test)]
+mod eval_op2_tests {
+    use super::*;
+
+    #[test]
+    fn test_eval_op2_arithmetic() {
+        assert_eq!(eval_op2(Op2::Add, 3.0, 4.0), 7.0);
+        assert_eq!(eval_op2(Op2::Sub, 10.0, 3.0), 7.0);
+        assert_eq!(eval_op2(Op2::Mul, 3.0, 4.0), 12.0);
+        assert_eq!(eval_op2(Op2::Div, 10.0, 4.0), 2.5);
+        assert_eq!(eval_op2(Op2::Exp, 2.0, 3.0), 8.0);
+        assert_eq!(eval_op2(Op2::Mod, 7.0, 3.0), 1.0);
+    }
+
+    #[test]
+    fn test_eval_op2_comparisons() {
+        assert_eq!(eval_op2(Op2::Gt, 5.0, 3.0), 1.0);
+        assert_eq!(eval_op2(Op2::Gt, 3.0, 5.0), 0.0);
+        assert_eq!(eval_op2(Op2::Gte, 5.0, 5.0), 1.0);
+        assert_eq!(eval_op2(Op2::Lt, 3.0, 5.0), 1.0);
+        assert_eq!(eval_op2(Op2::Lte, 5.0, 5.0), 1.0);
+        assert_eq!(eval_op2(Op2::Eq, 5.0, 5.0), 1.0);
+        assert_eq!(eval_op2(Op2::Eq, 5.0, 5.1), 0.0);
+    }
+
+    #[test]
+    fn test_eval_op2_logical() {
+        assert_eq!(eval_op2(Op2::And, 1.0, 1.0), 1.0);
+        assert_eq!(eval_op2(Op2::And, 1.0, 0.0), 0.0);
+        assert_eq!(eval_op2(Op2::Or, 0.0, 1.0), 1.0);
+        assert_eq!(eval_op2(Op2::Or, 0.0, 0.0), 0.0);
+    }
+}
+
+#[cfg(test)]
 mod lookup_tests {
     use super::*;
 
@@ -3099,5 +3202,1314 @@ mod override_tests {
             103.0,
             "stock should reflect overridden array element: 1+99+3=103"
         );
+    }
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+
+    #[test]
+    fn test_push_pop_basic() {
+        let mut s = Stack::new();
+        s.push(1.0);
+        s.push(2.0);
+        s.push(3.0);
+        assert_eq!(3.0, s.pop());
+        assert_eq!(2.0, s.pop());
+        assert_eq!(1.0, s.pop());
+    }
+
+    #[test]
+    fn test_lifo_ordering() {
+        let mut s = Stack::new();
+        for i in 0..10 {
+            s.push(i as f64);
+        }
+        for i in (0..10).rev() {
+            assert_eq!(i as f64, s.pop());
+        }
+    }
+
+    #[test]
+    fn test_clear_resets_stack() {
+        let mut s = Stack::new();
+        s.push(1.0);
+        s.push(2.0);
+        assert_eq!(2, s.len());
+        s.clear();
+        assert_eq!(0, s.len());
+    }
+
+    #[test]
+    fn test_len_tracks_size() {
+        let mut s = Stack::new();
+        assert_eq!(0, s.len());
+        s.push(10.0);
+        assert_eq!(1, s.len());
+        s.push(20.0);
+        assert_eq!(2, s.len());
+        s.pop();
+        assert_eq!(1, s.len());
+        s.pop();
+        assert_eq!(0, s.len());
+    }
+
+    #[test]
+    fn test_full_capacity() {
+        let mut s = Stack::new();
+        for i in 0..STACK_CAPACITY {
+            s.push(i as f64);
+        }
+        assert_eq!(STACK_CAPACITY, s.len());
+        for i in (0..STACK_CAPACITY).rev() {
+            assert_eq!(i as f64, s.pop());
+        }
+        assert_eq!(0, s.len());
+    }
+
+    #[test]
+    fn test_interleaved_push_pop() {
+        let mut s = Stack::new();
+        s.push(1.0);
+        s.push(2.0);
+        assert_eq!(2.0, s.pop());
+        s.push(3.0);
+        s.push(4.0);
+        assert_eq!(4.0, s.pop());
+        assert_eq!(3.0, s.pop());
+        assert_eq!(1.0, s.pop());
+        assert_eq!(0, s.len());
+    }
+
+    #[test]
+    fn test_push_after_clear() {
+        let mut s = Stack::new();
+        s.push(1.0);
+        s.push(2.0);
+        s.clear();
+        s.push(42.0);
+        assert_eq!(1, s.len());
+        assert_eq!(42.0, s.pop());
+    }
+
+    #[test]
+    fn test_negative_and_special_values() {
+        let mut s = Stack::new();
+        s.push(-1.0);
+        s.push(0.0);
+        s.push(f64::INFINITY);
+        s.push(f64::NEG_INFINITY);
+        s.push(f64::NAN);
+        assert!(s.pop().is_nan());
+        assert_eq!(f64::NEG_INFINITY, s.pop());
+        assert_eq!(f64::INFINITY, s.pop());
+        assert_eq!(0.0, s.pop());
+        assert_eq!(-1.0, s.pop());
+    }
+}
+
+#[cfg(test)]
+mod superinstruction_tests {
+    use super::*;
+    use crate::bytecode::Opcode;
+    use crate::test_common::TestProject;
+
+    fn build_vm(tp: &TestProject) -> Vm {
+        let sim = tp.build_sim().unwrap();
+        let compiled = sim.compile().unwrap();
+        Vm::new(compiled).unwrap()
+    }
+
+    /// Helper: collect all opcodes from the flow bytecode of the root module.
+    fn flow_opcodes(vm: &Vm) -> Vec<&Opcode> {
+        let bc = &vm.sliced_sim.flow_modules[&vm.root].bytecode;
+        bc.code.iter().collect()
+    }
+
+    /// Helper: collect all opcodes from the stock bytecode of the root module.
+    fn stock_opcodes(vm: &Vm) -> Vec<&Opcode> {
+        let bc = &vm.sliced_sim.stock_modules[&vm.root].bytecode;
+        bc.code.iter().collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // AssignConstCurr: a constant aux like `birth_rate = 0.1`
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_assign_const_curr_present_in_bytecode() {
+        let tp = TestProject::new("const_model")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("rate", "0.1", None)
+            .flow("inflow", "pop * rate", None)
+            .stock("pop", "100", &["inflow"], &[], None);
+
+        let vm = build_vm(&tp);
+        let ops = flow_opcodes(&vm);
+        let has_assign_const = ops
+            .iter()
+            .any(|op| matches!(op, Opcode::AssignConstCurr { .. }));
+        assert!(
+            has_assign_const,
+            "constant aux should produce AssignConstCurr in flow bytecode"
+        );
+    }
+
+    #[test]
+    fn test_assign_const_curr_simulation_result() {
+        let tp = TestProject::new("const_sim")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .aux("rate", "0.1", None)
+            .flow("inflow", "pop * rate", None)
+            .stock("pop", "100", &["inflow"], &[], None);
+
+        let vm_results = tp.run_vm().unwrap();
+        let interp_results = tp.run_interpreter().unwrap();
+
+        let vm_rate = &vm_results["rate"];
+        let interp_rate = &interp_results["rate"];
+        for (i, (v, e)) in vm_rate.iter().zip(interp_rate.iter()).enumerate() {
+            assert!(
+                (v - e).abs() < 1e-10,
+                "rate mismatch at step {i}: vm={v}, interp={e}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // BinOpAssignCurr: e.g. `births = population * birth_rate`
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_binop_assign_curr_present_in_bytecode() {
+        let tp = TestProject::new("binop_model")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("rate", "0.1", None)
+            .aux("result", "rate * 2", None)
+            .flow("inflow", "0", None)
+            .stock("s", "result", &["inflow"], &[], None);
+
+        let vm = build_vm(&tp);
+        let ops = flow_opcodes(&vm);
+        let has_binop_curr = ops
+            .iter()
+            .any(|op| matches!(op, Opcode::BinOpAssignCurr { .. }));
+        assert!(
+            has_binop_curr,
+            "binary operation with assign should produce BinOpAssignCurr"
+        );
+    }
+
+    #[test]
+    fn test_binop_assign_curr_simulation_mul() {
+        let tp = TestProject::new("binop_mul")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "3", None)
+            .aux("b", "4", None)
+            .aux("result", "a * b", None)
+            .flow("inflow", "0", None)
+            .stock("s", "result", &["inflow"], &[], None);
+
+        let vm_results = tp.run_vm().unwrap();
+        assert!(
+            (vm_results["result"][0] - 12.0).abs() < 1e-10,
+            "3 * 4 should equal 12"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BinOpAssignNext: stock integration `stock_next = stock + flow * dt`
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_binop_assign_next_present_in_bytecode() {
+        let tp = TestProject::new("stock_integ")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .flow("inflow", "10", None)
+            .stock("s", "0", &["inflow"], &[], None);
+
+        let vm = build_vm(&tp);
+        let ops = stock_opcodes(&vm);
+        let has_binop_next = ops
+            .iter()
+            .any(|op| matches!(op, Opcode::BinOpAssignNext { .. }));
+        assert!(
+            has_binop_next,
+            "stock integration should produce BinOpAssignNext in stock bytecode"
+        );
+    }
+
+    #[test]
+    fn test_binop_assign_next_simulation_stock_integration() {
+        let tp = TestProject::new("stock_integ_sim")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .flow("inflow", "10", None)
+            .stock("s", "0", &["inflow"], &[], None);
+
+        let vm_results = tp.run_vm().unwrap();
+        let interp_results = tp.run_interpreter().unwrap();
+
+        let vm_s = &vm_results["s"];
+        let interp_s = &interp_results["s"];
+
+        for (i, (v, e)) in vm_s.iter().zip(interp_s.iter()).enumerate() {
+            assert!(
+                (v - e).abs() < 1e-10,
+                "stock mismatch at step {i}: vm={v}, interp={e}"
+            );
+        }
+        // s starts at 0, inflow=10, dt=1 => s at step 1 = 10, step 2 = 20, etc.
+        assert!((vm_s[0] - 0.0).abs() < 1e-10, "stock initial should be 0");
+        assert!(
+            (vm_s[1] - 10.0).abs() < 1e-10,
+            "stock at step 1 should be 10"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Op2 variants through BinOpAssignCurr
+    // -----------------------------------------------------------------------
+
+    fn run_binop_model(equation: &str) -> f64 {
+        let tp = TestProject::new("binop_test")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "10", None)
+            .aux("b", "3", None)
+            .aux("result", equation, None)
+            .flow("inflow", "0", None)
+            .stock("s", "result", &["inflow"], &[], None);
+
+        let vm_results = tp.run_vm().unwrap();
+        vm_results["result"][0]
+    }
+
+    #[test]
+    fn test_op2_add() {
+        let result = run_binop_model("a + b");
+        assert!((result - 13.0).abs() < 1e-10, "10 + 3 = 13, got {result}");
+    }
+
+    #[test]
+    fn test_op2_sub() {
+        let result = run_binop_model("a - b");
+        assert!((result - 7.0).abs() < 1e-10, "10 - 3 = 7, got {result}");
+    }
+
+    #[test]
+    fn test_op2_mul() {
+        let result = run_binop_model("a * b");
+        assert!((result - 30.0).abs() < 1e-10, "10 * 3 = 30, got {result}");
+    }
+
+    #[test]
+    fn test_op2_div() {
+        let result = run_binop_model("a / b");
+        assert!((result - 10.0 / 3.0).abs() < 1e-10, "10 / 3, got {result}");
+    }
+
+    #[test]
+    fn test_op2_gt() {
+        let result = run_binop_model("IF a > b THEN 1 ELSE 0");
+        assert!(
+            (result - 1.0).abs() < 1e-10,
+            "10 > 3 should be true, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_op2_lt() {
+        let result = run_binop_model("IF a < b THEN 1 ELSE 0");
+        assert!(
+            (result - 0.0).abs() < 1e-10,
+            "10 < 3 should be false, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_op2_eq() {
+        // a=10, b=3, so a=b should be false
+        let tp = TestProject::new("eq_test")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "5", None)
+            .aux("b", "5", None)
+            .aux("result", "IF a = b THEN 1 ELSE 0", None)
+            .flow("inflow", "0", None)
+            .stock("s", "result", &["inflow"], &[], None);
+        let vm_results = tp.run_vm().unwrap();
+        let result = vm_results["result"][0];
+        assert!(
+            (result - 1.0).abs() < 1e-10,
+            "5 = 5 should be true, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_op2_and() {
+        let tp = TestProject::new("and_test")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "1", None)
+            .aux("b", "1", None)
+            .aux("result", "IF (a > 0) AND (b > 0) THEN 1 ELSE 0", None)
+            .flow("inflow", "0", None)
+            .stock("s", "result", &["inflow"], &[], None);
+        let vm_results = tp.run_vm().unwrap();
+        let result = vm_results["result"][0];
+        assert!(
+            (result - 1.0).abs() < 1e-10,
+            "1>0 AND 1>0 should be true, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_op2_or() {
+        let tp = TestProject::new("or_test")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "0", None)
+            .aux("b", "1", None)
+            .aux("result", "IF (a > 0) OR (b > 0) THEN 1 ELSE 0", None)
+            .flow("inflow", "0", None)
+            .stock("s", "result", &["inflow"], &[], None);
+        let vm_results = tp.run_vm().unwrap();
+        let result = vm_results["result"][0];
+        assert!(
+            (result - 1.0).abs() < 1e-10,
+            "0>0 OR 1>0 should be true, got {result}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Superinstruction execution correctness across multiple timesteps
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_superinstruction_population_model_matches_interpreter() {
+        let tp = TestProject::new("pop_model")
+            .with_sim_time(0.0, 10.0, 0.5)
+            .aux("birth_rate", "0.1", None)
+            .aux("death_rate", "0.05", None)
+            .flow("births", "population * birth_rate", None)
+            .flow("deaths", "population * death_rate", None)
+            .stock("population", "1000", &["births"], &["deaths"], None);
+
+        let vm_results = tp.run_vm().unwrap();
+        let interp_results = tp.run_interpreter().unwrap();
+
+        for var in &["population", "births", "deaths", "birth_rate", "death_rate"] {
+            let vm_vals = &vm_results[*var];
+            let interp_vals = &interp_results[*var];
+            assert_eq!(
+                vm_vals.len(),
+                interp_vals.len(),
+                "step count mismatch for {var}"
+            );
+            for (i, (v, e)) in vm_vals.iter().zip(interp_vals.iter()).enumerate() {
+                assert!(
+                    (v - e).abs() < 1e-10,
+                    "{var} mismatch at step {i}: vm={v}, interp={e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_superinstruction_with_small_dt() {
+        let tp = TestProject::new("small_dt")
+            .with_sim_time(0.0, 1.0, 0.125)
+            .aux("rate", "0.5", None)
+            .flow("growth", "s * rate", None)
+            .stock("s", "10", &["growth"], &[], None);
+
+        let vm_results = tp.run_vm().unwrap();
+        let interp_results = tp.run_interpreter().unwrap();
+
+        let vm_s = &vm_results["s"];
+        let interp_s = &interp_results["s"];
+        for (i, (v, e)) in vm_s.iter().zip(interp_s.iter()).enumerate() {
+            assert!(
+                (v - e).abs() < 1e-10,
+                "s mismatch at step {i}: vm={v}, interp={e}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Op2 variants through *fused* BinOpAssignCurr superinstruction.
+    // The run_binop_model tests above use IF/THEN/ELSE which goes through
+    // SetCond+If, not the fused path. These tests use direct assignment
+    // to ensure the BinOpAssignCurr handler is exercised for each Op2.
+    // -----------------------------------------------------------------------
+
+    fn run_fused_binop(equation: &str) -> f64 {
+        // equation should be a direct binary op like "a ^ b" assigned to result
+        let tp = TestProject::new("fused_binop")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "10", None)
+            .aux("b", "3", None)
+            .aux("result", equation, None)
+            .flow("inflow", "0", None)
+            .stock("s", "0", &["inflow"], &[], None);
+        let vm_results = tp.run_vm().unwrap();
+        vm_results["result"][0]
+    }
+
+    #[test]
+    fn test_fused_binop_exp() {
+        let result = run_fused_binop("a ^ b");
+        assert!((result - 1000.0).abs() < 1e-10, "10^3 = 1000, got {result}");
+    }
+
+    #[test]
+    fn test_fused_binop_div() {
+        let result = run_fused_binop("a / b");
+        assert!((result - 10.0 / 3.0).abs() < 1e-10, "10/3, got {result}");
+    }
+
+    #[test]
+    fn test_fused_binop_mod() {
+        let result = run_fused_binop("a MOD b");
+        assert!((result - 1.0).abs() < 1e-10, "10 mod 3 = 1, got {result}");
+    }
+
+    #[test]
+    fn test_fused_binop_gt() {
+        let result = run_fused_binop("a > b");
+        assert!((result - 1.0).abs() < 1e-10, "10 > 3 = 1, got {result}");
+    }
+
+    #[test]
+    fn test_fused_binop_gte() {
+        let result = run_fused_binop("a >= b");
+        assert!((result - 1.0).abs() < 1e-10, "10 >= 3 = 1, got {result}");
+    }
+
+    #[test]
+    fn test_fused_binop_lt() {
+        let result = run_fused_binop("a < b");
+        assert!((result - 0.0).abs() < 1e-10, "10 < 3 = 0, got {result}");
+    }
+
+    #[test]
+    fn test_fused_binop_lte() {
+        let result = run_fused_binop("a <= b");
+        assert!((result - 0.0).abs() < 1e-10, "10 <= 3 = 0, got {result}");
+    }
+
+    #[test]
+    fn test_fused_binop_eq() {
+        // Use equal values so we test the true case
+        let tp = TestProject::new("fused_eq")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "5", None)
+            .aux("b", "5", None)
+            .aux("result", "a = b", None)
+            .flow("inflow", "0", None)
+            .stock("s", "0", &["inflow"], &[], None);
+        let vm_results = tp.run_vm().unwrap();
+        let result = vm_results["result"][0];
+        assert!((result - 1.0).abs() < 1e-10, "5 = 5 = 1, got {result}");
+    }
+
+    #[test]
+    fn test_fused_binop_and() {
+        let tp = TestProject::new("fused_and")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "1", None)
+            .aux("b", "1", None)
+            .aux("result", "a AND b", None)
+            .flow("inflow", "0", None)
+            .stock("s", "0", &["inflow"], &[], None);
+        let vm_results = tp.run_vm().unwrap();
+        let result = vm_results["result"][0];
+        assert!((result - 1.0).abs() < 1e-10, "1 AND 1 = 1, got {result}");
+    }
+
+    #[test]
+    fn test_fused_binop_or() {
+        let tp = TestProject::new("fused_or")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "0", None)
+            .aux("b", "1", None)
+            .aux("result", "a OR b", None)
+            .flow("inflow", "0", None)
+            .stock("s", "0", &["inflow"], &[], None);
+        let vm_results = tp.run_vm().unwrap();
+        let result = vm_results["result"][0];
+        assert!((result - 1.0).abs() < 1e-10, "0 OR 1 = 1, got {result}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Op2 variants through fused BinOpAssignNext (stock integration)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fused_binop_next_sub() {
+        // stock with only outflow exercises Sub in AssignNext
+        let tp = TestProject::new("fused_next_sub")
+            .with_sim_time(0.0, 3.0, 1.0)
+            .flow("outflow", "5", None)
+            .stock("s", "100", &[], &["outflow"], None);
+        let vm_results = tp.run_vm().unwrap();
+        let interp_results = tp.run_interpreter().unwrap();
+        let vm_s = &vm_results["s"];
+        let interp_s = &interp_results["s"];
+        for (i, (v, e)) in vm_s.iter().zip(interp_s.iter()).enumerate() {
+            assert!(
+                (v - e).abs() < 1e-10,
+                "s mismatch at step {i}: vm={v}, interp={e}"
+            );
+        }
+        assert!((vm_s[0] - 100.0).abs() < 1e-10, "initial should be 100");
+        assert!(
+            (vm_s[1] - 95.0).abs() < 1e-10,
+            "step 1 should be 95 (100 - 5)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Unfused Op2 path: operations consumed by further stack ops
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_unfused_op2_exp_in_expression() {
+        // a^b + 1: the ^ result feeds into +, so Op2::Exp can't be fused with Assign
+        let tp = TestProject::new("unfused_exp")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "2", None)
+            .aux("b", "3", None)
+            .aux("result", "a ^ b + 1", None)
+            .flow("inflow", "0", None)
+            .stock("s", "0", &["inflow"], &[], None);
+        let vm_results = tp.run_vm().unwrap();
+        let result = vm_results["result"][0];
+        assert!((result - 9.0).abs() < 1e-10, "2^3 + 1 = 9, got {result}");
+    }
+
+    #[test]
+    fn test_unfused_op2_div_in_expression() {
+        let tp = TestProject::new("unfused_div")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "10", None)
+            .aux("b", "4", None)
+            .aux("result", "a / b + 1", None)
+            .flow("inflow", "0", None)
+            .stock("s", "0", &["inflow"], &[], None);
+        let vm_results = tp.run_vm().unwrap();
+        let result = vm_results["result"][0];
+        assert!((result - 3.5).abs() < 1e-10, "10/4 + 1 = 3.5, got {result}");
+    }
+
+    #[test]
+    fn test_unfused_op2_mod_in_expression() {
+        let tp = TestProject::new("unfused_mod")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "10", None)
+            .aux("b", "3", None)
+            .aux("result", "a MOD b + 1", None)
+            .flow("inflow", "0", None)
+            .stock("s", "0", &["inflow"], &[], None);
+        let vm_results = tp.run_vm().unwrap();
+        let result = vm_results["result"][0];
+        assert!(
+            (result - 2.0).abs() < 1e-10,
+            "10 mod 3 + 1 = 2, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_unfused_not_operator() {
+        let tp = TestProject::new("unfused_not")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "0", None)
+            .aux("result", "NOT a", None)
+            .flow("inflow", "0", None)
+            .stock("s", "0", &["inflow"], &[], None);
+        let vm_results = tp.run_vm().unwrap();
+        let result = vm_results["result"][0];
+        assert!((result - 1.0).abs() < 1e-10, "NOT 0 = 1, got {result}");
+    }
+
+    #[test]
+    fn test_unfused_comparison_gte_lte_in_expression() {
+        // Use >= and <= as intermediate values consumed by further ops
+        let tp = TestProject::new("unfused_cmp")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "5", None)
+            .aux("b", "5", None)
+            .aux("gte_result", "(a >= b) + (a <= b)", None)
+            .flow("inflow", "0", None)
+            .stock("s", "0", &["inflow"], &[], None);
+        let vm_results = tp.run_vm().unwrap();
+        let result = vm_results["gte_result"][0];
+        assert!(
+            (result - 2.0).abs() < 1e-10,
+            "(5>=5) + (5<=5) = 1+1 = 2, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_multiple_superinstructions_in_one_model() {
+        let tp = TestProject::new("multi_super")
+            .with_sim_time(0.0, 3.0, 1.0)
+            .aux("const_a", "2", None)
+            .aux("const_b", "3", None)
+            .aux("product", "const_a * const_b", None)
+            .aux("sum", "const_a + const_b", None)
+            .flow("inflow", "product + sum", None)
+            .stock("s", "0", &["inflow"], &[], None);
+
+        let vm = build_vm(&tp);
+        let ops = flow_opcodes(&vm);
+
+        // There should be at least 2 AssignConstCurr (for const_a, const_b)
+        let const_count = ops
+            .iter()
+            .filter(|op| matches!(op, Opcode::AssignConstCurr { .. }))
+            .count();
+        assert!(
+            const_count >= 2,
+            "expected at least 2 AssignConstCurr, got {const_count}"
+        );
+
+        let vm_results = tp.run_vm().unwrap();
+        let interp_results = tp.run_interpreter().unwrap();
+
+        // product = 2*3 = 6, sum = 2+3 = 5, inflow = 11
+        // s starts at 0, gains 11 per step
+        let vm_s = &vm_results["s"];
+        let interp_s = &interp_results["s"];
+        for (i, (v, e)) in vm_s.iter().zip(interp_s.iter()).enumerate() {
+            assert!(
+                (v - e).abs() < 1e-10,
+                "s mismatch at step {i}: vm={v}, interp={e}"
+            );
+        }
+        assert!(
+            (vm_s[1] - 11.0).abs() < 1e-10,
+            "s at step 1 should be 11, got {}",
+            vm_s[1]
+        );
+    }
+}
+
+#[cfg(test)]
+mod vm_reset_run_to_and_constants_tests {
+    use super::*;
+    use crate::canonicalize;
+    use crate::datamodel;
+    use crate::test_common::TestProject;
+
+    fn pop_model() -> TestProject {
+        TestProject::new("pop_model")
+            .with_sim_time(0.0, 100.0, 1.0)
+            .aux("birth_rate", "0.1", None)
+            .flow("births", "population * birth_rate", None)
+            .flow("deaths", "population / 80", None)
+            .stock("population", "100", &["births"], &["deaths"], None)
+    }
+
+    fn build_compiled(tp: &TestProject) -> CompiledSimulation {
+        let sim = tp.build_sim().unwrap();
+        sim.compile().unwrap()
+    }
+
+    // ================================================================
+    // Multiple reset cycles
+    // ================================================================
+
+    #[test]
+    fn test_multiple_reset_cycles_produce_identical_results() {
+        let compiled = build_compiled(&pop_model());
+        let mut vm = Vm::new(compiled).unwrap();
+
+        vm.run_to_end().unwrap();
+        let ref_series = vm.get_series(&canonicalize("population")).unwrap();
+
+        for cycle in 1..=5 {
+            vm.reset();
+            vm.run_to_end().unwrap();
+            let series = vm.get_series(&canonicalize("population")).unwrap();
+            assert_eq!(
+                series.len(),
+                ref_series.len(),
+                "cycle {cycle}: series length should match"
+            );
+            for (step, (a, b)) in ref_series.iter().zip(series.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-10,
+                    "cycle {cycle}, step {step}: {a} vs {b}"
+                );
+            }
+        }
+    }
+
+    // ================================================================
+    // Reset after partial run with different dt values
+    // ================================================================
+
+    #[test]
+    fn test_reset_after_partial_run_dt_quarter() {
+        let tp = TestProject::new("dt_quarter")
+            .with_sim_time(0.0, 10.0, 0.25)
+            .aux("rate", "0.05", None)
+            .flow("inflow", "stock * rate", None)
+            .stock("stock", "100", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+
+        let mut vm_ref = Vm::new(compiled.clone()).unwrap();
+        vm_ref.run_to_end().unwrap();
+        let ref_series = vm_ref.get_series(&canonicalize("stock")).unwrap();
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to(5.0).unwrap();
+        vm.reset();
+        vm.run_to_end().unwrap();
+        let series = vm.get_series(&canonicalize("stock")).unwrap();
+
+        assert_eq!(series.len(), ref_series.len());
+        for (step, (a, b)) in ref_series.iter().zip(series.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-10,
+                "step {step}: reference {a} vs reset {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reset_after_partial_run_dt_half() {
+        let tp = TestProject::new("dt_half")
+            .with_sim_time(0.0, 20.0, 0.5)
+            .aux("rate", "0.03", None)
+            .flow("inflow", "stock * rate", None)
+            .stock("stock", "50", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+
+        let mut vm_ref = Vm::new(compiled.clone()).unwrap();
+        vm_ref.run_to_end().unwrap();
+        let ref_series = vm_ref.get_series(&canonicalize("stock")).unwrap();
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to(10.0).unwrap();
+        vm.reset();
+        vm.run_to_end().unwrap();
+        let series = vm.get_series(&canonicalize("stock")).unwrap();
+
+        assert_eq!(series.len(), ref_series.len());
+        for (step, (a, b)) in ref_series.iter().zip(series.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-10,
+                "step {step}: reference {a} vs reset {b}"
+            );
+        }
+    }
+
+    // ================================================================
+    // Pre-filled constants verification
+    // ================================================================
+
+    #[test]
+    fn test_prefilled_constants_after_run_initials() {
+        let tp = TestProject::new("constants_check")
+            .with_sim_time(5.0, 50.0, 0.5)
+            .flow("inflow", "0", None)
+            .stock("s", "10", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_initials().unwrap();
+
+        assert_eq!(vm.get_value_now(TIME_OFF), 5.0);
+        assert_eq!(vm.get_value_now(DT_OFF), 0.5);
+        assert_eq!(vm.get_value_now(INITIAL_TIME_OFF), 5.0);
+        assert_eq!(vm.get_value_now(FINAL_TIME_OFF), 50.0);
+
+        // DT/INITIAL_TIME/FINAL_TIME are pre-filled in every chunk slot during initials
+        let data = vm.data.as_ref().unwrap();
+        let n_slots = vm.n_slots;
+        let total_chunks = vm.n_chunks + 2;
+        for chunk in 1..total_chunks {
+            let base = chunk * n_slots;
+            assert_eq!(data[base + DT_OFF], 0.5, "DT in chunk {chunk}");
+            assert_eq!(
+                data[base + INITIAL_TIME_OFF],
+                5.0,
+                "INITIAL_TIME in chunk {chunk}"
+            );
+            assert_eq!(
+                data[base + FINAL_TIME_OFF],
+                50.0,
+                "FINAL_TIME in chunk {chunk}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_constants_remain_correct_throughout_simulation() {
+        let tp = TestProject::new("constants_during_sim")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .flow("inflow", "1", None)
+            .stock("s", "0", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+
+        let data = vm.data.as_ref().unwrap();
+        let n_slots = vm.n_slots;
+        for chunk in 0..vm.n_chunks {
+            let base = chunk * n_slots;
+            assert_eq!(data[base + DT_OFF], 1.0, "DT in chunk {chunk}");
+            assert_eq!(
+                data[base + INITIAL_TIME_OFF],
+                0.0,
+                "INITIAL_TIME in chunk {chunk}"
+            );
+            assert_eq!(
+                data[base + FINAL_TIME_OFF],
+                10.0,
+                "FINAL_TIME in chunk {chunk}"
+            );
+        }
+    }
+
+    // ================================================================
+    // TIME series correctness
+    // ================================================================
+
+    #[test]
+    fn test_time_advances_by_dt_each_step() {
+        let tp = TestProject::new("time_series")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .flow("inflow", "0", None)
+            .stock("s", "0", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+
+        let data = vm.data.as_ref().unwrap();
+        let n_slots = vm.n_slots;
+        for chunk in 0..vm.n_chunks {
+            let base = chunk * n_slots;
+            let expected_time = chunk as f64;
+            assert!(
+                (data[base + TIME_OFF] - expected_time).abs() < 1e-10,
+                "chunk {chunk}: TIME={}, expected {}",
+                data[base + TIME_OFF],
+                expected_time
+            );
+        }
+    }
+
+    #[test]
+    fn test_time_series_with_fractional_dt() {
+        // Use save_step=dt so every step is saved
+        let tp = TestProject::new_with_specs(
+            "time_frac",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 2.0,
+                dt: datamodel::Dt::Dt(0.25),
+                save_step: Some(datamodel::Dt::Dt(0.25)),
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: Some("Month".to_string()),
+            },
+        )
+        .flow("inflow", "0", None)
+        .stock("s", "0", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+
+        let data = vm.data.as_ref().unwrap();
+        let n_slots = vm.n_slots;
+        // Expected: 0.0, 0.25, 0.5, ..., 2.0 => 9 saved steps
+        let expected_steps = 9;
+        assert_eq!(vm.n_chunks, expected_steps);
+        for chunk in 0..vm.n_chunks {
+            let base = chunk * n_slots;
+            let expected_time = chunk as f64 * 0.25;
+            assert!(
+                (data[base + TIME_OFF] - expected_time).abs() < 1e-10,
+                "chunk {chunk}: TIME={}, expected {}",
+                data[base + TIME_OFF],
+                expected_time
+            );
+        }
+    }
+
+    #[test]
+    fn test_time_series_with_nonzero_start() {
+        let tp = TestProject::new("time_nonzero")
+            .with_sim_time(10.0, 15.0, 1.0)
+            .flow("inflow", "0", None)
+            .stock("s", "0", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+
+        let data = vm.data.as_ref().unwrap();
+        let n_slots = vm.n_slots;
+        for chunk in 0..vm.n_chunks {
+            let base = chunk * n_slots;
+            let expected_time = 10.0 + chunk as f64;
+            assert!(
+                (data[base + TIME_OFF] - expected_time).abs() < 1e-10,
+                "chunk {chunk}: TIME={}, expected {}",
+                data[base + TIME_OFF],
+                expected_time
+            );
+        }
+    }
+
+    // ================================================================
+    // set_value_now / get_value_now
+    // ================================================================
+
+    #[test]
+    fn test_set_and_get_value_now() {
+        let tp = TestProject::new("set_get")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("rate", "0.1", None)
+            .flow("inflow", "stock * rate", None)
+            .stock("stock", "100", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_initials().unwrap();
+
+        let stock_off = vm.get_offset(&canonicalize("stock")).unwrap();
+
+        assert_eq!(vm.get_value_now(stock_off), 100.0);
+
+        vm.set_value_now(stock_off, 42.0);
+        assert_eq!(vm.get_value_now(stock_off), 42.0);
+
+        vm.set_value_now(stock_off, -7.5);
+        assert_eq!(vm.get_value_now(stock_off), -7.5);
+    }
+
+    #[test]
+    fn test_set_value_now_for_special_offsets() {
+        let tp = TestProject::new("set_specials")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .flow("inflow", "0", None)
+            .stock("s", "0", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_initials().unwrap();
+
+        assert_eq!(vm.get_value_now(TIME_OFF), 0.0);
+        assert_eq!(vm.get_value_now(DT_OFF), 1.0);
+        assert_eq!(vm.get_value_now(INITIAL_TIME_OFF), 0.0);
+        assert_eq!(vm.get_value_now(FINAL_TIME_OFF), 10.0);
+
+        vm.set_value_now(TIME_OFF, 99.0);
+        assert_eq!(vm.get_value_now(TIME_OFF), 99.0);
+    }
+
+    #[test]
+    fn test_set_value_now_after_run_initials_affects_simulation() {
+        let tp = TestProject::new("set_after_init")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .flow("inflow", "stock * 0.1", None)
+            .stock("stock", "100", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+
+        let mut vm1 = Vm::new(compiled.clone()).unwrap();
+        vm1.run_to_end().unwrap();
+        let series1 = vm1.get_series(&canonicalize("stock")).unwrap();
+
+        let mut vm2 = Vm::new(compiled).unwrap();
+        vm2.run_initials().unwrap();
+        let stock_off = vm2.get_offset(&canonicalize("stock")).unwrap();
+        vm2.set_value_now(stock_off, 200.0);
+        vm2.run_to_end().unwrap();
+        let series2 = vm2.get_series(&canonicalize("stock")).unwrap();
+
+        assert_eq!(series1[0], 100.0);
+        assert_eq!(series2[0], 200.0);
+        for step in 1..series1.len() {
+            assert!(
+                series2[step] > series1[step],
+                "step {step}: stock with init=200 ({}) should be > stock with init=100 ({})",
+                series2[step],
+                series1[step]
+            );
+        }
+    }
+
+    // ================================================================
+    // run_to with partial ranges
+    // ================================================================
+
+    #[test]
+    fn test_run_to_partial_then_continue_matches_full_run() {
+        let tp = pop_model();
+        let compiled = build_compiled(&tp);
+
+        let mut vm_full = Vm::new(compiled.clone()).unwrap();
+        vm_full.run_to_end().unwrap();
+        let full_series = vm_full.get_series(&canonicalize("population")).unwrap();
+
+        let mut vm_partial = Vm::new(compiled).unwrap();
+        vm_partial.run_to(50.0).unwrap();
+        vm_partial.run_to_end().unwrap();
+        let partial_series = vm_partial.get_series(&canonicalize("population")).unwrap();
+
+        assert_eq!(full_series.len(), partial_series.len());
+        for (step, (a, b)) in full_series.iter().zip(partial_series.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-10,
+                "step {step}: full={a} vs partial+continue={b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_to_multiple_segments_matches_full_run() {
+        let tp = pop_model();
+        let compiled = build_compiled(&tp);
+
+        let mut vm_full = Vm::new(compiled.clone()).unwrap();
+        vm_full.run_to_end().unwrap();
+        let full_series = vm_full.get_series(&canonicalize("population")).unwrap();
+
+        let mut vm_seg = Vm::new(compiled).unwrap();
+        vm_seg.run_to(25.0).unwrap();
+        vm_seg.run_to(50.0).unwrap();
+        vm_seg.run_to(75.0).unwrap();
+        vm_seg.run_to_end().unwrap();
+        let seg_series = vm_seg.get_series(&canonicalize("population")).unwrap();
+
+        assert_eq!(full_series.len(), seg_series.len());
+        for (step, (a, b)) in full_series.iter().zip(seg_series.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-10,
+                "step {step}: full={a} vs segmented={b}"
+            );
+        }
+    }
+
+    // ================================================================
+    // Non-default save_every (save_step != dt)
+    // ================================================================
+
+    #[test]
+    fn test_save_every_2_with_dt_1() {
+        let tp = TestProject::new_with_specs(
+            "save_every_test",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: Some(datamodel::Dt::Dt(2.0)),
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: Some("Month".to_string()),
+            },
+        )
+        .flow("inflow", "1", None)
+        .stock("s", "0", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let series = vm.get_series(&canonicalize("s")).unwrap();
+
+        // save_step=2, dt=1, start=0, stop=10: saved at t=0,2,4,6,8,10 => 6 points
+        assert_eq!(series.len(), 6, "should have 6 saved points");
+        let expected = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0];
+        for (i, (&actual, &exp)) in series.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - exp).abs() < 1e-10,
+                "saved point {i}: actual={actual}, expected={exp}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_save_every_with_fractional_dt() {
+        let tp = TestProject::new_with_specs(
+            "save_frac",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 4.0,
+                dt: datamodel::Dt::Dt(0.5),
+                save_step: Some(datamodel::Dt::Dt(1.0)),
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: Some("Month".to_string()),
+            },
+        )
+        .flow("inflow", "2", None)
+        .stock("s", "0", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let series = vm.get_series(&canonicalize("s")).unwrap();
+
+        // save_step=1, dt=0.5, start=0, stop=4: saved at t=0,1,2,3,4 => 5 points
+        assert_eq!(series.len(), 5, "should have 5 saved points");
+        // s increases by inflow*dt = 2*0.5 = 1.0 per dt step.
+        // At save points: t=0: 0, t=1: 2, t=2: 4, t=3: 6, t=4: 8
+        let expected = [0.0, 2.0, 4.0, 6.0, 8.0];
+        for (i, (&actual, &exp)) in series.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - exp).abs() < 1e-10,
+                "saved point {i}: actual={actual}, expected={exp}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_save_every_matches_dt_gives_all_steps() {
+        let tp = TestProject::new("save_all")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .flow("inflow", "1", None)
+            .stock("s", "0", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let series = vm.get_series(&canonicalize("s")).unwrap();
+
+        assert_eq!(series.len(), 6, "should have 6 saved points");
+        let expected = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        for (i, (&actual, &exp)) in series.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - exp).abs() < 1e-10,
+                "saved point {i}: actual={actual}, expected={exp}"
+            );
+        }
+    }
+
+    // ================================================================
+    // Reset clears temp_storage
+    // ================================================================
+
+    #[test]
+    fn test_reset_zeroes_temp_storage() {
+        let tp = pop_model();
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+
+        vm.reset();
+
+        for (i, &val) in vm.temp_storage.iter().enumerate() {
+            assert_eq!(val, 0.0, "temp_storage[{i}] should be 0 after reset");
+        }
+    }
+
+    // ================================================================
+    // Simulation produces correct numerical results
+    // ================================================================
+
+    #[test]
+    fn test_exponential_growth_euler() {
+        // ds/dt = s * 0.1, s(0) = 100, dt = 1
+        let tp = TestProject::new("exp_growth")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .flow("growth", "s * 0.1", None)
+            .stock("s", "100", &["growth"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let series = vm.get_series(&canonicalize("s")).unwrap();
+
+        // Euler: s(t+1) = s(t) * 1.1
+        let expected = [100.0, 110.0, 121.0, 133.1, 146.41, 161.051];
+        assert_eq!(series.len(), expected.len());
+        for (i, (&actual, &exp)) in series.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - exp).abs() < 1e-6,
+                "step {i}: actual={actual}, expected={exp}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_decay_model_with_small_dt() {
+        // ds/dt = -s * 0.1, dt = 0.25, save_step = 0.25 so every step is saved
+        let tp = TestProject::new_with_specs(
+            "decay",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 1.0,
+                dt: datamodel::Dt::Dt(0.25),
+                save_step: Some(datamodel::Dt::Dt(0.25)),
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: Some("Month".to_string()),
+            },
+        )
+        .flow("decay", "s * 0.1", None)
+        .stock("s", "100", &[], &["decay"], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let series = vm.get_series(&canonicalize("s")).unwrap();
+
+        // s(t+dt) = s(t) * (1 - 0.1*0.25) = s(t) * 0.975
+        assert_eq!(series.len(), 5, "5 saved points at dt=0.25 from 0 to 1");
+        let mut expected = 100.0;
+        assert!((series[0] - expected).abs() < 1e-10);
+        for step in 1..5 {
+            expected *= 0.975;
+            assert!(
+                (series[step] - expected).abs() < 1e-10,
+                "step {step}: actual={}, expected={}",
+                series[step],
+                expected
+            );
+        }
+    }
+
+    // ================================================================
+    // Reset with save_every > 1
+    // ================================================================
+
+    #[test]
+    fn test_reset_with_save_every_produces_identical_results() {
+        let tp = TestProject::new_with_specs(
+            "save_reset",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(0.5),
+                save_step: Some(datamodel::Dt::Dt(2.0)),
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: Some("Month".to_string()),
+            },
+        )
+        .flow("inflow", "s * 0.1", None)
+        .stock("s", "100", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+
+        let mut vm_ref = Vm::new(compiled.clone()).unwrap();
+        vm_ref.run_to_end().unwrap();
+        let ref_series = vm_ref.get_series(&canonicalize("s")).unwrap();
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        vm.reset();
+        vm.run_to_end().unwrap();
+        let series = vm.get_series(&canonicalize("s")).unwrap();
+
+        assert_eq!(ref_series.len(), series.len());
+        for (step, (a, b)) in ref_series.iter().zip(series.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-10,
+                "step {step}: reference={a} vs reset={b}"
+            );
+        }
     }
 }

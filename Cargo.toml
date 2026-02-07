@@ -13,3 +13,7 @@ opt-level = "z"
 lto = true
 panic = "abort"
 strip = true
+
+[profile.bench]
+debug = true
+strip = false

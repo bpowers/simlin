@@ -26,6 +26,21 @@ pub type DimId = u16; // Index into dimensions table
 pub type TempId = u8; // Temp array ID (max 256 temps per module)
 pub type PcOffset = i16; // Relative PC offset for jumps (signed for backward jumps)
 pub type NameId = u16; // Index into names table
+pub type DimListId = u16; // Index into dim_lists table (for [DimId; 4] or [u16; 4])
+
+/// Fixed capacity for the VM arithmetic stack.
+///
+/// 64 is generous for system dynamics expressions: the stack depth equals the
+/// maximum nesting depth of an expression tree. Even complex equations like
+/// `IF(a > b AND c < d, MAX(e, f) * g + h, MIN(i, j) / k - l)` use ~5 slots.
+/// The stack resets to 0 after every assignment opcode, so depth depends only on
+/// expression complexity, not on model size.
+///
+/// `ByteCodeBuilder::finish()` validates at compile time that no bytecode
+/// sequence exceeds this capacity, making the VM's unsafe unchecked stack
+/// access provably safe. The `#![deny(unsafe_code)]` crate attribute ensures
+/// no other unsafe code can be added without explicit opt-in.
+pub(crate) const STACK_CAPACITY: usize = 64;
 
 /// Lookup interpolation mode for graphical function tables.
 #[repr(u8)]
@@ -529,7 +544,7 @@ pub(crate) enum Op2 {
 /// - Array iteration (BeginIter, LoadIterElement, etc.)
 /// - Array reductions (ArraySum, ArrayMax, etc.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 #[allow(dead_code)] // Array opcodes not yet emitted by compiler
 pub(crate) enum Opcode {
     // === ARITHMETIC & LOGIC ===
@@ -597,6 +612,28 @@ pub(crate) enum Opcode {
         mode: LookupMode,
     },
 
+    // === SUPERINSTRUCTIONS (fused opcodes for common patterns) ===
+    /// Fused LoadConstant + AssignCurr.
+    /// curr[module_off + off] = literals[literal_id]; stack unchanged.
+    AssignConstCurr {
+        off: VariableOffset,
+        literal_id: LiteralId,
+    },
+
+    /// Fused Op2 + AssignCurr.
+    /// Pops two values, applies binary op, assigns result to curr[module_off + off].
+    BinOpAssignCurr {
+        op: Op2,
+        off: VariableOffset,
+    },
+
+    /// Fused Op2 + AssignNext.
+    /// Pops two values, applies binary op, assigns result to next[module_off + off].
+    BinOpAssignNext {
+        op: Op2,
+        off: VariableOffset,
+    },
+
     // =========================================================================
     // ARRAY SUPPORT (new)
     // =========================================================================
@@ -604,17 +641,17 @@ pub(crate) enum Opcode {
     // === VIEW STACK: Building views dynamically ===
     /// Push a view for a variable's full array onto the view stack.
     /// Looks up dimension info to compute strides.
+    /// The dim_list_id references a (n_dims, [DimId; 4]) entry in ByteCodeContext.dim_lists.
     PushVarView {
-        base_off: VariableOffset, // Variable offset in curr[]
-        n_dims: u8,               // Number of dimensions (1-4)
-        dim_ids: [DimId; 4],      // Dimension IDs (padded with 0 if < 4)
+        base_off: VariableOffset,
+        dim_list_id: DimListId,
     },
 
     /// Push a view for a temp array onto the view stack.
+    /// The dim_list_id references a (n_dims, [DimId; 4]) entry in ByteCodeContext.dim_lists.
     PushTempView {
         temp_id: TempId,
-        n_dims: u8,
-        dim_ids: [DimId; 4],
+        dim_list_id: DimListId,
     },
 
     /// Push a pre-computed static view onto the view stack.
@@ -624,10 +661,10 @@ pub(crate) enum Opcode {
 
     /// Push a view for a variable with explicit dimension sizes.
     /// Used when we have bounds but not dim_ids (e.g., dynamic subscripts).
+    /// The dim_list_id references a (n_dims, [u16; 4]) entry in ByteCodeContext.dim_lists.
     PushVarViewDirect {
-        base_off: VariableOffset, // Variable offset in curr[]
-        n_dims: u8,               // Number of dimensions (1-4)
-        dims: [u16; 4],           // Explicit dimension sizes (padded with 0 if < 4)
+        base_off: VariableOffset,
+        dim_list_id: DimListId,
     },
 
     /// Apply single-element subscript with constant index to top view.
@@ -785,6 +822,132 @@ pub(crate) enum Opcode {
     EndBroadcastIter {},
 }
 
+impl Opcode {
+    /// Returns the jump offset if this opcode is a backward jump instruction.
+    /// Centralizes jump handling so new jump opcodes can't be silently missed
+    /// by the peephole optimizer or other passes.
+    fn jump_offset(&self) -> Option<PcOffset> {
+        match self {
+            Opcode::NextIterOrJump { jump_back } | Opcode::NextBroadcastOrJump { jump_back } => {
+                Some(*jump_back)
+            }
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the jump offset, if this opcode is a backward jump.
+    fn jump_offset_mut(&mut self) -> Option<&mut PcOffset> {
+        match self {
+            Opcode::NextIterOrJump { jump_back } | Opcode::NextBroadcastOrJump { jump_back } => {
+                Some(jump_back)
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns (pops, pushes) describing this opcode's effect on the arithmetic stack.
+    /// Used by `ByteCode::max_stack_depth` to statically validate that compiled
+    /// bytecode cannot overflow the fixed-size VM stack.
+    ///
+    /// Opcodes that only affect the view stack, iter stack, or broadcast stack
+    /// return (0, 0) since they don't touch the arithmetic stack.
+    fn stack_effect(&self) -> (u8, u8) {
+        match self {
+            // Arithmetic: pop 2, push 1
+            Opcode::Op2 { .. } => (2, 1),
+            // Logic: pop 1, push 1
+            Opcode::Not {} => (1, 1),
+
+            // Constants/variables: push 1
+            Opcode::LoadConstant { .. }
+            | Opcode::LoadVar { .. }
+            | Opcode::LoadGlobalVar { .. }
+            | Opcode::LoadModuleInput { .. } => (0, 1),
+
+            // Legacy subscript: PushSubscriptIndex pops an index from the
+            // arithmetic stack and appends it to a separate subscript_index
+            // SmallVec (not the arithmetic stack). Multiple PushSubscriptIndex
+            // ops may precede a single LoadSubscript for multi-dimensional
+            // access, but each only pops 1 from the arithmetic stack.
+            Opcode::PushSubscriptIndex { .. } => (1, 0),
+            // LoadSubscript consumes the accumulated subscript_index entries
+            // and pushes the looked-up value onto the arithmetic stack.
+            Opcode::LoadSubscript { .. } => (0, 1),
+
+            // Control flow
+            Opcode::SetCond {} => (1, 0), // pops condition
+            Opcode::If {} => (2, 1),      // pops true+false branches, pushes result
+            Opcode::Ret => (0, 0),
+
+            // Module eval: pops n_inputs from the caller's arithmetic stack.
+            // The child module executes with its own stack context (via EvalState)
+            // and writes results directly to curr/next, not back to the caller's
+            // arithmetic stack, so pushes = 0 from the caller's perspective.
+            Opcode::EvalModule { n_inputs, .. } => (*n_inputs, 0),
+
+            // Assignment: pops 1 (the value to assign)
+            Opcode::AssignCurr { .. } | Opcode::AssignNext { .. } => (1, 0),
+
+            // Builtins always take 3 args (actual + padding), push 1 result
+            Opcode::Apply { .. } => (3, 1),
+            // Lookup pops element_offset and lookup_index, pushes result
+            Opcode::Lookup { .. } => (2, 1),
+
+            // Superinstructions
+            Opcode::AssignConstCurr { .. } => (0, 0), // reads literal directly
+            Opcode::BinOpAssignCurr { .. } => (2, 0), // pops 2, assigns directly
+            Opcode::BinOpAssignNext { .. } => (2, 0), // pops 2, assigns directly
+
+            // View stack ops don't touch arithmetic stack
+            Opcode::PushVarView { .. }
+            | Opcode::PushTempView { .. }
+            | Opcode::PushStaticView { .. }
+            | Opcode::PushVarViewDirect { .. }
+            | Opcode::ViewSubscriptConst { .. }
+            | Opcode::ViewRange { .. }
+            | Opcode::ViewStarRange { .. }
+            | Opcode::ViewWildcard { .. }
+            | Opcode::ViewTranspose {}
+            | Opcode::PopView {}
+            | Opcode::DupView {} => (0, 0),
+
+            // Dynamic subscript/range ops pop from arithmetic stack
+            Opcode::ViewSubscriptDynamic { .. } => (1, 0),
+            Opcode::ViewRangeDynamic { .. } => (2, 0),
+
+            // Temp array access
+            Opcode::LoadTempConst { .. } => (0, 1),
+            Opcode::LoadTempDynamic { .. } => (1, 1), // pops index, pushes value
+
+            // Iteration: BeginIter/EndIter don't touch arithmetic stack
+            Opcode::BeginIter { .. } | Opcode::EndIter {} => (0, 0),
+            // LoadIter* push 1 element
+            Opcode::LoadIterElement {}
+            | Opcode::LoadIterTempElement { .. }
+            | Opcode::LoadIterViewTop {}
+            | Opcode::LoadIterViewAt { .. } => (0, 1),
+            // StoreIterElement pops 1 value
+            Opcode::StoreIterElement {} => (1, 0),
+            // NextIter doesn't touch arithmetic stack
+            Opcode::NextIterOrJump { .. } => (0, 0),
+
+            // Array reductions push 1 result
+            Opcode::ArraySum {}
+            | Opcode::ArrayMax {}
+            | Opcode::ArrayMin {}
+            | Opcode::ArrayMean {}
+            | Opcode::ArrayStddev {}
+            | Opcode::ArraySize {} => (0, 1),
+
+            // Broadcasting
+            Opcode::BeginBroadcastIter { .. } | Opcode::EndBroadcastIter {} => (0, 0),
+            Opcode::LoadBroadcastElement { .. } => (0, 1),
+            Opcode::StoreBroadcastElement {} => (1, 0),
+            Opcode::NextBroadcastOrJump { .. } => (0, 0),
+        }
+    }
+}
+
 // ============================================================================
 // Module and Array Declarations
 // ============================================================================
@@ -878,6 +1041,11 @@ pub struct ByteCodeContext {
     pub(crate) temp_offsets: Vec<usize>,
     /// Total size needed for temp_storage
     pub(crate) temp_total_size: usize,
+
+    // === Dim list side table ===
+    /// Packed (n_dims, [DimId or u16; 4]) entries referenced by DimListId.
+    /// Each entry stores the dimension count and up to 4 IDs.
+    pub(crate) dim_lists: Vec<(u8, [u16; 4])>,
 }
 
 #[allow(dead_code)] // Methods used by array bytecode not yet emitted
@@ -942,6 +1110,23 @@ impl ByteCodeContext {
         }
         None
     }
+
+    /// Add a dim list entry (n_dims + up to 4 IDs) and return its DimListId.
+    pub fn add_dim_list(&mut self, n_dims: u8, ids: [u16; 4]) -> DimListId {
+        self.dim_lists.push((n_dims, ids));
+        (self.dim_lists.len() - 1) as DimListId
+    }
+
+    /// Get a dim list entry by ID.
+    ///
+    /// Panics on out-of-bounds ID, which is intentional: IDs are only produced
+    /// by `add_dim_list` during compilation, so an invalid ID indicates a
+    /// compiler bug that should surface immediately rather than be silently
+    /// converted to a default value.
+    pub fn get_dim_list(&self, id: DimListId) -> (u8, &[u16; 4]) {
+        let (n, ref ids) = self.dim_lists[id as usize];
+        (n, ids)
+    }
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -949,6 +1134,32 @@ impl ByteCodeContext {
 pub struct ByteCode {
     pub(crate) literals: Vec<f64>,
     pub(crate) code: Vec<Opcode>,
+}
+
+impl ByteCode {
+    /// Statically compute the maximum arithmetic stack depth reached by this bytecode.
+    ///
+    /// Walks the opcode stream applying each instruction's stack effect. Because
+    /// SD expressions are straight-line (no conditional jumps that could create
+    /// divergent stack depths -- backward jumps from iteration opcodes always
+    /// return to the same stack depth), a single linear pass is sufficient.
+    pub(crate) fn max_stack_depth(&self) -> usize {
+        let mut depth: usize = 0;
+        let mut max_depth: usize = 0;
+        for (pc, op) in self.code.iter().enumerate() {
+            let (pops, pushes) = op.stack_effect();
+            // Use checked_sub rather than saturating_sub: an underflow here
+            // means stack_effect() metadata is wrong for some opcode, which
+            // would silently invalidate our safety proof. Panicking surfaces
+            // the bug immediately in tests.
+            depth = depth.checked_sub(pops as usize).unwrap_or_else(|| {
+                panic!("stack_effect underflow at pc {pc}: {pops} pops but depth is {depth}")
+            });
+            depth += pushes as usize;
+            max_depth = max_depth.max(depth);
+        }
+        max_depth
+    }
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -980,7 +1191,113 @@ impl ByteCodeBuilder {
     }
 
     pub(crate) fn finish(self) -> ByteCode {
-        self.bytecode
+        let mut bc = self.bytecode;
+        bc.peephole_optimize();
+
+        // Validate that the compiled bytecode cannot overflow the VM's
+        // fixed-size stack. This makes the unsafe unchecked stack access
+        // in the VM provably safe for this bytecode.
+        let depth = bc.max_stack_depth();
+        assert!(
+            depth < STACK_CAPACITY,
+            "compiled bytecode requires stack depth {depth}, exceeding VM capacity {STACK_CAPACITY}"
+        );
+
+        bc
+    }
+}
+
+impl ByteCode {
+    /// Peephole optimization pass: fuse common opcode sequences into
+    /// superinstructions to reduce dispatch overhead.
+    ///
+    /// Only fuses adjacent instructions when neither is a jump target.
+    /// Jump offsets are recalculated after fusion using an old->new PC map.
+    fn peephole_optimize(&mut self) {
+        if self.code.is_empty() {
+            return;
+        }
+
+        // 1. Build set of PCs that are jump targets
+        let mut jump_targets = vec![false; self.code.len()];
+        for (pc, op) in self.code.iter().enumerate() {
+            if let Some(offset) = op.jump_offset() {
+                let target = (pc as isize + offset as isize) as usize;
+                assert!(
+                    target < jump_targets.len(),
+                    "jump at pc {pc} targets {target}, which is out of bounds (code length: {})",
+                    self.code.len()
+                );
+                jump_targets[target] = true;
+            }
+        }
+
+        // 2. Build old_pc -> new_pc mapping and fused output.
+        // pc_map has one entry per original instruction so that jump fixup
+        // can index by the original PC directly.
+        let mut optimized: Vec<Opcode> = Vec::with_capacity(self.code.len());
+        let mut pc_map: Vec<usize> = Vec::with_capacity(self.code.len() + 1);
+        let mut i = 0;
+        while i < self.code.len() {
+            let new_pc = optimized.len();
+            pc_map.push(new_pc);
+
+            // Only try fusion if the next instruction is not a jump target.
+            // We intentionally don't check whether instruction i itself is a
+            // jump target: the fused instruction replaces both i and i+1 at the
+            // same PC, so jumps to i still land on the correct (fused) opcode.
+            let can_fuse = i + 1 < self.code.len() && !jump_targets[i + 1];
+
+            if can_fuse {
+                let fused = match (&self.code[i], &self.code[i + 1]) {
+                    // Pattern: LoadConstant + AssignCurr -> AssignConstCurr
+                    (Opcode::LoadConstant { id }, Opcode::AssignCurr { off }) => {
+                        Some(Opcode::AssignConstCurr {
+                            off: *off,
+                            literal_id: *id,
+                        })
+                    }
+                    // Pattern: Op2 + AssignCurr -> BinOpAssignCurr
+                    (Opcode::Op2 { op }, Opcode::AssignCurr { off }) => {
+                        Some(Opcode::BinOpAssignCurr { op: *op, off: *off })
+                    }
+                    // Pattern: Op2 + AssignNext -> BinOpAssignNext
+                    (Opcode::Op2 { op }, Opcode::AssignNext { off }) => {
+                        Some(Opcode::BinOpAssignNext { op: *op, off: *off })
+                    }
+                    _ => None,
+                };
+
+                if let Some(op) = fused {
+                    optimized.push(op);
+                    // Both old PCs map to the same new PC
+                    pc_map.push(new_pc);
+                    i += 2;
+                    continue;
+                }
+            }
+
+            // No pattern matched - copy opcode as-is
+            optimized.push(self.code[i]);
+            i += 1;
+        }
+        // Sentinel for instructions past the end
+        pc_map.push(optimized.len());
+
+        // 3. Fix up jump offsets.  Iterate original code to find jumps,
+        // then use pc_map (indexed by old_pc) for O(1) translation.
+        for (old_pc, op) in self.code.iter().enumerate() {
+            let Some(jump_back) = op.jump_offset() else {
+                continue;
+            };
+            let new_pc = pc_map[old_pc];
+            let old_target = (old_pc as isize + jump_back as isize) as usize;
+            let new_target = pc_map[old_target];
+            let new_jump_back = (new_target as isize - new_pc as isize) as PcOffset;
+            *optimized[new_pc].jump_offset_mut().unwrap() = new_jump_back;
+        }
+
+        self.code = optimized;
     }
 }
 
@@ -1012,14 +1329,396 @@ mod tests {
         assert_eq!(2, bytecode.literals.len());
     }
 
+    // =========================================================================
+    // Stack Effect Tests
+    // =========================================================================
+
+    #[test]
+    fn test_stack_effect_arithmetic_ops() {
+        // Binary ops: pop 2, push 1
+        assert_eq!((Opcode::Op2 { op: Op2::Add }).stack_effect(), (2, 1));
+        assert_eq!((Opcode::Op2 { op: Op2::Mul }).stack_effect(), (2, 1));
+        assert_eq!((Opcode::Op2 { op: Op2::Gt }).stack_effect(), (2, 1));
+
+        // Unary not: pop 1, push 1
+        assert_eq!((Opcode::Not {}).stack_effect(), (1, 1));
+    }
+
+    #[test]
+    fn test_stack_effect_loads() {
+        assert_eq!((Opcode::LoadConstant { id: 0 }).stack_effect(), (0, 1));
+        assert_eq!((Opcode::LoadVar { off: 0 }).stack_effect(), (0, 1));
+        assert_eq!((Opcode::LoadGlobalVar { off: 0 }).stack_effect(), (0, 1));
+        assert_eq!(
+            (Opcode::LoadModuleInput { input: 0 }).stack_effect(),
+            (0, 1)
+        );
+    }
+
+    #[test]
+    fn test_stack_effect_assignments() {
+        assert_eq!((Opcode::AssignCurr { off: 0 }).stack_effect(), (1, 0));
+        assert_eq!((Opcode::AssignNext { off: 0 }).stack_effect(), (1, 0));
+    }
+
+    #[test]
+    fn test_stack_effect_superinstructions() {
+        assert_eq!(
+            (Opcode::AssignConstCurr {
+                off: 0,
+                literal_id: 0
+            })
+            .stack_effect(),
+            (0, 0)
+        );
+        assert_eq!(
+            (Opcode::BinOpAssignCurr {
+                op: Op2::Add,
+                off: 0
+            })
+            .stack_effect(),
+            (2, 0)
+        );
+        assert_eq!(
+            (Opcode::BinOpAssignNext {
+                op: Op2::Add,
+                off: 0
+            })
+            .stack_effect(),
+            (2, 0)
+        );
+    }
+
+    #[test]
+    fn test_stack_effect_builtins() {
+        assert_eq!(
+            (Opcode::Apply {
+                func: BuiltinId::Abs
+            })
+            .stack_effect(),
+            (3, 1)
+        );
+        assert_eq!(
+            (Opcode::Lookup {
+                base_gf: 0,
+                table_count: 1,
+                mode: LookupMode::Interpolate,
+            })
+            .stack_effect(),
+            (2, 1)
+        );
+    }
+
+    #[test]
+    fn test_stack_effect_control_flow() {
+        assert_eq!((Opcode::SetCond {}).stack_effect(), (1, 0));
+        assert_eq!((Opcode::If {}).stack_effect(), (2, 1));
+        assert_eq!(Opcode::Ret.stack_effect(), (0, 0));
+    }
+
+    #[test]
+    fn test_stack_effect_eval_module() {
+        assert_eq!(
+            (Opcode::EvalModule { id: 0, n_inputs: 3 }).stack_effect(),
+            (3, 0)
+        );
+        assert_eq!(
+            (Opcode::EvalModule { id: 0, n_inputs: 0 }).stack_effect(),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn test_stack_effect_view_ops_dont_affect_arithmetic_stack() {
+        assert_eq!(
+            (Opcode::PushVarView {
+                base_off: 0,
+                dim_list_id: 0,
+            })
+            .stack_effect(),
+            (0, 0)
+        );
+        assert_eq!((Opcode::PopView {}).stack_effect(), (0, 0));
+        assert_eq!((Opcode::DupView {}).stack_effect(), (0, 0));
+        assert_eq!(
+            (Opcode::ViewSubscriptConst {
+                dim_idx: 0,
+                index: 0,
+            })
+            .stack_effect(),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn test_stack_effect_dynamic_view_ops_pop_from_arithmetic_stack() {
+        assert_eq!(
+            (Opcode::ViewSubscriptDynamic { dim_idx: 0 }).stack_effect(),
+            (1, 0)
+        );
+        assert_eq!(
+            (Opcode::ViewRangeDynamic { dim_idx: 0 }).stack_effect(),
+            (2, 0)
+        );
+    }
+
+    #[test]
+    fn test_stack_effect_iteration() {
+        assert_eq!(
+            (Opcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: false,
+            })
+            .stack_effect(),
+            (0, 0)
+        );
+        assert_eq!((Opcode::LoadIterElement {}).stack_effect(), (0, 1));
+        assert_eq!((Opcode::StoreIterElement {}).stack_effect(), (1, 0));
+        assert_eq!((Opcode::EndIter {}).stack_effect(), (0, 0));
+    }
+
+    #[test]
+    fn test_stack_effect_array_reductions() {
+        assert_eq!((Opcode::ArraySum {}).stack_effect(), (0, 1));
+        assert_eq!((Opcode::ArrayMax {}).stack_effect(), (0, 1));
+        assert_eq!((Opcode::ArrayMin {}).stack_effect(), (0, 1));
+        assert_eq!((Opcode::ArrayMean {}).stack_effect(), (0, 1));
+        assert_eq!((Opcode::ArrayStddev {}).stack_effect(), (0, 1));
+        assert_eq!((Opcode::ArraySize {}).stack_effect(), (0, 1));
+    }
+
+    // =========================================================================
+    // Max Stack Depth Tests
+    // =========================================================================
+
+    #[test]
+    fn test_max_stack_depth_empty() {
+        let bc = ByteCode::default();
+        assert_eq!(bc.max_stack_depth(), 0);
+    }
+
+    #[test]
+    fn test_max_stack_depth_simple_assignment() {
+        // x = 42.0: LoadConstant(42.0), AssignCurr(x)
+        let bc = ByteCode {
+            literals: vec![42.0],
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::AssignCurr { off: 0 },
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 1);
+    }
+
+    #[test]
+    fn test_max_stack_depth_binary_expression() {
+        // x = a + b: LoadVar(a), LoadVar(b), Op2(Add), AssignCurr(x)
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::Op2 { op: Op2::Add },
+                Opcode::AssignCurr { off: 2 },
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 2);
+    }
+
+    #[test]
+    fn test_max_stack_depth_nested_expression() {
+        // x = (a + b) * (c + d):
+        // LoadVar(a), LoadVar(b), Op2(Add), LoadVar(c), LoadVar(d), Op2(Add), Op2(Mul), AssignCurr
+        // Peak depth is 3: after loading c while (a+b) result is still on stack
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },    // depth: 1
+                Opcode::LoadVar { off: 1 },    // depth: 2
+                Opcode::Op2 { op: Op2::Add },  // depth: 1
+                Opcode::LoadVar { off: 2 },    // depth: 2
+                Opcode::LoadVar { off: 3 },    // depth: 3 (peak)
+                Opcode::Op2 { op: Op2::Add },  // depth: 2
+                Opcode::Op2 { op: Op2::Mul },  // depth: 1
+                Opcode::AssignCurr { off: 4 }, // depth: 0
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 3);
+    }
+
+    #[test]
+    fn test_max_stack_depth_builtin_function() {
+        // x = ABS(a): LoadVar(a), LoadConstant(0), LoadConstant(0), Apply(Abs), AssignCurr
+        let bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::Apply {
+                    func: BuiltinId::Abs,
+                },
+                Opcode::AssignCurr { off: 1 },
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 3);
+    }
+
+    #[test]
+    fn test_max_stack_depth_if_expression() {
+        // IF(cond, a, b): LoadVar(cond), SetCond, LoadVar(a), LoadVar(b), If, AssignCurr
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },    // depth: 1
+                Opcode::SetCond {},            // depth: 0
+                Opcode::LoadVar { off: 1 },    // depth: 1
+                Opcode::LoadVar { off: 2 },    // depth: 2
+                Opcode::If {},                 // depth: 1
+                Opcode::AssignCurr { off: 3 }, // depth: 0
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 2);
+    }
+
+    #[test]
+    fn test_max_stack_depth_superinstruction_const_assign() {
+        // AssignConstCurr doesn't use the stack at all
+        let bc = ByteCode {
+            literals: vec![42.0],
+            code: vec![Opcode::AssignConstCurr {
+                off: 0,
+                literal_id: 0,
+            }],
+        };
+        assert_eq!(bc.max_stack_depth(), 0);
+    }
+
+    #[test]
+    fn test_max_stack_depth_multiple_assignments() {
+        // x = a; y = b + c
+        // Stack resets to 0 after each assignment, so peak is max of individual expressions
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::AssignCurr { off: 3 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::Op2 { op: Op2::Add },
+                Opcode::AssignCurr { off: 4 },
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 2);
+    }
+
+    #[test]
+    fn test_max_stack_depth_with_iteration() {
+        // Iteration body: LoadIterElement, StoreIterElement -- each iteration
+        // pushes 1 and pops 1, so peak depth within loop is 1
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::BeginIter {
+                    write_temp_id: 0,
+                    has_write_temp: true,
+                },
+                Opcode::LoadIterElement {},
+                Opcode::StoreIterElement {},
+                Opcode::NextIterOrJump { jump_back: -2 },
+                Opcode::EndIter {},
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 1);
+    }
+
+    #[test]
+    fn test_max_stack_depth_multidimensional_subscript() {
+        // a[i, j]: two PushSubscriptIndex (each pops 1 index from the arithmetic
+        // stack, writing to a separate subscript_index SmallVec), then LoadSubscript
+        // pushes the result. The indices must be loaded before being popped.
+        // LoadVar(i), PushSubscriptIndex, LoadVar(j), PushSubscriptIndex, LoadSubscript, Assign
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },               // depth: 1 (load index i)
+                Opcode::PushSubscriptIndex { bounds: 3 }, // depth: 0 (pop i)
+                Opcode::LoadVar { off: 1 },               // depth: 1 (load index j)
+                Opcode::PushSubscriptIndex { bounds: 4 }, // depth: 0 (pop j)
+                Opcode::LoadSubscript { off: 10 },        // depth: 1 (push result)
+                Opcode::AssignCurr { off: 20 },           // depth: 0
+            ],
+        };
+        assert_eq!(bc.max_stack_depth(), 1);
+    }
+
+    #[test]
+    fn test_finish_validates_stack_depth() {
+        // Build bytecode that fits within STACK_CAPACITY -- should succeed
+        let mut builder = ByteCodeBuilder::default();
+        let id = builder.intern_literal(1.0);
+        builder.push_opcode(Opcode::LoadConstant { id });
+        builder.push_opcode(Opcode::AssignCurr { off: 0 });
+        let _bc = builder.finish(); // should not panic
+    }
+
+    #[test]
+    #[should_panic(expected = "stack_effect underflow at pc 0")]
+    fn test_max_stack_depth_catches_underflow() {
+        // An Op2 at the start with nothing on the stack should panic,
+        // catching bugs in stack_effect metadata
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![Opcode::Op2 { op: Op2::Add }],
+        };
+        bc.max_stack_depth();
+    }
+
+    #[test]
+    #[should_panic(expected = "jump at pc 0 targets")]
+    fn test_peephole_panics_on_out_of_bounds_jump_target() {
+        // A jump that targets beyond the code length indicates a compiler bug
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![Opcode::NextIterOrJump { jump_back: 10 }],
+        };
+        bc.peephole_optimize();
+    }
+
+    // =========================================================================
+    // Jump Offset Tests
+    // =========================================================================
+
+    #[test]
+    fn test_jump_offset_returns_offset_for_jump_opcodes() {
+        let iter_jump = Opcode::NextIterOrJump { jump_back: -5 };
+        assert_eq!(iter_jump.jump_offset(), Some(-5));
+
+        let broadcast_jump = Opcode::NextBroadcastOrJump { jump_back: -3 };
+        assert_eq!(broadcast_jump.jump_offset(), Some(-3));
+
+        assert_eq!(Opcode::Ret.jump_offset(), None);
+        assert_eq!((Opcode::Op2 { op: Op2::Add }).jump_offset(), None);
+        assert_eq!((Opcode::LoadVar { off: 0 }).jump_offset(), None);
+    }
+
+    #[test]
+    fn test_jump_offset_mut_modifies_jump() {
+        let mut op = Opcode::NextIterOrJump { jump_back: -5 };
+        if let Some(offset) = op.jump_offset_mut() {
+            *offset = -2;
+        }
+        assert_eq!(op.jump_offset(), Some(-2));
+    }
+
     #[test]
     fn test_opcode_size() {
         use std::mem::size_of;
-        // With array support opcodes (PushVarView has [DimId; 4] = 8 bytes),
-        // the opcode size increases. We accept up to 16 bytes.
+        // Large inline arrays ([DimId; 4]) moved to a side table, so
+        // the largest variant payload is now ViewRange (u8 + u16 + u16 = 5 bytes)
+        // or Lookup (u8 + u16 + u8 = 4 bytes). With discriminant, expect 8 bytes.
         let size = size_of::<Opcode>();
-        assert!(size <= 16, "Opcode size {} exceeds 16 bytes", size);
-        // Print actual size for documentation
+        assert!(size <= 8, "Opcode size {} exceeds 8 bytes", size);
         eprintln!("Opcode size: {} bytes", size);
     }
 
@@ -1676,6 +2375,572 @@ mod tests {
 
         // For scalar, always return offset
         assert_eq!(view.offset_for_iter_index(0), 5);
+    }
+
+    // =========================================================================
+    // Peephole Optimizer Tests
+    // =========================================================================
+
+    #[test]
+    fn test_peephole_empty_bytecode() {
+        let mut bc = ByteCode {
+            code: vec![],
+            literals: vec![],
+        };
+        bc.peephole_optimize();
+        assert!(bc.code.is_empty());
+    }
+
+    #[test]
+    fn test_peephole_single_instruction() {
+        let mut bc = ByteCode {
+            code: vec![Opcode::Ret],
+            literals: vec![],
+        };
+        bc.peephole_optimize();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(bc.code[0], Opcode::Ret));
+    }
+
+    #[test]
+    fn test_peephole_no_fusible_patterns() {
+        let mut bc = ByteCode {
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::Not {},
+                Opcode::Ret,
+            ],
+            literals: vec![],
+        };
+        bc.peephole_optimize();
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
+        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 1 }));
+        assert!(matches!(bc.code[2], Opcode::Not {}));
+        assert!(matches!(bc.code[3], Opcode::Ret));
+    }
+
+    #[test]
+    fn test_peephole_load_constant_assign_curr_fusion() {
+        let mut bc = ByteCode {
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::AssignCurr { off: 5 },
+            ],
+            literals: vec![42.0],
+        };
+        bc.peephole_optimize();
+
+        assert_eq!(bc.code.len(), 1);
+        match &bc.code[0] {
+            Opcode::AssignConstCurr { off, literal_id } => {
+                assert_eq!(*off, 5);
+                assert_eq!(*literal_id, 0);
+            }
+            _ => panic!("expected AssignConstCurr"),
+        }
+    }
+
+    #[test]
+    fn test_peephole_op2_assign_curr_fusion() {
+        let mut bc = ByteCode {
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::Op2 { op: Op2::Add },
+                Opcode::AssignCurr { off: 2 },
+            ],
+            literals: vec![],
+        };
+        bc.peephole_optimize();
+
+        // LoadVar, LoadVar stay; Op2+AssignCurr fuse into BinOpAssignCurr
+        assert_eq!(bc.code.len(), 3);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
+        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 1 }));
+        match &bc.code[2] {
+            Opcode::BinOpAssignCurr { op, off } => {
+                assert!(matches!(op, Op2::Add));
+                assert_eq!(*off, 2);
+            }
+            _ => panic!("expected BinOpAssignCurr"),
+        }
+    }
+
+    #[test]
+    fn test_peephole_op2_assign_next_fusion() {
+        let mut bc = ByteCode {
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::Op2 { op: Op2::Mul },
+                Opcode::AssignNext { off: 3 },
+            ],
+            literals: vec![],
+        };
+        bc.peephole_optimize();
+
+        assert_eq!(bc.code.len(), 3);
+        match &bc.code[2] {
+            Opcode::BinOpAssignNext { op, off } => {
+                assert!(matches!(op, Op2::Mul));
+                assert_eq!(*off, 3);
+            }
+            _ => panic!("expected BinOpAssignNext"),
+        }
+    }
+
+    #[test]
+    fn test_peephole_all_op2_variants_fuse() {
+        // Verify every Op2 variant can be fused with AssignCurr
+        let ops = [
+            Op2::Add,
+            Op2::Sub,
+            Op2::Mul,
+            Op2::Div,
+            Op2::Exp,
+            Op2::Mod,
+            Op2::Gt,
+            Op2::Gte,
+            Op2::Lt,
+            Op2::Lte,
+            Op2::Eq,
+            Op2::And,
+            Op2::Or,
+        ];
+        for op in ops {
+            let mut bc = ByteCode {
+                code: vec![Opcode::Op2 { op }, Opcode::AssignCurr { off: 10 }],
+                literals: vec![],
+            };
+            bc.peephole_optimize();
+            assert_eq!(bc.code.len(), 1, "failed for op variant");
+            assert!(matches!(bc.code[0], Opcode::BinOpAssignCurr { .. }));
+        }
+    }
+
+    #[test]
+    fn test_peephole_multiple_fusions() {
+        // Two independent fusion opportunities in sequence
+        let mut bc = ByteCode {
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::AssignCurr { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::Op2 { op: Op2::Sub },
+                Opcode::AssignCurr { off: 3 },
+            ],
+            literals: vec![1.0],
+        };
+        bc.peephole_optimize();
+
+        // LoadConstant+AssignCurr -> AssignConstCurr
+        // LoadVar, LoadVar stay
+        // Op2+AssignCurr -> BinOpAssignCurr
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(bc.code[0], Opcode::AssignConstCurr { .. }));
+        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 1 }));
+        assert!(matches!(bc.code[2], Opcode::LoadVar { off: 2 }));
+        assert!(matches!(bc.code[3], Opcode::BinOpAssignCurr { .. }));
+    }
+
+    #[test]
+    fn test_peephole_mixed_fusible_and_nonfusible() {
+        let mut bc = ByteCode {
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::Not {},
+                Opcode::LoadConstant { id: 0 },
+                Opcode::AssignCurr { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::Ret,
+            ],
+            literals: vec![0.0],
+        };
+        bc.peephole_optimize();
+
+        // LoadVar, Not stay; LoadConstant+AssignCurr fuse; LoadVar, Ret stay
+        assert_eq!(bc.code.len(), 5);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
+        assert!(matches!(bc.code[1], Opcode::Not {}));
+        assert!(matches!(bc.code[2], Opcode::AssignConstCurr { .. }));
+        assert!(matches!(bc.code[3], Opcode::LoadVar { off: 2 }));
+        assert!(matches!(bc.code[4], Opcode::Ret));
+    }
+
+    #[test]
+    fn test_peephole_jump_target_prevents_fusion() {
+        // If instruction i+1 is a jump target, don't fuse i with i+1.
+        // Layout (before optimization):
+        //   0: LoadConstant { id: 0 }       <- loop body start (jump target)
+        //   1: AssignCurr { off: 0 }
+        //   2: NextIterOrJump { jump_back: -2 }  (target = 2 + (-2) = 0)
+        //   3: Ret
+        //
+        // Instruction 0 is a jump target, so even though 0 is LoadConstant
+        // and 1 is AssignCurr, we should NOT fuse them because instruction 0
+        // is a jump target. Wait -- actually the check is whether i+1 is a
+        // jump target. Here instruction 0 IS a jump target. The optimizer checks
+        // `!jump_targets[i + 1]` to decide whether to fuse i with i+1.
+        //
+        // For i=0: jump_targets[1] is false, so fusion IS allowed.
+        // The jump target protection matters when the SECOND instruction of a
+        // potential pair is a jump target. Let's build that scenario:
+        //
+        //   0: Ret                            <- something before the loop
+        //   1: LoadVar { off: 5 }             <- jump target (loop body start)
+        //   2: NextIterOrJump { jump_back: -1 }  (target = 2 + (-1) = 1)
+        //   3: Ret
+        //
+        // For i=0 (Ret): can_fuse checks jump_targets[1] = true -> no fusion.
+        // This prevents fusing Ret with LoadVar, which is correct.
+        //
+        // A more realistic scenario: Op2 followed by AssignCurr where the
+        // AssignCurr is a jump target.
+        let mut bc = ByteCode {
+            code: vec![
+                Opcode::Op2 { op: Op2::Add },             // 0
+                Opcode::AssignCurr { off: 0 },            // 1 -- jump target
+                Opcode::NextIterOrJump { jump_back: -1 }, // 2 -> target = 2-1 = 1
+                Opcode::Ret,                              // 3
+            ],
+            literals: vec![],
+        };
+        bc.peephole_optimize();
+
+        // Fusion of 0+1 should be prevented because instruction 1 is a jump target
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(bc.code[0], Opcode::Op2 { op: Op2::Add }));
+        assert!(matches!(bc.code[1], Opcode::AssignCurr { off: 0 }));
+        assert!(matches!(bc.code[2], Opcode::NextIterOrJump { .. }));
+        assert!(matches!(bc.code[3], Opcode::Ret));
+    }
+
+    #[test]
+    fn test_peephole_jump_target_only_blocks_specific_pair() {
+        // Verify that a jump target only blocks fusion of the pair where
+        // the second instruction is the target, not other pairs.
+        //
+        //   0: LoadConstant { id: 0 }
+        //   1: AssignCurr { off: 0 }         <- NOT a jump target, so 0+1 CAN fuse
+        //   2: LoadVar { off: 5 }            <- jump target
+        //   3: NextIterOrJump { jump_back: -1 }  (target = 3-1 = 2)
+        //   4: Ret
+        let mut bc = ByteCode {
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::AssignCurr { off: 0 },
+                Opcode::LoadVar { off: 5 },
+                Opcode::NextIterOrJump { jump_back: -1 },
+                Opcode::Ret,
+            ],
+            literals: vec![1.0],
+        };
+        bc.peephole_optimize();
+
+        // 0+1 should fuse (neither target), 2 stays (it's a jump target, but
+        // the previous instruction was AssignCurr which doesn't match any pattern
+        // anyway), 3 stays, 4 stays
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::AssignConstCurr {
+                off: 0,
+                literal_id: 0
+            }
+        ));
+        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 5 }));
+        assert!(matches!(bc.code[2], Opcode::NextIterOrJump { .. }));
+        assert!(matches!(bc.code[3], Opcode::Ret));
+    }
+
+    #[test]
+    fn test_peephole_jump_offset_recalculation_next_iter() {
+        // When fusion shrinks the code, jump offsets must be recalculated.
+        // This test places a fusion BEFORE the loop (outside the jump target
+        // to jump instruction range) so the fixup works correctly.
+        //
+        // Before optimization:
+        //   0: LoadConstant { id: 0 }    \
+        //   1: AssignCurr { off: 0 }     / -> fuse
+        //   2: LoadVar { off: 1 }        <- jump target
+        //   3: AssignCurr { off: 2 }
+        //   4: NextIterOrJump { jump_back: -2 }  target = 4+(-2) = 2
+        //   5: Ret
+        //
+        // After optimization:
+        //   0: AssignConstCurr            (fused 0+1)
+        //   1: LoadVar { off: 1 }         (jump target)
+        //   2: AssignCurr { off: 2 }
+        //   3: NextIterOrJump { jump_back: -2 }  (loop body unchanged)
+        //   4: Ret
+        let mut bc = ByteCode {
+            code: vec![
+                Opcode::LoadConstant { id: 0 },           // 0
+                Opcode::AssignCurr { off: 0 },            // 1
+                Opcode::LoadVar { off: 1 },               // 2 (jump target)
+                Opcode::AssignCurr { off: 2 },            // 3
+                Opcode::NextIterOrJump { jump_back: -2 }, // 4, target=2
+                Opcode::Ret,                              // 5
+            ],
+            literals: vec![1.0],
+        };
+        bc.peephole_optimize();
+
+        assert_eq!(bc.code.len(), 5);
+        assert!(matches!(bc.code[0], Opcode::AssignConstCurr { .. }));
+        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 1 }));
+        assert!(matches!(bc.code[2], Opcode::AssignCurr { off: 2 }));
+        match &bc.code[3] {
+            Opcode::NextIterOrJump { jump_back } => {
+                assert_eq!(*jump_back, -2, "jump_back should remain -2");
+            }
+            _ => panic!("expected NextIterOrJump"),
+        }
+        assert!(matches!(bc.code[4], Opcode::Ret));
+    }
+
+    #[test]
+    fn test_peephole_fusion_inside_loop_body() {
+        let mut bc = ByteCode {
+            code: vec![
+                Opcode::LoadVar { off: 0 },               // 0 (jump target)
+                Opcode::Op2 { op: Op2::Add },             // 1 \
+                Opcode::AssignCurr { off: 1 },            // 2 / fuse
+                Opcode::NextIterOrJump { jump_back: -3 }, // 3, target=0
+                Opcode::Ret,                              // 4
+            ],
+            literals: vec![],
+        };
+        bc.peephole_optimize();
+
+        // 1+2 fuse -> BinOpAssignCurr
+        // Result: [LoadVar, BinOpAssignCurr, NextIterOrJump, Ret]
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::BinOpAssignCurr {
+                op: Op2::Add,
+                off: 1
+            }
+        ));
+        match &bc.code[2] {
+            Opcode::NextIterOrJump { jump_back } => {
+                // new PC 2, target should be new PC 0 -> jump_back = -2
+                assert_eq!(*jump_back, -2);
+            }
+            other => panic!(
+                "expected NextIterOrJump, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        assert!(matches!(bc.code[3], Opcode::Ret));
+    }
+
+    #[test]
+    fn test_peephole_jump_offset_recalculation_next_broadcast() {
+        // Same as above but with NextBroadcastOrJump
+        let mut bc = ByteCode {
+            code: vec![
+                Opcode::LoadConstant { id: 0 },                // 0
+                Opcode::AssignCurr { off: 0 },                 // 1
+                Opcode::LoadVar { off: 1 },                    // 2 (jump target)
+                Opcode::NextBroadcastOrJump { jump_back: -1 }, // 3, target=2
+                Opcode::Ret,                                   // 4
+            ],
+            literals: vec![1.0],
+        };
+        bc.peephole_optimize();
+
+        // 0+1 fuse -> AssignConstCurr at new PC 0
+        // 2 -> new PC 1 (jump target)
+        // 3 -> new PC 2
+        // 4 -> new PC 3
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(bc.code[0], Opcode::AssignConstCurr { .. }));
+        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 1 }));
+        match &bc.code[2] {
+            Opcode::NextBroadcastOrJump { jump_back } => {
+                // new PC 2, target should be new PC 1
+                assert_eq!(*jump_back, -1, "jump_back should be -1");
+            }
+            _ => panic!("expected NextBroadcastOrJump"),
+        }
+        assert!(matches!(bc.code[3], Opcode::Ret));
+    }
+
+    #[test]
+    fn test_peephole_no_fusion_when_patterns_dont_match() {
+        // Op2 followed by something other than AssignCurr/AssignNext
+        let mut bc = ByteCode {
+            code: vec![Opcode::Op2 { op: Op2::Add }, Opcode::Not {}, Opcode::Ret],
+            literals: vec![],
+        };
+        bc.peephole_optimize();
+
+        assert_eq!(bc.code.len(), 3);
+        assert!(matches!(bc.code[0], Opcode::Op2 { op: Op2::Add }));
+        assert!(matches!(bc.code[1], Opcode::Not {}));
+    }
+
+    #[test]
+    fn test_peephole_load_constant_not_followed_by_assign_curr() {
+        // LoadConstant not followed by AssignCurr should not fuse
+        let mut bc = ByteCode {
+            code: vec![Opcode::LoadConstant { id: 0 }, Opcode::Not {}, Opcode::Ret],
+            literals: vec![1.0],
+        };
+        bc.peephole_optimize();
+
+        assert_eq!(bc.code.len(), 3);
+        assert!(matches!(bc.code[0], Opcode::LoadConstant { id: 0 }));
+    }
+
+    #[test]
+    fn test_peephole_via_builder() {
+        // Verify that ByteCodeBuilder::finish() runs peephole_optimize
+        let mut builder = ByteCodeBuilder::default();
+        let lit_id = builder.intern_literal(3.14);
+        builder.push_opcode(Opcode::LoadConstant { id: lit_id });
+        builder.push_opcode(Opcode::AssignCurr { off: 7 });
+        builder.push_opcode(Opcode::Ret);
+
+        let bc = builder.finish();
+        assert_eq!(bc.code.len(), 2);
+        match &bc.code[0] {
+            Opcode::AssignConstCurr { off, literal_id } => {
+                assert_eq!(*off, 7);
+                assert_eq!(*literal_id, lit_id);
+            }
+            _ => panic!("expected AssignConstCurr after builder finish"),
+        }
+        assert!(matches!(bc.code[1], Opcode::Ret));
+    }
+
+    #[test]
+    fn test_peephole_consecutive_fusions_chain() {
+        // Three consecutive fusible pairs
+        let mut bc = ByteCode {
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::AssignCurr { off: 0 },
+                Opcode::LoadConstant { id: 1 },
+                Opcode::AssignCurr { off: 1 },
+                Opcode::Op2 { op: Op2::Div },
+                Opcode::AssignNext { off: 2 },
+            ],
+            literals: vec![1.0, 2.0],
+        };
+        bc.peephole_optimize();
+
+        assert_eq!(bc.code.len(), 3);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::AssignConstCurr {
+                off: 0,
+                literal_id: 0
+            }
+        ));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::AssignConstCurr {
+                off: 1,
+                literal_id: 1
+            }
+        ));
+        match &bc.code[2] {
+            Opcode::BinOpAssignNext { op, off } => {
+                assert!(matches!(op, Op2::Div));
+                assert_eq!(*off, 2);
+            }
+            _ => panic!("expected BinOpAssignNext"),
+        }
+    }
+
+    #[test]
+    fn test_peephole_last_instruction_not_fused_alone() {
+        // If the fusible first instruction is the very last one, no fusion happens
+        let mut bc = ByteCode {
+            code: vec![Opcode::Ret, Opcode::LoadConstant { id: 0 }],
+            literals: vec![1.0],
+        };
+        bc.peephole_optimize();
+
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(bc.code[0], Opcode::Ret));
+        assert!(matches!(bc.code[1], Opcode::LoadConstant { id: 0 }));
+    }
+
+    // =========================================================================
+    // DimList Side Table Tests
+    // =========================================================================
+
+    #[test]
+    fn test_dim_list_add_and_get() {
+        let mut ctx = ByteCodeContext::default();
+
+        let id = ctx.add_dim_list(2, [10, 20, 0, 0]);
+        assert_eq!(id, 0);
+
+        let (n_dims, ids) = ctx.get_dim_list(id);
+        assert_eq!(n_dims, 2);
+        assert_eq!(ids[0], 10);
+        assert_eq!(ids[1], 20);
+    }
+
+    #[test]
+    fn test_dim_list_multiple_entries() {
+        let mut ctx = ByteCodeContext::default();
+
+        let id0 = ctx.add_dim_list(1, [5, 0, 0, 0]);
+        let id1 = ctx.add_dim_list(3, [1, 2, 3, 0]);
+        let id2 = ctx.add_dim_list(4, [10, 20, 30, 40]);
+
+        assert_eq!(id0, 0);
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+
+        let (n, ids) = ctx.get_dim_list(id0);
+        assert_eq!(n, 1);
+        assert_eq!(ids[0], 5);
+
+        let (n, ids) = ctx.get_dim_list(id1);
+        assert_eq!(n, 3);
+        assert_eq!(&ids[..3], &[1, 2, 3]);
+
+        let (n, ids) = ctx.get_dim_list(id2);
+        assert_eq!(n, 4);
+        assert_eq!(ids, &[10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn test_dim_list_zero_dims() {
+        let mut ctx = ByteCodeContext::default();
+
+        let id = ctx.add_dim_list(0, [0, 0, 0, 0]);
+        let (n_dims, _ids) = ctx.get_dim_list(id);
+        assert_eq!(n_dims, 0);
+    }
+
+    #[test]
+    fn test_dim_list_incremental_ids() {
+        let mut ctx = ByteCodeContext::default();
+
+        // Add several entries and verify IDs are sequential
+        for i in 0..10u16 {
+            let id = ctx.add_dim_list(1, [i, 0, 0, 0]);
+            assert_eq!(id, i, "dim list IDs should be assigned sequentially");
+        }
+
+        // Verify all entries are still retrievable
+        for i in 0..10u16 {
+            let (n, ids) = ctx.get_dim_list(i);
+            assert_eq!(n, 1);
+            assert_eq!(ids[0], i);
+        }
     }
 }
 

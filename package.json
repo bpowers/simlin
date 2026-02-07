@@ -12,7 +12,6 @@
   "packageManager": "pnpm@10.6.0",
   "devDependencies": {
     "@playwright/test": "^1.58.1",
-    "npm-run-all": "^4.1.5",
     "prettier": "^3.8.1",
     "ts-protoc-gen": "^0.15.0",
     "typescript": "^5.9.3"
@@ -22,8 +21,8 @@
     "rust-needs-format": "cargo fmt -- --check",
     "js-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|core)/' | xargs prettier --write",
     "rust-format": "cargo fmt",
-    "format": "npm-run-all -p js-format rust-format",
-    "precommit": "npm-run-all -p js-needs-format rust-needs-format lint",
+    "format": "cargo fmt && pnpm js-format",
+    "precommit": "pnpm js-needs-format && pnpm rust-needs-format && pnpm lint",
     "install-git-hooks": "cd .git/hooks && rm -f pre-commit && ln -s ../../scripts/pre-commit ./pre-commit",
     "lint": "pnpm rust-lint && pnpm -r run lint",
     "tsc": "pnpm --filter @simlin/core exec tsc --noEmit && pnpm --filter @simlin/diagram exec tsc --noEmit && pnpm --filter @simlin/server exec tsc --noEmit && pnpm --filter @simlin/app exec tsc --noEmit",

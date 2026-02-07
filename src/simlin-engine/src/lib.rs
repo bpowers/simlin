@@ -2,7 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-#![forbid(unsafe_code)]
+// deny (not forbid) because vm.rs Stack needs a targeted #[allow(unsafe_code)]
+// for unchecked array access in the hot dispatch loop. Rust's forbid() cannot
+// be overridden by inner #[allow] attributes (even in submodules), so deny()
+// is the strongest level that still permits a single opt-in. The unsafe stack
+// access is proven safe by ByteCodeBuilder::finish(), which statically validates
+// that compiled bytecode cannot exceed STACK_CAPACITY.
+#![deny(unsafe_code)]
 
 pub use prost;
 
