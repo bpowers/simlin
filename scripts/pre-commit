@@ -60,66 +60,67 @@ fi
 
 # Check if node_modules exists
 if [ ! -d "node_modules" ]; then
-    echo -e "${YELLOW}Warning: Dependencies not installed. Run 'pnpm install'${NC}"
-    echo -e "${YELLOW}Skipping TypeScript/JavaScript checks...${NC}"
+    echo -e "${RED}node_modules is missing.${NC}"
+    echo -e "${YELLOW}Run './scripts/cloud-init.sh' to install dependencies and configure the environment.${NC}"
+    exit 1
+fi
+
+echo -n "Running TypeScript/JavaScript linting... "
+LINT_OUTPUT="$(mktemp)"
+if pnpm lint > "$LINT_OUTPUT" 2>&1; then
+    echo -e "${GREEN}✓${NC}"
+    rm -f "$LINT_OUTPUT"
 else
-    echo -n "Running TypeScript/JavaScript linting... "
-    LINT_OUTPUT="$(mktemp)"
-    if pnpm lint > "$LINT_OUTPUT" 2>&1; then
-        echo -e "${GREEN}✓${NC}"
-        rm -f "$LINT_OUTPUT"
-    else
-        echo -e "${RED}✗${NC}"
-        echo -e "${RED}Linting failed:${NC}"
-        cat "$LINT_OUTPUT"
-        rm -f "$LINT_OUTPUT"
-        echo -e "${YELLOW}Run 'pnpm lint' to see errors${NC}"
-        exit 1
-    fi
+    echo -e "${RED}✗${NC}"
+    echo -e "${RED}Linting failed:${NC}"
+    cat "$LINT_OUTPUT"
+    rm -f "$LINT_OUTPUT"
+    echo -e "${YELLOW}Run 'pnpm lint' to see errors${NC}"
+    exit 1
+fi
 
-    # Build WASM and TS packages before type-checking, so that
-    # .d.ts files from project references are up to date.
-    echo -n "Building WASM module... "
-    BUILD_OUTPUT="$(mktemp)"
-    if pnpm build > "$BUILD_OUTPUT" 2>&1; then
-        echo -e "${GREEN}✓${NC}"
-        rm -f "$BUILD_OUTPUT"
-    else
-        echo -e "${RED}✗${NC}"
-        echo -e "${RED}WASM build failed:${NC}"
-        cat "$BUILD_OUTPUT"
-        rm -f "$BUILD_OUTPUT"
-        echo -e "${YELLOW}Run 'pnpm build' to see errors${NC}"
-        exit 1
-    fi
+# Build WASM and TS packages before type-checking, so that
+# .d.ts files from project references are up to date.
+echo -n "Building WASM module... "
+BUILD_OUTPUT="$(mktemp)"
+if pnpm build > "$BUILD_OUTPUT" 2>&1; then
+    echo -e "${GREEN}✓${NC}"
+    rm -f "$BUILD_OUTPUT"
+else
+    echo -e "${RED}✗${NC}"
+    echo -e "${RED}WASM build failed:${NC}"
+    cat "$BUILD_OUTPUT"
+    rm -f "$BUILD_OUTPUT"
+    echo -e "${YELLOW}Run 'pnpm build' to see errors${NC}"
+    exit 1
+fi
 
-    echo -n "Checking TypeScript types... "
-    TSC_OUTPUT="$(mktemp)"
-    if pnpm tsc > "$TSC_OUTPUT" 2>&1; then
-        echo -e "${GREEN}✓${NC}"
-        rm -f "$TSC_OUTPUT"
-    else
-        echo -e "${RED}✗${NC}"
-        echo -e "${RED}TypeScript type checking failed:${NC}"
-        cat "$TSC_OUTPUT"
-        rm -f "$TSC_OUTPUT"
-        echo -e "${YELLOW}Run 'pnpm tsc' to see errors${NC}"
-        exit 1
-    fi
+echo -n "Checking TypeScript types... "
+TSC_OUTPUT="$(mktemp)"
+if pnpm tsc > "$TSC_OUTPUT" 2>&1; then
+    echo -e "${GREEN}✓${NC}"
+    rm -f "$TSC_OUTPUT"
+else
+    echo -e "${RED}✗${NC}"
+    echo -e "${RED}TypeScript type checking failed:${NC}"
+    cat "$TSC_OUTPUT"
+    rm -f "$TSC_OUTPUT"
+    echo -e "${YELLOW}Run 'pnpm tsc' to see errors${NC}"
+    exit 1
+fi
 
-    echo -n "Running TypeScript tests... "
-    TS_TEST_OUTPUT="$(mktemp)"
-    if pnpm test > "$TS_TEST_OUTPUT" 2>&1; then
-        echo -e "${GREEN}✓${NC}"
-        rm -f "$TS_TEST_OUTPUT"
-    else
-        echo -e "${RED}✗${NC}"
-        echo -e "${RED}TypeScript tests failed:${NC}"
-        cat "$TS_TEST_OUTPUT"
-        rm -f "$TS_TEST_OUTPUT"
-        echo -e "${YELLOW}Run 'pnpm test' to see failures${NC}"
-        exit 1
-    fi
+echo -n "Running TypeScript tests... "
+TS_TEST_OUTPUT="$(mktemp)"
+if pnpm test > "$TS_TEST_OUTPUT" 2>&1; then
+    echo -e "${GREEN}✓${NC}"
+    rm -f "$TS_TEST_OUTPUT"
+else
+    echo -e "${RED}✗${NC}"
+    echo -e "${RED}TypeScript tests failed:${NC}"
+    cat "$TS_TEST_OUTPUT"
+    rm -f "$TS_TEST_OUTPUT"
+    echo -e "${YELLOW}Run 'pnpm test' to see failures${NC}"
+    exit 1
 fi
 
 # 5. Run pysimlin (Python) bindings tests on Python 3.11+

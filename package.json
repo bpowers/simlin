@@ -34,7 +34,7 @@
     "build:gen-protobufs": "protoc --plugin='protoc-gen-ts=node_modules/.bin/protoc-gen-ts' --js_out='import_style=commonjs_strict,binary:.' --ts_out=. $(find src/server -name '*.proto') && scripts/gen-rust-protobufs.sh && pnpm format",
     "rebuild-stdlib": "./scripts/gen-stdlib.sh",
     "build": "pnpm -r run build",
-    "clean": "pnpm -r run clean",
+    "clean": "pnpm -r run clean && cargo clean",
     "deploy": "export NODE_ENV=production && pnpm clean && pnpm build && pnpm --filter @simlin/app deploy && gcloud app deploy ./.app.prod.yaml && pnpm --filter @simlin/app deploy-clean",
     "start": "node src/server/lib",
     "test": "pnpm --filter @simlin/core test && pnpm --filter @simlin/diagram test && pnpm --filter @simlin/engine test && pnpm --filter @simlin/app test && pnpm --filter @simlin/server test",

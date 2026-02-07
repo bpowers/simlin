@@ -52,7 +52,7 @@ export function getStaticDirectory(env?: string): string {
 export function validateStaticDirectory(dir: string): void {
   if (!fs.existsSync(dir)) {
     throw new StaticConfigError(
-      `Static directory not found: ${dir}. ` + `Ensure the frontend is built (yarn build in src/app) or deployed.`,
+      `Static directory not found: ${dir}. ` + `Ensure the frontend is built (pnpm --filter @simlin/app build) or deployed.`,
     );
   }
 

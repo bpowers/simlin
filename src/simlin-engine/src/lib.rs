@@ -94,7 +94,7 @@ mod protobuf_freshness_tests {
     #[test]
     fn project_io_gen_is_up_to_date() {
         let gen_content = fs::read_to_string(GEN_FILE)
-            .expect("failed to read project_io.gen.rs - run `yarn build:gen-protobufs`");
+            .expect("failed to read project_io.gen.rs - run `pnpm build:gen-protobufs`");
 
         let recorded_hash = extract_hash_from_gen_file(&gen_content)
             .expect("project_io.gen.rs is missing SHA256 hash header");
@@ -107,7 +107,7 @@ mod protobuf_freshness_tests {
         assert_eq!(
             recorded_hash, current_hash,
             "project_io.proto has changed since project_io.gen.rs was generated.\n\
-             Run `yarn build:gen-protobufs` to regenerate the Rust protobuf code."
+             Run `pnpm build:gen-protobufs` to regenerate the Rust protobuf code."
         );
     }
 }

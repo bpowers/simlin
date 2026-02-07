@@ -24,7 +24,7 @@ Rust components are standard cargo projects in a cargo workspace, and TypeScript
 - Equation text is parsed into an AST using a recursive descent parser (`parser/mod.rs`)
 - Simulations are run/evaluated using a bytecode-based virtual machine (`vm.rs`)
 - We have a simple AST-walking `interpreter.rs` serving as a "spec" to verify the VM produces the same/correct results.
-- Contains (`builtins.rs`) "stdlib" of _models_ that implement stateful, standard SD "functions" like TREND and SMOOTH3
+- `builtins.rs` defines builtin equation functions; stateful SD module functions like TREND and SMOOTH3 are model definitions in `stdlib/*.stmx`, generated into `stdlib.gen.rs`
 
 **`src/libsimlin` (Rust)**: Flat "C" FFI to simlin-engine
 - Used from TypeScript, also usable from Go via CGo and from C/C++ through `simlin.h`.
@@ -46,6 +46,9 @@ Rust components are standard cargo projects in a cargo workspace, and TypeScript
 **`src/app` (TypeScript)**: Full featured system dynamics application
 - Browse existing models, create or import new models, login/logout, etc.
 
+**`website` (TypeScript)**: Rspress-based documentation and website package
+- Maintains published docs/site content and build tooling for the public-facing website
+
 **`src/server` (TypeScript)**: Express.js backend API
 - Authentication via Firebase Auth (`authn.ts`)
 - Models persisted in Firestore (`models/db-firestore.ts`) in protobuf form
@@ -61,6 +64,13 @@ Rust components are standard cargo projects in a cargo workspace, and TypeScript
 ### Test Models
 
 The `test/` directory contains an extensive suite of model files (XMILE, Vensim `.mdl`) with expected simulation outputs. These integration tests ensure engine behavior matches known-good results from other software and are critical when working on engine functionality.
+
+### Generated/Noise Paths
+
+When navigating or editing, treat these paths as generated output or transient build/test noise unless the task explicitly targets them:
+- `src/*/lib/**`, `src/*/lib.browser/**`, `src/*/lib.module/**`
+- `src/app/build/**`, `website/build/**`
+- `node_modules/**`, `target/**`, `playwright-report/**`, `test-results/**`
 
 ### Initial Environment Setup
 
@@ -166,6 +176,6 @@ Follow these steps when working on code changes in Rust crates like `src/simlin-
 
 #### Code Style
 - Use TypeScript with strict mode enabled
-- Prefer class components — AVOID hooks like useState
+- Prefer class components by default. Hooks are allowed when wrapping/integrating with components that only support hook-based APIs; in all other cases, prefer classes.
 - Use proper TypeScript types, avoid `any`
 - NEVER manually copy files around to get builds or tests passing. If there is some sort of regression or error where source files are not able to imported or used, identify the root cause and fix the build scripts.
