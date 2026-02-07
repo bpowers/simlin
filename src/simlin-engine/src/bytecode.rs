@@ -1138,9 +1138,17 @@ impl ByteCode {
     pub(crate) fn max_stack_depth(&self) -> usize {
         let mut depth: usize = 0;
         let mut max_depth: usize = 0;
-        for op in &self.code {
+        for (pc, op) in self.code.iter().enumerate() {
             let (pops, pushes) = op.stack_effect();
-            depth = depth.saturating_sub(pops as usize);
+            // Use checked_sub rather than saturating_sub: an underflow here
+            // means stack_effect() metadata is wrong for some opcode, which
+            // would silently invalidate our safety proof. Panicking surfaces
+            // the bug immediately in tests.
+            depth = depth.checked_sub(pops as usize).unwrap_or_else(|| {
+                panic!(
+                    "stack_effect underflow at pc {pc}: {pops} pops but depth is {depth}"
+                )
+            });
             depth += pushes as usize;
             max_depth = max_depth.max(depth);
         }
@@ -1617,6 +1625,18 @@ mod tests {
         builder.push_opcode(Opcode::LoadConstant { id });
         builder.push_opcode(Opcode::AssignCurr { off: 0 });
         let _bc = builder.finish(); // should not panic
+    }
+
+    #[test]
+    #[should_panic(expected = "stack_effect underflow at pc 0")]
+    fn test_max_stack_depth_catches_underflow() {
+        // An Op2 at the start with nothing on the stack should panic,
+        // catching bugs in stack_effect metadata
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![Opcode::Op2 { op: Op2::Add }],
+        };
+        bc.max_stack_depth();
     }
 
     // =========================================================================
