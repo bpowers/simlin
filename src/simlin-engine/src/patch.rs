@@ -15,14 +15,12 @@ use std::collections::HashMap;
 /// A patch to apply to a project. Contains project-level operations
 /// (like changing sim specs or adding models) and per-model patches
 /// (like upserting variables or views).
-#[derive(Clone)]
 pub struct ProjectPatch {
     pub project_ops: Vec<ProjectOperation>,
     pub models: Vec<ModelPatch>,
 }
 
 /// A project-level operation.
-#[derive(Clone)]
 pub enum ProjectOperation {
     SetSimSpecs(datamodel::SimSpecs),
     SetSource(datamodel::Source),
@@ -30,14 +28,12 @@ pub enum ProjectOperation {
 }
 
 /// A patch targeting a specific model within the project.
-#[derive(Clone)]
 pub struct ModelPatch {
     pub name: String,
     pub ops: Vec<ModelOperation>,
 }
 
 /// An operation on a single model.
-#[derive(Clone)]
 pub enum ModelOperation {
     UpsertStock(datamodel::Stock),
     UpsertFlow(datamodel::Flow),
@@ -64,17 +60,17 @@ pub enum ModelOperation {
     },
 }
 
-pub fn apply_patch(project: &mut datamodel::Project, patch: &ProjectPatch) -> Result<()> {
+pub fn apply_patch(project: &mut datamodel::Project, patch: ProjectPatch) -> Result<()> {
     let mut staged = project.clone();
 
     // Apply project-level operations first
-    for project_op in &patch.project_ops {
+    for project_op in patch.project_ops {
         match project_op {
             ProjectOperation::SetSimSpecs(sim_specs) => {
-                staged.sim_specs = sim_specs.clone();
+                staged.sim_specs = sim_specs;
             }
             ProjectOperation::SetSource(source) => {
-                staged.source = Some(source.clone());
+                staged.source = Some(source);
             }
             ProjectOperation::AddModel { name } => {
                 apply_add_model(&mut staged, name)?;
@@ -83,50 +79,46 @@ pub fn apply_patch(project: &mut datamodel::Project, patch: &ProjectPatch) -> Re
     }
 
     // Then apply model-level operations
-    for model_patch in &patch.models {
-        for op in &model_patch.ops {
+    for model_patch in patch.models {
+        for op in model_patch.ops {
             match op {
                 ModelOperation::RenameVariable { from, to } => {
-                    apply_rename_variable(&mut staged, &model_patch.name, from, to)?;
+                    apply_rename_variable(&mut staged, &model_patch.name, &from, &to)?;
                 }
                 _ => {
                     let model = get_model_mut(&mut staged, &model_patch.name)?;
                     match op {
-                        ModelOperation::UpsertStock(stock) => {
-                            let mut stock = stock.clone();
+                        ModelOperation::UpsertStock(mut stock) => {
                             canonicalize_stock(&mut stock);
                             upsert_variable(model, Variable::Stock(stock));
                         }
-                        ModelOperation::UpsertFlow(flow) => {
-                            let mut flow = flow.clone();
+                        ModelOperation::UpsertFlow(mut flow) => {
                             canonicalize_flow(&mut flow);
                             upsert_variable(model, Variable::Flow(flow));
                         }
-                        ModelOperation::UpsertAux(aux) => {
-                            let mut aux = aux.clone();
+                        ModelOperation::UpsertAux(mut aux) => {
                             canonicalize_aux(&mut aux);
                             upsert_variable(model, Variable::Aux(aux));
                         }
-                        ModelOperation::UpsertModule(module) => {
-                            let mut module = module.clone();
+                        ModelOperation::UpsertModule(mut module) => {
                             canonicalize_module(&mut module);
                             upsert_variable(model, Variable::Module(module));
                         }
                         ModelOperation::DeleteVariable { ident } => {
-                            apply_delete_variable(model, ident)?;
+                            apply_delete_variable(model, &ident)?;
                         }
                         ModelOperation::UpsertView { index, view } => {
-                            apply_upsert_view(model, *index, view)?;
+                            apply_upsert_view(model, index, view)?;
                         }
                         ModelOperation::DeleteView { index } => {
-                            apply_delete_view(model, *index)?;
+                            apply_delete_view(model, index)?;
                         }
                         ModelOperation::UpdateStockFlows {
                             ident,
                             inflows,
                             outflows,
                         } => {
-                            apply_update_stock_flows(model, ident, inflows, outflows)?;
+                            apply_update_stock_flows(model, &ident, &inflows, &outflows)?;
                         }
                         ModelOperation::RenameVariable { .. } => unreachable!(),
                     }
@@ -190,10 +182,11 @@ fn get_model_mut<'a>(
     })
 }
 
-fn apply_add_model(project: &mut datamodel::Project, name: &str) -> Result<()> {
-    let canonical_name = canonicalize(name);
-    // Check if a model with this name already exists
-    if project.get_model(canonical_name.as_str()).is_some() {
+fn apply_add_model(project: &mut datamodel::Project, name: String) -> Result<()> {
+    // Check if a model with this name already exists.
+    // Model names are stored and looked up as-is (no canonicalization),
+    // consistent with XMILE/JSON import and the C FFI simlin_project_add_model.
+    if project.get_model(&name).is_some() {
         return Err(Error::new(
             ErrorKind::Model,
             ErrorCode::DuplicateVariable,
@@ -201,7 +194,7 @@ fn apply_add_model(project: &mut datamodel::Project, name: &str) -> Result<()> {
         ));
     }
     project.models.push(datamodel::Model {
-        name: canonical_name.as_str().to_string(),
+        name,
         sim_specs: None,
         variables: vec![],
         views: vec![],
@@ -897,16 +890,16 @@ fn update_stock_flow_references(
 fn apply_upsert_view(
     model: &mut datamodel::Model,
     index: u32,
-    view: &datamodel::View,
+    view: datamodel::View,
 ) -> Result<()> {
     let index = index as usize;
 
     if index < model.views.len() {
-        model.views[index] = view.clone();
+        model.views[index] = view;
         Ok(())
     } else if index == model.views.len() {
         // Allow appending at the end
-        model.views.push(view.clone());
+        model.views.push(view);
         Ok(())
     } else {
         Err(Error::new(
@@ -959,7 +952,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
         let var = model.get_variable("new_aux").unwrap();
         match var {
@@ -994,7 +987,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
         let var = model.get_variable("stock").unwrap();
         match var {
@@ -1024,7 +1017,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
         assert!(model.get_variable("flow").is_none());
         match model.get_variable("stock").unwrap() {
@@ -1053,7 +1046,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
         assert!(model.get_variable("flow").is_none());
         match model.get_variable("new_flow").unwrap() {
@@ -1085,7 +1078,7 @@ mod tests {
             models: vec![],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         assert_eq!(project.sim_specs.start, 5.0);
         assert_eq!(project.sim_specs.dt, datamodel::Dt::Dt(0.5));
         assert!(project.sim_specs.save_step.is_none());
@@ -1116,7 +1109,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
         assert_eq!(model.views.len(), 1);
 
@@ -1128,7 +1121,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &delete_patch).unwrap();
+        apply_patch(&mut project, delete_patch).unwrap();
         let model = project.get_model("main").unwrap();
         assert!(model.views.is_empty());
     }
@@ -1144,7 +1137,7 @@ mod tests {
             models: vec![],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         assert!(project.source.is_some());
         assert_eq!(project.source.as_ref().unwrap().content, "hello");
     }
@@ -1166,7 +1159,7 @@ mod tests {
             }],
         };
 
-        let err = apply_patch(&mut project, &patch).unwrap_err();
+        let err = apply_patch(&mut project, patch).unwrap_err();
         assert_eq!(err.code, ErrorCode::DuplicateVariable);
         assert_eq!(err.kind, ErrorKind::Model);
     }
@@ -1189,7 +1182,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
 
         match model.get_variable("foo").unwrap() {
@@ -1271,7 +1264,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
 
         match model.get_variable("consumer").unwrap() {
@@ -1357,7 +1350,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
 
         match model.get_variable("consumer").unwrap() {
@@ -1399,7 +1392,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
 
         match model.get_variable("consumer").unwrap() {
@@ -1485,7 +1478,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
 
         match model.get_variable("regional_growth").unwrap() {
@@ -1574,7 +1567,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
 
         match model.get_variable("revenue").unwrap() {
@@ -1607,7 +1600,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
 
         match model.get_variable("inventory").unwrap() {
@@ -1663,7 +1656,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
 
         let model = project.get_model("main").unwrap();
         let var = model.get_variable("inventory").unwrap();
@@ -1702,7 +1695,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
 
         let model = project.get_model("main").unwrap();
         match model.get_variable("inventory").unwrap() {
@@ -1745,7 +1738,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
 
         let model = project.get_model("main").unwrap();
         match model.get_variable("population").unwrap() {
@@ -1780,7 +1773,7 @@ mod tests {
             }],
         };
 
-        let err = apply_patch(&mut project, &patch).unwrap_err();
+        let err = apply_patch(&mut project, patch).unwrap_err();
         assert_eq!(err.code, ErrorCode::DoesNotExist);
     }
 
@@ -1816,7 +1809,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
 
         assert_eq!(model.groups.len(), 1);
@@ -1854,7 +1847,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
 
         assert_eq!(model.groups.len(), 1);
@@ -1875,7 +1868,7 @@ mod tests {
             models: vec![],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         assert_eq!(project.models.len(), 2);
         let submodel = project.get_model("submodel").unwrap();
         assert!(submodel.variables.is_empty());
@@ -1893,7 +1886,7 @@ mod tests {
             models: vec![],
         };
 
-        let err = apply_patch(&mut project, &patch).unwrap_err();
+        let err = apply_patch(&mut project, patch).unwrap_err();
         assert_eq!(err.code, ErrorCode::DuplicateVariable);
     }
 
@@ -1941,7 +1934,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
         match model.get_variable("my_module").unwrap() {
             Variable::Module(m) => {
@@ -2001,7 +1994,7 @@ mod tests {
             }],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("main").unwrap();
         match model.get_variable("my_module").unwrap() {
             Variable::Module(m) => {
@@ -2044,7 +2037,7 @@ mod tests {
                 ops: vec![ModelOperation::UpsertModule(initial_module)],
             }],
         };
-        apply_patch(&mut project, &patch1).unwrap();
+        apply_patch(&mut project, patch1).unwrap();
 
         // Now upsert with updated data
         let updated_module = datamodel::Module {
@@ -2065,7 +2058,7 @@ mod tests {
                 ops: vec![ModelOperation::UpsertModule(updated_module)],
             }],
         };
-        apply_patch(&mut project, &patch2).unwrap();
+        apply_patch(&mut project, patch2).unwrap();
 
         let model = project.get_model("main").unwrap();
         match model.get_variable("my_module").unwrap() {
@@ -2109,7 +2102,7 @@ mod tests {
                 ops: vec![ModelOperation::UpsertModule(module)],
             }],
         };
-        apply_patch(&mut project, &add_patch).unwrap();
+        apply_patch(&mut project, add_patch).unwrap();
         assert!(
             project
                 .get_model("main")
@@ -2127,7 +2120,7 @@ mod tests {
                 }],
             }],
         };
-        apply_patch(&mut project, &delete_patch).unwrap();
+        apply_patch(&mut project, delete_patch).unwrap();
         assert!(
             project
                 .get_model("main")
@@ -2186,7 +2179,7 @@ mod tests {
             ],
         };
 
-        apply_patch(&mut project, &patch).unwrap();
+        apply_patch(&mut project, patch).unwrap();
 
         // Verify submodel was created with variable
         let submodel = project.get_model("new_submodel").unwrap();
@@ -2250,7 +2243,7 @@ mod tests {
                 ops: vec![ModelOperation::UpsertModule(module)],
             }],
         };
-        apply_patch(&mut project, &add_module_patch).unwrap();
+        apply_patch(&mut project, add_module_patch).unwrap();
 
         // Now rename old_name to new_name
         let rename_patch = ProjectPatch {
@@ -2263,7 +2256,7 @@ mod tests {
                 }],
             }],
         };
-        apply_patch(&mut project, &rename_patch).unwrap();
+        apply_patch(&mut project, rename_patch).unwrap();
 
         let model = project.get_model("main").unwrap();
         let module = model
@@ -2310,7 +2303,7 @@ mod tests {
             ],
         };
 
-        let result = apply_patch(&mut project, &patch);
+        let result = apply_patch(&mut project, patch);
         assert!(result.is_err());
 
         // Project should be unchanged (rollback)
@@ -2320,5 +2313,53 @@ mod tests {
             "y should not have been added on error"
         );
         assert!(model.get_variable("x").is_some(), "x should still exist");
+    }
+
+    #[test]
+    fn add_model_preserves_display_name() {
+        let mut project = TestProject::new("test").build_datamodel();
+
+        let patch = ProjectPatch {
+            project_ops: vec![ProjectOperation::AddModel {
+                name: "Customer Growth".to_string(),
+            }],
+            models: vec![],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+        assert_eq!(project.models.len(), 2);
+        // The model should be stored with its display name, not canonicalized
+        assert_eq!(project.models[1].name, "Customer Growth");
+        // And we should be able to find it by its display name
+        assert!(project.get_model("Customer Growth").is_some());
+    }
+
+    #[test]
+    fn add_model_and_operate_on_it_in_same_patch_with_display_name() {
+        let mut project = TestProject::new("test").build_datamodel();
+
+        let patch = ProjectPatch {
+            project_ops: vec![ProjectOperation::AddModel {
+                name: "Customer Growth".to_string(),
+            }],
+            models: vec![ModelPatch {
+                name: "Customer Growth".to_string(),
+                ops: vec![ModelOperation::UpsertAux(datamodel::Aux {
+                    ident: "growth_rate".to_string(),
+                    equation: Equation::Scalar("0.05".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                })],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+        let model = project.get_model("Customer Growth").unwrap();
+        assert!(model.get_variable("growth_rate").is_some());
     }
 }

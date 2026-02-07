@@ -3120,7 +3120,7 @@ unsafe fn apply_project_patch_internal(
         project_locked.datamodel.clone()
     };
 
-    if let Err(err) = engine::apply_patch(&mut staged_datamodel, &patch) {
+    if let Err(err) = engine::apply_patch(&mut staged_datamodel, patch) {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::from(err.code))
@@ -3384,7 +3384,13 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
         }
     };
 
-    let patch = convert_json_project_patch(json_patch);
+    let patch = match convert_json_project_patch(json_patch) {
+        Ok(patch) => patch,
+        Err(err) => {
+            store_ffi_error(out_error, err);
+            return;
+        }
+    };
 
     let project_ref = match require_project(project) {
         Ok(p) => p,
@@ -3472,43 +3478,48 @@ enum JsonModelOperation {
     },
 }
 
-fn convert_json_project_patch(patch: JsonProjectPatch) -> engine::ProjectPatch {
-    let project_ops = patch
-        .project_ops
-        .into_iter()
-        .map(convert_json_project_operation)
-        .collect();
+fn convert_json_project_patch(
+    patch: JsonProjectPatch,
+) -> std::result::Result<engine::ProjectPatch, FfiError> {
+    let mut project_ops = Vec::with_capacity(patch.project_ops.len());
+    for op in patch.project_ops {
+        project_ops.push(convert_json_project_operation(op)?);
+    }
 
-    let models = patch
-        .models
-        .into_iter()
-        .map(|model| engine::ModelPatch {
+    let mut models = Vec::with_capacity(patch.models.len());
+    for model in patch.models {
+        let mut ops = Vec::with_capacity(model.ops.len());
+        for op in model.ops {
+            ops.push(convert_json_model_operation(op)?);
+        }
+        models.push(engine::ModelPatch {
             name: model.name,
-            ops: model
-                .ops
-                .into_iter()
-                .map(convert_json_model_operation)
-                .collect(),
-        })
-        .collect();
+            ops,
+        });
+    }
 
-    engine::ProjectPatch {
+    Ok(engine::ProjectPatch {
         project_ops,
         models,
-    }
+    })
 }
 
-fn convert_json_project_operation(op: JsonProjectOperation) -> engine::ProjectOperation {
-    match op {
+fn convert_json_project_operation(
+    op: JsonProjectOperation,
+) -> std::result::Result<engine::ProjectOperation, FfiError> {
+    let result = match op {
         JsonProjectOperation::SetSimSpecs { sim_specs } => {
             engine::ProjectOperation::SetSimSpecs(sim_specs.into())
         }
         JsonProjectOperation::AddModel { name } => engine::ProjectOperation::AddModel { name },
-    }
+    };
+    Ok(result)
 }
 
-fn convert_json_model_operation(op: JsonModelOperation) -> engine::ModelOperation {
-    match op {
+fn convert_json_model_operation(
+    op: JsonModelOperation,
+) -> std::result::Result<engine::ModelOperation, FfiError> {
+    let result = match op {
         JsonModelOperation::UpsertAux { aux } => engine::ModelOperation::UpsertAux(aux.into()),
         JsonModelOperation::UpsertStock { stock } => {
             engine::ModelOperation::UpsertStock(stock.into())
@@ -3537,7 +3548,8 @@ fn convert_json_model_operation(op: JsonModelOperation) -> engine::ModelOperatio
             inflows,
             outflows,
         },
-    }
+    };
+    Ok(result)
 }
 
 // Builder for error details used to populate SimlinError instances
