@@ -1,96 +1,61 @@
-# CLAUDE.md
-
-This file provides guidance to AI agents when working with code in this repository.
+# Agent Guidance
 
 ## Overview
 
-Simlin is a system dynamics modeling tool.
+Simlin is a system dynamics (SD) modeling tool.
 It can be used to build and simulate system dynamics models, including models created in other software like Vensim (from Ventana Systems) and Stella (from isee systems).
 There is a model save file/interchange format called XMILE, and the XMILE specification is in `doc/xmile-v1.0.html`.
 It covers general concepts like how simulation works and how arrays and subscripting notation work as well as details of the XML structure and equation syntax.
 It is a crucial resource to consult when adding functionality to the simulation engine.
 
-The simulation engine for simulating system dynamics stock and flow models is written in Rust, and the interactive model editor (and other components like the web server and model creation/browsing) are written in TypeScript.
+The engine for simulating system dynamics stock and flow models is written in Rust, and the interactive model editor targets evergreen browsers and is written in TypeScript.
+Additional components like the server and higher-level app functionality are written in TypeScript as well.
 
-You should think of this as a monorepo without external users that depend on it – do NOT worry about breaking changes or backwards compatibility, especially if you see a way to simplify or generalize something.
+This as a monorepo without external users -- breaking changes and API changes are OK as long as tests + the pre-commit hook passes with only 1 exception: changes to protobuf files must follow standard best practices, as those as we have a DB with serialized protobuf instances in it.
 
 ## Architecture Overview
 
 ### Core Components
 
-**simlin-engine (Rust)**: The simulation engine that compiles, edits, and executes system dynamics models
-- Entry point: `src/simlin-engine/src/lib.rs`
-- Equation text is parsed into an AST using a recursive descent parser (`src/simlin-engine/src/parser/mod.rs`)
-- Projects consisting of models are compiled to a simple bytecode format (`compiler.rs`).  Today, there are NO places where the bytecode is serialized to disk, so no need for backwards compatibility of improvements here.
-- Executes simulations using a bytecode-based virtual machine (`vm.rs`)
-- There is also a AST-walking interpreter -- it is used as a "spec"/simple implementation to verify we get the exact same behavior from the more complicated bytecode VM.
-- Supports unit checking and dimensional analysis
-- Contains built-in functions library (`builtins.rs`) of _models_ that implement stateful "functions" like TREND and SMOOTH3
+Rust components are standard cargo projects in a cargo workspace, and TypeScript projects are in a pnpm workspace.
 
-**engine (Rust → WASM)**: WebAssembly bindings for the simulation engine
-- Wraps simlin-engine for JavaScript consumption
-- Built to `src/engine/core/` as WASM modules
+**`src/simlin-engine` (Rust)**: Compiles, type + unit checks, and simulates system dynamics models
+- Projects consist of 1 or more models, and are type-checked and compiled to a simple bytecode format (`compiler.rs`)
+- Equation text is parsed into an AST using a recursive descent parser (`parser/mod.rs`)
+- Simulations are run/evaluated using a bytecode-based virtual machine (`vm.rs`)
+- We have a a simple AST-walking `interpreter.rs` serving as a "spec" to verify the VM produces the same/correct results.
+- Contains (`builtins.rs`) "stdlib" of _models_ that implement stateful, standard SD "functions" like TREND and SMOOTH3
 
-**libsimlin (Rust → C FFI)**: C FFI interface for the simulation engine
-- Wraps simlin-engine and simlin-compat for consumption from C or Go
+**`src/libsimlin` (Rust)**: Flat "C" FFI to simlin-engine
+- Used from TypeScript, also usable from Go via CGo and from C/C++ through `simlin.h`.
 
-**core (TypeScript)**: Shared data models and common utilities
-- Defines protobuf-based data model (`datamodel.ts`)
-- Canonical variable name handling (`canonicalize.ts`)
+**`src/engine` (TypeScript)**: TypeScript API for interacting with WASM libsimlin
+- Provides clear, idiomatic TypeScript interface to the simulation engine
+- Internally deals with memory management and safely invoking WASM functions
+- Promise-based API; in browser WASM is instantiated in a Web Worker to avoid jank
+
+**`src/core` (TypeScript)**: Shared data models and common utilities
+- Defines protobuf-based `datamodel.ts`, `canonicalize.ts` variable name handling, etc
 - Used by both frontend and backend
 
-**diagram (TypeScript)**: React components for model visualization and editing
-- Main editor: `Editor.tsx`
+**`src/diagram` (TypeScript)**: React components for model visualization and editing
+- designed as a general purpose SD model editor component and toolkit, without dependencies on the Simlin app or server API
+- `Editor.tsx` is the model editor, handling user interaction, state, and tool selection
+- `Canvas.tsx` handles overall visual layout
 - Drawing components in `drawing/` subdirectory
-- Handles user interactions for model construction
 
-**app (TypeScript)**: React frontend application
-- Main components: `App.tsx`, `Home.tsx`, `Project.ts`
-- Builds both regular app and web component versions
-- Uses webpack for bundling
+**`src/app` (TypeScript)**: Full featured system dynamics application
+- Browse existing models, create or import new models, login/logout, etc.
 
-**server (TypeScript)**: Express.js backend API
+**`src/server` (TypeScript)**: Express.js backend API
 - Authentication via Firebase Auth (`authn.ts`)
-- Firestore database integration (`models/db-firestore.ts`)
-- Model rendering and export services (`render.ts`)
+- Models persisted in Firestore (`models/db-firestore.ts`) in protobuf form
 
-### Data Flow
+**`src/xmutil` (C++ and Rust)**: Rust package wrapping Bob Eberlein's xmutil C++ tool to convert Vensim models to XMILE format, including diagrams
+- Only used for testing -- `src/simlin-engine/src/mdl` now fully implements this functionality in Rust
 
-1. **Model Import**: XMILE/Vensim files processed by `importer` (Rust → WASM)
-2. **Model Storage**: Protobuf format in Firestore via `core` data models  
-3. **Simulation**: Engine compiles model equations and executes simulation
-4. **Visualization**: Frontend renders results using `diagram` components
+**`src/simlin-cli` (Rust)**: CLI for simulating and converting models, mostly for testing/debugging
 
-### Key File Locations
-
-- Protobuf schemas: `src/simlin-engine/src/project_io.proto`, `src/server/schemas/*.proto`
-- Standard library models: `stdlib/*.stmx` → compiled to `src/simlin-engine/src/stdlib/*.pb`
-- Test models: `test/` directory with various model formats
-- Build scripts: Individual `build.sh` files in Rust WASM crates
-
-### Workspace Structure
-
-There are two logical workspaces in this one repo.
-
-First is the Rust workspace with these packages:
-- `src/simlin-engine` - Core simulation engine
-- `src/simlin-compat` - Helpers to convert between our internal project representation and XMILE + Vensim formats, and open various types of result data formats (like CSVs).
-- `src/libsimlin` - C-compatible FFI interface to simlin-engine for language-agnostic access via WebAssembly
-- `src/simlin-cli` - a command line tool for simulating system dynamics models, mostly for testing/debugging.
-- `src/xmutil` - Rust wrapper around Bob Eberlein's tool to convert Vensim models to XMILE format, including diagrams.
-
-This is a pnpm workspace with these packages:
-- `@simlin/core` - Shared TypeScript utilities
-- `@simlin/diagram` - React diagram components
-- `@simlin/app` - Frontend application
-- `@simlin/server` - Backend API server
-- `@simlin/engine` - WASM simulation engine
-
-### Prerequisites for Development
-
-- Google Cloud CLI with Firestore emulator
-- Node.js and pnpm
-- Rust toolchain (specified in `rust-toolchain.toml`)
 
 ### Initial Environment Setup
 
@@ -102,26 +67,22 @@ For Claude Code on the web, Codex Web, or any fresh checkout, run the initializa
 
 **Important**: This script should be run any time the development environment is initialized or re-initialized (e.g., when a new container session starts, after a fresh clone, or when resuming work in a cloud environment). Running this script ensures the environment is properly configured so that you and other agents can be successful and productive.
 
-This script:
-- Installs git pre-commit hooks
-- Verifies required tools are available
-- Installs pnpm dependencies if needed
-- Configures AI tools (Claude CLI or Codex) for pre-commit checks
-
 ### Pre-commit Hooks
 
 The pre-commit hook (`scripts/pre-commit`) runs automatically before each commit and performs:
-1. Rust formatting check (`cargo fmt --check`)
-2. Rust linting (`cargo clippy`)
-3. Rust tests (`cargo test`)
-4. TypeScript/JavaScript linting (`pnpm lint`)
-5. TypeScript type checking (`pnpm tsc`)
-6. Python bindings tests (requires Python 3.11+)
-7. AI-powered test quality verification (checks for incomplete/stubbed tests)
+1. Rust formatting check
+2. Rust linting
+3. Rust tests
+4. TypeScript/JavaScript linting
+5. TypeScript type checking
+6. Python bindings tests
+7. Test quality verification
 
 If any check fails, the commit is rejected. Fix the issues and try again.
 
 **Important**: Never use `--no-verify` to skip hooks. The hooks exist to maintain code quality.
+
+IMPORTANT: lean on the pre-commit hook - if you are getting ready to commit, just run `git commit ...` and fix reported problems rather than running/re-running tests yourself to try to get a successful commit on the first try.
 
 ## Development Commands
 
@@ -129,25 +90,13 @@ If any check fails, the commit is rejected. Fix the issues and try again.
 - `pnpm build` - Build the web application and System Dynamics model editor, including compiling the simulation engine to WebAssembly.
 - `pnpm clean` - Clean all build artifacts
 - `cargo build` - Build Rust components
-- `cargo fmt` - Format Rust code
 - `pnpm format` - Format both JavaScript/TypeScript and Rust code
 
-### Development Server
-Start these commands in 3 separate terminals:
-```bash
-pnpm start:firestore  # Start local Firestore emulator (port 8092)
-pnpm start:backend    # Start backend server (port 3030)
-pnpm start:frontend   # Start frontend dev server (port 3000)
-```
-
 ### Linting and Type Checking
-- `pnpm lint` - Run linters for all workspaces (includes `cargo clippy`)
-- `cargo clippy` - Run Rust clippy linter only
-- `pnpm precommit` - Run format checks and linting (used by git hooks)
+- `pnpm lint` and `cargo clippy`
 
 ### Testing
-- `cargo test` - Run Rust tests: the simulation engine is in Rust.
-- most of the TypeScript code is related to an interactive web editor and doesn't have tests at this time.
+- `cargo test` and `pnpm test`
 
 ### Protobuf Generation
 - `pnpm build:gen-protobufs` - Regenerate protobuf bindings (TypeScript from server schemas, Rust from simlin-engine schema)
@@ -170,6 +119,13 @@ pnpm start:frontend   # Start frontend dev server (port 3000)
 
 It is CRITICAL that you NEVER use the `--no-verify` flag with `git commit`.
 
+IMPORTANT: It is MUCH better to have simple, general, testable and maintainable code than to avoid changing an interface or abstraction.  Take the time to do it right.
+There are NO places where the VM bytecode is serialized to disk, the ONLY place where there is a need for compatabilty is around protobufs, where we should follow standard protobuf versioning and change standards.
+
+**CRITICAL**: ALL work should follow test-driven development and target 95+% code coverage for all new code, both in Rust and TypeScript.  This should be straightforward for Rust code, for TypeScript it often means following the functional core, imperative shell pattern to ensure as much of the logic and functionality is in easily testable pure functions.  Parts of the Editor and TypeScript components didn't follow this practice historically: when planning new work, if necessary take your time, think deeply and where necessary have initial phase(s) of the plan refactor the code to be more modular and testable, with tests validating the current behavior (remember: TDD).
+
+IMPORTANT: If you get feedback on code that you don't think is actionable, it at a minimum indicates you are missing comments providing appropriate context for why the code looks that way or does what it does.
+
 When working on this codebase, follow this systematic approach:
 
 ### 0. Problem-Solving Philosophy
@@ -178,11 +134,8 @@ When working on this codebase, follow this systematic approach:
 - **Prioritize the right approach over the first approach**: Research the proper way to implement features rather than implementing workarounds. For example, check if an API provides token usage directly before implementing token counting. If you are not sure, explore several approaches and then choose the most promising one (or ask the user for their input if one isn't clearly best).
 - **Keep implementations simple and maintainable**: Start with the simplest solution that meets requirements. Only add complexity when the simple approach demonstrably fails.
 - **No special casing in tests**: Tests should hold all implementations to the same standard. Never add conditional logic in tests that allows certain implementations to skip requirements.
-- **Complete all aspects of a task**: When fixing bugs or implementing features, ensure the fix works for all code paths, not just the primary one. Continue making progress until all aspects of the user's task are done, including newly discovered but necessary work and rework along the way.
-- **Test-driven development**: When working on a task or todo-list item, start by writing a unit test with the expected behavior — it will initially fail. Use that to help guide your implementation, which should eventually get the unit test passing after some iteration.
-- **Commit with descriptive messages** strictly following the commit message style from above when you complete a unit of work, like a task or major TODO list item.
 - **No compatability shims or fallback paths**: Remember there are no external users of this codebase, and at this point we have a comprehensive test suite.  Fully complete migrations.
-- **Test Driven Development (TDD)**: Follow TDD best practices, ensure tests actually assert the behavior we're expecting AND have high code coverage.
+- **Test-driven Development (TDD)**: Follow TDD best practices, ensure tests actually assert the behavior we're expecting AND have high code coverage.
 
 ### 1. Understanding Requirements
 - Read relevant code and documentation (including for libraries) and build a plan based on the user's task.
@@ -190,28 +143,17 @@ When working on this codebase, follow this systematic approach:
 - Start by adding tests to validate assumptions before making changes.
 - Remember: we want to build the simplest interfaces and abstractions possible while FULLY addressing the task and requirements in full generality.
 
-### 2. Multi-Step Task Execution
-For complex tasks with multiple components:
-1. **Break down into discrete tasks** and track with a todo list
-2. **Complete each task fully** including tests and formatting before moving to the next
-3. **Commit each logical change separately** with clear commit messages
-4. **Boldly refactor** when needed - there's no legacy code to preserve
-5. **Address the root cause** if you find that a problem is due to a bad abstraction or deficiency in the current code, stop and create a plan to directly address it. Do not work around it by skipping tests or leaving part of the user's task unaddressed.
-
 ## Development Guide
 
 ### Rust Development Standards
 
 Follow these steps when working on code changes in Rust crates like `src/simlin-engine`:
 
-- To run specific tests use the form `RUST_BACKTRACE=1 cargo test -p $crate_name $test_name`. This command form is allowlisted, deviating from this is strongly discouraged and will slow progress.
-   - DO NOT write one-off rust files and compile them with `rustc` to test hypotheses and assumptions. Instead, write new unit tests as close to the source of the problem as possible. These unit tests are valuable additions to the test suite and should be left at the end of the task so that the user can review your assumptions.
-- **Strongly** prefer `.unwrap()` over `.unwrap_or_default()` (or one of the other ways to provide a value when unwrap fails). During this phase of development, it is valuable to understand when our assumptions are wrong, and using a default/0/1 fixed value hides that.
+- DO NOT write one-off rust files and compile them with `rustc` to test hypotheses and assumptions. Instead, write new unit tests as close to the source of the problem as possible. These unit tests are valuable additions to the test suite and should be left at the end of the task so that the user can review your assumptions.
+- **Strongly** prefer idiomatic use of `Result`/`Option` rather than `.unwrap()` or `.unwrap_or_default()`.  `unwrap_or_default` should generally be avoided as it masks unexpected conditions. It is EXTREMELY valuable to understand when our assumptions are wrong, and using a default/0/1 fixed value hides that.
 - If a case (for example in a match arm) is expected to be unreachable, use the `unreachable!()` macro not a code comment.
 - Code should never have comments like "this is a placeholder". If you have stubbed something out, that should be documented in code via the use of the `todo!()` or `unimplemented!()` macros. But generally this means your current task is not complete! Continue working until you have a general-purpose, maintainable solution that can be confidently deployed to a production environment.
-- Similarly, tests should err on the side of brittleness. For example, if you are missing a required test file, loudly fail the test rather than skipping the test.
-- Run `cargo fmt` one last time.
-- Commit your changes following the above commit message style guidance.
+- Similarly, tests should err on the side of brittleness: if you are missing a required test file, loudly fail rather than skipping the test.
 
 ### TypeScript/React Development Standards
 
@@ -219,34 +161,4 @@ Follow these steps when working on code changes in Rust crates like `src/simlin-
 - Use TypeScript with strict mode enabled
 - Prefer class components — AVOID hooks like useState
 - Use proper TypeScript types, avoid `any`
-- Run `pnpm lint` before committing
-- Run `pnpm tsc` to check types
-- Especially when working on the TypeScript side of the project, do NOT manually copy files around to get builds or tests passing. If there is some sort of regression or error where source files are not able to imported or used, ultrathink to understand why and fix the build scripts.
-
-## Testing Strategy
-
-- Rust: Unit tests in `src/*/tests/` and integration tests in `test/` directory.
-- TypeScript: Workspace-level linting and type checking
-- Models: Extensive test suite in `test/` with expected outputs. This is very important and ensures the engine behavior matches known-good results from other software.
-
-## General Guidelines
-
-* NEVER create files unless they're absolutely necessary for achieving your goal.
-* ALWAYS prefer editing an existing file to creating a new one.
-* NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
-
-## Common Pitfalls to Avoid
-
-### Rust Development
-- If you find yourself using `unwrap()` you _probably_ actually want a function to return a `Result` or `Option`.
-- Always handle error cases explicitly with proper error types
-- Be careful with floating point comparisons in tests
-
-### TypeScript Development
-- The development server auto-reloads, but the production build does not (you can build it with `pnpm build`)
-- Ensure proper typing for all components and functions
-
-### System Integration
-- The Firestore emulator must be running for backend functionality
-- WASM modules need to be rebuilt when Rust code changes
-- Protobuf schemas must be regenerated when `.proto` files change
+- NEVER manually copy files around to get builds or tests passing. If there is some sort of regression or error where source files are not able to imported or used, identify the root cause and fix the build scripts.
