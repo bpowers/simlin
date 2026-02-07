@@ -110,10 +110,15 @@ IMPORTANT: lean on the pre-commit hook - if you are getting ready to commit, jus
 - `pnpm format` - Format both JavaScript/TypeScript and Rust code
 
 ### Linting and Type Checking
-- `pnpm lint` and `cargo clippy`
+- `pnpm lint` - Lint both Rust (`cargo clippy`) and TypeScript/JavaScript
 
 ### Testing
 - `cargo test` and `pnpm test`
+
+### Code Coverage
+- `cargo llvm-cov` - Rust code coverage via LLVM source-based instrumentation (install: `cargo install cargo-llvm-cov`)
+- `cargo llvm-cov --html` - Generate an HTML coverage report in `target/llvm-cov/html/`
+- Works on both macOS and Linux; uses `rustc -C instrument-coverage` under the hood
 
 ### Protobuf Generation
 - `pnpm build:gen-protobufs` - Regenerate protobuf bindings (TypeScript from server schemas, Rust from simlin-engine schema)
