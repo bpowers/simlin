@@ -190,7 +190,8 @@ pub struct Vm {
     // Temp array storage (allocated once, reused across evals)
     // Indexed by temp_offsets from ByteCodeContext
     temp_storage: Vec<f64>,
-    // Reusable stacks for eval_bytecode (allocated once, cleared before each top-level call)
+    // Reusable stacks (allocated once, cleared before each top-level call)
+    stack: Stack,
     view_stack: Vec<RuntimeView>,
     iter_stack: Vec<IterState>,
     broadcast_stack: Vec<BroadcastState>,
@@ -203,6 +204,7 @@ pub struct Vm {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 struct Stack {
     stack: Vec<f64>,
 }
@@ -336,6 +338,7 @@ impl Vm {
             did_initials: false,
             step_accum: 0,
             temp_storage,
+            stack: Stack::new(),
             view_stack: Vec::with_capacity(4),
             iter_stack: Vec::with_capacity(2),
             broadcast_stack: Vec::with_capacity(1),
@@ -361,7 +364,7 @@ impl Vm {
 
         let save_every = std::cmp::max(1, (save_step / dt + 0.5).floor() as usize);
 
-        let mut stack = Stack::new();
+        self.stack.stack.clear();
         let module_inputs: &[f64] = &[0.0; 0];
         let mut data = None;
         std::mem::swap(&mut data, &mut self.data);
@@ -388,7 +391,7 @@ impl Vm {
                 module_inputs,
                 curr,
                 next,
-                &mut stack,
+                &mut self.stack,
                 &mut self.view_stack,
                 &mut self.iter_stack,
                 &mut self.broadcast_stack,
@@ -401,7 +404,7 @@ impl Vm {
                 module_inputs,
                 curr,
                 next,
-                &mut stack,
+                &mut self.stack,
                 &mut self.view_stack,
                 &mut self.iter_stack,
                 &mut self.broadcast_stack,
@@ -484,6 +487,7 @@ impl Vm {
         self.did_initials = false;
         self.step_accum = 0;
         self.temp_storage.fill(0.0);
+        self.stack.stack.clear();
         self.view_stack.clear();
         self.iter_stack.clear();
         self.broadcast_stack.clear();
@@ -548,7 +552,7 @@ impl Vm {
         let spec_stop = self.specs.stop;
         let dt = self.specs.dt;
 
-        let mut stack = Stack::new();
+        self.stack.stack.clear();
         let module_inputs: &[f64] = &[0.0; 0];
         let mut data = None;
         std::mem::swap(&mut data, &mut self.data);
@@ -572,7 +576,7 @@ impl Vm {
             module_inputs,
             curr,
             next,
-            &mut stack,
+            &mut self.stack,
             &self.overrides,
             &mut self.view_stack,
             &mut self.iter_stack,
