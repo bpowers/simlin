@@ -7,12 +7,14 @@
 //! These tests verify that `open_vensim_xmutil()` (MDL -> xmutil -> XMILE -> datamodel) produces
 //! equivalent results to `open_vensim()` (MDL -> datamodel directly).
 //!
-//! ## Known Feature Gaps in Native Parser
+//! ## Scope Notes
 //!
-//! The following features are not yet implemented in the native MDL parser:
-//! - TODO: View/diagram parsing (Model.views)
-//! - TODO: Loop metadata extraction (Model.loop_metadata)
-//! - TODO: Model-level sim_specs (currently only project-level is extracted)
+//! - View/diagram parsing is implemented in the native parser and validated in
+//!   `assert_model_equivalent`.
+//! - `Model.loop_metadata` is intentionally ignored in equivalence checks because
+//!   the xmutil -> XMILE -> datamodel path currently does not preserve loop metadata.
+//! - For Vensim MDL inputs, both paths currently use project-level `sim_specs`.
+//!   Model-level `sim_specs` are not populated by xmutil-generated XMILE.
 
 #![cfg(feature = "xmutil")]
 
@@ -203,7 +205,8 @@ fn summarize_view_elements(views: &[View]) -> String {
 }
 
 /// Normalize views for comparison.
-/// TODO: Full view comparison once all differences are understood.
+/// Views are compared structurally in `assert_model_equivalent`; this helper is
+/// only for debug summaries during test execution.
 fn normalize_views(views: &mut [View]) {
     if !views.is_empty() {
         eprintln!("  {}", summarize_view_elements(views));
@@ -215,8 +218,8 @@ fn normalize_model(model: &mut Model) {
     // Normalize views for comparison
     normalize_views(&mut model.views);
 
-    // TODO: Loop metadata is diagram-related; native parser doesn't extract it yet.
-    // When implemented, compare loop_metadata instead of clearing.
+    // Loop metadata is intentionally excluded from xmutil equivalence checks:
+    // the xmutil -> XMILE conversion path does not carry it through.
     model.loop_metadata.clear();
 
     // Normalize each variable
@@ -562,6 +565,11 @@ fn assert_model_equivalent(xm: &Model, nm: &Model, path: &str) {
         "{path}: model name differs: '{}' vs '{}'",
         xm.name, nm.name
     );
+    assert_eq!(
+        xm.sim_specs, nm.sim_specs,
+        "{path}: model '{}' sim_specs differ\n  xmutil: {:?}\n  native: {:?}",
+        xm.name, xm.sim_specs, nm.sim_specs
+    );
 
     // Compare variable counts with helpful diff output
     if xm.variables.len() != nm.variables.len() {
@@ -830,6 +838,8 @@ fn collect_model_diffs(diffs: &mut Vec<Diff>, xmutil: &Project, native: &Project
 }
 
 fn collect_single_model_diffs(diffs: &mut Vec<Diff>, xm: &Model, nm: &Model, path: &str) {
+    diff_field(diffs, path, "sim_specs", &xm.sim_specs, &nm.sim_specs);
+
     let x_by_ident: HashMap<&str, &Variable> =
         xm.variables.iter().map(|v| (v.get_ident(), v)).collect();
     let n_by_ident: HashMap<&str, &Variable> =
