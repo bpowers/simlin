@@ -404,9 +404,7 @@ impl Vm {
 
         self.stack.clear();
         let module_inputs: &[f64] = &[0.0; 0];
-        let mut data = None;
-        std::mem::swap(&mut data, &mut self.data);
-        let mut data = data.unwrap();
+        let mut data = self.data.take().unwrap();
 
         let module_flows = &self.sliced_sim.flow_modules[&self.root];
         let module_stocks = &self.sliced_sim.stock_modules[&self.root];
@@ -447,10 +445,9 @@ impl Vm {
                 curr,
                 next,
             );
+            // Only TIME changes per step; DT, INITIAL_TIME, FINAL_TIME are
+            // invariant and already set in every chunk slot during initials.
             next[TIME_OFF] = curr[TIME_OFF] + dt;
-            next[DT_OFF] = curr[DT_OFF];
-            next[INITIAL_TIME_OFF] = curr[INITIAL_TIME_OFF];
-            next[FINAL_TIME_OFF] = curr[FINAL_TIME_OFF];
 
             self.step_accum += 1;
             let is_initial_timestep = (self.curr_chunk == 0) && (curr[TIME_OFF] == spec_start);
@@ -485,11 +482,8 @@ impl Vm {
 
     pub fn set_value_now(&mut self, off: usize, val: f64) {
         let start = self.curr_chunk * self.n_slots;
-        let mut data = None;
-        std::mem::swap(&mut data, &mut self.data);
-        let mut data = data.unwrap();
+        let data = self.data.as_mut().unwrap();
         data[start + off] = val;
-        self.data = Some(data);
     }
 
     pub fn get_value_now(&self, off: usize) -> f64 {
@@ -517,9 +511,6 @@ impl Vm {
     /// Reset the VM to its pre-simulation state, reusing the data buffer allocation.
     /// Overrides are preserved across reset.
     pub fn reset(&mut self) {
-        if let Some(ref mut data) = self.data {
-            data.fill(0.0);
-        }
         self.curr_chunk = 0;
         self.next_chunk = 1;
         self.did_initials = false;
@@ -592,9 +583,7 @@ impl Vm {
 
         self.stack.clear();
         let module_inputs: &[f64] = &[0.0; 0];
-        let mut data = None;
-        std::mem::swap(&mut data, &mut self.data);
-        let mut data = data.unwrap();
+        let mut data = self.data.take().unwrap();
 
         let (curr, next) = borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
         curr[TIME_OFF] = spec_start;
@@ -624,6 +613,18 @@ impl Vm {
             next,
             &self.overrides,
         );
+
+        // Pre-fill DT, INITIAL_TIME, and FINAL_TIME across all chunk slots so
+        // run_to only needs to advance TIME per step.
+        let n_slots = self.n_slots;
+        let total_chunks = self.n_chunks + 2;
+        for chunk in 0..total_chunks {
+            let base = chunk * n_slots;
+            data[base + DT_OFF] = dt;
+            data[base + INITIAL_TIME_OFF] = spec_start;
+            data[base + FINAL_TIME_OFF] = spec_stop;
+        }
+
         self.did_initials = true;
         self.step_accum = 0;
 
@@ -750,6 +751,7 @@ impl Vm {
         );
     }
 
+    #[inline(always)]
     fn eval(
         sliced_sim: &CompiledSlicedSimulation,
         state: &mut EvalState<'_>,
