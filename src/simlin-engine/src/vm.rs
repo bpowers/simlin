@@ -203,25 +203,53 @@ pub struct Vm {
     initial_offsets: HashSet<usize>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+const STACK_CAPACITY: usize = 64;
+
 #[derive(Clone)]
 struct Stack {
-    stack: Vec<f64>,
+    data: [f64; STACK_CAPACITY],
+    top: usize,
 }
 
+#[cfg(feature = "debug-derive")]
+impl std::fmt::Debug for Stack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stack")
+            .field("top", &self.top)
+            .field("data", &&self.data[..self.top])
+            .finish()
+    }
+}
+
+#[allow(unsafe_code)]
 impl Stack {
     fn new() -> Self {
         Stack {
-            stack: Vec::with_capacity(32),
+            data: [0.0; STACK_CAPACITY],
+            top: 0,
         }
     }
     #[inline(always)]
     fn push(&mut self, value: f64) {
-        self.stack.push(value)
+        debug_assert!(self.top < STACK_CAPACITY, "stack overflow");
+        unsafe {
+            *self.data.get_unchecked_mut(self.top) = value;
+        }
+        self.top += 1;
     }
     #[inline(always)]
     fn pop(&mut self) -> f64 {
-        self.stack.pop().unwrap()
+        debug_assert!(self.top > 0, "stack underflow");
+        self.top -= 1;
+        unsafe { *self.data.get_unchecked(self.top) }
+    }
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.top
+    }
+    #[inline(always)]
+    fn clear(&mut self) {
+        self.top = 0;
     }
 }
 
@@ -364,7 +392,7 @@ impl Vm {
 
         let save_every = std::cmp::max(1, (save_step / dt + 0.5).floor() as usize);
 
-        self.stack.stack.clear();
+        self.stack.clear();
         let module_inputs: &[f64] = &[0.0; 0];
         let mut data = None;
         std::mem::swap(&mut data, &mut self.data);
@@ -487,7 +515,7 @@ impl Vm {
         self.did_initials = false;
         self.step_accum = 0;
         self.temp_storage.fill(0.0);
-        self.stack.stack.clear();
+        self.stack.clear();
         self.view_stack.clear();
         self.iter_stack.clear();
         self.broadcast_stack.clear();
@@ -552,7 +580,7 @@ impl Vm {
         let spec_stop = self.specs.stop;
         let dt = self.specs.dt;
 
-        self.stack.stack.clear();
+        self.stack.clear();
         let module_inputs: &[f64] = &[0.0; 0];
         let mut data = None;
         std::mem::swap(&mut data, &mut self.data);
@@ -921,11 +949,11 @@ impl Vm {
                 }
                 Opcode::AssignCurr { off } => {
                     curr[module_off + *off as usize] = stack.pop();
-                    assert_eq!(0, stack.stack.len());
+                    debug_assert_eq!(0, stack.len());
                 }
                 Opcode::AssignNext { off } => {
                     next[module_off + *off as usize] = stack.pop();
-                    assert_eq!(0, stack.stack.len());
+                    debug_assert_eq!(0, stack.len());
                 }
                 Opcode::Apply { func } => {
                     let time = curr[TIME_OFF];
