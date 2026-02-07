@@ -77,21 +77,8 @@ else
         exit 1
     fi
 
-    echo -n "Checking TypeScript types... "
-    TSC_OUTPUT="$(mktemp)"
-    if pnpm tsc > "$TSC_OUTPUT" 2>&1; then
-        echo -e "${GREEN}✓${NC}"
-        rm -f "$TSC_OUTPUT"
-    else
-        echo -e "${RED}✗${NC}"
-        echo -e "${RED}TypeScript type checking failed:${NC}"
-        cat "$TSC_OUTPUT"
-        rm -f "$TSC_OUTPUT"
-        echo -e "${YELLOW}Run 'pnpm tsc' to see errors${NC}"
-        exit 1
-    fi
-
-    # Build WASM and run engine tests
+    # Build WASM and TS packages before type-checking, so that
+    # .d.ts files from project references are up to date.
     echo -n "Building WASM module... "
     BUILD_OUTPUT="$(mktemp)"
     if pnpm build > "$BUILD_OUTPUT" 2>&1; then
@@ -103,6 +90,20 @@ else
         cat "$BUILD_OUTPUT"
         rm -f "$BUILD_OUTPUT"
         echo -e "${YELLOW}Run 'pnpm build' to see errors${NC}"
+        exit 1
+    fi
+
+    echo -n "Checking TypeScript types... "
+    TSC_OUTPUT="$(mktemp)"
+    if pnpm tsc > "$TSC_OUTPUT" 2>&1; then
+        echo -e "${GREEN}✓${NC}"
+        rm -f "$TSC_OUTPUT"
+    else
+        echo -e "${RED}✗${NC}"
+        echo -e "${RED}TypeScript type checking failed:${NC}"
+        cat "$TSC_OUTPUT"
+        rm -f "$TSC_OUTPUT"
+        echo -e "${YELLOW}Run 'pnpm tsc' to see errors${NC}"
         exit 1
     fi
 

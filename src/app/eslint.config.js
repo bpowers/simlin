@@ -4,7 +4,6 @@ module.exports = createConfig({
   react: true,
   project: './tsconfig.browser.json',
   ignorePatterns: [
-    'src/importer/',
     'src/engine-v2/',
     'src/system-dynamics-engine/',
     'src/schemas/',

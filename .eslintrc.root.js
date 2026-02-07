@@ -34,7 +34,6 @@ module.exports = {
     }
   },
   "ignorePatterns": [
-    "src/importer/",
     "src/engine-v2/",
     "src/system-dynamics-engine/",
     "src/schemas/",
