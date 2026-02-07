@@ -530,7 +530,7 @@ pub(crate) enum Op2 {
 /// - Array iteration (BeginIter, LoadIterElement, etc.)
 /// - Array reductions (ArraySum, ArrayMax, etc.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 #[allow(dead_code)] // Array opcodes not yet emitted by compiler
 pub(crate) enum Opcode {
     // === ARITHMETIC & LOGIC ===
@@ -808,6 +808,30 @@ pub(crate) enum Opcode {
     EndBroadcastIter {},
 }
 
+impl Opcode {
+    /// Returns the jump offset if this opcode is a backward jump instruction.
+    /// Centralizes jump handling so new jump opcodes can't be silently missed
+    /// by the peephole optimizer or other passes.
+    fn jump_offset(&self) -> Option<PcOffset> {
+        match self {
+            Opcode::NextIterOrJump { jump_back } | Opcode::NextBroadcastOrJump { jump_back } => {
+                Some(*jump_back)
+            }
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the jump offset, if this opcode is a backward jump.
+    fn jump_offset_mut(&mut self) -> Option<&mut PcOffset> {
+        match self {
+            Opcode::NextIterOrJump { jump_back } | Opcode::NextBroadcastOrJump { jump_back } => {
+                Some(jump_back)
+            }
+            _ => None,
+        }
+    }
+}
+
 // ============================================================================
 // Module and Array Declarations
 // ============================================================================
@@ -1040,20 +1064,11 @@ impl ByteCode {
         // 1. Build set of PCs that are jump targets
         let mut jump_targets = vec![false; self.code.len()];
         for (pc, op) in self.code.iter().enumerate() {
-            match op {
-                Opcode::NextIterOrJump { jump_back } => {
-                    let target = (pc as isize + *jump_back as isize) as usize;
-                    if target < jump_targets.len() {
-                        jump_targets[target] = true;
-                    }
+            if let Some(offset) = op.jump_offset() {
+                let target = (pc as isize + offset as isize) as usize;
+                if target < jump_targets.len() {
+                    jump_targets[target] = true;
                 }
-                Opcode::NextBroadcastOrJump { jump_back } => {
-                    let target = (pc as isize + *jump_back as isize) as usize;
-                    if target < jump_targets.len() {
-                        jump_targets[target] = true;
-                    }
-                }
-                _ => {}
             }
         }
 
@@ -1100,7 +1115,7 @@ impl ByteCode {
             }
 
             // No pattern matched - copy opcode as-is
-            optimized.push(self.code[i].clone());
+            optimized.push(self.code[i]);
             i += 1;
         }
         // Sentinel for instructions past the end
@@ -1109,22 +1124,14 @@ impl ByteCode {
         // 3. Fix up jump offsets.  Iterate original code to find jumps,
         // then use pc_map (indexed by old_pc) for O(1) translation.
         for (old_pc, op) in self.code.iter().enumerate() {
-            let jump_back = match op {
-                Opcode::NextIterOrJump { jump_back }
-                | Opcode::NextBroadcastOrJump { jump_back } => *jump_back,
-                _ => continue,
+            let Some(jump_back) = op.jump_offset() else {
+                continue;
             };
             let new_pc = pc_map[old_pc];
             let old_target = (old_pc as isize + jump_back as isize) as usize;
             let new_target = pc_map[old_target];
             let new_jump_back = (new_target as isize - new_pc as isize) as PcOffset;
-            match &mut optimized[new_pc] {
-                Opcode::NextIterOrJump { jump_back }
-                | Opcode::NextBroadcastOrJump { jump_back } => {
-                    *jump_back = new_jump_back;
-                }
-                _ => unreachable!(),
-            }
+            *optimized[new_pc].jump_offset_mut().unwrap() = new_jump_back;
         }
 
         self.code = optimized;
@@ -1157,6 +1164,28 @@ mod tests {
 
         let bytecode = bytecode.finish();
         assert_eq!(2, bytecode.literals.len());
+    }
+
+    #[test]
+    fn test_jump_offset_returns_offset_for_jump_opcodes() {
+        let iter_jump = Opcode::NextIterOrJump { jump_back: -5 };
+        assert_eq!(iter_jump.jump_offset(), Some(-5));
+
+        let broadcast_jump = Opcode::NextBroadcastOrJump { jump_back: -3 };
+        assert_eq!(broadcast_jump.jump_offset(), Some(-3));
+
+        assert_eq!(Opcode::Ret.jump_offset(), None);
+        assert_eq!((Opcode::Op2 { op: Op2::Add }).jump_offset(), None);
+        assert_eq!((Opcode::LoadVar { off: 0 }).jump_offset(), None);
+    }
+
+    #[test]
+    fn test_jump_offset_mut_modifies_jump() {
+        let mut op = Opcode::NextIterOrJump { jump_back: -5 };
+        if let Some(offset) = op.jump_offset_mut() {
+            *offset = -2;
+        }
+        assert_eq!(op.jump_offset(), Some(-2));
     }
 
     #[test]
