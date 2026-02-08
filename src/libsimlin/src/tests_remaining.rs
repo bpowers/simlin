@@ -4358,7 +4358,7 @@ fn test_libsimlin_set_value_survives_run_to_end() {
     unsafe {
         let (proj, model, sim) = create_test_sim(&dm);
 
-        // Set override
+        // Set value for birth_rate
         let c_name = CString::new("birth_rate").unwrap();
         let mut err: *mut SimlinError = ptr::null_mut();
         simlin_sim_set_value(sim, c_name.as_ptr(), 0.2, &mut err as *mut *mut SimlinError);
@@ -4398,20 +4398,20 @@ fn test_libsimlin_set_value_when_vm_is_none() {
         // Consume the VM
         run_to_end(sim);
 
-        // Set override while VM is None
+        // Set value while VM is None
         let c_name = CString::new("birth_rate").unwrap();
         let mut err: *mut SimlinError = ptr::null_mut();
         simlin_sim_set_value(sim, c_name.as_ptr(), 0.3, &mut err as *mut *mut SimlinError);
         assert!(err.is_null(), "set_value with no VM should succeed");
 
-        // Reset creates a new VM with the override applied
+        // Reset creates a new VM with the value applied
         reset_sim(sim);
         run_to_end(sim);
 
-        // Verify the override took effect by comparing against default
+        // Verify the set value took effect by comparing against default
         let series_overridden = get_series_vec(sim, "population", 200);
 
-        // Reset with no override to get baseline
+        // Reset with no value set to get baseline
         err = ptr::null_mut();
         simlin_sim_clear_values(sim, &mut err as *mut *mut SimlinError);
         assert!(err.is_null());
