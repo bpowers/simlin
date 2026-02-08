@@ -4461,13 +4461,11 @@ mod vm_reset_run_to_and_constants_tests {
         assert_eq!(series.len(), 5, "5 saved points at dt=0.25 from 0 to 1");
         let mut expected = 100.0;
         assert!((series[0] - expected).abs() < 1e-10);
-        for step in 1..5 {
+        for (step, &actual) in series.iter().enumerate().skip(1) {
             expected *= 0.975;
             assert!(
-                (series[step] - expected).abs() < 1e-10,
-                "step {step}: actual={}, expected={}",
-                series[step],
-                expected
+                (actual - expected).abs() < 1e-10,
+                "step {step}: actual={actual}, expected={expected}",
             );
         }
     }
