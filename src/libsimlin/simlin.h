@@ -452,7 +452,9 @@ void simlin_sim_get_value(SimlinSim *sim,
 
 // Sets a persistent value for a simple constant variable by name.
 //
-// The value is applied during initials evaluation (evaluate-then-patch).
+// The value is applied inline during bytecode execution (both initials
+// and flows phases) and is also written to the data buffer immediately
+// so that `simlin_sim_get_value` reflects the change right away.
 // Values persist across `simlin_sim_reset`. Call `simlin_sim_clear_values`
 // to remove them.
 //

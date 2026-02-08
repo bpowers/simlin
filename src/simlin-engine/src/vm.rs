@@ -593,6 +593,8 @@ impl Vm {
             );
         }
         self.overrides.insert(off, value);
+        // Eagerly write so get_value() reflects the change immediately;
+        // the overrides map ensures it persists across bytecode re-execution and resets.
         self.set_value_now(off, value);
         Ok(())
     }
@@ -612,6 +614,8 @@ impl Vm {
             );
         }
         self.overrides.insert(off, value);
+        // Eagerly write so get_value() reflects the change immediately;
+        // the overrides map ensures it persists across bytecode re-execution and resets.
         self.set_value_now(off, value);
         Ok(())
     }
