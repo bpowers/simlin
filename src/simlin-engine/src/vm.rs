@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use float_cmp::approx_eq;
@@ -110,6 +110,29 @@ fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
     }
 }
 
+/// Identifies a literal in a specific bytecode object that must be mutated
+/// when a constant's value is overridden via `set_value`.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
+enum BytecodeLocation {
+    /// A literal in a flows or stocks module's shared bytecode.
+    FlowOrStock {
+        module_key: ModuleKey,
+        part: StepPart,
+        /// The variable offset field from the AssignConstCurr opcode.
+        var_off: u16,
+        literal_id: u16,
+    },
+    /// A literal in a specific CompiledInitial's bytecode.
+    Initial {
+        module_key: ModuleKey,
+        initial_index: usize,
+        /// The variable offset field from the AssignConstCurr opcode.
+        var_off: u16,
+        literal_id: u16,
+    },
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct CompiledSimulation {
@@ -117,7 +140,7 @@ pub struct CompiledSimulation {
     pub(crate) specs: Specs,
     pub(crate) root: ModuleKey,
     pub(crate) offsets: HashMap<Ident<Canonical>, usize>,
-    cached_constant_offsets: HashSet<usize>,
+    cached_constant_info: HashMap<usize, Vec<BytecodeLocation>>,
 }
 
 impl CompiledSimulation {
@@ -127,13 +150,13 @@ impl CompiledSimulation {
         root: ModuleKey,
         offsets: HashMap<Ident<Canonical>, usize>,
     ) -> Self {
-        let cached_constant_offsets = collect_constant_offsets(&modules, &root, 0);
+        let cached_constant_info = collect_constant_info(&modules, &root, 0);
         CompiledSimulation {
             modules,
             specs,
             root,
             offsets,
-            cached_constant_offsets,
+            cached_constant_info,
         }
     }
 
@@ -145,8 +168,8 @@ impl CompiledSimulation {
         self.modules[&self.root].n_slots
     }
 
-    pub fn constant_offsets(&self) -> &HashSet<usize> {
-        &self.cached_constant_offsets
+    pub fn is_constant_offset(&self, off: usize) -> bool {
+        self.cached_constant_info.contains_key(&off)
     }
 }
 
@@ -212,12 +235,12 @@ pub struct Vm {
     view_stack: Vec<RuntimeView>,
     iter_stack: Vec<IterState>,
     broadcast_stack: Vec<BroadcastState>,
-    // Override values for simple constants: offset -> value.
-    // Checked during bytecode execution of AssignConstCurr opcodes.
-    overrides: HashMap<usize, f64>,
-    // All absolute data-buffer offsets for simple constants (AssignConstCurr)
-    // precomputed from the module tree for fast set_value validation.
-    constant_offsets: HashSet<usize>,
+    // Maps absolute offset -> all bytecode locations containing that constant's literal.
+    // Used by set_value to find and mutate the right literals, and for validation.
+    constant_info: HashMap<usize, Vec<BytecodeLocation>>,
+    // Tracks original literal values before override, keyed by absolute offset.
+    // Each entry stores the locations and their original values so clear_values can restore them.
+    original_literals: HashMap<usize, Vec<(BytecodeLocation, f64)>>,
 }
 
 #[derive(Clone)]
@@ -316,29 +339,92 @@ impl CompiledModuleSlice {
     }
 }
 
-/// Recursively collect all absolute offsets for simple constants (AssignConstCurr opcodes)
-/// from the flows bytecode across a module and its submodules.
-/// Only flows-phase constants (e.g. `rate = 0.1`) are included -- stock initial
-/// values are excluded because they are only meaningful during the initials phase
-/// and stocks are integrated from flows during simulation.
-fn collect_constant_offsets(
+/// Recursively collect all bytecode locations for simple constants (AssignConstCurr opcodes)
+/// that appear in a module's flows bytecode and its submodules.
+///
+/// Only offsets with AssignConstCurr in the flows phase are considered overridable
+/// (stocks with constant initials are not overridable). For each such offset,
+/// ALL bytecode locations across flows, stocks, and initials are collected so
+/// that a single `set_value` call mutates every literal that feeds that offset.
+fn collect_constant_info(
     modules: &HashMap<ModuleKey, CompiledModule>,
     module_key: &ModuleKey,
     base_off: usize,
-) -> HashSet<usize> {
-    let mut result = HashSet::new();
+) -> HashMap<usize, Vec<BytecodeLocation>> {
+    let mut result: HashMap<usize, Vec<BytecodeLocation>> = HashMap::new();
     let module = &modules[module_key];
 
+    // First pass: identify which absolute offsets are overridable (flows only).
+    let mut flow_offsets: HashMap<usize, Vec<BytecodeLocation>> = HashMap::new();
     for op in module.compiled_flows.code.iter() {
-        if let Opcode::AssignConstCurr { off, .. } = op {
-            result.insert(base_off + *off as usize);
+        if let Opcode::AssignConstCurr { off, literal_id } = op {
+            let abs_off = base_off + *off as usize;
+            flow_offsets
+                .entry(abs_off)
+                .or_default()
+                .push(BytecodeLocation::FlowOrStock {
+                    module_key: module_key.clone(),
+                    part: StepPart::Flows,
+                    var_off: *off,
+                    literal_id: *literal_id,
+                });
         }
     }
 
+    // Second pass: for each overridable offset, also collect locations in stocks and initials.
+    let mut all_locations: HashMap<usize, Vec<BytecodeLocation>> = HashMap::new();
+
+    for op in module.compiled_stocks.code.iter() {
+        if let Opcode::AssignConstCurr { off, literal_id } = op {
+            let abs_off = base_off + *off as usize;
+            if flow_offsets.contains_key(&abs_off) {
+                all_locations
+                    .entry(abs_off)
+                    .or_default()
+                    .push(BytecodeLocation::FlowOrStock {
+                        module_key: module_key.clone(),
+                        part: StepPart::Stocks,
+                        var_off: *off,
+                        literal_id: *literal_id,
+                    });
+            }
+        }
+    }
+
+    for (idx, initial) in module.compiled_initials.iter().enumerate() {
+        for op in initial.bytecode.code.iter() {
+            if let Opcode::AssignConstCurr { off, literal_id } = op {
+                let abs_off = base_off + *off as usize;
+                if flow_offsets.contains_key(&abs_off) {
+                    all_locations
+                        .entry(abs_off)
+                        .or_default()
+                        .push(BytecodeLocation::Initial {
+                            module_key: module_key.clone(),
+                            initial_index: idx,
+                            var_off: *off,
+                            literal_id: *literal_id,
+                        });
+                }
+            }
+        }
+    }
+
+    // Merge: flows first, then stocks/initials for each offset.
+    for (abs_off, mut flow_locs) in flow_offsets {
+        if let Some(extra) = all_locations.remove(&abs_off) {
+            flow_locs.extend(extra);
+        }
+        result.entry(abs_off).or_default().extend(flow_locs);
+    }
+
+    // Recurse into submodules.
     for module_decl in &module.context.modules {
         let child_key = make_module_key(&module_decl.model_name, &module_decl.input_set);
         let child_base = base_off + module_decl.off;
-        result.extend(collect_constant_offsets(modules, &child_key, child_base));
+        for (abs_off, locations) in collect_constant_info(modules, &child_key, child_base) {
+            result.entry(abs_off).or_default().extend(locations);
+        }
     }
 
     result
@@ -412,8 +498,8 @@ impl Vm {
             view_stack: Vec::with_capacity(4),
             iter_stack: Vec::with_capacity(2),
             broadcast_stack: Vec::with_capacity(1),
-            overrides: HashMap::new(),
-            constant_offsets: sim.cached_constant_offsets,
+            constant_info: sim.cached_constant_info,
+            original_literals: HashMap::new(),
         })
     }
 
@@ -467,7 +553,6 @@ impl Vm {
                 module_inputs,
                 curr,
                 next,
-                &self.overrides,
             );
             Self::eval(
                 &self.sliced_sim,
@@ -477,7 +562,6 @@ impl Vm {
                 module_inputs,
                 curr,
                 next,
-                &self.overrides,
             );
             // Only TIME changes per step; DT, INITIAL_TIME, FINAL_TIME are
             // invariant and already set in every chunk slot during initials.
@@ -546,9 +630,139 @@ impl Vm {
     }
 
     /// Returns whether a given absolute data-buffer offset corresponds to a
-    /// simple constant (AssignConstCurr opcode), O(1) lookup against precomputed set.
+    /// simple constant (AssignConstCurr opcode), O(1) lookup against precomputed map.
     fn is_constant(&self, off: usize) -> bool {
-        self.constant_offsets.contains(&off)
+        self.constant_info.contains_key(&off)
+    }
+
+    /// Write a value to the literal at a bytecode location, using Arc::make_mut
+    /// for copy-on-write semantics on shared bytecode.
+    fn write_literal(&mut self, loc: &BytecodeLocation, value: f64) {
+        match loc {
+            BytecodeLocation::FlowOrStock {
+                module_key,
+                part,
+                literal_id,
+                ..
+            } => {
+                let module = match part {
+                    StepPart::Flows => self
+                        .sliced_sim
+                        .flow_modules
+                        .get_mut(module_key)
+                        .expect("module key must exist"),
+                    StepPart::Stocks => self
+                        .sliced_sim
+                        .stock_modules
+                        .get_mut(module_key)
+                        .expect("module key must exist"),
+                    StepPart::Initials => unreachable!(),
+                };
+                Arc::make_mut(&mut module.bytecode).literals[*literal_id as usize] = value;
+            }
+            BytecodeLocation::Initial {
+                module_key,
+                initial_index,
+                literal_id,
+                ..
+            } => {
+                let initials_module = self
+                    .sliced_sim
+                    .initial_modules
+                    .get_mut(module_key)
+                    .expect("module key must exist");
+                let initials = Arc::make_mut(&mut initials_module.initials);
+                initials[*initial_index].bytecode.literals[*literal_id as usize] = value;
+            }
+        }
+    }
+
+    /// Give the AssignConstCurr opcode at `loc` its own private literal slot,
+    /// so that mutating the literal doesn't affect other opcodes that shared
+    /// the same interned literal_id.  Returns the updated BytecodeLocation
+    /// with the new literal_id, plus the original literal value.
+    fn de_intern_literal(&mut self, loc: &BytecodeLocation) -> (BytecodeLocation, f64) {
+        match loc {
+            BytecodeLocation::FlowOrStock {
+                module_key,
+                part,
+                var_off,
+                literal_id,
+            } => {
+                let module = match part {
+                    StepPart::Flows => self
+                        .sliced_sim
+                        .flow_modules
+                        .get_mut(module_key)
+                        .expect("module key must exist"),
+                    StepPart::Stocks => self
+                        .sliced_sim
+                        .stock_modules
+                        .get_mut(module_key)
+                        .expect("module key must exist"),
+                    StepPart::Initials => unreachable!(),
+                };
+                let bc = Arc::make_mut(&mut module.bytecode);
+                let original = bc.literals[*literal_id as usize];
+                let new_id = bc.literals.len() as u16;
+                bc.literals.push(original);
+                for op in bc.code.iter_mut() {
+                    if let Opcode::AssignConstCurr {
+                        off,
+                        literal_id: lid,
+                    } = op
+                        && *off == *var_off
+                        && *lid == *literal_id
+                    {
+                        *lid = new_id;
+                        break;
+                    }
+                }
+                let new_loc = BytecodeLocation::FlowOrStock {
+                    module_key: module_key.clone(),
+                    part: *part,
+                    var_off: *var_off,
+                    literal_id: new_id,
+                };
+                (new_loc, original)
+            }
+            BytecodeLocation::Initial {
+                module_key,
+                initial_index,
+                var_off,
+                literal_id,
+            } => {
+                let initials_module = self
+                    .sliced_sim
+                    .initial_modules
+                    .get_mut(module_key)
+                    .expect("module key must exist");
+                let initials = Arc::make_mut(&mut initials_module.initials);
+                let bc = &mut initials[*initial_index].bytecode;
+                let original = bc.literals[*literal_id as usize];
+                let new_id = bc.literals.len() as u16;
+                bc.literals.push(original);
+                for op in bc.code.iter_mut() {
+                    if let Opcode::AssignConstCurr {
+                        off,
+                        literal_id: lid,
+                    } = op
+                        && *off == *var_off
+                        && *lid == *literal_id
+                    {
+                        *lid = new_id;
+                        break;
+                    }
+                }
+                let new_loc = BytecodeLocation::Initial {
+                    module_key: module_key.clone(),
+                    initial_index: *initial_index,
+                    var_off: *var_off,
+                    literal_id: new_id,
+                };
+                (new_loc, original)
+            }
+        }
     }
 
     /// Reset the VM to its pre-simulation state, reusing the data buffer allocation.
@@ -571,8 +785,36 @@ impl Vm {
         self.broadcast_stack.clear();
     }
 
+    /// Apply an override for a constant at the given absolute offset.
+    /// On first override, de-interns the literal (gives it a private slot)
+    /// so that other opcodes sharing the same interned literal_id are not affected.
+    fn apply_override(&mut self, off: usize, value: f64) {
+        if !self.original_literals.contains_key(&off) {
+            // First override for this offset: de-intern each literal to get
+            // a private slot, and snapshot the original values for clear_values.
+            let locations = self.constant_info[&off].clone();
+            let mut new_locations = Vec::with_capacity(locations.len());
+            let mut originals = Vec::with_capacity(locations.len());
+            for loc in &locations {
+                let (new_loc, original) = self.de_intern_literal(loc);
+                originals.push((new_loc.clone(), original));
+                new_locations.push(new_loc);
+            }
+            self.original_literals.insert(off, originals);
+            // Update constant_info so subsequent overrides use the new literal_ids.
+            self.constant_info.insert(off, new_locations);
+        }
+        // Mutate the now-private literal slots.
+        let locations = self.constant_info[&off].clone();
+        for loc in &locations {
+            self.write_literal(loc, value);
+        }
+        // Eagerly write to the data buffer so get_value_now() reflects the change.
+        self.set_value_now(off, value);
+    }
+
     /// Set a value override for a simple constant by canonical variable name.
-    /// The override is applied inline during AssignConstCurr bytecode execution.
+    /// Mutates the bytecode literals directly so AssignConstCurr needs no branching.
     pub fn set_value(&mut self, ident: &Ident<Canonical>, value: f64) -> Result<()> {
         let off = match self.offsets.get(ident) {
             Some(&off) => off,
@@ -592,10 +834,7 @@ impl Vm {
                 )
             );
         }
-        self.overrides.insert(off, value);
-        // Eagerly write so get_value() reflects the change immediately;
-        // the overrides map ensures it persists across bytecode re-execution and resets.
-        self.set_value_now(off, value);
+        self.apply_override(off, value);
         Ok(())
     }
 
@@ -613,16 +852,18 @@ impl Vm {
                 format!("cannot set value of offset {}: not a simple constant", off)
             );
         }
-        self.overrides.insert(off, value);
-        // Eagerly write so get_value() reflects the change immediately;
-        // the overrides map ensures it persists across bytecode re-execution and resets.
-        self.set_value_now(off, value);
+        self.apply_override(off, value);
         Ok(())
     }
 
-    /// Remove all value overrides.
+    /// Remove all value overrides, restoring original compiled literal values.
     pub fn clear_values(&mut self) {
-        self.overrides.clear();
+        let drained: Vec<_> = self.original_literals.drain().collect();
+        for (_off, originals) in drained {
+            for (loc, original_value) in originals {
+                self.write_literal(&loc, original_value);
+            }
+        }
     }
 
     /// Run only the initials phase (idempotent: no-op if already done).
@@ -666,7 +907,6 @@ impl Vm {
             module_inputs,
             curr,
             next,
-            &self.overrides,
         );
 
         // Pre-fill DT, INITIAL_TIME, and FINAL_TIME across all chunk slots so
@@ -724,7 +964,6 @@ impl Vm {
         curr: &mut [f64],
         next: &mut [f64],
         id: ModuleId,
-        overrides: &HashMap<usize, f64>,
     ) {
         let new_module_decl = &parent_context.modules[id as usize];
         let module_key = make_module_key(&new_module_decl.model_name, &new_module_decl.input_set);
@@ -738,12 +977,10 @@ impl Vm {
             module_inputs,
             curr,
             next,
-            overrides,
         );
     }
 
     /// Run all per-variable initials for a module (in dependency order).
-    /// Overrides for simple constants are applied inline during bytecode execution.
     #[allow(clippy::too_many_arguments)]
     fn eval_initials(
         sliced_sim: &CompiledSlicedSimulation,
@@ -753,7 +990,6 @@ impl Vm {
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        overrides: &HashMap<usize, f64>,
     ) {
         let module_initials = &sliced_sim.initial_modules[module_key];
         let context = &module_initials.context;
@@ -768,7 +1004,6 @@ impl Vm {
                 module_inputs,
                 curr,
                 next,
-                overrides,
             );
         }
     }
@@ -783,7 +1018,6 @@ impl Vm {
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        overrides: &HashMap<usize, f64>,
     ) {
         Self::eval_bytecode(
             sliced_sim,
@@ -795,7 +1029,6 @@ impl Vm {
             module_inputs,
             curr,
             next,
-            overrides,
         );
     }
 
@@ -810,7 +1043,6 @@ impl Vm {
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
-        overrides: &HashMap<usize, f64>,
     ) {
         // Destructure EvalState into local reborrows so the opcode loop can use
         // them directly.  For recursive EvalModule calls we must re-pack into a
@@ -913,7 +1145,6 @@ impl Vm {
                                 curr,
                                 next,
                                 *id,
-                                overrides,
                             );
                         }
                         StepPart::Flows | StepPart::Stocks => {
@@ -936,7 +1167,6 @@ impl Vm {
                                 &module_inputs,
                                 curr,
                                 next,
-                                overrides,
                             );
                         }
                     }
@@ -964,14 +1194,7 @@ impl Vm {
                 }
                 // === SUPERINSTRUCTIONS ===
                 Opcode::AssignConstCurr { off, literal_id } => {
-                    let abs_off = module_off + *off as usize;
-                    let compiled_val = bytecode.literals[*literal_id as usize];
-                    // Skip the HashMap lookup when no overrides are set (the common case).
-                    curr[abs_off] = if !overrides.is_empty() {
-                        overrides.get(&abs_off).copied().unwrap_or(compiled_val)
-                    } else {
-                        compiled_val
-                    };
+                    curr[module_off + *off as usize] = bytecode.literals[*literal_id as usize];
                     debug_assert_eq!(0, stack.len());
                 }
                 Opcode::BinOpAssignCurr { op, off } => {
@@ -3057,6 +3280,117 @@ mod set_value_tests {
                 val
             );
         }
+    }
+
+    #[test]
+    fn test_override_does_not_corrupt_shared_literal() {
+        // Two constants with the same numeric value share an interned literal_id.
+        // Overriding one must NOT affect the other.
+        let tp = TestProject::new("shared_literal")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("rate_a", "0.1", None)
+            .aux("rate_b", "0.1", None)
+            .aux("total_rate", "rate_a + rate_b", None)
+            .flow("inflow", "stock_val * total_rate", None)
+            .stock("stock_val", "100", &["inflow"], &[], None);
+
+        let sim = tp.build_sim().unwrap();
+        let compiled = sim.compile().unwrap();
+        let mut vm = Vm::new(compiled).unwrap();
+
+        // Override rate_a only, then run the full simulation
+        vm.set_value(&canonicalize("rate_a"), 0.5).unwrap();
+        vm.run_to_end().unwrap();
+
+        let rate_a_series = vm.get_series(&canonicalize("rate_a")).unwrap();
+        let rate_b_series = vm.get_series(&canonicalize("rate_b")).unwrap();
+
+        for (i, &val) in rate_a_series.iter().enumerate() {
+            assert!(
+                (val - 0.5).abs() < 1e-10,
+                "rate_a should be 0.5 at step {i}, got {val}"
+            );
+        }
+        for (i, &val) in rate_b_series.iter().enumerate() {
+            assert!(
+                (val - 0.1).abs() < 1e-10,
+                "rate_b should remain 0.1 at step {i}, got {val} (must not be corrupted by rate_a override)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_override_does_not_corrupt_expression_literal() {
+        // A constant and an expression both use the same numeric value 0.1.
+        // Overriding the constant must not corrupt the expression's literal.
+        let tp = TestProject::new("expr_literal")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("rate", "0.1", None)
+            .aux("scaled", "stock_val * 0.1", None)
+            .flow("inflow", "stock_val * rate + scaled", None)
+            .stock("stock_val", "100", &["inflow"], &[], None);
+
+        let sim = tp.build_sim().unwrap();
+        let compiled = sim.compile().unwrap();
+        let mut vm = Vm::new(compiled).unwrap();
+
+        vm.set_value(&canonicalize("rate"), 0.9).unwrap();
+        vm.run_to_end().unwrap();
+
+        let scaled_series = vm.get_series(&canonicalize("scaled")).unwrap();
+        // At t=0, stock_val = 100, so scaled = 100 * 0.1 = 10.0
+        // If the literal 0.1 was corrupted to 0.9, scaled would be 90.0
+        assert!(
+            (scaled_series[0] - 10.0).abs() < 1e-10,
+            "scaled should be 10.0 at t=0 (the 0.1 literal in the expression must not be corrupted), got {}",
+            scaled_series[0]
+        );
+    }
+
+    #[test]
+    fn test_override_shared_literal_clear_restores_both() {
+        let tp = TestProject::new("shared_clear")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("rate_a", "0.1", None)
+            .aux("rate_b", "0.1", None)
+            .flow("inflow", "rate_a + rate_b", None)
+            .stock("s", "rate_a + rate_b", &["inflow"], &[], None);
+
+        let sim = tp.build_sim().unwrap();
+        let compiled = sim.compile().unwrap();
+        let mut vm = Vm::new(compiled).unwrap();
+
+        vm.set_value(&canonicalize("rate_a"), 0.5).unwrap();
+        vm.run_to_end().unwrap();
+
+        let rate_a_series = vm.get_series(&canonicalize("rate_a")).unwrap();
+        let rate_b_series = vm.get_series(&canonicalize("rate_b")).unwrap();
+        assert!(
+            (rate_a_series[0] - 0.5).abs() < 1e-10,
+            "rate_a should be 0.5"
+        );
+        assert!(
+            (rate_b_series[0] - 0.1).abs() < 1e-10,
+            "rate_b should be 0.1"
+        );
+
+        // Clear and re-run
+        vm.clear_values();
+        vm.reset();
+        vm.run_to_end().unwrap();
+
+        let rate_a_restored = vm.get_series(&canonicalize("rate_a")).unwrap();
+        let rate_b_restored = vm.get_series(&canonicalize("rate_b")).unwrap();
+        assert!(
+            (rate_a_restored[0] - 0.1).abs() < 1e-10,
+            "rate_a should be restored to 0.1, got {}",
+            rate_a_restored[0]
+        );
+        assert!(
+            (rate_b_restored[0] - 0.1).abs() < 1e-10,
+            "rate_b should still be 0.1, got {}",
+            rate_b_restored[0]
+        );
     }
 }
 

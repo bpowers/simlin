@@ -415,8 +415,7 @@ pub unsafe extern "C" fn simlin_sim_set_value(
         }
     } else if let Some(ref compiled) = state.compiled {
         if let Some(off) = compiled.get_offset(&canon_name) {
-            let constant_offsets = compiled.constant_offsets();
-            if !constant_offsets.contains(&off) {
+            if !compiled.is_constant_offset(off) {
                 let err = engine::Error {
                     code: engine::ErrorCode::BadOverride,
                     kind: engine::ErrorKind::Simulation,
