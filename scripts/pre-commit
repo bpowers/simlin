@@ -146,7 +146,7 @@ TEST_CHECK_PROMPT="the user is looking to commit code - at this point formatting
 # Determine which AI tool to use
 # Priority: 1) AI_TOOL env var, 2) .ai-tool-config file, 3) auto-detect
 AI_CONFIG_FILE="$REPO_ROOT/.ai-tool-config"
-if [ -n "$AI_TOOL" ]; then
+if [ -n "${AI_TOOL:-}" ]; then
     SELECTED_AI_TOOL="$AI_TOOL"
 elif [ -f "$AI_CONFIG_FILE" ]; then
     SELECTED_AI_TOOL=$(cat "$AI_CONFIG_FILE")
@@ -192,7 +192,7 @@ run_claude_check() {
 
 # Function to run the test check with Codex
 run_codex_check() {
-    run_with_timeout "$AI_TIMEOUT" codex exec -m gpt-5.3-codex-xhigh --full-auto "$TEST_CHECK_PROMPT" > "$AI_OUTPUT" 2>&1
+    run_with_timeout "$AI_TIMEOUT" codex exec -m gpt-5.3-codex -c 'model_reasoning_effort="high"' --full-auto "$TEST_CHECK_PROMPT" > "$AI_OUTPUT" 2>&1
 }
 
 echo -n "Running AI test quality check ($SELECTED_AI_TOOL)..."
