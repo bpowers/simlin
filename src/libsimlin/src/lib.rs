@@ -459,6 +459,94 @@ pub(crate) fn ffi_error_from_engine(error: &engine::Error) -> FfiError {
     FfiError::new(SimlinErrorCode::from(error.code)).with_message(error.to_string())
 }
 
+// ── handle ref-counting ────────────────────────────────────────────────
+//
+// Centralized here so that modules managing child handles (e.g. simulation
+// dropping its model, model dropping its project) don't need cross-module
+// imports that would create dependency cycles.
+
+/// Increment the project reference count.
+pub(crate) unsafe fn project_ref(project: *mut SimlinProject) {
+    if !project.is_null() {
+        (*project)
+            .ref_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Decrement the project reference count, freeing it when it reaches zero.
+pub(crate) unsafe fn project_unref(project: *mut SimlinProject) {
+    if project.is_null() {
+        return;
+    }
+    let prev_count = (*project)
+        .ref_count
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    if prev_count == 1 {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        let _ = Box::from_raw(project);
+    }
+}
+
+/// Increment the model reference count.
+pub(crate) unsafe fn model_ref(model: *mut SimlinModel) {
+    if !model.is_null() {
+        (*model)
+            .ref_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Decrement the model reference count, freeing it when it reaches zero.
+pub(crate) unsafe fn model_unref(model: *mut SimlinModel) {
+    if model.is_null() {
+        return;
+    }
+    let prev_count = (*model)
+        .ref_count
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    if prev_count == 1 {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        let model = Box::from_raw(model);
+        project_unref(model.project as *mut SimlinProject);
+    }
+}
+
+/// Increment the simulation reference count.
+pub(crate) unsafe fn sim_ref(sim: *mut SimlinSim) {
+    if !sim.is_null() {
+        (*sim)
+            .ref_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Decrement the simulation reference count, freeing it when it reaches zero.
+pub(crate) unsafe fn sim_unref(sim: *mut SimlinSim) {
+    if sim.is_null() {
+        return;
+    }
+    let prev_count = (*sim)
+        .ref_count
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    if prev_count == 1 {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        let sim = Box::from_raw(sim);
+        model_unref(sim.model as *mut SimlinModel);
+    }
+}
+
+/// Compile a project + model name into a `CompiledSimulation`.
+///
+/// Pure helper with no FFI state -- shared by `project`, `patch`, and `simulation`.
+pub(crate) fn compile_simulation(
+    project: &engine::Project,
+    model_name: &str,
+) -> std::result::Result<engine::CompiledSimulation, engine::Error> {
+    let compiler = engine::Simulation::new(project, model_name)?;
+    compiler.compile()
+}
+
 // ── tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]

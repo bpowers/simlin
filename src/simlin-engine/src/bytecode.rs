@@ -2803,7 +2803,7 @@ mod tests {
     fn test_peephole_via_builder() {
         // Verify that ByteCodeBuilder::finish() runs peephole_optimize
         let mut builder = ByteCodeBuilder::default();
-        let lit_id = builder.intern_literal(std::f64::consts::PI);
+        let lit_id = builder.intern_literal(3.125);
         builder.push_opcode(Opcode::LoadConstant { id: lit_id });
         builder.push_opcode(Opcode::AssignCurr { off: 7 });
         builder.push_opcode(Opcode::Ret);

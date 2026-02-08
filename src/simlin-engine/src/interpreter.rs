@@ -8,11 +8,12 @@ use crate::ast::{Ast, BinaryOp};
 use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, Ident, canonicalize};
 use crate::compiler::{BuiltinFn, Expr, Module, SubscriptIndex, UnaryOp};
+use crate::dimensions::SubscriptIterator;
 use crate::model::{ModuleInputSet, enumerate_modules};
 use crate::sim_err;
 use crate::vm::{
     CompiledSimulation, DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, ModuleKey,
-    Specs, StepPart, SubscriptIterator, TIME_OFF, is_truthy, pulse, ramp, step,
+    Specs, StepPart, TIME_OFF, is_truthy, pulse, ramp, step,
 };
 use crate::{Project, Results, Variable, compiler};
 use float_cmp::approx_eq;

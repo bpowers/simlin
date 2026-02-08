@@ -11,8 +11,7 @@ use crate::common::{
     canonicalize,
 };
 use crate::datamodel::Visibility;
-use crate::dimensions::{Dimension, DimensionsContext};
-use crate::vm::SubscriptIterator;
+use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
 use crate::{datamodel, eqn_err};
 
 fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {

@@ -8,30 +8,20 @@
 //! initials), resetting, setting/clearing overrides, and reading values
 //! and time series from simulation results.
 
-use simlin_engine::{self as engine, canonicalize, CompiledSimulation, Vm};
+use simlin_engine::{self as engine, canonicalize, Vm};
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_double};
 use std::ptr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
-use crate::model::{simlin_model_ref, simlin_model_unref};
 use crate::{
-    clear_out_error, ffi_error_from_engine, require_model, require_sim, store_error,
-    store_ffi_error, SimState, SimlinErrorCode, SimlinModel, SimlinSim,
+    clear_out_error, compile_simulation, ffi_error_from_engine, require_model, require_sim,
+    store_error, store_ffi_error, SimState, SimlinErrorCode, SimlinModel, SimlinSim,
 };
-
-/// Helper function to compile a project and model into a CompiledSimulation.
-pub(crate) fn compile_simulation(
-    project: &engine::Project,
-    model_name: &str,
-) -> Result<CompiledSimulation, engine::Error> {
-    let compiler = engine::Simulation::new(project, model_name)?;
-    compiler.compile()
-}
 
 /// Creates a new simulation context
 ///
@@ -71,7 +61,7 @@ pub unsafe extern "C" fn simlin_sim_new(
         cloned_project
     };
 
-    simlin_model_ref(model);
+    crate::model_ref(model);
 
     // Compile the simulation and cache the CompiledSimulation for reset reuse.
     let (compiled, vm, vm_error) = match compile_simulation(&project_variant, &model_ref.model_name)
@@ -104,9 +94,7 @@ pub unsafe extern "C" fn simlin_sim_new(
 /// - `sim` must be a valid pointer to a SimlinSim
 #[no_mangle]
 pub unsafe extern "C" fn simlin_sim_ref(sim: *mut SimlinSim) {
-    if !sim.is_null() {
-        (*sim).ref_count.fetch_add(1, Ordering::SeqCst);
-    }
+    crate::sim_ref(sim);
 }
 
 /// Decrements the reference count and frees the simulation if it reaches zero
@@ -115,16 +103,7 @@ pub unsafe extern "C" fn simlin_sim_ref(sim: *mut SimlinSim) {
 /// - `sim` must be a valid pointer to a SimlinSim
 #[no_mangle]
 pub unsafe extern "C" fn simlin_sim_unref(sim: *mut SimlinSim) {
-    if sim.is_null() {
-        return;
-    }
-    let prev_count = (*sim).ref_count.fetch_sub(1, Ordering::SeqCst);
-    if prev_count == 1 {
-        std::sync::atomic::fence(Ordering::SeqCst);
-        let sim = Box::from_raw(sim);
-        // Decrement model reference count
-        simlin_model_unref(sim.model as *mut SimlinModel);
-    }
+    crate::sim_unref(sim);
 }
 
 /// Runs the simulation to a specified time

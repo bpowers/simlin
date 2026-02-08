@@ -1489,3 +1489,208 @@ mod tests {
         );
     }
 }
+
+// ============================================================================
+// Subscript Iteration
+// ============================================================================
+
+/// Iterates over all combinations of subscript offsets for a set of dimensions.
+///
+/// For example, given dimensions [A(3), B(2)], produces:
+/// [0,0], [0,1], [1,0], [1,1], [2,0], [2,1]
+pub struct SubscriptOffsetIterator {
+    n: usize,
+    size: usize,
+    lengths: Vec<usize>,
+    next: Vec<usize>,
+}
+
+impl SubscriptOffsetIterator {
+    pub fn new(arrays: &[Dimension]) -> Self {
+        SubscriptOffsetIterator {
+            n: 0,
+            size: arrays.iter().map(|v| v.len()).product(),
+            lengths: arrays.iter().map(|v| v.len()).collect(),
+            next: vec![0; arrays.len()],
+        }
+    }
+}
+
+impl Iterator for SubscriptOffsetIterator {
+    type Item = Vec<usize>;
+
+    fn next(&mut self) -> Option<Vec<usize>> {
+        if self.n >= self.size {
+            return None;
+        }
+
+        let curr = self.next.clone();
+
+        assert_eq!(self.lengths.len(), self.next.len());
+
+        let mut carry = 1_usize;
+        for (i, n) in self.next.iter_mut().enumerate().rev() {
+            let orig_n = *n;
+            let orig_carry = carry;
+            *n = (*n + carry) % self.lengths[i];
+            carry = ((orig_n != 0 && *n == 0) || (orig_carry == 1 && self.lengths[i] < 2)) as usize;
+        }
+
+        self.n += 1;
+
+        Some(curr)
+    }
+}
+
+/// Iterates over all combinations of subscript element names for a set of dimensions.
+///
+/// Like `SubscriptOffsetIterator`, but yields the element names (strings) instead
+/// of numeric offsets.  For indexed dimensions the names are "1", "2", etc.
+pub struct SubscriptIterator<'a> {
+    dims: &'a [Dimension],
+    offsets: SubscriptOffsetIterator,
+}
+
+impl<'a> SubscriptIterator<'a> {
+    pub fn new(dims: &'a [Dimension]) -> Self {
+        SubscriptIterator {
+            dims,
+            offsets: SubscriptOffsetIterator::new(dims),
+        }
+    }
+}
+
+impl<'a> Iterator for SubscriptIterator<'a> {
+    type Item = Vec<String>;
+
+    fn next(&mut self) -> Option<Vec<String>> {
+        self.offsets.next().map(|subscripts| {
+            subscripts
+                .iter()
+                .enumerate()
+                .map(|(i, elem)| match &self.dims[i] {
+                    Dimension::Named(_, named_dim) => {
+                        named_dim.elements[*elem].as_str().to_string()
+                    }
+                    Dimension::Indexed(_name, _size) => format!("{}", elem + 1),
+                })
+                .collect()
+        })
+    }
+}
+
+#[cfg(test)]
+mod subscript_iter_tests {
+    use super::*;
+    use crate::datamodel;
+
+    #[test]
+    fn test_subscript_offset_iter() {
+        let empty_dim = Dimension::from(datamodel::Dimension::named("".to_string(), vec![]));
+        let one_dim = Dimension::from(datamodel::Dimension::named(
+            "".to_string(),
+            vec!["0".to_owned()],
+        ));
+        let two_dim = Dimension::from(datamodel::Dimension::named(
+            "".to_string(),
+            vec!["0".to_owned(), "1".to_owned()],
+        ));
+        let three_dim = Dimension::from(datamodel::Dimension::named(
+            "".to_string(),
+            vec!["0".to_owned(), "1".to_owned(), "2".to_owned()],
+        ));
+        let cases: &[(Vec<Dimension>, Vec<Vec<usize>>)] = &[
+            (vec![empty_dim.clone()], vec![]),
+            (vec![empty_dim.clone(), empty_dim], vec![]),
+            (vec![three_dim.clone()], vec![vec![0], vec![1], vec![2]]),
+            (
+                vec![three_dim.clone(), two_dim.clone()],
+                vec![
+                    vec![0, 0],
+                    vec![0, 1],
+                    vec![1, 0],
+                    vec![1, 1],
+                    vec![2, 0],
+                    vec![2, 1],
+                ],
+            ),
+            (
+                vec![three_dim, one_dim, two_dim],
+                vec![
+                    vec![0, 0, 0],
+                    vec![0, 0, 1],
+                    vec![1, 0, 0],
+                    vec![1, 0, 1],
+                    vec![2, 0, 0],
+                    vec![2, 0, 1],
+                ],
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let mut n = 0;
+            for (i, subscripts) in SubscriptOffsetIterator::new(input).enumerate() {
+                assert_eq!(expected[i], subscripts);
+                n += 1;
+            }
+            assert_eq!(expected.len(), n);
+        }
+    }
+
+    #[test]
+    fn test_subscript_iter() {
+        let empty_dim = Dimension::from(datamodel::Dimension::named("".to_string(), vec![]));
+        let one_dim = Dimension::from(datamodel::Dimension::named(
+            "".to_string(),
+            vec!["0".to_owned()],
+        ));
+        let two_dim = Dimension::from(datamodel::Dimension::named(
+            "".to_string(),
+            vec!["0".to_owned(), "1".to_owned()],
+        ));
+        let three_dim = Dimension::from(datamodel::Dimension::named(
+            "".to_string(),
+            vec!["0".to_owned(), "1".to_owned(), "2".to_owned()],
+        ));
+        let cases: &[(Vec<Dimension>, Vec<Vec<&str>>)] = &[
+            (vec![empty_dim.clone()], vec![]),
+            (vec![empty_dim.clone(), empty_dim], vec![]),
+            (
+                vec![three_dim.clone()],
+                vec![vec!["0"], vec!["1"], vec!["2"]],
+            ),
+            (
+                vec![three_dim.clone(), two_dim.clone()],
+                vec![
+                    vec!["0", "0"],
+                    vec!["0", "1"],
+                    vec!["1", "0"],
+                    vec!["1", "1"],
+                    vec!["2", "0"],
+                    vec!["2", "1"],
+                ],
+            ),
+            (
+                vec![three_dim, one_dim, two_dim],
+                vec![
+                    vec!["0", "0", "0"],
+                    vec!["0", "0", "1"],
+                    vec!["1", "0", "0"],
+                    vec!["1", "0", "1"],
+                    vec!["2", "0", "0"],
+                    vec!["2", "0", "1"],
+                ],
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let mut n = 0;
+            for (i, subscripts) in SubscriptIterator::new(input).enumerate() {
+                let refs: Vec<&str> = subscripts.iter().map(|s| s.as_str()).collect();
+                assert_eq!(expected[i], refs);
+                n += 1;
+            }
+            assert_eq!(expected.len(), n);
+        }
+    }
+}

@@ -16,10 +16,10 @@ use std::ptr;
 use crate::errors;
 pub use crate::ffi_error::ErrorDetail as ErrorDetailData;
 use crate::ffi_error::{FfiError, SimlinError};
-use crate::simulation::compile_simulation;
 use crate::{
-    build_simlin_error, clear_out_error, require_project, store_anyhow_error, store_error,
-    store_ffi_error, SimlinErrorCode, SimlinErrorKind, SimlinProject, SimlinUnitErrorKind,
+    build_simlin_error, clear_out_error, compile_simulation, require_project, store_anyhow_error,
+    store_error, store_ffi_error, SimlinErrorCode, SimlinErrorKind, SimlinProject,
+    SimlinUnitErrorKind,
 };
 
 // ── JSON serde types ───────────────────────────────────────────────────

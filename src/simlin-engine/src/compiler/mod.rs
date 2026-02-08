@@ -17,11 +17,11 @@ use crate::bytecode::CompiledModule;
 use crate::common::{
     Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize,
 };
-use crate::dimensions::{Dimension, DimensionsContext};
+use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
 use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::variable::Variable;
-use crate::vm::{IMPLICIT_VAR_COUNT, ModuleKey, SubscriptIterator};
+use crate::vm::{IMPLICIT_VAR_COUNT, ModuleKey};
 use crate::{Error, sim_err};
 
 // Re-exports for crate-internal API

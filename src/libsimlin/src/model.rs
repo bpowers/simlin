@@ -11,15 +11,13 @@ use simlin_engine::{self as engine, canonicalize};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::atomic::Ordering;
 
 use crate::ffi::{SimlinLink, SimlinLinkPolarity, SimlinLinks};
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
-use crate::project::simlin_project_unref;
 use crate::{
     clear_out_error, drop_c_string, drop_links_vec, require_model, store_anyhow_error, store_error,
-    SimlinErrorCode, SimlinModel, SimlinProject,
+    SimlinErrorCode, SimlinModel,
 };
 
 /// Increments the reference count of a model
@@ -28,9 +26,7 @@ use crate::{
 /// - `model` must be a valid pointer to a SimlinModel
 #[no_mangle]
 pub unsafe extern "C" fn simlin_model_ref(model: *mut SimlinModel) {
-    if !model.is_null() {
-        (*model).ref_count.fetch_add(1, Ordering::SeqCst);
-    }
+    crate::model_ref(model);
 }
 
 /// Decrements the reference count and frees the model if it reaches zero
@@ -39,16 +35,7 @@ pub unsafe extern "C" fn simlin_model_ref(model: *mut SimlinModel) {
 /// - `model` must be a valid pointer to a SimlinModel
 #[no_mangle]
 pub unsafe extern "C" fn simlin_model_unref(model: *mut SimlinModel) {
-    if model.is_null() {
-        return;
-    }
-    let prev_count = (*model).ref_count.fetch_sub(1, Ordering::SeqCst);
-    if prev_count == 1 {
-        std::sync::atomic::fence(Ordering::SeqCst);
-        let model = Box::from_raw(model);
-        // Decrement project reference count
-        simlin_project_unref(model.project as *mut SimlinProject);
-    }
+    crate::model_unref(model);
 }
 
 /// Gets the number of variables in the model

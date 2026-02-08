@@ -14,17 +14,16 @@ use std::ffi::{CStr, CString};
 use std::io::BufReader;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 
 use crate::ffi;
 use crate::ffi_error::{FfiError, SimlinError};
 use crate::ffi_try;
 use crate::patch::gather_error_details;
-use crate::simulation::compile_simulation;
 use crate::{
-    build_simlin_error, clear_out_error, drop_c_string, require_project, store_anyhow_error,
-    store_error, SimlinErrorCode, SimlinModel, SimlinProject,
+    build_simlin_error, clear_out_error, compile_simulation, drop_c_string, require_project,
+    store_anyhow_error, store_error, SimlinErrorCode, SimlinModel, SimlinProject,
 };
 
 /// Open a project from binary protobuf data
@@ -163,9 +162,7 @@ pub unsafe extern "C" fn simlin_project_open_json(
 /// - `project` must be a valid pointer to a SimlinProject
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_ref(project: *mut SimlinProject) {
-    if !project.is_null() {
-        (*project).ref_count.fetch_add(1, Ordering::SeqCst);
-    }
+    crate::project_ref(project);
 }
 
 /// Decrement the reference count and free the project if it reaches zero
@@ -174,14 +171,7 @@ pub unsafe extern "C" fn simlin_project_ref(project: *mut SimlinProject) {
 /// - `project` must be a valid pointer to a SimlinProject
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_unref(project: *mut SimlinProject) {
-    if project.is_null() {
-        return;
-    }
-    let prev_count = (*project).ref_count.fetch_sub(1, Ordering::SeqCst);
-    if prev_count == 1 {
-        std::sync::atomic::fence(Ordering::SeqCst);
-        let _ = Box::from_raw(project);
-    }
+    crate::project_unref(project);
 }
 
 /// Gets the number of models in the project
