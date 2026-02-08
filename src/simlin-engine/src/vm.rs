@@ -965,14 +965,12 @@ impl Vm {
                 // === SUPERINSTRUCTIONS ===
                 Opcode::AssignConstCurr { off, literal_id } => {
                     let abs_off = module_off + *off as usize;
+                    let compiled_val = bytecode.literals[*literal_id as usize];
+                    // Skip the HashMap lookup when no overrides are set (the common case).
                     curr[abs_off] = if !overrides.is_empty() {
-                        if let Some(&val) = overrides.get(&abs_off) {
-                            val
-                        } else {
-                            bytecode.literals[*literal_id as usize]
-                        }
+                        overrides.get(&abs_off).copied().unwrap_or(compiled_val)
                     } else {
-                        bytecode.literals[*literal_id as usize]
+                        compiled_val
                     };
                     debug_assert_eq!(0, stack.len());
                 }

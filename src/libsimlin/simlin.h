@@ -466,7 +466,7 @@ void simlin_sim_get_value(SimlinSim *sim,
 // - `name` must be a valid C string
 void simlin_sim_set_value(SimlinSim *sim, const char *name, double val, SimlinError **out_error);
 
-// Clears all persistent value settings, restoring original compiled values.
+// Clears all persistent constant value settings, restoring original compiled values.
 //
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
