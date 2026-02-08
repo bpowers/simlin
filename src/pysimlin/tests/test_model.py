@@ -432,15 +432,14 @@ class TestModelSimulationMethods:
         sim = test_model.simulate()
         assert isinstance(sim, Sim)
 
-    def test_simulate_with_overrides(self, test_model: Model) -> None:
+    def test_simulate_with_overrides(self, teacup_stmx_path) -> None:
         """Test simulate() with variable overrides."""
         from simlin import Sim
-        var_names = [v.name for v in test_model.variables]
-        if not var_names:
-            pytest.skip("No variables in model")
+        model = simlin.load(teacup_stmx_path)
 
-        overrides = {var_names[0]: 42.0}
-        sim = test_model.simulate(overrides=overrides)
+        # room_temperature is a simple constant (equation = "70")
+        overrides = {"room_temperature": 42.0}
+        sim = model.simulate(overrides=overrides)
         assert isinstance(sim, Sim)
 
     def test_simulate_with_ltm(self, test_model: Model) -> None:
@@ -455,15 +454,14 @@ class TestModelSimulationMethods:
         run = test_model.run(analyze_loops=False)
         assert isinstance(run, Run)
 
-    def test_run_with_overrides(self, test_model: Model) -> None:
+    def test_run_with_overrides(self, teacup_stmx_path) -> None:
         """Test run() with variable overrides."""
         from simlin.run import Run
-        var_names = [v.name for v in test_model.variables]
-        if not var_names:
-            pytest.skip("No variables in model")
+        model = simlin.load(teacup_stmx_path)
 
-        overrides = {var_names[0]: 123.0}
-        run = test_model.run(overrides=overrides, analyze_loops=False)
+        # room_temperature is a simple constant (equation = "70")
+        overrides = {"room_temperature": 123.0}
+        run = model.run(overrides=overrides, analyze_loops=False)
         assert isinstance(run, Run)
         assert run.overrides == overrides
 

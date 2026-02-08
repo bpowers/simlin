@@ -129,18 +129,12 @@ class TestCompleteWorkflow:
 
         model = simlin.load(teacup_stmx_path)
 
-        # Get a variable to override
-        var_names = [v.name for v in model.variables]
-        if not var_names:
-            pytest.skip("No variables in model")
-
-        # Run with overrides
-        override_var = var_names[0]
-        custom_run = model.run(overrides={override_var: 42.0}, analyze_loops=False)
+        # Override room_temperature, which is a simple constant (equation = "70")
+        custom_run = model.run(overrides={"room_temperature": 42.0}, analyze_loops=False)
 
         assert isinstance(custom_run, Run)
         assert len(custom_run.results) > 0
-        assert custom_run.overrides == {override_var: 42.0}
+        assert custom_run.overrides == {"room_temperature": 42.0}
 
     def test_workflow_base_case_vs_custom(self, teacup_stmx_path: Path) -> None:
         """Test comparing base case with custom run."""
@@ -151,13 +145,8 @@ class TestCompleteWorkflow:
         # Get base case
         base_run = model.base_case
 
-        # Run with different overrides
-        var_names = [v.name for v in model.variables]
-        if not var_names:
-            pytest.skip("No variables in model")
-
-        override_var = var_names[0]
-        custom_run = model.run(overrides={override_var: 99.0}, analyze_loops=False)
+        # Override room_temperature, which is a simple constant (equation = "70")
+        custom_run = model.run(overrides={"room_temperature": 99.0}, analyze_loops=False)
 
         # Both should be Run objects
         assert isinstance(base_run, Run)
@@ -174,7 +163,7 @@ class TestCompleteWorkflow:
         assert base_run.overrides == {}
 
         # Custom run should have overrides
-        assert custom_run.overrides == {override_var: 99.0}
+        assert custom_run.overrides == {"room_temperature": 99.0}
 
     def test_workflow_multiple_runs(self, teacup_stmx_path: Path) -> None:
         """Test creating multiple runs from the same model."""
