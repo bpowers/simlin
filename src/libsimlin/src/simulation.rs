@@ -5,7 +5,7 @@
 //! Simulation lifecycle FFI functions.
 //!
 //! Creating simulations, reference counting, running (to a time, to end,
-//! initials), resetting, setting/clearing overrides, and reading values
+//! initials), resetting, setting/clearing constant values, and reading values
 //! and time series from simulation results.
 
 use simlin_engine::{self as engine, canonicalize, Vm};
@@ -224,7 +224,7 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
         match Vm::new(compiled.clone()) {
             Ok(mut new_vm) => {
                 for (&off, &val) in &state.overrides {
-                    if let Err(err) = new_vm.set_override_by_offset(off, val) {
+                    if let Err(err) = new_vm.set_value_by_offset(off, val) {
                         store_ffi_error(out_error, ffi_error_from_engine(&err));
                         return;
                     }
@@ -272,161 +272,6 @@ pub unsafe extern "C" fn simlin_sim_run_initials(
             SimlinError::new(SimlinErrorCode::Generic)
                 .with_message("simulation has not been initialised with a VM"),
         );
-    }
-}
-
-/// Sets a persistent override for a variable by name.
-///
-/// The override is applied during initials evaluation (evaluate-then-patch).
-/// Overrides persist across `simlin_sim_reset`. Call `simlin_sim_clear_overrides`
-/// to remove them.
-///
-/// Can be called even when the VM has been consumed by `simlin_sim_run_to_end`;
-/// the override will be stored and applied to the next VM created on reset.
-///
-/// # Safety
-/// - `sim` must be a valid pointer to a SimlinSim
-/// - `name` must be a valid C string
-#[no_mangle]
-pub unsafe extern "C" fn simlin_sim_set_override(
-    sim: *mut SimlinSim,
-    name: *const c_char,
-    value: c_double,
-    out_error: *mut *mut SimlinError,
-) {
-    clear_out_error(out_error);
-    if name.is_null() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("variable name pointer must not be NULL"),
-        );
-        return;
-    }
-
-    let sim_ref = ffi_try!(out_error, require_sim(sim));
-    let canon_name = match CStr::from_ptr(name).to_str() {
-        Ok(s) => canonicalize(s),
-        Err(_) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic)
-                    .with_message("variable name is not valid UTF-8"),
-            );
-            return;
-        }
-    };
-
-    let mut state = sim_ref.state.lock().unwrap();
-    if let Some(ref mut vm) = state.vm {
-        match vm.set_override(&canon_name, value) {
-            Ok(()) => {
-                let off = vm.get_offset(&canon_name).unwrap();
-                state.overrides.insert(off, value);
-            }
-            Err(err) => {
-                store_ffi_error(out_error, ffi_error_from_engine(&err));
-            }
-        }
-    } else if let Some(ref compiled) = state.compiled {
-        // No VM present (consumed by run_to_end). Resolve the offset from
-        // the compiled simulation's offsets map and store for later.
-        if let Some(off) = compiled.get_offset(&canon_name) {
-            state.overrides.insert(off, value);
-        } else {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
-                    "variable '{}' not found in compiled simulation",
-                    canon_name
-                )),
-            );
-        }
-    } else {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("simulation was never successfully compiled"),
-        );
-    }
-}
-
-/// Sets a persistent override for a variable by data-buffer offset.
-///
-/// # Safety
-/// - `sim` must be a valid pointer to a SimlinSim
-#[no_mangle]
-pub unsafe extern "C" fn simlin_sim_set_override_by_offset(
-    sim: *mut SimlinSim,
-    offset: usize,
-    value: c_double,
-    out_error: *mut *mut SimlinError,
-) {
-    clear_out_error(out_error);
-    let sim_ref = ffi_try!(out_error, require_sim(sim));
-    let mut state = sim_ref.state.lock().unwrap();
-    if let Some(ref mut vm) = state.vm {
-        match vm.set_override_by_offset(offset, value) {
-            Ok(()) => {
-                state.overrides.insert(offset, value);
-            }
-            Err(err) => {
-                store_ffi_error(out_error, ffi_error_from_engine(&err));
-            }
-        }
-    } else if let Some(ref compiled) = state.compiled {
-        let n_slots = compiled.n_slots();
-        if offset >= n_slots {
-            let err = engine::Error {
-                code: engine::ErrorCode::BadOverride,
-                kind: engine::ErrorKind::Simulation,
-                details: Some(format!(
-                    "offset {} out of bounds (n_slots={})",
-                    offset, n_slots
-                )),
-            };
-            store_ffi_error(out_error, ffi_error_from_engine(&err));
-            return;
-        }
-        let initial_offsets = compiled.initial_offsets();
-        if !initial_offsets.contains(&offset) {
-            let err = engine::Error {
-                code: engine::ErrorCode::BadOverride,
-                kind: engine::ErrorKind::Simulation,
-                details: Some(format!(
-                    "cannot override offset {}: not an initial variable",
-                    offset
-                )),
-            };
-            store_ffi_error(out_error, ffi_error_from_engine(&err));
-            return;
-        }
-        state.overrides.insert(offset, value);
-    } else {
-        let err = engine::Error {
-            code: engine::ErrorCode::BadOverride,
-            kind: engine::ErrorKind::Simulation,
-            details: Some("no compiled simulation available for offset validation".to_string()),
-        };
-        store_ffi_error(out_error, ffi_error_from_engine(&err));
-    }
-}
-
-/// Clears all persistent overrides.
-///
-/// # Safety
-/// - `sim` must be a valid pointer to a SimlinSim
-#[no_mangle]
-pub unsafe extern "C" fn simlin_sim_clear_overrides(
-    sim: *mut SimlinSim,
-    out_error: *mut *mut SimlinError,
-) {
-    clear_out_error(out_error);
-    let sim_ref = ffi_try!(out_error, require_sim(sim));
-    let mut state = sim_ref.state.lock().unwrap();
-    state.overrides.clear();
-    if let Some(ref mut vm) = state.vm {
-        vm.clear_overrides();
     }
 }
 
@@ -516,12 +361,13 @@ pub unsafe extern "C" fn simlin_sim_get_value(
     }
 }
 
-/// Sets a value in the simulation
+/// Sets a persistent value for a simple constant variable by name.
 ///
-/// This function sets values at different phases of simulation:
-/// - Before first run_to: Sets initial value to be used when simulation starts
-/// - During simulation (after run_to): Sets value in current data for next iteration
-/// - After run_to_end: Returns error (simulation complete)
+/// The value persists across `simlin_sim_reset`. Call `simlin_sim_clear_values`
+/// to remove all overrides and restore compiled defaults.
+///
+/// Can be called even when the VM has been consumed by `simlin_sim_run_to_end`;
+/// the value will be stored and applied to the next VM created on reset.
 ///
 /// # Safety
 /// - `sim` must be a valid pointer to a SimlinSim
@@ -558,29 +404,64 @@ pub unsafe extern "C" fn simlin_sim_set_value(
 
     let mut state = sim_ref.state.lock().unwrap();
     if let Some(ref mut vm) = state.vm {
-        if let Some(off) = vm.get_offset(&canon_name) {
-            vm.set_value_now(off, val);
+        match vm.set_value(&canon_name, val) {
+            Ok(()) => {
+                let off = vm.get_offset(&canon_name).unwrap();
+                state.overrides.insert(off, val);
+            }
+            Err(err) => {
+                store_ffi_error(out_error, ffi_error_from_engine(&err));
+            }
+        }
+    } else if let Some(ref compiled) = state.compiled {
+        if let Some(off) = compiled.get_offset(&canon_name) {
+            let constant_offsets = compiled.constant_offsets();
+            if !constant_offsets.contains(&off) {
+                let err = engine::Error {
+                    code: engine::ErrorCode::BadOverride,
+                    kind: engine::ErrorKind::Simulation,
+                    details: Some(format!(
+                        "cannot set value of '{}': not a simple constant",
+                        canon_name
+                    )),
+                };
+                store_ffi_error(out_error, ffi_error_from_engine(&err));
+                return;
+            }
+            state.overrides.insert(off, val);
         } else {
             store_error(
                 out_error,
-                SimlinError::new(SimlinErrorCode::UnknownDependency).with_message(format!(
-                    "variable '{}' is not available in the simulation VM",
+                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                    "variable '{}' not found in compiled simulation",
                     canon_name
                 )),
             );
         }
-    } else if state.results.is_some() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::NotSimulatable)
-                .with_message("simulation already completed; cannot set values"),
-        );
     } else {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("simulation has not been initialised with a VM"),
+                .with_message("simulation was never successfully compiled"),
         );
+    }
+}
+
+/// Clears all constant value overrides, restoring original compiled values.
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim
+#[no_mangle]
+pub unsafe extern "C" fn simlin_sim_clear_values(
+    sim: *mut SimlinSim,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    let sim_ref = ffi_try!(out_error, require_sim(sim));
+    let mut state = sim_ref.state.lock().unwrap();
+    state.overrides.clear();
+    if let Some(ref mut vm) = state.vm {
+        vm.clear_values();
     }
 }
 

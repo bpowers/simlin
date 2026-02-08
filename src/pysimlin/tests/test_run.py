@@ -23,15 +23,12 @@ class TestRunClass:
         assert len(run.results) > 0
         assert "time" in run.results.index.name or run.results.index.name == "time"
 
-    def test_run_overrides_property(self, xmile_model_path: Path) -> None:
+    def test_run_overrides_property(self, teacup_stmx_path: Path) -> None:
         """Test that Run.overrides returns the overrides dict."""
-        model = simlin.load(xmile_model_path)
+        model = simlin.load(teacup_stmx_path)
 
-        var_names = [v.name for v in model.variables]
-        if not var_names:
-            pytest.skip("No variables in model")
-
-        overrides = {var_names[0]: 42.0}
+        # room_temperature is a simple constant (equation = "70")
+        overrides = {"room_temperature": 42.0}
         run = model.run(overrides=overrides, analyze_loops=False)
 
         assert run.overrides == overrides

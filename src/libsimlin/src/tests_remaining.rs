@@ -4353,7 +4353,7 @@ fn test_libsimlin_reset_preserves_compilation() {
 }
 
 #[test]
-fn test_libsimlin_override_survives_run_to_end() {
+fn test_libsimlin_set_value_survives_run_to_end() {
     let dm = build_population_datamodel();
     unsafe {
         let (proj, model, sim) = create_test_sim(&dm);
@@ -4361,8 +4361,8 @@ fn test_libsimlin_override_survives_run_to_end() {
         // Set override
         let c_name = CString::new("birth_rate").unwrap();
         let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_sim_set_override(sim, c_name.as_ptr(), 0.2, &mut err as *mut *mut SimlinError);
-        assert!(err.is_null(), "set_override failed");
+        simlin_sim_set_value(sim, c_name.as_ptr(), 0.2, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "set_value failed");
 
         // run_to_end consumes the VM
         run_to_end(sim);
@@ -4390,7 +4390,7 @@ fn test_libsimlin_override_survives_run_to_end() {
 }
 
 #[test]
-fn test_libsimlin_set_override_when_vm_is_none() {
+fn test_libsimlin_set_value_when_vm_is_none() {
     let dm = build_population_datamodel();
     unsafe {
         let (proj, model, sim) = create_test_sim(&dm);
@@ -4401,8 +4401,8 @@ fn test_libsimlin_set_override_when_vm_is_none() {
         // Set override while VM is None
         let c_name = CString::new("birth_rate").unwrap();
         let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_sim_set_override(sim, c_name.as_ptr(), 0.3, &mut err as *mut *mut SimlinError);
-        assert!(err.is_null(), "set_override with no VM should succeed");
+        simlin_sim_set_value(sim, c_name.as_ptr(), 0.3, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "set_value with no VM should succeed");
 
         // Reset creates a new VM with the override applied
         reset_sim(sim);
@@ -4413,7 +4413,7 @@ fn test_libsimlin_set_override_when_vm_is_none() {
 
         // Reset with no override to get baseline
         err = ptr::null_mut();
-        simlin_sim_clear_overrides(sim, &mut err as *mut *mut SimlinError);
+        simlin_sim_clear_values(sim, &mut err as *mut *mut SimlinError);
         assert!(err.is_null());
         reset_sim(sim);
         run_to_end(sim);
@@ -4483,7 +4483,7 @@ fn test_libsimlin_get_series_after_partial_run() {
 }
 
 #[test]
-fn test_libsimlin_override_flows_through_dependents() {
+fn test_libsimlin_set_value_flows_through_dependents() {
     let dm = TestProject::new("override_flow")
         .with_sim_time(0.0, 10.0, 1.0)
         .stock("population", "scaled_rate", &["growth"], &[], None)
@@ -4497,13 +4497,13 @@ fn test_libsimlin_override_flows_through_dependents() {
         // Override rate from 5 to 20
         let c_name = CString::new("rate").unwrap();
         let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_sim_set_override(
+        simlin_sim_set_value(
             sim,
             c_name.as_ptr(),
             20.0,
             &mut err as *mut *mut SimlinError,
         );
-        assert!(err.is_null(), "set_override failed");
+        assert!(err.is_null(), "set_value failed");
 
         simlin_sim_run_initials(sim, &mut err as *mut *mut SimlinError);
         assert!(err.is_null(), "run_initials failed");
@@ -4520,7 +4520,7 @@ fn test_libsimlin_override_flows_through_dependents() {
 }
 
 #[test]
-fn test_libsimlin_clear_overrides_restores_defaults() {
+fn test_libsimlin_clear_values_restores_defaults() {
     let dm = build_population_datamodel();
     unsafe {
         let (proj, model, sim) = create_test_sim(&dm);
@@ -4532,7 +4532,7 @@ fn test_libsimlin_clear_overrides_restores_defaults() {
         // Override, reset, run
         let c_name = CString::new("birth_rate").unwrap();
         let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_sim_set_override(sim, c_name.as_ptr(), 0.5, &mut err as *mut *mut SimlinError);
+        simlin_sim_set_value(sim, c_name.as_ptr(), 0.5, &mut err as *mut *mut SimlinError);
         assert!(err.is_null());
         reset_sim(sim);
         run_to_end(sim);
@@ -4540,7 +4540,7 @@ fn test_libsimlin_clear_overrides_restores_defaults() {
 
         // Clear overrides, reset, run — should match default
         err = ptr::null_mut();
-        simlin_sim_clear_overrides(sim, &mut err as *mut *mut SimlinError);
+        simlin_sim_clear_values(sim, &mut err as *mut *mut SimlinError);
         assert!(err.is_null());
         reset_sim(sim);
         run_to_end(sim);
@@ -4572,51 +4572,56 @@ fn test_libsimlin_clear_overrides_restores_defaults() {
 }
 
 #[test]
-fn test_libsimlin_set_override_by_offset_validates_without_vm() {
+fn test_libsimlin_set_value_validates_without_vm() {
     let dm = build_population_datamodel();
     unsafe {
         let (proj, model, sim) = create_test_sim(&dm);
 
-        // Look up the offset of "births" (a flow, not an initial variable)
-        // while the VM still exists.
-        let c_births = CString::new("births").unwrap();
-        let mut flow_offset: usize = 0;
-        let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_sim_get_offset(
-            sim,
-            c_births.as_ptr(),
-            &mut flow_offset,
-            &mut err as *mut *mut SimlinError,
-        );
-        assert!(err.is_null(), "get_offset for births should succeed");
-
         // Consume the VM so we exercise the no-VM validation path
         run_to_end(sim);
 
-        // Out-of-bounds offset should fail
-        err = ptr::null_mut();
-        simlin_sim_set_override_by_offset(sim, 99999, 42.0, &mut err as *mut *mut SimlinError);
-        assert!(
-            !err.is_null(),
-            "out-of-bounds offset should fail even without a VM"
-        );
-        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::BadOverride);
-        simlin_error_free(err);
-
-        // In-bounds offset for a non-initial variable (flow) should also fail
-        err = ptr::null_mut();
-        simlin_sim_set_override_by_offset(
+        // Setting a non-constant variable (flow) by name should fail
+        let c_births = CString::new("births").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_set_value(
             sim,
-            flow_offset,
+            c_births.as_ptr(),
             42.0,
             &mut err as *mut *mut SimlinError,
         );
         assert!(
             !err.is_null(),
-            "non-initial offset should fail even without a VM"
+            "non-constant variable should fail even without a VM"
         );
         assert_eq!(simlin_error_get_code(err), SimlinErrorCode::BadOverride);
         simlin_error_free(err);
+
+        // Setting a nonexistent variable should fail
+        let c_nonexistent = CString::new("nonexistent_var").unwrap();
+        err = ptr::null_mut();
+        simlin_sim_set_value(
+            sim,
+            c_nonexistent.as_ptr(),
+            42.0,
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(
+            !err.is_null(),
+            "nonexistent variable should fail"
+        );
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::DoesNotExist);
+        simlin_error_free(err);
+
+        // Setting a constant variable (birth_rate) should succeed
+        let c_rate = CString::new("birth_rate").unwrap();
+        err = ptr::null_mut();
+        simlin_sim_set_value(
+            sim,
+            c_rate.as_ptr(),
+            0.5,
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(err.is_null(), "constant variable should succeed without VM");
 
         simlin_sim_unref(sim);
         simlin_model_unref(model);
@@ -4625,7 +4630,7 @@ fn test_libsimlin_set_override_by_offset_validates_without_vm() {
 }
 
 #[test]
-fn test_libsimlin_multiple_reset_override_cycles() {
+fn test_libsimlin_multiple_reset_set_value_cycles() {
     let dm = build_population_datamodel();
     unsafe {
         let (proj, model, sim) = create_test_sim(&dm);
@@ -4635,7 +4640,7 @@ fn test_libsimlin_multiple_reset_override_cycles() {
         for i in 1..=10 {
             let rate = i as f64 * 0.02;
             let mut err: *mut SimlinError = ptr::null_mut();
-            simlin_sim_set_override(
+            simlin_sim_set_value(
                 sim,
                 c_name.as_ptr(),
                 rate,

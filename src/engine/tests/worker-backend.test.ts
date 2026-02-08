@@ -361,8 +361,8 @@ describe('WorkerBackend', () => {
       expect(typeof time).toBe('number');
 
       // Set a value and verify
-      await backend.simSetValue(simHandle, 'teacup_temperature', 100);
-      const value = await backend.simGetValue(simHandle, 'teacup_temperature');
+      await backend.simSetValue(simHandle, 'room_temperature', 100);
+      const value = await backend.simGetValue(simHandle, 'room_temperature');
       expect(value).toBe(100);
     });
 
