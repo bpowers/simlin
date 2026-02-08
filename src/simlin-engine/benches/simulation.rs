@@ -85,7 +85,7 @@ fn bench_slider_interaction(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let mut vm = Vm::new(compiled.clone()).unwrap();
-                        vm.set_override(ident, 0.2).unwrap();
+                        vm.set_value(ident, 0.2).unwrap();
                         vm
                     },
                     |mut vm| {

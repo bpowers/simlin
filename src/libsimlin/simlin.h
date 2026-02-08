@@ -439,38 +439,6 @@ void simlin_sim_reset(SimlinSim *sim, SimlinError **out_error);
 // - `sim` must be a valid pointer to a SimlinSim
 void simlin_sim_run_initials(SimlinSim *sim, SimlinError **out_error);
 
-// Sets a persistent override for a variable by name.
-//
-// The override is applied during initials evaluation (evaluate-then-patch).
-// Overrides persist across `simlin_sim_reset`. Call `simlin_sim_clear_overrides`
-// to remove them.
-//
-// Can be called even when the VM has been consumed by `simlin_sim_run_to_end`;
-// the override will be stored and applied to the next VM created on reset.
-//
-// # Safety
-// - `sim` must be a valid pointer to a SimlinSim
-// - `name` must be a valid C string
-void simlin_sim_set_override(SimlinSim *sim,
-                             const char *name,
-                             double value,
-                             SimlinError **out_error);
-
-// Sets a persistent override for a variable by data-buffer offset.
-//
-// # Safety
-// - `sim` must be a valid pointer to a SimlinSim
-void simlin_sim_set_override_by_offset(SimlinSim *sim,
-                                       uintptr_t offset,
-                                       double value,
-                                       SimlinError **out_error);
-
-// Clears all persistent overrides.
-//
-// # Safety
-// - `sim` must be a valid pointer to a SimlinSim
-void simlin_sim_clear_overrides(SimlinSim *sim, SimlinError **out_error);
-
 // Gets a single value from the simulation
 //
 // # Safety
@@ -482,17 +450,27 @@ void simlin_sim_get_value(SimlinSim *sim,
                           double *out_value,
                           SimlinError **out_error);
 
-// Sets a value in the simulation
+// Sets a persistent value for a simple constant variable by name.
 //
-// This function sets values at different phases of simulation:
-// - Before first run_to: Sets initial value to be used when simulation starts
-// - During simulation (after run_to): Sets value in current data for next iteration
-// - After run_to_end: Returns error (simulation complete)
+// The value is applied inline during bytecode execution (both initials
+// and flows phases) and is also written to the data buffer immediately
+// so that `simlin_sim_get_value` reflects the change right away.
+// Values persist across `simlin_sim_reset`. Call `simlin_sim_clear_values`
+// to remove them.
+//
+// Can be called even when the VM has been consumed by `simlin_sim_run_to_end`;
+// the value will be stored and applied to the next VM created on reset.
 //
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
 // - `name` must be a valid C string
 void simlin_sim_set_value(SimlinSim *sim, const char *name, double val, SimlinError **out_error);
+
+// Clears all persistent constant value settings, restoring original compiled values.
+//
+// # Safety
+// - `sim` must be a valid pointer to a SimlinSim
+void simlin_sim_clear_values(SimlinSim *sim, SimlinError **out_error);
 
 // Sets the value for a variable at the last saved timestep by offset
 //
