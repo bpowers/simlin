@@ -405,8 +405,7 @@ pub unsafe extern "C" fn simlin_sim_set_value(
     let mut state = sim_ref.state.lock().unwrap();
     if let Some(ref mut vm) = state.vm {
         match vm.set_value(&canon_name, val) {
-            Ok(()) => {
-                let off = vm.get_offset(&canon_name).unwrap();
+            Ok(off) => {
                 state.overrides.insert(off, val);
             }
             Err(err) => {

@@ -730,15 +730,15 @@ impl Vm {
     /// Named constants get their own literal slots at compile time (via
     /// push_named_literal), so no de-interning is needed at runtime.
     fn apply_override(&mut self, off: usize, value: f64) {
+        // Clone locations once; we need ownership because write_literal borrows &mut self.
+        let locations = self.constant_info[&off].clone();
         if !self.original_literals.contains_key(&off) {
-            let locations = self.constant_info[&off].clone();
             let originals: Vec<_> = locations
                 .iter()
                 .map(|loc| (loc.clone(), self.read_literal(loc)))
                 .collect();
             self.original_literals.insert(off, originals);
         }
-        let locations = self.constant_info[&off].clone();
         for loc in &locations {
             self.write_literal(loc, value);
         }
@@ -747,7 +747,8 @@ impl Vm {
 
     /// Set a value override for a simple constant by canonical variable name.
     /// Mutates the bytecode literals directly so AssignConstCurr needs no branching.
-    pub fn set_value(&mut self, ident: &Ident<Canonical>, value: f64) -> Result<()> {
+    /// Returns the data-buffer offset of the variable on success.
+    pub fn set_value(&mut self, ident: &Ident<Canonical>, value: f64) -> Result<usize> {
         let off = match self.offsets.get(ident) {
             Some(&off) => off,
             None => {
@@ -767,7 +768,7 @@ impl Vm {
             );
         }
         self.apply_override(off, value);
-        Ok(())
+        Ok(off)
     }
 
     /// Set a value override for a simple constant by raw data-buffer offset.
@@ -3011,6 +3012,20 @@ mod set_value_tests {
         assert!(
             result.is_err(),
             "overriding nonexistent variable should fail"
+        );
+    }
+
+    #[test]
+    fn test_set_value_returns_correct_offset() {
+        let compiled = build_compiled(&rate_model());
+        let mut vm = Vm::new(compiled).unwrap();
+        let rate_ident = canonicalize("rate");
+
+        let expected_off = vm.get_offset(&rate_ident).unwrap();
+        let returned_off = vm.set_value(&rate_ident, 0.5).unwrap();
+        assert_eq!(
+            returned_off, expected_off,
+            "set_value should return the data-buffer offset of the variable"
         );
     }
 
