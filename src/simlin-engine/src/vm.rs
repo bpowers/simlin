@@ -119,16 +119,12 @@ enum BytecodeLocation {
     FlowOrStock {
         module_key: ModuleKey,
         part: StepPart,
-        /// The variable offset field from the AssignConstCurr opcode.
-        var_off: u16,
         literal_id: u16,
     },
     /// A literal in a specific CompiledInitial's bytecode.
     Initial {
         module_key: ModuleKey,
         initial_index: usize,
-        /// The variable offset field from the AssignConstCurr opcode.
-        var_off: u16,
         literal_id: u16,
     },
 }
@@ -365,7 +361,6 @@ fn collect_constant_info(
                 .push(BytecodeLocation::FlowOrStock {
                     module_key: module_key.clone(),
                     part: StepPart::Flows,
-                    var_off: *off,
                     literal_id: *literal_id,
                 });
         }
@@ -384,7 +379,6 @@ fn collect_constant_info(
                     .push(BytecodeLocation::FlowOrStock {
                         module_key: module_key.clone(),
                         part: StepPart::Stocks,
-                        var_off: *off,
                         literal_id: *literal_id,
                     });
             }
@@ -402,7 +396,6 @@ fn collect_constant_info(
                         .push(BytecodeLocation::Initial {
                             module_key: module_key.clone(),
                             initial_index: idx,
-                            var_off: *off,
                             literal_id: *literal_id,
                         });
                 }
@@ -635,6 +628,44 @@ impl Vm {
         self.constant_info.contains_key(&off)
     }
 
+    /// Read the current value of a literal at a bytecode location.
+    fn read_literal(&self, loc: &BytecodeLocation) -> f64 {
+        match loc {
+            BytecodeLocation::FlowOrStock {
+                module_key,
+                part,
+                literal_id,
+            } => {
+                let module = match part {
+                    StepPart::Flows => self
+                        .sliced_sim
+                        .flow_modules
+                        .get(module_key)
+                        .expect("module key must exist"),
+                    StepPart::Stocks => self
+                        .sliced_sim
+                        .stock_modules
+                        .get(module_key)
+                        .expect("module key must exist"),
+                    StepPart::Initials => unreachable!(),
+                };
+                module.bytecode.literals[*literal_id as usize]
+            }
+            BytecodeLocation::Initial {
+                module_key,
+                initial_index,
+                literal_id,
+            } => {
+                let initials_module = self
+                    .sliced_sim
+                    .initial_modules
+                    .get(module_key)
+                    .expect("module key must exist");
+                initials_module.initials[*initial_index].bytecode.literals[*literal_id as usize]
+            }
+        }
+    }
+
     /// Write a value to the literal at a bytecode location, using Arc::make_mut
     /// for copy-on-write semantics on shared bytecode.
     fn write_literal(&mut self, loc: &BytecodeLocation, value: f64) {
@@ -643,7 +674,6 @@ impl Vm {
                 module_key,
                 part,
                 literal_id,
-                ..
             } => {
                 let module = match part {
                     StepPart::Flows => self
@@ -664,7 +694,6 @@ impl Vm {
                 module_key,
                 initial_index,
                 literal_id,
-                ..
             } => {
                 let initials_module = self
                     .sliced_sim
@@ -673,94 +702,6 @@ impl Vm {
                     .expect("module key must exist");
                 let initials = Arc::make_mut(&mut initials_module.initials);
                 initials[*initial_index].bytecode.literals[*literal_id as usize] = value;
-            }
-        }
-    }
-
-    /// Give the AssignConstCurr opcode at `loc` its own private literal slot,
-    /// so that mutating the literal doesn't affect other opcodes that shared
-    /// the same interned literal_id.  Returns the updated BytecodeLocation
-    /// with the new literal_id, plus the original literal value.
-    fn de_intern_literal(&mut self, loc: &BytecodeLocation) -> (BytecodeLocation, f64) {
-        match loc {
-            BytecodeLocation::FlowOrStock {
-                module_key,
-                part,
-                var_off,
-                literal_id,
-            } => {
-                let module = match part {
-                    StepPart::Flows => self
-                        .sliced_sim
-                        .flow_modules
-                        .get_mut(module_key)
-                        .expect("module key must exist"),
-                    StepPart::Stocks => self
-                        .sliced_sim
-                        .stock_modules
-                        .get_mut(module_key)
-                        .expect("module key must exist"),
-                    StepPart::Initials => unreachable!(),
-                };
-                let bc = Arc::make_mut(&mut module.bytecode);
-                let original = bc.literals[*literal_id as usize];
-                let new_id = bc.literals.len() as u16;
-                bc.literals.push(original);
-                for op in bc.code.iter_mut() {
-                    if let Opcode::AssignConstCurr {
-                        off,
-                        literal_id: lid,
-                    } = op
-                        && *off == *var_off
-                        && *lid == *literal_id
-                    {
-                        *lid = new_id;
-                        break;
-                    }
-                }
-                let new_loc = BytecodeLocation::FlowOrStock {
-                    module_key: module_key.clone(),
-                    part: *part,
-                    var_off: *var_off,
-                    literal_id: new_id,
-                };
-                (new_loc, original)
-            }
-            BytecodeLocation::Initial {
-                module_key,
-                initial_index,
-                var_off,
-                literal_id,
-            } => {
-                let initials_module = self
-                    .sliced_sim
-                    .initial_modules
-                    .get_mut(module_key)
-                    .expect("module key must exist");
-                let initials = Arc::make_mut(&mut initials_module.initials);
-                let bc = &mut initials[*initial_index].bytecode;
-                let original = bc.literals[*literal_id as usize];
-                let new_id = bc.literals.len() as u16;
-                bc.literals.push(original);
-                for op in bc.code.iter_mut() {
-                    if let Opcode::AssignConstCurr {
-                        off,
-                        literal_id: lid,
-                    } = op
-                        && *off == *var_off
-                        && *lid == *literal_id
-                    {
-                        *lid = new_id;
-                        break;
-                    }
-                }
-                let new_loc = BytecodeLocation::Initial {
-                    module_key: module_key.clone(),
-                    initial_index: *initial_index,
-                    var_off: *var_off,
-                    literal_id: new_id,
-                };
-                (new_loc, original)
             }
         }
     }
@@ -786,30 +727,21 @@ impl Vm {
     }
 
     /// Apply an override for a constant at the given absolute offset.
-    /// On first override, de-interns the literal (gives it a private slot)
-    /// so that other opcodes sharing the same interned literal_id are not affected.
+    /// Named constants get their own literal slots at compile time (via
+    /// push_named_literal), so no de-interning is needed at runtime.
     fn apply_override(&mut self, off: usize, value: f64) {
         if !self.original_literals.contains_key(&off) {
-            // First override for this offset: de-intern each literal to get
-            // a private slot, and snapshot the original values for clear_values.
             let locations = self.constant_info[&off].clone();
-            let mut new_locations = Vec::with_capacity(locations.len());
-            let mut originals = Vec::with_capacity(locations.len());
-            for loc in &locations {
-                let (new_loc, original) = self.de_intern_literal(loc);
-                originals.push((new_loc.clone(), original));
-                new_locations.push(new_loc);
-            }
+            let originals: Vec<_> = locations
+                .iter()
+                .map(|loc| (loc.clone(), self.read_literal(loc)))
+                .collect();
             self.original_literals.insert(off, originals);
-            // Update constant_info so subsequent overrides use the new literal_ids.
-            self.constant_info.insert(off, new_locations);
         }
-        // Mutate the now-private literal slots.
         let locations = self.constant_info[&off].clone();
         for loc in &locations {
             self.write_literal(loc, value);
         }
-        // Eagerly write to the data buffer so get_value_now() reflects the change.
         self.set_value_now(off, value);
     }
 
@@ -3284,7 +3216,8 @@ mod set_value_tests {
 
     #[test]
     fn test_override_does_not_corrupt_shared_literal() {
-        // Two constants with the same numeric value share an interned literal_id.
+        // Two constants with the same numeric value used to share an interned
+        // literal_id. Now they get distinct slots via push_named_literal.
         // Overriding one must NOT affect the other.
         let tp = TestProject::new("shared_literal")
             .with_sim_time(0.0, 5.0, 1.0)
@@ -3344,6 +3277,51 @@ mod set_value_tests {
             (scaled_series[0] - 10.0).abs() < 1e-10,
             "scaled should be 10.0 at t=0 (the 0.1 literal in the expression must not be corrupted), got {}",
             scaled_series[0]
+        );
+    }
+
+    #[test]
+    fn test_same_valued_constants_get_distinct_literal_ids() {
+        // Two constants with the same numeric value should get distinct literal
+        // slots in their AssignConstCurr opcodes (via push_named_literal).
+        let tp = TestProject::new("distinct_lits")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("rate_a", "0.1", None)
+            .aux("rate_b", "0.1", None)
+            .flow("inflow", "rate_a + rate_b", None)
+            .stock("s", "0", &["inflow"], &[], None);
+
+        let sim = tp.build_sim().unwrap();
+        let compiled = sim.compile().unwrap();
+        let root_module = &compiled.modules[&compiled.root];
+
+        // Collect all AssignConstCurr literal_ids from the flows bytecode.
+        let assign_const_lits: Vec<u16> = root_module
+            .compiled_flows
+            .code
+            .iter()
+            .filter_map(|op| {
+                if let Opcode::AssignConstCurr { literal_id, .. } = op {
+                    Some(*literal_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // rate_a and rate_b each get their own AssignConstCurr with distinct literal_ids.
+        assert!(
+            assign_const_lits.len() >= 2,
+            "expected at least 2 AssignConstCurr opcodes, got {}",
+            assign_const_lits.len()
+        );
+        // All literal_ids should be unique (no sharing).
+        let unique: std::collections::HashSet<u16> = assign_const_lits.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            assign_const_lits.len(),
+            "literal_ids should all be distinct, got {:?}",
+            assign_const_lits
         );
     }
 
