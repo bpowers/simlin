@@ -63,6 +63,7 @@ mod units;
 mod units_check;
 mod units_infer;
 mod variable;
+pub mod vdf;
 mod vm;
 pub mod xmile;
 
@@ -88,6 +89,8 @@ pub use self::compat::open_vensim_xmutil;
 #[cfg(feature = "file_io")]
 pub use self::compat::{load_csv, load_dat};
 pub use self::compat::{open_vensim, open_xmile, to_xmile};
+#[cfg(feature = "file_io")]
+pub use self::vdf::load_vdf;
 
 #[cfg(test)]
 mod protobuf_freshness_tests {
