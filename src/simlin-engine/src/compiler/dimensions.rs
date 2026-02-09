@@ -568,7 +568,7 @@ mod tests {
             .models
             .get(&canonicalize("main"))
             .expect("main model should exist");
-        let module = super::super::Module::new(
+        let module: super::super::Module<f64> = super::super::Module::new(
             &project,
             model.clone(),
             &std::collections::BTreeSet::new(),
@@ -684,7 +684,7 @@ mod tests {
             .models
             .get(&canonicalize("main"))
             .expect("main model should exist");
-        let module = super::super::Module::new(
+        let module: super::super::Module<f64> = super::super::Module::new(
             &project,
             model.clone(),
             &std::collections::BTreeSet::new(),
@@ -777,7 +777,7 @@ mod tests {
             .models
             .get(&canonicalize("main"))
             .expect("main model should exist");
-        let module = super::super::Module::new(
+        let module: super::super::Module<f64> = super::super::Module::new(
             &project,
             model.clone(),
             &std::collections::BTreeSet::new(),

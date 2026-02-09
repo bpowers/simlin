@@ -5,7 +5,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use float_cmp::approx_eq;
 use smallvec::SmallVec;
 
 use crate::bytecode::{
@@ -14,6 +13,7 @@ use crate::bytecode::{
 };
 use crate::common::{Canonical, Ident, Result};
 use crate::dimensions::match_dimensions_two_pass;
+use crate::float::SimFloat;
 #[allow(unused_imports)]
 pub use crate::results::{Method, Results, Specs};
 use crate::sim_err;
@@ -86,13 +86,13 @@ pub(crate) const INITIAL_TIME_OFF: usize = 2;
 pub(crate) const FINAL_TIME_OFF: usize = 3;
 pub(crate) const IMPLICIT_VAR_COUNT: usize = 4;
 
-pub(crate) fn is_truthy(n: f64) -> bool {
-    let is_false = approx_eq!(f64, n, 0.0);
+pub(crate) fn is_truthy<F: SimFloat>(n: F) -> bool {
+    let is_false = n.approx_eq(F::zero());
     !is_false
 }
 
 #[inline(always)]
-fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
+fn eval_op2<F: SimFloat>(op: Op2, l: F, r: F) -> F {
     match op {
         Op2::Add => l + r,
         Op2::Sub => l - r,
@@ -100,13 +100,13 @@ fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
         Op2::Mul => l * r,
         Op2::Div => l / r,
         Op2::Mod => l.rem_euclid(r),
-        Op2::Gt => (l > r) as i8 as f64,
-        Op2::Gte => (l >= r) as i8 as f64,
-        Op2::Lt => (l < r) as i8 as f64,
-        Op2::Lte => (l <= r) as i8 as f64,
-        Op2::Eq => approx_eq!(f64, l, r) as i8 as f64,
-        Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
-        Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
+        Op2::Gt => F::from_i8((l > r) as i8),
+        Op2::Gte => F::from_i8((l >= r) as i8),
+        Op2::Lt => F::from_i8((l < r) as i8),
+        Op2::Lte => F::from_i8((l <= r) as i8),
+        Op2::Eq => F::from_i8(l.approx_eq(r) as i8),
+        Op2::And => F::from_i8((is_truthy(l) && is_truthy(r)) as i8),
+        Op2::Or => F::from_i8((is_truthy(l) || is_truthy(r)) as i8),
     }
 }
 
@@ -131,18 +131,18 @@ enum BytecodeLocation {
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-pub struct CompiledSimulation {
-    pub(crate) modules: HashMap<ModuleKey, CompiledModule>,
-    pub(crate) specs: Specs,
+pub struct CompiledSimulation<F: SimFloat> {
+    pub(crate) modules: HashMap<ModuleKey, CompiledModule<F>>,
+    pub(crate) specs: Specs<F>,
     pub(crate) root: ModuleKey,
     pub(crate) offsets: HashMap<Ident<Canonical>, usize>,
     cached_constant_info: HashMap<usize, Vec<BytecodeLocation>>,
 }
 
-impl CompiledSimulation {
+impl<F: SimFloat> CompiledSimulation<F> {
     pub(crate) fn new(
-        modules: HashMap<ModuleKey, CompiledModule>,
-        specs: Specs,
+        modules: HashMap<ModuleKey, CompiledModule<F>>,
+        specs: Specs<F>,
         root: ModuleKey,
         offsets: HashMap<Ident<Canonical>, usize>,
     ) -> Self {
@@ -172,19 +172,19 @@ impl CompiledSimulation {
 /// Per-module compiled initials with the shared ByteCodeContext needed to eval them.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-struct CompiledModuleInitials {
+struct CompiledModuleInitials<F: SimFloat> {
     #[allow(dead_code)]
     ident: Ident<Canonical>,
-    context: Arc<ByteCodeContext>,
-    initials: Arc<Vec<CompiledInitial>>,
+    context: Arc<ByteCodeContext<F>>,
+    initials: Arc<Vec<CompiledInitial<F>>>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-struct CompiledSlicedSimulation {
-    initial_modules: HashMap<ModuleKey, CompiledModuleInitials>,
-    flow_modules: HashMap<ModuleKey, CompiledModuleSlice>,
-    stock_modules: HashMap<ModuleKey, CompiledModuleSlice>,
+struct CompiledSlicedSimulation<F: SimFloat> {
+    initial_modules: HashMap<ModuleKey, CompiledModuleInitials<F>>,
+    flow_modules: HashMap<ModuleKey, CompiledModuleSlice<F>>,
+    stock_modules: HashMap<ModuleKey, CompiledModuleSlice<F>>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -196,7 +196,7 @@ pub(crate) enum StepPart {
 }
 
 // helper to borrow two non-overlapping chunk slices by index
-fn borrow_two(buf: &mut [f64], n_slots: usize, a: usize, b: usize) -> (&mut [f64], &mut [f64]) {
+fn borrow_two<F>(buf: &mut [F], n_slots: usize, a: usize, b: usize) -> (&mut [F], &mut [F]) {
     let (lo, hi, flip) = if a < b { (a, b, false) } else { (b, a, true) };
     let split = hi * n_slots;
     let (left, right) = buf.split_at_mut(split);
@@ -207,15 +207,15 @@ fn borrow_two(buf: &mut [f64], n_slots: usize, a: usize, b: usize) -> (&mut [f64
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-pub struct Vm {
-    specs: Specs,
+pub struct Vm<F: SimFloat> {
+    specs: Specs<F>,
     root: ModuleKey,
     offsets: HashMap<Ident<Canonical>, usize>,
-    sliced_sim: CompiledSlicedSimulation,
+    sliced_sim: CompiledSlicedSimulation<F>,
     n_slots: usize,
     n_chunks: usize,
     // simulation buffer for saved samples and working state
-    data: Option<Box<[f64]>>,
+    data: Option<Box<[F]>>,
     // indices into chunks for current and next slots
     curr_chunk: usize,
     next_chunk: usize,
@@ -225,9 +225,9 @@ pub struct Vm {
     step_accum: usize,
     // Temp array storage (allocated once, reused across evals)
     // Indexed by temp_offsets from ByteCodeContext
-    temp_storage: Vec<f64>,
+    temp_storage: Vec<F>,
     // Reusable stacks (allocated once, cleared before each top-level call)
-    stack: Stack,
+    stack: Stack<F>,
     view_stack: Vec<RuntimeView>,
     iter_stack: Vec<IterState>,
     broadcast_stack: Vec<BroadcastState>,
@@ -236,17 +236,17 @@ pub struct Vm {
     constant_info: HashMap<usize, Vec<BytecodeLocation>>,
     // Tracks original literal values before override, keyed by absolute offset.
     // Each entry stores the locations and their original values so clear_values can restore them.
-    original_literals: HashMap<usize, Vec<(BytecodeLocation, f64)>>,
+    original_literals: HashMap<usize, Vec<(BytecodeLocation, F)>>,
 }
 
 #[derive(Clone)]
-struct Stack {
-    data: [f64; STACK_CAPACITY],
+struct Stack<F: SimFloat> {
+    data: [F; STACK_CAPACITY],
     top: usize,
 }
 
 #[cfg(feature = "debug-derive")]
-impl std::fmt::Debug for Stack {
+impl<F: SimFloat> std::fmt::Debug for Stack<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Stack")
             .field("top", &self.top)
@@ -256,15 +256,15 @@ impl std::fmt::Debug for Stack {
 }
 
 #[allow(unsafe_code)]
-impl Stack {
+impl<F: SimFloat> Stack<F> {
     fn new() -> Self {
         Stack {
-            data: [0.0; STACK_CAPACITY],
+            data: [F::zero(); STACK_CAPACITY],
             top: 0,
         }
     }
     #[inline(always)]
-    fn push(&mut self, value: f64) {
+    fn push(&mut self, value: F) {
         debug_assert!(self.top < STACK_CAPACITY, "stack overflow");
         // SAFETY: ByteCodeBuilder::finish() statically validates that the max
         // stack depth of all compiled bytecode is < STACK_CAPACITY, so this
@@ -276,7 +276,7 @@ impl Stack {
         self.top += 1;
     }
     #[inline(always)]
-    fn pop(&mut self) -> f64 {
+    fn pop(&mut self) -> F {
         debug_assert!(self.top > 0, "stack underflow");
         self.top -= 1;
         // SAFETY: ByteCodeBuilder::finish() validates via checked_sub that no
@@ -302,9 +302,9 @@ impl Stack {
 /// `EvalState` because the borrow checker cannot split the struct across the
 /// call boundary.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-struct EvalState<'a> {
-    stack: &'a mut Stack,
-    temp_storage: &'a mut [f64],
+struct EvalState<'a, F: SimFloat> {
+    stack: &'a mut Stack<F>,
+    temp_storage: &'a mut [F],
     view_stack: &'a mut Vec<RuntimeView>,
     iter_stack: &'a mut Vec<IterState>,
     broadcast_stack: &'a mut Vec<BroadcastState>,
@@ -312,16 +312,16 @@ struct EvalState<'a> {
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-struct CompiledModuleSlice {
+struct CompiledModuleSlice<F: SimFloat> {
     #[allow(dead_code)]
     ident: Ident<Canonical>,
-    context: Arc<ByteCodeContext>,
-    bytecode: Arc<ByteCode>,
+    context: Arc<ByteCodeContext<F>>,
+    bytecode: Arc<ByteCode<F>>,
     part: StepPart,
 }
 
-impl CompiledModuleSlice {
-    fn new(module: &CompiledModule, part: StepPart) -> Self {
+impl<F: SimFloat> CompiledModuleSlice<F> {
+    fn new(module: &CompiledModule<F>, part: StepPart) -> Self {
         CompiledModuleSlice {
             ident: module.ident.clone(),
             context: module.context.clone(),
@@ -342,8 +342,8 @@ impl CompiledModuleSlice {
 /// (stocks with constant initials are not overridable). For each such offset,
 /// ALL bytecode locations across flows, stocks, and initials are collected so
 /// that a single `set_value` call mutates every literal that feeds that offset.
-fn collect_constant_info(
-    modules: &HashMap<ModuleKey, CompiledModule>,
+fn collect_constant_info<F: SimFloat>(
+    modules: &HashMap<ModuleKey, CompiledModule<F>>,
     module_key: &ModuleKey,
     base_off: usize,
 ) -> HashMap<usize, Vec<BytecodeLocation>> {
@@ -423,15 +423,15 @@ fn collect_constant_info(
     result
 }
 
-impl Vm {
-    pub fn new(sim: CompiledSimulation) -> Result<Vm> {
+impl<F: SimFloat> Vm<F> {
+    pub fn new(sim: CompiledSimulation<F>) -> Result<Vm<F>> {
         if sim.specs.stop < sim.specs.start {
             return sim_err!(
                 BadSimSpecs,
                 "end time has to be after start time".to_string()
             );
         }
-        if approx_eq!(f64, sim.specs.dt, 0.0) {
+        if sim.specs.dt.approx_eq(F::zero()) {
             return sim_err!(BadSimSpecs, "dt must be greater than 0".to_string());
         }
 
@@ -442,12 +442,13 @@ impl Vm {
         };
         let root_module = &sim.modules[&sim.root];
         let n_slots = root_module.n_slots;
-        let n_chunks: usize = ((sim.specs.stop - sim.specs.start) / save_step + 1.0) as usize;
-        let data: Box<[f64]> = vec![0.0; n_slots * (n_chunks + 2)].into_boxed_slice();
+        let n_chunks: usize =
+            ((sim.specs.stop - sim.specs.start) / save_step + F::one()).to_f64() as usize;
+        let data: Box<[F]> = vec![F::zero(); n_slots * (n_chunks + 2)].into_boxed_slice();
 
         // Allocate temp storage based on context temp info
         let temp_total_size = root_module.context.temp_total_size;
-        let temp_storage = vec![0.0; temp_total_size];
+        let temp_storage = vec![F::zero(); temp_total_size];
 
         Ok(Vm {
             specs: sim.specs,
@@ -502,7 +503,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    pub fn run_to(&mut self, end: f64) -> Result<()> {
+    pub fn run_to(&mut self, end: F) -> Result<()> {
         self.run_initials()?;
 
         let spec_start = self.specs.start;
@@ -511,10 +512,11 @@ impl Vm {
         let n_slots = self.n_slots;
         let n_chunks = self.n_chunks;
 
-        let save_every = std::cmp::max(1, (save_step / dt + 0.5).floor() as usize);
+        let save_every =
+            std::cmp::max(1, ((save_step / dt + F::half()).floor()).to_f64() as usize);
 
         self.stack.clear();
-        let module_inputs: &[f64] = &[0.0; 0];
+        let module_inputs: &[F] = &[];
         let mut data = self.data.take().unwrap();
 
         let module_flows = &self.sliced_sim.flow_modules[&self.root];
@@ -580,7 +582,7 @@ impl Vm {
         Ok(())
     }
 
-    pub fn into_results(self) -> Results {
+    pub fn into_results(self) -> Results<F> {
         Results {
             offsets: self.offsets.clone(),
             data: self.data.unwrap(),
@@ -591,7 +593,7 @@ impl Vm {
         }
     }
 
-    pub fn set_value_now(&mut self, off: usize, val: f64) {
+    pub fn set_value_now(&mut self, off: usize, val: F) {
         let start = self.curr_chunk * self.n_slots;
         let data = self.data.as_mut().unwrap();
         data[start + off] = val;
@@ -602,7 +604,7 @@ impl Vm {
     /// Precondition: `run_initials()` must have been called since the last
     /// `reset()`. After `reset()` but before `run_initials()`, the data buffer
     /// may contain stale values from the previous simulation run.
-    pub fn get_value_now(&self, off: usize) -> f64 {
+    pub fn get_value_now(&self, off: usize) -> F {
         debug_assert!(
             self.did_initials,
             "get_value_now called before run_initials; data buffer may contain stale values"
@@ -629,7 +631,7 @@ impl Vm {
     }
 
     /// Read the current value of a literal at a bytecode location.
-    fn read_literal(&self, loc: &BytecodeLocation) -> f64 {
+    fn read_literal(&self, loc: &BytecodeLocation) -> F {
         match loc {
             BytecodeLocation::FlowOrStock {
                 module_key,
@@ -668,7 +670,7 @@ impl Vm {
 
     /// Write a value to the literal at a bytecode location, using Arc::make_mut
     /// for copy-on-write semantics on shared bytecode.
-    fn write_literal(&mut self, loc: &BytecodeLocation, value: f64) {
+    fn write_literal(&mut self, loc: &BytecodeLocation, value: F) {
         match loc {
             BytecodeLocation::FlowOrStock {
                 module_key,
@@ -719,7 +721,7 @@ impl Vm {
         self.next_chunk = 1;
         self.did_initials = false;
         self.step_accum = 0;
-        self.temp_storage.fill(0.0);
+        self.temp_storage.fill(F::zero());
         self.stack.clear();
         self.view_stack.clear();
         self.iter_stack.clear();
@@ -729,7 +731,7 @@ impl Vm {
     /// Apply an override for a constant at the given absolute offset.
     /// Named constants get their own literal slots at compile time (via
     /// push_named_literal), so no de-interning is needed at runtime.
-    fn apply_override(&mut self, off: usize, value: f64) {
+    fn apply_override(&mut self, off: usize, value: F) {
         // Clone locations once; we need ownership because write_literal borrows &mut self.
         let locations = self.constant_info[&off].clone();
         if !self.original_literals.contains_key(&off) {
@@ -748,7 +750,7 @@ impl Vm {
     /// Set a value override for a simple constant by canonical variable name.
     /// Mutates the bytecode literals directly so AssignConstCurr needs no branching.
     /// Returns the data-buffer offset of the variable on success.
-    pub fn set_value(&mut self, ident: &Ident<Canonical>, value: f64) -> Result<usize> {
+    pub fn set_value(&mut self, ident: &Ident<Canonical>, value: F) -> Result<usize> {
         let off = match self.offsets.get(ident) {
             Some(&off) => off,
             None => {
@@ -772,7 +774,7 @@ impl Vm {
     }
 
     /// Set a value override for a simple constant by raw data-buffer offset.
-    pub fn set_value_by_offset(&mut self, off: usize, value: f64) -> Result<()> {
+    pub fn set_value_by_offset(&mut self, off: usize, value: F) -> Result<()> {
         if off >= self.n_slots {
             return sim_err!(
                 BadOverride,
@@ -811,7 +813,7 @@ impl Vm {
         let dt = self.specs.dt;
 
         self.stack.clear();
-        let module_inputs: &[f64] = &[0.0; 0];
+        let module_inputs: &[F] = &[];
         let mut data = self.data.take().unwrap();
 
         let (curr, next) = borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
@@ -863,7 +865,7 @@ impl Vm {
     /// Extract the time series for a variable after simulation.
     /// Returns None if the ident is not found.
     /// The returned vector has one element per saved step (including t=0).
-    pub fn get_series(&self, ident: &Ident<Canonical>) -> Option<Vec<f64>> {
+    pub fn get_series(&self, ident: &Ident<Canonical>) -> Option<Vec<F>> {
         let &off = self.offsets.get(ident)?;
         let data = self.data.as_ref()?;
         if !self.did_initials {
@@ -889,13 +891,13 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn eval_module_initials(
-        sliced_sim: &CompiledSlicedSimulation,
-        state: &mut EvalState<'_>,
-        parent_context: &ByteCodeContext,
+        sliced_sim: &CompiledSlicedSimulation<F>,
+        state: &mut EvalState<'_, F>,
+        parent_context: &ByteCodeContext<F>,
         parent_module_off: usize,
-        module_inputs: &[f64],
-        curr: &mut [f64],
-        next: &mut [f64],
+        module_inputs: &[F],
+        curr: &mut [F],
+        next: &mut [F],
         id: ModuleId,
     ) {
         let new_module_decl = &parent_context.modules[id as usize];
@@ -916,13 +918,13 @@ impl Vm {
     /// Run all per-variable initials for a module (in dependency order).
     #[allow(clippy::too_many_arguments)]
     fn eval_initials(
-        sliced_sim: &CompiledSlicedSimulation,
-        state: &mut EvalState<'_>,
+        sliced_sim: &CompiledSlicedSimulation<F>,
+        state: &mut EvalState<'_, F>,
         module_key: &ModuleKey,
         module_off: usize,
-        module_inputs: &[f64],
-        curr: &mut [f64],
-        next: &mut [f64],
+        module_inputs: &[F],
+        curr: &mut [F],
+        next: &mut [F],
     ) {
         let module_initials = &sliced_sim.initial_modules[module_key];
         let context = &module_initials.context;
@@ -944,13 +946,13 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn eval(
-        sliced_sim: &CompiledSlicedSimulation,
-        state: &mut EvalState<'_>,
-        module: &CompiledModuleSlice,
+        sliced_sim: &CompiledSlicedSimulation<F>,
+        state: &mut EvalState<'_, F>,
+        module: &CompiledModuleSlice<F>,
         module_off: usize,
-        module_inputs: &[f64],
-        curr: &mut [f64],
-        next: &mut [f64],
+        module_inputs: &[F],
+        curr: &mut [F],
+        next: &mut [F],
     ) {
         Self::eval_bytecode(
             sliced_sim,
@@ -967,15 +969,15 @@ impl Vm {
 
     #[allow(clippy::too_many_arguments)]
     fn eval_bytecode(
-        sliced_sim: &CompiledSlicedSimulation,
-        state: &mut EvalState<'_>,
-        context: &ByteCodeContext,
-        bytecode: &ByteCode,
+        sliced_sim: &CompiledSlicedSimulation<F>,
+        state: &mut EvalState<'_, F>,
+        context: &ByteCodeContext<F>,
+        bytecode: &ByteCode<F>,
         part: StepPart,
         module_off: usize,
-        module_inputs: &[f64],
-        curr: &mut [f64],
-        next: &mut [f64],
+        module_inputs: &[F],
+        curr: &mut [F],
+        next: &mut [F],
     ) {
         // Destructure EvalState into local reborrows so the opcode loop can use
         // them directly.  For recursive EvalModule calls we must re-pack into a
@@ -1004,7 +1006,7 @@ impl Vm {
                 }
                 Opcode::Not {} => {
                     let r = stack.pop();
-                    stack.push((!is_truthy(r)) as i8 as f64);
+                    stack.push(F::from_i8((!is_truthy(r)) as i8));
                 }
                 Opcode::LoadConstant { id } => {
                     stack.push(bytecode.literals[*id as usize]);
@@ -1016,7 +1018,7 @@ impl Vm {
                     stack.push(curr[module_off + *off as usize]);
                 }
                 Opcode::PushSubscriptIndex { bounds } => {
-                    let index = stack.pop().floor() as u16;
+                    let index = stack.pop().floor().to_f64() as u16;
                     if index == 0 || index > *bounds {
                         subscript_index_valid = false;
                     } else {
@@ -1035,7 +1037,7 @@ impl Vm {
                         }
                         curr[module_off + *off as usize + index]
                     } else {
-                        f64::NAN
+                        F::nan()
                     };
                     stack.push(result);
                     subscript_index.clear();
@@ -1055,8 +1057,8 @@ impl Vm {
                 }
                 Opcode::EvalModule { id, n_inputs } => {
                     use std::iter;
-                    let mut module_inputs: SmallVec<[f64; 16]> =
-                        iter::repeat_n(0.0, *n_inputs as usize).collect();
+                    let mut module_inputs: SmallVec<[F; 16]> =
+                        iter::repeat_n(F::zero(), *n_inputs as usize).collect();
                     for j in (0..(*n_inputs as usize)).rev() {
                         module_inputs[j] = stack.pop();
                     }
@@ -1160,10 +1162,12 @@ impl Vm {
                     let element_offset = stack.pop();
 
                     // Bounds check: element_offset must be in [0, table_count)
-                    if element_offset < 0.0 || element_offset >= (*table_count as f64) {
-                        stack.push(f64::NAN);
+                    if element_offset < F::zero()
+                        || element_offset >= F::from_usize(*table_count as usize)
+                    {
+                        stack.push(F::nan());
                     } else {
-                        let gf_idx = (*base_gf as usize) + (element_offset as usize);
+                        let gf_idx = (*base_gf as usize) + (element_offset.to_f64() as usize);
                         let gf = &context.graphical_functions[gf_idx];
                         let result = match mode {
                             LookupMode::Interpolate => lookup(gf, lookup_index),
@@ -1240,7 +1244,7 @@ impl Vm {
 
                 Opcode::ViewSubscriptDynamic { dim_idx } => {
                     // XMILE uses 1-based indexing; validate bounds and convert to 0-based
-                    let index_1based = stack.pop().floor() as u16;
+                    let index_1based = stack.pop().floor().to_f64() as u16;
                     let view = view_stack.last_mut().unwrap();
                     // apply_single_subscript_checked validates bounds and sets is_valid=false
                     // if out of bounds, allowing subsequent reads to return NaN
@@ -1258,8 +1262,8 @@ impl Vm {
 
                 Opcode::ViewRangeDynamic { dim_idx } => {
                     // Pop end and start from stack (1-based indices, inclusive range)
-                    let end_1based = stack.pop() as u16;
-                    let start_1based = stack.pop() as u16;
+                    let end_1based = stack.pop().to_f64() as u16;
+                    let start_1based = stack.pop().to_f64() as u16;
                     let view = view_stack.last_mut().unwrap();
                     // apply_range_checked handles validation and 1-based to 0-based conversion
                     view.apply_range_checked(*dim_idx as usize, start_1based, end_1based);
@@ -1308,7 +1312,7 @@ impl Vm {
                 }
 
                 Opcode::LoadTempDynamic { temp_id } => {
-                    let index = stack.pop().floor() as usize;
+                    let index = stack.pop().floor().to_f64() as usize;
                     let temp_off = context.temp_offsets[*temp_id as usize];
                     let value = temp_storage[temp_off + index];
                     stack.push(value);
@@ -1369,7 +1373,7 @@ impl Vm {
 
                     // Return NaN for invalid views (e.g., out-of-bounds subscript)
                     if !view.is_valid {
-                        stack.push(f64::NAN);
+                        stack.push(F::nan());
                     } else {
                         let flat_off = if let Some(ref offsets) = iter_state.flat_offsets {
                             offsets[iter_state.current]
@@ -1411,7 +1415,7 @@ impl Vm {
                     let source_view = view_stack.last().unwrap();
 
                     if !source_view.is_valid {
-                        stack.push(f64::NAN);
+                        stack.push(F::nan());
                     } else {
                         // Get the iteration view (output dimensions)
                         let iter_view = &view_stack[iter_state.view_stack_idx];
@@ -1512,7 +1516,7 @@ impl Vm {
                             stack.push(value);
                         } else {
                             // Out of bounds or no matching dimension - return NaN
-                            stack.push(f64::NAN);
+                            stack.push(F::nan());
                         }
                     }
                 }
@@ -1527,7 +1531,7 @@ impl Vm {
                     let source_view = &view_stack[source_view_idx];
 
                     if !source_view.is_valid {
-                        stack.push(f64::NAN);
+                        stack.push(F::nan());
                     } else {
                         // Get the iteration view (output dimensions)
                         let iter_view = &view_stack[iter_state.view_stack_idx];
@@ -1628,7 +1632,7 @@ impl Vm {
                             stack.push(value);
                         } else {
                             // Out of bounds or no matching dimension - return NaN
-                            stack.push(f64::NAN);
+                            stack.push(F::nan());
                         }
                     }
                 }
@@ -1666,8 +1670,14 @@ impl Vm {
                 // =========================================================
                 Opcode::ArraySum {} => {
                     let view = view_stack.last().unwrap();
-                    let sum =
-                        Self::reduce_view(temp_storage, view, curr, context, |acc, v| acc + v, 0.0);
+                    let sum = Self::reduce_view(
+                        temp_storage,
+                        view,
+                        curr,
+                        context,
+                        |acc, v| acc + v,
+                        F::zero(),
+                    );
                     stack.push(sum);
                 }
 
@@ -1678,8 +1688,8 @@ impl Vm {
                         view,
                         curr,
                         context,
-                        |acc, v| acc.max(v),
-                        f64::NEG_INFINITY,
+                        |acc, v| if v > acc { v } else { acc },
+                        F::neg_infinity(),
                     );
                     stack.push(max);
                 }
@@ -1691,43 +1701,57 @@ impl Vm {
                         view,
                         curr,
                         context,
-                        |acc, v| acc.min(v),
-                        f64::INFINITY,
+                        |acc, v| if v < acc { v } else { acc },
+                        F::infinity(),
                     );
                     stack.push(min);
                 }
 
                 Opcode::ArrayMean {} => {
                     let view = view_stack.last().unwrap();
-                    let sum =
-                        Self::reduce_view(temp_storage, view, curr, context, |acc, v| acc + v, 0.0);
-                    let count = view.size() as f64;
+                    let sum = Self::reduce_view(
+                        temp_storage,
+                        view,
+                        curr,
+                        context,
+                        |acc, v| acc + v,
+                        F::zero(),
+                    );
+                    let count = F::from_usize(view.size());
                     stack.push(sum / count);
                 }
 
                 Opcode::ArrayStddev {} => {
                     let view = view_stack.last().unwrap();
                     let size = view.size();
-                    let sum =
-                        Self::reduce_view(temp_storage, view, curr, context, |acc, v| acc + v, 0.0);
-                    let mean = sum / size as f64;
+                    let sum = Self::reduce_view(
+                        temp_storage,
+                        view,
+                        curr,
+                        context,
+                        |acc, v| acc + v,
+                        F::zero(),
+                    );
+                    let fsize = F::from_usize(size);
+                    let mean = sum / fsize;
 
                     // Second pass for variance
+                    let two = F::one() + F::one();
                     let variance_sum = Self::reduce_view(
                         temp_storage,
                         view,
                         curr,
                         context,
-                        |acc, v| acc + (v - mean).powi(2),
-                        0.0,
+                        |acc, v| acc + (v - mean).powf(two),
+                        F::zero(),
                     );
-                    let stddev = (variance_sum / size as f64).sqrt();
+                    let stddev = (variance_sum / fsize).sqrt();
                     stack.push(stddev);
                 }
 
                 Opcode::ArraySize {} => {
                     let view = view_stack.last().unwrap();
-                    stack.push(view.size() as f64);
+                    stack.push(F::from_usize(view.size()));
                 }
 
                 // =========================================================
@@ -1801,7 +1825,7 @@ impl Vm {
 
                     // Return NaN for invalid views
                     if !view.is_valid {
-                        stack.push(f64::NAN);
+                        stack.push(F::nan());
                     } else {
                         // Map result indices to source indices
                         let mut source_indices: SmallVec<[u16; 4]> = SmallVec::new();
@@ -1874,20 +1898,20 @@ impl Vm {
     }
 
     /// Helper: Reduce all elements of a view using a fold function
-    fn reduce_view<F>(
-        temp_storage: &[f64],
+    fn reduce_view<Fold>(
+        temp_storage: &[F],
         view: &RuntimeView,
-        curr: &[f64],
-        context: &ByteCodeContext,
-        f: F,
-        init: f64,
-    ) -> f64
+        curr: &[F],
+        context: &ByteCodeContext<F>,
+        f: Fold,
+        init: F,
+    ) -> F
     where
-        F: Fn(f64, f64) -> f64,
+        Fold: Fn(F, F) -> F,
     {
         // Return NaN for invalid views
         if !view.is_valid {
-            return f64::NAN;
+            return F::nan();
         }
 
         let size = view.size();
@@ -1971,7 +1995,7 @@ impl Vm {
 }
 
 #[inline(always)]
-fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
+fn apply<F: SimFloat>(func: BuiltinId, time: F, dt: F, a: F, b: F, c: F) -> F {
     match func {
         BuiltinId::Abs => a.abs(),
         BuiltinId::Arccos => a.acos(),
@@ -1979,7 +2003,7 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
         BuiltinId::Arctan => a.atan(),
         BuiltinId::Cos => a.cos(),
         BuiltinId::Exp => a.exp(),
-        BuiltinId::Inf => f64::INFINITY,
+        BuiltinId::Inf => F::infinity(),
         BuiltinId::Int => a.floor(),
         BuiltinId::Ln => a.ln(),
         BuiltinId::Log10 => a.log10(),
@@ -1997,7 +2021,7 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
                 b
             }
         }
-        BuiltinId::Pi => std::f64::consts::PI,
+        BuiltinId::Pi => F::pi(),
         BuiltinId::Pulse => {
             let volume = a;
             let first_pulse = b;
@@ -2011,19 +2035,19 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
             ramp(time, slope, start_time, Some(end_time))
         }
         BuiltinId::SafeDiv => {
-            if b != 0.0 {
+            if !b.approx_eq(F::zero()) {
                 a / b
             } else {
                 c
             }
         }
         BuiltinId::Sign => {
-            if a > 0.0 {
-                1.0
-            } else if a < 0.0 {
-                -1.0
+            if a > F::zero() {
+                F::one()
+            } else if a < F::zero() {
+                F::neg_one()
             } else {
-                0.0
+                F::zero()
             }
         }
         BuiltinId::Sin => a.sin(),
@@ -2037,7 +2061,7 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
     }
 }
 
-pub(crate) fn ramp(time: f64, slope: f64, start_time: f64, end_time: Option<f64>) -> f64 {
+pub(crate) fn ramp<F: SimFloat>(time: F, slope: F, start_time: F, end_time: Option<F>) -> F {
     if time > start_time {
         let done_ramping = end_time.is_some() && time >= end_time.unwrap();
         if done_ramping {
@@ -2046,47 +2070,48 @@ pub(crate) fn ramp(time: f64, slope: f64, start_time: f64, end_time: Option<f64>
             slope * (time - start_time)
         }
     } else {
-        0.0
+        F::zero()
     }
 }
 
-pub(crate) fn step(time: f64, dt: f64, height: f64, step_time: f64) -> f64 {
-    if time + dt / 2.0 > step_time {
+pub(crate) fn step<F: SimFloat>(time: F, dt: F, height: F, step_time: F) -> F {
+    let two = F::one() + F::one();
+    if time + dt / two > step_time {
         height
     } else {
-        0.0
+        F::zero()
     }
 }
 
 #[inline(never)]
-pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval: f64) -> f64 {
+pub(crate) fn pulse<F: SimFloat>(time: F, dt: F, volume: F, first_pulse: F, interval: F) -> F {
     if time < first_pulse {
-        return 0.0;
+        return F::zero();
     }
 
     let mut next_pulse = first_pulse;
     while time >= next_pulse {
         if time < next_pulse + dt {
             return volume / dt;
-        } else if interval <= 0.0 {
+        } else if interval <= F::zero() {
             break;
         } else {
             next_pulse += interval;
         }
     }
 
-    0.0
+    F::zero()
 }
 
 #[inline(never)]
-fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
+fn lookup<F: SimFloat>(table: &[(F, F)], index: F) -> F {
     if table.is_empty() {
-        return f64::NAN;
+        return F::nan();
     }
 
     if index.is_nan() {
         // things get wonky below if we try to binary search for NaN
-        return f64::NAN;
+        return F::nan();
     }
 
     // check if index is below the start of the table
@@ -2117,7 +2142,7 @@ fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
     }
 
     let i = low;
-    if approx_eq!(f64, table[i].0, index) {
+    if table[i].0.approx_eq(index) {
         table[i].1
     } else {
         // slope = deltaY/deltaX
@@ -2131,13 +2156,13 @@ fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
 /// If x is beyond the last point, returns the y-value of the last point.
 /// This is a "sample and hold" interpolation where we look forward.
 #[inline(never)]
-fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
+fn lookup_forward<F: SimFloat>(table: &[(F, F)], index: F) -> F {
     if table.is_empty() {
-        return f64::NAN;
+        return F::nan();
     }
 
     if index.is_nan() {
-        return f64::NAN;
+        return F::nan();
     }
 
     // If index is at or below the first point, return first y
@@ -2173,13 +2198,13 @@ fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
 ///
 /// For duplicate x-values, returns the y of the LAST point with that x.
 #[inline(never)]
-fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
+fn lookup_backward<F: SimFloat>(table: &[(F, F)], index: F) -> F {
     if table.is_empty() {
-        return f64::NAN;
+        return F::nan();
     }
 
     if index.is_nan() {
-        return f64::NAN;
+        return F::nan();
     }
 
     // If index is at or below the first point, return first y
@@ -2335,7 +2360,7 @@ mod per_variable_initials_tests {
     use crate::test_common::TestProject;
 
     /// Helper: build a Simulation and CompiledSimulation from a TestProject
-    fn build_compiled(tp: &TestProject) -> (crate::interpreter::Simulation, CompiledSimulation) {
+    fn build_compiled(tp: &TestProject) -> (crate::interpreter::Simulation, CompiledSimulation<f64>) {
         let sim = tp.build_sim().expect("build_sim failed");
         let compiled = sim.compile().expect("compile failed");
         (sim, compiled)
@@ -2568,7 +2593,7 @@ mod vm_reset_and_run_initials_tests {
             .stock("population", "100", &["births"], &["deaths"], None)
     }
 
-    fn build_compiled(tp: &TestProject) -> (crate::interpreter::Simulation, CompiledSimulation) {
+    fn build_compiled(tp: &TestProject) -> (crate::interpreter::Simulation, CompiledSimulation<f64>) {
         let sim = tp.build_sim().unwrap();
         let compiled = sim.compile().unwrap();
         (sim, compiled)
@@ -2856,7 +2881,7 @@ mod set_value_tests {
             .stock("population", "scaled_rate", &["inflow"], &["outflow"], None)
     }
 
-    fn build_compiled(tp: &TestProject) -> CompiledSimulation {
+    fn build_compiled(tp: &TestProject) -> CompiledSimulation<f64> {
         let sim = tp.build_sim().unwrap();
         sim.compile().unwrap()
     }
@@ -3393,7 +3418,7 @@ mod stack_tests {
 
     #[test]
     fn test_push_pop_basic() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         s.push(1.0);
         s.push(2.0);
         s.push(3.0);
@@ -3404,7 +3429,7 @@ mod stack_tests {
 
     #[test]
     fn test_lifo_ordering() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         for i in 0..10 {
             s.push(i as f64);
         }
@@ -3415,7 +3440,7 @@ mod stack_tests {
 
     #[test]
     fn test_clear_resets_stack() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         s.push(1.0);
         s.push(2.0);
         assert_eq!(2, s.len());
@@ -3425,7 +3450,7 @@ mod stack_tests {
 
     #[test]
     fn test_len_tracks_size() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         assert_eq!(0, s.len());
         s.push(10.0);
         assert_eq!(1, s.len());
@@ -3439,7 +3464,7 @@ mod stack_tests {
 
     #[test]
     fn test_full_capacity() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         for i in 0..STACK_CAPACITY {
             s.push(i as f64);
         }
@@ -3452,7 +3477,7 @@ mod stack_tests {
 
     #[test]
     fn test_interleaved_push_pop() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         s.push(1.0);
         s.push(2.0);
         assert_eq!(2.0, s.pop());
@@ -3466,7 +3491,7 @@ mod stack_tests {
 
     #[test]
     fn test_push_after_clear() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         s.push(1.0);
         s.push(2.0);
         s.clear();
@@ -3477,7 +3502,7 @@ mod stack_tests {
 
     #[test]
     fn test_negative_and_special_values() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         s.push(-1.0);
         s.push(0.0);
         s.push(f64::INFINITY);
@@ -3497,20 +3522,20 @@ mod superinstruction_tests {
     use crate::bytecode::Opcode;
     use crate::test_common::TestProject;
 
-    fn build_vm(tp: &TestProject) -> Vm {
+    fn build_vm(tp: &TestProject) -> Vm<f64> {
         let sim = tp.build_sim().unwrap();
         let compiled = sim.compile().unwrap();
         Vm::new(compiled).unwrap()
     }
 
     /// Helper: collect all opcodes from the flow bytecode of the root module.
-    fn flow_opcodes(vm: &Vm) -> Vec<&Opcode> {
+    fn flow_opcodes(vm: &Vm<f64>) -> Vec<&Opcode> {
         let bc = &vm.sliced_sim.flow_modules[&vm.root].bytecode;
         bc.code.iter().collect()
     }
 
     /// Helper: collect all opcodes from the stock bytecode of the root module.
-    fn stock_opcodes(vm: &Vm) -> Vec<&Opcode> {
+    fn stock_opcodes(vm: &Vm<f64>) -> Vec<&Opcode> {
         let bc = &vm.sliced_sim.stock_modules[&vm.root].bytecode;
         bc.code.iter().collect()
     }
@@ -4090,7 +4115,7 @@ mod vm_reset_run_to_and_constants_tests {
             .stock("population", "100", &["births"], &["deaths"], None)
     }
 
-    fn build_compiled(tp: &TestProject) -> CompiledSimulation {
+    fn build_compiled(tp: &TestProject) -> CompiledSimulation<f64> {
         let sim = tp.build_sim().unwrap();
         sim.compile().unwrap()
     }

@@ -16,21 +16,26 @@ use crate::bytecode::{
 };
 use crate::common::{Canonical, ErrorCode, ErrorKind, Ident, Result, canonicalize};
 use crate::dimensions::Dimension;
+use crate::float::SimFloat;
 use crate::sim_err;
 use crate::vm::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
+use ordered_float::OrderedFloat;
 
 use super::Module;
 use super::dimensions::UnaryOp;
 use super::expr::{BuiltinFn, Expr, SubscriptIndex};
 
-pub(super) struct Compiler<'module> {
-    module: &'module Module,
+pub(super) struct Compiler<'module, F: SimFloat>
+where
+    OrderedFloat<F>: Eq + std::hash::Hash,
+{
+    module: &'module Module<F>,
     module_decls: Vec<ModuleDeclaration>,
-    graphical_functions: Vec<Vec<(f64, f64)>>,
+    graphical_functions: Vec<Vec<(F, F)>>,
     /// Maps table variable names to their base index in graphical_functions.
     /// For subscripted lookups, the actual table is at base_id + element_offset.
     table_base_ids: HashMap<Ident<Canonical>, GraphicalFunctionId>,
-    curr_code: ByteCodeBuilder,
+    curr_code: ByteCodeBuilder<F>,
     // Array support fields
     pub(super) dimensions: Vec<DimensionInfo>,
     pub(super) subdim_relations: Vec<SubdimensionRelation>,
@@ -45,8 +50,11 @@ pub(super) struct Compiler<'module> {
     iter_source_views: Option<Vec<(StaticArrayView, u8)>>,
 }
 
-impl<'module> Compiler<'module> {
-    pub(super) fn new(module: &'module Module) -> Compiler<'module> {
+impl<'module, F: SimFloat> Compiler<'module, F>
+where
+    OrderedFloat<F>: Eq + std::hash::Hash,
+{
+    pub(super) fn new(module: &'module Module<F>) -> Compiler<'module, F> {
         // Pre-populate graphical_functions with all tables and record base IDs
         let mut graphical_functions = Vec::new();
         let mut table_base_ids = HashMap::new();
@@ -280,7 +288,7 @@ impl<'module> Compiler<'module> {
 
     /// Emit bytecode to push an expression's view onto the view stack.
     /// This is used for array operations that need to iterate over arrays.
-    fn walk_expr_as_view(&mut self, expr: &Expr) -> Result<()> {
+    fn walk_expr_as_view(&mut self, expr: &Expr<F>) -> Result<()> {
         match expr {
             Expr::StaticSubscript(off, view, _) => {
                 // Create a static view and push it
@@ -360,7 +368,7 @@ impl<'module> Compiler<'module> {
         }
     }
 
-    fn walk(&mut self, exprs: &[Expr]) -> Result<ByteCode> {
+    fn walk(&mut self, exprs: &[Expr<F>]) -> Result<ByteCode<F>> {
         for expr in exprs.iter() {
             self.walk_expr(expr)?;
         }
@@ -371,7 +379,7 @@ impl<'module> Compiler<'module> {
         Ok(curr.finish())
     }
 
-    fn walk_expr(&mut self, expr: &Expr) -> Result<Option<()>> {
+    fn walk_expr(&mut self, expr: &Expr<F>) -> Result<Option<()>> {
         let result = match expr {
             Expr::Const(value, _) => {
                 let id = self.curr_code.intern_literal(*value);
@@ -475,10 +483,10 @@ impl<'module> Compiler<'module> {
             }
             Expr::App(builtin, _) => {
                 // Helper to extract table info from table expression
-                fn extract_table_info(
-                    table_expr: &Expr,
+                fn extract_table_info<F: SimFloat>(
+                    table_expr: &Expr<F>,
                     module_offsets: &HashMap<Ident<Canonical>, (usize, usize)>,
-                ) -> Result<(Ident<Canonical>, Expr)> {
+                ) -> Result<(Ident<Canonical>, Expr<F>)> {
                     match table_expr {
                         Expr::Var(off, loc) => {
                             // Could be a simple scalar table or an element of an arrayed table
@@ -496,7 +504,7 @@ impl<'module> Compiler<'module> {
                                     )
                                 })?;
                             let elem_off = *off - base_off;
-                            Ok((table_ident, Expr::Const(elem_off as f64, *loc)))
+                            Ok((table_ident, Expr::Const(F::from_usize(elem_off), *loc)))
                         }
                         Expr::StaticSubscript(off, view, loc) => {
                             // Static subscript - element offset is precomputed in the ArrayView
@@ -518,13 +526,13 @@ impl<'module> Compiler<'module> {
                                         Some("could not find table variable".to_string()),
                                     )
                                 })?;
-                            Ok((table_ident, Expr::Const(view.offset as f64, *loc)))
+                            Ok((table_ident, Expr::Const(F::from_usize(view.offset), *loc)))
                         }
                         Expr::Subscript(off, subscript_indices, dim_sizes, _loc) => {
                             // Subscripted table reference - compute element_offset
                             // For a multi-dimensional subscript, compute linear offset
                             // offset = sum(index_i * stride_i) where stride_i = product of sizes[i+1..]
-                            let mut offset_expr: Option<Expr> = None;
+                            let mut offset_expr: Option<Expr<F>> = None;
                             let mut stride = 1usize;
 
                             // Process indices in reverse order to compute strides correctly
@@ -532,7 +540,7 @@ impl<'module> Compiler<'module> {
                                 let idx_expr = match sub_idx {
                                     SubscriptIndex::Single(expr) => {
                                         // Convert to 0-based index by subtracting 1
-                                        let one = Expr::Const(1.0, expr.get_loc());
+                                        let one = Expr::Const(F::one(), expr.get_loc());
                                         Expr::Op2(
                                             BinaryOp::Sub,
                                             Box::new(expr.clone()),
@@ -554,7 +562,7 @@ impl<'module> Compiler<'module> {
                                     idx_expr
                                 } else {
                                     let stride_const =
-                                        Expr::Const(stride as f64, idx_expr.get_loc());
+                                        Expr::Const(F::from_usize(stride), idx_expr.get_loc());
                                     Expr::Op2(
                                         BinaryOp::Mul,
                                         Box::new(idx_expr),
@@ -589,7 +597,7 @@ impl<'module> Compiler<'module> {
                                         Some("could not find table variable".to_string()),
                                     )
                                 })?;
-                            Ok((table_ident, offset_expr.unwrap_or(Expr::Const(0.0, *_loc))))
+                            Ok((table_ident, offset_expr.unwrap_or(Expr::Const(F::zero(), *_loc))))
                         }
                         _ => {
                             sim_err!(
@@ -605,7 +613,7 @@ impl<'module> Compiler<'module> {
                 if let BuiltinFn::Lookup(table_expr, index, _loc) = builtin {
                     let module_offsets = &self.module.offsets[&self.module.ident];
                     let (table_ident, element_offset_expr) =
-                        extract_table_info(table_expr, module_offsets)?;
+                        extract_table_info::<F>(table_expr, module_offsets)?;
 
                     // Look up the base_gf for this table variable
                     let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
@@ -646,7 +654,7 @@ impl<'module> Compiler<'module> {
                     };
                     let module_offsets = &self.module.offsets[&self.module.ident];
                     let (table_ident, element_offset_expr) =
-                        extract_table_info(table_expr, module_offsets)?;
+                        extract_table_info::<F>(table_expr, module_offsets)?;
 
                     let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
                         crate::Error::new(
@@ -676,9 +684,9 @@ impl<'module> Compiler<'module> {
                 // so are module builtins
                 if let BuiltinFn::IsModuleInput(ident, _loc) = builtin {
                     let id = if self.module.inputs.contains(&canonicalize(ident)) {
-                        self.curr_code.intern_literal(1.0)
+                        self.curr_code.intern_literal(F::one())
                     } else {
-                        self.curr_code.intern_literal(0.0)
+                        self.curr_code.intern_literal(F::zero())
                     };
                     self.push(Opcode::LoadConstant { id });
                     return Ok(Some(()));
@@ -705,8 +713,8 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::IsModuleInput(_, _) => unreachable!(),
                     BuiltinFn::Inf | BuiltinFn::Pi => {
                         let lit = match builtin {
-                            BuiltinFn::Inf => f64::INFINITY,
-                            BuiltinFn::Pi => std::f64::consts::PI,
+                            BuiltinFn::Inf => F::infinity(),
+                            BuiltinFn::Pi => F::pi(),
                             _ => unreachable!(),
                         };
                         let id = self.curr_code.intern_literal(lit);
@@ -727,14 +735,14 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::Sqrt(a)
                     | BuiltinFn::Tan(a) => {
                         self.walk_expr(a)?.unwrap();
-                        let id = self.curr_code.intern_literal(0.0);
+                        let id = self.curr_code.intern_literal(F::zero());
                         self.push(Opcode::LoadConstant { id });
                         self.push(Opcode::LoadConstant { id });
                     }
                     BuiltinFn::Step(a, b) => {
                         self.walk_expr(a)?.unwrap();
                         self.walk_expr(b)?.unwrap();
-                        let id = self.curr_code.intern_literal(0.0);
+                        let id = self.curr_code.intern_literal(F::zero());
                         self.push(Opcode::LoadConstant { id });
                     }
                     BuiltinFn::Max(a, b) => {
@@ -742,7 +750,7 @@ impl<'module> Compiler<'module> {
                             // Two-argument scalar max
                             self.walk_expr(a)?.unwrap();
                             self.walk_expr(b)?.unwrap();
-                            let id = self.curr_code.intern_literal(0.0);
+                            let id = self.curr_code.intern_literal(F::zero());
                             self.push(Opcode::LoadConstant { id });
                         } else {
                             // Single-argument array max
@@ -757,7 +765,7 @@ impl<'module> Compiler<'module> {
                             // Two-argument scalar min
                             self.walk_expr(a)?.unwrap();
                             self.walk_expr(b)?.unwrap();
-                            let id = self.curr_code.intern_literal(0.0);
+                            let id = self.curr_code.intern_literal(F::zero());
                             self.push(Opcode::LoadConstant { id });
                         } else {
                             // Single-argument array min
@@ -773,7 +781,7 @@ impl<'module> Compiler<'module> {
                         if c.is_some() {
                             self.walk_expr(c.as_ref().unwrap())?.unwrap()
                         } else {
-                            let id = self.curr_code.intern_literal(0.0);
+                            let id = self.curr_code.intern_literal(F::zero());
                             self.push(Opcode::LoadConstant { id });
                         };
                     }
@@ -793,7 +801,7 @@ impl<'module> Compiler<'module> {
                         self.walk_expr(b)?.unwrap();
                         let c = c.as_ref().map(|c| self.walk_expr(c).unwrap().unwrap());
                         if c.is_none() {
-                            let id = self.curr_code.intern_literal(0.0);
+                            let id = self.curr_code.intern_literal(F::zero());
                             self.push(Opcode::LoadConstant { id });
                         }
                     }
@@ -817,7 +825,7 @@ impl<'module> Compiler<'module> {
                         }
 
                         // Multi-argument scalar mean: (arg1 + arg2 + ... + argN) / N
-                        let id = self.curr_code.intern_literal(0.0);
+                        let id = self.curr_code.intern_literal(F::zero());
                         self.push(Opcode::LoadConstant { id });
 
                         for arg in args.iter() {
@@ -825,7 +833,7 @@ impl<'module> Compiler<'module> {
                             self.push(Opcode::Op2 { op: Op2::Add });
                         }
 
-                        let id = self.curr_code.intern_literal(args.len() as f64);
+                        let id = self.curr_code.intern_literal(F::from_usize(args.len()));
                         self.push(Opcode::LoadConstant { id });
                         self.push(Opcode::Op2 { op: Op2::Div });
                         return Ok(Some(()));
@@ -1094,7 +1102,7 @@ impl<'module> Compiler<'module> {
     /// Collect all source views referenced in an expression.
     /// This traverses the expression and collects StaticArrayView data for each
     /// StaticSubscript and TempArray node, deduplicating identical views.
-    fn collect_iter_source_views(&mut self, expr: &Expr) -> Vec<StaticArrayView> {
+    fn collect_iter_source_views(&mut self, expr: &Expr<F>) -> Vec<StaticArrayView> {
         let mut views = Vec::new();
         let mut seen = std::collections::HashSet::new();
         self.collect_iter_source_views_impl(expr, &mut views, &mut seen);
@@ -1103,7 +1111,7 @@ impl<'module> Compiler<'module> {
 
     fn collect_iter_source_views_impl(
         &mut self,
-        expr: &Expr,
+        expr: &Expr<F>,
         views: &mut Vec<StaticArrayView>,
         seen: &mut std::collections::HashSet<StaticArrayView>,
     ) {
@@ -1155,7 +1163,7 @@ impl<'module> Compiler<'module> {
 
     fn collect_builtin_views(
         &mut self,
-        builtin: &BuiltinFn,
+        builtin: &BuiltinFn<F>,
         views: &mut Vec<StaticArrayView>,
         seen: &mut std::collections::HashSet<StaticArrayView>,
     ) {
@@ -1221,9 +1229,9 @@ impl<'module> Compiler<'module> {
         })
     }
 
-    pub(super) fn compile(mut self) -> Result<CompiledModule> {
+    pub(super) fn compile(mut self) -> Result<CompiledModule<F>> {
         // Compile each variable's initials separately
-        let compiled_initials: Vec<CompiledInitial> = self
+        let compiled_initials: Vec<CompiledInitial<F>> = self
             .module
             .runlist_initials_by_var
             .iter()

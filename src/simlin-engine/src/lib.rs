@@ -26,6 +26,7 @@ mod compiler;
 pub mod datamodel;
 pub mod diagram;
 mod dimensions;
+pub mod float;
 pub mod interpreter;
 pub mod json;
 #[cfg(test)]
@@ -65,13 +66,20 @@ mod vm;
 pub mod xmile;
 
 pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
-pub use self::interpreter::Simulation;
+pub use self::interpreter::{Simulation, compile_project};
 pub use self::model::{ModelStage1, resolve_non_private_dependencies};
 pub use self::patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, apply_patch};
 pub use self::project::Project;
-pub use self::results::{Method, Results, Specs as SimSpecs};
+pub use self::results::Method;
+/// Type alias for the production (f64) simulation specs.
+pub type SimSpecs = self::results::Specs<f64>;
+/// Type alias for the production (f64) simulation results.
+pub type Results = self::results::Results<f64>;
 pub use self::variable::{Variable, identifier_set};
-pub use self::vm::{CompiledSimulation, Vm};
+/// Type alias for the production (f64) compiled simulation.
+pub type CompiledSimulation = self::vm::CompiledSimulation<f64>;
+/// Type alias for the production (f64) VM.
+pub type Vm = self::vm::Vm<f64>;
 
 // Re-export compat functions at the crate root for convenience
 #[cfg(feature = "xmutil")]

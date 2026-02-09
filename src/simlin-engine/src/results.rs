@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use crate::common::{Canonical, Ident};
 use crate::datamodel::{Dt, SimMethod, SimSpecs};
+use crate::float::SimFloat;
 
 pub(crate) const TIME_OFF: usize = 0;
 
@@ -17,26 +18,37 @@ pub enum Method {
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-pub struct Specs {
-    pub start: f64,
-    pub stop: f64,
-    pub dt: f64,
-    pub save_step: f64,
+pub struct Specs<F: SimFloat> {
+    pub start: F,
+    pub stop: F,
+    pub dt: F,
+    pub save_step: F,
     pub method: Method,
 }
 
-impl Specs {
+impl<F: SimFloat> Specs<F> {
+    /// Convert this `Specs<F>` to `Specs<F2>` for a different float type.
+    pub fn convert<F2: SimFloat>(&self) -> Specs<F2> {
+        Specs {
+            start: F2::from_f64(self.start.to_f64()),
+            stop: F2::from_f64(self.stop.to_f64()),
+            dt: F2::from_f64(self.dt.to_f64()),
+            save_step: F2::from_f64(self.save_step.to_f64()),
+            method: self.method,
+        }
+    }
+
     pub fn from(specs: &SimSpecs) -> Self {
-        let dt: f64 = match &specs.dt {
-            Dt::Dt(value) => *value,
-            Dt::Reciprocal(value) => 1.0 / *value,
+        let dt: F = match &specs.dt {
+            Dt::Dt(value) => F::from_f64(*value),
+            Dt::Reciprocal(value) => F::one() / F::from_f64(*value),
         };
 
-        let save_step: f64 = match &specs.save_step {
+        let save_step: F = match &specs.save_step {
             None => dt,
             Some(save_step) => match save_step {
-                Dt::Dt(value) => *value,
-                Dt::Reciprocal(value) => 1.0 / *value,
+                Dt::Dt(value) => F::from_f64(*value),
+                Dt::Reciprocal(value) => F::one() / F::from_f64(*value),
             },
         };
 
@@ -53,8 +65,8 @@ impl Specs {
         };
 
         Specs {
-            start: specs.start,
-            stop: specs.stop,
+            start: F::from_f64(specs.start),
+            stop: F::from_f64(specs.stop),
             dt,
             save_step,
             method,
@@ -63,21 +75,21 @@ impl Specs {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-pub struct Results {
+pub struct Results<F: SimFloat> {
     pub offsets: HashMap<Ident<Canonical>, usize>,
     // one large allocation
-    pub data: Box<[f64]>,
+    pub data: Box<[F]>,
     pub step_size: usize,
     pub step_count: usize,
-    pub specs: Specs,
+    pub specs: Specs<F>,
     pub is_vensim: bool,
 }
 
-impl Results {
+impl<F: SimFloat> Results<F> {
     pub fn print_tsv(&self) {
         self.print_tsv_comparison(None)
     }
-    pub fn print_tsv_comparison(&self, reference: Option<&Results>) {
+    pub fn print_tsv_comparison(&self, reference: Option<&Results<F>>) {
         let unknown = Ident::<Canonical>::from_unchecked("UNKNOWN".to_string());
         let var_names = {
             let offset_name_map: HashMap<usize, &Ident<Canonical>> =
@@ -157,7 +169,7 @@ impl Results {
             }
         }
     }
-    pub fn iter(&self) -> std::iter::Take<std::slice::Chunks<'_, f64>> {
+    pub fn iter(&self) -> std::iter::Take<std::slice::Chunks<'_, F>> {
         self.data.chunks(self.step_size).take(self.step_count)
     }
 }

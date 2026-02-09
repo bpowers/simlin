@@ -643,7 +643,7 @@ impl TestProject {
     /// Build a Module for testing lowered expressions.
     /// Returns the compiled Module for the main model, allowing inspection of
     /// the lowered expressions via get_flow_exprs() and get_initial_exprs().
-    pub fn build_module(&self) -> Result<Module, String> {
+    pub fn build_module(&self) -> Result<Module<f64>, String> {
         let datamodel = self.build_datamodel();
         let compiled = Arc::new(CompiledProject::from(datamodel));
 
