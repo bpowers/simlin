@@ -387,9 +387,9 @@ describe('High-Level API', () => {
       const sim = await model.simulate();
 
       const newValue = 100;
-      await sim.setValue('teacup temperature', newValue);
+      await sim.setValue('room temperature', newValue);
 
-      const value = await sim.getValue('teacup temperature');
+      const value = await sim.getValue('room temperature');
       expect(value).toBe(newValue);
 
       await sim.dispose();

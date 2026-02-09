@@ -206,8 +206,8 @@ describe('DirectBackend', () => {
     });
 
     it('should get and set value', () => {
-      backend.simSetValue(simHandle, 'teacup temperature', 100);
-      const value = backend.simGetValue(simHandle, 'teacup temperature');
+      backend.simSetValue(simHandle, 'room temperature', 100);
+      const value = backend.simGetValue(simHandle, 'room temperature');
       expect(value).toBe(100);
     });
 

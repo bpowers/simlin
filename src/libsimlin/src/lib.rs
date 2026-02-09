@@ -14,7 +14,7 @@
 //! | `error_api`     | Error inspection helpers (code, message, details)   |
 //! | `project`       | Project lifecycle (open, ref/unref, query models)   |
 //! | `model`         | Model queries (variables, links, LaTeX equations)   |
-//! | `simulation`    | Simulation lifecycle (create, run, override, reset) |
+//! | `simulation`    | Simulation lifecycle (create, run, set values, reset) |
 //! | `serialization` | Serialize to protobuf, JSON, XMILE, SVG             |
 //! | `analysis`      | Feedback-loop / causal-link analysis, LTM scores    |
 //! | `patch`         | JSON patch application and error collection          |
@@ -292,7 +292,7 @@ pub(crate) struct SimState {
     /// the simulation, instead of a generic "VM not initialized" message.
     pub(crate) vm_error: Option<engine::Error>,
     pub(crate) results: Option<engine::Results>,
-    /// Overrides survive VM consumption (run_to_end consumes the VM).
+    /// Constant value overrides survive VM consumption (run_to_end consumes the VM).
     /// Re-applied to new VMs created on reset.
     pub(crate) overrides: HashMap<usize, f64>,
 }

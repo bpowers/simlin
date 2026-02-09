@@ -1181,6 +1181,14 @@ impl ByteCodeBuilder {
         literal_id
     }
 
+    /// Allocate a new literal slot without deduplication.
+    /// Used for named constants so each variable gets its own slot,
+    /// preventing shared-literal corruption when overriding via set_value.
+    pub(crate) fn push_named_literal(&mut self, lit: f64) -> LiteralId {
+        self.bytecode.literals.push(lit);
+        (self.bytecode.literals.len() - 1) as u16
+    }
+
     pub(crate) fn push_opcode(&mut self, op: Opcode) {
         self.bytecode.code.push(op)
     }
@@ -1327,6 +1335,18 @@ mod tests {
 
         let bytecode = bytecode.finish();
         assert_eq!(2, bytecode.literals.len());
+    }
+
+    #[test]
+    fn test_push_named_literal_no_dedup() {
+        let mut builder = ByteCodeBuilder::default();
+        let a = builder.push_named_literal(0.1);
+        let b = builder.push_named_literal(0.1);
+        let c = builder.push_named_literal(0.1);
+
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
     }
 
     // =========================================================================
@@ -2949,11 +2969,12 @@ mod tests {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct CompiledInitial {
-    // Used for diagnostics in debug_print_bytecode and set_override error messages
+    // Used for diagnostics in debug_print_bytecode and set_value error messages
     #[allow(dead_code)]
     pub(crate) ident: Ident<Canonical>,
     /// Sorted, deduplicated offsets of all AssignCurr targets in this variable's
-    /// initials bytecode.
+    /// initials bytecode.  Used in tests and debug printing.
+    #[allow(dead_code)]
     pub(crate) offsets: Vec<usize>,
     pub(crate) bytecode: ByteCode,
 }

@@ -966,10 +966,18 @@ impl<'module> Compiler<'module> {
                 Some(())
             }
             Expr::AssignCurr(off, rhs) => {
-                self.walk_expr(rhs)?.unwrap();
-                self.push(Opcode::AssignCurr {
-                    off: *off as VariableOffset,
-                });
+                if let Expr::Const(value, _) = rhs.as_ref() {
+                    let id = self.curr_code.push_named_literal(*value);
+                    self.push(Opcode::AssignConstCurr {
+                        off: *off as VariableOffset,
+                        literal_id: id,
+                    });
+                } else {
+                    self.walk_expr(rhs)?.unwrap();
+                    self.push(Opcode::AssignCurr {
+                        off: *off as VariableOffset,
+                    });
+                }
                 None
             }
             Expr::AssignNext(off, rhs) => {
