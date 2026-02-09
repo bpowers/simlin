@@ -1,0 +1,9 @@
+initial nonrenewable resources = 2e12
+persistent pollution technology change mult table (
+ (-1,-.03),(0,0))
+land yield technology change rate multiplier table (
+  (0,0),(1,.02))
+
+
+
+

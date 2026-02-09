@@ -1,0 +1,26 @@
+initial nonrenewable resources = 2e12
+desired food ratio = 3
+industrial output per capita desired = 700
+average life of industrial capital 2 = 18
+fertility control effectiveness time = 1995
+industrial equilibrium time = 1995
+land life policy implementation time = 1995
+zero population growth time = 1995
+fraction of agricultural inputs for land maintenance table(
+  (0,0),(1,.045),(2,.08),(3,.1),(4,.105))
+indicated food per capita table 2 (
+  (0,250),(200,600),(400,900),(600,1100),
+  (800,1200),(1000,1275),(1200,1350),
+  (1400,1375),(1600,1375))
+indicated services output per capita table 2(
+  (0,80),(200,450),(400,1000),(600,1500),
+  (800,1800),(1000,2100),(1200,2400),
+  (1400,2700),(1600,3000))
+persistent pollution technology change mult table(
+  (-1,-0.03),(0,0))
+resource technology change mult table(
+  (-1,-.03),(0,0))
+land yield technology change rate multiplier table(
+  (0,0),(1,.02))
+
+

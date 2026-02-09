@@ -1,0 +1,338 @@
+! World3 Model (2003) Venapp
+! Copyright 1988-2005 Ventana Systems, Inc.
+!
+:SCREEN WELCOME
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+COMMAND,"",0,0,0,0,,,SPECIAL>LOADMODEL|wrld3-03.vmf
+COMMAND,"",0,0,0,0,,,SPECIAL>READCUSTOM|wrld3-03.vgd
+COMMAND,"",0,0,0,0,,,SPECIAL>CLEARRUNS
+COMMAND,"",0,0,0,0,,,SPECIAL>SETWBITEM|POPULATION
+COMMAND,"",0,0,,,,,"SETTING>SHOWWARNING|0",
+TEXTONLY,"World3-03 Explorer",0,10,100,,C||24|B|255-0-0,,"",
+TEXTONLY,"Investigating the dynamics of growth in a finite world",0,20,100,0,C,
+TEXTONLY,"Limits to Growth - the 30-Year Update",0,31,100,0,C|Times New Roman|12|I|0-0-0,,,
+TEXTONLY,"the 2004 book by",0,35,100,,C||10,,"",
+TEXTONLY,"Donella H. Meadows, Jogern Randers and Dennis L. Meadows",0,38,100,,C||10,,"",
+TEXTONLY,"Chelsea Green Publishing Company",0,41,100,,C||10,,"",
+TEXTONLY,"White River Junction, VT",0,44,100,,C||10,,"",
+TEXTONLY,"based on the updated Limits to Growth model from",0,27,100,,C|Times New Roman|10||0-0-0,,"",
+TEXTONLY,"Press any key to continue",0,60,100,0,C,
+TEXTONLY,"Software provided under license from Ventana Systems, Inc.",0,80,100,0,C 3,
+TEXTONLY,"Copyright © 1988-2005 Ventana Systems, Inc.  ALL RIGHTS RESERVED.",0,90,100,,C,,"",
+ANYKEY,"",0,0,0,0,0,,,MAIN
+!
+:SCREEN MAIN
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"World3-91 Explorer - Main Menu",0,5,100,0,C||24|B|255-0-0
+RECTANGLE,"",25,16,50,31,C 4
+BUTTON,"View model structure",50,20,35,5,C,Rr,"",VIEW
+BUTTON,"Run a scenario",50,26,35,5,C,Rr,"",BASED
+BUTTON,"Analyze scenarios",50,32,35,5,C,Aa,"",ANALYZE
+BUTTON,"Exit to model selection menu",50,38,35,5,C,EeXx,"SPECIAL>LOADMODEL|..\intro.vmf&SPECIAL>LOADAPPINT\
+|intro.vcd@3",
+TOOL,"SP1",0,50,100,45,,,CUSTOM>COMM1
+!
+:SCREEN VIEW
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+SKETCH,"SK1",0,0,100,82,S,,1,
+COMMAND,"",18,77,20,6,L,,SPECIAL>SETTITLE|*MV|%s - View:%s
+BUTTON,"Choose a View",8,84,20,6,L,,SKETCH>CHOOSEVIEW|SK1|Choose a view of model structure&SPECIAL>SETTITLE\
+|*MV|%s - View:%s
+BUTTON,"Previous",7,92,10,6,L,,SKETCH>PREVVIEW|SK1&SPECIAL>SETTITLE|*MV|%s - View:%s,
+BUTTON,"Next",19,92,10,6,L,,SKETCH>NEXTVIEW|SK1&SPECIAL>SETTITLE|*MV|%s - View:%s,
+BUTTON,"Zoom",36,84,10,6,L,,SKETCH>ZOOM|SK1|?Percent to zoom to (10-500),
+BUTTON,"100%",36,92,10,6,L,,SKETCH>ZOOM|SK1|100,
+BUTTON,"Print",54,84,10,6,L,,PRINT>SK1
+BUTTON,"Export",54,92,10,6,L,,EXPORT>SK1
+BUTTON,"Exit to Main Menu",71,88,22,6,L,,,MAIN
+!
+:SCREEN BASED
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Choose a scenario on which to base your run",0,5,100,0,C||22|B|255-0-0
+TEXTMENU,"1 - Scenario 1 = The \"Standard Run\" from the Limits to Growth",5,15,0,0,L,1,SIMULATE>READCIN&SIMU\
+LATE>RUNNAME|scen01,RUN
+TEXTMENU,"2 - Scenario 2 = Doubled resources are added to scenario 1",5,20,0,0,L,2,SIMULATE>READCIN|W303S02&S\
+IMULATE>RUNNAME|scen02,RUN
+TEXTMENU,"3 - Scenario 3 = 2 + pollution control technology",5,25,0,0,L,3,SIMULATE>READCIN|W303S03&SIMULATE>R\
+UNNAME|scen03,RUN
+TEXTMENU,"4 - Scenario 4 = 3 + land yield enhancement",5,30,0,0,L,4,SIMULATE>READCIN|W303S04.cin&SIMULATE>RUN\
+NAME|scen04,RUN
+TEXTMENU,"5 - Scenario 5 = 4 + land erosion protection",5,35,0,0,L,5,SIMULATE>READCIN|W303S05.cin&SIMULATE>RU\
+NNAME|SCEN05,RUN
+TEXTMENU,"6 - Scenario 6 = 5 + resource efficiency technology",5,40,0,0,L,6,SIMULATE>READCIN|W303S06.cin&SIMU\
+LATE>RUNNAME|SCEN06,RUN
+TEXTMENU,"7 - Scenario 7 = 6 but all technologies applied with short (5 year) delay",5,45,0,0,L,7,SIMULATE>RE\
+ADCIN|W303S07.cin&SIMULATE>RUNNAME|SCEN07,RUN
+TEXTMENU,"8 - Scenario 8 = World adopts stable population goals in 1995",5,50,0,0,L,8,SIMULATE>READCIN|W303S0\
+8.cin&SIMULATE>RUNNAME|SCEN08,RUN
+TEXTMENU,"9 - Scenario 9 = 8 + stable industrial production goals in 1995",5,55,0,0,L,9,SIMULATE>READCIN|W303\
+S09.cin&SIMULATE>RUNNAME|SCEN09,RUN
+TEXTMENU,"A - Scenario 10 = 9 + technologies to reduce emissions, erosion and resource use",5,60,0,0,L,Aa,SIM\
+ULATE>READCIN|W303S10.cin&SIMULATE>RUNNAME|SCEN10,RUN
+TEXTMENU,"B - Scenario 11 = 10 with all changes made in 1975",5,65,0,0,L,Bb,SIMULATE>READCIN|W303S11.cin&SIMU\
+LATE>RUNNAME|SCEN11,RUN
+TEXTMENU,"C - Scenario 12 = 10 with all changes made in 2015",5,70,0,0,L,Cc,SIMULATE>READCIN|W303S12.cin&SIMU\
+LATE>RUNNAME|SCEN12,RUN
+TEXTMENU,"D - Scenario 13 = 10 but with higher goals for food and industrial output",5,75,0,0,L,Dd,SIMULATE>R\
+EADCIN|W303S13.cin&SIMULATE>RUNNAME|SCEN13,RUN
+TEXTMENU,"I - Infinity in infinity out",5,80,0,0,L,Ii,SIMULATE>READCIN|W303IFIO.cin&SIMULATE>RUNNAME|ifiifo,R\
+UN
+TEXTMENU,"P - Choose any previously run scenario as basis",5,85,0,0,L,Pp,SIMULATE>READRUNCHG|?Enter name of s\
+cenario to base new scenario on,RUN
+BUTTON,"Exit back to Main Menu",50,95,40,0,C,EeXx,,MAIN
+!
+!
+:SCREEN RUN
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Scenario Setup",0,5,100,0,C||22|B|255-0-0
+TEXTONLY,"Enter a new name for the scenario (<8 chars):",5,15,45,0,R
+MODRUNNAME,"",55,15,20,0,L,
+BUTTON,"Run the scenario",50,25,50,0,C,Rr,,GRAPH1
+BUTTON,"Change non-policy assumptions (initial resouces, etc.)",50,30,50,0,C,1,,RESCHG
+BUTTON,"Change technological progress assumptions",50,35,50,0,C,2,,TECHCHG
+BUTTON,"Change policies on consumption and production patterns",50,40,50,0,C,3,,CONCHG
+BUTTON,"Change the time at which different policies are introduced",50,45,50,0,C,4,,TIMECHG
+BUTTON,"Change other constants in the model",50,50,50,0,C,Cc,SIMULATE>GETCNSTCHG,RUN
+BUTTON,"Change other table functions in the model",50,55,50,0,C,Tt,SIMULATE>GETTABCHG,RUN
+BUTTON,"Exit back to base scenario menu",50,60,50,0,C,EeXx,,BASED
+TOOL,"SP1",0,70,100,30,,,CUSTOM>COMM2
+!
+:SCREEN RESCHG
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Changing non-policy parameters",0,5,100,0,C||22|B|255-0-0
+MODVAR,"initial nonrenewable resources|The initial level of nonrenewable natural resources",5,15,15,0,L
+TEXTONLY,"initial nonrenewable resources",22,16,0,0,L1
+MODVAR,"technology development delay|The delay (in years) between developing and using a technology",5,22,1\
+5,0,L
+TEXTONLY,"technology development delay",22,23,0,0,L1,
+MODTABLE,"crowding multiplier from industry table|Relates industrial capital to crowding",5,29,15,5,L
+TEXTONLY,"crowding multiplier from industry table",22,30,0,0,L1,,
+MODTABLE,"urban and industrial land required per capita table|Relates industrial capital to urban land requir\
+ements",5,36,15,5,L
+TEXTONLY,"urban and industrial land required per capita table",22,37,0,0,L1,
+MODTABLE,"industrial capital output ratio multiplier table|Relates yield technology to industrial capital out\
+put ratio",5,43,15,5,L
+TEXTONLY,"industrial capital output ratio multiplier table",22,44,0,0,L1,
+MODTABLE,"industrial capital output ratio multiplier from pollution table|Relates pollution technology to ind\
+ustrial capital output ratio",5,50,15,5,L
+TEXTONLY,"industrial capital output ratio multiplier from pollution table",22,51,0,0,L1
+BUTTON,"Record constant changes",5,60,30,0,L,Rr,,RUN
+BUTTON,"Exit without recording constant changes",5,65,30,0,L,EeXx,CANCEL,RUN
+TOOL,"SP1",0,70,100,30,,,CUSTOM>COMM5
+TEXTONLY,"Explanation",42,57,0,0,L|||B|
+RECTANGLE,"",42,60,50,7,C 4
+PROMPT,"",45,62,0,0,L
+!
+!
+!
+!
+:SCREEN TECHCHG
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Changing technological capability parameters",0,5,100,0,C||22|B|255-0-0
+MODVAR,"desired persistent pollution index|The target pollution level index used to drive technological cha\
+nge",5,15,15,0,L
+TEXTONLY,"desired persistent pollution index",22,16,0,0,L1
+MODVAR,"desired resource use rate|The desired resource use rate used to drive technological change",5,22,15\
+,0,L
+TEXTONLY,"desired resource use rate",22,23,0,0,L1
+MODTABLE,"persistent pollution technology change mult table|Relates persistent pollution to changes in techno\
+logy",5,29,15,5,L
+TEXTONLY,"persistent pollution technology change multiplier table",22,30,0,0,L1,
+MODTABLE,"land yield technology change rate multiplier table|Relates the gap in the food ratio to technologic\
+al change",5,36,15,5,L
+TEXTONLY,"land yield technology change rate multiplier table",22,37,0,0,L1
+MODTABLE,"resource technology change mult table|Relates resource use to technological change",5,43,15,5,L
+TEXTONLY,"resource technology change mult table",22,44,0,0,L1,
+BUTTON,"Record constant changes",5,60,30,0,L,Rr,,RUN
+BUTTON,"Exit without recording constant changes",5,65,30,0,L,EeXx,CANCEL,RUN
+TOOL,"SP1",0,70,100,30,,,CUSTOM>COMM5
+TEXTONLY,"Explanation",42,57,0,0,L|||B|
+RECTANGLE,"",42,60,50,7,C 4
+PROMPT,"",45,62,0,0,L
+!
+:SCREEN CONCHG
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Changing parameters affecting consumption patterns",0,5,100,0,C||22|B|255-0-0
+MODVAR,"desired food ratio|The desired amount of food relative to subsistence",5,15,15,0,L
+TEXTONLY,"desired food ratio",22,16,0,0,L1
+MODVAR,"industrial output per capita desired|The desired industrial output per capita",5,22,15,0,L
+TEXTONLY,"industrial output per capita desired",22,23,0,0,L1
+MODVAR,"average life of industrial capital 2|The average age at which capital is retired from production",5\
+,29,15,0,L
+TEXTONLY,"average life of industrial capital 2",22,30,0,0,L1
+MODTABLE,"fraction of agricultural inputs for land maintenance table|Relates food availablility to land maint\
+enance",5,36,15,5,L
+TEXTONLY,"fraction of agricultural inputs for land maintenance table",22,37,0,0,L1
+MODTABLE,"indicated food per capita table 2|Relates industrial output to food requirements",5,43,15,5,L
+TEXTONLY,"indicated food per capita table 2",22,44,0,0,L1,2,
+MODTABLE,"indicated services output per capita table 2|Relates industrial output to service requirements",5,5\
+0,15,5,L
+TEXTONLY,"indicated services output per capita table 2",22,51,0,0,L1,3,
+BUTTON,"Record constant changes",5,60,30,0,L,Rr,,RUN
+BUTTON,"Exit without recording constant changes",5,65,30,0,L,EeXx,CANCEL,RUN
+TOOL,"SP1",0,70,100,30,,,CUSTOM>COMM5
+TEXTONLY,"Explanation",42,57,0,0,L|||B|
+RECTANGLE,"",42,60,50,7,C 4
+PROMPT,"",45,62,0,0,L
+!
+:SCREEN TIMECHG
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Changing the timing of introduced changes",0,5,100,0,C||22|B|255-0-0
+MODVAR,"air pollution policy implementation time|Serious measures are taken to control air pollution",5,15,\
+15,0,L
+TEXTONLY,"air pollution policy implementation time",22,16,0,0,L1
+MODVAR,"land life policy implementation time|Measures are taken to increase the life of land",5,22,15,0,L
+TEXTONLY,"land life policy implementation time",22,23,0,0,L1
+MODVAR,"fertility control effectiveness time|Fertility controls are effectively established",5,29,15,0,L
+TEXTONLY,"fertility control effectiveness time",22,30,0,0,L1
+MODVAR,"zero population growth time|Low growth targets are universally adopted",5,36,15,0,L
+TEXTONLY,"zero population growth time",22,37,0,0,L1
+MODVAR,"industrial equilibrium time|Time after which industry reaches an equilibrium",5,43,15,0,L
+TEXTONLY,"industrial equilibrium time",22,44,0,0,L1
+MODVAR,"POLICY YEAR|Time at which all other policies take effect",5,50,15,0,L
+TEXTONLY,"POLICY YEAR",22,51,0,0,L1
+BUTTON,"Record constant changes",5,60,30,0,L,Rr,,RUN
+BUTTON,"Exit without recording constant changes",5,65,30,0,L,EeXx,CANCEL,RUN
+TOOL,"SP1",0,70,100,30,,,CUSTOM>COMM5
+TEXTONLY,"Explanation",42,57,0,0,L|||B|
+RECTANGLE,"",42,60,50,7,C 4
+PROMPT,"",45,62,0,0,L
+!
+:SCREEN GRAPH1
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Press P to print - any other key to continue",0,5,100,0,C
+WIPTOOL,"GR1",10,10,80,80,,,CUSTOM>WIP_STATE_OF_WORLD
+WIPTOOL,"nu",110,110,80,80,,,ERROR>ERR
+COMMAND,"",0,0,0,0,,,SPECIAL>CLEARRUNS|7&MENU>RUN1|O
+BUTTON,"Print",20,95,20,0,L,Pp,PRINT>GR1
+ANYKEY,"",0,0,0,0,0,,,GRAPH2
+BUTTON,"Continue",60,95,20,0,L,,,GRAPH2
+!
+:SCREEN GRAPH2
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Press P to print - any other key to continue.",0,5,100,0,C
+TOOL,"GR1",10,10,80,80,,,CUSTOM>MATERIAL_STANDARD_LIVING
+BUTTON,"Print",20,95,20,0,L,Pp,PRINT>GR1
+ANYKEY,"",0,0,0,0,0,,,GRAPH3
+BUTTON,"Continue",60,95,20,0,L,,,GRAPH3
+!
+:SCREEN GRAPH3
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Press P to print - any other key to continue.",0,5,100,0,C
+TOOL,"GR1",10,10,80,80,,,CUSTOM>HUMAN_WELFARE
+BUTTON,"Print",20,95,20,0,L,Pp,PRINT>GR1
+ANYKEY,"",0,0,0,0,0,,,MAIN
+BUTTON,"Continue",60,95,20,0,L,,,MAIN
+!
+:SCREEN ANALYZE
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Scenario Analysis",0,5,100,0,C||22|B|255-0-0
+BUTTON,"Load, unload and reorder previously run scenarios",50,15,50,0,C,Ll,MENU>LOAD_RUN,
+BUTTON,"State of the world - for the first loaded scenario",50,20,50,0,C,Ss,,GRAPH1A
+BUTTON,"Material standard of living - for the first loaded scenario",50,25,50,0,C,Mm,,GRAPH2A
+BUTTON,"Welfare/Ecological Footpring - for the first loaded scenario",50,25,50,0,C,Mm,,GRAPH3A
+BUTTON,"Select a variable as a start point for further analysis",50,30,50,0,C,Vv,SPECIAL>SETWBITEM|POPULATI\
+ON&SPECIAL>VARSELECT|New variable to use
+BUTTON,"Trace underlying causes using trees",50,35,50,0,C,Tt,,CAUSE1
+BUTTON,"Trace underlying causes using graphs",50,40,50,0,C,Gg,,CAUSE2
+BUTTON,"Trace the uses of a variable",50,45,50,0,C,Uu,,USE
+BUTTON,"Show the differences between the first two loaded scenarios",50,50,50,0,C,Dd,,DIFF
+BUTTON,"Exit back to Main Menu",50,60,50,0,C,EeXx,,MAIN
+TOOL,"SP1",0,70,100,30,,,CUSTOM>COMM3
+!
+:SCREEN GRAPH1A
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Press P to print - any other key to continue",0,5,100,0,C
+TOOL,"GR1",10,10,80,80,,,CUSTOM>STATE_OF_WORLD
+BUTTON,"",0,0,0,0,L,Pp,PRINT>GR1
+ANYKEY,"",0,0,0,0,0,,,ANALYZE
+!
+:SCREEN GRAPH2A
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Press P to print - any other key to continue",0,5,100,0,C
+TOOL,"GR1",10,10,80,80,,,CUSTOM>MATERIAL_STANDARD_LIVING
+BUTTON,"",0,0,0,0,L,Pp,PRINT>GR1
+ANYKEY,"",0,0,0,0,0,,,GRAPH3A
+!
+:SCREEN GRAPH3A
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Press P to print - any other key to continue",0,5,100,0,C
+TOOL,"GR1",10,10,80,80,,,CUSTOM>HUMAN_WELFARE
+BUTTON,"",0,0,0,0,L,Pp,PRINT>GR1
+ANYKEY,"",0,0,0,0,0,,,ANALYZE
+!
+:SCREEN CAUSE1
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Causal tracing -",0,2,50,0,R
+WBVAR,"",50,2,0,0,L
+TOOL,"TR1",2,6,96,42,,,WORKBENCH>CAUSES TREE
+BUTTON,"Change to graph based",5,50,30,0,L,Cc,,CAUSE2
+BUTTON,"Print tree",5,55,30,0,L,Pp,PRINT>TR1
+BUTTON,"Print graph",5,60,30,0,L,Gg,PRINT>GR1
+BUTTON,"Select a new variable to trace",5,65,30,0,L,Ss,SPECIAL>SETWBITEM|POPULATION&SPECIAL>VARSELECT|New v\
+ariable for tracing
+BUTTON,"Change to tracing uses",5,70,30,0,L,Cc,,USE
+BUTTON,"Exit - return to analysis",5,75,30,0,L,EeXx,,ANALYZE
+TOOL,"GR1",60,50,40,50,,,WORKBENCH>STRIP GRAPH
+TOOL,"COMM4",0,80,58,20,,,CUSTOM>COMM4
+SETWB,"",0,0,0,0,,,,CAUSE1
+!
+:SCREEN CAUSE2
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Causal tracing -",0,2,0,0,L
+WBVAR,"",20,2,0,0,L
+TOOL,"TR1",60,0,40,100,,,WORKBENCH>CAUSES STRIP
+BUTTON,"Change to tree based",5,50,30,0,L,Cc,,CAUSE1
+BUTTON,"Print graph",5,55,30,0,L,Pp,PRINT>TR1
+BUTTON,"Print equation",5,60,30,0,L,Qq,PRINT>GR1
+BUTTON,"Select a new variable to trace",5,65,30,0,L,Ss,SPECIAL>VARSELECT|New variable for tracing
+BUTTON,"Change to tracing uses",5,70,30,0,L,Cc,,USE
+BUTTON,"Exit - return to analysis",5,75,30,0,L,EeXx,,ANALYZE
+TOOL,"GR1",0,8,58,40,,,WORKBENCH>DOCUMENT
+TOOL,"COMM4",0,80,60,20,,,CUSTOM>COMM4
+SETWB,"",0,0,0,0,,,,CAUSE2
+!
+:SCREEN USE
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Uses of -",0,2,50,0,R
+WBVAR,"",50,2,0,0,L
+TOOL,"TR1",2,6,96,42,,,WORKBENCH>USES TREE
+BUTTON,"Print tree",5,55,30,0,L,Pp,PRINT>TR1
+BUTTON,"Print graph",5,60,30,0,L,Gg,PRINT>GR1
+BUTTON,"Select a new variable to trace",5,65,30,0,L,Ss,SPECIAL>VARSELECT|New variable for tracing
+BUTTON,"Change to tracing causes",5,70,30,0,L,Cc,,CAUSE1
+BUTTON,"Exit - return to analysis",5,75,30,0,L,EeXx,,ANALYZE
+TOOL,"GR1",60,50,40,50,,,WORKBENCH>STRIP GRAPH
+TOOL,"COMM4",0,80,58,20,,,CUSTOM>COMM4
+SETWB,"",0,0,0,0,,,,USE
+!
+:SCREEN DIFF
+SCREENFONT,Times New Roman|12||0-0-0|-1--1--1
+PIXELPOS,0
+TEXTONLY,"Constant and table differences between first two loaded scenarios",0,2,100,0,C||18|B|255-0-0
+TOOL,"D1",5,10,90,80,,,WORKBENCH>RUNS COMPARE
+TEXTONLY,"Press P to print - any other key to continue",0,95,100,0,C
+BUTTON,"",0,0,0,0,L,Pp,PRINT>D1
+ANYKEY,"",0,0,0,0,0,,,ANALYZE
+!
+!
+!

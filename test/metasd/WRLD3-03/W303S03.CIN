@@ -1,0 +1,6 @@
+initial nonrenewable resources =2e12
+persistent pollution technology change mult table (
+ (-1,-.03),(0,0))
+
+
+

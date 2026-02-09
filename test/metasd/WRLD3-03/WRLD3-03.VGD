@@ -1,0 +1,220 @@
+:GRAPH STATE_OF_WORLD
+:TITLE State of the World
+:X-DIV 2
+:Y-DIV 1
+:SOFT-BOUNDS
+:SCALE
+:VAR population
+:Y-MIN 0
+:Y-MAX 1.2e+010
+:SCALE
+:VAR food
+:Y-MIN 0
+:Y-MAX 6e+012
+:SCALE
+:VAR industrial output
+:Y-MIN 0
+:Y-MAX 4e+012
+:SCALE
+:VAR persistent pollution index
+:Y-MIN 0
+:Y-MAX 40
+:SCALE
+:VAR nonrenewable resources
+:Y-MIN 0
+:Y-MAX 2e+012
+
+:GRAPH MATERIAL_STANDARD_LIVING
+:TITLE Material standard of living
+:X-DIV 2
+:Y-DIV 1
+:SOFT-BOUNDS
+:SCALE
+:VAR food per capita
+:Y-MIN 0
+:Y-MAX 1000
+:SCALE
+:VAR consumed industrial output per capita
+:Y-MIN 0
+:Y-MAX 250
+:SCALE
+:VAR service output per capita
+:Y-MIN 0
+:Y-MAX 1000
+:SCALE
+:VAR life expectancy
+:Y-MIN 0
+:Y-MAX 90
+
+:GRAPH WIP_STATE_OF_WORLD
+:TITLE State of the World
+:WIP
+:X-DIV 2
+:Y-DIV 1
+:X-MIN 1900
+:X-MAX 2100
+:SOFT-BOUNDS
+:MAX-POINTS 200
+:SCALE
+:VAR population
+:Y-MIN 0
+:Y-MAX 1.2e+010
+:SCALE
+:VAR food
+:Y-MIN 0
+:Y-MAX 6e+012
+:SCALE
+:VAR industrial output
+:Y-MIN 0
+:Y-MAX 4e+012
+:SCALE
+:VAR persistent pollution index
+:Y-MIN 0
+:Y-MAX 40
+:SCALE
+:VAR Nonrenewable Resources
+:Y-MIN 0
+:Y-MAX 2e+012
+
+:GRAPH HUMAN_WELFARE
+:TITLE Human Welfare and Ecological Footprint
+:X-DIV 2
+:Y-DIV 1
+:SCALE
+:VAR Human Welfare Index
+:Y-MIN 0
+:Y-MAX 1
+:SCALE
+:VAR Human Ecological Footprint
+:Y-MIN 0
+:Y-MAX 4
+
+:REPORT COMM1
+:TITLE COMM1
+:FONT Times New Roman|10||0-0-0
+	The software you are using allows you to explore the behavior and 
+	sensitivity of the World3-03 model used in the book "Limites to Growth:
+	The 30 Year Update," by Donella Meadows, Dennis Meadows and Jørgen 
+	Randers.  This model is based on the World3 model which is documented 
+	in detail in "The Dynamics of Growth in a Finite World," by Dennis 
+	Meadows et al.  The World3-03 model contains a number of changes that 
+	allow different technological assumptions and assertions to be tested.
+	It also has new output measures of welfare and the human ecological 
+	footprint.
+
+	The software allows you to explore the model by means of buttons, menus,
+	and output screens.  To activate a button, click on it.  To select a menu
+	item, you can click on it, type the first letter in the menu description,
+	or select it using the up and down	arrow keys and then press the Enter key.
+	The selected menu item appears highlighted - usually black on white.  
+
+	Additional functionality available in the software is described in 
+	places where it can be used.  To conserve space, later commentaries
+	will be kept small, and you will need to scroll them to read all the
+	information they contain.
+:END-OF-REPORT
+
+:REPORT COMM2
+:TITLE COMM2
+:FONT Times New Roman|10||0-0-0
+	Anything you type will appear as the name of the scenario.  
+
+	You can change any constants or lookup tables in the model. The 
+	values that have been changed in "Beyond the Limits" can be 
+	accessed through through the first three change buttons.
+	Any Constant in the model (including those in the first three buttons)
+	can be changed using the constants button.  The Table functions
+	in the model can be changed using the tables button.  Table (or Lookup)
+	functions are nonlinear relationships relating an input to an output.
+	The lookup table editor is graphically oriented.  You can drag points 
+	around, or click where you would like new points to appear.
+
+	The Escape key is used to back out of dialog boxes, without recording
+	changes, and after one, two, or at most three times will return you 
+	to this screen.  
+
+	When you click on Run the scenario, your scenario will be run using 
+	the changes you have entered.  After your scenario runs you will see
+	a graph that has the same structure as the "State of the World" 
+	graphs shown in "Beyond the Limits," but showing values for the 
+	assumptions you have made.  If you have based your scenario on one of
+	the predefined scenarios, and not changed any assumptions, the graph 
+	should match the corresponding graph in the book.
+:END-OF-REPORT
+
+:REPORT COMM3
+:TITLE COMM3
+:FONT Times New Roman|10||0-0-0
+	You can perform analysis of the model by first loading in scenarios of 
+	interest, and then reviewing the output or doing causal tracing.  
+	Scenarios that you have run are automatically loaded for analysis.
+	The Load and reorder command will put up a small window with two lists.  
+	On the left is a list of loaded scenarios, on the right a list of 
+	scenarios that have been run.  The << button loads scenarios.  Click 
+	on the scenario you want to load in the right hand list, and then 
+	click the << button.  The >> button unloads scenarios.  Click on the 
+	scenario you want to unload in the left hand list, and the click on 
+	the >> button.
+
+	You can load up to 8 scenarios at a time, but it is difficult to read
+	graphs with more than 4 scenarios loaded.
+
+	If the list on the right is empty, you will need to run some 
+	scenarios.  Exit back to the Main Menu and do this.  You can run
+	the scenarios described in "Beyond the Limits" by choosing one
+	of the named scenarios as base for your scenario, and running the
+	scenario without making any additional changes.
+
+	The two graphs used to review scenarios throughout "Beyond the
+	Limits" can be accessed for the first loaded scenario by clicking
+	the buttons State of the world or Material standard of living.
+
+	Causal tracing is a process that allows you to determine the underlying
+	causes of behavior, and the differences in behavior between different
+	scenarios.  There are two options for doing causal tracing.	 The first 
+	uses tree diagrams and single graphs.  The second uses	equations and 
+	multiple graphs.  Try them both to see which you prefer.
+:END-OF-REPORT
+
+:REPORT COMM4
+:TITLE COMM4
+:FONT Times New Roman|10||0-0-0
+	The cause and use screens show lists of
+	different variables.  The graphs allow
+	you to compare different scenarios.
+	The trees allow you to investigate the
+	structure of the model.
+
+	To view the causes, graphs, or uses of a
+	variable, double click on its name anywhere
+	it appears: in the graphs, trees, or 
+	documentation.  You can select a new working 
+	variable to trace by clicking on the button 
+	Select a new variable to trace.
+
+	You can print the contents of the graphs
+	and trees by clicking on Print, or pressing
+	P.  Output will be directed to your default 
+	printer.
+
+	During causal tracing, you can switch
+	between the Tree and Graph represen-
+	tations of causes.  This can be useful 
+	as means of understanding both
+	structure and behavior.
+:END-OF-REPORT
+
+:REPORT COMM5
+:TITLE COMM5
+:FONT Times New Roman|10||0-0-0
+	Use the Tab key or mouse to move between the number entry and 
+	table positions. To change the lookup tables, click the appropriate 
+	table, and modify it graphically by dragging points around, 
+	or type in new XY pairs.
+
+	Changes you make to tables are recorded when you click OK on the table
+	changing window.  Changes you make to constants are recorded when you
+	click the button Record constant changes.  You can exit without 
+	recording any changes you made by clicking on the Exit without
+	recording... button.
+:END-OF-REPORT
