@@ -13,7 +13,7 @@ use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::interpreter::Simulation;
 use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{Project, Results, Vm, project_io};
-use simlin_engine::{load_csv, load_dat, xmile};
+use simlin_engine::{load_csv, load_dat, open_vensim, xmile};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
@@ -119,6 +119,63 @@ fn load_expected_results(xmile_path: &str) -> Option<Results> {
     }
 
     None
+}
+
+/// Compare VDF reference data against simulation results with cross-simulator
+/// tolerance. VDF stores f32 (~7 digits) and Vensim's integration may differ
+/// from ours, so we allow up to 1% relative error.
+/// Variables present in `results` but not in `vdf_expected` are skipped
+/// (they may be internal module variables without VDF entries).
+fn ensure_vdf_results(vdf_expected: &Results, results: &Results) {
+    assert_eq!(vdf_expected.step_count, results.step_count);
+
+    let mut matched = 0;
+    let mut max_rel_error: f64 = 0.0;
+    let mut max_rel_ident = String::new();
+    let mut failures = 0;
+    let step_count = vdf_expected.step_count;
+
+    for ident in vdf_expected.offsets.keys() {
+        if !results.offsets.contains_key(ident) {
+            continue;
+        }
+        let vdf_off = vdf_expected.offsets[ident];
+        let sim_off = results.offsets[ident];
+        matched += 1;
+
+        for step in 0..step_count {
+            let expected = vdf_expected.data[step * vdf_expected.step_size + vdf_off];
+            let actual = results.data[step * results.step_size + sim_off];
+
+            if expected.is_nan() || actual.is_nan() {
+                continue;
+            }
+
+            let max_val = expected.abs().max(actual.abs()).max(1e-10);
+            let rel_err = (expected - actual).abs() / max_val;
+            if rel_err > max_rel_error {
+                max_rel_error = rel_err;
+                max_rel_ident = format!("{ident} (step {step})");
+            }
+
+            // 1% relative tolerance for cross-simulator comparison
+            if rel_err > 0.01 {
+                failures += 1;
+                if failures <= 5 {
+                    eprintln!(
+                        "FAIL step {step}: {ident}: {expected} (vdf) != {actual} (sim), rel_err={rel_err:.6}"
+                    );
+                }
+            }
+        }
+    }
+
+    eprintln!("VDF comparison: {matched} variables matched across {step_count} time steps");
+    eprintln!("  Max relative error: {max_rel_error:.6} at {max_rel_ident}");
+    if failures > 0 {
+        eprintln!("  {failures} comparisons exceeded 1% tolerance");
+        panic!("VDF comparison failed with {failures} tolerance violations");
+    }
 }
 
 fn ensure_results(expected: &Results, results: &Results) {
@@ -637,4 +694,55 @@ fn verify_ai_information(xmile_path: &str) {
     let key = ed25519_dalek::VerifyingKey::from_bytes(&raw_pubkey.0).unwrap();
 
     simlin_engine::ai_info::verify(&datamodel_project, &key).unwrap()
+}
+
+#[test]
+fn simulates_wrld3_03() {
+    let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
+
+    eprintln!("model (vensim mdl): {mdl_path}");
+
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+    let project = Rc::new(Project::from(datamodel_project.clone()));
+
+    let sim = Simulation::new(&project, "main")
+        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
+
+    let results1 = sim
+        .run_to_end()
+        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
+
+    let compiled = sim
+        .compile()
+        .unwrap_or_else(|e| panic!("compilation failed for {mdl_path}: {e}"));
+    let mut vm =
+        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
+    let results2 = vm.into_results();
+
+    ensure_results(&results1, &results2);
+
+    // Compare simulation output against the Vensim reference VDF data.
+    // Uses empirical matching (time series correlation) to map VDF entries
+    // to simulation variables, since the VDF metadata chain linking names
+    // to data entries has not been fully decoded.
+    let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
+    let vdf_data_bytes =
+        std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
+    let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
+        .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
+
+    let vdf_results = vdf_file
+        .to_results(&results1)
+        .unwrap_or_else(|e| panic!("VDF to_results failed: {e}"));
+
+    // Cross-simulator comparison needs wider tolerance than our own
+    // interpreter vs VM check: Vensim's integration may differ slightly,
+    // and VDF stores f32 values (~7 significant digits).
+    ensure_vdf_results(&vdf_results, &results1);
 }
