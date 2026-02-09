@@ -4718,3 +4718,164 @@ mod vm_reset_run_to_and_constants_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod f32_vm_tests {
+    //! Tests that verify the f32 VM path compiles, runs, and produces
+    //! results consistent with the f64 path (within f32 precision).
+
+    use crate::test_common::TestProject;
+
+    /// f32 has ~7 decimal digits of precision, so we allow up to ~1e-4
+    /// relative error when comparing against f64 results for values near 100.
+    const F32_ABS_TOLERANCE: f64 = 1e-2;
+
+    /// Helper: run both f64 and f32 VM paths and compare results for a variable.
+    fn assert_f32_f64_close(tp: &TestProject, var_name: &str) {
+        let f64_results = tp.run_vm().expect("f64 VM should succeed");
+        let f32_results = tp.run_vm_f32().expect("f32 VM should succeed");
+
+        let f64_vals = f64_results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("{var_name} not found in f64 results"));
+        let f32_vals = f32_results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("{var_name} not found in f32 results"));
+
+        assert_eq!(
+            f64_vals.len(),
+            f32_vals.len(),
+            "step count mismatch for {var_name}"
+        );
+
+        for (i, (f64_v, f32_v)) in f64_vals.iter().zip(f32_vals.iter()).enumerate() {
+            // f32 has ~7 decimal digits of precision: use ~1e-5 relative tolerance
+            // for values well above 1, absolute tolerance for near-zero values.
+            let tol = if f64_v.abs() > 1.0 {
+                f64_v.abs() * 5e-5
+            } else {
+                F32_ABS_TOLERANCE
+            };
+            assert!(
+                (f64_v - f32_v).abs() < tol,
+                "{var_name} at step {i}: f64={f64_v}, f32={f32_v}, diff={}, tol={tol}",
+                (f64_v - f32_v).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn f32_simple_aux() {
+        let tp = TestProject::new("f32_simple")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "42", None);
+
+        assert_f32_f64_close(&tp, "x");
+    }
+
+    #[test]
+    fn f32_exponential_growth() {
+        let tp = TestProject::new("f32_growth")
+            .with_sim_time(0.0, 50.0, 1.0)
+            .aux("rate", "0.1", None)
+            .flow("inflow", "population * rate", None)
+            .stock("population", "100", &["inflow"], &[], None);
+
+        assert_f32_f64_close(&tp, "population");
+    }
+
+    #[test]
+    fn f32_sir_model() {
+        // A more complex model to exercise multiple stocks, flows, and builtins
+        let tp = TestProject::new("f32_sir")
+            .with_sim_time(0.0, 100.0, 0.25)
+            .aux("contact_rate", "6", None)
+            .aux("infectivity", "0.03", None)
+            .aux("recovery_rate", "0.2", None)
+            .aux("total_pop", "susceptible + infected + recovered", None)
+            .flow(
+                "new_infections",
+                "susceptible * infected * contact_rate * infectivity / total_pop",
+                None,
+            )
+            .flow("recoveries", "infected * recovery_rate", None)
+            .stock(
+                "susceptible",
+                "990",
+                &[],
+                &["new_infections"],
+                None,
+            )
+            .stock(
+                "infected",
+                "10",
+                &["new_infections"],
+                &["recoveries"],
+                None,
+            )
+            .stock("recovered", "0", &["recoveries"], &[], None);
+
+        assert_f32_f64_close(&tp, "susceptible");
+        assert_f32_f64_close(&tp, "infected");
+        assert_f32_f64_close(&tp, "recovered");
+    }
+
+    #[test]
+    fn f32_trig_functions() {
+        let tp = TestProject::new("f32_trig")
+            .with_sim_time(0.0, 6.28, 0.1)
+            .aux("s", "SIN(TIME)", None)
+            .aux("c", "COS(TIME)", None)
+            .aux("t", "TAN(TIME/4)", None);
+
+        assert_f32_f64_close(&tp, "s");
+        assert_f32_f64_close(&tp, "c");
+        assert_f32_f64_close(&tp, "t");
+    }
+
+    #[test]
+    fn f32_math_functions() {
+        let tp = TestProject::new("f32_math")
+            .with_sim_time(1.0, 10.0, 1.0)
+            .aux("sq", "SQRT(TIME)", None)
+            .aux("lg", "LN(TIME)", None)
+            .aux("ex", "EXP(TIME/10)", None)
+            .aux("ab", "ABS(TIME - 5)", None);
+
+        assert_f32_f64_close(&tp, "sq");
+        assert_f32_f64_close(&tp, "lg");
+        assert_f32_f64_close(&tp, "ex");
+        assert_f32_f64_close(&tp, "ab");
+    }
+
+    #[test]
+    fn f32_if_then_else() {
+        let tp = TestProject::new("f32_if")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "IF TIME > 5 THEN 100 ELSE 0", None);
+
+        assert_f32_f64_close(&tp, "x");
+    }
+
+    #[test]
+    fn f32_step_pulse() {
+        let tp = TestProject::new("f32_step_pulse")
+            .with_sim_time(0.0, 20.0, 1.0)
+            .aux("s", "STEP(10, 5)", None)
+            .aux("p", "PULSE(10, 5, 3)", None);
+
+        assert_f32_f64_close(&tp, "s");
+        assert_f32_f64_close(&tp, "p");
+    }
+
+    #[test]
+    fn f32_min_max() {
+        let tp = TestProject::new("f32_minmax")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("mn", "MIN(TIME, 5)", None)
+            .aux("mx", "MAX(TIME, 5)", None);
+
+        assert_f32_f64_close(&tp, "mn");
+        assert_f32_f64_close(&tp, "mx");
+    }
+}
