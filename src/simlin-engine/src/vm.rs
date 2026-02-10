@@ -2035,7 +2035,10 @@ fn apply<F: SimFloat>(func: BuiltinId, time: F, dt: F, a: F, b: F, c: F) -> F {
             ramp(time, slope, start_time, Some(end_time))
         }
         BuiltinId::SafeDiv => {
-            if !b.approx_eq(F::zero()) {
+            // Use exact zero comparison, not approx_eq: a denominator that
+            // is very small but non-zero (e.g. subnormal) should still
+            // produce a / b, not silently fall back to the default c.
+            if b != F::zero() {
                 a / b
             } else {
                 c
@@ -2351,6 +2354,310 @@ mod lookup_tests {
         // Regular lookup should interpolate
         assert_eq!(0.5, lookup(&table, 0.5));
         assert_eq!(1.5, lookup(&table, 1.5));
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::*;
+    use crate::bytecode::BuiltinId;
+
+    // ── SafeDiv ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn safediv_nonzero_denominator() {
+        let result: f64 = apply(BuiltinId::SafeDiv, 0.0, 1.0, 10.0, 2.0, 99.0);
+        assert_eq!(result, 5.0);
+    }
+
+    #[test]
+    fn safediv_exact_zero_denominator_returns_default() {
+        let result: f64 = apply(BuiltinId::SafeDiv, 0.0, 1.0, 10.0, 0.0, 99.0);
+        assert_eq!(result, 99.0);
+    }
+
+    #[test]
+    fn safediv_subnormal_denominator_divides_normally() {
+        // A subnormal (very small but non-zero) denominator must NOT trigger
+        // the fallback branch — this is the key semantic distinction between
+        // exact-zero and approx_eq checks.
+        let subnormal: f64 = f64::MIN_POSITIVE / 2.0; // subnormal value
+        assert!(subnormal != 0.0, "subnormal should not be exactly zero");
+        let result: f64 = apply(BuiltinId::SafeDiv, 0.0, 1.0, 10.0, subnormal, 99.0);
+        // Should perform division, not return default
+        assert_ne!(result, 99.0, "subnormal denominator should NOT trigger fallback");
+        assert_eq!(result, 10.0 / subnormal);
+    }
+
+    #[test]
+    fn safediv_negative_zero_is_zero() {
+        // -0.0 == 0.0 in IEEE 754, so SafeDiv should return default
+        let result: f64 = apply(BuiltinId::SafeDiv, 0.0, 1.0, 10.0, -0.0, 99.0);
+        assert_eq!(result, 99.0, "negative zero should trigger the fallback");
+    }
+
+    #[test]
+    fn safediv_f32_exact_zero_returns_default() {
+        let result: f32 = apply(BuiltinId::SafeDiv, 0.0f32, 1.0f32, 10.0f32, 0.0f32, 42.0f32);
+        assert_eq!(result, 42.0f32);
+    }
+
+    #[test]
+    fn safediv_f32_subnormal_divides() {
+        let subnormal: f32 = f32::MIN_POSITIVE / 2.0;
+        assert!(subnormal != 0.0f32);
+        let result: f32 = apply(BuiltinId::SafeDiv, 0.0f32, 1.0f32, 10.0f32, subnormal, 99.0f32);
+        assert_ne!(result, 99.0f32, "f32 subnormal denominator should NOT trigger fallback");
+    }
+
+    // ── Sign ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sign_positive() {
+        assert_eq!(1.0, apply::<f64>(BuiltinId::Sign, 0.0, 1.0, 5.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn sign_negative() {
+        assert_eq!(-1.0, apply::<f64>(BuiltinId::Sign, 0.0, 1.0, -3.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn sign_zero() {
+        assert_eq!(0.0, apply::<f64>(BuiltinId::Sign, 0.0, 1.0, 0.0, 0.0, 0.0));
+    }
+
+    // ── Other builtins ──────────────────────────────────────────────────
+
+    #[test]
+    fn apply_abs() {
+        assert_eq!(3.0, apply::<f64>(BuiltinId::Abs, 0.0, 1.0, -3.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn apply_int_floors() {
+        assert_eq!(3.0, apply::<f64>(BuiltinId::Int, 0.0, 1.0, 3.7, 0.0, 0.0));
+        assert_eq!(-4.0, apply::<f64>(BuiltinId::Int, 0.0, 1.0, -3.2, 0.0, 0.0));
+    }
+
+    #[test]
+    fn apply_pi() {
+        let result: f64 = apply(BuiltinId::Pi, 0.0, 1.0, 0.0, 0.0, 0.0);
+        assert!((result - std::f64::consts::PI).abs() < 1e-15);
+    }
+
+    #[test]
+    fn apply_inf() {
+        let result: f64 = apply(BuiltinId::Inf, 0.0, 1.0, 0.0, 0.0, 0.0);
+        assert!(result.is_infinite() && result > 0.0);
+    }
+
+    #[test]
+    fn apply_trig_round_trip() {
+        // sin(asin(0.5)) should be ~0.5
+        let asin_val: f64 = apply(BuiltinId::Arcsin, 0.0, 1.0, 0.5, 0.0, 0.0);
+        let sin_val: f64 = apply(BuiltinId::Sin, 0.0, 1.0, asin_val, 0.0, 0.0);
+        assert!((sin_val - 0.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn apply_log10() {
+        let result: f64 = apply(BuiltinId::Log10, 0.0, 1.0, 100.0, 0.0, 0.0);
+        assert!((result - 2.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn apply_ln() {
+        let result: f64 = apply(BuiltinId::Ln, 0.0, 1.0, std::f64::consts::E, 0.0, 0.0);
+        assert!((result - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn apply_sqrt() {
+        assert_eq!(3.0, apply::<f64>(BuiltinId::Sqrt, 0.0, 1.0, 9.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn apply_max_min() {
+        assert_eq!(7.0, apply::<f64>(BuiltinId::Max, 0.0, 1.0, 3.0, 7.0, 0.0));
+        assert_eq!(3.0, apply::<f64>(BuiltinId::Min, 0.0, 1.0, 3.0, 7.0, 0.0));
+    }
+
+    // ── f32 builtins ────────────────────────────────────────────────────
+
+    #[test]
+    fn f32_apply_abs() {
+        assert_eq!(3.0f32, apply::<f32>(BuiltinId::Abs, 0.0, 1.0, -3.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn f32_apply_trig() {
+        let sin_val: f32 = apply(BuiltinId::Sin, 0.0, 1.0, 1.0, 0.0, 0.0);
+        assert!((sin_val - 1.0f32.sin()).abs() < 1e-6);
+        let cos_val: f32 = apply(BuiltinId::Cos, 0.0, 1.0, 1.0, 0.0, 0.0);
+        assert!((cos_val - 1.0f32.cos()).abs() < 1e-6);
+        let tan_val: f32 = apply(BuiltinId::Tan, 0.0, 1.0, 1.0, 0.0, 0.0);
+        assert!((tan_val - 1.0f32.tan()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn f32_apply_inverse_trig() {
+        let asin: f32 = apply(BuiltinId::Arcsin, 0.0, 1.0, 0.5, 0.0, 0.0);
+        assert!((asin - 0.5f32.asin()).abs() < 1e-6);
+        let acos: f32 = apply(BuiltinId::Arccos, 0.0, 1.0, 0.5, 0.0, 0.0);
+        assert!((acos - 0.5f32.acos()).abs() < 1e-6);
+        let atan: f32 = apply(BuiltinId::Arctan, 0.0, 1.0, 1.0, 0.0, 0.0);
+        assert!((atan - 1.0f32.atan()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn f32_apply_log() {
+        let ln: f32 = apply(BuiltinId::Ln, 0.0, 1.0, std::f32::consts::E, 0.0, 0.0);
+        assert!((ln - 1.0).abs() < 1e-5);
+        let log10: f32 = apply(BuiltinId::Log10, 0.0, 1.0, 100.0, 0.0, 0.0);
+        assert!((log10 - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn f32_apply_sqrt_exp() {
+        let sq: f32 = apply(BuiltinId::Sqrt, 0.0, 1.0, 9.0, 0.0, 0.0);
+        assert!((sq - 3.0).abs() < 1e-6);
+        let ex: f32 = apply(BuiltinId::Exp, 0.0, 1.0, 1.0, 0.0, 0.0);
+        assert!((ex - std::f32::consts::E).abs() < 1e-5);
+    }
+}
+
+#[cfg(test)]
+mod is_truthy_and_eval_op2_tests {
+    use super::*;
+
+    #[test]
+    fn is_truthy_zero_is_false() {
+        assert!(!is_truthy(0.0_f64));
+        assert!(!is_truthy(0.0_f32));
+    }
+
+    #[test]
+    fn is_truthy_nonzero_is_true() {
+        assert!(is_truthy(1.0_f64));
+        assert!(is_truthy(-1.0_f64));
+        assert!(is_truthy(0.001_f64));
+        assert!(is_truthy(1.0_f32));
+        assert!(is_truthy(-1.0_f32));
+    }
+
+    #[test]
+    fn is_truthy_nan_is_true() {
+        // NaN is not approx_eq to zero, so it's truthy
+        assert!(is_truthy(f64::NAN));
+        assert!(is_truthy(f32::NAN));
+    }
+
+    #[test]
+    fn eval_op2_arithmetic_f64() {
+        assert_eq!(5.0, eval_op2::<f64>(Op2::Add, 2.0, 3.0));
+        assert_eq!(-1.0, eval_op2::<f64>(Op2::Sub, 2.0, 3.0));
+        assert_eq!(6.0, eval_op2::<f64>(Op2::Mul, 2.0, 3.0));
+        assert_eq!(2.0, eval_op2::<f64>(Op2::Div, 6.0, 3.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Mod, 7.0, 3.0));
+        assert_eq!(8.0, eval_op2::<f64>(Op2::Exp, 2.0, 3.0));
+    }
+
+    #[test]
+    fn eval_op2_comparison_f64() {
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Gt, 3.0, 2.0));
+        assert_eq!(0.0, eval_op2::<f64>(Op2::Gt, 2.0, 3.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Gte, 3.0, 3.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Lt, 2.0, 3.0));
+        assert_eq!(0.0, eval_op2::<f64>(Op2::Lt, 3.0, 2.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Lte, 3.0, 3.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Eq, 3.0, 3.0));
+        assert_eq!(0.0, eval_op2::<f64>(Op2::Eq, 3.0, 4.0));
+    }
+
+    #[test]
+    fn eval_op2_logical_f64() {
+        assert_eq!(1.0, eval_op2::<f64>(Op2::And, 1.0, 1.0));
+        assert_eq!(0.0, eval_op2::<f64>(Op2::And, 1.0, 0.0));
+        assert_eq!(0.0, eval_op2::<f64>(Op2::And, 0.0, 1.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Or, 1.0, 0.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Or, 0.0, 1.0));
+        assert_eq!(0.0, eval_op2::<f64>(Op2::Or, 0.0, 0.0));
+    }
+
+    #[test]
+    fn eval_op2_arithmetic_f32() {
+        assert_eq!(5.0f32, eval_op2::<f32>(Op2::Add, 2.0, 3.0));
+        assert_eq!(-1.0f32, eval_op2::<f32>(Op2::Sub, 2.0, 3.0));
+        assert_eq!(6.0f32, eval_op2::<f32>(Op2::Mul, 2.0, 3.0));
+        assert_eq!(2.0f32, eval_op2::<f32>(Op2::Div, 6.0, 3.0));
+        assert_eq!(1.0f32, eval_op2::<f32>(Op2::Mod, 7.0, 3.0));
+        assert_eq!(8.0f32, eval_op2::<f32>(Op2::Exp, 2.0, 3.0));
+    }
+
+    #[test]
+    fn eval_op2_comparison_f32() {
+        assert_eq!(1.0f32, eval_op2::<f32>(Op2::Gt, 3.0, 2.0));
+        assert_eq!(0.0f32, eval_op2::<f32>(Op2::Gt, 2.0, 3.0));
+        assert_eq!(1.0f32, eval_op2::<f32>(Op2::Eq, 3.0, 3.0));
+    }
+}
+
+#[cfg(test)]
+mod specs_convert_tests {
+    use super::*;
+
+    #[test]
+    fn specs_f64_to_f32_preserves_values() {
+        let specs_f64 = Specs {
+            start: 0.0_f64,
+            stop: 100.0_f64,
+            dt: 0.25_f64,
+            save_step: 1.0_f64,
+            method: Method::Euler,
+        };
+
+        let specs_f32: Specs<f32> = specs_f64.convert();
+        assert_eq!(specs_f32.start, 0.0_f32);
+        assert_eq!(specs_f32.stop, 100.0_f32);
+        assert_eq!(specs_f32.dt, 0.25_f32);
+        assert_eq!(specs_f32.save_step, 1.0_f32);
+        assert_eq!(specs_f32.method, Method::Euler);
+    }
+
+    #[test]
+    fn specs_f32_to_f64_preserves_values() {
+        let specs_f32 = Specs {
+            start: 0.0_f32,
+            stop: 50.0_f32,
+            dt: 0.5_f32,
+            save_step: 2.0_f32,
+            method: Method::Euler,
+        };
+
+        let specs_f64: Specs<f64> = specs_f32.convert();
+        assert_eq!(specs_f64.start, 0.0_f64);
+        assert_eq!(specs_f64.stop, 50.0_f64);
+        assert_eq!(specs_f64.dt, 0.5_f64);
+        assert_eq!(specs_f64.save_step, 2.0_f64);
+    }
+
+    #[test]
+    fn specs_f64_round_trip() {
+        let original = Specs {
+            start: 1.5_f64,
+            stop: 99.75_f64,
+            dt: 0.125_f64,
+            save_step: 0.5_f64,
+            method: Method::Euler,
+        };
+
+        // f64 -> f32 -> f64: values representable in f32 should round-trip
+        let round_tripped: Specs<f64> = original.convert::<f32>().convert();
+        assert!((round_tripped.start - original.start).abs() < 1e-6);
+        assert!((round_tripped.stop - original.stop).abs() < 1e-4);
+        assert!((round_tripped.dt - original.dt).abs() < 1e-6);
+        assert!((round_tripped.save_step - original.save_step).abs() < 1e-6);
     }
 }
 
@@ -4877,5 +5184,115 @@ mod f32_vm_tests {
 
         assert_f32_f64_close(&tp, "mn");
         assert_f32_f64_close(&tp, "mx");
+    }
+
+    #[test]
+    fn f32_inverse_trig_and_log10() {
+        // Exercises asin, acos, atan, log10 which are uncovered in float.rs
+        let tp = TestProject::new("f32_inv_trig")
+            .with_sim_time(1.0, 10.0, 1.0)
+            .aux("as_val", "ARCSIN(0.5)", None)
+            .aux("ac_val", "ARCCOS(0.5)", None)
+            .aux("at_val", "ARCTAN(1)", None)
+            .aux("lg10", "LOG10(TIME)", None);
+
+        assert_f32_f64_close(&tp, "as_val");
+        assert_f32_f64_close(&tp, "ac_val");
+        assert_f32_f64_close(&tp, "at_val");
+        assert_f32_f64_close(&tp, "lg10");
+    }
+
+    #[test]
+    fn f32_pi_and_inf() {
+        // Exercises the PI and INF builtins through f32
+        let tp = TestProject::new("f32_pi_inf")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("pi_val", "PI", None)
+            .aux("inf_val", "INF", None);
+
+        let f32_results = tp.run_vm_f32().expect("f32 VM should succeed");
+        let pi_vals = f32_results.get("pi_val").expect("pi_val not found");
+        assert!(
+            (pi_vals[0] - std::f64::consts::PI).abs() < 0.001,
+            "PI should be approximately 3.14159, got {}",
+            pi_vals[0]
+        );
+        let inf_vals = f32_results.get("inf_val").expect("inf_val not found");
+        assert!(inf_vals[0].is_infinite(), "INF should be infinity");
+    }
+
+    #[test]
+    fn f32_sign_and_int() {
+        // Exercises Sign (neg_one), Int (floor/trunc), through f32
+        let tp = TestProject::new("f32_sign_int")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("pos_sign", "SIGN(TIME + 1)", None)
+            .aux("neg_sign", "SIGN(-5)", None)
+            .aux("zero_sign", "SIGN(0)", None)
+            .aux("int_val", "INT(TIME + 0.7)", None);
+
+        assert_f32_f64_close(&tp, "pos_sign");
+        assert_f32_f64_close(&tp, "neg_sign");
+        assert_f32_f64_close(&tp, "zero_sign");
+        assert_f32_f64_close(&tp, "int_val");
+    }
+
+    #[test]
+    fn f32_safediv() {
+        // SafeDiv with non-zero denominator, zero denominator, and default value
+        let tp = TestProject::new("f32_safediv")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("normal_div", "SAFEDIV(10, 2, 99)", None)
+            .aux("zero_div", "SAFEDIV(10, 0, 99)", None)
+            .aux("no_default", "SAFEDIV(10, 0)", None);
+
+        assert_f32_f64_close(&tp, "normal_div");
+        assert_f32_f64_close(&tp, "zero_div");
+        assert_f32_f64_close(&tp, "no_default");
+    }
+
+    #[test]
+    fn f32_ramp() {
+        let tp = TestProject::new("f32_ramp")
+            .with_sim_time(0.0, 20.0, 1.0)
+            .aux("r", "RAMP(2, 5, 15)", None);
+
+        assert_f32_f64_close(&tp, "r");
+    }
+
+    #[test]
+    fn f32_modulo() {
+        // Exercises the Mod (rem_euclid) operation through f32
+        let tp = TestProject::new("f32_mod")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("m", "TIME mod 3", None);
+
+        assert_f32_f64_close(&tp, "m");
+    }
+
+    #[test]
+    fn f32_power() {
+        // Exercises powf through f32
+        let tp = TestProject::new("f32_pow")
+            .with_sim_time(1.0, 5.0, 1.0)
+            .aux("p", "TIME ^ 2.5", None);
+
+        assert_f32_f64_close(&tp, "p");
+    }
+
+    #[test]
+    fn f32_boolean_ops() {
+        // Exercises AND, OR, NOT, and equality comparisons through f32
+        let tp = TestProject::new("f32_bool")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("and_val", "IF (TIME > 3) AND (TIME < 7) THEN 1 ELSE 0", None)
+            .aux("or_val", "IF (TIME < 2) OR (TIME > 8) THEN 1 ELSE 0", None)
+            .aux("not_val", "IF NOT(TIME > 5) THEN 1 ELSE 0", None)
+            .aux("eq_val", "IF TIME = 5 THEN 1 ELSE 0", None);
+
+        assert_f32_f64_close(&tp, "and_val");
+        assert_f32_f64_close(&tp, "or_val");
+        assert_f32_f64_close(&tp, "not_val");
+        assert_f32_f64_close(&tp, "eq_val");
     }
 }

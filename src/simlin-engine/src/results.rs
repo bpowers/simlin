@@ -173,3 +173,217 @@ impl<F: SimFloat> Results<F> {
         self.data.chunks(self.step_size).take(self.step_count)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn specs_from_dt_value() {
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 100.0,
+            dt: Dt::Dt(0.25),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+
+        let specs: Specs<f64> = Specs::from(&sim_specs);
+        assert_eq!(specs.start, 0.0);
+        assert_eq!(specs.stop, 100.0);
+        assert_eq!(specs.dt, 0.25);
+        assert_eq!(specs.save_step, 0.25); // defaults to dt when save_step is None
+        assert_eq!(specs.method, Method::Euler);
+    }
+
+    #[test]
+    fn specs_from_dt_reciprocal() {
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: Dt::Reciprocal(4.0), // 1/4 = 0.25
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+
+        let specs: Specs<f64> = Specs::from(&sim_specs);
+        assert_eq!(specs.dt, 0.25);
+    }
+
+    #[test]
+    fn specs_from_with_save_step() {
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 100.0,
+            dt: Dt::Dt(0.25),
+            save_step: Some(Dt::Dt(1.0)),
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+
+        let specs: Specs<f64> = Specs::from(&sim_specs);
+        assert_eq!(specs.dt, 0.25);
+        assert_eq!(specs.save_step, 1.0);
+    }
+
+    #[test]
+    fn specs_from_with_reciprocal_save_step() {
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 100.0,
+            dt: Dt::Dt(0.25),
+            save_step: Some(Dt::Reciprocal(2.0)), // 1/2 = 0.5
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+
+        let specs: Specs<f64> = Specs::from(&sim_specs);
+        assert_eq!(specs.save_step, 0.5);
+    }
+
+    #[test]
+    fn specs_from_f32() {
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 100.0,
+            dt: Dt::Dt(0.25),
+            save_step: Some(Dt::Dt(1.0)),
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+
+        let specs: Specs<f32> = Specs::from(&sim_specs);
+        assert_eq!(specs.start, 0.0_f32);
+        assert_eq!(specs.stop, 100.0_f32);
+        assert_eq!(specs.dt, 0.25_f32);
+        assert_eq!(specs.save_step, 1.0_f32);
+    }
+
+    #[test]
+    fn specs_from_rk2_warns() {
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::RungeKutta2,
+            time_units: None,
+        };
+
+        let specs: Specs<f64> = Specs::from(&sim_specs);
+        // Falls back to Euler with a warning
+        assert_eq!(specs.method, Method::Euler);
+    }
+
+    #[test]
+    fn specs_from_rk4_warns() {
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::RungeKutta4,
+            time_units: None,
+        };
+
+        let specs: Specs<f64> = Specs::from(&sim_specs);
+        assert_eq!(specs.method, Method::Euler);
+    }
+
+    #[test]
+    fn results_iter_yields_correct_steps() {
+        let specs = Specs {
+            start: 0.0_f64,
+            stop: 2.0,
+            dt: 1.0,
+            save_step: 1.0,
+            method: Method::Euler,
+        };
+
+        // 2 variables, 3 steps (0, 1, 2)
+        let data: Box<[f64]> = vec![
+            0.0, 10.0, // step 0
+            1.0, 20.0, // step 1
+            2.0, 30.0, // step 2
+        ]
+        .into_boxed_slice();
+
+        let results = Results {
+            offsets: HashMap::new(),
+            data,
+            step_size: 2,
+            step_count: 3,
+            specs,
+            is_vensim: false,
+        };
+
+        let steps: Vec<&[f64]> = results.iter().collect();
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0], &[0.0, 10.0]);
+        assert_eq!(steps[1], &[1.0, 20.0]);
+        assert_eq!(steps[2], &[2.0, 30.0]);
+    }
+
+    #[test]
+    fn results_iter_f32() {
+        let specs = Specs {
+            start: 0.0_f32,
+            stop: 1.0,
+            dt: 1.0,
+            save_step: 1.0,
+            method: Method::Euler,
+        };
+
+        let data: Box<[f32]> = vec![0.0f32, 1.0, 2.0, 3.0].into_boxed_slice();
+        let results = Results {
+            offsets: HashMap::new(),
+            data,
+            step_size: 2,
+            step_count: 2,
+            specs,
+            is_vensim: false,
+        };
+
+        let steps: Vec<&[f32]> = results.iter().collect();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0], &[0.0f32, 1.0]);
+        assert_eq!(steps[1], &[2.0f32, 3.0]);
+    }
+
+    #[test]
+    fn specs_convert_f64_to_f32() {
+        let specs = Specs {
+            start: 0.0_f64,
+            stop: 100.0,
+            dt: 0.25,
+            save_step: 1.0,
+            method: Method::Euler,
+        };
+
+        let converted: Specs<f32> = specs.convert();
+        assert_eq!(converted.start, 0.0_f32);
+        assert_eq!(converted.stop, 100.0_f32);
+        assert_eq!(converted.dt, 0.25_f32);
+        assert_eq!(converted.save_step, 1.0_f32);
+        assert_eq!(converted.method, Method::Euler);
+    }
+
+    #[test]
+    fn specs_convert_f32_to_f64() {
+        let specs = Specs {
+            start: 0.0_f32,
+            stop: 50.0,
+            dt: 0.5,
+            save_step: 2.0,
+            method: Method::Euler,
+        };
+
+        let converted: Specs<f64> = specs.convert();
+        assert_eq!(converted.start, 0.0_f64);
+        assert_eq!(converted.stop, 50.0_f64);
+        assert_eq!(converted.dt, 0.5_f64);
+        assert_eq!(converted.save_step, 2.0_f64);
+    }
+}

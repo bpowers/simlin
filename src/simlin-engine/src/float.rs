@@ -431,4 +431,171 @@ mod tests {
         let wide: f64 = narrow.to_f64();
         assert!((wide - original).abs() < 1e-6);
     }
+
+    // ── Constants coverage ──────────────────────────────────────────────
+
+    #[test]
+    fn f64_constants() {
+        assert_eq!(<f64 as SimFloat>::neg_one(), -1.0);
+        assert!(<f64 as SimFloat>::infinity().is_infinite());
+        assert!(<f64 as SimFloat>::infinity() > 0.0);
+        assert!(<f64 as SimFloat>::neg_infinity().is_infinite());
+        assert!(<f64 as SimFloat>::neg_infinity() < 0.0);
+        assert!(<f64 as SimFloat>::epsilon() > 0.0);
+        assert!(<f64 as SimFloat>::epsilon() < 1e-10);
+        assert!((<f64 as SimFloat>::pi() - std::f64::consts::PI).abs() < 1e-15);
+        assert_eq!(<f64 as SimFloat>::half(), 0.5);
+    }
+
+    #[test]
+    fn f32_constants() {
+        assert_eq!(<f32 as SimFloat>::neg_one(), -1.0f32);
+        assert!(<f32 as SimFloat>::infinity().is_infinite());
+        assert!(<f32 as SimFloat>::infinity() > 0.0f32);
+        assert!(<f32 as SimFloat>::neg_infinity().is_infinite());
+        assert!(<f32 as SimFloat>::neg_infinity() < 0.0f32);
+        assert!(<f32 as SimFloat>::epsilon() > 0.0f32);
+        assert!((<f32 as SimFloat>::pi() - std::f32::consts::PI).abs() < 1e-6);
+        assert_eq!(<f32 as SimFloat>::half(), 0.5f32);
+    }
+
+    // ── Conversion coverage ─────────────────────────────────────────────
+
+    #[test]
+    fn f64_from_usize_and_from_i8() {
+        assert_eq!(<f64 as SimFloat>::from_usize(42), 42.0);
+        assert_eq!(<f64 as SimFloat>::from_usize(0), 0.0);
+        assert_eq!(<f64 as SimFloat>::from_i8(1), 1.0);
+        assert_eq!(<f64 as SimFloat>::from_i8(0), 0.0);
+        assert_eq!(<f64 as SimFloat>::from_i8(-1), -1.0);
+    }
+
+    #[test]
+    fn f32_from_usize_and_from_i8() {
+        assert_eq!(<f32 as SimFloat>::from_usize(42), 42.0f32);
+        assert_eq!(<f32 as SimFloat>::from_usize(0), 0.0f32);
+        assert_eq!(<f32 as SimFloat>::from_i8(1), 1.0f32);
+        assert_eq!(<f32 as SimFloat>::from_i8(0), 0.0f32);
+        assert_eq!(<f32 as SimFloat>::from_i8(-1), -1.0f32);
+    }
+
+    // ── Classification coverage ─────────────────────────────────────────
+
+    #[test]
+    fn f64_is_nan() {
+        assert!(<f64 as SimFloat>::nan().is_nan());
+        assert!(!0.0_f64.is_nan());
+        assert!(!1.0_f64.is_nan());
+    }
+
+    #[test]
+    fn f32_is_nan() {
+        assert!(<f32 as SimFloat>::nan().is_nan());
+        assert!(!0.0_f32.is_nan());
+        assert!(!1.0_f32.is_nan());
+    }
+
+    // ── Rounding coverage ───────────────────────────────────────────────
+
+    #[test]
+    fn f64_rounding() {
+        assert_eq!(3.0_f64.floor(), 3.0);
+        assert_eq!(3.7_f64.floor(), 3.0);
+        assert_eq!(3.7_f64.round(), 4.0);
+        assert_eq!(3.3_f64.round(), 3.0);
+        assert_eq!(3.7_f64.trunc(), 3.0);
+        assert_eq!((-3.7_f64).trunc(), -3.0);
+    }
+
+    #[test]
+    fn f32_rounding() {
+        assert_eq!(SimFloat::floor(3.7f32), 3.0f32);
+        assert_eq!(SimFloat::round(3.7f32), 4.0f32);
+        assert_eq!(SimFloat::round(3.3f32), 3.0f32);
+        assert_eq!(SimFloat::trunc(3.7f32), 3.0f32);
+        assert_eq!(SimFloat::trunc(-3.7f32), -3.0f32);
+    }
+
+    // ── Math functions coverage ─────────────────────────────────────────
+
+    #[test]
+    fn f64_math_functions() {
+        assert_eq!((-3.0_f64).abs(), 3.0);
+        assert_eq!(9.0_f64.sqrt(), 3.0);
+        assert!((2.0_f64.powf(3.0) - 8.0).abs() < 1e-15);
+        assert!((1.0_f64.exp() - std::f64::consts::E).abs() < 1e-15);
+        assert!((std::f64::consts::E.ln() - 1.0).abs() < 1e-15);
+        assert!((100.0_f64.log10() - 2.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn f64_trig_functions() {
+        assert!((0.0_f64.sin()).abs() < 1e-15);
+        assert!((0.0_f64.cos() - 1.0).abs() < 1e-15);
+        assert!((0.0_f64.tan()).abs() < 1e-15);
+        assert!((0.5_f64.asin() - 0.5_f64.asin()).abs() < 1e-15); // identity
+        assert!((0.5_f64.acos() - 0.5_f64.acos()).abs() < 1e-15);
+        assert!((1.0_f64.atan() - std::f64::consts::FRAC_PI_4).abs() < 1e-15);
+    }
+
+    #[test]
+    fn f64_rem_euclid() {
+        assert_eq!(7.0_f64.rem_euclid(3.0), 1.0);
+        assert_eq!((-1.0_f64).rem_euclid(3.0), 2.0);
+    }
+
+    #[test]
+    fn f32_math_functions() {
+        assert_eq!(SimFloat::abs(-3.0f32), 3.0f32);
+        assert_eq!(SimFloat::sqrt(9.0f32), 3.0f32);
+        assert!((SimFloat::powf(2.0f32, 3.0) - 8.0).abs() < 1e-6);
+        assert!((SimFloat::exp(1.0f32) - std::f32::consts::E).abs() < 1e-6);
+        assert!((SimFloat::ln(std::f32::consts::E) - 1.0).abs() < 1e-6);
+        assert!((SimFloat::log10(100.0f32) - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn f32_trig_functions() {
+        assert!(SimFloat::sin(0.0f32).abs() < 1e-6);
+        assert!((SimFloat::cos(0.0f32) - 1.0).abs() < 1e-6);
+        assert!(SimFloat::tan(0.0f32).abs() < 1e-6);
+        assert!((SimFloat::asin(0.5f32) - 0.5f32.asin()).abs() < 1e-6);
+        assert!((SimFloat::acos(0.5f32) - 0.5f32.acos()).abs() < 1e-6);
+        assert!((SimFloat::atan(1.0f32) - std::f32::consts::FRAC_PI_4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn f32_rem_euclid() {
+        assert_eq!(SimFloat::rem_euclid(7.0f32, 3.0), 1.0f32);
+        assert_eq!(SimFloat::rem_euclid(-1.0f32, 3.0), 2.0f32);
+    }
+
+    // ── OrderedFloat / approx_eq coverage ───────────────────────────────
+
+    #[test]
+    fn f64_to_ordered() {
+        let a = 3.14_f64.to_ordered();
+        let b = 3.14_f64.to_ordered();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn f32_to_ordered() {
+        let a = 3.14_f32.to_ordered();
+        let b = 3.14_f32.to_ordered();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn f32_approx_eq() {
+        let a = 1.0_f32;
+        let b = 1.0_f32 + f32::EPSILON;
+        assert!(a.approx_eq(b));
+        assert!(!1.0_f32.approx_eq(2.0_f32));
+    }
+
+    #[test]
+    fn f64_from_f64_identity() {
+        assert_eq!(<f64 as SimFloat>::from_f64(42.5), 42.5);
+    }
 }

@@ -2336,3 +2336,97 @@ fn simulation_defaults_to_project_sim_specs_without_model_override() {
     assert!(approx_eq!(f64, sim.specs.dt, 0.25));
     assert!(approx_eq!(f64, sim.specs.save_step, 0.5));
 }
+
+#[cfg(test)]
+mod compile_project_tests {
+    use crate::common::canonicalize;
+    use crate::test_common::TestProject;
+    use crate::vm::Vm;
+    use std::sync::Arc;
+
+    #[test]
+    fn compile_project_f64_matches_simulation_compile() {
+        let tp = TestProject::new("compile_f64")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("rate", "0.1", None)
+            .flow("inflow", "s * rate", None)
+            .stock("s", "100", &["inflow"], &[], None);
+
+        // Via Simulation::compile()
+        let sim = tp.build_sim().expect("build_sim");
+        let compiled_via_sim = sim.compile().expect("compile");
+        let mut vm1 = Vm::new(compiled_via_sim).expect("vm1");
+        vm1.run_to_end().expect("vm1 run");
+        let s1 = vm1.get_series(&canonicalize("s")).expect("s series");
+
+        // Via compile_project::<f64>()
+        let datamodel = tp.build_datamodel();
+        let project = Arc::new(crate::project::Project::from(datamodel));
+        let compiled_generic = super::compile_project::<f64>(&project, "main").expect("compile_project");
+        let mut vm2 = Vm::new(compiled_generic).expect("vm2");
+        vm2.run_to_end().expect("vm2 run");
+        let s2 = vm2.get_series(&canonicalize("s")).expect("s series");
+
+        assert_eq!(s1.len(), s2.len());
+        for (i, (a, b)) in s1.iter().zip(s2.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-15,
+                "step {i}: sim.compile()={a}, compile_project()={b}"
+            );
+        }
+    }
+
+    #[test]
+    fn compile_project_f32_runs_successfully() {
+        let tp = TestProject::new("compile_f32")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("rate", "0.1", None)
+            .flow("inflow", "s * rate", None)
+            .stock("s", "100", &["inflow"], &[], None);
+
+        let datamodel = tp.build_datamodel();
+        let project = Arc::new(crate::project::Project::from(datamodel));
+        let compiled = super::compile_project::<f32>(&project, "main").expect("compile_project f32");
+
+        let mut vm: crate::vm::Vm<f32> = crate::vm::Vm::new(compiled).expect("vm f32");
+        vm.run_to_end().expect("vm f32 run");
+        let results = vm.into_results();
+
+        // Should have results
+        assert!(results.step_count > 0);
+        assert!(results.data.len() > 0);
+    }
+
+    #[test]
+    fn compile_project_nonexistent_model_errors() {
+        let tp = TestProject::new("no_such_model")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("x", "1", None);
+
+        let datamodel = tp.build_datamodel();
+        let project = Arc::new(crate::project::Project::from(datamodel));
+        let result = super::compile_project::<f64>(&project, "nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compile_as_matches_compile_project() {
+        // Simulation::compile_as<F> should delegate to compile_project<F>
+        let tp = TestProject::new("compile_as")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("x", "TIME * 2", None);
+
+        let datamodel = tp.build_datamodel();
+        let project = Arc::new(crate::project::Project::from(datamodel));
+
+        let compiled = super::Simulation::compile_as::<f64>(&project, "main")
+            .expect("compile_as");
+        let mut vm = Vm::new(compiled).expect("vm");
+        vm.run_to_end().expect("run");
+        let x = vm.get_series(&canonicalize("x")).expect("x series");
+
+        assert_eq!(x.len(), 6); // steps 0,1,2,3,4,5
+        assert!((x[0] - 0.0).abs() < 1e-10);
+        assert!((x[5] - 10.0).abs() < 1e-10);
+    }
+}
