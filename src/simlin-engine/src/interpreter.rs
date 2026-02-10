@@ -1531,12 +1531,7 @@ impl Simulation {
         if spec.stop < spec.start {
             return sim_err!(BadSimSpecs, "".to_string());
         }
-        let save_step = if spec.save_step > spec.dt {
-            spec.save_step
-        } else {
-            spec.dt
-        };
-        let n_chunks: usize = ((spec.stop - spec.start) / save_step + 1.0) as usize;
+        let n_chunks = spec.n_chunks;
         let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5).floor() as usize);
 
         let dt = spec.dt;
@@ -1546,7 +1541,10 @@ impl Simulation {
 
         let module = &self.modules[&self.root];
 
-        let slab: Vec<f64> = vec![0.0; n_slots * (n_chunks + 1)];
+        // Allocate n_chunks + 2 slabs: n_chunks saved timesteps, plus 2
+        // working slots for the curr/next pair needed to advance past stop
+        // (especially when save_step does not evenly divide the time range).
+        let slab: Vec<f64> = vec![0.0; n_slots * (n_chunks + 2)];
         let mut boxed_slab = slab.into_boxed_slice();
         {
             let mut slabs = boxed_slab.chunks_mut(n_slots);

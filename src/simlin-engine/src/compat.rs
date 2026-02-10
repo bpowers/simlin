@@ -164,6 +164,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
             dt: 0.0,
             save_step: 0.0,
             method: Method::Euler,
+            n_chunks: step_count,
         },
         is_vensim: true,
     })
@@ -225,6 +226,7 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
             dt: 0.0,
             save_step: 0.0,
             method: Method::Euler,
+            n_chunks: step_count,
         },
         is_vensim: false,
     })

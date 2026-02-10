@@ -24,6 +24,10 @@ pub struct Specs<F: SimFloat> {
     pub dt: F,
     pub save_step: F,
     pub method: Method,
+    /// Number of saved output timesteps, pre-computed from the original f64
+    /// spec values.  Using truncation (floor) so non-divisible save_step
+    /// values don't over-allocate beyond the simulation horizon.
+    pub n_chunks: usize,
 }
 
 impl<F: SimFloat> Specs<F> {
@@ -35,6 +39,7 @@ impl<F: SimFloat> Specs<F> {
             dt: F2::from_f64(self.dt.to_f64()),
             save_step: F2::from_f64(self.save_step.to_f64()),
             method: self.method,
+            n_chunks: self.n_chunks,
         }
     }
 
@@ -64,12 +69,30 @@ impl<F: SimFloat> Specs<F> {
             }
         };
 
+        // Compute n_chunks from the original f64 spec values to avoid
+        // precision loss after F::from_f64 conversion (especially for f32).
+        // Truncation (not round) is correct: for non-divisible save_step
+        // values only save points within [start, stop] are counted.
+        let dt_f64: f64 = match &specs.dt {
+            Dt::Dt(value) => *value,
+            Dt::Reciprocal(value) => 1.0 / *value,
+        };
+        let save_step_f64: f64 = match &specs.save_step {
+            None => dt_f64,
+            Some(ss) => match ss {
+                Dt::Dt(value) => *value,
+                Dt::Reciprocal(value) => 1.0 / *value,
+            },
+        };
+        let n_chunks = ((specs.stop - specs.start) / save_step_f64 + 1.0) as usize;
+
         Specs {
             start: F::from_f64(specs.start),
             stop: F::from_f64(specs.stop),
             dt,
             save_step,
             method,
+            n_chunks,
         }
     }
 }
@@ -300,6 +323,7 @@ mod tests {
             dt: 1.0,
             save_step: 1.0,
             method: Method::Euler,
+            n_chunks: 3,
         };
 
         // 2 variables, 3 steps (0, 1, 2)
@@ -334,6 +358,7 @@ mod tests {
             dt: 1.0,
             save_step: 1.0,
             method: Method::Euler,
+            n_chunks: 2,
         };
 
         let data: Box<[f32]> = vec![0.0f32, 1.0, 2.0, 3.0].into_boxed_slice();
@@ -360,6 +385,7 @@ mod tests {
             dt: 0.25,
             save_step: 1.0,
             method: Method::Euler,
+            n_chunks: 101,
         };
 
         let converted: Specs<f32> = specs.convert();
@@ -378,6 +404,7 @@ mod tests {
             dt: 0.5,
             save_step: 2.0,
             method: Method::Euler,
+            n_chunks: 26,
         };
 
         let converted: Specs<f64> = specs.convert();
@@ -385,5 +412,83 @@ mod tests {
         assert_eq!(converted.stop, 50.0_f64);
         assert_eq!(converted.dt, 0.5_f64);
         assert_eq!(converted.save_step, 2.0_f64);
+    }
+
+    // ── n_chunks tests ────────────────────────────────────────────────
+
+    #[test]
+    fn specs_n_chunks_divisible() {
+        // start=0, stop=10, save_step=1 → 11 save points (0,1,...,10)
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+        let specs: Specs<f64> = Specs::from(&sim_specs);
+        assert_eq!(specs.n_chunks, 11);
+    }
+
+    #[test]
+    fn specs_n_chunks_non_divisible() {
+        // start=0, stop=10, save_step=4 → 3 save points (0,4,8); 12 > stop
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: Dt::Dt(1.0),
+            save_step: Some(Dt::Dt(4.0)),
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+        let specs: Specs<f64> = Specs::from(&sim_specs);
+        assert_eq!(specs.n_chunks, 3);
+    }
+
+    #[test]
+    fn specs_n_chunks_non_divisible_three() {
+        // start=0, stop=10, save_step=3 → 4 save points (0,3,6,9); 12 > stop
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: Dt::Dt(1.0),
+            save_step: Some(Dt::Dt(3.0)),
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+        let specs: Specs<f64> = Specs::from(&sim_specs);
+        assert_eq!(specs.n_chunks, 4);
+    }
+
+    #[test]
+    fn specs_n_chunks_f32_no_truncation_loss() {
+        // dt = 1/7 ≈ 0.142857... loses precision in f32.
+        // start=0, stop=1 → should still give 8 save points.
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0 / 7.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+        let specs: Specs<f32> = Specs::from(&sim_specs);
+        assert_eq!(specs.n_chunks, 8);
+    }
+
+    #[test]
+    fn specs_n_chunks_survives_convert() {
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: Dt::Dt(1.0),
+            save_step: Some(Dt::Dt(4.0)),
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+        let specs_f64: Specs<f64> = Specs::from(&sim_specs);
+        let specs_f32: Specs<f32> = specs_f64.convert();
+        assert_eq!(specs_f32.n_chunks, 3);
     }
 }

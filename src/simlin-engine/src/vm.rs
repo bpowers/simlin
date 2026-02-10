@@ -435,22 +435,9 @@ impl<F: SimFloat> Vm<F> {
             return sim_err!(BadSimSpecs, "dt must be greater than 0".to_string());
         }
 
-        let save_step = if sim.specs.save_step > sim.specs.dt {
-            sim.specs.save_step
-        } else {
-            sim.specs.dt
-        };
         let root_module = &sim.modules[&sim.root];
         let n_slots = root_module.n_slots;
-        // Compute n_chunks in f64 to avoid truncation loss in the f32 path.
-        // For example, 1.0f32 / (1.0f32/7.0f32) gives ~6.999999 instead of 7.0,
-        // which would silently drop the final timestep when cast to usize.
-        let n_chunks: usize = {
-            let start = sim.specs.start.to_f64();
-            let stop = sim.specs.stop.to_f64();
-            let ss = save_step.to_f64();
-            ((stop - start) / ss + 1.0).round() as usize
-        };
+        let n_chunks = sim.specs.n_chunks;
         let data: Box<[F]> = vec![F::zero(); n_slots * (n_chunks + 2)].into_boxed_slice();
 
         // Allocate temp storage based on context temp info
@@ -2636,6 +2623,7 @@ mod specs_convert_tests {
             dt: 0.25_f64,
             save_step: 1.0_f64,
             method: Method::Euler,
+            n_chunks: 101,
         };
 
         let specs_f32: Specs<f32> = specs_f64.convert();
@@ -2654,6 +2642,7 @@ mod specs_convert_tests {
             dt: 0.5_f32,
             save_step: 2.0_f32,
             method: Method::Euler,
+            n_chunks: 26,
         };
 
         let specs_f64: Specs<f64> = specs_f32.convert();
@@ -2671,6 +2660,7 @@ mod specs_convert_tests {
             dt: 0.125_f64,
             save_step: 0.5_f64,
             method: Method::Euler,
+            n_chunks: 197, // (99.75-1.5)/0.5 + 1 = 196.5 + 1 = 197.5, truncated = 197
         };
 
         // f64 -> f32 -> f64: values representable in f32 should round-trip
@@ -4703,6 +4693,77 @@ mod vm_reset_run_to_and_constants_tests {
                 expected_time
             );
         }
+    }
+
+    /// When save_step does not evenly divide (stop-start), the VM must
+    /// only report the save points that fall within the horizon.
+    /// start=0, stop=10, save_step=4 → saves at t=0,4,8 (3 steps).
+    /// t=12 > stop, so we must NOT report a 4th step.
+    #[test]
+    fn test_non_divisible_save_step_no_over_allocation() {
+        let tp = TestProject::new_with_specs(
+            "non_div_save",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: Some(datamodel::Dt::Dt(4.0)),
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+        )
+        .flow("inflow", "1", None)
+        .stock("s", "0", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+
+        // 3 saved steps: t=0, t=4, t=8
+        assert_eq!(
+            vm.n_chunks, 3,
+            "non-divisible save_step must truncate, not round"
+        );
+
+        let results = vm.into_results();
+        assert_eq!(results.step_count, 3);
+
+        // Verify saved times
+        let steps: Vec<&[f64]> = results.iter().collect();
+        assert_eq!(steps.len(), 3);
+        assert!((steps[0][TIME_OFF] - 0.0).abs() < 1e-10);
+        assert!((steps[1][TIME_OFF] - 4.0).abs() < 1e-10);
+        assert!((steps[2][TIME_OFF] - 8.0).abs() < 1e-10);
+    }
+
+    /// Same test but via the interpreter, to verify VM and interpreter agree.
+    #[test]
+    fn test_non_divisible_save_step_interpreter_agreement() {
+        let tp = TestProject::new_with_specs(
+            "non_div_interp",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: Some(datamodel::Dt::Dt(4.0)),
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+        )
+        .flow("inflow", "1", None)
+        .stock("s", "0", &["inflow"], &[], None);
+
+        let vm_results = tp.run_vm().expect("VM should succeed");
+        let interp_results = tp.run_interpreter().expect("Interpreter should succeed");
+
+        let vm_time = vm_results.get("time").expect("time in VM results");
+        let interp_time = interp_results.get("time").expect("time in interp results");
+
+        assert_eq!(
+            vm_time.len(),
+            interp_time.len(),
+            "VM and interpreter must agree on step count for non-divisible save_step"
+        );
     }
 
     // ================================================================
