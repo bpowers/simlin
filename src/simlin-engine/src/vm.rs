@@ -442,8 +442,15 @@ impl<F: SimFloat> Vm<F> {
         };
         let root_module = &sim.modules[&sim.root];
         let n_slots = root_module.n_slots;
-        let n_chunks: usize =
-            ((sim.specs.stop - sim.specs.start) / save_step + F::one()).to_f64() as usize;
+        // Compute n_chunks in f64 to avoid truncation loss in the f32 path.
+        // For example, 1.0f32 / (1.0f32/7.0f32) gives ~6.999999 instead of 7.0,
+        // which would silently drop the final timestep when cast to usize.
+        let n_chunks: usize = {
+            let start = sim.specs.start.to_f64();
+            let stop = sim.specs.stop.to_f64();
+            let ss = save_step.to_f64();
+            ((stop - start) / ss + 1.0).round() as usize
+        };
         let data: Box<[F]> = vec![F::zero(); n_slots * (n_chunks + 2)].into_boxed_slice();
 
         // Allocate temp storage based on context temp info
@@ -512,7 +519,7 @@ impl<F: SimFloat> Vm<F> {
         let n_slots = self.n_slots;
         let n_chunks = self.n_chunks;
 
-        let save_every = std::cmp::max(1, ((save_step / dt + F::half()).floor()).to_f64() as usize);
+        let save_every = std::cmp::max(1, (save_step.to_f64() / dt.to_f64()).round() as usize);
 
         self.stack.clear();
         let module_inputs: &[F] = &[];
@@ -5135,8 +5142,10 @@ mod f32_vm_tests {
 
     #[test]
     fn f32_trig_functions() {
+        // Keep TIME/4 well away from π/2 ≈ 1.5708 where TAN diverges.
+        // stop=5.0 gives max arg TAN(5.0/4)=TAN(1.25), safely bounded.
         let tp = TestProject::new("f32_trig")
-            .with_sim_time(0.0, 6.3, 0.1)
+            .with_sim_time(0.0, 5.0, 0.1)
             .aux("s", "SIN(TIME)", None)
             .aux("c", "COS(TIME)", None)
             .aux("t", "TAN(TIME/4)", None);
@@ -5304,5 +5313,46 @@ mod f32_vm_tests {
         assert_f32_f64_close(&tp, "or_val");
         assert_f32_f64_close(&tp, "not_val");
         assert_f32_f64_close(&tp, "eq_val");
+    }
+
+    /// Regression: f32 path under-allocates n_chunks when (stop-start)/save_step
+    /// yields a float just below an integer due to f32 precision.
+    /// For example, 1.0f32 / (1.0f32/7.0f32) + 1.0f32 ≈ 7.9999995 which truncates
+    /// to 7 instead of 8.  The fix is to compute n_chunks in f64 regardless of F.
+    #[test]
+    fn f32_n_chunks_no_truncation_loss() {
+        // Verify the underlying f32 arithmetic problem exists:
+        // 1/7 in f32 then 1.0/(1/7) should be 7.0 but f32 gives ~6.999999
+        let seventh_f32: f32 = 1.0 / 7.0;
+        let ratio = 1.0_f32 / seventh_f32;
+        assert!(
+            ratio < 7.0_f32,
+            "precondition: f32 1.0/(1.0/7.0) should be slightly below 7.0, \
+             got {ratio:.10} -- if this fails, the test premise no longer holds"
+        );
+        // Naive truncation drops the +1 step
+        let n_chunks_naive = (ratio + 1.0_f32) as usize;
+        assert_eq!(
+            n_chunks_naive, 7,
+            "precondition: naive truncation should give 7, not 8"
+        );
+
+        // Now test through the actual VM: start=0, stop=1, dt=1/7 should
+        // produce 8 saved steps in both f64 and f32.
+        let tp = TestProject::new("f32_trunc")
+            .with_sim_time(0.0, 1.0, 1.0 / 7.0)
+            .aux("x", "TIME", None);
+
+        let f64_results = tp.run_vm().expect("f64 VM should succeed");
+        let f64_vals = f64_results.get("x").expect("x in f64 results");
+        assert_eq!(f64_vals.len(), 8, "f64 should have 8 steps");
+
+        let f32_results = tp.run_vm_f32().expect("f32 VM should succeed");
+        let f32_vals = f32_results.get("x").expect("x in f32 results");
+        assert_eq!(
+            f32_vals.len(),
+            8,
+            "f32 must not lose the final timestep due to float truncation"
+        );
     }
 }

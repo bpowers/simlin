@@ -73,6 +73,9 @@ impl TestProject {
         self.sim_specs.start = start;
         self.sim_specs.stop = stop;
         self.sim_specs.dt = datamodel::Dt::Dt(dt);
+        // Default save_step to dt so callers don't have to set it separately.
+        // If save_step differs from dt, use with_save_step() after this.
+        self.sim_specs.save_step = None;
         self
     }
 
