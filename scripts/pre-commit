@@ -61,7 +61,7 @@ fi
 # Check if node_modules exists
 if [ ! -d "node_modules" ]; then
     echo -e "${RED}node_modules is missing.${NC}"
-    echo -e "${YELLOW}Run './scripts/cloud-init.sh' to install dependencies and configure the environment.${NC}"
+    echo -e "${YELLOW}Run './scripts/dev-init.sh' to install dependencies and configure the environment.${NC}"
     exit 1
 fi
 
@@ -255,7 +255,7 @@ case "$SELECTED_AI_TOOL" in
         ;;
     none|*)
         echo -e " ${YELLOW}skipped (no AI tool available)${NC}"
-        echo -e "${YELLOW}Warning: No AI tool configured. Run ./scripts/cloud-init.sh to set up.${NC}"
+        echo -e "${YELLOW}Warning: No AI tool configured. Run ./scripts/dev-init.sh to set up.${NC}"
         rm -f "$AI_OUTPUT"
         ;;
 esac
