@@ -9,13 +9,13 @@ use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, Ident, canonicalize};
 use crate::compiler::{BuiltinFn, Expr, Module, SubscriptIndex, UnaryOp};
 use crate::dimensions::SubscriptIterator;
+use crate::float::SimFloat;
 use crate::model::{ModuleInputSet, enumerate_modules};
 use crate::sim_err;
 use crate::vm::{
     CompiledSimulation, DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, ModuleKey,
     Specs, StepPart, TIME_OFF, is_truthy, pulse, ramp, step,
 };
-use crate::float::SimFloat;
 use crate::{Project, Results, Variable, compiler};
 use float_cmp::approx_eq;
 use ordered_float::OrderedFloat;
@@ -2362,7 +2362,8 @@ mod compile_project_tests {
         // Via compile_project::<f64>()
         let datamodel = tp.build_datamodel();
         let project = Arc::new(crate::project::Project::from(datamodel));
-        let compiled_generic = super::compile_project::<f64>(&project, "main").expect("compile_project");
+        let compiled_generic =
+            super::compile_project::<f64>(&project, "main").expect("compile_project");
         let mut vm2 = Vm::new(compiled_generic).expect("vm2");
         vm2.run_to_end().expect("vm2 run");
         let s2 = vm2.get_series(&canonicalize("s")).expect("s series");
@@ -2386,7 +2387,8 @@ mod compile_project_tests {
 
         let datamodel = tp.build_datamodel();
         let project = Arc::new(crate::project::Project::from(datamodel));
-        let compiled = super::compile_project::<f32>(&project, "main").expect("compile_project f32");
+        let compiled =
+            super::compile_project::<f32>(&project, "main").expect("compile_project f32");
 
         let mut vm: crate::vm::Vm<f32> = crate::vm::Vm::new(compiled).expect("vm f32");
         vm.run_to_end().expect("vm f32 run");
@@ -2394,7 +2396,7 @@ mod compile_project_tests {
 
         // Should have results
         assert!(results.step_count > 0);
-        assert!(results.data.len() > 0);
+        assert!(!results.data.is_empty());
     }
 
     #[test]
@@ -2419,8 +2421,7 @@ mod compile_project_tests {
         let datamodel = tp.build_datamodel();
         let project = Arc::new(crate::project::Project::from(datamodel));
 
-        let compiled = super::Simulation::compile_as::<f64>(&project, "main")
-            .expect("compile_as");
+        let compiled = super::Simulation::compile_as::<f64>(&project, "main").expect("compile_as");
         let mut vm = Vm::new(compiled).expect("vm");
         vm.run_to_end().expect("run");
         let x = vm.get_series(&canonicalize("x")).expect("x series");

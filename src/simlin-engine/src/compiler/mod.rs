@@ -450,7 +450,10 @@ fn extract_temp_sizes<F: SimFloat>(expr: &Expr<F>, temp_sizes_map: &mut HashMap<
 }
 
 /// Extract temp sizes from builtin function arguments.
-fn extract_temp_sizes_from_builtin<F: SimFloat>(builtin: &BuiltinFn<F>, temp_sizes_map: &mut HashMap<u32, usize>) {
+fn extract_temp_sizes_from_builtin<F: SimFloat>(
+    builtin: &BuiltinFn<F>,
+    temp_sizes_map: &mut HashMap<u32, usize>,
+) {
     match builtin {
         BuiltinFn::Lookup(_, expr, _)
         | BuiltinFn::LookupForward(_, expr, _)

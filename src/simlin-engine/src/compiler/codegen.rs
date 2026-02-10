@@ -597,7 +597,10 @@ where
                                         Some("could not find table variable".to_string()),
                                     )
                                 })?;
-                            Ok((table_ident, offset_expr.unwrap_or(Expr::Const(F::zero(), *_loc))))
+                            Ok((
+                                table_ident,
+                                offset_expr.unwrap_or(Expr::Const(F::zero(), *_loc)),
+                            ))
                         }
                         _ => {
                             sim_err!(

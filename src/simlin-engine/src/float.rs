@@ -399,9 +399,9 @@ mod tests {
 
     #[test]
     fn f64_basic_ops() {
-        let a: f64 = SimFloat::from_f64(3.14);
-        // 3.14 != PI, so approx_eq should return false
-        assert!(!a.approx_eq(std::f64::consts::PI));
+        let a: f64 = SimFloat::from_f64(2.78);
+        // 2.78 != E, so approx_eq should return false
+        assert!(!a.approx_eq(std::f64::consts::E));
         assert_eq!(<f64 as SimFloat>::zero(), 0.0);
         assert_eq!(<f64 as SimFloat>::one(), 1.0);
         assert!(<f64 as SimFloat>::nan().is_nan());
@@ -409,11 +409,11 @@ mod tests {
 
     #[test]
     fn f32_basic_ops() {
-        let a: f32 = SimFloat::from_f64(3.14);
+        let a: f32 = SimFloat::from_f64(2.78);
         assert_eq!(<f32 as SimFloat>::zero(), 0.0f32);
         assert_eq!(<f32 as SimFloat>::one(), 1.0f32);
         assert!(<f32 as SimFloat>::nan().is_nan());
-        assert!((a - 3.14f32).abs() < 0.001);
+        assert!((a - 2.78f32).abs() < 0.001);
     }
 
     #[test]
@@ -574,15 +574,15 @@ mod tests {
 
     #[test]
     fn f64_to_ordered() {
-        let a = 3.14_f64.to_ordered();
-        let b = 3.14_f64.to_ordered();
+        let a = 2.78_f64.to_ordered();
+        let b = 2.78_f64.to_ordered();
         assert_eq!(a, b);
     }
 
     #[test]
     fn f32_to_ordered() {
-        let a = 3.14_f32.to_ordered();
-        let b = 3.14_f32.to_ordered();
+        let a = 2.78_f32.to_ordered();
+        let b = 2.78_f32.to_ordered();
         assert_eq!(a, b);
     }
 

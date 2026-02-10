@@ -512,8 +512,7 @@ impl<F: SimFloat> Vm<F> {
         let n_slots = self.n_slots;
         let n_chunks = self.n_chunks;
 
-        let save_every =
-            std::cmp::max(1, ((save_step / dt + F::half()).floor()).to_f64() as usize);
+        let save_every = std::cmp::max(1, ((save_step / dt + F::half()).floor()).to_f64() as usize);
 
         self.stack.clear();
         let module_inputs: &[F] = &[];
@@ -2038,11 +2037,7 @@ fn apply<F: SimFloat>(func: BuiltinId, time: F, dt: F, a: F, b: F, c: F) -> F {
             // Use exact zero comparison, not approx_eq: a denominator that
             // is very small but non-zero (e.g. subnormal) should still
             // produce a / b, not silently fall back to the default c.
-            if b != F::zero() {
-                a / b
-            } else {
-                c
-            }
+            if b != F::zero() { a / b } else { c }
         }
         BuiltinId::Sign => {
             if a > F::zero() {
@@ -2385,7 +2380,10 @@ mod apply_tests {
         assert!(subnormal != 0.0, "subnormal should not be exactly zero");
         let result: f64 = apply(BuiltinId::SafeDiv, 0.0, 1.0, 10.0, subnormal, 99.0);
         // Should perform division, not return default
-        assert_ne!(result, 99.0, "subnormal denominator should NOT trigger fallback");
+        assert_ne!(
+            result, 99.0,
+            "subnormal denominator should NOT trigger fallback"
+        );
         assert_eq!(result, 10.0 / subnormal);
     }
 
@@ -2406,8 +2404,18 @@ mod apply_tests {
     fn safediv_f32_subnormal_divides() {
         let subnormal: f32 = f32::MIN_POSITIVE / 2.0;
         assert!(subnormal != 0.0f32);
-        let result: f32 = apply(BuiltinId::SafeDiv, 0.0f32, 1.0f32, 10.0f32, subnormal, 99.0f32);
-        assert_ne!(result, 99.0f32, "f32 subnormal denominator should NOT trigger fallback");
+        let result: f32 = apply(
+            BuiltinId::SafeDiv,
+            0.0f32,
+            1.0f32,
+            10.0f32,
+            subnormal,
+            99.0f32,
+        );
+        assert_ne!(
+            result, 99.0f32,
+            "f32 subnormal denominator should NOT trigger fallback"
+        );
     }
 
     // ── Sign ────────────────────────────────────────────────────────────
@@ -2419,7 +2427,10 @@ mod apply_tests {
 
     #[test]
     fn sign_negative() {
-        assert_eq!(-1.0, apply::<f64>(BuiltinId::Sign, 0.0, 1.0, -3.0, 0.0, 0.0));
+        assert_eq!(
+            -1.0,
+            apply::<f64>(BuiltinId::Sign, 0.0, 1.0, -3.0, 0.0, 0.0)
+        );
     }
 
     #[test]
@@ -2487,7 +2498,10 @@ mod apply_tests {
 
     #[test]
     fn f32_apply_abs() {
-        assert_eq!(3.0f32, apply::<f32>(BuiltinId::Abs, 0.0, 1.0, -3.0, 0.0, 0.0));
+        assert_eq!(
+            3.0f32,
+            apply::<f32>(BuiltinId::Abs, 0.0, 1.0, -3.0, 0.0, 0.0)
+        );
     }
 
     #[test]
@@ -2667,7 +2681,9 @@ mod per_variable_initials_tests {
     use crate::test_common::TestProject;
 
     /// Helper: build a Simulation and CompiledSimulation from a TestProject
-    fn build_compiled(tp: &TestProject) -> (crate::interpreter::Simulation, CompiledSimulation<f64>) {
+    fn build_compiled(
+        tp: &TestProject,
+    ) -> (crate::interpreter::Simulation, CompiledSimulation<f64>) {
         let sim = tp.build_sim().expect("build_sim failed");
         let compiled = sim.compile().expect("compile failed");
         (sim, compiled)
@@ -2900,7 +2916,9 @@ mod vm_reset_and_run_initials_tests {
             .stock("population", "100", &["births"], &["deaths"], None)
     }
 
-    fn build_compiled(tp: &TestProject) -> (crate::interpreter::Simulation, CompiledSimulation<f64>) {
+    fn build_compiled(
+        tp: &TestProject,
+    ) -> (crate::interpreter::Simulation, CompiledSimulation<f64>) {
         let sim = tp.build_sim().unwrap();
         let compiled = sim.compile().unwrap();
         (sim, compiled)
@@ -5106,20 +5124,8 @@ mod f32_vm_tests {
                 None,
             )
             .flow("recoveries", "infected * recovery_rate", None)
-            .stock(
-                "susceptible",
-                "990",
-                &[],
-                &["new_infections"],
-                None,
-            )
-            .stock(
-                "infected",
-                "10",
-                &["new_infections"],
-                &["recoveries"],
-                None,
-            )
+            .stock("susceptible", "990", &[], &["new_infections"], None)
+            .stock("infected", "10", &["new_infections"], &["recoveries"], None)
             .stock("recovered", "0", &["recoveries"], &[], None);
 
         assert_f32_f64_close(&tp, "susceptible");
@@ -5130,7 +5136,7 @@ mod f32_vm_tests {
     #[test]
     fn f32_trig_functions() {
         let tp = TestProject::new("f32_trig")
-            .with_sim_time(0.0, 6.28, 0.1)
+            .with_sim_time(0.0, 6.3, 0.1)
             .aux("s", "SIN(TIME)", None)
             .aux("c", "COS(TIME)", None)
             .aux("t", "TAN(TIME/4)", None);
@@ -5285,7 +5291,11 @@ mod f32_vm_tests {
         // Exercises AND, OR, NOT, and equality comparisons through f32
         let tp = TestProject::new("f32_bool")
             .with_sim_time(0.0, 10.0, 1.0)
-            .aux("and_val", "IF (TIME > 3) AND (TIME < 7) THEN 1 ELSE 0", None)
+            .aux(
+                "and_val",
+                "IF (TIME > 3) AND (TIME < 7) THEN 1 ELSE 0",
+                None,
+            )
             .aux("or_val", "IF (TIME < 2) OR (TIME > 8) THEN 1 ELSE 0", None)
             .aux("not_val", "IF NOT(TIME > 5) THEN 1 ELSE 0", None)
             .aux("eq_val", "IF TIME = 5 THEN 1 ELSE 0", None);

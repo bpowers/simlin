@@ -23,13 +23,12 @@ impl<F: SimFloat> Table<F> {
             return sim_err!(BadTable, ident.to_string());
         }
 
-        let data: Vec<(F, F)> = t
-            .x
-            .iter()
-            .copied()
-            .zip(t.y.iter().copied())
-            .map(|(x, y)| (F::from_f64(x), F::from_f64(y)))
-            .collect();
+        let data: Vec<(F, F)> =
+            t.x.iter()
+                .copied()
+                .zip(t.y.iter().copied())
+                .map(|(x, y)| (F::from_f64(x), F::from_f64(y)))
+                .collect();
 
         Ok(Self { data })
     }

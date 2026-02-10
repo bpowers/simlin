@@ -786,12 +786,11 @@ impl TestProject {
             return Err("Project has compilation errors".to_string());
         }
 
-        let compiled_sim: crate::vm::CompiledSimulation<F> =
-            compile_project(&compiled, "main")
-                .map_err(|e| format!("compile_project failed: {e:?}"))?;
+        let compiled_sim: crate::vm::CompiledSimulation<F> = compile_project(&compiled, "main")
+            .map_err(|e| format!("compile_project failed: {e:?}"))?;
 
-        let mut vm = crate::vm::Vm::new(compiled_sim)
-            .map_err(|e| format!("VM creation failed: {e:?}"))?;
+        let mut vm =
+            crate::vm::Vm::new(compiled_sim).map_err(|e| format!("VM creation failed: {e:?}"))?;
         vm.run_to_end()
             .map_err(|e| format!("VM run failed: {e:?}"))?;
         let results = vm.into_results();

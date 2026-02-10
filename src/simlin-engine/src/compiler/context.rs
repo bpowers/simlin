@@ -11,8 +11,8 @@ use crate::common::{
     Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize,
 };
 use crate::dimensions::{Dimension, DimensionsContext};
-use crate::variable::Variable;
 use crate::float::SimFloat;
+use crate::variable::Variable;
 use crate::{Error, sim_err};
 
 use super::dimensions::{UnaryOp, find_dimension_reordering, match_dimensions_two_pass_partial};
@@ -626,7 +626,10 @@ impl Context<'_> {
         Ok(result)
     }
 
-    pub(super) fn fold_flows<F: SimFloat>(&self, flows: &[Ident<Canonical>]) -> Result<Option<Expr<F>>> {
+    pub(super) fn fold_flows<F: SimFloat>(
+        &self,
+        flows: &[Ident<Canonical>],
+    ) -> Result<Option<Expr<F>>> {
         if flows.is_empty() {
             return Ok(None);
         }
@@ -722,7 +725,11 @@ impl Context<'_> {
         sim_err!(DoesNotExist, "Variable not found by offset".to_string())
     }
 
-    pub(super) fn build_stock_update_expr<F: SimFloat>(&self, stock_off: usize, var: &Variable) -> Result<Expr<F>> {
+    pub(super) fn build_stock_update_expr<F: SimFloat>(
+        &self,
+        stock_off: usize,
+        var: &Variable,
+    ) -> Result<Expr<F>> {
         if let Variable::Stock {
             inflows, outflows, ..
         } = var
@@ -1817,7 +1824,8 @@ impl Context<'_> {
                             let size_usize = *size as usize;
                             if idx >= 1 && idx <= size_usize {
                                 return Ok(SubscriptIndex::Single(Expr::Const(
-                                    F::from_usize(idx), *var_loc,
+                                    F::from_usize(idx),
+                                    *var_loc,
                                 )));
                             }
                         }
