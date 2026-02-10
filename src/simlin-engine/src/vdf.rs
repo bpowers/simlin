@@ -282,8 +282,15 @@ pub struct VdfFile {
     pub bitmap_size: usize,
     /// All sections found in the file.
     pub sections: Vec<Section>,
-    /// Parsed variable names from the name table section.
+    /// Variable names from the name table section (within declared boundary).
+    /// These correspond 1:1 with slot table entries.
     pub names: Vec<String>,
+    /// Additional names that overflow past the name table section's declared
+    /// size boundary. Vensim frequently writes more names than the section
+    /// header accounts for; these "extended" names include internal module
+    /// variables, equation expansion strings, and model variables that
+    /// simply didn't fit within the declared section size.
+    pub extended_names: Vec<String>,
     /// Index into `sections` for the name table section.
     pub name_section_idx: Option<usize>,
     /// Slot table: one u32 per name, each a byte offset into section 1 data.
@@ -316,9 +323,22 @@ impl VdfFile {
 
         let sections = find_sections(&data);
         let name_section_idx = find_name_table_section_idx(&data, &sections);
-        let names = name_section_idx
-            .map(|i| parse_name_table(&data, &sections[i]))
+
+        // Parse names with an extended boundary to capture overflow entries.
+        // The gap between the name table section's declared end and the next
+        // section frequently contains additional valid name entries.
+        let (all_names, section_name_count) = name_section_idx
+            .map(|ns_idx| {
+                let gap_end = sections
+                    .get(ns_idx + 1)
+                    .map(|s| s.file_offset)
+                    .unwrap_or(data.len());
+                parse_name_table_extended(&data, &sections[ns_idx], gap_end)
+            })
             .unwrap_or_default();
+
+        let names: Vec<String> = all_names[..section_name_count].to_vec();
+        let extended_names: Vec<String> = all_names[section_name_count..].to_vec();
 
         // Section at index 1 is the variable slot table section. Its field4
         // value varies across VDF versions (2, 42, etc.) so we identify it
@@ -328,7 +348,7 @@ impl VdfFile {
         let (slot_table_offset, slot_table) = name_section_idx
             .map(|ns_idx| {
                 let ns = &sections[ns_idx];
-                find_slot_table(&data, ns, names.len(), sec1_data_size)
+                find_slot_table(&data, ns, section_name_count, sec1_data_size)
             })
             .unwrap_or((0, Vec::new()));
 
@@ -357,6 +377,7 @@ impl VdfFile {
             bitmap_size,
             sections,
             names,
+            extended_names,
             name_section_idx,
             slot_table,
             slot_table_offset,
@@ -384,6 +405,11 @@ impl VdfFile {
     pub fn is_data_block_offset(&self, raw: u32) -> bool {
         let offset = raw as usize;
         offset >= self.first_data_block && offset < self.data.len()
+    }
+
+    /// Iterate over all names: section names followed by extended names.
+    pub fn all_names(&self) -> impl Iterator<Item = &String> {
+        self.names.iter().chain(self.extended_names.iter())
     }
 
     /// Get the variable slot table section (always at section index 1).
@@ -580,17 +606,42 @@ pub fn find_sections(data: &[u8]) -> Vec<Section> {
     sections
 }
 
-/// Parse the name table from a section. The first entry has no u16 length
-/// prefix; its length comes from field5's high 16 bits. Subsequent entries
-/// are u16-length-prefixed. u16=0 entries are group separators (skipped).
+/// Parse the name table from a section, stopping at the declared section
+/// boundary. The first entry has no u16 length prefix; its length comes
+/// from field5's high 16 bits. Subsequent entries are u16-length-prefixed.
+/// u16=0 entries are group separators (skipped).
 pub fn parse_name_table(data: &[u8], section: &Section) -> Vec<String> {
+    let section_end = section.data_end().min(data.len());
+    parse_name_table_extended(data, section, section_end).0
+}
+
+/// Parse the name table with an extended boundary. Vensim's name table
+/// frequently overflows the section's declared size: the section header's
+/// `size` field is too small, so the final name(s) and additional entries
+/// spill into the gap between the section end and the next file structure.
+///
+/// This function parses names up to `parse_end`, which should be the file
+/// offset of the next section (or another known boundary). It validates
+/// each entry (max 256 bytes, printable ASCII) and stops when it encounters
+/// data that doesn't look like a name entry.
+///
+/// Returns `(all_names, section_name_count)` where `section_name_count` is
+/// the number of names whose data fits entirely within the section's declared
+/// size. This count is needed for slot table sizing, since the slot table
+/// has exactly `section_name_count` entries.
+pub fn parse_name_table_extended(
+    data: &[u8],
+    section: &Section,
+    parse_end: usize,
+) -> (Vec<String>, usize) {
     let mut names = Vec::new();
     let data_start = section.data_offset();
     let section_end = section.data_end().min(data.len());
+    let parse_end = parse_end.min(data.len());
 
     let first_len = (section.field5 >> 16) as usize;
     if first_len == 0 || data_start + first_len > data.len() {
-        return names;
+        return (names, 0);
     }
     let s: String = data[data_start..data_start + first_len]
         .iter()
@@ -600,24 +651,56 @@ pub fn parse_name_table(data: &[u8], section: &Section) -> Vec<String> {
     names.push(s);
 
     let mut pos = data_start + first_len;
-    while pos + 2 <= section_end {
+    let mut section_name_count: Option<usize> = None;
+
+    while pos + 2 <= parse_end {
+        // Track when we've crossed the section boundary. The old
+        // parse_name_table stops in two cases: (1) can't read a u16
+        // prefix because pos+2 > section_end, or (2) the name data
+        // extends past section_end. Record the count at that point.
+        if section_name_count.is_none() && pos + 2 > section_end {
+            section_name_count = Some(names.len());
+        }
+
         let len = read_u16(data, pos) as usize;
         pos += 2;
         if len == 0 {
             continue;
         }
-        if pos + len > section_end {
+
+        if section_name_count.is_none() && pos + len > section_end {
+            section_name_count = Some(names.len());
+        }
+
+        if pos + len > parse_end {
             break;
         }
+
+        // Reject entries that are implausibly long -- real Vensim variable
+        // names max out well under this, and the overflow region frequently
+        // ends with non-name binary data whose first u16 decodes to a large
+        // "length" value.
+        const MAX_NAME_ENTRY_LEN: usize = 256;
+        if len > MAX_NAME_ENTRY_LEN {
+            break;
+        }
+
         let s: String = data[pos..pos + len]
             .iter()
             .take_while(|&&b| b != 0)
             .map(|&b| b as char)
             .collect();
+
+        if s.is_empty() || !s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+            break;
+        }
+
         names.push(s);
         pos += len;
     }
-    names
+
+    let section_name_count = section_name_count.unwrap_or(names.len());
+    (names, section_name_count)
 }
 
 /// Find the name table section index. Heuristic: it's the section where
@@ -1234,5 +1317,313 @@ mod tests {
         let data = vec![0u8; 100];
         let blocks = enumerate_data_blocks(&data, 0, 8, 100);
         assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_name_table_extended_handles_split_name() {
+        // Simulate a name table section where the last name is split across
+        // the section boundary. The u16 prefix is inside the section but
+        // the name data extends past it.
+        let mut data = vec![0u8; 256];
+
+        // Section header at offset 0
+        data[0..4].copy_from_slice(&VDF_SECTION_MAGIC);
+        // section size = 20 bytes of data (tight boundary)
+        data[4..8].copy_from_slice(&20u32.to_le_bytes());
+        data[8..12].copy_from_slice(&20u32.to_le_bytes());
+        data[12..16].copy_from_slice(&500u32.to_le_bytes());
+        data[16..20].copy_from_slice(&0u32.to_le_bytes());
+        // field5: first name length = 6 in high 16 bits
+        data[20..24].copy_from_slice(&(6u32 << 16).to_le_bytes());
+
+        // Data starts at offset 24
+        // First name: "Time\0\0" (6 bytes, no u16 prefix)
+        data[24..28].copy_from_slice(b"Time");
+        data[28..30].copy_from_slice(&[0, 0]);
+
+        // Second name: u16 len = 14, "hello world\0\0\0"
+        // u16 prefix at offset 30 (inside section, section data ends at 24+20=44)
+        data[30..32].copy_from_slice(&14u16.to_le_bytes());
+        // Name data starts at 32, extends to 46 (past section end at 44)
+        data[32..43].copy_from_slice(b"hello world");
+        data[43..46].copy_from_slice(&[0, 0, 0]);
+
+        // Third name: u16 len = 8, "foo\0\0\0\0\0" at offset 46
+        data[46..48].copy_from_slice(&8u16.to_le_bytes());
+        data[48..51].copy_from_slice(b"foo");
+        data[51..56].copy_from_slice(&[0, 0, 0, 0, 0]);
+
+        let section = Section {
+            file_offset: 0,
+            size: 20,
+            field3: 500,
+            field4: 0,
+            field5: 6u32 << 16,
+        };
+
+        // Old behavior: only parses within section boundary, misses split name
+        let section_only = parse_name_table(&data, &section);
+        assert_eq!(section_only.len(), 1); // only "Time"
+        assert_eq!(section_only[0], "Time");
+
+        // Extended parsing: continues past section boundary
+        let (all_names, section_name_count) = parse_name_table_extended(&data, &section, 80);
+        assert_eq!(section_name_count, 1); // "Time" was fully in-section
+        assert_eq!(all_names.len(), 3);
+        assert_eq!(all_names[0], "Time");
+        assert_eq!(all_names[1], "hello world");
+        assert_eq!(all_names[2], "foo");
+    }
+
+    #[test]
+    fn test_parse_name_table_extended_stops_on_invalid_data() {
+        let mut data = vec![0u8; 256];
+
+        data[0..4].copy_from_slice(&VDF_SECTION_MAGIC);
+        data[4..8].copy_from_slice(&40u32.to_le_bytes());
+        data[8..12].copy_from_slice(&40u32.to_le_bytes());
+        data[12..16].copy_from_slice(&500u32.to_le_bytes());
+        data[16..20].copy_from_slice(&0u32.to_le_bytes());
+        data[20..24].copy_from_slice(&(6u32 << 16).to_le_bytes());
+
+        // First name at offset 24: "Time\0\0"
+        data[24..28].copy_from_slice(b"Time");
+        data[28..30].copy_from_slice(&[0, 0]);
+
+        // Second name at offset 30: u16=10, "test var\0\0"
+        data[30..32].copy_from_slice(&10u16.to_le_bytes());
+        data[32..40].copy_from_slice(b"test var");
+        data[40..42].copy_from_slice(&[0, 0]);
+
+        // After section data ends at 64, put some binary garbage
+        // u16 = 500 (> 256 max)
+        data[64..66].copy_from_slice(&500u16.to_le_bytes());
+        data[66..70].copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+
+        let section = Section {
+            file_offset: 0,
+            size: 40,
+            field3: 500,
+            field4: 0,
+            field5: 6u32 << 16,
+        };
+
+        let (names, section_name_count) = parse_name_table_extended(&data, &section, 200);
+        // Both names are within the section
+        assert_eq!(section_name_count, 2);
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0], "Time");
+        assert_eq!(names[1], "test var");
+    }
+
+    #[test]
+    fn test_parse_name_table_extended_skips_separators() {
+        let mut data = vec![0u8; 256];
+
+        data[0..4].copy_from_slice(&VDF_SECTION_MAGIC);
+        data[4..8].copy_from_slice(&10u32.to_le_bytes()); // small section
+        data[8..12].copy_from_slice(&10u32.to_le_bytes());
+        data[12..16].copy_from_slice(&500u32.to_le_bytes());
+        data[16..20].copy_from_slice(&0u32.to_le_bytes());
+        data[20..24].copy_from_slice(&(6u32 << 16).to_le_bytes());
+
+        // First name: "Time\0\0" (6 bytes)
+        data[24..28].copy_from_slice(b"Time");
+        data[28..30].copy_from_slice(&[0, 0]);
+
+        // Section ends at 24 + 10 = 34
+
+        // u16 separator at offset 30
+        data[30..32].copy_from_slice(&0u16.to_le_bytes());
+        // u16 separator at offset 32
+        data[32..34].copy_from_slice(&0u16.to_le_bytes());
+
+        // Extended name after section boundary: u16=6, "abc\0\0\0"
+        data[34..36].copy_from_slice(&6u16.to_le_bytes());
+        data[36..39].copy_from_slice(b"abc");
+        data[39..42].copy_from_slice(&[0, 0, 0]);
+
+        let section = Section {
+            file_offset: 0,
+            size: 10,
+            field3: 500,
+            field4: 0,
+            field5: 6u32 << 16,
+        };
+
+        let (names, section_name_count) = parse_name_table_extended(&data, &section, 80);
+        assert_eq!(section_name_count, 1); // only "Time" in section
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0], "Time");
+        assert_eq!(names[1], "abc");
+    }
+
+    #[cfg(feature = "file_io")]
+    mod file_io_tests {
+        use super::super::*;
+
+        fn vdf_file(path: &str) -> VdfFile {
+            let data = std::fs::read(path)
+                .unwrap_or_else(|e| panic!("failed to read VDF file {}: {}", path, e));
+            VdfFile::parse(data)
+                .unwrap_or_else(|e| panic!("failed to parse VDF file {}: {}", path, e))
+        }
+
+        #[test]
+        fn test_econ_base_extended_names_include_split_name() {
+            let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
+
+            // Section names should remain at 42 (for slot table compatibility)
+            assert_eq!(vdf.names.len(), 42);
+            assert_eq!(vdf.names[0], "Time");
+            assert_eq!(
+                vdf.names[41],
+                "effect of hud policies on risk taking behavior"
+            );
+
+            // The split name should be the first extended name, fully reconstructed
+            assert!(
+                !vdf.extended_names.is_empty(),
+                "expected extended names for econ model"
+            );
+            assert_eq!(
+                vdf.extended_names[0],
+                "effect of negative inflation rate on risk taking behavior"
+            );
+            assert_eq!(vdf.extended_names[1], "max risk");
+            assert_eq!(vdf.extended_names[2], "hud policy");
+
+            // Should have many extended names (the dump showed 58)
+            assert!(
+                vdf.extended_names.len() >= 50,
+                "expected at least 50 extended names, got {}",
+                vdf.extended_names.len()
+            );
+
+            // Slot table should still have 42 entries
+            assert_eq!(vdf.slot_table.len(), 42);
+        }
+
+        #[test]
+        fn test_zambaqui_baserun_extended_names() {
+            let vdf = vdf_file("../../third_party/uib_sd/zambaqui/baserun.vdf");
+
+            // Section names
+            assert_eq!(vdf.names.len(), 178);
+            assert_eq!(vdf.names[0], "Time");
+
+            // Extended names should be present
+            assert!(
+                !vdf.extended_names.is_empty(),
+                "expected extended names for zambaqui model"
+            );
+
+            // Check some known extended names from the dump
+            assert!(
+                vdf.extended_names.contains(&"births".to_string()),
+                "expected 'births' in extended names"
+            );
+            assert!(
+                vdf.extended_names.contains(&"capital".to_string()),
+                "expected 'capital' in extended names"
+            );
+            assert!(
+                vdf.extended_names.contains(&"total population".to_string()),
+                "expected 'total population' in extended names"
+            );
+
+            // Should have many extended names (the dump showed 301)
+            assert!(
+                vdf.extended_names.len() >= 250,
+                "expected at least 250 extended names, got {}",
+                vdf.extended_names.len()
+            );
+
+            // Slot table should still have 178 entries
+            assert_eq!(vdf.slot_table.len(), 178);
+        }
+
+        #[test]
+        fn test_small_vdf_no_extended_names() {
+            // Small models should have no extended names
+            let vdf = vdf_file(
+                "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_2/Current.vdf",
+            );
+
+            assert!(!vdf.names.is_empty());
+            assert!(
+                vdf.extended_names.is_empty(),
+                "small VDF should have no extended names, got {:?}",
+                vdf.extended_names
+            );
+        }
+
+        fn collect_vdf_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+            let mut files = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        files.extend(collect_vdf_files(&path));
+                    } else if path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("vdf"))
+                    {
+                        files.push(path);
+                    }
+                }
+            }
+            files
+        }
+
+        #[test]
+        fn test_all_uib_vdf_files_parse() {
+            let vdf_paths = collect_vdf_files(std::path::Path::new("../../third_party/uib_sd"));
+
+            assert!(
+                vdf_paths.len() >= 10,
+                "expected at least 10 VDF files, found {}",
+                vdf_paths.len()
+            );
+
+            let mut parsed_count = 0;
+            for path in &vdf_paths {
+                let data = std::fs::read(path)
+                    .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+                // Some .vdf files use a different format variant (e.g. magic
+                // 0x41 instead of 0x52). Skip those rather than failing.
+                let vdf = match VdfFile::parse(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                parsed_count += 1;
+
+                assert!(
+                    !vdf.names.is_empty(),
+                    "{}: expected at least one name",
+                    path.display()
+                );
+                assert_eq!(
+                    vdf.names[0],
+                    "Time",
+                    "{}: first name should be 'Time'",
+                    path.display()
+                );
+
+                for name in &vdf.extended_names {
+                    assert!(
+                        !name.is_empty() && name.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+                        "{}: invalid extended name: {:?}",
+                        path.display(),
+                        name
+                    );
+                }
+            }
+            assert!(
+                parsed_count >= 10,
+                "expected at least 10 parseable VDF files, only {} succeeded",
+                parsed_count
+            );
+        }
     }
 }

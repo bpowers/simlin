@@ -239,10 +239,12 @@ fn print_names(vdf: &VdfFile) {
     println!();
 }
 
-/// Show the region between the name table section's declared end and the
-/// next section. For large models (WRLD3), this gap contains additional
-/// u16-length-prefixed names not covered by the section's declared size.
+/// Show extended names parsed from the post-name-table overflow region.
 fn print_extended_names(vdf: &VdfFile) {
+    if vdf.extended_names.is_empty() {
+        return;
+    }
+
     let Some(ns_idx) = vdf.name_section_idx else {
         return;
     };
@@ -255,91 +257,22 @@ fn print_extended_names(vdf: &VdfFile) {
         .map(|s| s.file_offset)
         .unwrap_or(vdf.offset_table_start);
 
-    if next_boundary <= ns_end + 4 {
-        return;
-    }
-
     let gap = next_boundary - ns_end;
-    let gap_data = &vdf.data[ns_end..next_boundary];
-
-    // The extended region may start mid-name (the section boundary can
-    // split a name entry). First capture any initial string fragment,
-    // then parse normal u16-length-prefixed entries.
-    let mut pos = 0;
-    let mut ext_names: Vec<String> = Vec::new();
-    let mut failed_at = None;
-
-    // Capture initial string fragment (continuation from section)
-    let frag_end = gap_data
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(gap_data.len());
-    if frag_end > 0 {
-        let frag: String = gap_data[..frag_end].iter().map(|&b| b as char).collect();
-        if frag.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-            ext_names.push(frag);
-        }
-        pos = frag_end;
-    }
-
-    // Skip null padding after fragment
-    while pos < gap_data.len() && gap_data[pos] == 0 {
-        pos += 1;
-    }
-
-    // Parse u16-length-prefixed names
-    while pos + 2 <= gap_data.len() {
-        let len = read_u16(gap_data, pos) as usize;
-        pos += 2;
-        if len == 0 {
-            continue;
-        }
-        if len > 256 || pos + len > gap_data.len() {
-            failed_at = Some(pos - 2);
-            break;
-        }
-        let s: String = gap_data[pos..pos + len]
-            .iter()
-            .take_while(|&&b| b != 0)
-            .map(|&b| b as char)
-            .collect();
-        if !s.is_empty() && s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-            ext_names.push(s);
-        } else {
-            failed_at = Some(pos - 2);
-            break;
-        }
-        pos += len;
-    }
 
     println!(
         "=== Post-Name-Table Region ({} bytes @ 0x{:08x}..0x{:08x}) ===",
         gap, ns_end, next_boundary
     );
 
-    if !ext_names.is_empty() {
-        println!("  Extended names ({}):", ext_names.len());
-        for (i, name) in ext_names.iter().enumerate() {
-            let class = classify_name(name);
-            let global_idx = vdf.names.len() + i;
-            if class.is_empty() {
-                println!("    {:>3}  \"{}\"", global_idx, name);
-            } else {
-                println!("    {:>3}  \"{}\"  ({})", global_idx, name, class);
-            }
+    println!("  Extended names ({}):", vdf.extended_names.len());
+    for (i, name) in vdf.extended_names.iter().enumerate() {
+        let class = classify_name(name);
+        let global_idx = vdf.names.len() + i;
+        if class.is_empty() {
+            println!("    {:>3}  \"{}\"", global_idx, name);
+        } else {
+            println!("    {:>3}  \"{}\"  ({})", global_idx, name, class);
         }
-    }
-
-    if let Some(fail_off) = failed_at {
-        let remaining = gap - fail_off;
-        println!(
-            "  Unparseable data ({} bytes @ gap+{}):",
-            remaining, fail_off
-        );
-        hexdump(&gap_data[fail_off..], ns_end + fail_off, 128);
-    } else if ext_names.is_empty() {
-        println!("  No parseable names found. Raw data:");
-        hexdump(gap_data, ns_end, 128);
     }
     println!();
 }
@@ -595,6 +528,12 @@ fn print_summary(vdf: &VdfFile, file_size: usize) {
         n_builtins,
         n_model_names
     );
+    if !vdf.extended_names.is_empty() {
+        println!(
+            "  Extended names: {} (overflow past section boundary)",
+            vdf.extended_names.len()
+        );
+    }
     println!(
         "  Records:        {} ({} model var, {} f[12] groups)",
         vdf.records.len(),
