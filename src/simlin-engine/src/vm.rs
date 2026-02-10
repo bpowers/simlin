@@ -431,7 +431,10 @@ impl<F: SimFloat> Vm<F> {
                 "end time has to be after start time".to_string()
             );
         }
-        if sim.specs.dt.approx_eq(F::zero()) {
+        // Strict positivity: reject dt <= 0 (and NaN), but accept any positive
+        // value including very small ones (e.g. 1e-8 in f32).  Using approx_eq
+        // here would incorrectly reject small-but-valid timesteps.
+        if sim.specs.dt <= F::zero() || sim.specs.dt.is_nan() {
             return sim_err!(BadSimSpecs, "dt must be greater than 0".to_string());
         }
 
@@ -4805,6 +4808,58 @@ mod vm_reset_run_to_and_constants_tests {
                 i
             );
         }
+    }
+
+    /// A very small but positive dt must be accepted, not rejected by
+    /// an approximate-zero check.  The contract is dt > 0 (strict positivity).
+    #[test]
+    fn test_small_positive_dt_accepted() {
+        let tp = TestProject::new_with_specs(
+            "tiny_dt",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 1e-6,
+                dt: datamodel::Dt::Dt(1e-8),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+        )
+        .aux("x", "42", None);
+
+        // f64: should work fine
+        let sim = tp.build_sim().expect("build_sim should succeed");
+        let compiled = sim.compile().expect("compile should succeed");
+        assert!(Vm::new(compiled).is_ok(), "f64 Vm::new must accept dt=1e-8");
+
+        // f32: 1e-8 is representable (not subnormal) and must also be accepted
+        let f32_result = tp.run_vm_f32();
+        assert!(
+            f32_result.is_ok(),
+            "f32 Vm::new must accept dt=1e-8, got: {:?}",
+            f32_result.err()
+        );
+    }
+
+    /// dt=0 must still be rejected.
+    #[test]
+    fn test_zero_dt_rejected() {
+        let tp = TestProject::new_with_specs(
+            "zero_dt",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(0.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+        )
+        .aux("x", "1", None);
+
+        let sim = tp.build_sim().expect("build_sim should succeed");
+        let compiled = sim.compile().expect("compile should succeed");
+        assert!(Vm::new(compiled).is_err(), "Vm::new must reject dt=0");
     }
 
     // ================================================================
