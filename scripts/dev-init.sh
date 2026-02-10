@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
-# Cloud initialization script for Claude Code on the web and Codex Web.
-# This script sets up the development environment for Simlin, ensuring
-# that git hooks are installed and basic dependencies are checked.
+# Development environment initialization script.
+# Sets up git hooks, checks toolchain dependencies, installs pnpm
+# packages, and configures AI tools for the pre-commit hook.
 #
-# This script is idempotent - it can be run multiple times safely.
+# This script is idempotent and fast -- run it at the start of every
+# session (agent or human) to ensure the environment is ready.
 #
 set -euo pipefail
 
@@ -21,7 +22,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 AI_CONFIG_FILE="$REPO_ROOT/.ai-tool-config"
-NODE_DEPS_STAMP_FILE="$REPO_ROOT/node_modules/.simlin-cloud-init-stamp"
+NODE_DEPS_STAMP_FILE="$REPO_ROOT/node_modules/.simlin-dev-init-stamp"
 INSTALL_CODEX="${SIMLIN_INIT_INSTALL_CODEX:-0}"
 PROBE_AI_TOOLS="${SIMLIN_INIT_AI_PROBE:-1}"
 REFRESH_AI_CONFIG="${SIMLIN_INIT_REFRESH_AI_CONFIG:-0}"

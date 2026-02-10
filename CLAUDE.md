@@ -72,15 +72,15 @@ When navigating or editing, treat these paths as generated output or transient b
 - `src/app/build/**`, `website/build/**`
 - `node_modules/**`, `target/**`, `playwright-report/**`, `test-results/**`
 
-### Initial Environment Setup
+### Environment Setup
 
-For Claude Code on the web, Codex Web, or any fresh checkout, run the initialization script:
+**Always run at the start of every session** (agent or human, fresh container or long-running host):
 
 ```bash
-./scripts/cloud-init.sh
+./scripts/dev-init.sh
 ```
 
-**Important**: This script should be run any time the development environment is initialized or re-initialized (e.g., when a new container session starts, after a fresh clone, or when resuming work in a cloud environment). Running this script ensures the environment is properly configured so that you and other agents can be successful and productive.
+The script is idempotent and fast -- it short-circuits work that is already done (git hooks installed, pnpm deps up to date, AI tool already configured).  Run it unconditionally; there is no need to check whether it has already been run.
 
 ### Pre-commit Hooks
 
