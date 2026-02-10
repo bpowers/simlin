@@ -73,18 +73,27 @@ impl<F: SimFloat> Specs<F> {
         // precision loss after F::from_f64 conversion (especially for f32).
         // Truncation (not round) is correct: for non-divisible save_step
         // values only save points within [start, stop] are counted.
+        //
+        // The effective save cadence is max(save_step, dt) because the VM
+        // and interpreter cannot save more often than once per dt step
+        // (save_every = max(1, round(save_step/dt))).
         let dt_f64: f64 = match &specs.dt {
             Dt::Dt(value) => *value,
             Dt::Reciprocal(value) => 1.0 / *value,
         };
-        let save_step_f64: f64 = match &specs.save_step {
+        let raw_save_step_f64: f64 = match &specs.save_step {
             None => dt_f64,
             Some(ss) => match ss {
                 Dt::Dt(value) => *value,
                 Dt::Reciprocal(value) => 1.0 / *value,
             },
         };
-        let n_chunks = ((specs.stop - specs.start) / save_step_f64 + 1.0) as usize;
+        let effective_save_step = if raw_save_step_f64 > dt_f64 {
+            raw_save_step_f64
+        } else {
+            dt_f64
+        };
+        let n_chunks = ((specs.stop - specs.start) / effective_save_step + 1.0) as usize;
 
         Specs {
             start: F::from_f64(specs.start),
@@ -490,5 +499,21 @@ mod tests {
         let specs_f64: Specs<f64> = Specs::from(&sim_specs);
         let specs_f32: Specs<f32> = specs_f64.convert();
         assert_eq!(specs_f32.n_chunks, 3);
+    }
+
+    #[test]
+    fn specs_n_chunks_save_step_smaller_than_dt() {
+        // save_step=0.5 < dt=1.0: can't save more often than once per dt,
+        // so effective save cadence is dt=1.0, giving 11 steps for [0,10].
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: Dt::Dt(1.0),
+            save_step: Some(Dt::Dt(0.5)),
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+        let specs: Specs<f64> = Specs::from(&sim_specs);
+        assert_eq!(specs.n_chunks, 11);
     }
 }

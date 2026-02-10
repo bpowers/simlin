@@ -4766,6 +4766,47 @@ mod vm_reset_run_to_and_constants_tests {
         );
     }
 
+    /// When save_step < dt the VM can only save once per dt step, so
+    /// n_chunks must reflect the dt-based cadence, not the raw save_step.
+    #[test]
+    fn test_save_step_smaller_than_dt() {
+        let tp = TestProject::new_with_specs(
+            "save_lt_dt",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: Some(datamodel::Dt::Dt(0.5)),
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+        )
+        .flow("inflow", "1", None)
+        .stock("s", "0", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+
+        // Effective save cadence is dt=1.0 (can't save more often than dt),
+        // so we expect 11 saved steps at t=0,1,2,...,10.
+        assert_eq!(vm.n_chunks, 11);
+
+        let results = vm.into_results();
+        assert_eq!(results.step_count, 11);
+
+        let steps: Vec<&[f64]> = results.iter().collect();
+        assert_eq!(steps.len(), 11);
+        for (i, step) in steps.iter().enumerate() {
+            assert!(
+                (step[TIME_OFF] - i as f64).abs() < 1e-10,
+                "step {i}: TIME={}, expected {}",
+                step[TIME_OFF],
+                i
+            );
+        }
+    }
+
     // ================================================================
     // set_value_now / get_value_now
     // ================================================================
