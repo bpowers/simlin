@@ -23,7 +23,12 @@ use crate::canonicalize;
 #[cfg(feature = "file_io")]
 use crate::common::{Canonical, Ident};
 #[cfg(feature = "file_io")]
-use crate::results::{Method, Results, Specs};
+use crate::results::Method;
+// compat always loads f64 data from external files
+#[cfg(feature = "file_io")]
+type Results = crate::results::Results<f64>;
+#[cfg(feature = "file_io")]
+type Specs = crate::results::Specs<f64>;
 
 use crate::mdl;
 use crate::xmile;
@@ -159,6 +164,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
             dt: 0.0,
             save_step: 0.0,
             method: Method::Euler,
+            n_chunks: step_count,
         },
         is_vensim: true,
     })
@@ -220,6 +226,7 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
             dt: 0.0,
             save_step: 0.0,
             method: Method::Euler,
+            n_chunks: step_count,
         },
         is_vensim: false,
     })

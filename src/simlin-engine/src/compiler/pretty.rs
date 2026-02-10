@@ -3,11 +3,12 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::ast::BinaryOp;
+use crate::float::SimFloat;
 
 use super::dimensions::UnaryOp;
 use super::expr::{BuiltinFn, Expr, SubscriptIndex};
 
-fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
+fn child_needs_parens<F: SimFloat>(parent: &Expr<F>, child: &Expr<F>) -> bool {
     match parent {
         // no children so doesn't matter
         Expr::Const(_, _) | Expr::Var(_, _) => false,
@@ -52,7 +53,7 @@ fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
     }
 }
 
-fn paren_if_necessary(parent: &Expr, child: &Expr, eqn: String) -> String {
+fn paren_if_necessary<F: SimFloat>(parent: &Expr<F>, child: &Expr<F>, eqn: String) -> String {
     if child_needs_parens(parent, child) {
         format!("({eqn})")
     } else {
@@ -60,7 +61,7 @@ fn paren_if_necessary(parent: &Expr, child: &Expr, eqn: String) -> String {
     }
 }
 
-fn pretty_subscript_index(idx: &SubscriptIndex) -> String {
+fn pretty_subscript_index<F: SimFloat>(idx: &SubscriptIndex<F>) -> String {
     match idx {
         SubscriptIndex::Single(e) => pretty(e),
         SubscriptIndex::Range(start, end) => format!("{}:{}", pretty(start), pretty(end)),
@@ -68,7 +69,7 @@ fn pretty_subscript_index(idx: &SubscriptIndex) -> String {
 }
 
 #[allow(dead_code)]
-pub fn pretty(expr: &Expr) -> String {
+pub fn pretty<F: SimFloat>(expr: &Expr<F>) -> String {
     match expr {
         Expr::Const(n, _) => format!("{n}"),
         Expr::Var(off, _) => format!("curr[{off}]"),

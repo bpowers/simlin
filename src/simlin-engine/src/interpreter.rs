@@ -9,6 +9,7 @@ use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, Ident, canonicalize};
 use crate::compiler::{BuiltinFn, Expr, Module, SubscriptIndex, UnaryOp};
 use crate::dimensions::SubscriptIterator;
+use crate::float::SimFloat;
 use crate::model::{ModuleInputSet, enumerate_modules};
 use crate::sim_err;
 use crate::vm::{
@@ -17,6 +18,7 @@ use crate::vm::{
 };
 use crate::{Project, Results, Variable, compiler};
 use float_cmp::approx_eq;
+use ordered_float::OrderedFloat;
 use std::borrow::BorrowMut;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -70,13 +72,13 @@ pub struct ModuleEvaluator<'a> {
     inputs: &'a [f64],
     curr: &'a mut [f64],
     next: &'a mut [f64],
-    module: &'a Module,
+    module: &'a Module<f64>,
     sim: &'a Simulation,
 }
 
 impl ModuleEvaluator<'_> {
     /// Helper to find array dimensions from an expression (returns a cloned dims vector)
-    fn find_array_dims(expr: &Expr) -> Option<Vec<usize>> {
+    fn find_array_dims(expr: &Expr<f64>) -> Option<Vec<usize>> {
         match expr {
             Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => {
                 Some(view.dims.clone())
@@ -139,7 +141,7 @@ impl ModuleEvaluator<'_> {
     }
 
     /// Helper to evaluate an expression at a specific array index
-    fn eval_at_index(&mut self, expr: &Expr, index: usize) -> f64 {
+    fn eval_at_index(&mut self, expr: &Expr<f64>, index: usize) -> f64 {
         match expr {
             Expr::StaticSubscript(off, view, _) => {
                 let base_off = self.off + *off;
@@ -329,7 +331,7 @@ impl ModuleEvaluator<'_> {
     }
 
     /// Helper to iterate over all elements in an array expression
-    fn iter_array_elements<F>(&mut self, expr: &Expr, mut f: F)
+    fn iter_array_elements<F>(&mut self, expr: &Expr<f64>, mut f: F)
     where
         F: FnMut(f64),
     {
@@ -469,7 +471,7 @@ impl ModuleEvaluator<'_> {
 
     /// Helper to get the size of an array.
     /// For dynamic subscripts with ranges, evaluates range bounds at runtime.
-    fn get_array_size(&mut self, expr: &Expr) -> usize {
+    fn get_array_size(&mut self, expr: &Expr<f64>) -> usize {
         match expr {
             Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => {
                 view.dims.iter().product()
@@ -504,7 +506,7 @@ impl ModuleEvaluator<'_> {
     }
 
     /// Helper to apply a reduction operation over array elements
-    fn reduce_array<F>(&mut self, expr: &Expr, init: f64, mut reducer: F) -> f64
+    fn reduce_array<F>(&mut self, expr: &Expr<f64>, init: f64, mut reducer: F) -> f64
     where
         F: FnMut(f64, f64) -> f64,
     {
@@ -516,7 +518,7 @@ impl ModuleEvaluator<'_> {
     }
 
     /// Helper to calculate mean of an array
-    fn array_mean(&mut self, expr: &Expr) -> f64 {
+    fn array_mean(&mut self, expr: &Expr<f64>) -> f64 {
         let size = self.get_array_size(expr);
         if size == 0 {
             return 0.0;
@@ -527,7 +529,7 @@ impl ModuleEvaluator<'_> {
     }
 
     /// Helper to calculate standard deviation of an array
-    fn array_stddev(&mut self, expr: &Expr) -> f64 {
+    fn array_stddev(&mut self, expr: &Expr<f64>) -> f64 {
         let size = self.get_array_size(expr);
         if size <= 1 {
             return 0.0;
@@ -555,7 +557,7 @@ impl ModuleEvaluator<'_> {
     /// - Expr::StaticSubscript/Subscript: Uses exact match because the offset is just
     ///   the base of the array, and the element offset comes from view.offset or
     ///   subscript indices computed at runtime.
-    fn extract_table_info(&mut self, table_expr: &Expr) -> Option<(Ident<Canonical>, usize)> {
+    fn extract_table_info(&mut self, table_expr: &Expr<f64>) -> Option<(Ident<Canonical>, usize)> {
         match table_expr {
             compiler::Expr::Var(off, _) => {
                 // Could be a simple scalar table or an element of an arrayed table
@@ -616,7 +618,7 @@ impl ModuleEvaluator<'_> {
         }
     }
 
-    fn eval(&mut self, expr: &Expr) -> f64 {
+    fn eval(&mut self, expr: &Expr<f64>) -> f64 {
         match expr {
             Expr::Const(n, _) => *n,
             Expr::Dt(_) => self.curr[DT_OFF],
@@ -1083,7 +1085,7 @@ impl ModuleEvaluator<'_> {
                 // fewer dimensions which requires broadcasting (dimension matching by name).
                 fn eval_at_index(
                     evaluator: &mut ModuleEvaluator,
-                    expr: &Expr,
+                    expr: &Expr<f64>,
                     flat_idx: usize,
                     dims: &[usize],
                     dim_names: &[String],
@@ -1320,8 +1322,8 @@ impl ModuleEvaluator<'_> {
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 pub struct Simulation {
-    pub(crate) modules: HashMap<ModuleKey, Module>,
-    specs: Specs,
+    pub(crate) modules: HashMap<ModuleKey, Module<f64>>,
+    specs: Specs<f64>,
     root: ModuleKey,
     offsets: HashMap<Ident<Canonical>, usize>,
     temps: std::rc::Rc<RefCell<Vec<f64>>>, // Flat storage for all temporary arrays
@@ -1365,7 +1367,7 @@ impl Simulation {
         let root_input_set: ModuleInputSet = BTreeSet::new();
         let root_key: ModuleKey = (main_model_ident.clone(), root_input_set.clone());
 
-        let mut compiled_modules: HashMap<ModuleKey, Module> = HashMap::new();
+        let mut compiled_modules: HashMap<ModuleKey, Module<f64>> = HashMap::new();
         for name in module_names {
             let distinct_inputs = &modules[name];
             for inputs in distinct_inputs.iter() {
@@ -1421,8 +1423,8 @@ impl Simulation {
         })
     }
 
-    pub fn compile(&self) -> crate::Result<CompiledSimulation> {
-        let modules: crate::Result<HashMap<ModuleKey, CompiledModule>> = self
+    pub fn compile(&self) -> crate::Result<CompiledSimulation<f64>> {
+        let modules: crate::Result<HashMap<ModuleKey, CompiledModule<f64>>> = self
             .modules
             .iter()
             .map(|(key, module)| module.compile().map(|module| (key.clone(), module)))
@@ -1434,6 +1436,21 @@ impl Simulation {
             self.root.clone(),
             self.offsets.clone(),
         ))
+    }
+
+    /// Compile the simulation to bytecode for a potentially different float type.
+    ///
+    /// This rebuilds `Module<F>` from the project data and compiles to `CompiledSimulation<F>`.
+    /// For f32, all constants are narrowed at module-build time, and the VM runs entirely
+    /// in single precision.
+    pub fn compile_as<F: SimFloat>(
+        project: &Project,
+        main_model_name: &str,
+    ) -> crate::Result<CompiledSimulation<F>>
+    where
+        OrderedFloat<F>: Eq + std::hash::Hash,
+    {
+        compile_project(project, main_model_name)
     }
 
     pub fn runlist_order(&self) -> Vec<Ident<Canonical>> {
@@ -1478,7 +1495,7 @@ impl Simulation {
     fn calc(
         &self,
         step_part: StepPart,
-        module: &Module,
+        module: &Module<f64>,
         module_off: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
@@ -1514,12 +1531,7 @@ impl Simulation {
         if spec.stop < spec.start {
             return sim_err!(BadSimSpecs, "".to_string());
         }
-        let save_step = if spec.save_step > spec.dt {
-            spec.save_step
-        } else {
-            spec.dt
-        };
-        let n_chunks: usize = ((spec.stop - spec.start) / save_step + 1.0) as usize;
+        let n_chunks = spec.n_chunks;
         let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5).floor() as usize);
 
         let dt = spec.dt;
@@ -1529,7 +1541,10 @@ impl Simulation {
 
         let module = &self.modules[&self.root];
 
-        let slab: Vec<f64> = vec![0.0; n_slots * (n_chunks + 1)];
+        // Allocate n_chunks + 2 slabs: n_chunks saved timesteps, plus 2
+        // working slots for the curr/next pair needed to advance past stop
+        // (especially when save_step does not evenly divide the time range).
+        let slab: Vec<f64> = vec![0.0; n_slots * (n_chunks + 2)];
         let mut boxed_slab = slab.into_boxed_slice();
         {
             let mut slabs = boxed_slab.chunks_mut(n_slots);
@@ -1582,6 +1597,89 @@ impl Simulation {
             is_vensim: false,
         })
     }
+}
+
+/// Build a `CompiledSimulation<F>` directly from a project, for any float type.
+///
+/// This is the primary entry point for running simulations in a non-default
+/// precision.  For f32, all data model constants (which are always f64) are
+/// narrowed to f32 at module-build time via `F::from_f64()`, and the resulting
+/// bytecode and VM operate entirely in single precision.
+///
+/// The interpreter's `Simulation` struct remains f64-only because it is a
+/// reference implementation; this function provides the generic compile path
+/// for the bytecode VM.
+pub fn compile_project<F: SimFloat>(
+    project: &Project,
+    main_model_name: &str,
+) -> crate::Result<CompiledSimulation<F>>
+where
+    OrderedFloat<F>: Eq + std::hash::Hash,
+{
+    let main_model_ident = canonicalize(main_model_name);
+    if !project.models.contains_key(&main_model_ident) {
+        return sim_err!(
+            NotSimulatable,
+            format!("no model named '{}' to simulate", main_model_name)
+        );
+    }
+
+    let modules = {
+        let project_models: HashMap<_, _> = project
+            .models
+            .iter()
+            .map(|(name, model)| (name.as_str(), model.as_ref()))
+            .collect();
+        enumerate_modules(&project_models, main_model_name, |model| model.name.clone())?
+    };
+
+    let module_names: Vec<&Ident<Canonical>> = {
+        let mut module_names: Vec<_> = modules.keys().collect();
+        module_names.sort_unstable();
+
+        let mut sorted_names = vec![&main_model_ident];
+        sorted_names.extend(
+            module_names
+                .into_iter()
+                .filter(|n| n.as_str() != main_model_name),
+        );
+        sorted_names
+    };
+
+    let root_input_set: ModuleInputSet = BTreeSet::new();
+    let root_key: ModuleKey = (main_model_ident.clone(), root_input_set);
+
+    let mut compiled_modules: HashMap<ModuleKey, CompiledModule<F>> = HashMap::new();
+    for name in module_names {
+        let distinct_inputs = &modules[name];
+        for inputs in distinct_inputs.iter() {
+            let model = Arc::clone(&project.models[name]);
+            let is_root = name.as_str() == main_model_ident.as_str();
+            let module: Module<F> = Module::new(project, model, inputs, is_root)?;
+            let compiled = module.compile()?;
+            let module_key: ModuleKey = (name.clone(), inputs.clone());
+            compiled_modules.insert(module_key, compiled);
+        }
+    }
+
+    let sim_specs_dm = project
+        .datamodel
+        .get_model(main_model_name)
+        .and_then(|model| model.sim_specs.clone())
+        .unwrap_or_else(|| project.datamodel.sim_specs.clone());
+
+    let specs: Specs<F> = Specs::from(&sim_specs_dm);
+
+    let offsets = calc_flattened_offsets(project, main_model_name);
+    let offsets: HashMap<Ident<Canonical>, usize> =
+        offsets.into_iter().map(|(k, (off, _))| (k, off)).collect();
+
+    Ok(CompiledSimulation::new(
+        compiled_modules,
+        specs,
+        root_key,
+        offsets,
+    ))
 }
 
 /// calc_flattened_offsets generates a mapping from name to offset
@@ -1937,7 +2035,7 @@ fn test_arrays() {
 
     let arrayed_constants_var =
         &parsed_project.models[&main_ident].variables[&canonicalize("constants")];
-    let parsed_var = Var::new(
+    let parsed_var = Var::<f64>::new(
         &Context {
             dimensions: parsed_project
                 .datamodel
@@ -1976,7 +2074,7 @@ fn test_arrays() {
     assert_eq!(expected, parsed_var);
 
     let arrayed_aux_var = &parsed_project.models[&main_ident].variables[&canonicalize("aux")];
-    let parsed_var = Var::new(
+    let parsed_var: crate::common::Result<Var<f64>> = Var::new(
         &Context {
             dimensions: parsed_project
                 .datamodel
@@ -1999,7 +2097,7 @@ fn test_arrays() {
     );
 
     assert!(parsed_var.is_ok());
-    let expected = Var {
+    let expected: Var<f64> = Var {
         ident: canonicalize(arrayed_aux_var.ident()),
         ast: vec![
             Expr::AssignCurr(4, Box::new(Expr::Var(7, Loc::default()))),
@@ -2014,7 +2112,7 @@ fn test_arrays() {
     assert_eq!(expected, parsed_var);
 
     let var = &parsed_project.models[&main_ident].variables[&canonicalize("picked2")];
-    let parsed_var = Var::new(
+    let parsed_var = Var::<f64>::new(
         &Context {
             dimensions: parsed_project
                 .datamodel
@@ -2062,7 +2160,7 @@ fn test_arrays() {
     assert_eq!(expected, parsed_var);
 
     let var = &parsed_project.models[&main_ident].variables[&canonicalize("picked")];
-    let parsed_var = Var::new(
+    let parsed_var = Var::<f64>::new(
         &Context {
             dimensions: parsed_project
                 .datamodel
@@ -2235,4 +2333,99 @@ fn simulation_defaults_to_project_sim_specs_without_model_override() {
     assert_eq!(sim.specs.stop, 11.0);
     assert!(approx_eq!(f64, sim.specs.dt, 0.25));
     assert!(approx_eq!(f64, sim.specs.save_step, 0.5));
+}
+
+#[cfg(test)]
+mod compile_project_tests {
+    use crate::common::canonicalize;
+    use crate::test_common::TestProject;
+    use crate::vm::Vm;
+    use std::sync::Arc;
+
+    #[test]
+    fn compile_project_f64_matches_simulation_compile() {
+        let tp = TestProject::new("compile_f64")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("rate", "0.1", None)
+            .flow("inflow", "s * rate", None)
+            .stock("s", "100", &["inflow"], &[], None);
+
+        // Via Simulation::compile()
+        let sim = tp.build_sim().expect("build_sim");
+        let compiled_via_sim = sim.compile().expect("compile");
+        let mut vm1 = Vm::new(compiled_via_sim).expect("vm1");
+        vm1.run_to_end().expect("vm1 run");
+        let s1 = vm1.get_series(&canonicalize("s")).expect("s series");
+
+        // Via compile_project::<f64>()
+        let datamodel = tp.build_datamodel();
+        let project = Arc::new(crate::project::Project::from(datamodel));
+        let compiled_generic =
+            super::compile_project::<f64>(&project, "main").expect("compile_project");
+        let mut vm2 = Vm::new(compiled_generic).expect("vm2");
+        vm2.run_to_end().expect("vm2 run");
+        let s2 = vm2.get_series(&canonicalize("s")).expect("s series");
+
+        assert_eq!(s1.len(), s2.len());
+        for (i, (a, b)) in s1.iter().zip(s2.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-15,
+                "step {i}: sim.compile()={a}, compile_project()={b}"
+            );
+        }
+    }
+
+    #[test]
+    fn compile_project_f32_runs_successfully() {
+        let tp = TestProject::new("compile_f32")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("rate", "0.1", None)
+            .flow("inflow", "s * rate", None)
+            .stock("s", "100", &["inflow"], &[], None);
+
+        let datamodel = tp.build_datamodel();
+        let project = Arc::new(crate::project::Project::from(datamodel));
+        let compiled =
+            super::compile_project::<f32>(&project, "main").expect("compile_project f32");
+
+        let mut vm: crate::vm::Vm<f32> = crate::vm::Vm::new(compiled).expect("vm f32");
+        vm.run_to_end().expect("vm f32 run");
+        let results = vm.into_results();
+
+        // Should have results
+        assert!(results.step_count > 0);
+        assert!(!results.data.is_empty());
+    }
+
+    #[test]
+    fn compile_project_nonexistent_model_errors() {
+        let tp = TestProject::new("no_such_model")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("x", "1", None);
+
+        let datamodel = tp.build_datamodel();
+        let project = Arc::new(crate::project::Project::from(datamodel));
+        let result = super::compile_project::<f64>(&project, "nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compile_as_matches_compile_project() {
+        // Simulation::compile_as<F> should delegate to compile_project<F>
+        let tp = TestProject::new("compile_as")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("x", "TIME * 2", None);
+
+        let datamodel = tp.build_datamodel();
+        let project = Arc::new(crate::project::Project::from(datamodel));
+
+        let compiled = super::Simulation::compile_as::<f64>(&project, "main").expect("compile_as");
+        let mut vm = Vm::new(compiled).expect("vm");
+        vm.run_to_end().expect("run");
+        let x = vm.get_series(&canonicalize("x")).expect("x series");
+
+        assert_eq!(x.len(), 6); // steps 0,1,2,3,4,5
+        assert!((x[0] - 0.0).abs() < 1e-10);
+        assert!((x[5] - 10.0).abs() < 1e-10);
+    }
 }

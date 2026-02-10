@@ -5,7 +5,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use float_cmp::approx_eq;
 use smallvec::SmallVec;
 
 use crate::bytecode::{
@@ -14,6 +13,7 @@ use crate::bytecode::{
 };
 use crate::common::{Canonical, Ident, Result};
 use crate::dimensions::match_dimensions_two_pass;
+use crate::float::SimFloat;
 #[allow(unused_imports)]
 pub use crate::results::{Method, Results, Specs};
 use crate::sim_err;
@@ -86,13 +86,13 @@ pub(crate) const INITIAL_TIME_OFF: usize = 2;
 pub(crate) const FINAL_TIME_OFF: usize = 3;
 pub(crate) const IMPLICIT_VAR_COUNT: usize = 4;
 
-pub(crate) fn is_truthy(n: f64) -> bool {
-    let is_false = approx_eq!(f64, n, 0.0);
+pub(crate) fn is_truthy<F: SimFloat>(n: F) -> bool {
+    let is_false = n.approx_eq(F::zero());
     !is_false
 }
 
 #[inline(always)]
-fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
+fn eval_op2<F: SimFloat>(op: Op2, l: F, r: F) -> F {
     match op {
         Op2::Add => l + r,
         Op2::Sub => l - r,
@@ -100,13 +100,13 @@ fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
         Op2::Mul => l * r,
         Op2::Div => l / r,
         Op2::Mod => l.rem_euclid(r),
-        Op2::Gt => (l > r) as i8 as f64,
-        Op2::Gte => (l >= r) as i8 as f64,
-        Op2::Lt => (l < r) as i8 as f64,
-        Op2::Lte => (l <= r) as i8 as f64,
-        Op2::Eq => approx_eq!(f64, l, r) as i8 as f64,
-        Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
-        Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
+        Op2::Gt => F::from_i8((l > r) as i8),
+        Op2::Gte => F::from_i8((l >= r) as i8),
+        Op2::Lt => F::from_i8((l < r) as i8),
+        Op2::Lte => F::from_i8((l <= r) as i8),
+        Op2::Eq => F::from_i8(l.approx_eq(r) as i8),
+        Op2::And => F::from_i8((is_truthy(l) && is_truthy(r)) as i8),
+        Op2::Or => F::from_i8((is_truthy(l) || is_truthy(r)) as i8),
     }
 }
 
@@ -131,18 +131,18 @@ enum BytecodeLocation {
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-pub struct CompiledSimulation {
-    pub(crate) modules: HashMap<ModuleKey, CompiledModule>,
-    pub(crate) specs: Specs,
+pub struct CompiledSimulation<F: SimFloat> {
+    pub(crate) modules: HashMap<ModuleKey, CompiledModule<F>>,
+    pub(crate) specs: Specs<F>,
     pub(crate) root: ModuleKey,
     pub(crate) offsets: HashMap<Ident<Canonical>, usize>,
     cached_constant_info: HashMap<usize, Vec<BytecodeLocation>>,
 }
 
-impl CompiledSimulation {
+impl<F: SimFloat> CompiledSimulation<F> {
     pub(crate) fn new(
-        modules: HashMap<ModuleKey, CompiledModule>,
-        specs: Specs,
+        modules: HashMap<ModuleKey, CompiledModule<F>>,
+        specs: Specs<F>,
         root: ModuleKey,
         offsets: HashMap<Ident<Canonical>, usize>,
     ) -> Self {
@@ -172,19 +172,19 @@ impl CompiledSimulation {
 /// Per-module compiled initials with the shared ByteCodeContext needed to eval them.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-struct CompiledModuleInitials {
+struct CompiledModuleInitials<F: SimFloat> {
     #[allow(dead_code)]
     ident: Ident<Canonical>,
-    context: Arc<ByteCodeContext>,
-    initials: Arc<Vec<CompiledInitial>>,
+    context: Arc<ByteCodeContext<F>>,
+    initials: Arc<Vec<CompiledInitial<F>>>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-struct CompiledSlicedSimulation {
-    initial_modules: HashMap<ModuleKey, CompiledModuleInitials>,
-    flow_modules: HashMap<ModuleKey, CompiledModuleSlice>,
-    stock_modules: HashMap<ModuleKey, CompiledModuleSlice>,
+struct CompiledSlicedSimulation<F: SimFloat> {
+    initial_modules: HashMap<ModuleKey, CompiledModuleInitials<F>>,
+    flow_modules: HashMap<ModuleKey, CompiledModuleSlice<F>>,
+    stock_modules: HashMap<ModuleKey, CompiledModuleSlice<F>>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -196,7 +196,7 @@ pub(crate) enum StepPart {
 }
 
 // helper to borrow two non-overlapping chunk slices by index
-fn borrow_two(buf: &mut [f64], n_slots: usize, a: usize, b: usize) -> (&mut [f64], &mut [f64]) {
+fn borrow_two<F>(buf: &mut [F], n_slots: usize, a: usize, b: usize) -> (&mut [F], &mut [F]) {
     let (lo, hi, flip) = if a < b { (a, b, false) } else { (b, a, true) };
     let split = hi * n_slots;
     let (left, right) = buf.split_at_mut(split);
@@ -207,15 +207,15 @@ fn borrow_two(buf: &mut [f64], n_slots: usize, a: usize, b: usize) -> (&mut [f64
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-pub struct Vm {
-    specs: Specs,
+pub struct Vm<F: SimFloat> {
+    specs: Specs<F>,
     root: ModuleKey,
     offsets: HashMap<Ident<Canonical>, usize>,
-    sliced_sim: CompiledSlicedSimulation,
+    sliced_sim: CompiledSlicedSimulation<F>,
     n_slots: usize,
     n_chunks: usize,
     // simulation buffer for saved samples and working state
-    data: Option<Box<[f64]>>,
+    data: Option<Box<[F]>>,
     // indices into chunks for current and next slots
     curr_chunk: usize,
     next_chunk: usize,
@@ -225,9 +225,9 @@ pub struct Vm {
     step_accum: usize,
     // Temp array storage (allocated once, reused across evals)
     // Indexed by temp_offsets from ByteCodeContext
-    temp_storage: Vec<f64>,
+    temp_storage: Vec<F>,
     // Reusable stacks (allocated once, cleared before each top-level call)
-    stack: Stack,
+    stack: Stack<F>,
     view_stack: Vec<RuntimeView>,
     iter_stack: Vec<IterState>,
     broadcast_stack: Vec<BroadcastState>,
@@ -236,17 +236,17 @@ pub struct Vm {
     constant_info: HashMap<usize, Vec<BytecodeLocation>>,
     // Tracks original literal values before override, keyed by absolute offset.
     // Each entry stores the locations and their original values so clear_values can restore them.
-    original_literals: HashMap<usize, Vec<(BytecodeLocation, f64)>>,
+    original_literals: HashMap<usize, Vec<(BytecodeLocation, F)>>,
 }
 
 #[derive(Clone)]
-struct Stack {
-    data: [f64; STACK_CAPACITY],
+struct Stack<F: SimFloat> {
+    data: [F; STACK_CAPACITY],
     top: usize,
 }
 
 #[cfg(feature = "debug-derive")]
-impl std::fmt::Debug for Stack {
+impl<F: SimFloat> std::fmt::Debug for Stack<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Stack")
             .field("top", &self.top)
@@ -256,15 +256,15 @@ impl std::fmt::Debug for Stack {
 }
 
 #[allow(unsafe_code)]
-impl Stack {
+impl<F: SimFloat> Stack<F> {
     fn new() -> Self {
         Stack {
-            data: [0.0; STACK_CAPACITY],
+            data: [F::zero(); STACK_CAPACITY],
             top: 0,
         }
     }
     #[inline(always)]
-    fn push(&mut self, value: f64) {
+    fn push(&mut self, value: F) {
         debug_assert!(self.top < STACK_CAPACITY, "stack overflow");
         // SAFETY: ByteCodeBuilder::finish() statically validates that the max
         // stack depth of all compiled bytecode is < STACK_CAPACITY, so this
@@ -276,7 +276,7 @@ impl Stack {
         self.top += 1;
     }
     #[inline(always)]
-    fn pop(&mut self) -> f64 {
+    fn pop(&mut self) -> F {
         debug_assert!(self.top > 0, "stack underflow");
         self.top -= 1;
         // SAFETY: ByteCodeBuilder::finish() validates via checked_sub that no
@@ -302,9 +302,9 @@ impl Stack {
 /// `EvalState` because the borrow checker cannot split the struct across the
 /// call boundary.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-struct EvalState<'a> {
-    stack: &'a mut Stack,
-    temp_storage: &'a mut [f64],
+struct EvalState<'a, F: SimFloat> {
+    stack: &'a mut Stack<F>,
+    temp_storage: &'a mut [F],
     view_stack: &'a mut Vec<RuntimeView>,
     iter_stack: &'a mut Vec<IterState>,
     broadcast_stack: &'a mut Vec<BroadcastState>,
@@ -312,16 +312,16 @@ struct EvalState<'a> {
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-struct CompiledModuleSlice {
+struct CompiledModuleSlice<F: SimFloat> {
     #[allow(dead_code)]
     ident: Ident<Canonical>,
-    context: Arc<ByteCodeContext>,
-    bytecode: Arc<ByteCode>,
+    context: Arc<ByteCodeContext<F>>,
+    bytecode: Arc<ByteCode<F>>,
     part: StepPart,
 }
 
-impl CompiledModuleSlice {
-    fn new(module: &CompiledModule, part: StepPart) -> Self {
+impl<F: SimFloat> CompiledModuleSlice<F> {
+    fn new(module: &CompiledModule<F>, part: StepPart) -> Self {
         CompiledModuleSlice {
             ident: module.ident.clone(),
             context: module.context.clone(),
@@ -342,8 +342,8 @@ impl CompiledModuleSlice {
 /// (stocks with constant initials are not overridable). For each such offset,
 /// ALL bytecode locations across flows, stocks, and initials are collected so
 /// that a single `set_value` call mutates every literal that feeds that offset.
-fn collect_constant_info(
-    modules: &HashMap<ModuleKey, CompiledModule>,
+fn collect_constant_info<F: SimFloat>(
+    modules: &HashMap<ModuleKey, CompiledModule<F>>,
     module_key: &ModuleKey,
     base_off: usize,
 ) -> HashMap<usize, Vec<BytecodeLocation>> {
@@ -423,31 +423,29 @@ fn collect_constant_info(
     result
 }
 
-impl Vm {
-    pub fn new(sim: CompiledSimulation) -> Result<Vm> {
+impl<F: SimFloat> Vm<F> {
+    pub fn new(sim: CompiledSimulation<F>) -> Result<Vm<F>> {
         if sim.specs.stop < sim.specs.start {
             return sim_err!(
                 BadSimSpecs,
                 "end time has to be after start time".to_string()
             );
         }
-        if approx_eq!(f64, sim.specs.dt, 0.0) {
+        // Strict positivity: reject dt <= 0 (and NaN), but accept any positive
+        // value including very small ones (e.g. 1e-8 in f32).  Using approx_eq
+        // here would incorrectly reject small-but-valid timesteps.
+        if sim.specs.dt <= F::zero() || sim.specs.dt.is_nan() {
             return sim_err!(BadSimSpecs, "dt must be greater than 0".to_string());
         }
 
-        let save_step = if sim.specs.save_step > sim.specs.dt {
-            sim.specs.save_step
-        } else {
-            sim.specs.dt
-        };
         let root_module = &sim.modules[&sim.root];
         let n_slots = root_module.n_slots;
-        let n_chunks: usize = ((sim.specs.stop - sim.specs.start) / save_step + 1.0) as usize;
-        let data: Box<[f64]> = vec![0.0; n_slots * (n_chunks + 2)].into_boxed_slice();
+        let n_chunks = sim.specs.n_chunks;
+        let data: Box<[F]> = vec![F::zero(); n_slots * (n_chunks + 2)].into_boxed_slice();
 
         // Allocate temp storage based on context temp info
         let temp_total_size = root_module.context.temp_total_size;
-        let temp_storage = vec![0.0; temp_total_size];
+        let temp_storage = vec![F::zero(); temp_total_size];
 
         Ok(Vm {
             specs: sim.specs,
@@ -502,7 +500,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    pub fn run_to(&mut self, end: f64) -> Result<()> {
+    pub fn run_to(&mut self, end: F) -> Result<()> {
         self.run_initials()?;
 
         let spec_start = self.specs.start;
@@ -511,10 +509,10 @@ impl Vm {
         let n_slots = self.n_slots;
         let n_chunks = self.n_chunks;
 
-        let save_every = std::cmp::max(1, (save_step / dt + 0.5).floor() as usize);
+        let save_every = std::cmp::max(1, (save_step.to_f64() / dt.to_f64()).round() as usize);
 
         self.stack.clear();
-        let module_inputs: &[f64] = &[0.0; 0];
+        let module_inputs: &[F] = &[];
         let mut data = self.data.take().unwrap();
 
         let module_flows = &self.sliced_sim.flow_modules[&self.root];
@@ -580,7 +578,7 @@ impl Vm {
         Ok(())
     }
 
-    pub fn into_results(self) -> Results {
+    pub fn into_results(self) -> Results<F> {
         Results {
             offsets: self.offsets.clone(),
             data: self.data.unwrap(),
@@ -591,7 +589,7 @@ impl Vm {
         }
     }
 
-    pub fn set_value_now(&mut self, off: usize, val: f64) {
+    pub fn set_value_now(&mut self, off: usize, val: F) {
         let start = self.curr_chunk * self.n_slots;
         let data = self.data.as_mut().unwrap();
         data[start + off] = val;
@@ -602,7 +600,7 @@ impl Vm {
     /// Precondition: `run_initials()` must have been called since the last
     /// `reset()`. After `reset()` but before `run_initials()`, the data buffer
     /// may contain stale values from the previous simulation run.
-    pub fn get_value_now(&self, off: usize) -> f64 {
+    pub fn get_value_now(&self, off: usize) -> F {
         debug_assert!(
             self.did_initials,
             "get_value_now called before run_initials; data buffer may contain stale values"
@@ -629,7 +627,7 @@ impl Vm {
     }
 
     /// Read the current value of a literal at a bytecode location.
-    fn read_literal(&self, loc: &BytecodeLocation) -> f64 {
+    fn read_literal(&self, loc: &BytecodeLocation) -> F {
         match loc {
             BytecodeLocation::FlowOrStock {
                 module_key,
@@ -668,7 +666,7 @@ impl Vm {
 
     /// Write a value to the literal at a bytecode location, using Arc::make_mut
     /// for copy-on-write semantics on shared bytecode.
-    fn write_literal(&mut self, loc: &BytecodeLocation, value: f64) {
+    fn write_literal(&mut self, loc: &BytecodeLocation, value: F) {
         match loc {
             BytecodeLocation::FlowOrStock {
                 module_key,
@@ -719,7 +717,7 @@ impl Vm {
         self.next_chunk = 1;
         self.did_initials = false;
         self.step_accum = 0;
-        self.temp_storage.fill(0.0);
+        self.temp_storage.fill(F::zero());
         self.stack.clear();
         self.view_stack.clear();
         self.iter_stack.clear();
@@ -729,7 +727,7 @@ impl Vm {
     /// Apply an override for a constant at the given absolute offset.
     /// Named constants get their own literal slots at compile time (via
     /// push_named_literal), so no de-interning is needed at runtime.
-    fn apply_override(&mut self, off: usize, value: f64) {
+    fn apply_override(&mut self, off: usize, value: F) {
         // Clone locations once; we need ownership because write_literal borrows &mut self.
         let locations = self.constant_info[&off].clone();
         if !self.original_literals.contains_key(&off) {
@@ -748,7 +746,7 @@ impl Vm {
     /// Set a value override for a simple constant by canonical variable name.
     /// Mutates the bytecode literals directly so AssignConstCurr needs no branching.
     /// Returns the data-buffer offset of the variable on success.
-    pub fn set_value(&mut self, ident: &Ident<Canonical>, value: f64) -> Result<usize> {
+    pub fn set_value(&mut self, ident: &Ident<Canonical>, value: F) -> Result<usize> {
         let off = match self.offsets.get(ident) {
             Some(&off) => off,
             None => {
@@ -772,7 +770,7 @@ impl Vm {
     }
 
     /// Set a value override for a simple constant by raw data-buffer offset.
-    pub fn set_value_by_offset(&mut self, off: usize, value: f64) -> Result<()> {
+    pub fn set_value_by_offset(&mut self, off: usize, value: F) -> Result<()> {
         if off >= self.n_slots {
             return sim_err!(
                 BadOverride,
@@ -811,7 +809,7 @@ impl Vm {
         let dt = self.specs.dt;
 
         self.stack.clear();
-        let module_inputs: &[f64] = &[0.0; 0];
+        let module_inputs: &[F] = &[];
         let mut data = self.data.take().unwrap();
 
         let (curr, next) = borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
@@ -863,7 +861,7 @@ impl Vm {
     /// Extract the time series for a variable after simulation.
     /// Returns None if the ident is not found.
     /// The returned vector has one element per saved step (including t=0).
-    pub fn get_series(&self, ident: &Ident<Canonical>) -> Option<Vec<f64>> {
+    pub fn get_series(&self, ident: &Ident<Canonical>) -> Option<Vec<F>> {
         let &off = self.offsets.get(ident)?;
         let data = self.data.as_ref()?;
         if !self.did_initials {
@@ -889,13 +887,13 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn eval_module_initials(
-        sliced_sim: &CompiledSlicedSimulation,
-        state: &mut EvalState<'_>,
-        parent_context: &ByteCodeContext,
+        sliced_sim: &CompiledSlicedSimulation<F>,
+        state: &mut EvalState<'_, F>,
+        parent_context: &ByteCodeContext<F>,
         parent_module_off: usize,
-        module_inputs: &[f64],
-        curr: &mut [f64],
-        next: &mut [f64],
+        module_inputs: &[F],
+        curr: &mut [F],
+        next: &mut [F],
         id: ModuleId,
     ) {
         let new_module_decl = &parent_context.modules[id as usize];
@@ -916,13 +914,13 @@ impl Vm {
     /// Run all per-variable initials for a module (in dependency order).
     #[allow(clippy::too_many_arguments)]
     fn eval_initials(
-        sliced_sim: &CompiledSlicedSimulation,
-        state: &mut EvalState<'_>,
+        sliced_sim: &CompiledSlicedSimulation<F>,
+        state: &mut EvalState<'_, F>,
         module_key: &ModuleKey,
         module_off: usize,
-        module_inputs: &[f64],
-        curr: &mut [f64],
-        next: &mut [f64],
+        module_inputs: &[F],
+        curr: &mut [F],
+        next: &mut [F],
     ) {
         let module_initials = &sliced_sim.initial_modules[module_key];
         let context = &module_initials.context;
@@ -944,13 +942,13 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn eval(
-        sliced_sim: &CompiledSlicedSimulation,
-        state: &mut EvalState<'_>,
-        module: &CompiledModuleSlice,
+        sliced_sim: &CompiledSlicedSimulation<F>,
+        state: &mut EvalState<'_, F>,
+        module: &CompiledModuleSlice<F>,
         module_off: usize,
-        module_inputs: &[f64],
-        curr: &mut [f64],
-        next: &mut [f64],
+        module_inputs: &[F],
+        curr: &mut [F],
+        next: &mut [F],
     ) {
         Self::eval_bytecode(
             sliced_sim,
@@ -967,15 +965,15 @@ impl Vm {
 
     #[allow(clippy::too_many_arguments)]
     fn eval_bytecode(
-        sliced_sim: &CompiledSlicedSimulation,
-        state: &mut EvalState<'_>,
-        context: &ByteCodeContext,
-        bytecode: &ByteCode,
+        sliced_sim: &CompiledSlicedSimulation<F>,
+        state: &mut EvalState<'_, F>,
+        context: &ByteCodeContext<F>,
+        bytecode: &ByteCode<F>,
         part: StepPart,
         module_off: usize,
-        module_inputs: &[f64],
-        curr: &mut [f64],
-        next: &mut [f64],
+        module_inputs: &[F],
+        curr: &mut [F],
+        next: &mut [F],
     ) {
         // Destructure EvalState into local reborrows so the opcode loop can use
         // them directly.  For recursive EvalModule calls we must re-pack into a
@@ -1004,7 +1002,7 @@ impl Vm {
                 }
                 Opcode::Not {} => {
                     let r = stack.pop();
-                    stack.push((!is_truthy(r)) as i8 as f64);
+                    stack.push(F::from_i8((!is_truthy(r)) as i8));
                 }
                 Opcode::LoadConstant { id } => {
                     stack.push(bytecode.literals[*id as usize]);
@@ -1016,7 +1014,7 @@ impl Vm {
                     stack.push(curr[module_off + *off as usize]);
                 }
                 Opcode::PushSubscriptIndex { bounds } => {
-                    let index = stack.pop().floor() as u16;
+                    let index = stack.pop().floor().to_f64() as u16;
                     if index == 0 || index > *bounds {
                         subscript_index_valid = false;
                     } else {
@@ -1035,7 +1033,7 @@ impl Vm {
                         }
                         curr[module_off + *off as usize + index]
                     } else {
-                        f64::NAN
+                        F::nan()
                     };
                     stack.push(result);
                     subscript_index.clear();
@@ -1055,8 +1053,8 @@ impl Vm {
                 }
                 Opcode::EvalModule { id, n_inputs } => {
                     use std::iter;
-                    let mut module_inputs: SmallVec<[f64; 16]> =
-                        iter::repeat_n(0.0, *n_inputs as usize).collect();
+                    let mut module_inputs: SmallVec<[F; 16]> =
+                        iter::repeat_n(F::zero(), *n_inputs as usize).collect();
                     for j in (0..(*n_inputs as usize)).rev() {
                         module_inputs[j] = stack.pop();
                     }
@@ -1160,10 +1158,12 @@ impl Vm {
                     let element_offset = stack.pop();
 
                     // Bounds check: element_offset must be in [0, table_count)
-                    if element_offset < 0.0 || element_offset >= (*table_count as f64) {
-                        stack.push(f64::NAN);
+                    if element_offset < F::zero()
+                        || element_offset >= F::from_usize(*table_count as usize)
+                    {
+                        stack.push(F::nan());
                     } else {
-                        let gf_idx = (*base_gf as usize) + (element_offset as usize);
+                        let gf_idx = (*base_gf as usize) + (element_offset.to_f64() as usize);
                         let gf = &context.graphical_functions[gf_idx];
                         let result = match mode {
                             LookupMode::Interpolate => lookup(gf, lookup_index),
@@ -1240,7 +1240,7 @@ impl Vm {
 
                 Opcode::ViewSubscriptDynamic { dim_idx } => {
                     // XMILE uses 1-based indexing; validate bounds and convert to 0-based
-                    let index_1based = stack.pop().floor() as u16;
+                    let index_1based = stack.pop().floor().to_f64() as u16;
                     let view = view_stack.last_mut().unwrap();
                     // apply_single_subscript_checked validates bounds and sets is_valid=false
                     // if out of bounds, allowing subsequent reads to return NaN
@@ -1258,8 +1258,8 @@ impl Vm {
 
                 Opcode::ViewRangeDynamic { dim_idx } => {
                     // Pop end and start from stack (1-based indices, inclusive range)
-                    let end_1based = stack.pop() as u16;
-                    let start_1based = stack.pop() as u16;
+                    let end_1based = stack.pop().to_f64() as u16;
+                    let start_1based = stack.pop().to_f64() as u16;
                     let view = view_stack.last_mut().unwrap();
                     // apply_range_checked handles validation and 1-based to 0-based conversion
                     view.apply_range_checked(*dim_idx as usize, start_1based, end_1based);
@@ -1308,7 +1308,7 @@ impl Vm {
                 }
 
                 Opcode::LoadTempDynamic { temp_id } => {
-                    let index = stack.pop().floor() as usize;
+                    let index = stack.pop().floor().to_f64() as usize;
                     let temp_off = context.temp_offsets[*temp_id as usize];
                     let value = temp_storage[temp_off + index];
                     stack.push(value);
@@ -1369,7 +1369,7 @@ impl Vm {
 
                     // Return NaN for invalid views (e.g., out-of-bounds subscript)
                     if !view.is_valid {
-                        stack.push(f64::NAN);
+                        stack.push(F::nan());
                     } else {
                         let flat_off = if let Some(ref offsets) = iter_state.flat_offsets {
                             offsets[iter_state.current]
@@ -1411,7 +1411,7 @@ impl Vm {
                     let source_view = view_stack.last().unwrap();
 
                     if !source_view.is_valid {
-                        stack.push(f64::NAN);
+                        stack.push(F::nan());
                     } else {
                         // Get the iteration view (output dimensions)
                         let iter_view = &view_stack[iter_state.view_stack_idx];
@@ -1512,7 +1512,7 @@ impl Vm {
                             stack.push(value);
                         } else {
                             // Out of bounds or no matching dimension - return NaN
-                            stack.push(f64::NAN);
+                            stack.push(F::nan());
                         }
                     }
                 }
@@ -1527,7 +1527,7 @@ impl Vm {
                     let source_view = &view_stack[source_view_idx];
 
                     if !source_view.is_valid {
-                        stack.push(f64::NAN);
+                        stack.push(F::nan());
                     } else {
                         // Get the iteration view (output dimensions)
                         let iter_view = &view_stack[iter_state.view_stack_idx];
@@ -1628,7 +1628,7 @@ impl Vm {
                             stack.push(value);
                         } else {
                             // Out of bounds or no matching dimension - return NaN
-                            stack.push(f64::NAN);
+                            stack.push(F::nan());
                         }
                     }
                 }
@@ -1666,8 +1666,14 @@ impl Vm {
                 // =========================================================
                 Opcode::ArraySum {} => {
                     let view = view_stack.last().unwrap();
-                    let sum =
-                        Self::reduce_view(temp_storage, view, curr, context, |acc, v| acc + v, 0.0);
+                    let sum = Self::reduce_view(
+                        temp_storage,
+                        view,
+                        curr,
+                        context,
+                        |acc, v| acc + v,
+                        F::zero(),
+                    );
                     stack.push(sum);
                 }
 
@@ -1678,8 +1684,8 @@ impl Vm {
                         view,
                         curr,
                         context,
-                        |acc, v| acc.max(v),
-                        f64::NEG_INFINITY,
+                        |acc, v| if v > acc { v } else { acc },
+                        F::neg_infinity(),
                     );
                     stack.push(max);
                 }
@@ -1691,43 +1697,57 @@ impl Vm {
                         view,
                         curr,
                         context,
-                        |acc, v| acc.min(v),
-                        f64::INFINITY,
+                        |acc, v| if v < acc { v } else { acc },
+                        F::infinity(),
                     );
                     stack.push(min);
                 }
 
                 Opcode::ArrayMean {} => {
                     let view = view_stack.last().unwrap();
-                    let sum =
-                        Self::reduce_view(temp_storage, view, curr, context, |acc, v| acc + v, 0.0);
-                    let count = view.size() as f64;
+                    let sum = Self::reduce_view(
+                        temp_storage,
+                        view,
+                        curr,
+                        context,
+                        |acc, v| acc + v,
+                        F::zero(),
+                    );
+                    let count = F::from_usize(view.size());
                     stack.push(sum / count);
                 }
 
                 Opcode::ArrayStddev {} => {
                     let view = view_stack.last().unwrap();
                     let size = view.size();
-                    let sum =
-                        Self::reduce_view(temp_storage, view, curr, context, |acc, v| acc + v, 0.0);
-                    let mean = sum / size as f64;
+                    let sum = Self::reduce_view(
+                        temp_storage,
+                        view,
+                        curr,
+                        context,
+                        |acc, v| acc + v,
+                        F::zero(),
+                    );
+                    let fsize = F::from_usize(size);
+                    let mean = sum / fsize;
 
                     // Second pass for variance
+                    let two = F::one() + F::one();
                     let variance_sum = Self::reduce_view(
                         temp_storage,
                         view,
                         curr,
                         context,
-                        |acc, v| acc + (v - mean).powi(2),
-                        0.0,
+                        |acc, v| acc + (v - mean).powf(two),
+                        F::zero(),
                     );
-                    let stddev = (variance_sum / size as f64).sqrt();
+                    let stddev = (variance_sum / fsize).sqrt();
                     stack.push(stddev);
                 }
 
                 Opcode::ArraySize {} => {
                     let view = view_stack.last().unwrap();
-                    stack.push(view.size() as f64);
+                    stack.push(F::from_usize(view.size()));
                 }
 
                 // =========================================================
@@ -1801,7 +1821,7 @@ impl Vm {
 
                     // Return NaN for invalid views
                     if !view.is_valid {
-                        stack.push(f64::NAN);
+                        stack.push(F::nan());
                     } else {
                         // Map result indices to source indices
                         let mut source_indices: SmallVec<[u16; 4]> = SmallVec::new();
@@ -1874,20 +1894,20 @@ impl Vm {
     }
 
     /// Helper: Reduce all elements of a view using a fold function
-    fn reduce_view<F>(
-        temp_storage: &[f64],
+    fn reduce_view<Fold>(
+        temp_storage: &[F],
         view: &RuntimeView,
-        curr: &[f64],
-        context: &ByteCodeContext,
-        f: F,
-        init: f64,
-    ) -> f64
+        curr: &[F],
+        context: &ByteCodeContext<F>,
+        f: Fold,
+        init: F,
+    ) -> F
     where
-        F: Fn(f64, f64) -> f64,
+        Fold: Fn(F, F) -> F,
     {
         // Return NaN for invalid views
         if !view.is_valid {
-            return f64::NAN;
+            return F::nan();
         }
 
         let size = view.size();
@@ -1971,7 +1991,7 @@ impl Vm {
 }
 
 #[inline(always)]
-fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
+fn apply<F: SimFloat>(func: BuiltinId, time: F, dt: F, a: F, b: F, c: F) -> F {
     match func {
         BuiltinId::Abs => a.abs(),
         BuiltinId::Arccos => a.acos(),
@@ -1979,7 +1999,7 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
         BuiltinId::Arctan => a.atan(),
         BuiltinId::Cos => a.cos(),
         BuiltinId::Exp => a.exp(),
-        BuiltinId::Inf => f64::INFINITY,
+        BuiltinId::Inf => F::infinity(),
         BuiltinId::Int => a.floor(),
         BuiltinId::Ln => a.ln(),
         BuiltinId::Log10 => a.log10(),
@@ -1997,7 +2017,7 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
                 b
             }
         }
-        BuiltinId::Pi => std::f64::consts::PI,
+        BuiltinId::Pi => F::pi(),
         BuiltinId::Pulse => {
             let volume = a;
             let first_pulse = b;
@@ -2011,19 +2031,18 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
             ramp(time, slope, start_time, Some(end_time))
         }
         BuiltinId::SafeDiv => {
-            if b != 0.0 {
-                a / b
-            } else {
-                c
-            }
+            // Use exact zero comparison, not approx_eq: a denominator that
+            // is very small but non-zero (e.g. subnormal) should still
+            // produce a / b, not silently fall back to the default c.
+            if b != F::zero() { a / b } else { c }
         }
         BuiltinId::Sign => {
-            if a > 0.0 {
-                1.0
-            } else if a < 0.0 {
-                -1.0
+            if a > F::zero() {
+                F::one()
+            } else if a < F::zero() {
+                F::neg_one()
             } else {
-                0.0
+                F::zero()
             }
         }
         BuiltinId::Sin => a.sin(),
@@ -2037,7 +2056,7 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
     }
 }
 
-pub(crate) fn ramp(time: f64, slope: f64, start_time: f64, end_time: Option<f64>) -> f64 {
+pub(crate) fn ramp<F: SimFloat>(time: F, slope: F, start_time: F, end_time: Option<F>) -> F {
     if time > start_time {
         let done_ramping = end_time.is_some() && time >= end_time.unwrap();
         if done_ramping {
@@ -2046,47 +2065,48 @@ pub(crate) fn ramp(time: f64, slope: f64, start_time: f64, end_time: Option<f64>
             slope * (time - start_time)
         }
     } else {
-        0.0
+        F::zero()
     }
 }
 
-pub(crate) fn step(time: f64, dt: f64, height: f64, step_time: f64) -> f64 {
-    if time + dt / 2.0 > step_time {
+pub(crate) fn step<F: SimFloat>(time: F, dt: F, height: F, step_time: F) -> F {
+    let two = F::one() + F::one();
+    if time + dt / two > step_time {
         height
     } else {
-        0.0
+        F::zero()
     }
 }
 
 #[inline(never)]
-pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval: f64) -> f64 {
+pub(crate) fn pulse<F: SimFloat>(time: F, dt: F, volume: F, first_pulse: F, interval: F) -> F {
     if time < first_pulse {
-        return 0.0;
+        return F::zero();
     }
 
     let mut next_pulse = first_pulse;
     while time >= next_pulse {
         if time < next_pulse + dt {
             return volume / dt;
-        } else if interval <= 0.0 {
+        } else if interval <= F::zero() {
             break;
         } else {
             next_pulse += interval;
         }
     }
 
-    0.0
+    F::zero()
 }
 
 #[inline(never)]
-fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
+fn lookup<F: SimFloat>(table: &[(F, F)], index: F) -> F {
     if table.is_empty() {
-        return f64::NAN;
+        return F::nan();
     }
 
     if index.is_nan() {
         // things get wonky below if we try to binary search for NaN
-        return f64::NAN;
+        return F::nan();
     }
 
     // check if index is below the start of the table
@@ -2117,7 +2137,7 @@ fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
     }
 
     let i = low;
-    if approx_eq!(f64, table[i].0, index) {
+    if table[i].0.approx_eq(index) {
         table[i].1
     } else {
         // slope = deltaY/deltaX
@@ -2131,13 +2151,13 @@ fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
 /// If x is beyond the last point, returns the y-value of the last point.
 /// This is a "sample and hold" interpolation where we look forward.
 #[inline(never)]
-fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
+fn lookup_forward<F: SimFloat>(table: &[(F, F)], index: F) -> F {
     if table.is_empty() {
-        return f64::NAN;
+        return F::nan();
     }
 
     if index.is_nan() {
-        return f64::NAN;
+        return F::nan();
     }
 
     // If index is at or below the first point, return first y
@@ -2173,13 +2193,13 @@ fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
 ///
 /// For duplicate x-values, returns the y of the LAST point with that x.
 #[inline(never)]
-fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
+fn lookup_backward<F: SimFloat>(table: &[(F, F)], index: F) -> F {
     if table.is_empty() {
-        return f64::NAN;
+        return F::nan();
     }
 
     if index.is_nan() {
-        return f64::NAN;
+        return F::nan();
     }
 
     // If index is at or below the first point, return first y
@@ -2330,12 +2350,340 @@ mod lookup_tests {
 }
 
 #[cfg(test)]
+mod apply_tests {
+    use super::*;
+    use crate::bytecode::BuiltinId;
+
+    // ── SafeDiv ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn safediv_nonzero_denominator() {
+        let result: f64 = apply(BuiltinId::SafeDiv, 0.0, 1.0, 10.0, 2.0, 99.0);
+        assert_eq!(result, 5.0);
+    }
+
+    #[test]
+    fn safediv_exact_zero_denominator_returns_default() {
+        let result: f64 = apply(BuiltinId::SafeDiv, 0.0, 1.0, 10.0, 0.0, 99.0);
+        assert_eq!(result, 99.0);
+    }
+
+    #[test]
+    fn safediv_subnormal_denominator_divides_normally() {
+        // A subnormal (very small but non-zero) denominator must NOT trigger
+        // the fallback branch — this is the key semantic distinction between
+        // exact-zero and approx_eq checks.
+        let subnormal: f64 = f64::MIN_POSITIVE / 2.0; // subnormal value
+        assert!(subnormal != 0.0, "subnormal should not be exactly zero");
+        let result: f64 = apply(BuiltinId::SafeDiv, 0.0, 1.0, 10.0, subnormal, 99.0);
+        // Should perform division, not return default
+        assert_ne!(
+            result, 99.0,
+            "subnormal denominator should NOT trigger fallback"
+        );
+        assert_eq!(result, 10.0 / subnormal);
+    }
+
+    #[test]
+    fn safediv_negative_zero_is_zero() {
+        // -0.0 == 0.0 in IEEE 754, so SafeDiv should return default
+        let result: f64 = apply(BuiltinId::SafeDiv, 0.0, 1.0, 10.0, -0.0, 99.0);
+        assert_eq!(result, 99.0, "negative zero should trigger the fallback");
+    }
+
+    #[test]
+    fn safediv_f32_exact_zero_returns_default() {
+        let result: f32 = apply(BuiltinId::SafeDiv, 0.0f32, 1.0f32, 10.0f32, 0.0f32, 42.0f32);
+        assert_eq!(result, 42.0f32);
+    }
+
+    #[test]
+    fn safediv_f32_subnormal_divides() {
+        let subnormal: f32 = f32::MIN_POSITIVE / 2.0;
+        assert!(subnormal != 0.0f32);
+        let result: f32 = apply(
+            BuiltinId::SafeDiv,
+            0.0f32,
+            1.0f32,
+            10.0f32,
+            subnormal,
+            99.0f32,
+        );
+        assert_ne!(
+            result, 99.0f32,
+            "f32 subnormal denominator should NOT trigger fallback"
+        );
+    }
+
+    // ── Sign ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sign_positive() {
+        assert_eq!(1.0, apply::<f64>(BuiltinId::Sign, 0.0, 1.0, 5.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn sign_negative() {
+        assert_eq!(
+            -1.0,
+            apply::<f64>(BuiltinId::Sign, 0.0, 1.0, -3.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn sign_zero() {
+        assert_eq!(0.0, apply::<f64>(BuiltinId::Sign, 0.0, 1.0, 0.0, 0.0, 0.0));
+    }
+
+    // ── Other builtins ──────────────────────────────────────────────────
+
+    #[test]
+    fn apply_abs() {
+        assert_eq!(3.0, apply::<f64>(BuiltinId::Abs, 0.0, 1.0, -3.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn apply_int_floors() {
+        assert_eq!(3.0, apply::<f64>(BuiltinId::Int, 0.0, 1.0, 3.7, 0.0, 0.0));
+        assert_eq!(-4.0, apply::<f64>(BuiltinId::Int, 0.0, 1.0, -3.2, 0.0, 0.0));
+    }
+
+    #[test]
+    fn apply_pi() {
+        let result: f64 = apply(BuiltinId::Pi, 0.0, 1.0, 0.0, 0.0, 0.0);
+        assert!((result - std::f64::consts::PI).abs() < 1e-15);
+    }
+
+    #[test]
+    fn apply_inf() {
+        let result: f64 = apply(BuiltinId::Inf, 0.0, 1.0, 0.0, 0.0, 0.0);
+        assert!(result.is_infinite() && result > 0.0);
+    }
+
+    #[test]
+    fn apply_trig_round_trip() {
+        // sin(asin(0.5)) should be ~0.5
+        let asin_val: f64 = apply(BuiltinId::Arcsin, 0.0, 1.0, 0.5, 0.0, 0.0);
+        let sin_val: f64 = apply(BuiltinId::Sin, 0.0, 1.0, asin_val, 0.0, 0.0);
+        assert!((sin_val - 0.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn apply_log10() {
+        let result: f64 = apply(BuiltinId::Log10, 0.0, 1.0, 100.0, 0.0, 0.0);
+        assert!((result - 2.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn apply_ln() {
+        let result: f64 = apply(BuiltinId::Ln, 0.0, 1.0, std::f64::consts::E, 0.0, 0.0);
+        assert!((result - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn apply_sqrt() {
+        assert_eq!(3.0, apply::<f64>(BuiltinId::Sqrt, 0.0, 1.0, 9.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn apply_max_min() {
+        assert_eq!(7.0, apply::<f64>(BuiltinId::Max, 0.0, 1.0, 3.0, 7.0, 0.0));
+        assert_eq!(3.0, apply::<f64>(BuiltinId::Min, 0.0, 1.0, 3.0, 7.0, 0.0));
+    }
+
+    // ── f32 builtins ────────────────────────────────────────────────────
+
+    #[test]
+    fn f32_apply_abs() {
+        assert_eq!(
+            3.0f32,
+            apply::<f32>(BuiltinId::Abs, 0.0, 1.0, -3.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn f32_apply_trig() {
+        let sin_val: f32 = apply(BuiltinId::Sin, 0.0, 1.0, 1.0, 0.0, 0.0);
+        assert!((sin_val - 1.0f32.sin()).abs() < 1e-6);
+        let cos_val: f32 = apply(BuiltinId::Cos, 0.0, 1.0, 1.0, 0.0, 0.0);
+        assert!((cos_val - 1.0f32.cos()).abs() < 1e-6);
+        let tan_val: f32 = apply(BuiltinId::Tan, 0.0, 1.0, 1.0, 0.0, 0.0);
+        assert!((tan_val - 1.0f32.tan()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn f32_apply_inverse_trig() {
+        let asin: f32 = apply(BuiltinId::Arcsin, 0.0, 1.0, 0.5, 0.0, 0.0);
+        assert!((asin - 0.5f32.asin()).abs() < 1e-6);
+        let acos: f32 = apply(BuiltinId::Arccos, 0.0, 1.0, 0.5, 0.0, 0.0);
+        assert!((acos - 0.5f32.acos()).abs() < 1e-6);
+        let atan: f32 = apply(BuiltinId::Arctan, 0.0, 1.0, 1.0, 0.0, 0.0);
+        assert!((atan - 1.0f32.atan()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn f32_apply_log() {
+        let ln: f32 = apply(BuiltinId::Ln, 0.0, 1.0, std::f32::consts::E, 0.0, 0.0);
+        assert!((ln - 1.0).abs() < 1e-5);
+        let log10: f32 = apply(BuiltinId::Log10, 0.0, 1.0, 100.0, 0.0, 0.0);
+        assert!((log10 - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn f32_apply_sqrt_exp() {
+        let sq: f32 = apply(BuiltinId::Sqrt, 0.0, 1.0, 9.0, 0.0, 0.0);
+        assert!((sq - 3.0).abs() < 1e-6);
+        let ex: f32 = apply(BuiltinId::Exp, 0.0, 1.0, 1.0, 0.0, 0.0);
+        assert!((ex - std::f32::consts::E).abs() < 1e-5);
+    }
+}
+
+#[cfg(test)]
+mod is_truthy_and_eval_op2_tests {
+    use super::*;
+
+    #[test]
+    fn is_truthy_zero_is_false() {
+        assert!(!is_truthy(0.0_f64));
+        assert!(!is_truthy(0.0_f32));
+    }
+
+    #[test]
+    fn is_truthy_nonzero_is_true() {
+        assert!(is_truthy(1.0_f64));
+        assert!(is_truthy(-1.0_f64));
+        assert!(is_truthy(0.001_f64));
+        assert!(is_truthy(1.0_f32));
+        assert!(is_truthy(-1.0_f32));
+    }
+
+    #[test]
+    fn is_truthy_nan_is_true() {
+        // NaN is not approx_eq to zero, so it's truthy
+        assert!(is_truthy(f64::NAN));
+        assert!(is_truthy(f32::NAN));
+    }
+
+    #[test]
+    fn eval_op2_arithmetic_f64() {
+        assert_eq!(5.0, eval_op2::<f64>(Op2::Add, 2.0, 3.0));
+        assert_eq!(-1.0, eval_op2::<f64>(Op2::Sub, 2.0, 3.0));
+        assert_eq!(6.0, eval_op2::<f64>(Op2::Mul, 2.0, 3.0));
+        assert_eq!(2.0, eval_op2::<f64>(Op2::Div, 6.0, 3.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Mod, 7.0, 3.0));
+        assert_eq!(8.0, eval_op2::<f64>(Op2::Exp, 2.0, 3.0));
+    }
+
+    #[test]
+    fn eval_op2_comparison_f64() {
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Gt, 3.0, 2.0));
+        assert_eq!(0.0, eval_op2::<f64>(Op2::Gt, 2.0, 3.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Gte, 3.0, 3.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Lt, 2.0, 3.0));
+        assert_eq!(0.0, eval_op2::<f64>(Op2::Lt, 3.0, 2.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Lte, 3.0, 3.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Eq, 3.0, 3.0));
+        assert_eq!(0.0, eval_op2::<f64>(Op2::Eq, 3.0, 4.0));
+    }
+
+    #[test]
+    fn eval_op2_logical_f64() {
+        assert_eq!(1.0, eval_op2::<f64>(Op2::And, 1.0, 1.0));
+        assert_eq!(0.0, eval_op2::<f64>(Op2::And, 1.0, 0.0));
+        assert_eq!(0.0, eval_op2::<f64>(Op2::And, 0.0, 1.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Or, 1.0, 0.0));
+        assert_eq!(1.0, eval_op2::<f64>(Op2::Or, 0.0, 1.0));
+        assert_eq!(0.0, eval_op2::<f64>(Op2::Or, 0.0, 0.0));
+    }
+
+    #[test]
+    fn eval_op2_arithmetic_f32() {
+        assert_eq!(5.0f32, eval_op2::<f32>(Op2::Add, 2.0, 3.0));
+        assert_eq!(-1.0f32, eval_op2::<f32>(Op2::Sub, 2.0, 3.0));
+        assert_eq!(6.0f32, eval_op2::<f32>(Op2::Mul, 2.0, 3.0));
+        assert_eq!(2.0f32, eval_op2::<f32>(Op2::Div, 6.0, 3.0));
+        assert_eq!(1.0f32, eval_op2::<f32>(Op2::Mod, 7.0, 3.0));
+        assert_eq!(8.0f32, eval_op2::<f32>(Op2::Exp, 2.0, 3.0));
+    }
+
+    #[test]
+    fn eval_op2_comparison_f32() {
+        assert_eq!(1.0f32, eval_op2::<f32>(Op2::Gt, 3.0, 2.0));
+        assert_eq!(0.0f32, eval_op2::<f32>(Op2::Gt, 2.0, 3.0));
+        assert_eq!(1.0f32, eval_op2::<f32>(Op2::Eq, 3.0, 3.0));
+    }
+}
+
+#[cfg(test)]
+mod specs_convert_tests {
+    use super::*;
+
+    #[test]
+    fn specs_f64_to_f32_preserves_values() {
+        let specs_f64 = Specs {
+            start: 0.0_f64,
+            stop: 100.0_f64,
+            dt: 0.25_f64,
+            save_step: 1.0_f64,
+            method: Method::Euler,
+            n_chunks: 101,
+        };
+
+        let specs_f32: Specs<f32> = specs_f64.convert();
+        assert_eq!(specs_f32.start, 0.0_f32);
+        assert_eq!(specs_f32.stop, 100.0_f32);
+        assert_eq!(specs_f32.dt, 0.25_f32);
+        assert_eq!(specs_f32.save_step, 1.0_f32);
+        assert_eq!(specs_f32.method, Method::Euler);
+    }
+
+    #[test]
+    fn specs_f32_to_f64_preserves_values() {
+        let specs_f32 = Specs {
+            start: 0.0_f32,
+            stop: 50.0_f32,
+            dt: 0.5_f32,
+            save_step: 2.0_f32,
+            method: Method::Euler,
+            n_chunks: 26,
+        };
+
+        let specs_f64: Specs<f64> = specs_f32.convert();
+        assert_eq!(specs_f64.start, 0.0_f64);
+        assert_eq!(specs_f64.stop, 50.0_f64);
+        assert_eq!(specs_f64.dt, 0.5_f64);
+        assert_eq!(specs_f64.save_step, 2.0_f64);
+    }
+
+    #[test]
+    fn specs_f64_round_trip() {
+        let original = Specs {
+            start: 1.5_f64,
+            stop: 99.75_f64,
+            dt: 0.125_f64,
+            save_step: 0.5_f64,
+            method: Method::Euler,
+            n_chunks: 197, // (99.75-1.5)/0.5 + 1 = 196.5 + 1 = 197.5, truncated = 197
+        };
+
+        // f64 -> f32 -> f64: values representable in f32 should round-trip
+        let round_tripped: Specs<f64> = original.convert::<f32>().convert();
+        assert!((round_tripped.start - original.start).abs() < 1e-6);
+        assert!((round_tripped.stop - original.stop).abs() < 1e-4);
+        assert!((round_tripped.dt - original.dt).abs() < 1e-6);
+        assert!((round_tripped.save_step - original.save_step).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
 mod per_variable_initials_tests {
     use super::*;
     use crate::test_common::TestProject;
 
     /// Helper: build a Simulation and CompiledSimulation from a TestProject
-    fn build_compiled(tp: &TestProject) -> (crate::interpreter::Simulation, CompiledSimulation) {
+    fn build_compiled(
+        tp: &TestProject,
+    ) -> (crate::interpreter::Simulation, CompiledSimulation<f64>) {
         let sim = tp.build_sim().expect("build_sim failed");
         let compiled = sim.compile().expect("compile failed");
         (sim, compiled)
@@ -2568,7 +2916,9 @@ mod vm_reset_and_run_initials_tests {
             .stock("population", "100", &["births"], &["deaths"], None)
     }
 
-    fn build_compiled(tp: &TestProject) -> (crate::interpreter::Simulation, CompiledSimulation) {
+    fn build_compiled(
+        tp: &TestProject,
+    ) -> (crate::interpreter::Simulation, CompiledSimulation<f64>) {
         let sim = tp.build_sim().unwrap();
         let compiled = sim.compile().unwrap();
         (sim, compiled)
@@ -2856,7 +3206,7 @@ mod set_value_tests {
             .stock("population", "scaled_rate", &["inflow"], &["outflow"], None)
     }
 
-    fn build_compiled(tp: &TestProject) -> CompiledSimulation {
+    fn build_compiled(tp: &TestProject) -> CompiledSimulation<f64> {
         let sim = tp.build_sim().unwrap();
         sim.compile().unwrap()
     }
@@ -3393,7 +3743,7 @@ mod stack_tests {
 
     #[test]
     fn test_push_pop_basic() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         s.push(1.0);
         s.push(2.0);
         s.push(3.0);
@@ -3404,7 +3754,7 @@ mod stack_tests {
 
     #[test]
     fn test_lifo_ordering() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         for i in 0..10 {
             s.push(i as f64);
         }
@@ -3415,7 +3765,7 @@ mod stack_tests {
 
     #[test]
     fn test_clear_resets_stack() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         s.push(1.0);
         s.push(2.0);
         assert_eq!(2, s.len());
@@ -3425,7 +3775,7 @@ mod stack_tests {
 
     #[test]
     fn test_len_tracks_size() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         assert_eq!(0, s.len());
         s.push(10.0);
         assert_eq!(1, s.len());
@@ -3439,7 +3789,7 @@ mod stack_tests {
 
     #[test]
     fn test_full_capacity() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         for i in 0..STACK_CAPACITY {
             s.push(i as f64);
         }
@@ -3452,7 +3802,7 @@ mod stack_tests {
 
     #[test]
     fn test_interleaved_push_pop() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         s.push(1.0);
         s.push(2.0);
         assert_eq!(2.0, s.pop());
@@ -3466,7 +3816,7 @@ mod stack_tests {
 
     #[test]
     fn test_push_after_clear() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         s.push(1.0);
         s.push(2.0);
         s.clear();
@@ -3477,7 +3827,7 @@ mod stack_tests {
 
     #[test]
     fn test_negative_and_special_values() {
-        let mut s = Stack::new();
+        let mut s: Stack<f64> = Stack::new();
         s.push(-1.0);
         s.push(0.0);
         s.push(f64::INFINITY);
@@ -3497,20 +3847,20 @@ mod superinstruction_tests {
     use crate::bytecode::Opcode;
     use crate::test_common::TestProject;
 
-    fn build_vm(tp: &TestProject) -> Vm {
+    fn build_vm(tp: &TestProject) -> Vm<f64> {
         let sim = tp.build_sim().unwrap();
         let compiled = sim.compile().unwrap();
         Vm::new(compiled).unwrap()
     }
 
     /// Helper: collect all opcodes from the flow bytecode of the root module.
-    fn flow_opcodes(vm: &Vm) -> Vec<&Opcode> {
+    fn flow_opcodes(vm: &Vm<f64>) -> Vec<&Opcode> {
         let bc = &vm.sliced_sim.flow_modules[&vm.root].bytecode;
         bc.code.iter().collect()
     }
 
     /// Helper: collect all opcodes from the stock bytecode of the root module.
-    fn stock_opcodes(vm: &Vm) -> Vec<&Opcode> {
+    fn stock_opcodes(vm: &Vm<f64>) -> Vec<&Opcode> {
         let bc = &vm.sliced_sim.stock_modules[&vm.root].bytecode;
         bc.code.iter().collect()
     }
@@ -4090,7 +4440,7 @@ mod vm_reset_run_to_and_constants_tests {
             .stock("population", "100", &["births"], &["deaths"], None)
     }
 
-    fn build_compiled(tp: &TestProject) -> CompiledSimulation {
+    fn build_compiled(tp: &TestProject) -> CompiledSimulation<f64> {
         let sim = tp.build_sim().unwrap();
         sim.compile().unwrap()
     }
@@ -4346,6 +4696,170 @@ mod vm_reset_run_to_and_constants_tests {
                 expected_time
             );
         }
+    }
+
+    /// When save_step does not evenly divide (stop-start), the VM must
+    /// only report the save points that fall within the horizon.
+    /// start=0, stop=10, save_step=4 → saves at t=0,4,8 (3 steps).
+    /// t=12 > stop, so we must NOT report a 4th step.
+    #[test]
+    fn test_non_divisible_save_step_no_over_allocation() {
+        let tp = TestProject::new_with_specs(
+            "non_div_save",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: Some(datamodel::Dt::Dt(4.0)),
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+        )
+        .flow("inflow", "1", None)
+        .stock("s", "0", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+
+        // 3 saved steps: t=0, t=4, t=8
+        assert_eq!(
+            vm.n_chunks, 3,
+            "non-divisible save_step must truncate, not round"
+        );
+
+        let results = vm.into_results();
+        assert_eq!(results.step_count, 3);
+
+        // Verify saved times
+        let steps: Vec<&[f64]> = results.iter().collect();
+        assert_eq!(steps.len(), 3);
+        assert!((steps[0][TIME_OFF] - 0.0).abs() < 1e-10);
+        assert!((steps[1][TIME_OFF] - 4.0).abs() < 1e-10);
+        assert!((steps[2][TIME_OFF] - 8.0).abs() < 1e-10);
+    }
+
+    /// Same test but via the interpreter, to verify VM and interpreter agree.
+    #[test]
+    fn test_non_divisible_save_step_interpreter_agreement() {
+        let tp = TestProject::new_with_specs(
+            "non_div_interp",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: Some(datamodel::Dt::Dt(4.0)),
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+        )
+        .flow("inflow", "1", None)
+        .stock("s", "0", &["inflow"], &[], None);
+
+        let vm_results = tp.run_vm().expect("VM should succeed");
+        let interp_results = tp.run_interpreter().expect("Interpreter should succeed");
+
+        let vm_time = vm_results.get("time").expect("time in VM results");
+        let interp_time = interp_results.get("time").expect("time in interp results");
+
+        assert_eq!(
+            vm_time.len(),
+            interp_time.len(),
+            "VM and interpreter must agree on step count for non-divisible save_step"
+        );
+    }
+
+    /// When save_step < dt the VM can only save once per dt step, so
+    /// n_chunks must reflect the dt-based cadence, not the raw save_step.
+    #[test]
+    fn test_save_step_smaller_than_dt() {
+        let tp = TestProject::new_with_specs(
+            "save_lt_dt",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: Some(datamodel::Dt::Dt(0.5)),
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+        )
+        .flow("inflow", "1", None)
+        .stock("s", "0", &["inflow"], &[], None);
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+
+        // Effective save cadence is dt=1.0 (can't save more often than dt),
+        // so we expect 11 saved steps at t=0,1,2,...,10.
+        assert_eq!(vm.n_chunks, 11);
+
+        let results = vm.into_results();
+        assert_eq!(results.step_count, 11);
+
+        let steps: Vec<&[f64]> = results.iter().collect();
+        assert_eq!(steps.len(), 11);
+        for (i, step) in steps.iter().enumerate() {
+            assert!(
+                (step[TIME_OFF] - i as f64).abs() < 1e-10,
+                "step {i}: TIME={}, expected {}",
+                step[TIME_OFF],
+                i
+            );
+        }
+    }
+
+    /// A very small but positive dt must be accepted, not rejected by
+    /// an approximate-zero check.  The contract is dt > 0 (strict positivity).
+    #[test]
+    fn test_small_positive_dt_accepted() {
+        let tp = TestProject::new_with_specs(
+            "tiny_dt",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 1e-6,
+                dt: datamodel::Dt::Dt(1e-8),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+        )
+        .aux("x", "42", None);
+
+        // f64: should work fine
+        let sim = tp.build_sim().expect("build_sim should succeed");
+        let compiled = sim.compile().expect("compile should succeed");
+        assert!(Vm::new(compiled).is_ok(), "f64 Vm::new must accept dt=1e-8");
+
+        // f32: 1e-8 is representable (not subnormal) and must also be accepted
+        let f32_result = tp.run_vm_f32();
+        assert!(
+            f32_result.is_ok(),
+            "f32 Vm::new must accept dt=1e-8, got: {:?}",
+            f32_result.err()
+        );
+    }
+
+    /// dt=0 must still be rejected.
+    #[test]
+    fn test_zero_dt_rejected() {
+        let tp = TestProject::new_with_specs(
+            "zero_dt",
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(0.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+        )
+        .aux("x", "1", None);
+
+        let sim = tp.build_sim().expect("build_sim should succeed");
+        let compiled = sim.compile().expect("compile should succeed");
+        assert!(Vm::new(compiled).is_err(), "Vm::new must reject dt=0");
     }
 
     // ================================================================
@@ -4691,5 +5205,311 @@ mod vm_reset_run_to_and_constants_tests {
                 "step {step}: reference={a} vs reset={b}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod f32_vm_tests {
+    //! Tests that verify the f32 VM path compiles, runs, and produces
+    //! results consistent with the f64 path (within f32 precision).
+
+    use crate::test_common::TestProject;
+
+    /// f32 has ~7 decimal digits of precision, so we allow up to ~1e-4
+    /// relative error when comparing against f64 results for values near 100.
+    const F32_ABS_TOLERANCE: f64 = 1e-2;
+
+    /// Helper: run both f64 and f32 VM paths and compare results for a variable.
+    fn assert_f32_f64_close(tp: &TestProject, var_name: &str) {
+        let f64_results = tp.run_vm().expect("f64 VM should succeed");
+        let f32_results = tp.run_vm_f32().expect("f32 VM should succeed");
+
+        let f64_vals = f64_results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("{var_name} not found in f64 results"));
+        let f32_vals = f32_results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("{var_name} not found in f32 results"));
+
+        assert_eq!(
+            f64_vals.len(),
+            f32_vals.len(),
+            "step count mismatch for {var_name}"
+        );
+
+        for (i, (f64_v, f32_v)) in f64_vals.iter().zip(f32_vals.iter()).enumerate() {
+            // f32 has ~7 decimal digits of precision: use ~1e-5 relative tolerance
+            // for values well above 1, absolute tolerance for near-zero values.
+            let tol = if f64_v.abs() > 1.0 {
+                f64_v.abs() * 5e-5
+            } else {
+                F32_ABS_TOLERANCE
+            };
+            assert!(
+                (f64_v - f32_v).abs() < tol,
+                "{var_name} at step {i}: f64={f64_v}, f32={f32_v}, diff={}, tol={tol}",
+                (f64_v - f32_v).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn f32_simple_aux() {
+        let tp = TestProject::new("f32_simple")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "42", None);
+
+        assert_f32_f64_close(&tp, "x");
+    }
+
+    #[test]
+    fn f32_exponential_growth() {
+        let tp = TestProject::new("f32_growth")
+            .with_sim_time(0.0, 50.0, 1.0)
+            .aux("rate", "0.1", None)
+            .flow("inflow", "population * rate", None)
+            .stock("population", "100", &["inflow"], &[], None);
+
+        assert_f32_f64_close(&tp, "population");
+    }
+
+    #[test]
+    fn f32_sir_model() {
+        // A more complex model to exercise multiple stocks, flows, and builtins
+        let tp = TestProject::new("f32_sir")
+            .with_sim_time(0.0, 100.0, 0.25)
+            .aux("contact_rate", "6", None)
+            .aux("infectivity", "0.03", None)
+            .aux("recovery_rate", "0.2", None)
+            .aux("total_pop", "susceptible + infected + recovered", None)
+            .flow(
+                "new_infections",
+                "susceptible * infected * contact_rate * infectivity / total_pop",
+                None,
+            )
+            .flow("recoveries", "infected * recovery_rate", None)
+            .stock("susceptible", "990", &[], &["new_infections"], None)
+            .stock("infected", "10", &["new_infections"], &["recoveries"], None)
+            .stock("recovered", "0", &["recoveries"], &[], None);
+
+        assert_f32_f64_close(&tp, "susceptible");
+        assert_f32_f64_close(&tp, "infected");
+        assert_f32_f64_close(&tp, "recovered");
+    }
+
+    #[test]
+    fn f32_trig_functions() {
+        // Keep TIME/4 well away from π/2 ≈ 1.5708 where TAN diverges.
+        // stop=5.0 gives max arg TAN(5.0/4)=TAN(1.25), safely bounded.
+        let tp = TestProject::new("f32_trig")
+            .with_sim_time(0.0, 5.0, 0.1)
+            .aux("s", "SIN(TIME)", None)
+            .aux("c", "COS(TIME)", None)
+            .aux("t", "TAN(TIME/4)", None);
+
+        assert_f32_f64_close(&tp, "s");
+        assert_f32_f64_close(&tp, "c");
+        assert_f32_f64_close(&tp, "t");
+    }
+
+    #[test]
+    fn f32_math_functions() {
+        let tp = TestProject::new("f32_math")
+            .with_sim_time(1.0, 10.0, 1.0)
+            .aux("sq", "SQRT(TIME)", None)
+            .aux("lg", "LN(TIME)", None)
+            .aux("ex", "EXP(TIME/10)", None)
+            .aux("ab", "ABS(TIME - 5)", None);
+
+        assert_f32_f64_close(&tp, "sq");
+        assert_f32_f64_close(&tp, "lg");
+        assert_f32_f64_close(&tp, "ex");
+        assert_f32_f64_close(&tp, "ab");
+    }
+
+    #[test]
+    fn f32_if_then_else() {
+        let tp = TestProject::new("f32_if")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "IF TIME > 5 THEN 100 ELSE 0", None);
+
+        assert_f32_f64_close(&tp, "x");
+    }
+
+    #[test]
+    fn f32_step_pulse() {
+        let tp = TestProject::new("f32_step_pulse")
+            .with_sim_time(0.0, 20.0, 1.0)
+            .aux("s", "STEP(10, 5)", None)
+            .aux("p", "PULSE(10, 5, 3)", None);
+
+        assert_f32_f64_close(&tp, "s");
+        assert_f32_f64_close(&tp, "p");
+    }
+
+    #[test]
+    fn f32_min_max() {
+        let tp = TestProject::new("f32_minmax")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("mn", "MIN(TIME, 5)", None)
+            .aux("mx", "MAX(TIME, 5)", None);
+
+        assert_f32_f64_close(&tp, "mn");
+        assert_f32_f64_close(&tp, "mx");
+    }
+
+    #[test]
+    fn f32_inverse_trig_and_log10() {
+        // Exercises asin, acos, atan, log10 which are uncovered in float.rs
+        let tp = TestProject::new("f32_inv_trig")
+            .with_sim_time(1.0, 10.0, 1.0)
+            .aux("as_val", "ARCSIN(0.5)", None)
+            .aux("ac_val", "ARCCOS(0.5)", None)
+            .aux("at_val", "ARCTAN(1)", None)
+            .aux("lg10", "LOG10(TIME)", None);
+
+        assert_f32_f64_close(&tp, "as_val");
+        assert_f32_f64_close(&tp, "ac_val");
+        assert_f32_f64_close(&tp, "at_val");
+        assert_f32_f64_close(&tp, "lg10");
+    }
+
+    #[test]
+    fn f32_pi_and_inf() {
+        // Exercises the PI and INF builtins through f32
+        let tp = TestProject::new("f32_pi_inf")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("pi_val", "PI", None)
+            .aux("inf_val", "INF", None);
+
+        let f32_results = tp.run_vm_f32().expect("f32 VM should succeed");
+        let pi_vals = f32_results.get("pi_val").expect("pi_val not found");
+        assert!(
+            (pi_vals[0] - std::f64::consts::PI).abs() < 0.001,
+            "PI should be approximately 3.14159, got {}",
+            pi_vals[0]
+        );
+        let inf_vals = f32_results.get("inf_val").expect("inf_val not found");
+        assert!(inf_vals[0].is_infinite(), "INF should be infinity");
+    }
+
+    #[test]
+    fn f32_sign_and_int() {
+        // Exercises Sign (neg_one), Int (floor/trunc), through f32
+        let tp = TestProject::new("f32_sign_int")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("pos_sign", "SIGN(TIME + 1)", None)
+            .aux("neg_sign", "SIGN(-5)", None)
+            .aux("zero_sign", "SIGN(0)", None)
+            .aux("int_val", "INT(TIME + 0.7)", None);
+
+        assert_f32_f64_close(&tp, "pos_sign");
+        assert_f32_f64_close(&tp, "neg_sign");
+        assert_f32_f64_close(&tp, "zero_sign");
+        assert_f32_f64_close(&tp, "int_val");
+    }
+
+    #[test]
+    fn f32_safediv() {
+        // SafeDiv with non-zero denominator, zero denominator, and default value
+        let tp = TestProject::new("f32_safediv")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("normal_div", "SAFEDIV(10, 2, 99)", None)
+            .aux("zero_div", "SAFEDIV(10, 0, 99)", None)
+            .aux("no_default", "SAFEDIV(10, 0)", None);
+
+        assert_f32_f64_close(&tp, "normal_div");
+        assert_f32_f64_close(&tp, "zero_div");
+        assert_f32_f64_close(&tp, "no_default");
+    }
+
+    #[test]
+    fn f32_ramp() {
+        let tp = TestProject::new("f32_ramp")
+            .with_sim_time(0.0, 20.0, 1.0)
+            .aux("r", "RAMP(2, 5, 15)", None);
+
+        assert_f32_f64_close(&tp, "r");
+    }
+
+    #[test]
+    fn f32_modulo() {
+        // Exercises the Mod (rem_euclid) operation through f32
+        let tp = TestProject::new("f32_mod")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("m", "TIME mod 3", None);
+
+        assert_f32_f64_close(&tp, "m");
+    }
+
+    #[test]
+    fn f32_power() {
+        // Exercises powf through f32
+        let tp = TestProject::new("f32_pow")
+            .with_sim_time(1.0, 5.0, 1.0)
+            .aux("p", "TIME ^ 2.5", None);
+
+        assert_f32_f64_close(&tp, "p");
+    }
+
+    #[test]
+    fn f32_boolean_ops() {
+        // Exercises AND, OR, NOT, and equality comparisons through f32
+        let tp = TestProject::new("f32_bool")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux(
+                "and_val",
+                "IF (TIME > 3) AND (TIME < 7) THEN 1 ELSE 0",
+                None,
+            )
+            .aux("or_val", "IF (TIME < 2) OR (TIME > 8) THEN 1 ELSE 0", None)
+            .aux("not_val", "IF NOT(TIME > 5) THEN 1 ELSE 0", None)
+            .aux("eq_val", "IF TIME = 5 THEN 1 ELSE 0", None);
+
+        assert_f32_f64_close(&tp, "and_val");
+        assert_f32_f64_close(&tp, "or_val");
+        assert_f32_f64_close(&tp, "not_val");
+        assert_f32_f64_close(&tp, "eq_val");
+    }
+
+    /// Regression: f32 path under-allocates n_chunks when (stop-start)/save_step
+    /// yields a float just below an integer due to f32 precision.
+    /// For example, 1.0f32 / (1.0f32/7.0f32) + 1.0f32 ≈ 7.9999995 which truncates
+    /// to 7 instead of 8.  The fix is to compute n_chunks in f64 regardless of F.
+    #[test]
+    fn f32_n_chunks_no_truncation_loss() {
+        // Verify the underlying f32 arithmetic problem exists:
+        // 1/7 in f32 then 1.0/(1/7) should be 7.0 but f32 gives ~6.999999
+        let seventh_f32: f32 = 1.0 / 7.0;
+        let ratio = 1.0_f32 / seventh_f32;
+        assert!(
+            ratio < 7.0_f32,
+            "precondition: f32 1.0/(1.0/7.0) should be slightly below 7.0, \
+             got {ratio:.10} -- if this fails, the test premise no longer holds"
+        );
+        // Naive truncation drops the +1 step
+        let n_chunks_naive = (ratio + 1.0_f32) as usize;
+        assert_eq!(
+            n_chunks_naive, 7,
+            "precondition: naive truncation should give 7, not 8"
+        );
+
+        // Now test through the actual VM: start=0, stop=1, dt=1/7 should
+        // produce 8 saved steps in both f64 and f32.
+        let tp = TestProject::new("f32_trunc")
+            .with_sim_time(0.0, 1.0, 1.0 / 7.0)
+            .aux("x", "TIME", None);
+
+        let f64_results = tp.run_vm().expect("f64 VM should succeed");
+        let f64_vals = f64_results.get("x").expect("x in f64 results");
+        assert_eq!(f64_vals.len(), 8, "f64 should have 8 steps");
+
+        let f32_results = tp.run_vm_f32().expect("f32 VM should succeed");
+        let f32_vals = f32_results.get("x").expect("x in f32 results");
+        assert_eq!(
+            f32_vals.len(),
+            8,
+            "f32 must not lose the final timestep due to float truncation"
+        );
     }
 }

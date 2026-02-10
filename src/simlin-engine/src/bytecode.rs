@@ -8,6 +8,7 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use crate::common::{Canonical, Ident};
+use crate::float::SimFloat;
 use ordered_float::OrderedFloat;
 
 // ============================================================================
@@ -1015,10 +1016,10 @@ impl StaticArrayView {
 /// Contains tables that opcodes reference by index.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Default)]
-pub struct ByteCodeContext {
+pub struct ByteCodeContext<F: SimFloat> {
     // === Existing fields ===
     /// Graphical function lookup tables
-    pub(crate) graphical_functions: Vec<Vec<(f64, f64)>>,
+    pub(crate) graphical_functions: Vec<Vec<(F, F)>>,
     /// Module declarations for nested modules
     pub(crate) modules: Vec<ModuleDeclaration>,
     /// Legacy array definitions (deprecated, use dimensions instead)
@@ -1049,7 +1050,7 @@ pub struct ByteCodeContext {
 }
 
 #[allow(dead_code)] // Methods used by array bytecode not yet emitted
-impl ByteCodeContext {
+impl<F: SimFloat> ByteCodeContext<F> {
     /// Intern a name (dimension or element name) and return its NameId.
     /// If the name already exists, returns the existing ID.
     pub fn intern_name(&mut self, name: &str) -> NameId {
@@ -1131,12 +1132,12 @@ impl ByteCodeContext {
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Default)]
-pub struct ByteCode {
-    pub(crate) literals: Vec<f64>,
+pub struct ByteCode<F: SimFloat> {
+    pub(crate) literals: Vec<F>,
     pub(crate) code: Vec<Opcode>,
 }
 
-impl ByteCode {
+impl<F: SimFloat> ByteCode<F> {
     /// Statically compute the maximum arithmetic stack depth reached by this bytecode.
     ///
     /// Walks the opcode stream applying each instruction's stack effect. Because
@@ -1164,14 +1165,17 @@ impl ByteCode {
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Default)]
-pub struct ByteCodeBuilder {
-    bytecode: ByteCode,
-    interned_literals: HashMap<OrderedFloat<f64>, LiteralId>,
+pub struct ByteCodeBuilder<F: SimFloat> {
+    bytecode: ByteCode<F>,
+    interned_literals: HashMap<OrderedFloat<F>, LiteralId>,
 }
 
-impl ByteCodeBuilder {
-    pub(crate) fn intern_literal(&mut self, lit: f64) -> LiteralId {
-        let key: OrderedFloat<f64> = lit.into();
+impl<F: SimFloat> ByteCodeBuilder<F>
+where
+    OrderedFloat<F>: Eq + std::hash::Hash,
+{
+    pub(crate) fn intern_literal(&mut self, lit: F) -> LiteralId {
+        let key = lit.to_ordered();
         if self.interned_literals.contains_key(&key) {
             return self.interned_literals[&key];
         }
@@ -1184,7 +1188,7 @@ impl ByteCodeBuilder {
     /// Allocate a new literal slot without deduplication.
     /// Used for named constants so each variable gets its own slot,
     /// preventing shared-literal corruption when overriding via set_value.
-    pub(crate) fn push_named_literal(&mut self, lit: f64) -> LiteralId {
+    pub(crate) fn push_named_literal(&mut self, lit: F) -> LiteralId {
         self.bytecode.literals.push(lit);
         (self.bytecode.literals.len() - 1) as u16
     }
@@ -1198,7 +1202,7 @@ impl ByteCodeBuilder {
         self.bytecode.code.len()
     }
 
-    pub(crate) fn finish(self) -> ByteCode {
+    pub(crate) fn finish(self) -> ByteCode<F> {
         let mut bc = self.bytecode;
         bc.peephole_optimize();
 
@@ -1215,7 +1219,7 @@ impl ByteCodeBuilder {
     }
 }
 
-impl ByteCode {
+impl<F: SimFloat> ByteCode<F> {
     /// Peephole optimization pass: fuse common opcode sequences into
     /// superinstructions to reduce dispatch overhead.
     ///
@@ -1319,7 +1323,7 @@ mod tests {
 
     #[test]
     fn test_memoizing_interning() {
-        let mut bytecode = ByteCodeBuilder::default();
+        let mut bytecode = ByteCodeBuilder::<f64>::default();
         let a1 = bytecode.intern_literal(1.0);
         let b1 = bytecode.intern_literal(1.01);
         let b2 = bytecode.intern_literal(1.01);
@@ -1339,7 +1343,7 @@ mod tests {
 
     #[test]
     fn test_push_named_literal_no_dedup() {
-        let mut builder = ByteCodeBuilder::default();
+        let mut builder = ByteCodeBuilder::<f64>::default();
         let a = builder.push_named_literal(0.1);
         let b = builder.push_named_literal(0.1);
         let c = builder.push_named_literal(0.1);
@@ -1513,14 +1517,14 @@ mod tests {
 
     #[test]
     fn test_max_stack_depth_empty() {
-        let bc = ByteCode::default();
+        let bc = ByteCode::<f64>::default();
         assert_eq!(bc.max_stack_depth(), 0);
     }
 
     #[test]
     fn test_max_stack_depth_simple_assignment() {
         // x = 42.0: LoadConstant(42.0), AssignCurr(x)
-        let bc = ByteCode {
+        let bc = ByteCode::<f64> {
             literals: vec![42.0],
             code: vec![
                 Opcode::LoadConstant { id: 0 },
@@ -1533,7 +1537,7 @@ mod tests {
     #[test]
     fn test_max_stack_depth_binary_expression() {
         // x = a + b: LoadVar(a), LoadVar(b), Op2(Add), AssignCurr(x)
-        let bc = ByteCode {
+        let bc = ByteCode::<f64> {
             literals: vec![],
             code: vec![
                 Opcode::LoadVar { off: 0 },
@@ -1550,7 +1554,7 @@ mod tests {
         // x = (a + b) * (c + d):
         // LoadVar(a), LoadVar(b), Op2(Add), LoadVar(c), LoadVar(d), Op2(Add), Op2(Mul), AssignCurr
         // Peak depth is 3: after loading c while (a+b) result is still on stack
-        let bc = ByteCode {
+        let bc = ByteCode::<f64> {
             literals: vec![],
             code: vec![
                 Opcode::LoadVar { off: 0 },    // depth: 1
@@ -1569,7 +1573,7 @@ mod tests {
     #[test]
     fn test_max_stack_depth_builtin_function() {
         // x = ABS(a): LoadVar(a), LoadConstant(0), LoadConstant(0), Apply(Abs), AssignCurr
-        let bc = ByteCode {
+        let bc = ByteCode::<f64> {
             literals: vec![0.0],
             code: vec![
                 Opcode::LoadVar { off: 0 },
@@ -1587,7 +1591,7 @@ mod tests {
     #[test]
     fn test_max_stack_depth_if_expression() {
         // IF(cond, a, b): LoadVar(cond), SetCond, LoadVar(a), LoadVar(b), If, AssignCurr
-        let bc = ByteCode {
+        let bc = ByteCode::<f64> {
             literals: vec![],
             code: vec![
                 Opcode::LoadVar { off: 0 },    // depth: 1
@@ -1604,7 +1608,7 @@ mod tests {
     #[test]
     fn test_max_stack_depth_superinstruction_const_assign() {
         // AssignConstCurr doesn't use the stack at all
-        let bc = ByteCode {
+        let bc = ByteCode::<f64> {
             literals: vec![42.0],
             code: vec![Opcode::AssignConstCurr {
                 off: 0,
@@ -1618,7 +1622,7 @@ mod tests {
     fn test_max_stack_depth_multiple_assignments() {
         // x = a; y = b + c
         // Stack resets to 0 after each assignment, so peak is max of individual expressions
-        let bc = ByteCode {
+        let bc = ByteCode::<f64> {
             literals: vec![],
             code: vec![
                 Opcode::LoadVar { off: 0 },
@@ -1636,7 +1640,7 @@ mod tests {
     fn test_max_stack_depth_with_iteration() {
         // Iteration body: LoadIterElement, StoreIterElement -- each iteration
         // pushes 1 and pops 1, so peak depth within loop is 1
-        let bc = ByteCode {
+        let bc = ByteCode::<f64> {
             literals: vec![],
             code: vec![
                 Opcode::BeginIter {
@@ -1658,7 +1662,7 @@ mod tests {
         // stack, writing to a separate subscript_index SmallVec), then LoadSubscript
         // pushes the result. The indices must be loaded before being popped.
         // LoadVar(i), PushSubscriptIndex, LoadVar(j), PushSubscriptIndex, LoadSubscript, Assign
-        let bc = ByteCode {
+        let bc = ByteCode::<f64> {
             literals: vec![],
             code: vec![
                 Opcode::LoadVar { off: 0 },               // depth: 1 (load index i)
@@ -1675,7 +1679,7 @@ mod tests {
     #[test]
     fn test_finish_validates_stack_depth() {
         // Build bytecode that fits within STACK_CAPACITY -- should succeed
-        let mut builder = ByteCodeBuilder::default();
+        let mut builder = ByteCodeBuilder::<f64>::default();
         let id = builder.intern_literal(1.0);
         builder.push_opcode(Opcode::LoadConstant { id });
         builder.push_opcode(Opcode::AssignCurr { off: 0 });
@@ -1687,7 +1691,7 @@ mod tests {
     fn test_max_stack_depth_catches_underflow() {
         // An Op2 at the start with nothing on the stack should panic,
         // catching bugs in stack_effect metadata
-        let bc = ByteCode {
+        let bc = ByteCode::<f64> {
             literals: vec![],
             code: vec![Opcode::Op2 { op: Op2::Add }],
         };
@@ -1698,7 +1702,7 @@ mod tests {
     #[should_panic(expected = "jump at pc 0 targets")]
     fn test_peephole_panics_on_out_of_bounds_jump_target() {
         // A jump that targets beyond the code length indicates a compiler bug
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             literals: vec![],
             code: vec![Opcode::NextIterOrJump { jump_back: 10 }],
         };
@@ -2090,7 +2094,7 @@ mod tests {
 
     #[test]
     fn test_context_intern_name() {
-        let mut ctx = ByteCodeContext::default();
+        let mut ctx = ByteCodeContext::<f64>::default();
 
         let id1 = ctx.intern_name("DimA");
         let id2 = ctx.intern_name("DimB");
@@ -2106,7 +2110,7 @@ mod tests {
 
     #[test]
     fn test_context_add_dimension() {
-        let mut ctx = ByteCodeContext::default();
+        let mut ctx = ByteCodeContext::<f64>::default();
 
         let name_id = ctx.intern_name("DimA");
         let dim = DimensionInfo::indexed(name_id, 5);
@@ -2119,7 +2123,7 @@ mod tests {
 
     #[test]
     fn test_context_find_dimension_by_name() {
-        let mut ctx = ByteCodeContext::default();
+        let mut ctx = ByteCodeContext::<f64>::default();
 
         let name_a = ctx.intern_name("DimA");
         let name_b = ctx.intern_name("DimB");
@@ -2134,7 +2138,7 @@ mod tests {
 
     #[test]
     fn test_context_add_static_view() {
-        let mut ctx = ByteCodeContext::default();
+        let mut ctx = ByteCodeContext::<f64>::default();
 
         let view = StaticArrayView {
             base_off: 100,
@@ -2177,7 +2181,7 @@ mod tests {
 
     #[test]
     fn test_context_set_temp_info() {
-        let mut ctx = ByteCodeContext::default();
+        let mut ctx = ByteCodeContext::<f64>::default();
 
         ctx.set_temp_info(vec![0, 10, 25], 50);
 
@@ -2187,7 +2191,7 @@ mod tests {
 
     #[test]
     fn test_context_subdim_relations() {
-        let mut ctx = ByteCodeContext::default();
+        let mut ctx = ByteCodeContext::<f64>::default();
 
         let rel = SubdimensionRelation::contiguous(0, 1, 2, 3);
         let rel_id = ctx.add_subdim_relation(rel);
@@ -2403,7 +2407,7 @@ mod tests {
 
     #[test]
     fn test_peephole_empty_bytecode() {
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![],
             literals: vec![],
         };
@@ -2413,7 +2417,7 @@ mod tests {
 
     #[test]
     fn test_peephole_single_instruction() {
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![Opcode::Ret],
             literals: vec![],
         };
@@ -2424,7 +2428,7 @@ mod tests {
 
     #[test]
     fn test_peephole_no_fusible_patterns() {
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![
                 Opcode::LoadVar { off: 0 },
                 Opcode::LoadVar { off: 1 },
@@ -2443,7 +2447,7 @@ mod tests {
 
     #[test]
     fn test_peephole_load_constant_assign_curr_fusion() {
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![
                 Opcode::LoadConstant { id: 0 },
                 Opcode::AssignCurr { off: 5 },
@@ -2464,7 +2468,7 @@ mod tests {
 
     #[test]
     fn test_peephole_op2_assign_curr_fusion() {
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![
                 Opcode::LoadVar { off: 0 },
                 Opcode::LoadVar { off: 1 },
@@ -2490,7 +2494,7 @@ mod tests {
 
     #[test]
     fn test_peephole_op2_assign_next_fusion() {
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![
                 Opcode::LoadVar { off: 0 },
                 Opcode::LoadVar { off: 1 },
@@ -2530,7 +2534,7 @@ mod tests {
             Op2::Or,
         ];
         for op in ops {
-            let mut bc = ByteCode {
+            let mut bc = ByteCode::<f64> {
                 code: vec![Opcode::Op2 { op }, Opcode::AssignCurr { off: 10 }],
                 literals: vec![],
             };
@@ -2543,7 +2547,7 @@ mod tests {
     #[test]
     fn test_peephole_multiple_fusions() {
         // Two independent fusion opportunities in sequence
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![
                 Opcode::LoadConstant { id: 0 },
                 Opcode::AssignCurr { off: 0 },
@@ -2568,7 +2572,7 @@ mod tests {
 
     #[test]
     fn test_peephole_mixed_fusible_and_nonfusible() {
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![
                 Opcode::LoadVar { off: 0 },
                 Opcode::Not {},
@@ -2619,7 +2623,7 @@ mod tests {
         //
         // A more realistic scenario: Op2 followed by AssignCurr where the
         // AssignCurr is a jump target.
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![
                 Opcode::Op2 { op: Op2::Add },             // 0
                 Opcode::AssignCurr { off: 0 },            // 1 -- jump target
@@ -2648,7 +2652,7 @@ mod tests {
         //   2: LoadVar { off: 5 }            <- jump target
         //   3: NextIterOrJump { jump_back: -1 }  (target = 3-1 = 2)
         //   4: Ret
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![
                 Opcode::LoadConstant { id: 0 },
                 Opcode::AssignCurr { off: 0 },
@@ -2696,7 +2700,7 @@ mod tests {
         //   2: AssignCurr { off: 2 }
         //   3: NextIterOrJump { jump_back: -2 }  (loop body unchanged)
         //   4: Ret
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![
                 Opcode::LoadConstant { id: 0 },           // 0
                 Opcode::AssignCurr { off: 0 },            // 1
@@ -2724,7 +2728,7 @@ mod tests {
 
     #[test]
     fn test_peephole_fusion_inside_loop_body() {
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![
                 Opcode::LoadVar { off: 0 },               // 0 (jump target)
                 Opcode::Op2 { op: Op2::Add },             // 1 \
@@ -2763,7 +2767,7 @@ mod tests {
     #[test]
     fn test_peephole_jump_offset_recalculation_next_broadcast() {
         // Same as above but with NextBroadcastOrJump
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![
                 Opcode::LoadConstant { id: 0 },                // 0
                 Opcode::AssignCurr { off: 0 },                 // 1
@@ -2795,7 +2799,7 @@ mod tests {
     #[test]
     fn test_peephole_no_fusion_when_patterns_dont_match() {
         // Op2 followed by something other than AssignCurr/AssignNext
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![Opcode::Op2 { op: Op2::Add }, Opcode::Not {}, Opcode::Ret],
             literals: vec![],
         };
@@ -2809,7 +2813,7 @@ mod tests {
     #[test]
     fn test_peephole_load_constant_not_followed_by_assign_curr() {
         // LoadConstant not followed by AssignCurr should not fuse
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![Opcode::LoadConstant { id: 0 }, Opcode::Not {}, Opcode::Ret],
             literals: vec![1.0],
         };
@@ -2822,7 +2826,7 @@ mod tests {
     #[test]
     fn test_peephole_via_builder() {
         // Verify that ByteCodeBuilder::finish() runs peephole_optimize
-        let mut builder = ByteCodeBuilder::default();
+        let mut builder = ByteCodeBuilder::<f64>::default();
         let lit_id = builder.intern_literal(3.125);
         builder.push_opcode(Opcode::LoadConstant { id: lit_id });
         builder.push_opcode(Opcode::AssignCurr { off: 7 });
@@ -2843,7 +2847,7 @@ mod tests {
     #[test]
     fn test_peephole_consecutive_fusions_chain() {
         // Three consecutive fusible pairs
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![
                 Opcode::LoadConstant { id: 0 },
                 Opcode::AssignCurr { off: 0 },
@@ -2883,7 +2887,7 @@ mod tests {
     #[test]
     fn test_peephole_last_instruction_not_fused_alone() {
         // If the fusible first instruction is the very last one, no fusion happens
-        let mut bc = ByteCode {
+        let mut bc = ByteCode::<f64> {
             code: vec![Opcode::Ret, Opcode::LoadConstant { id: 0 }],
             literals: vec![1.0],
         };
@@ -2900,7 +2904,7 @@ mod tests {
 
     #[test]
     fn test_dim_list_add_and_get() {
-        let mut ctx = ByteCodeContext::default();
+        let mut ctx = ByteCodeContext::<f64>::default();
 
         let id = ctx.add_dim_list(2, [10, 20, 0, 0]);
         assert_eq!(id, 0);
@@ -2913,7 +2917,7 @@ mod tests {
 
     #[test]
     fn test_dim_list_multiple_entries() {
-        let mut ctx = ByteCodeContext::default();
+        let mut ctx = ByteCodeContext::<f64>::default();
 
         let id0 = ctx.add_dim_list(1, [5, 0, 0, 0]);
         let id1 = ctx.add_dim_list(3, [1, 2, 3, 0]);
@@ -2938,7 +2942,7 @@ mod tests {
 
     #[test]
     fn test_dim_list_zero_dims() {
-        let mut ctx = ByteCodeContext::default();
+        let mut ctx = ByteCodeContext::<f64>::default();
 
         let id = ctx.add_dim_list(0, [0, 0, 0, 0]);
         let (n_dims, _ids) = ctx.get_dim_list(id);
@@ -2947,7 +2951,7 @@ mod tests {
 
     #[test]
     fn test_dim_list_incremental_ids() {
-        let mut ctx = ByteCodeContext::default();
+        let mut ctx = ByteCodeContext::<f64>::default();
 
         // Add several entries and verify IDs are sequential
         for i in 0..10u16 {
@@ -2968,7 +2972,7 @@ mod tests {
 /// data-buffer offsets it writes to (from AssignCurr nodes).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-pub struct CompiledInitial {
+pub struct CompiledInitial<F: SimFloat> {
     // Used for diagnostics in debug_print_bytecode and set_value error messages
     #[allow(dead_code)]
     pub(crate) ident: Ident<Canonical>,
@@ -2976,16 +2980,16 @@ pub struct CompiledInitial {
     /// initials bytecode.  Used in tests and debug printing.
     #[allow(dead_code)]
     pub(crate) offsets: Vec<usize>,
-    pub(crate) bytecode: ByteCode,
+    pub(crate) bytecode: ByteCode<F>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-pub struct CompiledModule {
+pub struct CompiledModule<F: SimFloat> {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) n_slots: usize,
-    pub(crate) context: Arc<ByteCodeContext>,
-    pub(crate) compiled_initials: Arc<Vec<CompiledInitial>>,
-    pub(crate) compiled_flows: Arc<ByteCode>,
-    pub(crate) compiled_stocks: Arc<ByteCode>,
+    pub(crate) context: Arc<ByteCodeContext<F>>,
+    pub(crate) compiled_initials: Arc<Vec<CompiledInitial<F>>>,
+    pub(crate) compiled_flows: Arc<ByteCode<F>>,
+    pub(crate) compiled_stocks: Arc<ByteCode<F>>,
 }

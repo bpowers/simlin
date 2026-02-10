@@ -12,9 +12,11 @@ use crate::common::UnitError;
 use crate::common::{Canonical, Ident};
 use crate::compiler::Module;
 use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
-use crate::interpreter::Simulation;
+use crate::float::SimFloat;
+use crate::interpreter::{Simulation, compile_project};
 use crate::project::Project as CompiledProject;
 use crate::vm::Vm;
+use ordered_float::OrderedFloat;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -71,6 +73,9 @@ impl TestProject {
         self.sim_specs.start = start;
         self.sim_specs.stop = stop;
         self.sim_specs.dt = datamodel::Dt::Dt(dt);
+        // Default save_step to dt so callers don't have to set it separately.
+        // If save_step differs from dt, use with_save_step() after this.
+        self.sim_specs.save_step = None;
         self
     }
 
@@ -643,7 +648,7 @@ impl TestProject {
     /// Build a Module for testing lowered expressions.
     /// Returns the compiled Module for the main model, allowing inspection of
     /// the lowered expressions via get_flow_exprs() and get_initial_exprs().
-    pub fn build_module(&self) -> Result<Module, String> {
+    pub fn build_module(&self) -> Result<Module<f64>, String> {
         let datamodel = self.build_datamodel();
         let compiled = Arc::new(CompiledProject::from(datamodel));
 
@@ -756,6 +761,59 @@ impl TestProject {
                 "VM value mismatch for {var_name} at index {i}: expected {expected_val}, got {actual_val}"
             );
         }
+    }
+
+    /// Run the VM in a generic float type and get results as f64.
+    ///
+    /// Builds `Module<F>` from scratch, compiles to `CompiledSimulation<F>`,
+    /// and runs via `Vm<F>`.  Results are widened to f64 for easy comparison.
+    pub fn run_vm_generic<F: SimFloat>(&self) -> Result<HashMap<String, Vec<f64>>, String>
+    where
+        OrderedFloat<F>: Eq + std::hash::Hash,
+    {
+        let datamodel = self.build_datamodel();
+        let compiled = Arc::new(CompiledProject::from(datamodel));
+
+        // Check for compilation errors first
+        let mut has_errors = false;
+        if !compiled.errors.is_empty() {
+            has_errors = true;
+        }
+        for model in compiled.models.values() {
+            if model.errors.is_some() || !model.get_variable_errors().is_empty() {
+                has_errors = true;
+                break;
+            }
+        }
+        if has_errors {
+            return Err("Project has compilation errors".to_string());
+        }
+
+        let compiled_sim: crate::vm::CompiledSimulation<F> = compile_project(&compiled, "main")
+            .map_err(|e| format!("compile_project failed: {e:?}"))?;
+
+        let mut vm =
+            crate::vm::Vm::new(compiled_sim).map_err(|e| format!("VM creation failed: {e:?}"))?;
+        vm.run_to_end()
+            .map_err(|e| format!("VM run failed: {e:?}"))?;
+        let results = vm.into_results();
+
+        let mut output: HashMap<String, Vec<f64>> = HashMap::new();
+        for (name, &offset) in &results.offsets {
+            let mut values = Vec::new();
+            for step in 0..results.step_count {
+                let idx = step * results.step_size + offset;
+                values.push(results.data[idx].to_f64());
+            }
+            output.insert(name.to_string(), values);
+        }
+
+        Ok(output)
+    }
+
+    /// Run the VM in f32 mode and get results widened to f64.
+    pub fn run_vm_f32(&self) -> Result<HashMap<String, Vec<f64>>, String> {
+        self.run_vm_generic::<f32>()
     }
 }
 
