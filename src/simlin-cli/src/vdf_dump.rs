@@ -41,11 +41,11 @@ pub fn dump_vdf(path: &str) -> Result<(), Box<dyn Error>> {
     print_layout(&vdf);
     print_sections(&vdf);
     print_names(&vdf);
-    print_extended_names(&vdf);
     print_slots(&vdf);
     print_records(&vdf);
     print_offset_table(&vdf);
     print_data_blocks(&vdf);
+    print_gaps(&vdf, file_size);
     print_summary(&vdf, file_size);
 
     Ok(())
@@ -222,56 +222,29 @@ fn print_names(vdf: &VdfFile) {
         .name_section_idx
         .map(|i| format!("section {}", i))
         .unwrap_or_else(|| "unknown section".to_string());
+    let overflow_count = vdf.names.len() - vdf.section_name_count;
     println!(
-        "=== Name Table ({} names, {}) ===",
+        "=== Name Table ({} names: {} in section, {} overflow, {}) ===",
         vdf.names.len(),
+        vdf.section_name_count,
+        overflow_count,
         sec_label
     );
 
     for (i, name) in vdf.names.iter().enumerate() {
         let class = classify_name(name);
+        let overflow_marker = if i == vdf.section_name_count {
+            "  --- overflow past section boundary ---"
+        } else {
+            ""
+        };
+        if !overflow_marker.is_empty() {
+            println!("{}", overflow_marker);
+        }
         if class.is_empty() {
             println!("  {:>3}  \"{}\"", i, name);
         } else {
             println!("  {:>3}  \"{}\"  ({})", i, name, class);
-        }
-    }
-    println!();
-}
-
-/// Show extended names parsed from the post-name-table overflow region.
-fn print_extended_names(vdf: &VdfFile) {
-    if vdf.extended_names.is_empty() {
-        return;
-    }
-
-    let Some(ns_idx) = vdf.name_section_idx else {
-        return;
-    };
-    let ns = &vdf.sections[ns_idx];
-    let ns_end = ns.data_end();
-
-    let next_boundary = vdf
-        .sections
-        .get(ns_idx + 1)
-        .map(|s| s.file_offset)
-        .unwrap_or(vdf.offset_table_start);
-
-    let gap = next_boundary - ns_end;
-
-    println!(
-        "=== Post-Name-Table Region ({} bytes @ 0x{:08x}..0x{:08x}) ===",
-        gap, ns_end, next_boundary
-    );
-
-    println!("  Extended names ({}):", vdf.extended_names.len());
-    for (i, name) in vdf.extended_names.iter().enumerate() {
-        let class = classify_name(name);
-        let global_idx = vdf.names.len() + i;
-        if class.is_empty() {
-            println!("    {:>3}  \"{}\"", global_idx, name);
-        } else {
-            println!("    {:>3}  \"{}\"  ({})", global_idx, name, class);
         }
     }
     println!();
@@ -466,6 +439,151 @@ fn print_data_blocks(vdf: &VdfFile) {
     println!();
 }
 
+/// Build an ordered list of (start_offset, end_offset, label) for every known
+/// file structure, then check for non-zero data in any gap between adjacent
+/// structures. This surfaces overflow data that the parser doesn't yet account
+/// for (e.g. records extending past their detected boundary, section data
+/// overflowing its declared size, etc.).
+fn print_gaps(vdf: &VdfFile, file_size: usize) {
+    let mut regions: Vec<(usize, usize, String)> = Vec::new();
+
+    // File header
+    regions.push((0, FILE_HEADER_SIZE, "file header".to_string()));
+
+    // Each section: header + declared data
+    for (i, sec) in vdf.sections.iter().enumerate() {
+        let role = SECTION_ROLES.get(i).copied().unwrap_or("unknown");
+        regions.push((
+            sec.file_offset,
+            sec.data_end(),
+            format!("section {} ({})", i, role),
+        ));
+    }
+
+    // Records
+    if !vdf.records.is_empty() {
+        let rec_start = vdf.records.first().unwrap().file_offset;
+        let rec_end = vdf.records.last().unwrap().file_offset + RECORD_SIZE;
+        regions.push((rec_start, rec_end, "records".to_string()));
+    }
+
+    // Slot table
+    if vdf.slot_table_offset > 0 && !vdf.slot_table.is_empty() {
+        let slot_end = vdf.slot_table_offset + vdf.slot_table.len() * 4;
+        regions.push((vdf.slot_table_offset, slot_end, "slot table".to_string()));
+    }
+
+    // Offset table
+    if vdf.offset_table_count > 0 {
+        let ot_end = vdf.offset_table_start + vdf.offset_table_count * 4;
+        regions.push((vdf.offset_table_start, ot_end, "offset table".to_string()));
+    }
+
+    // Data blocks (from first to end of last)
+    if vdf.first_data_block > 0 {
+        let blocks = simlin_engine::vdf::enumerate_data_blocks(
+            &vdf.data,
+            vdf.first_data_block,
+            vdf.bitmap_size,
+            vdf.time_point_count,
+        );
+        if let Some(last) = blocks.last() {
+            let blocks_end = last.0 + last.2;
+            regions.push((vdf.first_data_block, blocks_end, "data blocks".to_string()));
+        }
+    }
+
+    regions.sort_by_key(|&(start, end, _)| (start, end));
+
+    // Merge overlapping regions (some structures overlap, like the name table
+    // section boundary vs the overflow parsed as part of names)
+    let mut merged: Vec<(usize, usize, String)> = Vec::new();
+    for (start, end, label) in regions {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            // Overlapping or adjacent -- extend the merged region
+            if end > last.1 {
+                last.1 = end;
+                last.2 = format!("{} + {}", last.2, label);
+            }
+            continue;
+        }
+        merged.push((start, end, label));
+    }
+
+    // Check gaps between adjacent merged regions
+    let mut gap_count = 0;
+    let mut total_gap_bytes = 0;
+
+    for pair in merged.windows(2) {
+        let gap_start = pair[0].1;
+        let gap_end = pair[1].0;
+        if gap_start >= gap_end {
+            continue;
+        }
+
+        let gap_data = &vdf.data[gap_start..gap_end];
+        let non_zero_count = gap_data.iter().filter(|&&b| b != 0).count();
+        total_gap_bytes += gap_end - gap_start;
+
+        if non_zero_count > 0 {
+            if gap_count == 0 {
+                println!("=== Non-Zero Gaps Between Structures ===");
+            }
+            gap_count += 1;
+
+            println!(
+                "\n  Gap: 0x{:08x}..0x{:08x} ({} bytes, {} non-zero)",
+                gap_start,
+                gap_end,
+                gap_end - gap_start,
+                non_zero_count,
+            );
+            println!("  Between: \"{}\" and \"{}\"", pair[0].2, pair[1].2);
+            hexdump(gap_data, gap_start, MAX_HEXDUMP);
+        }
+    }
+
+    // Also check after the last known structure to end of file
+    if let Some(last) = merged.last()
+        && last.1 < file_size
+    {
+        let trailing = &vdf.data[last.1..file_size];
+        let non_zero_count = trailing.iter().filter(|&&b| b != 0).count();
+        total_gap_bytes += file_size - last.1;
+        if non_zero_count > 0 {
+            if gap_count == 0 {
+                println!("=== Non-Zero Gaps Between Structures ===");
+            }
+            gap_count += 1;
+            println!(
+                "\n  Trailing data: 0x{:08x}..0x{:08x} ({} bytes, {} non-zero)",
+                last.1,
+                file_size,
+                file_size - last.1,
+                non_zero_count,
+            );
+            println!("  After: \"{}\"", last.2);
+            hexdump(trailing, last.1, MAX_HEXDUMP);
+        }
+    }
+
+    if gap_count == 0 {
+        println!("=== Gaps Between Structures ===");
+        println!(
+            "  No non-zero gaps found ({} gap bytes, all zeros)",
+            total_gap_bytes
+        );
+    } else {
+        println!(
+            "\n  Total: {} gaps with non-zero data out of {} total gap bytes",
+            gap_count, total_gap_bytes
+        );
+    }
+    println!();
+}
+
 fn print_summary(vdf: &VdfFile, file_size: usize) {
     let n_block_ot = (0..vdf.offset_table_count)
         .filter(|&i| {
@@ -528,10 +646,11 @@ fn print_summary(vdf: &VdfFile, file_size: usize) {
         n_builtins,
         n_model_names
     );
-    if !vdf.extended_names.is_empty() {
+    let overflow_count = vdf.names.len() - vdf.section_name_count;
+    if overflow_count > 0 {
         println!(
-            "  Extended names: {} (overflow past section boundary)",
-            vdf.extended_names.len()
+            "  Overflow names: {} (past section boundary)",
+            overflow_count
         );
     }
     println!(

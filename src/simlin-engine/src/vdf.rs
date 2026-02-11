@@ -282,15 +282,14 @@ pub struct VdfFile {
     pub bitmap_size: usize,
     /// All sections found in the file.
     pub sections: Vec<Section>,
-    /// Variable names from the name table section (within declared boundary).
-    /// These correspond 1:1 with slot table entries.
+    /// All parsed variable names from the name table section and its overflow
+    /// region. The first `section_name_count` names came from within the
+    /// section's declared size boundary; the rest overflowed past it.
     pub names: Vec<String>,
-    /// Additional names that overflow past the name table section's declared
-    /// size boundary. Vensim frequently writes more names than the section
-    /// header accounts for; these "extended" names include internal module
-    /// variables, equation expansion strings, and model variables that
-    /// simply didn't fit within the declared section size.
-    pub extended_names: Vec<String>,
+    /// How many names fit within the name table section's declared size.
+    /// The slot table has exactly this many entries, paired 1:1 with
+    /// `names[..section_name_count]`.
+    pub section_name_count: usize,
     /// Index into `sections` for the name table section.
     pub name_section_idx: Option<usize>,
     /// Slot table: one u32 per name, each a byte offset into section 1 data.
@@ -327,7 +326,7 @@ impl VdfFile {
         // Parse names with an extended boundary to capture overflow entries.
         // The gap between the name table section's declared end and the next
         // section frequently contains additional valid name entries.
-        let (all_names, section_name_count) = name_section_idx
+        let (names, section_name_count) = name_section_idx
             .map(|ns_idx| {
                 let gap_end = sections
                     .get(ns_idx + 1)
@@ -336,9 +335,6 @@ impl VdfFile {
                 parse_name_table_extended(&data, &sections[ns_idx], gap_end)
             })
             .unwrap_or_default();
-
-        let names: Vec<String> = all_names[..section_name_count].to_vec();
-        let extended_names: Vec<String> = all_names[section_name_count..].to_vec();
 
         // Section at index 1 is the variable slot table section. Its field4
         // value varies across VDF versions (2, 42, etc.) so we identify it
@@ -377,7 +373,7 @@ impl VdfFile {
             bitmap_size,
             sections,
             names,
-            extended_names,
+            section_name_count,
             name_section_idx,
             slot_table,
             slot_table_offset,
@@ -405,11 +401,6 @@ impl VdfFile {
     pub fn is_data_block_offset(&self, raw: u32) -> bool {
         let offset = raw as usize;
         offset >= self.first_data_block && offset < self.data.len()
-    }
-
-    /// Iterate over all names: section names followed by extended names.
-    pub fn all_names(&self) -> impl Iterator<Item = &String> {
-        self.names.iter().chain(self.extended_names.iter())
     }
 
     /// Get the variable slot table section (always at section index 1).
@@ -524,8 +515,9 @@ impl VdfFile {
                 .into_iter()
                 .collect();
 
-        let mut candidates: Vec<String> = self
-            .names
+        // Only use section-boundary names (those with slot table entries)
+        // for the deterministic mapping. Overflow names have no slot entries.
+        let mut candidates: Vec<String> = self.names[..self.section_name_count]
             .iter()
             .filter(|name| {
                 !name.is_empty()
@@ -1473,32 +1465,36 @@ mod tests {
         fn test_econ_base_extended_names_include_split_name() {
             let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
 
-            // Section names should remain at 42 (for slot table compatibility)
-            assert_eq!(vdf.names.len(), 42);
+            // 42 names within the section boundary have slot table entries
+            assert_eq!(vdf.section_name_count, 42);
             assert_eq!(vdf.names[0], "Time");
             assert_eq!(
                 vdf.names[41],
                 "effect of hud policies on risk taking behavior"
             );
 
-            // The split name should be the first extended name, fully reconstructed
+            // The split name should be reconstructed as the first overflow name
+            let overflow = &vdf.names[vdf.section_name_count..];
             assert!(
-                !vdf.extended_names.is_empty(),
-                "expected extended names for econ model"
+                !overflow.is_empty(),
+                "expected overflow names for econ model"
             );
             assert_eq!(
-                vdf.extended_names[0],
+                overflow[0],
                 "effect of negative inflation rate on risk taking behavior"
             );
-            assert_eq!(vdf.extended_names[1], "max risk");
-            assert_eq!(vdf.extended_names[2], "hud policy");
+            assert_eq!(overflow[1], "max risk");
+            assert_eq!(overflow[2], "hud policy");
 
-            // Should have many extended names (the dump showed 58)
+            // Should have many overflow names (the dump showed 58)
             assert!(
-                vdf.extended_names.len() >= 50,
-                "expected at least 50 extended names, got {}",
-                vdf.extended_names.len()
+                overflow.len() >= 50,
+                "expected at least 50 overflow names, got {}",
+                overflow.len()
             );
+
+            // Total names = section + overflow
+            assert!(vdf.names.len() >= 92);
 
             // Slot table should still have 42 entries
             assert_eq!(vdf.slot_table.len(), 42);
@@ -1508,35 +1504,33 @@ mod tests {
         fn test_zambaqui_baserun_extended_names() {
             let vdf = vdf_file("../../third_party/uib_sd/zambaqui/baserun.vdf");
 
-            // Section names
-            assert_eq!(vdf.names.len(), 178);
+            assert_eq!(vdf.section_name_count, 178);
             assert_eq!(vdf.names[0], "Time");
 
-            // Extended names should be present
+            let overflow = &vdf.names[vdf.section_name_count..];
             assert!(
-                !vdf.extended_names.is_empty(),
-                "expected extended names for zambaqui model"
+                !overflow.is_empty(),
+                "expected overflow names for zambaqui model"
             );
 
-            // Check some known extended names from the dump
             assert!(
-                vdf.extended_names.contains(&"births".to_string()),
-                "expected 'births' in extended names"
+                overflow.contains(&"births".to_string()),
+                "expected 'births' in overflow names"
             );
             assert!(
-                vdf.extended_names.contains(&"capital".to_string()),
-                "expected 'capital' in extended names"
+                overflow.contains(&"capital".to_string()),
+                "expected 'capital' in overflow names"
             );
             assert!(
-                vdf.extended_names.contains(&"total population".to_string()),
-                "expected 'total population' in extended names"
+                overflow.contains(&"total population".to_string()),
+                "expected 'total population' in overflow names"
             );
 
-            // Should have many extended names (the dump showed 301)
+            // Should have many overflow names (the dump showed 301)
             assert!(
-                vdf.extended_names.len() >= 250,
-                "expected at least 250 extended names, got {}",
-                vdf.extended_names.len()
+                overflow.len() >= 250,
+                "expected at least 250 overflow names, got {}",
+                overflow.len()
             );
 
             // Slot table should still have 178 entries
@@ -1544,17 +1538,19 @@ mod tests {
         }
 
         #[test]
-        fn test_small_vdf_no_extended_names() {
-            // Small models should have no extended names
+        fn test_small_vdf_no_overflow_names() {
+            // Small models should have all names within the section boundary
             let vdf = vdf_file(
                 "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_2/Current.vdf",
             );
 
             assert!(!vdf.names.is_empty());
-            assert!(
-                vdf.extended_names.is_empty(),
-                "small VDF should have no extended names, got {:?}",
-                vdf.extended_names
+            assert_eq!(
+                vdf.section_name_count,
+                vdf.names.len(),
+                "small VDF should have no overflow names, got {} total vs {} in section",
+                vdf.names.len(),
+                vdf.section_name_count
             );
         }
 
@@ -1610,10 +1606,10 @@ mod tests {
                     path.display()
                 );
 
-                for name in &vdf.extended_names {
+                for name in &vdf.names[vdf.section_name_count..] {
                     assert!(
                         !name.is_empty() && name.chars().all(|c| c.is_ascii_graphic() || c == ' '),
-                        "{}: invalid extended name: {:?}",
+                        "{}: invalid overflow name: {:?}",
                         path.display(),
                         name
                     );
