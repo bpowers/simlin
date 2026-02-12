@@ -172,9 +172,12 @@ pub fn render_label(props: &LabelProps) -> String {
         escape_xml_attr(&js_format_number(layout.text_y))
     ));
 
-    // The TS code always includes text-anchor when align is truthy ('middle' is truthy)
+    // Font properties are inlined rather than relying on CSS <style> blocks alone,
+    // because resvg-wasm >= 0.4 doesn't apply CSS class-based font properties to text.
+    // Single quotes (&#x27;) avoid &quot; encoding issues with React's renderToString.
+    // We use &#x27; here to match React's encoding of single quotes in attributes.
     svg.push_str(&format!(
-        " style=\"text-anchor:{};filter:url(#labelBackground)\"",
+        " style=\"fill:#000000;font-size:12px;font-family:&#x27;Roboto Light&#x27;, &#x27;Roboto&#x27;, &#x27;Open Sans&#x27;, &#x27;Arial&#x27;, sans-serif;font-weight:300;white-space:nowrap;text-anchor:{};filter:url(#labelBackground)\"",
         layout.align.as_str()
     ));
 

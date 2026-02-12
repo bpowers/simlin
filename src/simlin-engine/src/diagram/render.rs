@@ -19,7 +19,7 @@ const RENDER_STYLES: &str = r#"
 .simlin-canvas text {
   fill: #000000;
   font-size: 12px;
-  font-family: "Roboto", "Open Sans", "Arial", sans-serif;
+  font-family: "Roboto Light", "Roboto", "Open Sans", "Arial", sans-serif;
   font-weight: 300;
   text-anchor: middle;
   white-space: nowrap;

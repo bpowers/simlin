@@ -9,6 +9,19 @@ import { AuxRadius } from './default';
 
 import { CommonLabelProps, LabelPadding, lineSpacing } from './CommonLabel';
 
+// Font properties applied as inline styles on <text> elements rather than
+// relying on CSS <style> blocks alone.  resvg-wasm >= 0.4 doesn't apply
+// CSS class-based font properties to text, so we duplicate them here.
+// Single quotes avoid &quot; encoding issues from React's renderToString,
+// which resvg-wasm >= 0.4 doesn't decode when parsing inline CSS.
+const textStyle: React.CSSProperties = {
+  fill: '#000000',
+  fontSize: '12px',
+  fontFamily: "'Roboto Light', 'Roboto', 'Open Sans', 'Arial', sans-serif",
+  fontWeight: 300,
+  whiteSpace: 'nowrap',
+};
+
 interface LabelLayout {
   textX: number;
   textY: number;
@@ -183,7 +196,7 @@ export class Label extends React.PureComponent<LabelPropsFull> {
         <text
           x={textX}
           y={textY}
-          style={align ? { textAnchor: align, filter: 'url(#labelBackground)' } : { filter: 'url(#labelBackground)' }}
+          style={{ ...textStyle, textAnchor: align, filter: 'url(#labelBackground)' }}
           onPointerDown={this.handlePointerDown}
           onPointerMove={this.handlePointerMove}
           onPointerUp={this.handlePointerUp}
