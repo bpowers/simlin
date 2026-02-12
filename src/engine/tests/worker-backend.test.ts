@@ -478,4 +478,78 @@ describe('WorkerBackend', () => {
       await expect(backend.projectOpenXmile(loadTestXmile())).rejects.toThrow(/terminated/i);
     });
   });
+
+  describe('delayed server (race condition regression)', () => {
+    /**
+     * Simulates the real-world race condition from the async WASM module bug:
+     * the backend sends messages immediately, but the server doesn't start
+     * processing them until some async initialization completes (like the
+     * dynamic import of WorkerServer resolving).  Messages sent before the
+     * server is "ready" are buffered and replayed, just like the fix in
+     * engine-worker.ts.
+     */
+    function createDelayedServerTestPair(): TestPair & { markServerReady: () => void } {
+      let backendOnMessage: ((msg: WorkerResponse) => void) | null = null;
+      const transfers: (Transferable[] | undefined)[] = [];
+      const pendingMessages: WorkerRequest[] = [];
+      let serverReady = false;
+
+      const server = new WorkerServer((msg: WorkerResponse) => {
+        if (backendOnMessage) {
+          setTimeout(() => backendOnMessage!(msg), 0);
+        }
+      });
+
+      const backend = new WorkerBackend(
+        (msg: WorkerRequest, transfer?: Transferable[]) => {
+          transfers.push(transfer);
+          if (serverReady) {
+            setTimeout(() => server.handleMessage(msg), 0);
+          } else {
+            pendingMessages.push(msg);
+          }
+        },
+        (callback: (msg: WorkerResponse) => void) => {
+          backendOnMessage = callback;
+        },
+      );
+
+      const markServerReady = () => {
+        serverReady = true;
+        for (const msg of pendingMessages) {
+          setTimeout(() => server.handleMessage(msg), 0);
+        }
+        pendingMessages.length = 0;
+      };
+
+      return { backend, server, transfers, markServerReady };
+    }
+
+    test('init completes even when server starts processing after messages are sent', async () => {
+      const { backend, markServerReady } = createDelayedServerTestPair();
+
+      // Start init -- message is buffered, not delivered to server yet.
+      const initPromise = backend.init(loadWasmSource());
+
+      // Simulate the async module load completing (e.g. dynamic import resolves).
+      // In the real bug, this delay was the WASM binary loading.
+      setTimeout(markServerReady, 10);
+
+      await initPromise;
+      expect(backend.isInitialized()).toBe(true);
+    });
+
+    test('init + follow-up operations complete with delayed server', async () => {
+      const { backend, markServerReady } = createDelayedServerTestPair();
+
+      const initPromise = backend.init(loadWasmSource());
+      setTimeout(markServerReady, 10);
+      await initPromise;
+
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+      const count = await backend.projectGetModelCount(handle);
+      expect(count).toBe(1);
+    });
+  });
 });
