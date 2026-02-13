@@ -76,10 +76,16 @@ fn print_layout(vdf: &VdfFile) {
 
     for (i, sec) in vdf.sections.iter().enumerate() {
         let role = SECTION_ROLES.get(i).copied().unwrap_or("unknown");
-        let total = SECTION_HEADER_SIZE + sec.size as usize;
+        let region_size = sec.region_end - sec.file_offset;
         entries.push((
             sec.file_offset,
-            format!("Section {}: {} ({} bytes)", i, role, total),
+            format!(
+                "Section {}: {} (declared {}B, region {}B)",
+                i,
+                role,
+                SECTION_HEADER_SIZE as u32 + sec.declared_size,
+                region_size
+            ),
         ));
     }
 
@@ -166,13 +172,20 @@ fn print_section_header(sec: &Section, data: &[u8], index: usize) {
     println!();
     println!("Section {} @ 0x{:08x}  [{}]", index, sec.file_offset, role);
     print!(
-        "  size={}  size2={}  field3={}  field4={}  field5=0x{:08x}",
-        sec.size, size2, sec.field3, sec.field4, sec.field5
+        "  declared_size={}  size2={}  field3={}  field4={}  field5=0x{:08x}",
+        sec.declared_size, size2, sec.field3, sec.field4, sec.field5
     );
-    if size2 != sec.size {
-        print!("  WARNING: size2 != size");
+    if size2 != sec.declared_size {
+        print!("  WARNING: size2 != declared_size");
     }
     println!();
+    println!(
+        "  region: 0x{:08x}..0x{:08x} ({}B data, declared {}B)",
+        sec.data_offset(),
+        sec.region_end,
+        sec.region_data_size(),
+        sec.declared_size
+    );
 }
 
 fn print_sections(vdf: &VdfFile) {
@@ -182,18 +195,18 @@ fn print_sections(vdf: &VdfFile) {
         print_section_header(sec, &vdf.data, i);
 
         let data_start = sec.data_offset();
-        let data_end = sec.data_end().min(vdf.data.len());
-        if data_start >= data_end {
-            println!("  (no data)");
+        let region_end = sec.region_end.min(vdf.data.len());
+        if data_start >= region_end {
+            println!("  (no data / degenerate section)");
             continue;
         }
 
-        let section_data = &vdf.data[data_start..data_end];
+        let region_data = &vdf.data[data_start..region_end];
 
         if vdf.name_section_idx == Some(i) {
             println!("  (name table -- shown separately below)");
         } else {
-            hexdump(section_data, data_start, MAX_HEXDUMP);
+            hexdump(region_data, data_start, MAX_HEXDUMP);
         }
     }
     println!();
@@ -450,12 +463,12 @@ fn print_gaps(vdf: &VdfFile, file_size: usize) {
     // File header
     regions.push((0, FILE_HEADER_SIZE, "file header".to_string()));
 
-    // Each section: header + declared data
+    // Each section: full region (magic-to-magic)
     for (i, sec) in vdf.sections.iter().enumerate() {
         let role = SECTION_ROLES.get(i).copied().unwrap_or("unknown");
         regions.push((
             sec.file_offset,
-            sec.data_end(),
+            sec.region_end,
             format!("section {} ({})", i, role),
         ));
     }

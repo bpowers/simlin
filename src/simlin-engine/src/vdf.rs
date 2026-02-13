@@ -32,12 +32,12 @@
 //!
 //! ```text
 //!   +0   u32  magic (0xbf4c37a1)
-//!   +4   u32  size (byte count of section data that follows)
-//!   +8   u32  size2 (always equals size)
+//!   +4   u32  declared_size (byte count of "core" section data)
+//!   +8   u32  size2 (always equals declared_size)
 //!   +12  u32  field3 (often 0x1F4 = 500)
 //!   +16  u32  field4 (section type: 19=model info, 2=variable slots, etc.)
 //!   +20  u32  field5 (for name table section: high 16 bits = first name length)
-//!   +24  ...  section data (size bytes)
+//!   +24  ...  section data (extends to next section's magic, not just declared_size)
 //! ```
 //!
 //! ### Section with field4=2 ("Section 1"): Variable slot table
@@ -220,12 +220,22 @@ pub fn read_f32(data: &[u8], offset: usize) -> f32 {
 // ---- Parsed structures ----
 
 /// A section within a VDF file, delimited by section magic bytes.
+///
+/// Each section has a 24-byte header followed by data. The header's `declared_size`
+/// field describes only a "core" portion of the section's data. The actual extent
+/// of a section runs from its header to the start of the next section header
+/// (magic-to-magic), captured by `region_end`. See `vdf_analysis.md` for details.
 #[derive(Debug, Clone)]
 pub struct Section {
     /// Absolute file offset of the section magic bytes.
     pub file_offset: usize,
-    /// Size of section data in bytes (follows the 24-byte header).
-    pub size: u32,
+    /// Declared size of section data in bytes (from the header). This describes
+    /// only a "core" or "initial" portion; the real extent is `region_end`.
+    pub declared_size: u32,
+    /// Absolute file offset where this section's region ends. For sections
+    /// 0..n-1, this is the next section's `file_offset`. For the last
+    /// section, this is the file length.
+    pub region_end: usize,
     /// Field3 in header (often 0x1F4 = 500).
     pub field3: u32,
     /// Field4: section type identifier (e.g. 19=model info, 2=variable slots).
@@ -240,9 +250,17 @@ impl Section {
         self.file_offset + SECTION_HEADER_SIZE
     }
 
-    /// Absolute file offset where section data ends.
-    pub fn data_end(&self) -> usize {
-        self.data_offset() + self.size as usize
+    /// Absolute file offset where the declared section data ends.
+    /// This is the header's `declared_size` extent, not the full region.
+    pub fn declared_data_end(&self) -> usize {
+        self.data_offset() + self.declared_size as usize
+    }
+
+    /// Size in bytes of the section's full region data (after the header).
+    /// For degenerate sections (like section 5 in small models, whose
+    /// declared data overlaps the next section's header), this returns 0.
+    pub fn region_data_size(&self) -> usize {
+        self.region_end.saturating_sub(self.data_offset())
     }
 }
 
@@ -323,23 +341,19 @@ impl VdfFile {
         let sections = find_sections(&data);
         let name_section_idx = find_name_table_section_idx(&data, &sections);
 
-        // Parse names with an extended boundary to capture overflow entries.
-        // The gap between the name table section's declared end and the next
-        // section frequently contains additional valid name entries.
+        // Parse names up to the section's region boundary. The name table
+        // frequently overflows its declared size, but the region (which
+        // extends to the next section's magic) covers all the data.
         let (names, section_name_count) = name_section_idx
             .map(|ns_idx| {
-                let gap_end = sections
-                    .get(ns_idx + 1)
-                    .map(|s| s.file_offset)
-                    .unwrap_or(data.len());
-                parse_name_table_extended(&data, &sections[ns_idx], gap_end)
+                parse_name_table_extended(&data, &sections[ns_idx], sections[ns_idx].region_end)
             })
             .unwrap_or_default();
 
         // Section at index 1 is the variable slot table section. Its field4
         // value varies across VDF versions (2, 42, etc.) so we identify it
         // by position rather than field4.
-        let sec1_data_size = sections.get(1).map(|s| s.size as usize).unwrap_or(0);
+        let sec1_data_size = sections.get(1).map(|s| s.region_data_size()).unwrap_or(0);
 
         let (slot_table_offset, slot_table) = name_section_idx
             .map(|ns_idx| {
@@ -348,14 +362,14 @@ impl VdfFile {
             })
             .unwrap_or((0, Vec::new()));
 
-        // Find records in the gap between section 1 data and the slot table
+        // Find records between section 1's declared data end and the name
+        // table section boundary. Records live within section 1's region
+        // but past its declared data extent.
         let search_start = sections
             .get(1)
-            .map(|s| s.data_end())
+            .map(|s| s.declared_data_end())
             .unwrap_or(FILE_HEADER_SIZE);
-        let search_bound = name_section_idx
-            .map(|i| sections[i].file_offset)
-            .unwrap_or(data.len());
+        let search_bound = sections.get(1).map(|s| s.region_end).unwrap_or(data.len());
         let records_end = if slot_table_offset > 0 && slot_table_offset < search_bound {
             slot_table_offset
         } else {
@@ -575,6 +589,10 @@ impl VdfFile {
 // ---- Parsing functions ----
 
 /// Find all sections in a VDF file by scanning for section magic bytes.
+///
+/// After collecting all sections, computes each section's `region_end`:
+/// for sections 0..n-1, `region_end` is the next section's `file_offset`;
+/// for the last section, `region_end` is the file length.
 pub fn find_sections(data: &[u8]) -> Vec<Section> {
     let mut sections = Vec::new();
     let mut pos = 0;
@@ -584,7 +602,8 @@ pub fn find_sections(data: &[u8]) -> Vec<Section> {
             if offset + SECTION_HEADER_SIZE <= data.len() {
                 sections.push(Section {
                     file_offset: offset,
-                    size: read_u32(data, offset + 4),
+                    declared_size: read_u32(data, offset + 4),
+                    region_end: 0, // filled in below
                     field3: read_u32(data, offset + 12),
                     field4: read_u32(data, offset + 16),
                     field5: read_u32(data, offset + 20),
@@ -595,6 +614,17 @@ pub fn find_sections(data: &[u8]) -> Vec<Section> {
             break;
         }
     }
+
+    // Compute region_end for each section: magic-to-magic boundaries.
+    let n = sections.len();
+    for i in 0..n {
+        sections[i].region_end = if i + 1 < n {
+            sections[i + 1].file_offset
+        } else {
+            data.len()
+        };
+    }
+
     sections
 }
 
@@ -603,19 +633,19 @@ pub fn find_sections(data: &[u8]) -> Vec<Section> {
 /// from field5's high 16 bits. Subsequent entries are u16-length-prefixed.
 /// u16=0 entries are group separators (skipped).
 pub fn parse_name_table(data: &[u8], section: &Section) -> Vec<String> {
-    let section_end = section.data_end().min(data.len());
+    let section_end = section.declared_data_end().min(data.len());
     parse_name_table_extended(data, section, section_end).0
 }
 
 /// Parse the name table with an extended boundary. Vensim's name table
 /// frequently overflows the section's declared size: the section header's
-/// `size` field is too small, so the final name(s) and additional entries
-/// spill into the gap between the section end and the next file structure.
+/// `declared_size` field is too small, so the final name(s) and additional
+/// entries extend past it but remain within the section's region (up to the
+/// next section's magic).
 ///
-/// This function parses names up to `parse_end`, which should be the file
-/// offset of the next section (or another known boundary). It validates
-/// each entry (max 256 bytes, printable ASCII) and stops when it encounters
-/// data that doesn't look like a name entry.
+/// `parse_end` should be the section's `region_end` (or another known
+/// boundary). The function validates each entry (max 256 bytes, printable
+/// ASCII) and stops when it encounters data that doesn't look like a name.
 ///
 /// Returns `(all_names, section_name_count)` where `section_name_count` is
 /// the number of names whose data fits entirely within the section's declared
@@ -628,7 +658,7 @@ pub fn parse_name_table_extended(
 ) -> (Vec<String>, usize) {
     let mut names = Vec::new();
     let data_start = section.data_offset();
-    let section_end = section.data_end().min(data.len());
+    let section_end = section.declared_data_end().min(data.len());
     let parse_end = parse_end.min(data.len());
 
     let first_len = (section.field5 >> 16) as usize;
@@ -1254,13 +1284,33 @@ mod tests {
     fn test_section_offsets() {
         let s = Section {
             file_offset: 100,
-            size: 50,
+            declared_size: 50,
+            region_end: 300,
             field3: 0,
             field4: 0,
             field5: 0,
         };
         assert_eq!(s.data_offset(), 124);
-        assert_eq!(s.data_end(), 174);
+        assert_eq!(s.declared_data_end(), 174);
+        assert_eq!(s.region_data_size(), 176); // 300 - 124
+    }
+
+    #[test]
+    fn test_section_degenerate_region() {
+        // Section 5 in small models has declared_size=6 but its data
+        // overlaps with the next section's header, so region_end <=
+        // data_offset, yielding region_data_size() == 0.
+        let s = Section {
+            file_offset: 100,
+            declared_size: 6,
+            region_end: 118, // next section starts before data_offset (124)
+            field3: 0,
+            field4: 0,
+            field5: 0,
+        };
+        assert_eq!(s.data_offset(), 124);
+        assert_eq!(s.declared_data_end(), 130);
+        assert_eq!(s.region_data_size(), 0);
     }
 
     #[test]
@@ -1287,8 +1337,43 @@ mod tests {
         let sections = find_sections(&data);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].file_offset, 10);
-        assert_eq!(sections[0].size, 10);
+        assert_eq!(sections[0].declared_size, 10);
         assert_eq!(sections[0].field4, 2);
+        // Last section's region_end should be the file length
+        assert_eq!(sections[0].region_end, data.len());
+    }
+
+    #[test]
+    fn test_find_sections_multi_contiguous_regions() {
+        let mut data = vec![0u8; 200];
+
+        // Section 0 at offset 10
+        data[10..14].copy_from_slice(&VDF_SECTION_MAGIC);
+        data[14..18].copy_from_slice(&5u32.to_le_bytes());
+        data[18..22].copy_from_slice(&5u32.to_le_bytes());
+
+        // Section 1 at offset 60
+        data[60..64].copy_from_slice(&VDF_SECTION_MAGIC);
+        data[64..68].copy_from_slice(&20u32.to_le_bytes());
+        data[68..72].copy_from_slice(&20u32.to_le_bytes());
+
+        // Section 2 at offset 150
+        data[150..154].copy_from_slice(&VDF_SECTION_MAGIC);
+        data[154..158].copy_from_slice(&8u32.to_le_bytes());
+        data[158..162].copy_from_slice(&8u32.to_le_bytes());
+
+        let sections = find_sections(&data);
+        assert_eq!(sections.len(), 3);
+
+        // Regions should be contiguous
+        assert_eq!(sections[0].region_end, sections[1].file_offset);
+        assert_eq!(sections[1].region_end, sections[2].file_offset);
+        assert_eq!(sections[2].region_end, data.len());
+
+        // Region data sizes
+        assert_eq!(sections[0].region_data_size(), 60 - 34); // 60 - (10 + 24)
+        assert_eq!(sections[1].region_data_size(), 150 - 84); // 150 - (60 + 24)
+        assert_eq!(sections[2].region_data_size(), 200 - 174); // 200 - (150 + 24)
     }
 
     #[test]
@@ -1347,7 +1432,8 @@ mod tests {
 
         let section = Section {
             file_offset: 0,
-            size: 20,
+            declared_size: 20,
+            region_end: 80,
             field3: 500,
             field4: 0,
             field5: 6u32 << 16,
@@ -1394,7 +1480,8 @@ mod tests {
 
         let section = Section {
             file_offset: 0,
-            size: 40,
+            declared_size: 40,
+            region_end: 200,
             field3: 500,
             field4: 0,
             field5: 6u32 << 16,
@@ -1437,7 +1524,8 @@ mod tests {
 
         let section = Section {
             file_offset: 0,
-            size: 10,
+            declared_size: 10,
+            region_end: 80,
             field3: 500,
             field4: 0,
             field5: 6u32 << 16,
@@ -1586,6 +1674,7 @@ mod tests {
             for path in &vdf_paths {
                 let data = std::fs::read(path)
                     .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+                let file_len = data.len();
                 // Some .vdf files use a different format variant (e.g. magic
                 // 0x41 instead of 0x52). Skip those rather than failing.
                 let vdf = match VdfFile::parse(data) {
@@ -1614,12 +1703,94 @@ mod tests {
                         name
                     );
                 }
+
+                // Verify section regions are contiguous
+                for i in 0..vdf.sections.len() - 1 {
+                    assert_eq!(
+                        vdf.sections[i].region_end,
+                        vdf.sections[i + 1].file_offset,
+                        "{}: section {} region_end should equal section {} file_offset",
+                        path.display(),
+                        i,
+                        i + 1
+                    );
+                }
+                if let Some(last) = vdf.sections.last() {
+                    assert_eq!(
+                        last.region_end,
+                        file_len,
+                        "{}: last section region_end should equal file length",
+                        path.display()
+                    );
+                }
             }
             assert!(
                 parsed_count >= 10,
                 "expected at least 10 parseable VDF files, only {} succeeded",
                 parsed_count
             );
+        }
+
+        #[test]
+        fn test_section5_degenerate_in_small_models() {
+            // In small/econ models, section 5 has size=6 and its "data"
+            // overlaps with section 6's header, making it a zero-content marker.
+            let vdf = vdf_file(
+                "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_2/Current.vdf",
+            );
+            assert!(
+                vdf.sections.len() >= 6,
+                "expected at least 6 sections, got {}",
+                vdf.sections.len()
+            );
+
+            let sec5 = &vdf.sections[5];
+            assert_eq!(sec5.declared_size, 6);
+            assert_eq!(
+                sec5.region_data_size(),
+                0,
+                "section 5 should be degenerate (region_data_size == 0)"
+            );
+        }
+
+        #[test]
+        fn test_records_within_section1_region() {
+            let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
+            if let Some(sec1) = vdf.sections.get(1) {
+                for rec in &vdf.records {
+                    assert!(
+                        rec.file_offset >= sec1.declared_data_end()
+                            && rec.file_offset + RECORD_SIZE <= sec1.region_end,
+                        "record at 0x{:x} outside section 1 region (0x{:x}..0x{:x})",
+                        rec.file_offset,
+                        sec1.declared_data_end(),
+                        sec1.region_end,
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_name_table_within_section_region() {
+            let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
+            if let Some(ns_idx) = vdf.name_section_idx {
+                let sec = &vdf.sections[ns_idx];
+                // All names (including overflow) should come from data
+                // within the section's region.
+                assert!(
+                    !vdf.names.is_empty(),
+                    "expected names in the name table section"
+                );
+                assert!(
+                    vdf.names.len() > vdf.section_name_count,
+                    "econ model should have overflow names"
+                );
+                // The region should be large enough to hold the name data
+                assert!(
+                    sec.region_data_size() > sec.declared_size as usize,
+                    "name table region should be larger than declared size"
+                );
+            }
         }
     }
 }
