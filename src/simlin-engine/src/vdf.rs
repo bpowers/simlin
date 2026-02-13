@@ -300,11 +300,11 @@ pub struct VdfFile {
     pub bitmap_size: usize,
     /// All sections found in the file.
     pub sections: Vec<Section>,
-    /// All parsed variable names from the name table section and its overflow
-    /// region. The first `section_name_count` names came from within the
-    /// section's declared size boundary; the rest overflowed past it.
+    /// All parsed variable names from the name table section's region.
+    /// The first `section_name_count` names fall within the section's
+    /// `declared_size`; the rest are in the region but past that boundary.
     pub names: Vec<String>,
-    /// How many names fit within the name table section's declared size.
+    /// How many names fall within the name table section's `declared_size`.
     /// The slot table has exactly this many entries, paired 1:1 with
     /// `names[..section_name_count]`.
     pub section_name_count: usize,
@@ -342,8 +342,7 @@ impl VdfFile {
         let name_section_idx = find_name_table_section_idx(&data, &sections);
 
         // Parse names up to the section's region boundary. The name table
-        // frequently overflows its declared size, but the region (which
-        // extends to the next section's magic) covers all the data.
+        // extends past declared_size within the region.
         let (names, section_name_count) = name_section_idx
             .map(|ns_idx| {
                 parse_name_table_extended(&data, &sections[ns_idx], sections[ns_idx].region_end)
@@ -529,8 +528,8 @@ impl VdfFile {
                 .into_iter()
                 .collect();
 
-        // Only use section-boundary names (those with slot table entries)
-        // for the deterministic mapping. Overflow names have no slot entries.
+        // Only use slotted names (those within declared_size, which have
+        // slot table entries) for the deterministic mapping.
         let mut candidates: Vec<String> = self.names[..self.section_name_count]
             .iter()
             .filter(|name| {
@@ -637,20 +636,16 @@ pub fn parse_name_table(data: &[u8], section: &Section) -> Vec<String> {
     parse_name_table_extended(data, section, section_end).0
 }
 
-/// Parse the name table with an extended boundary. Vensim's name table
-/// frequently overflows the section's declared size: the section header's
-/// `declared_size` field is too small, so the final name(s) and additional
-/// entries extend past it but remain within the section's region (up to the
-/// next section's magic).
+/// Parse the name table up to `parse_end`. The name table typically extends
+/// past the section's `declared_size` within its region. `parse_end` should
+/// be the section's `region_end`.
 ///
-/// `parse_end` should be the section's `region_end` (or another known
-/// boundary). The function validates each entry (max 256 bytes, printable
-/// ASCII) and stops when it encounters data that doesn't look like a name.
+/// Validates each entry (max 256 bytes, printable ASCII) and stops when it
+/// encounters data that doesn't look like a name entry.
 ///
 /// Returns `(all_names, section_name_count)` where `section_name_count` is
-/// the number of names whose data fits entirely within the section's declared
-/// size. This count is needed for slot table sizing, since the slot table
-/// has exactly `section_name_count` entries.
+/// the number of names within the section's `declared_size`. The slot table
+/// has exactly `section_name_count` entries, paired 1:1 with those names.
 pub fn parse_name_table_extended(
     data: &[u8],
     section: &Section,
@@ -699,8 +694,8 @@ pub fn parse_name_table_extended(
         }
 
         // Reject entries that are implausibly long -- real Vensim variable
-        // names max out well under this, and the overflow region frequently
-        // ends with non-name binary data whose first u16 decodes to a large
+        // names max out well under this, and the tail of the region may
+        // contain non-name binary data whose first u16 decodes to a large
         // "length" value.
         const MAX_NAME_ENTRY_LEN: usize = 256;
         if len > MAX_NAME_ENTRY_LEN {
@@ -1397,15 +1392,13 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_name_table_extended_handles_split_name() {
-        // Simulate a name table section where the last name is split across
-        // the section boundary. The u16 prefix is inside the section but
-        // the name data extends past it.
+    fn test_parse_name_table_extended_past_declared_size() {
+        // Names extend past declared_size within the section's region.
+        // Only "Time" fits within declared_size (20 bytes); the other
+        // names are in the region but past that boundary.
         let mut data = vec![0u8; 256];
 
-        // Section header at offset 0
         data[0..4].copy_from_slice(&VDF_SECTION_MAGIC);
-        // section size = 20 bytes of data (tight boundary)
         data[4..8].copy_from_slice(&20u32.to_le_bytes());
         data[8..12].copy_from_slice(&20u32.to_le_bytes());
         data[12..16].copy_from_slice(&500u32.to_le_bytes());
@@ -1419,9 +1412,9 @@ mod tests {
         data[28..30].copy_from_slice(&[0, 0]);
 
         // Second name: u16 len = 14, "hello world\0\0\0"
-        // u16 prefix at offset 30 (inside section, section data ends at 24+20=44)
+        // u16 prefix at offset 30 (inside declared_size, which ends at 44)
         data[30..32].copy_from_slice(&14u16.to_le_bytes());
-        // Name data starts at 32, extends to 46 (past section end at 44)
+        // Name data at 32..46, extends past declared_size boundary
         data[32..43].copy_from_slice(b"hello world");
         data[43..46].copy_from_slice(&[0, 0, 0]);
 
@@ -1439,14 +1432,14 @@ mod tests {
             field5: 6u32 << 16,
         };
 
-        // Old behavior: only parses within section boundary, misses split name
+        // parse_name_table stops at declared_size
         let section_only = parse_name_table(&data, &section);
-        assert_eq!(section_only.len(), 1); // only "Time"
+        assert_eq!(section_only.len(), 1);
         assert_eq!(section_only[0], "Time");
 
-        // Extended parsing: continues past section boundary
+        // parse_name_table_extended parses the full region
         let (all_names, section_name_count) = parse_name_table_extended(&data, &section, 80);
-        assert_eq!(section_name_count, 1); // "Time" was fully in-section
+        assert_eq!(section_name_count, 1); // only "Time" within declared_size
         assert_eq!(all_names.len(), 3);
         assert_eq!(all_names[0], "Time");
         assert_eq!(all_names[1], "hello world");
@@ -1550,7 +1543,7 @@ mod tests {
         }
 
         #[test]
-        fn test_econ_base_extended_names_include_split_name() {
+        fn test_econ_base_names_past_declared_size() {
             let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
 
             // 42 names within the section boundary have slot table entries
@@ -1561,73 +1554,70 @@ mod tests {
                 "effect of hud policies on risk taking behavior"
             );
 
-            // The split name should be reconstructed as the first overflow name
-            let overflow = &vdf.names[vdf.section_name_count..];
+            // Names past declared_size don't have slot table entries
+            let unslotted = &vdf.names[vdf.section_name_count..];
             assert!(
-                !overflow.is_empty(),
-                "expected overflow names for econ model"
+                !unslotted.is_empty(),
+                "expected unslotted names for econ model"
             );
             assert_eq!(
-                overflow[0],
+                unslotted[0],
                 "effect of negative inflation rate on risk taking behavior"
             );
-            assert_eq!(overflow[1], "max risk");
-            assert_eq!(overflow[2], "hud policy");
+            assert_eq!(unslotted[1], "max risk");
+            assert_eq!(unslotted[2], "hud policy");
 
-            // Should have many overflow names (the dump showed 58)
             assert!(
-                overflow.len() >= 50,
-                "expected at least 50 overflow names, got {}",
-                overflow.len()
+                unslotted.len() >= 50,
+                "expected at least 50 unslotted names, got {}",
+                unslotted.len()
             );
 
-            // Total names = section + overflow
             assert!(vdf.names.len() >= 92);
 
-            // Slot table should still have 42 entries
+            // Slot table has entries only for names within declared_size
             assert_eq!(vdf.slot_table.len(), 42);
         }
 
         #[test]
-        fn test_zambaqui_baserun_extended_names() {
+        fn test_zambaqui_baserun_names_past_declared_size() {
             let vdf = vdf_file("../../third_party/uib_sd/zambaqui/baserun.vdf");
 
             assert_eq!(vdf.section_name_count, 178);
             assert_eq!(vdf.names[0], "Time");
 
-            let overflow = &vdf.names[vdf.section_name_count..];
+            let unslotted = &vdf.names[vdf.section_name_count..];
             assert!(
-                !overflow.is_empty(),
-                "expected overflow names for zambaqui model"
+                !unslotted.is_empty(),
+                "expected unslotted names for zambaqui model"
             );
 
             assert!(
-                overflow.contains(&"births".to_string()),
-                "expected 'births' in overflow names"
+                unslotted.contains(&"births".to_string()),
+                "expected 'births' in unslotted names"
             );
             assert!(
-                overflow.contains(&"capital".to_string()),
-                "expected 'capital' in overflow names"
+                unslotted.contains(&"capital".to_string()),
+                "expected 'capital' in unslotted names"
             );
             assert!(
-                overflow.contains(&"total population".to_string()),
-                "expected 'total population' in overflow names"
+                unslotted.contains(&"total population".to_string()),
+                "expected 'total population' in unslotted names"
             );
 
-            // Should have many overflow names (the dump showed 301)
             assert!(
-                overflow.len() >= 250,
-                "expected at least 250 overflow names, got {}",
-                overflow.len()
+                unslotted.len() >= 250,
+                "expected at least 250 unslotted names, got {}",
+                unslotted.len()
             );
 
-            // Slot table should still have 178 entries
+            // Slot table has entries only for names within declared_size
             assert_eq!(vdf.slot_table.len(), 178);
         }
 
         #[test]
-        fn test_small_vdf_no_overflow_names() {
-            // Small models should have all names within the section boundary
+        fn test_small_vdf_all_names_slotted() {
+            // Small models should have all names within declared_size
             let vdf = vdf_file(
                 "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_2/Current.vdf",
             );
@@ -1636,7 +1626,7 @@ mod tests {
             assert_eq!(
                 vdf.section_name_count,
                 vdf.names.len(),
-                "small VDF should have no overflow names, got {} total vs {} in section",
+                "small VDF should have all names within declared_size, got {} total vs {} slotted",
                 vdf.names.len(),
                 vdf.section_name_count
             );
@@ -1698,7 +1688,7 @@ mod tests {
                 for name in &vdf.names[vdf.section_name_count..] {
                     assert!(
                         !name.is_empty() && name.chars().all(|c| c.is_ascii_graphic() || c == ' '),
-                        "{}: invalid overflow name: {:?}",
+                        "{}: invalid unslotted name: {:?}",
                         path.display(),
                         name
                     );
@@ -1775,15 +1765,13 @@ mod tests {
             let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
             if let Some(ns_idx) = vdf.name_section_idx {
                 let sec = &vdf.sections[ns_idx];
-                // All names (including overflow) should come from data
-                // within the section's region.
                 assert!(
                     !vdf.names.is_empty(),
                     "expected names in the name table section"
                 );
                 assert!(
                     vdf.names.len() > vdf.section_name_count,
-                    "econ model should have overflow names"
+                    "econ model should have names past declared_size"
                 );
                 // The region should be large enough to hold the name data
                 assert!(

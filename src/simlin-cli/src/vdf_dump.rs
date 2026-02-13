@@ -235,24 +235,19 @@ fn print_names(vdf: &VdfFile) {
         .name_section_idx
         .map(|i| format!("section {}", i))
         .unwrap_or_else(|| "unknown section".to_string());
-    let overflow_count = vdf.names.len() - vdf.section_name_count;
+    let unslotted = vdf.names.len() - vdf.section_name_count;
     println!(
-        "=== Name Table ({} names: {} in section, {} overflow, {}) ===",
+        "=== Name Table ({} names: {} with slots, {} without, {}) ===",
         vdf.names.len(),
         vdf.section_name_count,
-        overflow_count,
+        unslotted,
         sec_label
     );
 
     for (i, name) in vdf.names.iter().enumerate() {
         let class = classify_name(name);
-        let overflow_marker = if i == vdf.section_name_count {
-            "  --- overflow past section boundary ---"
-        } else {
-            ""
-        };
-        if !overflow_marker.is_empty() {
-            println!("{}", overflow_marker);
+        if i == vdf.section_name_count && vdf.section_name_count < vdf.names.len() {
+            println!("  --- names without slot table entries ---");
         }
         if class.is_empty() {
             println!("  {:>3}  \"{}\"", i, name);
@@ -454,9 +449,8 @@ fn print_data_blocks(vdf: &VdfFile) {
 
 /// Build an ordered list of (start_offset, end_offset, label) for every known
 /// file structure, then check for non-zero data in any gap between adjacent
-/// structures. This surfaces overflow data that the parser doesn't yet account
-/// for (e.g. records extending past their detected boundary, section data
-/// overflowing its declared size, etc.).
+/// structures (e.g. between the file header and the first section, or after
+/// the last section's region).
 fn print_gaps(vdf: &VdfFile, file_size: usize) {
     let mut regions: Vec<(usize, usize, String)> = Vec::new();
 
@@ -508,8 +502,8 @@ fn print_gaps(vdf: &VdfFile, file_size: usize) {
 
     regions.sort_by_key(|&(start, end, _)| (start, end));
 
-    // Merge overlapping regions (some structures overlap, like the name table
-    // section boundary vs the overflow parsed as part of names)
+    // Merge overlapping regions (e.g. records and slot tables are sub-structures
+    // within a section's region)
     let mut merged: Vec<(usize, usize, String)> = Vec::new();
     for (start, end, label) in regions {
         if let Some(last) = merged.last_mut()
@@ -659,11 +653,11 @@ fn print_summary(vdf: &VdfFile, file_size: usize) {
         n_builtins,
         n_model_names
     );
-    let overflow_count = vdf.names.len() - vdf.section_name_count;
-    if overflow_count > 0 {
+    let unslotted_count = vdf.names.len() - vdf.section_name_count;
+    if unslotted_count > 0 {
         println!(
-            "  Overflow names: {} (past section boundary)",
-            overflow_count
+            "  Unslotted names: {} (no slot table entry)",
+            unslotted_count
         );
     }
     println!(
