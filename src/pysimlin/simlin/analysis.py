@@ -1,19 +1,20 @@
 """Analysis types for the simlin package."""
 
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import Optional
-from dataclasses import dataclass
+
 import numpy as np
 from numpy.typing import NDArray
 
 
 class LinkPolarity(IntEnum):
     """Polarity of a causal link."""
-    
+
     POSITIVE = 0
     NEGATIVE = 1
     UNKNOWN = 2
-    
+
     def __str__(self) -> str:
         if self == LinkPolarity.POSITIVE:
             return "+"
@@ -83,28 +84,28 @@ class LoopPolarity(IntEnum):
 @dataclass
 class Link:
     """Represents a causal link between two variables."""
-    
+
     from_var: str
     to_var: str
     polarity: LinkPolarity
-    score: Optional[NDArray[np.float64]] = None
-    
+    score: NDArray[np.float64] | None = None
+
     def __str__(self) -> str:
         """Return a human-readable string representation."""
         pol_str = str(self.polarity)
         return f"{self.from_var} --{pol_str}--> {self.to_var}"
-    
+
     def has_score(self) -> bool:
         """Check if this link has LTM score data."""
         return self.score is not None and len(self.score) > 0
-    
-    def average_score(self) -> Optional[float]:
+
+    def average_score(self) -> float | None:
         """Calculate the average score across all time steps."""
         if self.score is None or len(self.score) == 0:
             return None
         return float(np.nanmean(self.score))
-    
-    def max_score(self) -> Optional[float]:
+
+    def max_score(self) -> float | None:
         """Get the maximum score across all time steps."""
         if self.score is None or len(self.score) == 0:
             return None
@@ -132,7 +133,7 @@ class Loop:
     polarity: LoopPolarity
     """Loop polarity: REINFORCING (R), BALANCING (B), or UNDETERMINED (U)"""
 
-    behavior_time_series: Optional[NDArray[np.float64]] = None
+    behavior_time_series: NDArray[np.float64] | None = None
     """
     Loop's contribution to model behavior over time.
     None for structural loops, populated for loops from Run objects.
@@ -153,7 +154,7 @@ class Loop:
         """Check if a variable is part of this loop."""
         return var_name in self.variables
 
-    def average_importance(self) -> Optional[float]:
+    def average_importance(self) -> float | None:
         """
         Average importance across simulation.
 
@@ -164,13 +165,15 @@ class Loop:
             Average importance score, or None if no behavioral data
 
         Example:
-            >>> important_loops = [l for l in run.loops if l.average_importance() and l.average_importance() > 0.1]
+            >>> important_loops = [
+            ...     l for l in run.loops if l.average_importance() and l.average_importance() > 0.1
+            ... ]
         """
         if self.behavior_time_series is None or len(self.behavior_time_series) == 0:
             return None
         return float(np.nanmean(np.abs(self.behavior_time_series)))
 
-    def max_importance(self) -> Optional[float]:
+    def max_importance(self) -> float | None:
         """
         Maximum importance during simulation.
 

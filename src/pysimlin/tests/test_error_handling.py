@@ -1,11 +1,13 @@
 """Tests for error handling and error string management."""
 
+import contextlib
 import gc
+
 import pytest
 
 import simlin
-from simlin import Project, SimlinImportError, SimlinRuntimeError
-from simlin._ffi import ffi, lib, get_error_string, _finalizer_refs
+from simlin import SimlinRuntimeError
+from simlin._ffi import _finalizer_refs, ffi, get_error_string, lib
 
 
 class TestErrorStringHandling:
@@ -23,13 +25,13 @@ class TestErrorStringHandling:
         """Verify that simlin_error_str returns static strings that shouldn't be freed."""
         # This test verifies our understanding that simlin_error_str returns
         # const static strings. If this crashes, our assumption is wrong.
-        for i in range(10):
+        for _i in range(10):
             error_code = 2  # XML_DESERIALIZATION error
             c_str = lib.simlin_error_str(error_code)
             assert c_str != ffi.NULL
 
             # Convert to Python string multiple times (shouldn't crash)
-            for j in range(5):
+            for _j in range(5):
                 python_str = ffi.string(c_str).decode("utf-8")
                 assert len(python_str) > 0
                 assert "XML" in python_str or "deserialization" in python_str.lower()
@@ -61,13 +63,11 @@ class TestErrorStringHandling:
         # Generate many errors rapidly
         for i in range(100):
             # Try various invalid imports
-            for j, invalid_data in enumerate([b"", b"x", b"not xml", b"\x00" * 10, b"\xFF" * 10]):
+            for j, invalid_data in enumerate([b"", b"x", b"not xml", b"\x00" * 10, b"\xff" * 10]):
                 invalid_file = tmp_path / f"invalid_{i}_{j}.stmx"
                 invalid_file.write_bytes(invalid_data)
-                try:
+                with contextlib.suppress(SimlinRuntimeError):
                     simlin.load(invalid_file)
-                except SimlinRuntimeError:
-                    pass  # Expected
 
         # Force garbage collection
         gc.collect()
@@ -75,7 +75,8 @@ class TestErrorStringHandling:
         # Check that we haven't leaked too many finalizer refs
         final_refs = len(_finalizer_refs)
         # Allow some tolerance for objects that may still be in scope
-        assert final_refs <= initial_refs + 10, f"Too many finalizer refs: {final_refs - initial_refs}"
+        leaked = final_refs - initial_refs
+        assert final_refs <= initial_refs + 10, f"Too many finalizer refs: {leaked}"
 
     def test_model_error_paths(self, xmile_model_path) -> None:
         """Test error handling in model operations."""

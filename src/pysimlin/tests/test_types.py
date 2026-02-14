@@ -1,14 +1,15 @@
 """Tests for types module."""
 
 import pytest
+
 from simlin import (
-    TimeSpec,
-    GraphicalFunctionScale,
-    GraphicalFunction,
-    Stock,
-    Flow,
     Aux,
     DominantPeriod,
+    Flow,
+    GraphicalFunction,
+    GraphicalFunctionScale,
+    Stock,
+    TimeSpec,
 )
 
 
@@ -37,7 +38,7 @@ class TestTimeSpec:
         """Test that TimeSpec is immutable."""
         ts = TimeSpec(start=0.0, stop=10.0, dt=0.1)
 
-        with pytest.raises(Exception):
+        with pytest.raises(AttributeError):
             ts.start = 5.0  # type: ignore
 
 
@@ -55,7 +56,7 @@ class TestGraphicalFunctionScale:
         """Test that GraphicalFunctionScale is immutable."""
         scale = GraphicalFunctionScale(min=0.0, max=100.0)
 
-        with pytest.raises(Exception):
+        with pytest.raises(AttributeError):
             scale.min = 10.0  # type: ignore
 
 
@@ -109,7 +110,7 @@ class TestGraphicalFunction:
             y_scale=y_scale,
         )
 
-        with pytest.raises(Exception):
+        with pytest.raises(AttributeError):
             gf.kind = "extrapolate"  # type: ignore
 
     def test_tuple_immutability(self) -> None:
@@ -180,7 +181,7 @@ class TestStock:
             outflows=("deaths",),
         )
 
-        with pytest.raises(Exception):
+        with pytest.raises(AttributeError):
             stock.name = "new_name"  # type: ignore
 
     def test_stock_tuple_fields(self) -> None:
@@ -238,7 +239,7 @@ class TestFlow:
         """Test that Flow is immutable."""
         flow = Flow(name="births", equation="population * birth_rate")
 
-        with pytest.raises(Exception):
+        with pytest.raises(AttributeError):
             flow.equation = "new_equation"  # type: ignore
 
     def test_flow_tuple_dimensions(self) -> None:
@@ -288,7 +289,7 @@ class TestAux:
         """Test that Aux is immutable."""
         aux = Aux(name="rate", equation="0.05")
 
-        with pytest.raises(Exception):
+        with pytest.raises(AttributeError):
             aux.name = "new_name"  # type: ignore
 
     def test_aux_tuple_dimensions(self) -> None:
@@ -350,7 +351,7 @@ class TestDominantPeriod:
             end_time=10.0,
         )
 
-        with pytest.raises(Exception):
+        with pytest.raises(AttributeError):
             period.start_time = 5.0  # type: ignore
 
     def test_dominant_period_tuple_loops(self) -> None:

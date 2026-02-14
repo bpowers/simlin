@@ -1,19 +1,20 @@
 """Tests for analysis types."""
 
-import pytest
 import numpy as np
-from simlin import LinkPolarity, LoopPolarity, Link, Loop
+import pytest
+
+from simlin import Link, LinkPolarity, Loop, LoopPolarity
 
 
 class TestLinkPolarity:
     """Test LinkPolarity enum."""
-    
+
     def test_link_polarity_values(self) -> None:
         """Test that link polarities have expected values."""
         assert LinkPolarity.POSITIVE == 0
         assert LinkPolarity.NEGATIVE == 1
         assert LinkPolarity.UNKNOWN == 2
-    
+
     def test_link_polarity_str(self) -> None:
         """Test string representation of link polarities."""
         assert str(LinkPolarity.POSITIVE) == "+"
@@ -23,12 +24,12 @@ class TestLinkPolarity:
 
 class TestLoopPolarity:
     """Test LoopPolarity enum."""
-    
+
     def test_loop_polarity_values(self) -> None:
         """Test that loop polarities have expected values."""
         assert LoopPolarity.REINFORCING == 0
         assert LoopPolarity.BALANCING == 1
-    
+
     def test_loop_polarity_str(self) -> None:
         """Test string representation of loop polarities."""
         assert str(LoopPolarity.REINFORCING) == "R"
@@ -37,53 +38,36 @@ class TestLoopPolarity:
 
 class TestLink:
     """Test Link dataclass."""
-    
+
     def test_link_creation(self) -> None:
         """Test creating Link instances."""
-        link = Link(
-            from_var="population",
-            to_var="births",
-            polarity=LinkPolarity.POSITIVE
-        )
-        
+        link = Link(from_var="population", to_var="births", polarity=LinkPolarity.POSITIVE)
+
         assert link.from_var == "population"
         assert link.to_var == "births"
         assert link.polarity == LinkPolarity.POSITIVE
         assert link.score is None
-    
+
     def test_link_with_score(self) -> None:
         """Test Link with LTM score data."""
         scores = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
-        link = Link(
-            from_var="A",
-            to_var="B",
-            polarity=LinkPolarity.NEGATIVE,
-            score=scores
-        )
-        
+        link = Link(from_var="A", to_var="B", polarity=LinkPolarity.NEGATIVE, score=scores)
+
         assert link.has_score()
         assert link.average_score() == pytest.approx(0.3)
         assert link.max_score() == pytest.approx(0.5)
-    
+
     def test_link_without_score(self) -> None:
         """Test Link without score data."""
-        link = Link(
-            from_var="X",
-            to_var="Y",
-            polarity=LinkPolarity.UNKNOWN
-        )
-        
+        link = Link(from_var="X", to_var="Y", polarity=LinkPolarity.UNKNOWN)
+
         assert not link.has_score()
         assert link.average_score() is None
         assert link.max_score() is None
-    
+
     def test_link_str(self) -> None:
         """Test string representation of Link."""
-        link = Link(
-            from_var="input",
-            to_var="output",
-            polarity=LinkPolarity.POSITIVE
-        )
+        link = Link(from_var="input", to_var="output", polarity=LinkPolarity.POSITIVE)
 
         str_repr = str(link)
         assert "input" in str_repr
@@ -93,12 +77,7 @@ class TestLink:
     def test_link_average_score_with_nan(self) -> None:
         """Test Link average_score handles NaN values correctly."""
         scores = np.array([np.nan, np.nan, 0.2, 0.3, 0.4])
-        link = Link(
-            from_var="A",
-            to_var="B",
-            polarity=LinkPolarity.POSITIVE,
-            score=scores
-        )
+        link = Link(from_var="A", to_var="B", polarity=LinkPolarity.POSITIVE, score=scores)
 
         avg = link.average_score()
         assert avg is not None
@@ -107,12 +86,7 @@ class TestLink:
     def test_link_max_score_with_nan(self) -> None:
         """Test Link max_score handles NaN values correctly."""
         scores = np.array([np.nan, 0.1, 0.5, 0.2, 0.3])
-        link = Link(
-            from_var="A",
-            to_var="B",
-            polarity=LinkPolarity.NEGATIVE,
-            score=scores
-        )
+        link = Link(from_var="A", to_var="B", polarity=LinkPolarity.NEGATIVE, score=scores)
 
         max_score = link.max_score()
         assert max_score is not None
@@ -121,12 +95,7 @@ class TestLink:
     def test_link_average_score_all_nan(self) -> None:
         """Test Link average_score returns NaN when all values are NaN."""
         scores = np.array([np.nan, np.nan, np.nan])
-        link = Link(
-            from_var="A",
-            to_var="B",
-            polarity=LinkPolarity.POSITIVE,
-            score=scores
-        )
+        link = Link(from_var="A", to_var="B", polarity=LinkPolarity.POSITIVE, score=scores)
 
         avg = link.average_score()
         assert avg is not None
@@ -195,7 +164,7 @@ class TestLoop:
             polarity=LoopPolarity.REINFORCING,
         )
 
-        with pytest.raises(Exception):
+        with pytest.raises(AttributeError):
             loop.id = "R2"  # type: ignore
 
     def test_loop_tuple_variables(self) -> None:

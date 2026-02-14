@@ -1,9 +1,9 @@
 """Pytest configuration and shared fixtures."""
 
 import os
-import pytest
 from pathlib import Path
-from typing import Generator
+
+import pytest
 
 
 def get_repo_root() -> Path:
@@ -82,4 +82,11 @@ def logistic_growth_json_path() -> Path:
 def subscripted_model_path() -> Path:
     """Return path to a model with subscripted (arrayed) variables."""
     # This model has flows with apply-to-all equations
-    return get_repo_root() / "test" / "test-models" / "tests" / "subscript_multiples" / "test_multiple_subscripts.stmx"
+    return (
+        get_repo_root()
+        / "test"
+        / "test-models"
+        / "tests"
+        / "subscript_multiples"
+        / "test_multiple_subscripts.stmx"
+    )

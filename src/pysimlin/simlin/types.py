@@ -1,7 +1,6 @@
 """Data structures for the simlin package."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -17,7 +16,7 @@ class TimeSpec:
     dt: float
     """Time step for simulation"""
 
-    units: Optional[str] = None
+    units: str | None = None
     """Time units (if specified)"""
 
 
@@ -41,7 +40,7 @@ class GraphicalFunction:
     Used in table functions and WITH LOOKUP expressions.
     """
 
-    x_points: Optional[tuple[float, ...]]
+    x_points: tuple[float, ...] | None
     """X coordinates. If None, uses implicit x scale from 0 to len(y_points)-1"""
 
     y_points: tuple[float, ...]
@@ -81,10 +80,10 @@ class Stock:
     outflows: tuple[str, ...]
     """Names of flows that decrease this stock"""
 
-    units: Optional[str] = None
+    units: str | None = None
     """Units (if specified)"""
 
-    documentation: Optional[str] = None
+    documentation: str | None = None
     """Documentation/comments"""
 
     dimensions: tuple[str, ...] = ()
@@ -112,10 +111,10 @@ class Flow:
     equation: str
     """Flow rate expression"""
 
-    units: Optional[str] = None
+    units: str | None = None
     """Units (if specified)"""
 
-    documentation: Optional[str] = None
+    documentation: str | None = None
     """Documentation/comments"""
 
     dimensions: tuple[str, ...] = ()
@@ -124,7 +123,7 @@ class Flow:
     non_negative: bool = False
     """Whether this flow is constrained to be non-negative"""
 
-    graphical_function: Optional[GraphicalFunction] = None
+    graphical_function: GraphicalFunction | None = None
     """Graphical/table function if this uses WITH LOOKUP"""
 
 
@@ -149,19 +148,19 @@ class Aux:
     equation: str
     """Equation defining this variable"""
 
-    initial_equation: Optional[str] = None
+    initial_equation: str | None = None
     """Initial value equation (for variables with memory like DELAY, SMOOTH)"""
 
-    units: Optional[str] = None
+    units: str | None = None
     """Units (if specified)"""
 
-    documentation: Optional[str] = None
+    documentation: str | None = None
     """Documentation/comments"""
 
     dimensions: tuple[str, ...] = ()
     """Dimension names for arrayed variables (empty if scalar)"""
 
-    graphical_function: Optional[GraphicalFunction] = None
+    graphical_function: GraphicalFunction | None = None
     """Graphical/table function if this uses WITH LOOKUP"""
 
 
@@ -175,10 +174,10 @@ class ModelIssue:
     message: str
     """Human-readable description of the issue"""
 
-    variable: Optional[str] = None
+    variable: str | None = None
     """Name of the variable with the issue (if applicable)"""
 
-    suggestion: Optional[str] = None
+    suggestion: str | None = None
     """Suggested fix for the issue (if available)"""
 
 
@@ -192,8 +191,8 @@ class UnitIssue:
     message: str
     """Description of the unit issue"""
 
-    expected_units: Optional[str] = None
+    expected_units: str | None = None
     """Expected units for this variable"""
 
-    actual_units: Optional[str] = None
+    actual_units: str | None = None
     """Actual units computed for this variable"""

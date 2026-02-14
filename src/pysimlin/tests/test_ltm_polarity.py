@@ -5,9 +5,8 @@ These tests verify that the loop score polarity matches the LTM papers:
 - Balancing (B) loops have NEGATIVE loop scores
 """
 
-import json
 import math
-import pytest
+
 import numpy as np
 
 from simlin import Project
@@ -34,8 +33,8 @@ class TestLtmReinforcingLoop:
         model = project.main_model
 
         # Add the reinforcing loop structure using the edit context
-        with model.edit() as (current, patch):
-            from simlin.json_types import Stock, Flow, Auxiliary
+        with model.edit() as (_current, patch):
+            from simlin.json_types import Auxiliary, Flow, Stock
 
             patch.upsert_stock(
                 Stock(
@@ -65,7 +64,7 @@ class TestLtmReinforcingLoop:
         loops = run.loops
         assert len(loops) >= 1, "Should have at least one loop"
 
-        r_loops = [l for l in loops if l.polarity == LoopPolarity.REINFORCING]
+        r_loops = [lp for lp in loops if lp.polarity == LoopPolarity.REINFORCING]
         assert len(r_loops) >= 1, "Should have at least one reinforcing loop"
 
         # Get the absolute loop score for the reinforcing loop
@@ -75,7 +74,7 @@ class TestLtmReinforcingLoop:
         sim = model.simulate(enable_ltm=True)
         sim.run_to_end()
 
-        abs_loop_score_var = f"$\u205Altm\u205Aabs_loop_score\u205A{r_loop.id}"
+        abs_loop_score_var = f"$\u205altm\u205aabs_loop_score\u205a{r_loop.id}"
         loop_scores = sim.get_series(abs_loop_score_var)
 
         # Filter out NaN and zero values (initial timesteps and equilibrium)
@@ -112,8 +111,8 @@ class TestLtmBalancingLoop:
         model = project.main_model
 
         # Add the balancing loop structure
-        with model.edit() as (current, patch):
-            from simlin.json_types import Stock, Flow, Auxiliary
+        with model.edit() as (_current, patch):
+            from simlin.json_types import Auxiliary, Flow, Stock
 
             patch.upsert_aux(
                 Auxiliary(
@@ -155,7 +154,7 @@ class TestLtmBalancingLoop:
         loops = run.loops
         assert len(loops) >= 1, "Should have at least one loop"
 
-        b_loops = [l for l in loops if l.polarity == LoopPolarity.BALANCING]
+        b_loops = [lp for lp in loops if lp.polarity == LoopPolarity.BALANCING]
         assert len(b_loops) >= 1, "Should have at least one balancing loop"
 
         # Get the absolute loop score for the balancing loop
@@ -165,7 +164,7 @@ class TestLtmBalancingLoop:
         sim = model.simulate(enable_ltm=True)
         sim.run_to_end()
 
-        abs_loop_score_var = f"$\u205Altm\u205Aabs_loop_score\u205A{b_loop.id}"
+        abs_loop_score_var = f"$\u205altm\u205aabs_loop_score\u205a{b_loop.id}"
         loop_scores = sim.get_series(abs_loop_score_var)
 
         # Filter out NaN and zero values (initial timesteps and equilibrium)
@@ -176,8 +175,7 @@ class TestLtmBalancingLoop:
         # ALL valid scores for a balancing loop should be NEGATIVE
         for score in valid_scores:
             assert score < 0.0, (
-                f"Balancing loop score should be negative, got {score}. "
-                f"All scores: {valid_scores}"
+                f"Balancing loop score should be negative, got {score}. All scores: {valid_scores}"
             )
 
 
@@ -187,25 +185,25 @@ class TestLtmUndeterminedPolarity:
     def test_from_runtime_scores_undetermined(self) -> None:
         """Test that from_runtime_scores correctly classifies mixed-sign scores."""
         # Create an array with both positive and negative values
-        mixed_scores = np.array([float('nan'), 1.0, 2.0, -1.0, -2.0, 3.0])
+        mixed_scores = np.array([float("nan"), 1.0, 2.0, -1.0, -2.0, 3.0])
         polarity = LoopPolarity.from_runtime_scores(mixed_scores)
         assert polarity == LoopPolarity.UNDETERMINED
 
     def test_from_runtime_scores_reinforcing(self) -> None:
         """Test that from_runtime_scores correctly classifies all-positive scores."""
-        positive_scores = np.array([float('nan'), 1.0, 2.0, 3.0, 0.5])
+        positive_scores = np.array([float("nan"), 1.0, 2.0, 3.0, 0.5])
         polarity = LoopPolarity.from_runtime_scores(positive_scores)
         assert polarity == LoopPolarity.REINFORCING
 
     def test_from_runtime_scores_balancing(self) -> None:
         """Test that from_runtime_scores correctly classifies all-negative scores."""
-        negative_scores = np.array([float('nan'), -1.0, -2.0, -3.0, -0.5])
+        negative_scores = np.array([float("nan"), -1.0, -2.0, -3.0, -0.5])
         polarity = LoopPolarity.from_runtime_scores(negative_scores)
         assert polarity == LoopPolarity.BALANCING
 
     def test_from_runtime_scores_all_nan(self) -> None:
         """Test that from_runtime_scores returns None for all-NaN scores."""
-        nan_scores = np.array([float('nan'), float('nan'), float('nan')])
+        nan_scores = np.array([float("nan"), float("nan"), float("nan")])
         polarity = LoopPolarity.from_runtime_scores(nan_scores)
         assert polarity is None
 
@@ -255,8 +253,8 @@ class TestStructuralPolarityClassification:
 
         model = project.main_model
 
-        with model.edit() as (current, patch):
-            from simlin.json_types import Stock, Flow, Auxiliary
+        with model.edit() as (_current, patch):
+            from simlin.json_types import Auxiliary, Flow, Stock
 
             patch.upsert_stock(
                 Stock(
@@ -283,7 +281,7 @@ class TestStructuralPolarityClassification:
         loops = run.loops
 
         assert len(loops) >= 1, "Should have at least one loop"
-        r_loops = [l for l in loops if l.polarity == LoopPolarity.REINFORCING]
+        r_loops = [lp for lp in loops if lp.polarity == LoopPolarity.REINFORCING]
         assert len(r_loops) >= 1, "Simple exponential growth should have a Reinforcing loop"
 
     def test_all_known_polarities_balancing(self) -> None:
@@ -301,8 +299,8 @@ class TestStructuralPolarityClassification:
 
         model = project.main_model
 
-        with model.edit() as (current, patch):
-            from simlin.json_types import Stock, Flow, Auxiliary
+        with model.edit() as (_current, patch):
+            from simlin.json_types import Auxiliary, Flow, Stock
 
             patch.upsert_aux(
                 Auxiliary(
@@ -341,5 +339,5 @@ class TestStructuralPolarityClassification:
         loops = run.loops
 
         assert len(loops) >= 1, "Should have at least one loop"
-        b_loops = [l for l in loops if l.polarity == LoopPolarity.BALANCING]
+        b_loops = [lp for lp in loops if lp.polarity == LoopPolarity.BALANCING]
         assert len(b_loops) >= 1, "Goal-seeking model should have a Balancing loop"

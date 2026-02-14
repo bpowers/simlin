@@ -1,7 +1,8 @@
 """Tests for the _dt module (dt parsing and validation)."""
 
 import pytest
-from simlin._dt import validate_dt, parse_dt
+
+from simlin._dt import parse_dt, validate_dt
 
 
 class TestValidateDt:

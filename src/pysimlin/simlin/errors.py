@@ -1,8 +1,8 @@
 """Error handling for the simlin package."""
 
-from enum import IntEnum
-from typing import Optional, TypedDict
 from dataclasses import dataclass
+from enum import IntEnum
+from typing import TypedDict
 
 
 class ErrorCode(IntEnum):
@@ -82,55 +82,57 @@ class ErrorDetail:
 
     code: ErrorCode
     message: str
-    model_name: Optional[str] = None
-    variable_name: Optional[str] = None
+    model_name: str | None = None
+    variable_name: str | None = None
     start_offset: int = 0
     end_offset: int = 0
     kind: ErrorKind = ErrorKind.VARIABLE
     unit_error_kind: UnitErrorKind = UnitErrorKind.NOT_APPLICABLE
-    
+
     def __str__(self) -> str:
         """Return a human-readable string representation."""
         parts = [f"Error {self.code.name}"]
-        
+
         if self.model_name:
             parts.append(f"in model '{self.model_name}'")
-        
+
         if self.variable_name:
             parts.append(f"for variable '{self.variable_name}'")
-            
+
         if self.message:
             parts.append(f": {self.message}")
-            
+
         if self.start_offset or self.end_offset:
             parts.append(f" (at {self.start_offset}:{self.end_offset})")
-            
+
         return " ".join(parts)
 
 
 class SimlinError(Exception):
     """Base exception for all Simlin errors."""
-    
-    def __init__(self, message: str, code: Optional[ErrorCode] = None):
+
+    def __init__(self, message: str, code: ErrorCode | None = None):
         super().__init__(message)
         self.code = code
 
 
 class SimlinCompilationError(SimlinError):
     """Exception raised when model compilation fails."""
-    
-    def __init__(self, message: str, errors: Optional[list[ErrorDetail]] = None):
+
+    def __init__(self, message: str, errors: list[ErrorDetail] | None = None):
         super().__init__(message)
         self.errors = errors or []
 
 
 class SimlinRuntimeError(SimlinError):
     """Exception raised during simulation execution."""
+
     pass
 
 
 class SimlinImportError(SimlinError):
     """Exception raised when importing a model fails."""
+
     pass
 
 

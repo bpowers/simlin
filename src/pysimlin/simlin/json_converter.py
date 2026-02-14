@@ -7,7 +7,10 @@ the Rust serde expectations in libsimlin.
 from __future__ import annotations
 
 from dataclasses import MISSING, fields
-from typing import Any, Callable, Union
+from typing import TYPE_CHECKING, Any, Union
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import cattrs
 
@@ -408,7 +411,7 @@ def _create_converter() -> cattrs.Converter:
 
     def structure_link_view_element(d: dict[str, Any], _: type) -> LinkViewElement:
         multi_points = None
-        if "multiPoints" in d and d["multiPoints"]:
+        if d.get("multiPoints"):
             multi_points = [conv.structure(p, LinkPoint) for p in d["multiPoints"]]
         return LinkViewElement(
             uid=d["uid"],
@@ -490,7 +493,7 @@ def _create_converter() -> cattrs.Converter:
     # ElementEquation: handle optional graphicalFunction
     def structure_element_equation(d: dict[str, Any], _: type) -> ElementEquation:
         gf = None
-        if "graphicalFunction" in d and d["graphicalFunction"]:
+        if d.get("graphicalFunction"):
             gf = conv.structure(d["graphicalFunction"], GraphicalFunction)
         return ElementEquation(
             subscript=d["subscript"],
@@ -504,7 +507,7 @@ def _create_converter() -> cattrs.Converter:
     # ArrayedEquation: handle elements list with nested types
     def structure_arrayed_equation(d: dict[str, Any], _: type) -> ArrayedEquation:
         elements = None
-        if "elements" in d and d["elements"]:
+        if d.get("elements"):
             elements = [conv.structure(e, ElementEquation) for e in d["elements"]]
         return ArrayedEquation(
             dimensions=d.get("dimensions", []),
@@ -524,7 +527,7 @@ def _create_converter() -> cattrs.Converter:
     # Stock: handle nested types
     def structure_stock(d: dict[str, Any], _: type) -> Stock:
         arrayed_equation = None
-        if "arrayedEquation" in d and d["arrayedEquation"]:
+        if d.get("arrayedEquation"):
             arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
         return Stock(
             name=d["name"],
@@ -545,10 +548,10 @@ def _create_converter() -> cattrs.Converter:
     # Flow: handle nested types
     def structure_flow(d: dict[str, Any], _: type) -> Flow:
         gf = None
-        if "graphicalFunction" in d and d["graphicalFunction"]:
+        if d.get("graphicalFunction"):
             gf = conv.structure(d["graphicalFunction"], GraphicalFunction)
         arrayed_equation = None
-        if "arrayedEquation" in d and d["arrayedEquation"]:
+        if d.get("arrayedEquation"):
             arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
         return Flow(
             name=d["name"],
@@ -568,10 +571,10 @@ def _create_converter() -> cattrs.Converter:
     # Auxiliary: handle nested types
     def structure_auxiliary(d: dict[str, Any], _: type) -> Auxiliary:
         gf = None
-        if "graphicalFunction" in d and d["graphicalFunction"]:
+        if d.get("graphicalFunction"):
             gf = conv.structure(d["graphicalFunction"], GraphicalFunction)
         arrayed_equation = None
-        if "arrayedEquation" in d and d["arrayedEquation"]:
+        if d.get("arrayedEquation"):
             arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
         return Auxiliary(
             name=d["name"],
@@ -652,12 +655,9 @@ def _create_converter() -> cattrs.Converter:
 
     # View: handle elements list
     def structure_view(d: dict[str, Any], _: type) -> View:
-        elements = [
-            structure_view_element(e, ViewElement)
-            for e in d.get("elements", [])
-        ]
+        elements = [structure_view_element(e, ViewElement) for e in d.get("elements", [])]
         view_box = None
-        if "viewBox" in d and d["viewBox"]:
+        if d.get("viewBox"):
             vb = d["viewBox"]
             view_box = Rect(x=vb["x"], y=vb["y"], width=vb["width"], height=vb["height"])
         return View(
@@ -676,12 +676,10 @@ def _create_converter() -> cattrs.Converter:
         auxiliaries = [conv.structure(a, Auxiliary) for a in d.get("auxiliaries", [])]
         modules = [conv.structure(m, Module) for m in d.get("modules", [])]
         sim_specs = None
-        if "simSpecs" in d and d["simSpecs"]:
+        if d.get("simSpecs"):
             sim_specs = conv.structure(d["simSpecs"], SimSpecs)
         views = [conv.structure(v, View) for v in d.get("views", [])]
-        loop_metadata = [
-            conv.structure(lm, LoopMetadata) for lm in d.get("loopMetadata", [])
-        ]
+        loop_metadata = [conv.structure(lm, LoopMetadata) for lm in d.get("loopMetadata", [])]
         return Model(
             name=d["name"],
             stocks=stocks,

@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import given, strategies as st, settings, assume
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 try:
     import jsonschema
@@ -19,26 +20,22 @@ try:
 except ImportError:
     HAS_JSONSCHEMA = False
 
+from simlin.json_converter import converter
 from simlin.json_types import (
-    Stock,
-    Flow,
     Auxiliary,
-    Module,
-    ModuleReference,
+    DeleteVariable,
+    Flow,
     GraphicalFunction,
     GraphicalFunctionScale,
-    ArrayedEquation,
-    ElementEquation,
-    JsonProjectPatch,
     JsonModelPatch,
-    UpsertStock,
-    UpsertFlow,
-    UpsertAux,
-    DeleteVariable,
+    JsonProjectPatch,
+    Module,
+    ModuleReference,
     RenameVariable,
+    Stock,
+    UpsertFlow,
+    UpsertStock,
 )
-from simlin.json_converter import converter
-
 
 # Load the JSON schema
 SCHEMA_PATH = Path(__file__).parents[3] / "doc" / "simlin-project.schema.json"

@@ -7,41 +7,41 @@ allowing you to load, run, and analyze system dynamics models.
 
 __version__ = "0.1.0"
 
-from typing import Union
 from pathlib import Path
+from typing import Union
 
+from .analysis import (
+    Link,
+    LinkPolarity,
+    Loop,
+    LoopPolarity,
+)
 from .errors import (
-    SimlinError,
-    SimlinCompilationError,
-    SimlinRuntimeError,
-    SimlinImportError,
     ErrorCode,
     ErrorDetail,
+    SimlinCompilationError,
+    SimlinError,
+    SimlinImportError,
+    SimlinRuntimeError,
     error_code_to_string,
 )
-from .analysis import (
-    LinkPolarity,
-    LoopPolarity,
-    Link,
-    Loop,
+from .model import Model
+from .project import JSON_FORMAT_SDAI, JSON_FORMAT_SIMLIN, Project
+from .run import (
+    DominantPeriod,
+    Run,
 )
+from .sim import Sim
 from .types import (
-    TimeSpec,
-    GraphicalFunctionScale,
-    GraphicalFunction,
-    Stock,
-    Flow,
     Aux,
+    Flow,
+    GraphicalFunction,
+    GraphicalFunctionScale,
     ModelIssue,
+    Stock,
+    TimeSpec,
     UnitIssue,
 )
-from .run import (
-    Run,
-    DominantPeriod,
-)
-from .project import Project, JSON_FORMAT_SIMLIN, JSON_FORMAT_SDAI
-from .model import Model
-from .sim import Sim
 
 
 def load(path: Union[str, Path]) -> Model:
@@ -62,10 +62,11 @@ def load(path: Union[str, Path]) -> Model:
         >>> import simlin
         >>> model = simlin.load("population.stmx")
         >>> print(f"Model has {len(model.stocks)} stocks")
-        >>> model.base_case.results['population'].plot()
+        >>> model.base_case.results["population"].plot()
     """
     from pathlib import Path as PathlibPath
-    from ._ffi import ffi, lib, check_out_error
+
+    from ._ffi import check_out_error, ffi, lib
 
     path = PathlibPath(path)
 
@@ -107,37 +108,31 @@ def load(path: Union[str, Path]) -> Model:
 
 
 __all__ = [
-    # Top-level functions
-    "load",
-    # Main classes
-    "Project",
-    "Model",
-    "Sim",
-    "Run",
-    # Errors
-    "SimlinError",
-    "SimlinCompilationError",
-    "SimlinRuntimeError",
-    "SimlinImportError",
+    "JSON_FORMAT_SDAI",
+    "JSON_FORMAT_SIMLIN",
+    "Aux",
+    "DominantPeriod",
     "ErrorCode",
     "ErrorDetail",
-    "error_code_to_string",
-    # Analysis types
-    "LinkPolarity",
-    "LoopPolarity",
-    "Link",
-    "Loop",
-    "DominantPeriod",
-    # Model structure types
-    "TimeSpec",
-    "GraphicalFunctionScale",
-    "GraphicalFunction",
-    "Stock",
     "Flow",
-    "Aux",
+    "GraphicalFunction",
+    "GraphicalFunctionScale",
+    "Link",
+    "LinkPolarity",
+    "Loop",
+    "LoopPolarity",
+    "Model",
     "ModelIssue",
+    "Project",
+    "Run",
+    "Sim",
+    "SimlinCompilationError",
+    "SimlinError",
+    "SimlinImportError",
+    "SimlinRuntimeError",
+    "Stock",
+    "TimeSpec",
     "UnitIssue",
-    # JSON format constants
-    "JSON_FORMAT_SIMLIN",
-    "JSON_FORMAT_SDAI",
+    "error_code_to_string",
+    "load",
 ]

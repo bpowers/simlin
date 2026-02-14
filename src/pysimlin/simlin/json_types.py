@@ -7,8 +7,7 @@ and are used for serializing patches to send to the simulation engine.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Union
-
+from typing import Union
 
 # Supporting types
 
@@ -28,8 +27,8 @@ class GraphicalFunction:
     points: list[tuple[float, float]] = field(default_factory=list)
     y_points: list[float] = field(default_factory=list)
     kind: str = ""
-    x_scale: Optional[GraphicalFunctionScale] = None
-    y_scale: Optional[GraphicalFunctionScale] = None
+    x_scale: GraphicalFunctionScale | None = None
+    y_scale: GraphicalFunctionScale | None = None
 
 
 @dataclass
@@ -39,7 +38,7 @@ class ElementEquation:
     subscript: str
     equation: str
     initial_equation: str = ""
-    graphical_function: Optional[GraphicalFunction] = None
+    graphical_function: GraphicalFunction | None = None
 
 
 @dataclass
@@ -47,9 +46,9 @@ class ArrayedEquation:
     """Equation structure for arrayed/subscripted variables."""
 
     dimensions: list[str] = field(default_factory=list)
-    equation: Optional[str] = None
-    initial_equation: Optional[str] = None
-    elements: Optional[list[ElementEquation]] = None
+    equation: str | None = None
+    initial_equation: str | None = None
+    elements: list[ElementEquation] | None = None
 
 
 @dataclass
@@ -77,7 +76,7 @@ class Stock:
     documentation: str = ""
     can_be_module_input: bool = False
     is_public: bool = False
-    arrayed_equation: Optional[ArrayedEquation] = None
+    arrayed_equation: ArrayedEquation | None = None
 
 
 @dataclass
@@ -89,11 +88,11 @@ class Flow:
     equation: str = ""
     units: str = ""
     non_negative: bool = False
-    graphical_function: Optional[GraphicalFunction] = None
+    graphical_function: GraphicalFunction | None = None
     documentation: str = ""
     can_be_module_input: bool = False
     is_public: bool = False
-    arrayed_equation: Optional[ArrayedEquation] = None
+    arrayed_equation: ArrayedEquation | None = None
 
 
 @dataclass
@@ -105,11 +104,11 @@ class Auxiliary:
     equation: str = ""
     initial_equation: str = ""
     units: str = ""
-    graphical_function: Optional[GraphicalFunction] = None
+    graphical_function: GraphicalFunction | None = None
     documentation: str = ""
     can_be_module_input: bool = False
     is_public: bool = False
-    arrayed_equation: Optional[ArrayedEquation] = None
+    arrayed_equation: ArrayedEquation | None = None
 
 
 @dataclass
@@ -207,7 +206,7 @@ class LinkViewElement:
     uid: int
     from_uid: int
     to_uid: int
-    arc: Optional[float] = None
+    arc: float | None = None
     multi_points: list[LinkPoint] = field(default_factory=list)
 
 
@@ -251,7 +250,7 @@ class View:
 
     elements: list[ViewElement] = field(default_factory=list)
     kind: str = ""
-    view_box: Optional[Rect] = None
+    view_box: Rect | None = None
     zoom: float = 0.0
 
 
@@ -280,7 +279,7 @@ class Dimension:
     name: str
     elements: list[str] = field(default_factory=list)
     size: int = 0
-    maps_to: Optional[str] = None
+    maps_to: str | None = None
 
 
 @dataclass
@@ -312,7 +311,7 @@ class Model:
     flows: list[Flow] = field(default_factory=list)
     auxiliaries: list[Auxiliary] = field(default_factory=list)
     modules: list[Module] = field(default_factory=list)
-    sim_specs: Optional[SimSpecs] = None
+    sim_specs: SimSpecs | None = None
     views: list[View] = field(default_factory=list)
     loop_metadata: list[LoopMetadata] = field(default_factory=list)
 
