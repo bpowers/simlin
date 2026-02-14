@@ -7,10 +7,11 @@
 //! Functions for inspecting models: reference counting, listing variables,
 //! querying dependencies, retrieving causal links, and getting LaTeX equations.
 
-use simlin_engine::{self as engine, canonicalize};
+use simlin_engine::{self as engine, canonicalize, datamodel};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
+use std::sync::MutexGuard;
 
 use crate::ffi::{SimlinLink, SimlinLinkPolarity, SimlinLinks};
 use crate::ffi_error::SimlinError;
@@ -20,6 +21,49 @@ use crate::{
     clear_out_error, drop_c_string, drop_links_vec, require_model, store_anyhow_error, store_error,
     SimlinErrorCode, SimlinModel,
 };
+
+/// Allocate an FFI output buffer and copy `bytes` into it.
+///
+/// On success, writes the buffer pointer and length to `out_buffer`/`out_len`
+/// and returns `true`. On allocation failure, stores an error and returns `false`.
+///
+/// # Safety
+/// `out_buffer` and `out_len` must be valid, non-null pointers.
+unsafe fn write_bytes_to_ffi_output(
+    bytes: &[u8],
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+    context: &str,
+) -> bool {
+    let len = bytes.len();
+    let buf = simlin_malloc(len);
+    if buf.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message(format!("allocation failed while serializing {context}")),
+        );
+        return false;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+    *out_buffer = buf;
+    *out_len = len;
+    true
+}
+
+/// Find a model by name in a locked project.
+fn find_model_in_project<'a>(
+    project: &'a MutexGuard<'_, engine::Project>,
+    model_name: &str,
+) -> Option<&'a datamodel::Model> {
+    let canonical = canonicalize(model_name);
+    project
+        .datamodel
+        .models
+        .iter()
+        .find(|m| canonicalize(&m.name) == canonical)
+}
 
 /// Increments the reference count of a model
 ///
@@ -564,12 +608,7 @@ pub unsafe extern "C" fn simlin_model_get_var_json(
     };
     let canonical_name = canonicalize(name_str);
 
-    let dm_model = match project_locked
-        .datamodel
-        .models
-        .iter()
-        .find(|m| canonicalize(&m.name) == canonicalize(&model_ref.model_name))
-    {
+    let dm_model = match find_model_in_project(&project_locked, &model_ref.model_name) {
         Some(m) => m,
         None => {
             store_error(
@@ -612,20 +651,7 @@ pub unsafe extern "C" fn simlin_model_get_var_json(
         }
     };
 
-    let len = bytes.len();
-    let buf = simlin_malloc(len);
-    if buf.is_null() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("allocation failed while serializing variable"),
-        );
-        return;
-    }
-
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
-    *out_buffer = buf;
-    *out_len = len;
+    write_bytes_to_ffi_output(&bytes, out_buffer, out_len, out_error, "variable");
 }
 
 /// Gets all variables from the model as a tagged JSON array.
@@ -659,12 +685,7 @@ pub unsafe extern "C" fn simlin_model_get_vars_json(
     let model_ref = ffi_try!(out_error, require_model(model));
     let project_locked = (*model_ref.project).project.lock().unwrap();
 
-    let dm_model = match project_locked
-        .datamodel
-        .models
-        .iter()
-        .find(|m| canonicalize(&m.name) == canonicalize(&model_ref.model_name))
-    {
+    let dm_model = match find_model_in_project(&project_locked, &model_ref.model_name) {
         Some(m) => m,
         None => {
             store_error(
@@ -694,20 +715,7 @@ pub unsafe extern "C" fn simlin_model_get_vars_json(
         }
     };
 
-    let len = bytes.len();
-    let buf = simlin_malloc(len);
-    if buf.is_null() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("allocation failed while serializing variables"),
-        );
-        return;
-    }
-
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
-    *out_buffer = buf;
-    *out_len = len;
+    write_bytes_to_ffi_output(&bytes, out_buffer, out_len, out_error, "variables");
 }
 
 /// Gets the effective sim specs for a model as JSON.
@@ -742,13 +750,8 @@ pub unsafe extern "C" fn simlin_model_get_sim_specs_json(
     let model_ref = ffi_try!(out_error, require_model(model));
     let project_locked = (*model_ref.project).project.lock().unwrap();
 
-    let dm_model = project_locked
-        .datamodel
-        .models
-        .iter()
-        .find(|m| canonicalize(&m.name) == canonicalize(&model_ref.model_name));
+    let dm_model = find_model_in_project(&project_locked, &model_ref.model_name);
 
-    // Use model-level sim_specs if present, otherwise project-level
     let dm_sim_specs = dm_model
         .and_then(|m| m.sim_specs.as_ref())
         .unwrap_or(&project_locked.datamodel.sim_specs);
@@ -767,18 +770,5 @@ pub unsafe extern "C" fn simlin_model_get_sim_specs_json(
         }
     };
 
-    let len = bytes.len();
-    let buf = simlin_malloc(len);
-    if buf.is_null() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("allocation failed while serializing sim specs"),
-        );
-        return;
-    }
-
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
-    *out_buffer = buf;
-    *out_len = len;
+    write_bytes_to_ffi_output(&bytes, out_buffer, out_len, out_error, "sim specs");
 }

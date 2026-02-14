@@ -285,10 +285,42 @@ export function simlin_model_get_incoming_links(model: SimlinModelPtr, varName: 
 }
 
 /**
+ * Call a WASM FFI function that writes its result to an out_buffer/out_len pair.
+ * Handles error checking, buffer copying, and memory cleanup.
+ */
+function callBufferReturningFn(
+  invoke: (outBuf: number, outLen: number, outErr: number) => void,
+): Uint8Array {
+  const outBufPtr = allocOutPtr();
+  const outLenPtr = allocOutUsize();
+  const outErrPtr = allocOutPtr();
+
+  try {
+    invoke(outBufPtr, outLenPtr, outErrPtr);
+    const errPtr = readOutPtr(outErrPtr);
+
+    if (errPtr !== 0) {
+      const code = simlin_error_get_code(errPtr);
+      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
+      simlin_error_free(errPtr);
+      throw new SimlinError(message, code, details);
+    }
+
+    const bufPtr = readOutPtr(outBufPtr);
+    const len = readOutUsize(outLenPtr);
+    const data = copyFromWasm(bufPtr, len);
+    free(bufPtr);
+    return data;
+  } finally {
+    free(outBufPtr);
+    free(outLenPtr);
+    free(outErrPtr);
+  }
+}
+
+/**
  * Get a single variable's data as JSON.
- * @param model Model pointer
- * @param varName Variable name
- * @returns JSON bytes for the variable
  */
 export function simlin_model_get_var_json(model: SimlinModelPtr, varName: string): Uint8Array {
   const exports = getExports();
@@ -301,115 +333,37 @@ export function simlin_model_get_var_json(model: SimlinModelPtr, varName: string
   ) => void;
 
   const varNamePtr = stringToWasm(varName);
-  const outBufPtr = allocOutPtr();
-  const outLenPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
-
   try {
-    fn(model, varNamePtr, outBufPtr, outLenPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-
-    const bufPtr = readOutPtr(outBufPtr);
-    const len = readOutUsize(outLenPtr);
-    const data = copyFromWasm(bufPtr, len);
-    free(bufPtr);
-    return data;
+    return callBufferReturningFn((outBuf, outLen, outErr) => fn(model, varNamePtr, outBuf, outLen, outErr));
   } finally {
     free(varNamePtr);
-    free(outBufPtr);
-    free(outLenPtr);
-    free(outErrPtr);
   }
 }
 
 /**
  * Get all variables' data as a JSON array.
- * @param model Model pointer
- * @returns JSON bytes for all variables
  */
 export function simlin_model_get_vars_json(model: SimlinModelPtr): Uint8Array {
-  const exports = getExports();
-  const fn = exports.simlin_model_get_vars_json as (
+  const fn = getExports().simlin_model_get_vars_json as (
     model: number,
     outBuf: number,
     outLen: number,
     outErr: number,
   ) => void;
 
-  const outBufPtr = allocOutPtr();
-  const outLenPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(model, outBufPtr, outLenPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-
-    const bufPtr = readOutPtr(outBufPtr);
-    const len = readOutUsize(outLenPtr);
-    const data = copyFromWasm(bufPtr, len);
-    free(bufPtr);
-    return data;
-  } finally {
-    free(outBufPtr);
-    free(outLenPtr);
-    free(outErrPtr);
-  }
+  return callBufferReturningFn((outBuf, outLen, outErr) => fn(model, outBuf, outLen, outErr));
 }
 
 /**
  * Get simulation specs as JSON.
- * @param model Model pointer
- * @returns JSON bytes for sim specs
  */
 export function simlin_model_get_sim_specs_json(model: SimlinModelPtr): Uint8Array {
-  const exports = getExports();
-  const fn = exports.simlin_model_get_sim_specs_json as (
+  const fn = getExports().simlin_model_get_sim_specs_json as (
     model: number,
     outBuf: number,
     outLen: number,
     outErr: number,
   ) => void;
 
-  const outBufPtr = allocOutPtr();
-  const outLenPtr = allocOutUsize();
-  const outErrPtr = allocOutPtr();
-
-  try {
-    fn(model, outBufPtr, outLenPtr, outErrPtr);
-    const errPtr = readOutPtr(outErrPtr);
-
-    if (errPtr !== 0) {
-      const code = simlin_error_get_code(errPtr);
-      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
-      const details = readAllErrorDetails(errPtr);
-      simlin_error_free(errPtr);
-      throw new SimlinError(message, code, details);
-    }
-
-    const bufPtr = readOutPtr(outBufPtr);
-    const len = readOutUsize(outLenPtr);
-    const data = copyFromWasm(bufPtr, len);
-    free(bufPtr);
-    return data;
-  } finally {
-    free(outBufPtr);
-    free(outLenPtr);
-    free(outErrPtr);
-  }
+  return callBufferReturningFn((outBuf, outLen, outErr) => fn(model, outBuf, outLen, outErr));
 }
