@@ -176,6 +176,11 @@ impl SearchGraph {
     /// `visiting`: set of variables on the current DFS path
     /// `stack`: the current path for recording discovered loops
     /// `best_score`: highest score seen at each variable (persists across stock iterations)
+    ///
+    /// Recursion depth is bounded by the number of unique variables in the model
+    /// (the `visiting` set prevents revisiting nodes on the current path). For
+    /// typical SD models (tens to low hundreds of variables) this is safe; very
+    /// large models (1000+ variables) could in theory approach stack limits.
     #[allow(clippy::too_many_arguments)]
     fn check_outbound_uses(
         &self,
@@ -273,14 +278,24 @@ fn parse_link_offsets(results: &Results<f64>) -> Vec<LinkOffset> {
     link_offsets
 }
 
-/// Identify stock variables from the project's first non-implicit model.
+/// Look up the main (non-implicit) model deterministically by canonical name "main".
 ///
-/// Only examines the first non-implicit model, consistent with `discover_loops()`
-/// which builds the `CausalGraph` from the same model.
+/// Falls back to the first non-implicit model if "main" isn't found (shouldn't
+/// happen in practice for well-formed projects).
+fn find_main_model(project: &Project) -> Option<&std::sync::Arc<crate::model::ModelStage1>> {
+    let main_ident = crate::common::canonicalize("main");
+    project
+        .models
+        .get(&main_ident)
+        .filter(|m| !m.implicit)
+        .or_else(|| project.models.values().find(|m| !m.implicit))
+}
+
+/// Identify stock variables from the project's main model.
 fn get_stock_variables(project: &Project) -> Vec<Ident<Canonical>> {
     let mut stocks = Vec::new();
 
-    let main_model = match project.models.values().find(|m| !m.implicit) {
+    let main_model = match find_main_model(project) {
         Some(model) => model,
         None => return stocks,
     };
@@ -346,16 +361,14 @@ pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<F
         return Ok(Vec::new());
     }
 
-    // Build a CausalGraph to convert paths to Loop objects
-    let main_model = project
-        .models
-        .values()
-        .find(|m| !m.implicit)
-        .ok_or_else(|| crate::common::Error {
-            kind: crate::common::ErrorKind::Model,
-            code: crate::common::ErrorCode::NotSimulatable,
-            details: Some("No non-implicit model found for loop discovery".to_string()),
-        })?;
+    // Build a CausalGraph to convert paths to Loop objects.
+    // Uses find_main_model for deterministic model selection (HashMap iteration
+    // order is non-deterministic, so we look up "main" by canonical name).
+    let main_model = find_main_model(project).ok_or_else(|| crate::common::Error {
+        kind: crate::common::ErrorKind::Model,
+        code: crate::common::ErrorCode::NotSimulatable,
+        details: Some("No non-implicit model found for loop discovery".to_string()),
+    })?;
     let causal_graph = CausalGraph::from_model(main_model, project)?;
 
     // Convert paths to FoundLoop objects with scores
@@ -367,7 +380,27 @@ pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<F
         let loop_stocks = causal_graph.find_stocks_in_loop(path);
         let polarity_structural = causal_graph.calculate_polarity(&links);
 
-        // Compute signed loop score at each timestep
+        // Precompute the results offset for each link in this loop, avoiding
+        // repeated HashMap lookups and Ident clones in the per-timestep inner loop.
+        let mut link_result_offsets: Vec<usize> = Vec::with_capacity(links.len());
+        for link in &links {
+            let offset = link_offset_map
+                .get(&(link.from.clone(), link.to.clone()))
+                .ok_or_else(|| crate::common::Error {
+                    kind: crate::common::ErrorKind::Model,
+                    code: crate::common::ErrorCode::NotSimulatable,
+                    details: Some(format!(
+                        "Link score variable not found for {} -> {}. \
+                         The project may not have been augmented with with_ltm_all_links().",
+                        link.from.as_str(),
+                        link.to.as_str()
+                    )),
+                })?;
+            link_result_offsets.push(*offset);
+        }
+
+        // Compute signed loop score at each timestep.
+        // Time is derived from specs assuming evenly-spaced results at save_step intervals.
         let mut scores: Vec<(f64, f64)> = Vec::new();
         let mut abs_score_sum = 0.0;
         let mut valid_count = 0usize;
@@ -379,27 +412,13 @@ pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<F
             let mut loop_score = 1.0;
             let mut has_nan = false;
 
-            for link in &links {
-                let link_key = (link.from.clone(), link.to.clone());
-                if let Some(&offset) = link_offset_map.get(&link_key) {
-                    let value = results.data[step * results.step_size + offset];
-                    if value.is_nan() {
-                        has_nan = true;
-                        break;
-                    }
-                    loop_score *= value;
-                } else {
-                    return Err(crate::common::Error {
-                        kind: crate::common::ErrorKind::Model,
-                        code: crate::common::ErrorCode::NotSimulatable,
-                        details: Some(format!(
-                            "Link score variable not found for {} -> {}. \
-                             The project may not have been augmented with with_ltm_all_links().",
-                            link.from.as_str(),
-                            link.to.as_str()
-                        )),
-                    });
+            for &offset in &link_result_offsets {
+                let value = results.data[step * results.step_size + offset];
+                if value.is_nan() {
+                    has_nan = true;
+                    break;
                 }
+                loop_score *= value;
             }
 
             if has_nan {
@@ -777,16 +796,13 @@ mod tests {
     // --- Additional edge case tests ---
 
     #[test]
-    fn test_self_loop_not_found() {
-        // The algorithm requires visiting=true AND variable=TARGET.
-        // A self-loop (a -> a) would have a in the visiting set when we
-        // first visit it, but we'd need to return to a via an edge.
-        // With a->a: check(a,1): visiting={a}, push a, edge a->a:
-        //   check(a, score): a IS visiting AND a=TARGET -> found [a]
+    fn test_self_loop_found() {
+        // A self-loop (a -> a): check(a,1) sets visiting={a}, pushes a,
+        // then explores edge a->a: check(a, score) finds a IS visiting
+        // AND a=TARGET -> loop [a] is recorded.
         let graph = SearchGraph::from_edges(edges(&[("a", "a", 5.0)]), stock_list(&["a"]));
 
         let loops = graph.find_strongest_loops();
-        // Self-loops ARE found by this algorithm (single-node loops)
         assert_eq!(loops.len(), 1, "Self-loop should be found");
         assert_eq!(loops[0].len(), 1);
         assert_eq!(loops[0][0].as_str(), "a");

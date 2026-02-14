@@ -381,10 +381,11 @@ Model from Figure 1 of the paper:
 - Adjustment times: A=10, B=10, C=10
 - Sim specs: 0 to 100, dt=1
 
-Expected loops (8 total):
+Expected loops (7 unique):
 - 3 self-adjustment (balancing): A->A, B->B, C->C
 - 3 pairwise reinforcing: A<->B, B<->C, A<->C
-- 2 three-way reinforcing: A->B->C->A and A->C->B->A
+- 1 three-way reinforcing: A->B->C->A (the reverse direction A->C->B->A
+  traverses the same node set and is deduplicated)
 
 From Figure 3 in the paper: the two long loops dominate after ~t=50, and the pairwise interactions and self-corrections are important at the beginning.
 
