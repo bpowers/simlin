@@ -4992,3 +4992,82 @@ fn test_model_get_var_json_case_insensitive() {
         simlin_project_unref(proj);
     }
 }
+
+#[test]
+fn test_get_model_null_name_returns_default() {
+    let datamodel = TestProject::new("default_model")
+        .stock("population", "100", &[], &[], None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null(), "null name should return default model");
+        assert!(!model.is_null());
+
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_get_model_valid_name() {
+    let datamodel = TestProject::new("named_model")
+        .stock("population", "100", &[], &[], None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let name = CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, name.as_ptr(), &mut err);
+        assert!(err.is_null(), "exact model name should succeed");
+        assert!(!model.is_null());
+
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_get_model_canonical_name_match() {
+    let mut datamodel = TestProject::new("canonical_test")
+        .stock("population", "100", &[], &[], None)
+        .build_datamodel();
+    // Rename the model to have mixed case so we can test canonical matching
+    datamodel.models[0].name = "My Model".to_string();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // "my_model" is the canonical form of "My Model"
+        let name = CString::new("my_model").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, name.as_ptr(), &mut err);
+        assert!(err.is_null(), "canonical name variant should succeed");
+        assert!(!model.is_null());
+
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_get_model_nonexistent_name_returns_error() {
+    let datamodel = TestProject::new("model_lookup")
+        .stock("population", "100", &[], &[], None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let name = CString::new("nonexistent_model").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, name.as_ptr(), &mut err);
+        assert!(model.is_null(), "nonexistent model name should return null");
+        assert!(!err.is_null(), "should set error for missing model");
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::BadModelName);
+
+        simlin_error_free(err);
+        simlin_project_unref(proj);
+    }
+}

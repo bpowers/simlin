@@ -384,7 +384,7 @@ pub unsafe extern "C" fn simlin_project_get_model(
         return ptr::null_mut();
     }
 
-    let mut requested_name = if model_name.is_null() {
+    let requested_name = if model_name.is_null() {
         None
     } else {
         match CStr::from_ptr(model_name).to_str() {
@@ -401,20 +401,27 @@ pub unsafe extern "C" fn simlin_project_get_model(
         }
     };
 
-    if requested_name
-        .as_deref()
-        .and_then(|name| project_locked.datamodel.get_model(name))
-        .is_none()
-    {
-        requested_name = Some(project_locked.datamodel.models[0].name.clone());
-    }
+    let resolved_name = match requested_name {
+        None => project_locked.datamodel.models[0].name.clone(),
+        Some(ref name) => match crate::model::find_model_in_project(&project_locked, name) {
+            Some(m) => m.name.clone(),
+            None => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::BadModelName)
+                        .with_message(format!("model '{}' not found", name)),
+                );
+                return ptr::null_mut();
+            }
+        },
+    };
 
     simlin_project_ref(project);
     drop(project_locked);
 
     let model = SimlinModel {
         project,
-        model_name: std::sync::Arc::new(requested_name.unwrap()),
+        model_name: std::sync::Arc::new(resolved_name),
         ref_count: AtomicUsize::new(1),
     };
 

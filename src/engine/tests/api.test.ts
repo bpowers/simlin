@@ -87,6 +87,25 @@ describe('High-Level API', () => {
       await project.dispose();
     });
 
+    it('should get the default model with null name', async () => {
+      const project = await openTestProject();
+
+      const model = await project.getModel(null);
+      expect(model).toBeInstanceOf(Model);
+
+      await project.dispose();
+    });
+
+    it('should throw for nonexistent model name', async () => {
+      const project = await openTestProject();
+
+      await expect(project.getModel('nonexistent_model_xyz')).rejects.toThrow(
+        /not found/,
+      );
+
+      await project.dispose();
+    });
+
     it('should check if project is simulatable', async () => {
       const project = await openTestProject();
 

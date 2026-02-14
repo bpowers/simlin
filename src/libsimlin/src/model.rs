@@ -53,7 +53,7 @@ unsafe fn write_bytes_to_ffi_output(
 }
 
 /// Find a model by name in a locked project.
-fn find_model_in_project<'a>(
+pub(crate) fn find_model_in_project<'a>(
     project: &'a MutexGuard<'_, engine::Project>,
     model_name: &str,
 ) -> Option<&'a datamodel::Model> {
