@@ -1,43 +1,82 @@
-"""Model class for working with system dynamics models."""
+"""Model class for working with system dynamics models.
+
+Thread-safety: ``Model`` instances own a ``threading.Lock`` that
+protects cached properties and the underlying ``_ptr``.  For methods
+that call into the parent ``Project`` (which has its own lock), the
+model lock is released before acquiring the project lock to prevent
+lock-ordering deadlocks.
+"""
 
 from __future__ import annotations
 
 import json
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Any, Self, Union
-from types import TracebackType
+import threading
+from typing import TYPE_CHECKING, Any, Self, Union
 
 from ._dt import parse_dt
-from ._ffi import ffi, lib, string_to_c, c_to_string, free_c_string, _register_finalizer, check_out_error
-from .errors import SimlinRuntimeError, ErrorCode
+from ._ffi import (
+    _register_finalizer,
+    c_to_string,
+    check_out_error,
+    ffi,
+    free_c_string,
+    lib,
+    string_to_c,
+)
 from .analysis import Link, LinkPolarity, Loop
-from .types import Stock, Flow, Aux, TimeSpec, GraphicalFunction, GraphicalFunctionScale, ModelIssue
+from .errors import ErrorCode, SimlinRuntimeError
+from .json_converter import converter
 from .json_types import (
-    Stock as JsonStock,
-    Flow as JsonFlow,
     Auxiliary as JsonAuxiliary,
-    Module as JsonModule,
-    Model as JsonModel,
-    View as JsonView,
-    GraphicalFunction as JsonGraphicalFunction,
-    SimSpecs as JsonSimSpecs,
+)
+from .json_types import (
+    DeleteVariable,
+    DeleteView,
+    JsonModelOperation,
     JsonModelPatch,
     JsonProjectPatch,
-    JsonModelOperation,
-    UpsertStock,
-    UpsertFlow,
-    UpsertAux,
-    UpsertModule,
-    DeleteVariable,
     RenameVariable,
+    UpsertAux,
+    UpsertFlow,
+    UpsertModule,
+    UpsertStock,
     UpsertView,
-    DeleteView,
 )
-from .json_converter import converter
+from .json_types import (
+    Flow as JsonFlow,
+)
+from .json_types import (
+    GraphicalFunction as JsonGraphicalFunction,
+)
+from .json_types import (
+    Model as JsonModel,
+)
+from .json_types import (
+    Module as JsonModule,
+)
+from .json_types import (
+    Stock as JsonStock,
+)
+from .json_types import (
+    View as JsonView,
+)
+from .types import (
+    Aux,
+    Flow,
+    GraphicalFunction,
+    GraphicalFunctionScale,
+    ModelIssue,
+    Stock,
+    TimeSpec,
+    UnitIssue,
+)
 
 if TYPE_CHECKING:
-    from .sim import Sim
+    from types import TracebackType
+
     from .project import Project
     from .run import Run
+    from .sim import Sim
 
 
 # Type for variable in the edit context current dict
@@ -92,14 +131,14 @@ class ModelPatchBuilder:
 
 
 class _ModelEditContext:
-    def __init__(self, model: "Model", dry_run: bool, allow_errors: bool) -> None:
+    def __init__(self, model: Model, dry_run: bool, allow_errors: bool) -> None:
         self._model = model
         self._dry_run = dry_run
         self._allow_errors = allow_errors
-        self._current: Dict[str, JsonVariable] = {}
+        self._current: dict[str, JsonVariable] = {}
         self._patch = ModelPatchBuilder(model._name or "")
 
-    def __enter__(self) -> Tuple[Dict[str, JsonVariable], ModelPatchBuilder]:
+    def __enter__(self) -> tuple[dict[str, JsonVariable], ModelPatchBuilder]:
         project = self._model._project
         if project is None:
             raise SimlinRuntimeError("Model is not attached to a Project")
@@ -141,9 +180,9 @@ class _ModelEditContext:
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
     ) -> bool:
         if exc_type is not None:
             return False
@@ -173,43 +212,53 @@ class _ModelEditContext:
 
 
 class Model:
-    """
-    Represents a system dynamics model within a project.
-    
+    """Represents a system dynamics model within a project.
+
     A model contains variables, equations, and structure that define
-    the system dynamics simulation. Models can be simulated by creating
-    Sim instances.
+    the system dynamics simulation.  Models can be simulated by
+    creating ``Sim`` instances.
+
+    Thread-safety: individual instances are safe to use from multiple
+    threads.  All public methods acquire an internal lock before
+    touching mutable state.
     """
-    
-    def __init__(self, ptr: Any, project: Optional["Project"] = None, name: Optional[str] = None) -> None:
+
+    def __init__(self, ptr: Any, project: Project | None = None, name: str | None = None) -> None:
         """Initialize a Model from a C pointer."""
         if ptr == ffi.NULL:
             raise ValueError("Cannot create Model from NULL pointer")
+        self._lock = threading.Lock()
         self._ptr = ptr
         self._project = project
         self._name = name or ""
         _register_finalizer(self, lib.simlin_model_unref, ptr)
 
-        self._cached_model_json: Optional[JsonModel] = None
-        self._cached_stocks: Optional[tuple[Stock, ...]] = None
-        self._cached_flows: Optional[tuple[Flow, ...]] = None
-        self._cached_auxs: Optional[tuple[Aux, ...]] = None
-        self._cached_time_spec: Optional[TimeSpec] = None
-        self._cached_base_case: Optional["Run"] = None
+        self._cached_model_json: JsonModel | None = None
+        self._cached_stocks: tuple[Stock, ...] | None = None
+        self._cached_flows: tuple[Flow, ...] | None = None
+        self._cached_auxs: tuple[Aux, ...] | None = None
+        self._cached_time_spec: TimeSpec | None = None
+        self._cached_base_case: Run | None = None
+
+    def _check_alive(self) -> None:
+        """Raise if the underlying C object has been freed.
+
+        Must be called while ``_lock`` is held.
+        """
+        if self._ptr == ffi.NULL:
+            raise SimlinRuntimeError("Model has been closed")
 
     @property
-    def project(self) -> Optional["Project"]:
-        """
-        The Project this model belongs to.
+    def project(self) -> Project | None:
+        """The Project this model belongs to.
 
         Returns:
             The parent Project instance, or None if this model is not attached to a project
         """
         return self._project
 
-    def get_incoming_links(self, var_name: str) -> List[str]:
-        """
-        Get the dependencies (incoming links) for a given variable.
+    def get_incoming_links(self, var_name: str) -> list[str]:
+        """Get the dependencies (incoming links) for a given variable.
 
         For flows and auxiliary variables, returns dependencies from their equations.
         For stocks, returns dependencies from their initial value equation.
@@ -228,48 +277,54 @@ class Model:
         if var_name not in names:
             raise SimlinRuntimeError(f"Variable not found: {var_name}")
 
-        c_var_name = string_to_c(var_name)
+        with self._lock:
+            self._check_alive()
+            c_var_name = string_to_c(var_name)
 
-        # First query the number of dependencies
-        out_written_ptr = ffi.new("uintptr_t *")
-        err_ptr = ffi.new("SimlinError **")
-        lib.simlin_model_get_incoming_links(self._ptr, c_var_name, ffi.NULL, 0, out_written_ptr, err_ptr)
-        check_out_error(err_ptr, f"Get incoming links count for '{var_name}'")
+            # First query the number of dependencies
+            out_written_ptr = ffi.new("uintptr_t *")
+            err_ptr = ffi.new("SimlinError **")
+            lib.simlin_model_get_incoming_links(
+                self._ptr, c_var_name, ffi.NULL, 0, out_written_ptr, err_ptr
+            )
+            check_out_error(err_ptr, f"Get incoming links count for '{var_name}'")
 
-        count = int(out_written_ptr[0])
-        if count == 0:
-            return []
+            count = int(out_written_ptr[0])
+            if count == 0:
+                return []
 
-        # Allocate array for dependency names
-        c_deps = ffi.new("char *[]", count)
-        out_written_ptr = ffi.new("uintptr_t *")
-        err_ptr = ffi.new("SimlinError **")
+            # Allocate array for dependency names
+            c_deps = ffi.new("char *[]", count)
+            out_written_ptr = ffi.new("uintptr_t *")
+            err_ptr = ffi.new("SimlinError **")
 
-        # Get the actual dependencies
-        lib.simlin_model_get_incoming_links(self._ptr, c_var_name, c_deps, count, out_written_ptr, err_ptr)
-        check_out_error(err_ptr, f"Get incoming links for '{var_name}'")
+            # Get the actual dependencies
+            lib.simlin_model_get_incoming_links(
+                self._ptr, c_var_name, c_deps, count, out_written_ptr, err_ptr
+            )
+            check_out_error(err_ptr, f"Get incoming links for '{var_name}'")
 
-        actual_count = int(out_written_ptr[0])
-        if actual_count != count:
+            actual_count = int(out_written_ptr[0])
+            if actual_count != count:
+                for i in range(count):
+                    if c_deps[i] != ffi.NULL:
+                        free_c_string(c_deps[i])
+                raise SimlinRuntimeError(
+                    f"Failed to get incoming links for '{var_name}': "
+                    f"count mismatch (expected {count}, got {actual_count})"
+                )
+
+            # Convert to Python strings and free C memory
+            deps = []
             for i in range(count):
                 if c_deps[i] != ffi.NULL:
+                    deps.append(c_to_string(c_deps[i]))
                     free_c_string(c_deps[i])
-            raise SimlinRuntimeError(
-                f"Failed to get incoming links for '{var_name}': count mismatch (expected {count}, got {actual_count})"
-            )
 
-        # Convert to Python strings and free C memory
-        deps = []
-        for i in range(count):
-            if c_deps[i] != ffi.NULL:
-                deps.append(c_to_string(c_deps[i]))
-                free_c_string(c_deps[i])
+            return deps
 
-        return deps
-    
-    def get_links(self) -> List[Link]:
-        """
-        Get all causal links in the model (static analysis).
+    def get_links(self) -> list[Link]:
+        """Get all causal links in the model (static analysis).
 
         This returns the structural links in the model without simulation data.
         To get links with LTM scores, run a simulation with enable_ltm=True
@@ -278,9 +333,11 @@ class Model:
         Returns:
             List of Link objects representing causal relationships
         """
-        err_ptr = ffi.new("SimlinError **")
-        links_ptr = lib.simlin_model_get_links(self._ptr, err_ptr)
-        check_out_error(err_ptr, "Get links")
+        with self._lock:
+            self._check_alive()
+            err_ptr = ffi.new("SimlinError **")
+            links_ptr = lib.simlin_model_get_links(self._ptr, err_ptr)
+            check_out_error(err_ptr, "Get links")
 
         if links_ptr == ffi.NULL:
             return []
@@ -294,10 +351,10 @@ class Model:
                 c_link = links_ptr.links[i]
 
                 link = Link(
-                    from_var=c_to_string(getattr(c_link, 'from')) or "",
+                    from_var=c_to_string(getattr(c_link, "from")) or "",
                     to_var=c_to_string(c_link.to) or "",
                     polarity=LinkPolarity(c_link.polarity),
-                    score=None  # No scores in static analysis
+                    score=None,  # No scores in static analysis
                 )
                 links.append(link)
 
@@ -307,33 +364,54 @@ class Model:
             lib.simlin_free_links(links_ptr)
 
     def _get_model_json(self) -> JsonModel:
-        """Get this model's JSON representation as a dataclass (cached)."""
-        if self._cached_model_json is not None:
-            return self._cached_model_json
+        """Get this model's JSON representation as a dataclass (cached).
+
+        Uses double-checked locking: acquires ``_lock`` only to read/write
+        the cache.  The potentially expensive ``serialize_json()`` call on
+        the parent ``Project`` runs *without* holding the model lock to
+        prevent lock-ordering deadlocks.
+        """
+        with self._lock:
+            if self._cached_model_json is not None:
+                return self._cached_model_json
 
         if self._project is None:
             raise SimlinRuntimeError("Model is not attached to a Project")
 
+        # Call project.serialize_json() WITHOUT holding self._lock to avoid
+        # lock-ordering issues (project has its own lock).
         project_json = json.loads(self._project.serialize_json().decode("utf-8"))
+
+        result: JsonModel | None = None
         for model_dict in project_json.get("models", []):
             if model_dict["name"] == self._name or not self._name:
-                self._cached_model_json = converter.structure(model_dict, JsonModel)
-                return self._cached_model_json
-        raise SimlinRuntimeError(f"Model '{self._name}' not found in project")
+                result = converter.structure(model_dict, JsonModel)
+                break
+
+        if result is None:
+            raise SimlinRuntimeError(f"Model '{self._name}' not found in project")
+
+        with self._lock:
+            # Double-checked: another thread may have populated the cache
+            # while we were computing.
+            if self._cached_model_json is None:
+                self._cached_model_json = result
+            return self._cached_model_json
 
     def _invalidate_caches(self) -> None:
         """Invalidate all cached data. Called after model edits."""
-        self._cached_model_json = None
-        self._cached_stocks = None
-        self._cached_flows = None
-        self._cached_auxs = None
-        self._cached_time_spec = None
-        self._cached_base_case = None
+        with self._lock:
+            self._cached_model_json = None
+            self._cached_stocks = None
+            self._cached_flows = None
+            self._cached_auxs = None
+            self._cached_time_spec = None
+            self._cached_base_case = None
 
     def _extract_equation(
         self,
         top_level: str,
-        arrayed: Optional[Any],
+        arrayed: Any | None,
         field: str = "equation",
     ) -> str:
         """Extract equation from JSON, handling apply-to-all arrayed equations.
@@ -367,7 +445,7 @@ class Model:
         """Parse a JSON GraphicalFunction into a types dataclass."""
         # Handle points format (list of [x, y] pairs)
         if gf.points:
-            x_points: Optional[tuple[float, ...]] = tuple(p[0] for p in gf.points)
+            x_points: tuple[float, ...] | None = tuple(p[0] for p in gf.points)
             y_points: tuple[float, ...] = tuple(p[1] for p in gf.points)
         else:
             x_points = None
@@ -392,103 +470,120 @@ class Model:
 
     @property
     def stocks(self) -> tuple[Stock, ...]:
-        """
-        Stock variables (immutable tuple).
+        """Stock variables (immutable tuple).
 
         Returns:
             Tuple of Stock objects representing all stocks in the model
         """
-        if self._cached_stocks is None:
-            model = self._get_model_json()
-            self._cached_stocks = tuple(
-                Stock(
-                    name=s.name,
-                    initial_equation=self._extract_equation(
-                        s.initial_equation, s.arrayed_equation, "equation"
-                    ),
-                    inflows=tuple(s.inflows),
-                    outflows=tuple(s.outflows),
-                    units=s.units or None,
-                    documentation=s.documentation or None,
-                    dimensions=tuple(s.arrayed_equation.dimensions) if s.arrayed_equation else (),
-                    non_negative=s.non_negative,
-                )
-                for s in model.stocks
+        with self._lock:
+            if self._cached_stocks is not None:
+                return self._cached_stocks
+
+        model = self._get_model_json()
+        result = tuple(
+            Stock(
+                name=s.name,
+                initial_equation=self._extract_equation(
+                    s.initial_equation, s.arrayed_equation, "equation"
+                ),
+                inflows=tuple(s.inflows),
+                outflows=tuple(s.outflows),
+                units=s.units or None,
+                documentation=s.documentation or None,
+                dimensions=tuple(s.arrayed_equation.dimensions) if s.arrayed_equation else (),
+                non_negative=s.non_negative,
             )
-        return self._cached_stocks
+            for s in model.stocks
+        )
+
+        with self._lock:
+            if self._cached_stocks is None:
+                self._cached_stocks = result
+            return self._cached_stocks
 
     @property
     def flows(self) -> tuple[Flow, ...]:
-        """
-        Flow variables (immutable tuple).
+        """Flow variables (immutable tuple).
 
         Returns:
             Tuple of Flow objects representing all flows in the model
         """
-        if self._cached_flows is None:
-            model = self._get_model_json()
-            flows_list = []
+        with self._lock:
+            if self._cached_flows is not None:
+                return self._cached_flows
 
-            for f in model.flows:
-                gf = None
-                if f.graphical_function:
-                    gf = self._parse_json_graphical_function(f.graphical_function)
+        model = self._get_model_json()
+        flows_list = []
 
-                flow = Flow(
-                    name=f.name,
-                    equation=self._extract_equation(f.equation, f.arrayed_equation),
-                    units=f.units or None,
-                    documentation=f.documentation or None,
-                    dimensions=tuple(f.arrayed_equation.dimensions) if f.arrayed_equation else (),
-                    non_negative=f.non_negative,
-                    graphical_function=gf,
-                )
-                flows_list.append(flow)
+        for f in model.flows:
+            gf = None
+            if f.graphical_function:
+                gf = self._parse_json_graphical_function(f.graphical_function)
 
-            self._cached_flows = tuple(flows_list)
-        return self._cached_flows
+            flow = Flow(
+                name=f.name,
+                equation=self._extract_equation(f.equation, f.arrayed_equation),
+                units=f.units or None,
+                documentation=f.documentation or None,
+                dimensions=tuple(f.arrayed_equation.dimensions) if f.arrayed_equation else (),
+                non_negative=f.non_negative,
+                graphical_function=gf,
+            )
+            flows_list.append(flow)
+
+        result = tuple(flows_list)
+
+        with self._lock:
+            if self._cached_flows is None:
+                self._cached_flows = result
+            return self._cached_flows
 
     @property
     def auxs(self) -> tuple[Aux, ...]:
-        """
-        Auxiliary variables (immutable tuple).
+        """Auxiliary variables (immutable tuple).
 
         Returns:
             Tuple of Aux objects representing all auxiliary variables in the model
         """
-        if self._cached_auxs is None:
-            model = self._get_model_json()
-            auxs_list = []
+        with self._lock:
+            if self._cached_auxs is not None:
+                return self._cached_auxs
 
-            for a in model.auxiliaries:
-                gf = None
-                if a.graphical_function:
-                    gf = self._parse_json_graphical_function(a.graphical_function)
+        model = self._get_model_json()
+        auxs_list = []
 
-                # Extract equations, handling apply-to-all arrayed equations
-                equation = self._extract_equation(a.equation, a.arrayed_equation)
-                initial_eq = self._extract_equation(
-                    a.initial_equation, a.arrayed_equation, "initial_equation"
-                )
+        for a in model.auxiliaries:
+            gf = None
+            if a.graphical_function:
+                gf = self._parse_json_graphical_function(a.graphical_function)
 
-                aux = Aux(
-                    name=a.name,
-                    equation=equation,
-                    initial_equation=initial_eq or None,
-                    units=a.units or None,
-                    documentation=a.documentation or None,
-                    dimensions=tuple(a.arrayed_equation.dimensions) if a.arrayed_equation else (),
-                    graphical_function=gf,
-                )
-                auxs_list.append(aux)
+            # Extract equations, handling apply-to-all arrayed equations
+            equation = self._extract_equation(a.equation, a.arrayed_equation)
+            initial_eq = self._extract_equation(
+                a.initial_equation, a.arrayed_equation, "initial_equation"
+            )
 
-            self._cached_auxs = tuple(auxs_list)
-        return self._cached_auxs
+            aux = Aux(
+                name=a.name,
+                equation=equation,
+                initial_equation=initial_eq or None,
+                units=a.units or None,
+                documentation=a.documentation or None,
+                dimensions=tuple(a.arrayed_equation.dimensions) if a.arrayed_equation else (),
+                graphical_function=gf,
+            )
+            auxs_list.append(aux)
+
+        result = tuple(auxs_list)
+
+        with self._lock:
+            if self._cached_auxs is None:
+                self._cached_auxs = result
+            return self._cached_auxs
 
     @property
-    def variables(self) -> tuple[Union[Stock, Flow, Aux], ...]:
-        """
-        All variables in the model.
+    def variables(self) -> tuple[Stock | Flow | Aux, ...]:
+        """All variables in the model.
 
         Returns stocks + flows + auxs combined as an immutable tuple.
 
@@ -499,31 +594,36 @@ class Model:
 
     @property
     def time_spec(self) -> TimeSpec:
-        """
-        Time bounds and step size.
+        """Time bounds and step size.
 
         Returns:
             TimeSpec with simulation time configuration
         """
-        if self._cached_time_spec is None:
-            if self._project is None:
-                raise SimlinRuntimeError("Model is not attached to a Project")
+        with self._lock:
+            if self._cached_time_spec is not None:
+                return self._cached_time_spec
 
-            project_json = json.loads(self._project.serialize_json().decode("utf-8"))
-            sim_specs = project_json["simSpecs"]
+        if self._project is None:
+            raise SimlinRuntimeError("Model is not attached to a Project")
 
-            self._cached_time_spec = TimeSpec(
-                start=sim_specs.get("startTime", 0.0),
-                stop=sim_specs.get("endTime", 10.0),
-                dt=parse_dt(sim_specs.get("dt", "1")),
-                units=sim_specs.get("timeUnits") or None,
-            )
-        return self._cached_time_spec
+        project_json = json.loads(self._project.serialize_json().decode("utf-8"))
+        sim_specs = project_json["simSpecs"]
+
+        result = TimeSpec(
+            start=sim_specs.get("startTime", 0.0),
+            stop=sim_specs.get("endTime", 10.0),
+            dt=parse_dt(sim_specs.get("dt", "1")),
+            units=sim_specs.get("timeUnits") or None,
+        )
+
+        with self._lock:
+            if self._cached_time_spec is None:
+                self._cached_time_spec = result
+            return self._cached_time_spec
 
     @property
     def loops(self) -> tuple[Loop, ...]:
-        """
-        Structural feedback loops (no behavior data).
+        """Structural feedback loops (no behavior data).
 
         Returns an immutable tuple of Loop objects.
         For loops with behavior time series, use model.base_case.loops
@@ -538,11 +638,10 @@ class Model:
 
     def simulate(
         self,
-        overrides: Optional[Dict[str, float]] = None,
+        overrides: dict[str, float] | None = None,
         enable_ltm: bool = False,
-    ) -> "Sim":
-        """
-        Create low-level simulation for step-by-step execution.
+    ) -> Sim:
+        """Create low-level simulation for step-by-step execution.
 
         Use this for gaming applications where you need to inspect state
         and modify variables during simulation. For batch analysis, use
@@ -561,11 +660,12 @@ class Model:
             ...     run = sim.get_run()
         """
         from .sim import Sim
-        from ._ffi import lib, ffi, check_out_error
 
-        err_ptr = ffi.new("SimlinError **")
-        sim_ptr = lib.simlin_sim_new(self._ptr, enable_ltm, err_ptr)
-        check_out_error(err_ptr, "Create simulation")
+        with self._lock:
+            self._check_alive()
+            err_ptr = ffi.new("SimlinError **")
+            sim_ptr = lib.simlin_sim_new(self._ptr, enable_ltm, err_ptr)
+            check_out_error(err_ptr, "Create simulation")
 
         sim = Sim(sim_ptr, self, overrides or {})
         if overrides:
@@ -575,13 +675,12 @@ class Model:
 
     def run(
         self,
-        overrides: Optional[Dict[str, float]] = None,
-        time_range: Optional[Tuple[float, float]] = None,
-        dt: Optional[float] = None,
+        overrides: dict[str, float] | None = None,
+        time_range: tuple[float, float] | None = None,
+        dt: float | None = None,
         analyze_loops: bool = True,
-    ) -> "Run":
-        """
-        Run simulation with optional variable overrides.
+    ) -> Run:
+        """Run simulation with optional variable overrides.
 
         Args:
             overrides: Override values for any model variables (by name)
@@ -593,8 +692,8 @@ class Model:
             Run object with results and analysis
 
         Example:
-            >>> run = model.run(overrides={'birth_rate': 0.03})
-            >>> run.results['population'].plot()
+            >>> run = model.run(overrides={"birth_rate": 0.03})
+            >>> run.results["population"].plot()
         """
         from .run import Run
 
@@ -606,9 +705,8 @@ class Model:
         return Run(sim, overrides or {}, loops_structural)
 
     @property
-    def base_case(self) -> "Run":
-        """
-        Simulation results with default parameters.
+    def base_case(self) -> Run:
+        """Simulation results with default parameters.
 
         Computed on first access and cached.
 
@@ -616,15 +714,21 @@ class Model:
             Run object with baseline simulation results
 
         Example:
-            >>> model.base_case.results['population'].plot()
+            >>> model.base_case.results["population"].plot()
         """
-        if self._cached_base_case is None:
-            self._cached_base_case = self.run()
-        return self._cached_base_case
+        with self._lock:
+            if self._cached_base_case is not None:
+                return self._cached_base_case
+
+        result = self.run()
+
+        with self._lock:
+            if self._cached_base_case is None:
+                self._cached_base_case = result
+            return self._cached_base_case
 
     def check(self) -> tuple[ModelIssue, ...]:
-        """
-        Check model for common issues.
+        """Check model for common issues.
 
         Returns tuple of warnings/errors about model structure, equations, etc.
 
@@ -655,9 +759,8 @@ class Model:
 
         return tuple(issues)
 
-    def check_units(self) -> tuple["UnitIssue", ...]:
-        """
-        Check dimensional consistency of equations.
+    def check_units(self) -> tuple[UnitIssue, ...]:
+        """Check dimensional consistency of equations.
 
         Returns tuple of unit issues found.
 
@@ -668,9 +771,6 @@ class Model:
             >>> issues = model.check_units()
             >>> errors = [i for i in issues if i.expected_units != i.actual_units]
         """
-        from .types import UnitIssue
-        from .errors import ErrorCode
-
         if self._project is None:
             return ()
 
@@ -690,8 +790,7 @@ class Model:
         return tuple(unit_issues)
 
     def explain(self, variable: str) -> str:
-        """
-        Get human-readable explanation of a variable.
+        """Get human-readable explanation of a variable.
 
         Args:
             variable: Variable name
@@ -700,7 +799,7 @@ class Model:
             Textual description of what defines/drives this variable
 
         Example:
-            >>> print(model.explain('population'))
+            >>> print(model.explain("population"))
             "population is a stock increased by births and decreased by deaths"
 
         Raises:
@@ -710,7 +809,10 @@ class Model:
             if stock.name == variable:
                 inflows_str = ", ".join(stock.inflows) if stock.inflows else "no inflows"
                 outflows_str = ", ".join(stock.outflows) if stock.outflows else "no outflows"
-                return f"{stock.name} is a stock with initial value {stock.initial_equation}, increased by {inflows_str}, decreased by {outflows_str}"
+                return (
+                    f"{stock.name} is a stock with initial value {stock.initial_equation}, "
+                    f"increased by {inflows_str}, decreased by {outflows_str}"
+                )
 
         for flow in self.flows:
             if flow.name == variable:
@@ -719,15 +821,16 @@ class Model:
         for aux in self.auxs:
             if aux.name == variable:
                 if aux.initial_equation:
-                    return f"{aux.name} is an auxiliary variable computed as {aux.equation} with initial value {aux.initial_equation}"
-                else:
-                    return f"{aux.name} is an auxiliary variable computed as {aux.equation}"
+                    return (
+                        f"{aux.name} is an auxiliary variable computed as {aux.equation} "
+                        f"with initial value {aux.initial_equation}"
+                    )
+                return f"{aux.name} is an auxiliary variable computed as {aux.equation}"
 
         raise SimlinRuntimeError(f"Variable '{variable}' not found in model")
 
     def edit(self, *, dry_run: bool = False, allow_errors: bool = False) -> _ModelEditContext:
         """Return a context manager for batching model edits."""
-
         if self._project is None:
             raise SimlinRuntimeError("Model is not attached to a Project")
 
@@ -736,19 +839,25 @@ class Model:
     def __enter__(self) -> Self:
         """Context manager entry point."""
         return self
-    
-    def __exit__(self, exc_type: Optional[type[BaseException]], exc_val: Optional[BaseException], exc_tb: Optional[TracebackType]) -> None:
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """Context manager exit point with explicit cleanup."""
-        finalizer = getattr(self, "_finalizer", None)
-        if finalizer and getattr(finalizer, "alive", False):
-            finalizer()
-        self._ptr = ffi.NULL
-    
+        with self._lock:
+            finalizer = getattr(self, "_finalizer", None)
+            if finalizer and getattr(finalizer, "alive", False):
+                finalizer()
+            self._ptr = ffi.NULL
+
     def __repr__(self) -> str:
         """Return a string representation of the Model."""
         try:
             var_count = len(self.variables)
             name = f" '{self._name}'" if self._name else ""
             return f"<Model{name} with {var_count} variable(s)>"
-        except:
+        except Exception:
             return "<Model (invalid)>"

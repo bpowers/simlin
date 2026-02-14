@@ -1,10 +1,12 @@
 """Tests for the top-level pysimlin API."""
 
-import pytest
 from pathlib import Path
+
 import pandas as pd
+import pytest
+
 import simlin
-from simlin import Model, Run, Project
+from simlin import Model, Project, Run
 
 
 class TestLoadFunction:
@@ -75,7 +77,9 @@ class TestLoadFunction:
 
     def test_load_json_format(self, logistic_growth_json_path: Path) -> None:
         """Test loading JSON format."""
-        assert logistic_growth_json_path.exists(), f"Test file not found: {logistic_growth_json_path}"
+        assert logistic_growth_json_path.exists(), (
+            f"Test file not found: {logistic_growth_json_path}"
+        )
 
         model = simlin.load(logistic_growth_json_path)
         assert isinstance(model, Model)
@@ -198,6 +202,7 @@ class TestCompleteWorkflow:
 
         for loop in model_loops:
             from simlin import Loop
+
             assert isinstance(loop, Loop)
             assert isinstance(loop.id, str)
             assert isinstance(loop.variables, tuple)
@@ -211,6 +216,7 @@ class TestCompleteWorkflow:
         # If there are loops, they should have behavior data
         for loop in run_loops:
             from simlin import Loop
+
             assert isinstance(loop, Loop)
             assert loop.behavior_time_series is not None
 
@@ -223,19 +229,19 @@ class TestCompleteWorkflow:
         # Stocks are frozen dataclasses
         if model.stocks:
             stock = model.stocks[0]
-            with pytest.raises(Exception):
+            with pytest.raises(AttributeError):
                 stock.name = "modified"
 
         # Flows are frozen dataclasses
         if model.flows:
             flow = model.flows[0]
-            with pytest.raises(Exception):
+            with pytest.raises(AttributeError):
                 flow.name = "modified"
 
         # Auxs are frozen dataclasses
         if model.auxs:
             aux = model.auxs[0]
-            with pytest.raises(Exception):
+            with pytest.raises(AttributeError):
                 aux.name = "modified"
 
     def test_workflow_results_dataframe_properties(self, teacup_stmx_path: Path) -> None:
@@ -293,11 +299,13 @@ class TestLoadExportedName:
     def test_load_importable(self) -> None:
         """Test that load can be imported from simlin."""
         from simlin import load
+
         assert callable(load)
 
     def test_load_has_docstring(self) -> None:
         """Test that load has a proper docstring."""
         from simlin import load
+
         assert load.__doc__ is not None
         assert "Load a system dynamics model" in load.__doc__
         assert "Example:" in load.__doc__

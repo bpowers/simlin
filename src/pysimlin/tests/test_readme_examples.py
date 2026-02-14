@@ -50,9 +50,7 @@ def extract_python_blocks(markdown: str) -> list[CodeBlock]:
 
         # Check for directive comment
         directive = ""
-        directive_match = re.match(
-            r"<!--\s*pysimlin-test:\s*(\w+(?:-\w+)*)\s*-->", stripped
-        )
+        directive_match = re.match(r"<!--\s*pysimlin-test:\s*(\w+(?:-\w+)*)\s*-->", stripped)
         if directive_match:
             directive = directive_match.group(1)
             i += 1
@@ -149,7 +147,9 @@ class TestReadmeExamples:
             except Exception as e:
                 if not expect_error:
                     pytest.fail(
-                        f"README.md line {line_num}: {type(e).__name__}: {e}\n\nCode:\n{code_preview}"
+                        f"README.md line {line_num}: "
+                        f"{type(e).__name__}: {e}\n\n"
+                        f"Code:\n{code_preview}"
                     )
 
 

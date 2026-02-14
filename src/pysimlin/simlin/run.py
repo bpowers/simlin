@@ -1,23 +1,27 @@
 """Simulation run results and analysis."""
 
-from dataclasses import dataclass
-from typing import Dict, Optional, TYPE_CHECKING
-import pandas as pd
-import numpy as np
-from numpy.typing import NDArray
+from __future__ import annotations
 
-from .types import TimeSpec
+import contextlib
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import numpy as np
+import pandas as pd
+
 from .analysis import Loop, LoopPolarity
 from .errors import SimlinRuntimeError
+from .types import TimeSpec
 
 if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
     from .sim import Sim
 
 
 @dataclass(frozen=True)
 class DominantPeriod:
-    """
-    Time period where specific loops dominate model behavior.
+    """Time period where specific loops dominate model behavior.
 
     DominantPeriod represents a contiguous time interval during which
     a specific set of feedback loops collectively explain the majority
@@ -35,8 +39,7 @@ class DominantPeriod:
     """Period end time"""
 
     def duration(self) -> float:
-        """
-        Calculate the duration of this period.
+        """Calculate the duration of this period.
 
         Returns:
             Duration in time units (end_time - start_time)
@@ -44,8 +47,7 @@ class DominantPeriod:
         return self.end_time - self.start_time
 
     def contains_loop(self, loop_id: str) -> bool:
-        """
-        Check if a specific loop dominates during this period.
+        """Check if a specific loop dominates during this period.
 
         Args:
             loop_id: Loop identifier to check (e.g., 'R1', 'B2', 'U3')
@@ -57,8 +59,7 @@ class DominantPeriod:
 
 
 class Run:
-    """
-    Results and analysis from a single simulation run.
+    """Results and analysis from a single simulation run.
 
     This class bundles together time series data, loop analysis results,
     and metadata from a single simulation execution. It is returned by
@@ -77,7 +78,7 @@ class Run:
     Example:
         >>> model = simlin.load("model.stmx")
         >>> run = model.base_case
-        >>> run.results['population'].plot()
+        >>> run.results["population"].plot()
         >>> print(f"Final value: {run.results['population'].iloc[-1]}")
         >>>
         >>> # Analyze loop dominance
@@ -86,22 +87,20 @@ class Run:
         >>>
         >>> # Compare scenarios
         >>> import pandas as pd
-        >>> policy_run = model.run(overrides={'tax_rate': 0.3})
-        >>> comparison = pd.DataFrame({
-        ...     'baseline': run.results['gdp'],
-        ...     'policy': policy_run.results['gdp']
-        ... })
+        >>> policy_run = model.run(overrides={"tax_rate": 0.3})
+        >>> comparison = pd.DataFrame(
+        ...     {"baseline": run.results["gdp"], "policy": policy_run.results["gdp"]}
+        ... )
         >>> comparison.plot()
     """
 
     def __init__(
         self,
-        sim: "Sim",
-        overrides: Dict[str, float],
+        sim: Sim,
+        overrides: dict[str, float],
         loops_structural: tuple[Loop, ...],
     ) -> None:
-        """
-        Initialize a Run from completed simulation.
+        """Initialize a Run from completed simulation.
 
         Args:
             sim: Completed Sim instance with results
@@ -111,15 +110,14 @@ class Run:
         self._sim = sim
         self._overrides = overrides
         self._loops_structural = loops_structural
-        self._cached_results: Optional[pd.DataFrame] = None
-        self._cached_loops: Optional[tuple[Loop, ...]] = None
-        self._cached_dominant_periods: Optional[tuple[DominantPeriod, ...]] = None
-        self._cached_time_spec: Optional[TimeSpec] = None
+        self._cached_results: pd.DataFrame | None = None
+        self._cached_loops: tuple[Loop, ...] | None = None
+        self._cached_dominant_periods: tuple[DominantPeriod, ...] | None = None
+        self._cached_time_spec: TimeSpec | None = None
 
     @property
     def results(self) -> pd.DataFrame:
-        """
-        Time series results as a pandas DataFrame.
+        """Time series results as a pandas DataFrame.
 
         Index is simulation time. Columns are variable names.
         For arrayed variables, columns are named like "var[element]".
@@ -130,9 +128,9 @@ class Run:
             DataFrame with time as index and variables as columns
 
         Example:
-            >>> run.results['population'].plot()
-            >>> print(run.results['population'].describe())
-            >>> final_pop = run.results['population'].iloc[-1]
+            >>> run.results["population"].plot()
+            >>> print(run.results["population"].describe())
+            >>> final_pop = run.results["population"].iloc[-1]
         """
         if self._cached_results is None:
             self._cached_results = self._build_results_dataframe()
@@ -140,10 +138,6 @@ class Run:
 
     def _build_results_dataframe(self) -> pd.DataFrame:
         """Build the results DataFrame from simulation data."""
-        from .errors import SimlinRuntimeError
-        from typing import Dict
-        from numpy.typing import NDArray
-
         variables = self._sim.get_var_names()
         step_count = self._sim.get_step_count()
 
@@ -155,15 +149,13 @@ class Run:
         except SimlinRuntimeError:
             time_series = np.arange(step_count, dtype=np.float64)
 
-        data: Dict[str, NDArray[np.float64]] = {}
+        data: dict[str, NDArray[np.float64]] = {}
 
         for var_name in variables:
             if var_name.lower() == "time":
                 continue
-            try:
+            with contextlib.suppress(SimlinRuntimeError):
                 data[var_name] = self._sim.get_series(var_name)
-            except SimlinRuntimeError:
-                pass
 
         df = pd.DataFrame(data, index=time_series)
         df.index.name = "time"
@@ -172,8 +164,7 @@ class Run:
 
     @property
     def loops(self) -> tuple[Loop, ...]:
-        """
-        Feedback loops with behavior time series.
+        """Feedback loops with behavior time series.
 
         Each Loop has behavior_time_series populated showing the loop's
         contribution to model behavior at each time step.
@@ -193,8 +184,7 @@ class Run:
 
     @property
     def dominant_periods(self) -> tuple[DominantPeriod, ...]:
-        """
-        Time periods where specific loops dominate.
+        """Time periods where specific loops dominate.
 
         Uses greedy algorithm to identify which loops explain the most
         variance in model behavior during each period.
@@ -213,9 +203,8 @@ class Run:
         return self._cached_dominant_periods
 
     @property
-    def overrides(self) -> Dict[str, float]:
-        """
-        Variable overrides used for this run.
+    def overrides(self) -> dict[str, float]:
+        """Variable overrides used for this run.
 
         Empty dict if no overrides were specified.
 
@@ -226,8 +215,7 @@ class Run:
 
     @property
     def time_spec(self) -> TimeSpec:
-        """
-        Time specification used for this run.
+        """Time specification used for this run.
 
         Returns:
             TimeSpec with start, stop, dt, and units
@@ -241,8 +229,7 @@ class Run:
         return self._cached_time_spec
 
     def _populate_loop_behavior(self) -> tuple[Loop, ...]:
-        """
-        Populate structural loops with behavioral time series data.
+        """Populate structural loops with behavioral time series data.
 
         Also reclassifies loop polarity based on actual runtime scores:
         - If loop scores are all positive -> Reinforcing
@@ -262,12 +249,16 @@ class Run:
 
                 # Get absolute loop score to determine runtime polarity
                 # The absolute score determines the sign (positive/negative)
-                abs_score_var = f"$\u205Altm\u205Aabs_loop_score\u205A{structural_loop.id}"
+                abs_score_var = f"$\u205altm\u205aabs_loop_score\u205a{structural_loop.id}"
                 try:
                     abs_scores = self._sim.get_series(abs_score_var)
                     runtime_polarity = LoopPolarity.from_runtime_scores(abs_scores)
                     # Use runtime polarity if it could be determined, otherwise keep structural
-                    polarity = runtime_polarity if runtime_polarity is not None else structural_loop.polarity
+                    polarity = (
+                        runtime_polarity
+                        if runtime_polarity is not None
+                        else structural_loop.polarity
+                    )
                 except SimlinRuntimeError:
                     # If we can't get absolute scores, use structural polarity
                     polarity = structural_loop.polarity
@@ -284,11 +275,8 @@ class Run:
 
         return tuple(loops_with_behavior)
 
-    def _calculate_dominant_periods(
-        self, threshold: float = 0.5
-    ) -> tuple[DominantPeriod, ...]:
-        """
-        Calculate dominant periods using greedy algorithm.
+    def _calculate_dominant_periods(self, threshold: float = 0.5) -> tuple[DominantPeriod, ...]:
+        """Calculate dominant periods using greedy algorithm.
 
         For each timestep, tries to find a set of same-polarity loops
         whose combined importance score exceeds the threshold.
@@ -341,8 +329,10 @@ class Run:
                     elif score < 0:
                         balancing_loops.append((lid, score))
 
-            def try_polarity_group(loops_with_scores):
-                selected = []
+            def try_polarity_group(
+                loops_with_scores: list[tuple[str, float]],
+            ) -> tuple[list[str], float]:
+                selected: list[str] = []
                 combined_score = 0.0
                 for lid, score in loops_with_scores:
                     selected.append(lid)
@@ -361,7 +351,7 @@ class Run:
             else:
                 dominant_loop_sets.append(frozenset())
 
-        periods = []
+        periods: list[DominantPeriod] = []
         if not dominant_loop_sets:
             return ()
 
@@ -393,8 +383,7 @@ class Run:
         return tuple(periods)
 
     def _extract_time_spec(self) -> TimeSpec:
-        """
-        Extract time specification from simulation results.
+        """Extract time specification from simulation results.
 
         Returns:
             TimeSpec with start, stop, dt from results

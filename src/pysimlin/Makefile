@@ -19,7 +19,7 @@ test:
 # Run linting
 lint:
 	uv run ruff check simlin tests
-	uv run black --check simlin tests
+	uv run ruff format --check simlin tests
 
 # Run type checking
 type-check:
@@ -27,7 +27,7 @@ type-check:
 
 # Format code
 format:
-	uv run black simlin tests
+	uv run ruff format simlin tests
 	uv run ruff check --fix simlin tests
 
 # Clean build artifacts

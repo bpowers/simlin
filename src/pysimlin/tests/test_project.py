@@ -1,16 +1,16 @@
 """Tests for the Project class."""
 
 import json
-import pytest
-from pathlib import Path
-import simlin
-from simlin import Project, SimlinImportError, ErrorCode
 
+import pytest
+
+import simlin
+from simlin import Project, SimlinImportError
 
 
 class TestProjectModels:
     """Test working with models in a project."""
-    
+
     def test_get_model_count(self, xmile_model_path) -> None:
         """Test getting the number of models through names."""
         model = simlin.load(xmile_model_path)
@@ -18,7 +18,7 @@ class TestProjectModels:
         names = project.get_model_names()
         assert len(names) >= 1
         assert isinstance(len(names), int)
-    
+
     def test_get_model_names(self, xmile_model_path) -> None:
         """Test getting model names."""
         model = simlin.load(xmile_model_path)
@@ -28,7 +28,7 @@ class TestProjectModels:
         # Names list has been validated above
         for name in names:
             assert isinstance(name, str)
-    
+
     def test_get_default_model(self, xmile_model_path) -> None:
         """Test getting the default model."""
         model = simlin.load(xmile_model_path)
@@ -36,8 +36,9 @@ class TestProjectModels:
         model = project.get_model()
         assert model is not None
         from simlin import Model
+
         assert isinstance(model, Model)
-    
+
     def test_get_named_model(self, xmile_model_path) -> None:
         """Test getting a model by name."""
         model = simlin.load(xmile_model_path)
@@ -68,7 +69,7 @@ class TestProjectModels:
 
 class TestProjectAnalysis:
     """Test project analysis functions."""
-    
+
     def test_get_loops(self, xmile_model_path) -> None:
         """Test getting feedback loops."""
         model = simlin.load(xmile_model_path)
@@ -77,10 +78,10 @@ class TestProjectAnalysis:
         assert isinstance(loops, list)
         # Not all models have loops
         for loop in loops:
-            assert hasattr(loop, 'id')
-            assert hasattr(loop, 'variables')
-            assert hasattr(loop, 'polarity')
-    
+            assert hasattr(loop, "id")
+            assert hasattr(loop, "variables")
+            assert hasattr(loop, "polarity")
+
     def test_get_errors(self, xmile_model_path) -> None:
         """Test getting project errors."""
         model = simlin.load(xmile_model_path)
@@ -89,8 +90,8 @@ class TestProjectAnalysis:
         assert isinstance(errors, list)
         # Valid models might have no errors
         for error in errors:
-            assert hasattr(error, 'code')
-            assert hasattr(error, 'message')
+            assert hasattr(error, "code")
+            assert hasattr(error, "message")
 
 
 class TestProjectSerialization:
@@ -128,9 +129,10 @@ class TestProjectSerialization:
         assert len(xmile_data) > 0
         assert b"<xmile" in xmile_data or b"<?xml" in xmile_data
 
+
 class TestProjectContextManager:
     """Test context manager functionality for projects."""
-    
+
     def test_context_manager_basic_usage(self, xmile_model_path) -> None:
         """Test basic context manager usage."""
         model = simlin.load(xmile_model_path)
@@ -141,47 +143,47 @@ class TestProjectContextManager:
             # Project should be usable inside the context
             model = project.get_model()
             assert model is not None
-    
+
     def test_context_manager_returns_self(self, xmile_model_path) -> None:
         """Test that __enter__ returns self."""
         model = simlin.load(xmile_model_path)
         project = model.project
         with project as ctx_project:
             assert ctx_project is project
-    
+
     def test_context_manager_explicit_cleanup(self, xmile_model_path) -> None:
         """Test that __exit__ performs explicit cleanup."""
         from simlin._ffi import ffi
-        
+
         model = simlin.load(xmile_model_path)
         project = model.project
         original_ptr = project._ptr
-        
+
         # Use as context manager
         with project:
             pass
-        
+
         # After context exit, pointer should be NULL
         assert project._ptr == ffi.NULL
         assert original_ptr != ffi.NULL  # Original was valid
-    
+
     def test_context_manager_with_exception(self, xmile_model_path) -> None:
         """Test context manager cleanup when exception occurs."""
         from simlin._ffi import ffi
-        
+
         model = simlin.load(xmile_model_path)
         project = model.project
-        
+
         try:
             with project:
                 # Simulate an exception
                 raise ValueError("Test exception")
         except ValueError:
             pass
-        
+
         # Even with exception, cleanup should occur
         assert project._ptr == ffi.NULL
-    
+
     def test_non_context_manager_usage_still_works(self, xmile_model_path) -> None:
         """Test that objects still work without context manager."""
         # Should work exactly as before without using 'with'
@@ -277,7 +279,7 @@ class TestProjectEditing:
 
 class TestProjectRepr:
     """Test string representation of projects."""
-    
+
     def test_repr(self, xmile_model_path) -> None:
         """Test __repr__ method."""
         model = simlin.load(xmile_model_path)

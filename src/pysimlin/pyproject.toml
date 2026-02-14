@@ -49,8 +49,7 @@ test = [
 dev = [
     "pysimlin[test]",
     "mypy>=1.5.0",
-    "black>=23.0.0",
-    "ruff>=0.1.0",
+    "ruff>=0.8.0",
     "pandas-stubs>=2.0.0",
     "types-setuptools",
     "build>=1.0.0",
@@ -88,19 +87,28 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = [
-    "E",  # pycodestyle errors
-    "W",  # pycodestyle warnings
-    "F",  # pyflakes
-    "I",  # isort
-    "B",  # flake8-bugbear
-    "C4", # flake8-comprehensions
-    "UP", # pyupgrade
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking
+    "RUF", # ruff-specific rules
+    "PT",  # flake8-pytest-style
 ]
-ignore = []
+ignore = [
+    "UP007",  # Use X | Y for union types -- we use this deliberately in some places
+]
 
-[tool.black]
-line-length = 100
-target-version = ['py311']
+[tool.ruff.lint.per-file-ignores]
+# C declaration strings have long lines that cannot be wrapped
+"simlin/_ffi_build.py" = ["E501"]
+
+[tool.ruff.format]
+docstring-code-format = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

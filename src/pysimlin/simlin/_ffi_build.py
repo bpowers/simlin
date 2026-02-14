@@ -3,6 +3,7 @@
 import os
 import platform
 from pathlib import Path
+
 from cffi import FFI
 
 ffibuilder = FFI()
@@ -189,10 +190,10 @@ def get_library_path() -> str:
     candidates = [
         # Workspace targets (default for cargo in a workspace)
         workspace_target / "release" / lib_name,
-        *[p for p in workspace_target.glob("*/release/" + lib_name)],
+        *list(workspace_target.glob("*/release/" + lib_name)),
         # Crate-local targets (if building in crate dir)
         libsimlin_dir / "target" / "release" / lib_name,
-        *[p for p in (libsimlin_dir / "target").glob("*/release/" + lib_name)],
+        *list((libsimlin_dir / "target").glob("*/release/" + lib_name)),
         libsimlin_dir / "target" / "debug" / lib_name,
     ]
     for path in candidates:

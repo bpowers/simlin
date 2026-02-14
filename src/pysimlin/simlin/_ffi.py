@@ -1,24 +1,41 @@
-"""Low-level FFI helpers and lifecycle management for simlin."""
+"""Low-level FFI helpers and lifecycle management for simlin.
 
-from typing import Optional, Any, List
+Thread-safety: The module-level ``_finalizer_refs`` dictionary is
+protected by ``_refs_lock`` so that ``_register_finalizer`` is safe to
+call from any thread, including free-threaded Python (PEP 703 / 3.13t+).
+"""
+
+from __future__ import annotations
+
+import threading
 import weakref
+from typing import TYPE_CHECKING, Any
 
 # Import the compiled CFFI extension
 from ._clib import ffi, lib
 
-# Registry used by tests to observe outstanding objects
-_finalizer_refs: "weakref.WeakValueDictionary[int, Any]" = weakref.WeakValueDictionary()
+if TYPE_CHECKING:
+    from .errors import ErrorDetail
+
+# Lock protecting module-level mutable state (_finalizer_refs).
+# Required for free-threaded Python where the GIL no longer serialises
+# access to pure-Python containers.
+_refs_lock = threading.Lock()
+
+# Registry used by tests to observe outstanding objects.
+_finalizer_refs: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
 
 
 def _register_finalizer(obj: Any, cleanup_func: Any, *args: Any) -> None:
-    """Register a one-shot finalizer and track the object for tests."""
+    """Register a one-shot weak-ref finalizer and track *obj* for tests."""
     # weakref.finalize guarantees the callback runs at most once.
     finalizer = weakref.finalize(obj, cleanup_func, *args)
-    setattr(obj, "_finalizer", finalizer)
-    _finalizer_refs[id(obj)] = obj
+    obj._finalizer = finalizer
+    with _refs_lock:
+        _finalizer_refs[id(obj)] = obj
 
 
-def string_to_c(s: Optional[str]) -> Any:
+def string_to_c(s: str | None) -> Any:
     """Convert Python string to C string.
 
     Note: The returned memory is managed by CFFI and will be garbage collected.
@@ -30,7 +47,7 @@ def string_to_c(s: Optional[str]) -> Any:
     return ffi.new("char[]", s.encode("utf-8"))
 
 
-def c_to_string(c_str: Any) -> Optional[str]:
+def c_to_string(c_str: Any) -> str | None:
     if c_str == ffi.NULL:
         return None
     return ffi.string(c_str).decode("utf-8")
@@ -57,7 +74,7 @@ def get_error_string(error_code: Any) -> str:
     return ffi.string(c_str).decode("utf-8")
 
 
-def extract_error_details(err_ptr: Any) -> List[Any]:
+def extract_error_details(err_ptr: Any) -> list[Any]:
     """Extract error details from a SimlinError pointer.
 
     Args:
@@ -66,7 +83,7 @@ def extract_error_details(err_ptr: Any) -> List[Any]:
     Returns:
         List of ErrorDetail objects
     """
-    from .errors import ErrorDetail, ErrorCode, ErrorKind, UnitErrorKind
+    from .errors import ErrorCode, ErrorDetail, ErrorKind, UnitErrorKind
 
     if err_ptr == ffi.NULL:
         return []
@@ -76,16 +93,18 @@ def extract_error_details(err_ptr: Any) -> List[Any]:
     for i in range(count):
         c_detail = lib.simlin_error_get_detail(err_ptr, i)
         if c_detail != ffi.NULL:
-            details.append(ErrorDetail(
-                code=ErrorCode(c_detail.code),
-                message=c_to_string(c_detail.message) or "",
-                model_name=c_to_string(c_detail.model_name),
-                variable_name=c_to_string(c_detail.variable_name),
-                start_offset=c_detail.start_offset,
-                end_offset=c_detail.end_offset,
-                kind=ErrorKind(c_detail.kind),
-                unit_error_kind=UnitErrorKind(c_detail.unit_error_kind),
-            ))
+            details.append(
+                ErrorDetail(
+                    code=ErrorCode(c_detail.code),
+                    message=c_to_string(c_detail.message) or "",
+                    model_name=c_to_string(c_detail.model_name),
+                    variable_name=c_to_string(c_detail.variable_name),
+                    start_offset=c_detail.start_offset,
+                    end_offset=c_detail.end_offset,
+                    kind=ErrorKind(c_detail.kind),
+                    unit_error_kind=UnitErrorKind(c_detail.unit_error_kind),
+                )
+            )
     return details
 
 
@@ -111,7 +130,7 @@ def check_out_error(out_error_ptr: Any, operation: str = "operation") -> None:
 
     lib.simlin_error_free(err)
 
-    from .errors import SimlinRuntimeError, SimlinCompilationError, ErrorCode
+    from .errors import ErrorCode, SimlinCompilationError, SimlinRuntimeError
 
     try:
         error_code = ErrorCode(code)
@@ -135,7 +154,8 @@ def check_error(result: int, operation: str = "operation") -> None:
         SimlinRuntimeError: If result is non-zero
     """
     if result != 0:
-        from .errors import SimlinRuntimeError, ErrorCode
+        from .errors import ErrorCode, SimlinRuntimeError
+
         error_str = get_error_string(result)
         code = None
         try:
@@ -150,7 +170,7 @@ def apply_patch_json(
     patch_json: bytes,
     dry_run: bool,
     allow_errors: bool,
-) -> List[Any]:
+) -> list[ErrorDetail]:
     """Apply a JSON patch to a project.
 
     Args:
@@ -165,8 +185,6 @@ def apply_patch_json(
     Raises:
         SimlinRuntimeError or SimlinCompilationError: If operation fails
     """
-    from .errors import ErrorDetail
-
     c_patch = ffi.new("uint8_t[]", patch_json)
     out_collected_errors_ptr = ffi.new("SimlinError **")
     err_ptr = ffi.new("SimlinError **")
@@ -180,7 +198,7 @@ def apply_patch_json(
         out_collected_errors_ptr,
         err_ptr,
     )
-    errors: List[ErrorDetail] = []
+    errors: list[ErrorDetail] = []
     errors_ptr = out_collected_errors_ptr[0]
     try:
         check_out_error(err_ptr, "Apply JSON patch")
@@ -247,18 +265,19 @@ def open_json(json_data: bytes) -> Any:
 
 
 __all__ = [
-    "ffi",
-    "lib",
-    "string_to_c",
+    "_finalizer_refs",
+    "_refs_lock",
+    "_register_finalizer",
+    "apply_patch_json",
     "c_to_string",
+    "check_error",
+    "check_out_error",
+    "extract_error_details",
+    "ffi",
     "free_c_string",
     "get_error_string",
-    "extract_error_details",
-    "check_out_error",
-    "check_error",
-    "apply_patch_json",
-    "serialize_json",
+    "lib",
     "open_json",
-    "_register_finalizer",
-    "_finalizer_refs",
+    "serialize_json",
+    "string_to_c",
 ]

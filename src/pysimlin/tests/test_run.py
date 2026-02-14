@@ -1,12 +1,12 @@
 """Tests for the Run class."""
 
-import pytest
 from pathlib import Path
-import numpy as np
+
 import pandas as pd
+import pytest
+
 import simlin
-from simlin.run import Run, DominantPeriod
-from simlin.analysis import Loop, LoopPolarity
+from simlin.run import DominantPeriod
 from simlin.types import TimeSpec
 
 
@@ -37,7 +37,6 @@ class TestRunClass:
     def test_run_overrides_empty_when_none(self, xmile_model_path: Path) -> None:
         """Test that Run.overrides is empty dict when no overrides provided."""
         model = simlin.load(xmile_model_path)
-        
 
         run = model.run(analyze_loops=False)
 
@@ -46,7 +45,6 @@ class TestRunClass:
     def test_run_time_spec_property(self, xmile_model_path: Path) -> None:
         """Test that Run.time_spec returns valid TimeSpec."""
         model = simlin.load(xmile_model_path)
-        
 
         run = model.run(analyze_loops=False)
 
@@ -58,7 +56,6 @@ class TestRunClass:
     def test_run_loops_property_without_ltm(self, xmile_model_path: Path) -> None:
         """Test that Run.loops returns empty tuple when analyze_loops=False."""
         model = simlin.load(xmile_model_path)
-        
 
         run = model.run(analyze_loops=False)
 
@@ -67,7 +64,6 @@ class TestRunClass:
     def test_run_loops_property_with_ltm(self, xmile_model_path: Path) -> None:
         """Test that Run.loops returns Loop objects with behavior when analyze_loops=True."""
         model = simlin.load(xmile_model_path)
-        
 
         if len(model.loops) == 0:
             pytest.skip("Test model has no loops")
@@ -79,7 +75,6 @@ class TestRunClass:
     def test_run_dominant_periods_without_ltm(self, xmile_model_path: Path) -> None:
         """Test that Run.dominant_periods returns empty tuple when analyze_loops=False."""
         model = simlin.load(xmile_model_path)
-        
 
         run = model.run(analyze_loops=False)
 
@@ -89,7 +84,6 @@ class TestRunClass:
     def test_run_dominant_periods_with_ltm(self, xmile_model_path: Path) -> None:
         """Test that Run.dominant_periods returns DominantPeriod objects."""
         model = simlin.load(xmile_model_path)
-        
 
         if len(model.loops) == 0:
             pytest.skip("Test model has no loops")
@@ -101,7 +95,6 @@ class TestRunClass:
     def test_run_caching(self, xmile_model_path: Path) -> None:
         """Test that Run properties are cached properly."""
         model = simlin.load(xmile_model_path)
-        
 
         run = model.run(analyze_loops=False)
 

@@ -62,7 +62,7 @@ def validate_dt(value: Any) -> str:
             raise ValueError(
                 f"Invalid dt format: {value!r}. Expected a positive number or "
                 f"reciprocal notation like '1/4'"
-            )
+            ) from None
 
     raise ValueError(f"dt must be a number or string, got {type(value).__name__}")
 

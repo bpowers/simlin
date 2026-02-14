@@ -59,7 +59,11 @@ Rust components are standard cargo projects in a cargo workspace, and TypeScript
 **`src/simlin-cli` (Rust)**: CLI for simulating and converting models, mostly for testing/debugging
 
 **`src/pysimlin` (Python/Rust)**: Python bindings for the simulation engine
-- aims to expose the full engine functionality in idiomatic Python, with the target users being AI agents analyzing model behavior, calibrating models, etc.
+- Aims to expose the full engine functionality in idiomatic Python, with the target users being AI agents analyzing model behavior, calibrating models, etc.
+- Uses CFFI to call libsimlin's C API; the Rust FFI layer uses per-object `Mutex` for thread safety
+- Python wrapper classes (`Project`, `Model`, `Sim`) each carry a `threading.Lock` to be safe under free-threaded Python (PEP 703 / 3.13t+)
+- Module-level shared state (`_finalizer_refs`) is protected by `_refs_lock`
+- Tooling: `ruff` for linting **and** formatting (no black), `mypy` strict mode, `pytest` with `hypothesis`, `uv` for package management
 
 ### Test Models
 
@@ -184,3 +188,22 @@ Follow these steps when working on code changes in Rust crates like `src/simlin-
 - Prefer class components by default. Hooks are allowed when wrapping/integrating with components that only support hook-based APIs; in all other cases, prefer classes.
 - Use proper TypeScript types, avoid `any`
 - NEVER manually copy files around to get builds or tests passing. If there is some sort of regression or error where source files are not able to imported or used, identify the root cause and fix the build scripts.
+
+### Python (pysimlin) Development Standards
+
+#### Code Style
+- Use `ruff` for both linting and formatting (replaces black). Run `ruff check` and `ruff format`.
+- Use `mypy` with strict mode (`mypy simlin`).
+- Target Python 3.11+ -- use modern type syntax (`list[str]`, `dict[str, int]`, `X | None`) and `from __future__ import annotations` in all source files.
+
+#### Thread Safety
+- **All wrapper classes** (`Project`, `Model`, `Sim`) have a per-instance `threading.Lock` (`self._lock`) that protects `_ptr` and cached state.
+- **Module-level `_finalizer_refs`** (a `WeakValueDictionary`) is protected by `_refs_lock` in `_ffi.py`.
+- When adding new methods to wrapper classes, always acquire `self._lock` before touching `_ptr` or mutable state.
+- **Lock ordering**: `Model` methods must release `self._lock` before calling `Project` methods (which acquire the project's lock) to prevent deadlocks. Use the double-checked locking pattern for caches: check cache with lock, compute without lock, write cache with lock.
+- This locking is critical for free-threaded Python (PEP 703 / Python 3.13t+ / 3.14t) where the GIL does not serialize access.
+
+#### Testing
+- Use `pytest` with `hypothesis` for property-based testing.
+- Thread-safety tests live in `tests/test_thread_safety.py`.
+- Run from `src/pysimlin`: `uv run pytest tests/ -x`

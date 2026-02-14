@@ -1,10 +1,12 @@
 """Tests for the Model class."""
 
 import json
-import pytest
 from pathlib import Path
+
+import pytest
+
 import simlin
-from simlin import Project, Model, SimlinRuntimeError, SimlinCompilationError
+from simlin import Model, SimlinCompilationError, SimlinRuntimeError
 from simlin.json_types import Auxiliary as JsonAuxiliary
 
 
@@ -16,7 +18,7 @@ def test_model(xmile_model_path) -> Model:
 
 class TestModelVariables:
     """Test working with model variables."""
-    
+
     def test_get_var_count_via_variables(self, test_model: Model) -> None:
         """Test getting the number of variables via variables property."""
         count = len(test_model.variables)
@@ -42,22 +44,20 @@ class TestModelVariables:
             assert isinstance(deps, list)
             for dep in deps:
                 assert isinstance(dep, str)
-    
+
     def test_get_incoming_links_nonexistent_raises(self, test_model: Model) -> None:
         """Test that getting links for nonexistent variable raises error."""
         with pytest.raises(SimlinRuntimeError):
             test_model.get_incoming_links("nonexistent_variable_xyz_123")
-    
+
     def test_get_incoming_links_empty(self, test_model: Model) -> None:
         """Test that some variables might have no dependencies."""
         var_names = [v.name for v in test_model.variables]
 
         # Find a constant or time variable that has no deps
-        found_empty = False
         for name in var_names:
             deps = test_model.get_incoming_links(name)
             if len(deps) == 0:
-                found_empty = True
                 break
 
         # Most models have at least one variable with no dependencies
@@ -66,21 +66,21 @@ class TestModelVariables:
 
 class TestModelLinks:
     """Test model causal link analysis."""
-    
+
     def test_get_links(self, test_model: Model) -> None:
         """Test getting all causal links."""
         links = test_model.get_links()
         assert isinstance(links, list)
-        
+
         for link in links:
-            assert hasattr(link, 'from_var')
-            assert hasattr(link, 'to_var')
-            assert hasattr(link, 'polarity')
+            assert hasattr(link, "from_var")
+            assert hasattr(link, "to_var")
+            assert hasattr(link, "polarity")
             assert isinstance(link.from_var, str)
             assert isinstance(link.to_var, str)
             # Static analysis doesn't have scores
             assert link.score is None
-    
+
     def test_link_str_representation(self, test_model: Model) -> None:
         """Test string representation of links."""
         links = test_model.get_links()
@@ -93,21 +93,23 @@ class TestModelLinks:
 
 class TestModelSimulation:
     """Test creating simulations from models."""
-    
+
     def test_new_sim_default(self, test_model: Model) -> None:
         """Test creating a simulation with default settings."""
         sim = test_model.simulate()
         assert sim is not None
         from simlin import Sim
+
         assert isinstance(sim, Sim)
-    
+
     def test_new_sim_with_ltm(self, test_model: Model) -> None:
         """Test creating a simulation with LTM enabled."""
         sim = test_model.simulate(enable_ltm=True)
         assert sim is not None
         from simlin import Sim
+
         assert isinstance(sim, Sim)
-    
+
     def test_multiple_sims(self, test_model: Model) -> None:
         """Test creating multiple simulations from the same model."""
         sim1 = test_model.simulate()
@@ -120,7 +122,7 @@ class TestModelSimulation:
 
 class TestModelContextManager:
     """Test context manager functionality for models."""
-    
+
     def test_context_manager_basic_usage(self, xmile_model_path) -> None:
         """Test basic context manager usage."""
         model = simlin.load(xmile_model_path)
@@ -130,26 +132,26 @@ class TestModelContextManager:
             # Model should be usable inside the context
             var_names = [v.name for v in model.variables]
             assert len(var_names) > 0
-    
+
     def test_context_manager_returns_self(self, test_model: Model) -> None:
         """Test that __enter__ returns self."""
         with test_model as ctx_model:
             assert ctx_model is test_model
-    
+
     def test_context_manager_explicit_cleanup(self, test_model: Model) -> None:
         """Test that __exit__ performs explicit cleanup."""
         from simlin._ffi import ffi
-        
+
         original_ptr = test_model._ptr
-        
+
         # Use as context manager
         with test_model:
             pass
-        
+
         # After context exit, pointer should be NULL
         assert test_model._ptr == ffi.NULL
         assert original_ptr != ffi.NULL  # Original was valid
-    
+
     def test_context_manager_with_exception(self, xmile_model_path) -> None:
         """Test context manager cleanup when exception occurs."""
         from simlin._ffi import ffi
@@ -191,8 +193,7 @@ class TestModelEditing:
         # Verify via JSON serialization
         project_json = json.loads(model.project.serialize_json().decode("utf-8"))
         flow_dict = next(
-            f for f in project_json["models"][0]["flows"]
-            if f["name"] == "heat_loss_to_room"
+            f for f in project_json["models"][0]["flows"] if f["name"] == "heat_loss_to_room"
         )
         assert flow_dict.get("equation", "") == "0"
 
@@ -203,8 +204,7 @@ class TestModelEditing:
         # Get original equation via JSON
         original_json = json.loads(model.project.serialize_json().decode("utf-8"))
         original_flow = next(
-            f for f in original_json["models"][0]["flows"]
-            if f["name"] == "heat_loss_to_room"
+            f for f in original_json["models"][0]["flows"] if f["name"] == "heat_loss_to_room"
         )
         original_equation = original_flow.get("equation", "")
 
@@ -216,8 +216,7 @@ class TestModelEditing:
         # Verify equation unchanged via JSON
         after_json = json.loads(model.project.serialize_json().decode("utf-8"))
         after_flow = next(
-            f for f in after_json["models"][0]["flows"]
-            if f["name"] == "heat_loss_to_room"
+            f for f in after_json["models"][0]["flows"] if f["name"] == "heat_loss_to_room"
         )
         assert after_flow.get("equation", "") == original_equation
 
@@ -227,13 +226,16 @@ class TestModelEditing:
 
         before_json = model.project.serialize_json()
 
-        with pytest.raises((SimlinRuntimeError, SimlinCompilationError)):
-            with model.edit() as (_, patch):
-                bad_aux = JsonAuxiliary(
+        with (
+            pytest.raises((SimlinRuntimeError, SimlinCompilationError)),
+            model.edit() as (_, patch),
+        ):
+            patch.upsert_aux(
+                JsonAuxiliary(
                     name="bad_variable",
                     equation="?? invalid expression",
                 )
-                patch.upsert_aux(bad_aux)
+            )
 
         after_json = model.project.serialize_json()
         assert after_json == before_json
@@ -261,13 +263,16 @@ class TestModelEditing:
 
         before_json = model.project.serialize_json()
 
-        with pytest.raises((SimlinRuntimeError, SimlinCompilationError)):
-            with model.edit(dry_run=True) as (_, patch):
-                bad_aux = JsonAuxiliary(
+        with (
+            pytest.raises((SimlinRuntimeError, SimlinCompilationError)),
+            model.edit(dry_run=True) as (_, patch),
+        ):
+            patch.upsert_aux(
+                JsonAuxiliary(
                     name="bad_variable",
                     equation="?? invalid expression",
                 )
-                patch.upsert_aux(bad_aux)
+            )
 
         # Verify project unchanged
         after_json = model.project.serialize_json()
@@ -301,9 +306,10 @@ class TestModelEditing:
     def test_apply_patch_json_returns_errors_when_allowed(self, xmile_model_path) -> None:
         """apply_patch_json with allow_errors=True should return error details."""
         import json as json_module
-        from simlin.json_types import JsonProjectPatch, JsonModelPatch, UpsertAux, Auxiliary
+
+        from simlin.errors import ErrorCode, ErrorDetail
         from simlin.json_converter import converter
-        from simlin.errors import ErrorDetail, ErrorCode
+        from simlin.json_types import Auxiliary, JsonModelPatch, JsonProjectPatch, UpsertAux
 
         model = simlin.load(xmile_model_path)
 
@@ -325,7 +331,9 @@ class TestModelEditing:
         assert isinstance(error, ErrorDetail)
         assert error.code != ErrorCode.NO_ERROR, "Error should have a non-zero error code"
         # The error should reference the variable with the bad equation
-        assert error.variable_name == "broken_var", f"Expected variable_name='broken_var', got '{error.variable_name}'"
+        assert error.variable_name == "broken_var", (
+            f"Expected variable_name='broken_var', got '{error.variable_name}'"
+        )
 
 
 class TestModelRepr:
@@ -348,6 +356,7 @@ class TestModelStructuralProperties:
 
         for stock in stocks:
             from simlin.types import Stock
+
             assert isinstance(stock, Stock)
             assert isinstance(stock.name, str)
             assert isinstance(stock.initial_equation, str)
@@ -361,6 +370,7 @@ class TestModelStructuralProperties:
 
         for flow in flows:
             from simlin.types import Flow
+
             assert isinstance(flow, Flow)
             assert isinstance(flow.name, str)
             assert isinstance(flow.equation, str)
@@ -372,6 +382,7 @@ class TestModelStructuralProperties:
 
         for aux in auxs:
             from simlin.types import Aux
+
             assert isinstance(aux, Aux)
             assert isinstance(aux.name, str)
             assert isinstance(aux.equation, str)
@@ -390,6 +401,7 @@ class TestModelStructuralProperties:
     def test_time_spec_property(self, test_model: Model) -> None:
         """Test that time_spec property returns TimeSpec."""
         from simlin.types import TimeSpec
+
         time_spec = test_model.time_spec
         assert isinstance(time_spec, TimeSpec)
         assert time_spec.start >= 0
@@ -403,6 +415,7 @@ class TestModelStructuralProperties:
 
         for loop in loops:
             from simlin.analysis import Loop
+
             assert isinstance(loop, Loop)
             assert isinstance(loop.id, str)
             assert isinstance(loop.variables, tuple)
@@ -429,12 +442,14 @@ class TestModelSimulationMethods:
     def test_simulate_method(self, test_model: Model) -> None:
         """Test simulate() method returns Sim."""
         from simlin import Sim
+
         sim = test_model.simulate()
         assert isinstance(sim, Sim)
 
     def test_simulate_with_overrides(self, teacup_stmx_path) -> None:
         """Test simulate() with variable overrides."""
         from simlin import Sim
+
         model = simlin.load(teacup_stmx_path)
 
         # room_temperature is a simple constant (equation = "70")
@@ -445,18 +460,21 @@ class TestModelSimulationMethods:
     def test_simulate_with_ltm(self, test_model: Model) -> None:
         """Test simulate() with LTM enabled."""
         from simlin import Sim
+
         sim = test_model.simulate(enable_ltm=True)
         assert isinstance(sim, Sim)
 
     def test_run_method(self, test_model: Model) -> None:
         """Test run() method returns Run."""
         from simlin.run import Run
+
         run = test_model.run(analyze_loops=False)
         assert isinstance(run, Run)
 
     def test_run_with_overrides(self, teacup_stmx_path) -> None:
         """Test run() with variable overrides."""
         from simlin.run import Run
+
         model = simlin.load(teacup_stmx_path)
 
         # room_temperature is a simple constant (equation = "70")
@@ -468,12 +486,14 @@ class TestModelSimulationMethods:
     def test_run_with_analyze_loops(self, test_model: Model) -> None:
         """Test run() with loop analysis."""
         from simlin.run import Run
+
         run = test_model.run(analyze_loops=True)
         assert isinstance(run, Run)
 
     def test_base_case_property(self, test_model: Model) -> None:
         """Test base_case property returns Run."""
         from simlin.run import Run
+
         base_case = test_model.base_case
         assert isinstance(base_case, Run)
 
@@ -491,6 +511,7 @@ class TestModelSimulationMethods:
     def test_base_case_has_results(self, test_model: Model) -> None:
         """Test that base_case has results."""
         import pandas as pd
+
         base_case = test_model.base_case
         assert isinstance(base_case.results, pd.DataFrame)
         assert len(base_case.results) > 0
@@ -511,9 +532,10 @@ class TestModelUtilities:
 
         for issue in issues:
             from simlin import ModelIssue
+
             assert isinstance(issue, ModelIssue)
-            assert hasattr(issue, 'severity')
-            assert hasattr(issue, 'message')
+            assert hasattr(issue, "severity")
+            assert hasattr(issue, "message")
             assert isinstance(issue.severity, str)
             assert isinstance(issue.message, str)
 
