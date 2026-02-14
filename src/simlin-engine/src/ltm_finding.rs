@@ -278,17 +278,14 @@ fn parse_link_offsets(results: &Results<f64>) -> Vec<LinkOffset> {
     link_offsets
 }
 
-/// Look up the main (non-implicit) model deterministically by canonical name "main".
+/// Look up the main model deterministically by its canonical name "main".
 ///
-/// Falls back to the first non-implicit model if "main" isn't found (shouldn't
-/// happen in practice for well-formed projects).
+/// Returns `None` if no model named "main" exists or if it is implicit.
+/// We intentionally avoid falling back to arbitrary HashMap iteration
+/// (which is nondeterministic) -- all well-formed projects have a "main" model.
 fn find_main_model(project: &Project) -> Option<&std::sync::Arc<crate::model::ModelStage1>> {
     let main_ident = crate::common::canonicalize("main");
-    project
-        .models
-        .get(&main_ident)
-        .filter(|m| !m.implicit)
-        .or_else(|| project.models.values().find(|m| !m.implicit))
+    project.models.get(&main_ident).filter(|m| !m.implicit)
 }
 
 /// Identify stock variables from the project's main model.
@@ -455,6 +452,19 @@ pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<F
         });
     }
 
+    rank_and_filter(&mut found_loops);
+
+    Ok(found_loops)
+}
+
+/// Rank, truncate, filter, and assign IDs to discovered loops.
+///
+/// 1. Sort by average |score| descending
+/// 2. Truncate to MAX_LOOPS (200)
+/// 3. Filter loops contributing less than MIN_CONTRIBUTION (0.1%) of total score
+/// 4. Assign deterministic polarity-based IDs (r1, b1, etc.)
+/// 5. Re-sort by score descending for callers
+fn rank_and_filter(found_loops: &mut Vec<FoundLoop>) {
     // Sort by average |score| descending
     found_loops.sort_by(|a, b| {
         b.avg_abs_score
@@ -473,7 +483,7 @@ pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<F
     }
 
     // Assign deterministic IDs (sorts by content key for stable naming)
-    assign_loop_ids(&mut found_loops);
+    assign_loop_ids(found_loops);
 
     // Re-sort by score descending so callers get results ranked by importance
     found_loops.sort_by(|a, b| {
@@ -481,8 +491,6 @@ pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<F
             .partial_cmp(&a.avg_abs_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-
-    Ok(found_loops)
 }
 
 /// Assign deterministic IDs to discovered loops based on polarity and content.
@@ -841,24 +849,12 @@ mod tests {
 
     #[test]
     fn test_parse_link_offsets() {
-        // Test the link offset parsing from variable names
+        // Test the link offset parsing from variable names.
+        // Use canonicalize() directly to match how the interpreter stores keys.
         let mut offsets = HashMap::new();
-        offsets.insert(
-            Ident::<Canonical>::from_unchecked(
-                canonicalize("$⁚ltm⁚link_score⁚population⁚births").to_source_repr(),
-            ),
-            0usize,
-        );
-        offsets.insert(
-            Ident::<Canonical>::from_unchecked(
-                canonicalize("$⁚ltm⁚link_score⁚births⁚population").to_source_repr(),
-            ),
-            1usize,
-        );
-        offsets.insert(
-            Ident::<Canonical>::from_unchecked(canonicalize("population").to_source_repr()),
-            2usize,
-        );
+        offsets.insert(canonicalize("$⁚ltm⁚link_score⁚population⁚births"), 0usize);
+        offsets.insert(canonicalize("$⁚ltm⁚link_score⁚births⁚population"), 1usize);
+        offsets.insert(canonicalize("population"), 2usize);
 
         let results = Results {
             offsets,
@@ -962,5 +958,120 @@ mod tests {
 
         assert_eq!(a_b_loop.loop_info.id, "b1");
         assert_eq!(x_y_loop.loop_info.id, "r1");
+    }
+
+    /// Helper to create a FoundLoop with given variable names, polarity, and score.
+    fn make_found_loop(
+        var_pairs: &[(&str, &str)],
+        polarity: LoopPolarity,
+        avg_abs_score: f64,
+    ) -> FoundLoop {
+        let links: Vec<Link> = var_pairs
+            .iter()
+            .map(|(from, to)| Link {
+                from: canonicalize(from),
+                to: canonicalize(to),
+                polarity: crate::ltm::LinkPolarity::Positive,
+            })
+            .collect();
+        FoundLoop {
+            loop_info: Loop {
+                id: String::new(),
+                links,
+                stocks: vec![],
+                polarity,
+            },
+            scores: vec![],
+            avg_abs_score,
+        }
+    }
+
+    #[test]
+    fn test_rank_and_filter_truncates_to_max_loops() {
+        // Create MAX_LOOPS + 50 loops and verify truncation
+        let mut loops: Vec<FoundLoop> = (0..MAX_LOOPS + 50)
+            .map(|i| {
+                let name_a = format!("var_a_{i:04}");
+                let name_b = format!("var_b_{i:04}");
+                make_found_loop(
+                    &[(&name_a, &name_b), (&name_b, &name_a)],
+                    LoopPolarity::Reinforcing,
+                    // Give all loops equal score so none are filtered by MIN_CONTRIBUTION
+                    1.0,
+                )
+            })
+            .collect();
+
+        assert_eq!(loops.len(), MAX_LOOPS + 50);
+        rank_and_filter(&mut loops);
+        assert_eq!(
+            loops.len(),
+            MAX_LOOPS,
+            "Should truncate to MAX_LOOPS ({})",
+            MAX_LOOPS
+        );
+    }
+
+    #[test]
+    fn test_rank_and_filter_removes_low_contribution() {
+        // Create loops where one dominates and others have negligible contribution.
+        // The dominant loop has score 1000; the tiny loop has score 0.0001.
+        // Total = 1000.0001, tiny/total ~= 0.0000001 < MIN_CONTRIBUTION (0.001).
+        let mut loops = vec![
+            make_found_loop(
+                &[("big_a", "big_b"), ("big_b", "big_a")],
+                LoopPolarity::Reinforcing,
+                1000.0,
+            ),
+            make_found_loop(
+                &[("tiny_a", "tiny_b"), ("tiny_b", "tiny_a")],
+                LoopPolarity::Balancing,
+                0.0001,
+            ),
+        ];
+
+        rank_and_filter(&mut loops);
+
+        // Only the dominant loop should remain
+        assert_eq!(
+            loops.len(),
+            1,
+            "Loops below MIN_CONTRIBUTION should be filtered out"
+        );
+        assert_eq!(loops[0].avg_abs_score, 1000.0);
+    }
+
+    #[test]
+    fn test_rank_and_filter_preserves_score_ordering() {
+        let mut loops = vec![
+            make_found_loop(
+                &[("low_a", "low_b"), ("low_b", "low_a")],
+                LoopPolarity::Balancing,
+                1.0,
+            ),
+            make_found_loop(
+                &[("high_a", "high_b"), ("high_b", "high_a")],
+                LoopPolarity::Reinforcing,
+                100.0,
+            ),
+            make_found_loop(
+                &[("mid_a", "mid_b"), ("mid_b", "mid_a")],
+                LoopPolarity::Reinforcing,
+                50.0,
+            ),
+        ];
+
+        rank_and_filter(&mut loops);
+
+        // Should be sorted by score descending
+        assert_eq!(loops.len(), 3);
+        assert_eq!(loops[0].avg_abs_score, 100.0);
+        assert_eq!(loops[1].avg_abs_score, 50.0);
+        assert_eq!(loops[2].avg_abs_score, 1.0);
+
+        // IDs should be assigned (deterministically by content, but present)
+        assert!(!loops[0].loop_info.id.is_empty());
+        assert!(!loops[1].loop_info.id.is_empty());
+        assert!(!loops[2].loop_info.id.is_empty());
     }
 }
