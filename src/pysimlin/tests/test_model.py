@@ -845,3 +845,22 @@ class TestTimeSpecDirect:
         model.project.set_sim_specs(stop=50.0)
         ts = model.time_spec
         assert ts.stop == 50.0
+
+
+class TestVarFromDict:
+    """Unit tests for _var_from_dict type dispatch."""
+
+    def test_module_type_returns_none(self) -> None:
+        """Module-type variables should return None (not part of public API)."""
+        from simlin.model import _var_from_dict
+
+        d: dict[str, Any] = {"type": "module", "name": "sub", "modelName": "sub_model"}
+        assert _var_from_dict(d) is None
+
+    def test_unknown_type_raises(self) -> None:
+        """Unknown variable types should raise, not silently return None."""
+        from simlin.model import _var_from_dict
+
+        d: dict[str, Any] = {"type": "bogus", "name": "x"}
+        with pytest.raises(SimlinRuntimeError, match="unknown variable type"):
+            _var_from_dict(d)

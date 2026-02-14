@@ -12,7 +12,7 @@
 
 import { EngineBackend, ModelHandle } from './backend';
 import { Stock, Flow, Aux, Module, Variable, TimeSpec, Link, Loop, ModelIssue, GraphicalFunction } from './types';
-import { JsonStock, JsonFlow, JsonAuxiliary, JsonGraphicalFunction, JsonProjectPatch, JsonSimSpecs } from './json-types';
+import { JsonStock, JsonFlow, JsonAuxiliary, JsonModule, JsonGraphicalFunction, JsonProjectPatch, JsonSimSpecs } from './json-types';
 import { ErrorCode } from './errors';
 import { Project } from './project';
 import { Sim } from './sim';
@@ -55,7 +55,7 @@ type JsonVarWithType =
   | ({ type: 'stock' } & JsonStock)
   | ({ type: 'flow' } & JsonFlow)
   | ({ type: 'aux' } & JsonAuxiliary)
-  | ({ type: 'module' } & { name: string; modelName: string; [key: string]: unknown });
+  | ({ type: 'module' } & JsonModule);
 
 function parseJsonGraphicalFunction(gf: JsonGraphicalFunction): GraphicalFunction {
   let points: [number, number][] | undefined;

@@ -202,8 +202,10 @@ def _var_from_dict(d: dict[str, Any]) -> Stock | Flow | Aux | None:
         return _flow_from_dict(d)
     elif var_type == "aux":
         return _aux_from_dict(d)
-    else:
+    elif var_type == "module":
         return None
+    else:
+        raise SimlinRuntimeError(f"unknown variable type: {var_type!r}")
 
 
 def _get_all_vars(model_ptr: Any) -> list[dict[str, Any]]:
@@ -782,7 +784,7 @@ class Model:
                 )
             return f"{var.name} is an auxiliary variable computed as {var.equation}"
 
-        raise SimlinRuntimeError(f"Variable '{variable}' not found in model")
+        raise AssertionError(f"unexpected variable type: {type(var)}")
 
     def edit(self, *, dry_run: bool = False, allow_errors: bool = False) -> _ModelEditContext:
         """Return a context manager for batching model edits."""
