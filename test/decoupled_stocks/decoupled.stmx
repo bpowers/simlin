@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <name>decoupled-stocks</name>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler">
+        <start>0</start>
+        <stop>10</stop>
+        <dt>1</dt>
+        <time_units>year</time_units>
+    </sim_specs>
+    <model>
+        <variables>
+            <stock name="stock_1">
+                <eqn>1</eqn>
+                <inflow>flow_1</inflow>
+            </stock>
+            <stock name="stock_2">
+                <eqn>1</eqn>
+                <inflow>flow_2</inflow>
+            </stock>
+            <flow name="flow_1">
+                <eqn>IF stock_2 &gt; 50 THEN stock_2/DT ELSE stock_1/DT</eqn>
+            </flow>
+            <flow name="flow_2">
+                <eqn>IF stock_1 &gt; 10 AND stock_1 &lt; 20 THEN stock_1/DT ELSE stock_2/DT</eqn>
+            </flow>
+        </variables>
+        <views>
+            <view isee:show_pages="false" page_width="800" page_height="600" view_type="stock_flow">
+                <stock name="stock 1" x="200" y="200" label_side="top"></stock>
+                <stock name="stock 2" x="600" y="200" label_side="top"></stock>
+                <flow name="flow 1" x="120" y="200" label_side="top">
+                    <pts>
+                        <pt x="60" y="200"></pt>
+                        <pt x="177.5" y="200"></pt>
+                    </pts>
+                </flow>
+                <flow name="flow 2" x="520" y="200" label_side="top">
+                    <pts>
+                        <pt x="460" y="200"></pt>
+                        <pt x="577.5" y="200"></pt>
+                    </pts>
+                </flow>
+                <connector angle="0">
+                    <from>stock 2</from>
+                    <to>flow 1</to>
+                </connector>
+                <connector angle="180">
+                    <from>stock 1</from>
+                    <to>flow 1</to>
+                </connector>
+                <connector angle="0">
+                    <from>stock 1</from>
+                    <to>flow 2</to>
+                </connector>
+                <connector angle="180">
+                    <from>stock 2</from>
+                    <to>flow 2</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

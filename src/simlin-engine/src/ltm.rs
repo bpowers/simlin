@@ -554,7 +554,7 @@ impl CausalGraph {
     }
 
     /// Convert a circuit (list of nodes) to a list of links
-    fn circuit_to_links(&self, circuit: &[Ident<Canonical>]) -> Vec<Link> {
+    pub fn circuit_to_links(&self, circuit: &[Ident<Canonical>]) -> Vec<Link> {
         let mut links = Vec::new();
         for i in 0..circuit.len() {
             let from = &circuit[i];
@@ -570,12 +570,40 @@ impl CausalGraph {
     }
 
     /// Find stocks in a loop
-    fn find_stocks_in_loop(&self, circuit: &[Ident<Canonical>]) -> Vec<Ident<Canonical>> {
+    pub fn find_stocks_in_loop(&self, circuit: &[Ident<Canonical>]) -> Vec<Ident<Canonical>> {
         circuit
             .iter()
             .filter(|node| self.stocks.contains(*node))
             .cloned()
             .collect()
+    }
+
+    /// Return all causal links in the model with their computed polarity.
+    ///
+    /// This iterates over every edge in the causal graph and builds a `Link`
+    /// with polarity determined by static analysis of the equation AST. Used
+    /// by discovery mode to generate link score variables for ALL causal
+    /// connections, not just those in known loops.
+    pub fn all_links(&self) -> Vec<Link> {
+        let mut links = Vec::new();
+        for (from, targets) in &self.edges {
+            for to in targets {
+                let polarity = self.get_link_polarity(from, to);
+                links.push(Link {
+                    from: from.clone(),
+                    to: to.clone(),
+                    polarity,
+                });
+            }
+        }
+        // Sort for deterministic ordering
+        links.sort_by(|a, b| {
+            a.from
+                .as_str()
+                .cmp(b.from.as_str())
+                .then_with(|| a.to.as_str().cmp(b.to.as_str()))
+        });
+        links
     }
 
     /// Get the polarity of a single link
@@ -606,7 +634,7 @@ impl CausalGraph {
     }
 
     /// Calculate loop polarity based on link polarities
-    fn calculate_polarity(&self, links: &[Link]) -> LoopPolarity {
+    pub fn calculate_polarity(&self, links: &[Link]) -> LoopPolarity {
         // If ANY link has unknown polarity, the loop is Undetermined
         let has_unknown_polarity = links
             .iter()
@@ -2442,5 +2470,91 @@ mod tests {
             "Reinforcing polarity loop should have 'r' prefix, got: {}",
             reinforcing_loop.id
         );
+    }
+
+    #[test]
+    fn test_all_links() {
+        // Create a model with known causal structure:
+        // population -> births -> population (reinforcing loop)
+        // population -> deaths -> population (balancing loop)
+        // birth_rate -> births (external input)
+        // death_rate -> deaths (external input)
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("population", "100", &["births"], &["deaths"], None),
+                x_flow("births", "population * birth_rate", None),
+                x_flow("deaths", "population * death_rate", None),
+                x_aux("birth_rate", "0.02", None),
+                x_aux("death_rate", "0.01", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[model]);
+        let project = Project::from(project);
+
+        let main_ident = crate::common::canonicalize("main");
+        let main_model = project.models.get(&main_ident).unwrap();
+        let graph = CausalGraph::from_model(main_model, &project).unwrap();
+
+        let links = graph.all_links();
+
+        // Should have links for:
+        // birth_rate -> births
+        // births -> population (inflow, positive)
+        // death_rate -> deaths
+        // deaths -> population (outflow, negative)
+        // population -> births (stock to flow)
+        // population -> deaths (stock to flow)
+        assert!(
+            links.len() >= 4,
+            "Should have at least 4 causal links, found {}",
+            links.len()
+        );
+
+        // Check specific links exist with correct polarity
+        let births_to_pop = links
+            .iter()
+            .find(|l| l.from.as_str() == "births" && l.to.as_str() == "population");
+        assert!(
+            births_to_pop.is_some(),
+            "Should have births->population link"
+        );
+        assert_eq!(
+            births_to_pop.unwrap().polarity,
+            LinkPolarity::Positive,
+            "Inflow should have positive polarity"
+        );
+
+        let deaths_to_pop = links
+            .iter()
+            .find(|l| l.from.as_str() == "deaths" && l.to.as_str() == "population");
+        assert!(
+            deaths_to_pop.is_some(),
+            "Should have deaths->population link"
+        );
+        assert_eq!(
+            deaths_to_pop.unwrap().polarity,
+            LinkPolarity::Negative,
+            "Outflow should have negative polarity"
+        );
+
+        // Verify deterministic ordering (sorted by from, then to)
+        for i in 1..links.len() {
+            let prev = &links[i - 1];
+            let curr = &links[i];
+            let order = prev
+                .from
+                .as_str()
+                .cmp(curr.from.as_str())
+                .then_with(|| prev.to.as_str().cmp(curr.to.as_str()));
+            assert!(
+                order != std::cmp::Ordering::Greater,
+                "Links should be sorted: {:?} should come before {:?}",
+                (prev.from.as_str(), prev.to.as_str()),
+                (curr.from.as_str(), curr.to.as_str())
+            );
+        }
     }
 }

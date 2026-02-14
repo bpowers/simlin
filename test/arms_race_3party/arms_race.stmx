@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <name>arms-race-3party</name>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler">
+        <start>0</start>
+        <stop>100</stop>
+        <dt>1</dt>
+        <time_units>year</time_units>
+    </sim_specs>
+    <model>
+        <variables>
+            <stock name="a_s_arms">
+                <eqn>50</eqn>
+                <inflow>a_s_changing</inflow>
+            </stock>
+            <stock name="b_s_arms">
+                <eqn>100</eqn>
+                <inflow>b_s_changing</inflow>
+            </stock>
+            <stock name="c_s_arms">
+                <eqn>150</eqn>
+                <inflow>c_s_changing</inflow>
+            </stock>
+            <flow name="a_s_changing">
+                <eqn>(a_s_target - a_s_arms) / adjustment_time_a</eqn>
+            </flow>
+            <flow name="b_s_changing">
+                <eqn>(b_s_target - b_s_arms) / adjustment_time_b</eqn>
+            </flow>
+            <flow name="c_s_changing">
+                <eqn>(c_s_target - c_s_arms) / adjustment_time_c</eqn>
+            </flow>
+            <aux name="a_s_target">
+                <eqn>b_s_arms + 0.9 * c_s_arms</eqn>
+            </aux>
+            <aux name="b_s_target">
+                <eqn>a_s_arms + 1.1 * c_s_arms</eqn>
+            </aux>
+            <aux name="c_s_target">
+                <eqn>1.1 * a_s_arms + 0.9 * b_s_arms</eqn>
+            </aux>
+            <aux name="adjustment_time_a">
+                <eqn>10</eqn>
+            </aux>
+            <aux name="adjustment_time_b">
+                <eqn>10</eqn>
+            </aux>
+            <aux name="adjustment_time_c">
+                <eqn>10</eqn>
+            </aux>
+        </variables>
+    </model>
+</xmile>
