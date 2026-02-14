@@ -27,6 +27,9 @@ use crate::results::Results;
 /// A parsed link score offset: ((from_variable, to_variable), offset_in_results).
 type LinkOffset = ((Ident<Canonical>, Ident<Canonical>), usize);
 
+/// HashMap for O(1) link offset lookup by (from, to) key.
+type LinkOffsetMap = HashMap<(Ident<Canonical>, Ident<Canonical>), usize>;
+
 // --- Constants (from the paper) ---
 
 /// Maximum loops to retain after discovery (paper uses 200)
@@ -270,18 +273,21 @@ fn parse_link_offsets(results: &Results<f64>) -> Vec<LinkOffset> {
     link_offsets
 }
 
-/// Identify stock variables from the project's main model.
+/// Identify stock variables from the project's first non-implicit model.
+///
+/// Only examines the first non-implicit model, consistent with `discover_loops()`
+/// which builds the `CausalGraph` from the same model.
 fn get_stock_variables(project: &Project) -> Vec<Ident<Canonical>> {
     let mut stocks = Vec::new();
 
-    for model in project.models.values() {
-        if model.implicit {
-            continue;
-        }
-        for (var_name, var) in &model.variables {
-            if matches!(var, crate::variable::Variable::Stock { .. }) {
-                stocks.push(var_name.clone());
-            }
+    let main_model = match project.models.values().find(|m| !m.implicit) {
+        Some(model) => model,
+        None => return stocks,
+    };
+
+    for (var_name, var) in &main_model.variables {
+        if matches!(var, crate::variable::Variable::Stock { .. }) {
+            stocks.push(var_name.clone());
         }
     }
 
@@ -303,6 +309,12 @@ pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<F
     if link_offsets.is_empty() {
         return Ok(Vec::new());
     }
+
+    // Build HashMap for O(1) link offset lookups during score computation
+    let link_offset_map: LinkOffsetMap = link_offsets
+        .iter()
+        .map(|((from, to), offset)| ((from.clone(), to.clone()), *offset))
+        .collect();
 
     let stocks = get_stock_variables(project);
     if stocks.is_empty() {
@@ -368,13 +380,8 @@ pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<F
             let mut has_nan = false;
 
             for link in &links {
-                // Find the link score offset
                 let link_key = (link.from.clone(), link.to.clone());
-                if let Some(&offset) = link_offsets
-                    .iter()
-                    .find(|((f, t), _)| *f == link_key.0 && *t == link_key.1)
-                    .map(|(_, off)| off)
-                {
+                if let Some(&offset) = link_offset_map.get(&link_key) {
                     let value = results.data[step * results.step_size + offset];
                     if value.is_nan() {
                         has_nan = true;
@@ -382,9 +389,16 @@ pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<F
                     }
                     loop_score *= value;
                 } else {
-                    // Link score variable not found - shouldn't happen
-                    has_nan = true;
-                    break;
+                    return Err(crate::common::Error {
+                        kind: crate::common::ErrorKind::Model,
+                        code: crate::common::ErrorCode::NotSimulatable,
+                        details: Some(format!(
+                            "Link score variable not found for {} -> {}. \
+                             The project may not have been augmented with with_ltm_all_links().",
+                            link.from.as_str(),
+                            link.to.as_str()
+                        )),
+                    });
                 }
             }
 
@@ -439,8 +453,15 @@ pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<F
         found_loops.retain(|l| l.avg_abs_score / total_avg_score >= MIN_CONTRIBUTION);
     }
 
-    // Assign deterministic IDs
+    // Assign deterministic IDs (sorts by content key for stable naming)
     assign_loop_ids(&mut found_loops);
+
+    // Re-sort by score descending so callers get results ranked by importance
+    found_loops.sort_by(|a, b| {
+        b.avg_abs_score
+            .partial_cmp(&a.avg_abs_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Ok(found_loops)
 }

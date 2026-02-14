@@ -2507,9 +2507,10 @@ mod tests {
         // deaths -> population (outflow, negative)
         // population -> births (stock to flow)
         // population -> deaths (stock to flow)
-        assert!(
-            links.len() >= 4,
-            "Should have at least 4 causal links, found {}",
+        assert_eq!(
+            links.len(),
+            6,
+            "Should have exactly 6 causal links, found {}",
             links.len()
         );
 

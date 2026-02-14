@@ -202,16 +202,9 @@ fn ensure_ltm_results(
 }
 
 fn simulate_ltm_path(model_path: &str) {
-    eprintln!("LTM model: {}", model_path);
-
     let f = File::open(model_path).unwrap();
     let mut f = BufReader::new(f);
-    let datamodel_project = xmile::project_from_reader(&mut f);
-
-    if let Err(ref err) = datamodel_project {
-        eprintln!("model '{model_path}' error: {err}");
-    }
-    let datamodel_project = datamodel_project.unwrap();
+    let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
 
     let project = Project::from(datamodel_project);
     let ltm_project = project.with_ltm().unwrap();
@@ -267,13 +260,15 @@ fn discover_loops_from_path(model_path: &str) -> Vec<ltm_finding::FoundLoop> {
 
 #[test]
 fn discovery_logistic_growth_finds_both_loops() {
-    // The logistic growth model has exactly 2 loops.
-    // Discovery mode should find both of them.
+    // The logistic growth model has exactly 2 loops:
+    // 1. population -> births -> population (reinforcing)
+    // 2. population -> fraction_used -> fractional_growth_rate -> births -> population (balancing)
     let found = discover_loops_from_path("../../test/logistic_growth_ltm/logistic_growth.stmx");
 
-    assert!(
-        found.len() >= 2,
-        "Discovery should find at least 2 loops in logistic growth model, found {}",
+    assert_eq!(
+        found.len(),
+        2,
+        "Discovery should find exactly 2 loops in logistic growth model, found {}",
         found.len()
     );
 
@@ -355,11 +350,6 @@ fn discovery_cross_validates_with_exhaustive() {
 
 #[test]
 fn discovery_arms_race_3party() {
-    // The three-party arms race model has 8 feedback loops:
-    // - 3 self-adjustment (balancing): A->A, B->B, C->C
-    // - 3 pairwise (reinforcing): A<->B, B<->C, A<->C
-    // - 2 three-way (reinforcing): A->B->C->A and A->C->B->A
-
     let model_path = "../../test/arms_race_3party/arms_race.stmx";
 
     // Exhaustive mode to establish ground truth
@@ -370,21 +360,10 @@ fn discovery_arms_race_3party() {
     let exhaustive_loops = ltm::detect_loops(&project).unwrap();
     let exhaustive_count: usize = exhaustive_loops.values().map(|v| v.len()).sum();
 
-    eprintln!("Arms race exhaustive loops: {}", exhaustive_count);
-    for loops in exhaustive_loops.values() {
-        for l in loops {
-            eprintln!(
-                "  {} ({}): {}",
-                l.id,
-                l.polarity.abbreviation(),
-                l.format_path()
-            );
-        }
-    }
-
-    // The paper estimated 8 loops. Our exhaustive search finds 7: 3 self-adjustment
-    // (balancing), 3 pairwise (reinforcing), and 1 three-way (reinforcing). The second
-    // three-way loop (reverse direction) traverses the same node set and is deduplicated.
+    // The three-party arms race has 7 unique feedback loops: 3 self-adjustment
+    // (balancing), 3 pairwise (reinforcing), and 1 three-way (reinforcing).
+    // The second three-way loop (reverse direction) traverses the same node set
+    // and is deduplicated by the exhaustive search.
     assert_eq!(
         exhaustive_count, 7,
         "Arms race should have 7 feedback loops, found {}",
@@ -394,73 +373,97 @@ fn discovery_arms_race_3party() {
     // Discovery mode
     let found = discover_loops_from_path(model_path);
 
-    eprintln!("Arms race discovery found {} loops:", found.len());
-    for l in &found {
-        eprintln!(
-            "  {} ({}): {} (avg score: {:.4})",
-            l.loop_info.id,
-            l.loop_info.polarity.abbreviation(),
-            l.loop_info.format_path(),
-            l.avg_abs_score
-        );
-    }
-
-    // Discovery should find a significant subset of the loops.
-    // The heuristic may not find all 8 (that's expected), but it should
-    // find the most important ones. At minimum, the 3 self-loops and some
-    // pairwise/three-way loops.
-    assert!(
-        found.len() >= 3,
-        "Discovery should find at least the 3 self-adjustment loops, found {}",
+    // The heuristic finds 3 of 7 loops: the 3 self-adjustment (balancing) loops.
+    // The pairwise and three-way reinforcing loops are pruned by best_score
+    // persistence -- once the strong self-loops set high scores on shared nodes,
+    // the weaker cross-stock paths can't improve on them. This is expected
+    // behavior for the strongest-path heuristic on symmetric models.
+    assert_eq!(
+        found.len(),
+        3,
+        "Discovery should find 3 loops in arms race model, found {}",
         found.len()
     );
+
+    // All found loops should be a subset of the exhaustive results
+    for found_loop in &found {
+        let mut found_nodes: Vec<String> = found_loop
+            .loop_info
+            .links
+            .iter()
+            .map(|l| l.from.as_str().to_string())
+            .collect();
+        found_nodes.sort();
+
+        let in_exhaustive = exhaustive_loops.values().any(|loops| {
+            loops.iter().any(|exh| {
+                let mut exh_nodes: Vec<String> = exh
+                    .links
+                    .iter()
+                    .map(|l| l.from.as_str().to_string())
+                    .collect();
+                exh_nodes.sort();
+                exh_nodes == found_nodes
+            })
+        });
+        assert!(
+            in_exhaustive,
+            "Discovered loop {} should exist in exhaustive results",
+            found_loop.loop_info.format_path()
+        );
+    }
 }
 
 #[test]
 fn discovery_decoupled_stocks() {
-    // The decoupled stocks model has time-varying loop activity.
-    // Different loops activate at different timesteps, demonstrating
-    // why per-timestep discovery is necessary.
-
     let model_path = "../../test/decoupled_stocks/decoupled.stmx";
 
-    // Discovery mode should find some loops
-    let found = discover_loops_from_path(model_path);
-
-    eprintln!("Decoupled stocks discovery found {} loops:", found.len());
-    for l in &found {
-        eprintln!(
-            "  {} ({}): {} (avg score: {:.4})",
-            l.loop_info.id,
-            l.loop_info.polarity.abbreviation(),
-            l.loop_info.format_path(),
-            l.avg_abs_score
-        );
-    }
-
-    // At minimum, the self-loops should be found (stock_1 via flow_1, stock_2 via flow_2)
-    assert!(
-        !found.is_empty(),
-        "Discovery should find at least some loops in the decoupled model"
-    );
-
-    // Cross-validate with exhaustive
+    // Cross-validate with exhaustive to establish ground truth
     let f = File::open(model_path).unwrap();
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
     let project = Project::from(datamodel_project);
     let exhaustive_loops = ltm::detect_loops(&project).unwrap();
-    let exhaustive_count: usize = exhaustive_loops.values().map(|v| v.len()).sum();
+    // Discovery mode -- the decoupled stocks model has time-varying loop
+    // activity where different loops activate at different timesteps,
+    // demonstrating why per-timestep discovery is necessary.
+    let found = discover_loops_from_path(model_path);
 
-    eprintln!("Decoupled stocks exhaustive loops: {}", exhaustive_count);
-    for loops in exhaustive_loops.values() {
-        for l in loops {
-            eprintln!(
-                "  {} ({}): {}",
-                l.id,
-                l.polarity.abbreviation(),
-                l.format_path()
-            );
-        }
+    // The heuristic finds 2 of 3 loops: the self-loops for each stock.
+    // One cross-stock loop is pruned by best_score persistence. This is
+    // expected for the strongest-path heuristic.
+    assert_eq!(
+        found.len(),
+        2,
+        "Discovery should find 2 loops in decoupled model, found {}",
+        found.len()
+    );
+
+    // All found loops should be a subset of the exhaustive results
+    for found_loop in &found {
+        let mut found_nodes: Vec<String> = found_loop
+            .loop_info
+            .links
+            .iter()
+            .map(|l| l.from.as_str().to_string())
+            .collect();
+        found_nodes.sort();
+
+        let in_exhaustive = exhaustive_loops.values().any(|loops| {
+            loops.iter().any(|exh| {
+                let mut exh_nodes: Vec<String> = exh
+                    .links
+                    .iter()
+                    .map(|l| l.from.as_str().to_string())
+                    .collect();
+                exh_nodes.sort();
+                exh_nodes == found_nodes
+            })
+        });
+        assert!(
+            in_exhaustive,
+            "Discovered loop {} should exist in exhaustive results",
+            found_loop.loop_info.format_path()
+        );
     }
 }
