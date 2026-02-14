@@ -13,6 +13,7 @@
 import { EngineBackend, ModelHandle } from './backend';
 import { Stock, Flow, Aux, Module, Variable, TimeSpec, Link, Loop, ModelIssue, GraphicalFunction } from './types';
 import { JsonStock, JsonFlow, JsonAuxiliary, JsonGraphicalFunction, JsonProjectPatch, JsonSimSpecs } from './json-types';
+import { ErrorCode } from './errors';
 import { Project } from './project';
 import { Sim } from './sim';
 import { Run } from './run';
@@ -234,8 +235,12 @@ export class Model {
       const bytes = await this.backend.modelGetVarJson(this._handle, name);
       const jsonVar = JSON.parse(new TextDecoder().decode(bytes)) as JsonVarWithType;
       return jsonVarToVariable(jsonVar);
-    } catch {
-      return undefined;
+    } catch (e: unknown) {
+      const code = (e as { code?: number }).code;
+      if (code === ErrorCode.DoesNotExist) {
+        return undefined;
+      }
+      throw e;
     }
   }
 
