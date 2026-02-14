@@ -119,7 +119,10 @@ def _stock_from_dict(d: dict[str, Any]) -> Stock:
     arrayed = d.get("arrayedEquation")
     initial_eq = d.get("initialEquation", "")
     if not initial_eq and arrayed:
-        initial_eq = arrayed.get("equation", "")
+        # For stocks, the initial value can come from two arrayed fields:
+        # - initialEquation: JSON-sourced data with an explicit initial field
+        # - equation: XMILE-sourced data (where <eqn> IS the initial value)
+        initial_eq = arrayed.get("initialEquation", "") or arrayed.get("equation", "")
     dimensions: tuple[str, ...] = ()
     if arrayed:
         dimensions = tuple(arrayed.get("dimensions", []))

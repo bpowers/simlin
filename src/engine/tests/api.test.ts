@@ -954,6 +954,31 @@ describe('High-Level API', () => {
       await project.dispose();
     });
 
+    // Test for: XMILE-sourced arrayed stocks store initial value in arrayedEquation.equation
+    it('should read XMILE-sourced arrayed stock initialEquation from equation field', async () => {
+      const subscriptedPath = path.join(
+        __dirname,
+        '..',
+        '..',
+        '..',
+        'test',
+        'test-models',
+        'tests',
+        'subscript_multiples',
+        'test_multiple_subscripts.stmx',
+      );
+      const xmileData = fs.readFileSync(subscriptedPath);
+      const project = await Project.open(xmileData);
+      const model = await project.mainModel();
+
+      const stocks = await model.stocks();
+      const stockA = stocks.find((s) => s.name === 'Stock A');
+      expect(stockA).toBeDefined();
+      expect(stockA!.initialEquation).toBe('0');
+
+      await project.dispose();
+    });
+
     // Test for: Model.check() should filter results to this model only
     it('should filter check() results to this model only', async () => {
       // Use the modules test model which has multiple models

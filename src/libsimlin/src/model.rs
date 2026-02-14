@@ -752,6 +752,8 @@ pub unsafe extern "C" fn simlin_model_get_sim_specs_json(
 
     let dm_model = find_model_in_project(&project_locked, &model_ref.model_name);
 
+    // Sim specs are project-global with optional per-model overrides, so a
+    // missing model name is not an error here (unlike get_var_json/get_vars_json).
     let dm_sim_specs = dm_model
         .and_then(|m| m.sim_specs.as_ref())
         .unwrap_or(&project_locked.datamodel.sim_specs);

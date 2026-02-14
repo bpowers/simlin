@@ -1,7 +1,10 @@
 """Tests for the Model class."""
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -746,6 +749,79 @@ class TestStocksOnlyReturnsStocks:
         stock_names = {s.name for s in model.stocks}
         aux_names = {a.name for a in model.auxs}
         assert stock_names.isdisjoint(aux_names)
+
+
+class TestStockFromDict:
+    """Unit tests for _stock_from_dict JSON parsing."""
+
+    def test_arrayed_stock_equation_as_initial(self) -> None:
+        """XMILE-sourced stocks store their initial value in arrayedEquation.equation."""
+        from simlin.model import _stock_from_dict
+
+        d: dict[str, Any] = {
+            "type": "stock",
+            "name": "arrayed_stock",
+            "initialEquation": "",
+            "inflows": [],
+            "outflows": [],
+            "arrayedEquation": {
+                "dimensions": ["Region"],
+                "equation": "100",
+            },
+        }
+        stock = _stock_from_dict(d)
+        assert stock.initial_equation == "100"
+
+    def test_arrayed_stock_initial_equation_field(self) -> None:
+        """JSON-sourced stocks can use arrayedEquation.initialEquation."""
+        from simlin.model import _stock_from_dict
+
+        d: dict[str, Any] = {
+            "type": "stock",
+            "name": "arrayed_stock",
+            "initialEquation": "",
+            "inflows": [],
+            "outflows": [],
+            "arrayedEquation": {
+                "dimensions": ["Region"],
+                "initialEquation": "200",
+            },
+        }
+        stock = _stock_from_dict(d)
+        assert stock.initial_equation == "200"
+
+    def test_arrayed_stock_initial_equation_preferred_over_equation(self) -> None:
+        """When both are present, initialEquation takes precedence over equation."""
+        from simlin.model import _stock_from_dict
+
+        d: dict[str, Any] = {
+            "type": "stock",
+            "name": "arrayed_stock",
+            "initialEquation": "",
+            "inflows": [],
+            "outflows": [],
+            "arrayedEquation": {
+                "dimensions": ["Region"],
+                "equation": "fallback_value",
+                "initialEquation": "preferred_value",
+            },
+        }
+        stock = _stock_from_dict(d)
+        assert stock.initial_equation == "preferred_value"
+
+    def test_top_level_initial_equation_takes_precedence(self) -> None:
+        """Top-level initialEquation should be used when present."""
+        from simlin.model import _stock_from_dict
+
+        d: dict[str, Any] = {
+            "type": "stock",
+            "name": "scalar_stock",
+            "initialEquation": "50",
+            "inflows": [],
+            "outflows": [],
+        }
+        stock = _stock_from_dict(d)
+        assert stock.initial_equation == "50"
 
 
 class TestTimeSpecDirect:

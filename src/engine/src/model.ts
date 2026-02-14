@@ -93,13 +93,40 @@ function extractEquation(
   return '';
 }
 
+/**
+ * Extract a stock's initial equation. For stocks, the initial value can appear
+ * in two arrayed fields depending on the source format:
+ * - `arrayedEquation.equation`: XMILE-sourced data (where `<eqn>` IS the initial value)
+ * - `arrayedEquation.initialEquation`: JSON-sourced data with an explicit initial field
+ */
+function extractStockInitialEquation(
+  topLevel: string | undefined,
+  arrayed: { equation?: string; initialEquation?: string } | undefined,
+): string {
+  if (topLevel) {
+    return topLevel;
+  }
+  if (arrayed) {
+    if (arrayed.initialEquation) {
+      return arrayed.initialEquation;
+    }
+    if (arrayed.equation) {
+      return arrayed.equation;
+    }
+  }
+  return '';
+}
+
 function jsonVarToVariable(v: JsonVarWithType): Variable {
   switch (v.type) {
     case 'stock': {
       const s: Stock = {
         type: 'stock',
         name: v.name,
-        initialEquation: extractEquation(v.initialEquation, v.arrayedEquation, 'initialEquation'),
+        // For stocks, the initial value can come from two arrayed fields:
+        // - arrayedEquation.equation (XMILE-sourced: <eqn> IS the initial value)
+        // - arrayedEquation.initialEquation (JSON-sourced: explicit initial field)
+        initialEquation: extractStockInitialEquation(v.initialEquation, v.arrayedEquation),
         inflows: v.inflows || [],
         outflows: v.outflows || [],
         units: v.units || undefined,
