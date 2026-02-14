@@ -334,6 +334,24 @@ export class WorkerServer {
         this.sendSuccess(requestId, this.backend.modelGetLatexEquation(handle, request.ident));
         return;
       }
+      case 'modelGetVarJson': {
+        const handle = this.getModelHandle(request.handle);
+        const result = this.backend.modelGetVarJson(handle, request.varName);
+        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        return;
+      }
+      case 'modelGetVarsJson': {
+        const handle = this.getModelHandle(request.handle);
+        const result = this.backend.modelGetVarsJson(handle);
+        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        return;
+      }
+      case 'modelGetSimSpecsJson': {
+        const handle = this.getModelHandle(request.handle);
+        const result = this.backend.modelGetSimSpecsJson(handle);
+        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        return;
+      }
 
       // Sim operations
       case 'simNew': {

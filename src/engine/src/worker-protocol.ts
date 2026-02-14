@@ -67,6 +67,9 @@ export type WorkerRequest =
   | { type: 'modelGetIncomingLinks'; requestId: number; handle: WorkerModelHandle; varName: string }
   | { type: 'modelGetLinks'; requestId: number; handle: WorkerModelHandle }
   | { type: 'modelGetLatexEquation'; requestId: number; handle: WorkerModelHandle; ident: string }
+  | { type: 'modelGetVarJson'; requestId: number; handle: WorkerModelHandle; varName: string }
+  | { type: 'modelGetVarsJson'; requestId: number; handle: WorkerModelHandle }
+  | { type: 'modelGetSimSpecsJson'; requestId: number; handle: WorkerModelHandle }
   // Sim operations
   | { type: 'simNew'; requestId: number; modelHandle: WorkerModelHandle; enableLtm: boolean }
   | { type: 'simDispose'; requestId: number; handle: WorkerSimHandle }
@@ -169,6 +172,9 @@ export const VALID_REQUEST_TYPES: ReadonlySet<string> = new Set([
   'modelGetIncomingLinks',
   'modelGetLinks',
   'modelGetLatexEquation',
+  'modelGetVarJson',
+  'modelGetVarsJson',
+  'modelGetSimSpecsJson',
   'simNew',
   'simDispose',
   'simRunTo',

@@ -11,8 +11,8 @@
  */
 
 import { EngineBackend, ModelHandle } from './backend';
-import { Stock, Flow, Aux, Variable, TimeSpec, Link, Loop, ModelIssue, GraphicalFunction } from './types';
-import { JsonModel, JsonStock, JsonFlow, JsonAuxiliary, JsonGraphicalFunction, JsonProjectPatch } from './json-types';
+import { Stock, Flow, Aux, Module, Variable, TimeSpec, Link, Loop, ModelIssue, GraphicalFunction } from './types';
+import { JsonStock, JsonFlow, JsonAuxiliary, JsonGraphicalFunction, JsonProjectPatch, JsonSimSpecs } from './json-types';
 import { Project } from './project';
 import { Sim } from './sim';
 import { Run } from './run';
@@ -46,6 +46,116 @@ function parseDt(dt: string): number {
 }
 
 /**
+ * JSON shape returned by the simlin_model_get_var_json / simlin_model_get_vars_json FFI.
+ * Each variable has a "type" discriminator field alongside the camelCase fields
+ * matching the json-types.ts interfaces.
+ */
+type JsonVarWithType =
+  | ({ type: 'stock' } & JsonStock)
+  | ({ type: 'flow' } & JsonFlow)
+  | ({ type: 'aux' } & JsonAuxiliary)
+  | ({ type: 'module' } & { name: string; modelName: string; [key: string]: unknown });
+
+function parseJsonGraphicalFunction(gf: JsonGraphicalFunction): GraphicalFunction {
+  let points: [number, number][] | undefined;
+  let yPoints: number[] | undefined;
+
+  if (gf.points && gf.points.length > 0) {
+    points = gf.points;
+  } else if (gf.yPoints && gf.yPoints.length > 0) {
+    yPoints = gf.yPoints;
+  }
+
+  return {
+    points,
+    yPoints,
+    xScale: gf.xScale ? { min: gf.xScale.min, max: gf.xScale.max } : undefined,
+    yScale: gf.yScale ? { min: gf.yScale.min, max: gf.yScale.max } : undefined,
+    kind: gf.kind,
+  };
+}
+
+function extractEquation(
+  topLevel: string | undefined,
+  arrayed: { equation?: string; initialEquation?: string } | undefined,
+  field: 'equation' | 'initialEquation' = 'equation',
+): string {
+  if (topLevel) {
+    return topLevel;
+  }
+  if (arrayed) {
+    const value = arrayed[field];
+    if (value) {
+      return value;
+    }
+  }
+  return '';
+}
+
+function jsonVarToVariable(v: JsonVarWithType): Variable {
+  switch (v.type) {
+    case 'stock': {
+      const s: Stock = {
+        type: 'stock',
+        name: v.name,
+        initialEquation: extractEquation(v.initialEquation, v.arrayedEquation, 'initialEquation'),
+        inflows: v.inflows || [],
+        outflows: v.outflows || [],
+        units: v.units || undefined,
+        documentation: v.documentation || undefined,
+        nonNegative: v.nonNegative || false,
+        arrayedEquation: v.arrayedEquation,
+      };
+      return s;
+    }
+    case 'flow': {
+      let gf: GraphicalFunction | undefined;
+      if (v.graphicalFunction) {
+        gf = parseJsonGraphicalFunction(v.graphicalFunction);
+      }
+      const f: Flow = {
+        type: 'flow',
+        name: v.name,
+        equation: extractEquation(v.equation, v.arrayedEquation),
+        units: v.units || undefined,
+        documentation: v.documentation || undefined,
+        nonNegative: v.nonNegative || false,
+        graphicalFunction: gf,
+        arrayedEquation: v.arrayedEquation,
+      };
+      return f;
+    }
+    case 'aux': {
+      let gf: GraphicalFunction | undefined;
+      if (v.graphicalFunction) {
+        gf = parseJsonGraphicalFunction(v.graphicalFunction);
+      }
+      const equation = extractEquation(v.equation, v.arrayedEquation);
+      const initialEquation = extractEquation(v.initialEquation, v.arrayedEquation, 'initialEquation');
+      const a: Aux = {
+        type: 'aux',
+        name: v.name,
+        equation,
+        initialEquation: initialEquation || undefined,
+        units: v.units || undefined,
+        documentation: v.documentation || undefined,
+        graphicalFunction: gf,
+        arrayedEquation: v.arrayedEquation,
+      };
+      return a;
+    }
+    case 'module': {
+      const m: Module = {
+        type: 'module',
+        name: v.name,
+        modelName: v.modelName,
+      };
+      return m;
+    }
+  }
+}
+
+/**
  * A system dynamics model.
  *
  * Models are obtained from Project.getModel() or Project.mainModel().
@@ -57,14 +167,9 @@ export class Model {
   private _name: string | null;
   private _disposed: boolean = false;
 
-  // Cached data
-  private _cachedModelJson: JsonModel | null = null;
-  private _cachedStocks: Stock[] | null = null;
-  private _cachedFlows: Flow[] | null = null;
-  private _cachedAuxs: Aux[] | null = null;
-  private _cachedTimeSpec: TimeSpec | null = null;
+  // Only simulation results are cached, since the new targeted FFI calls
+  // are efficient enough that caching model data is unnecessary.
   private _cachedBaseCase: Run | null = null;
-  private _cachedVariables: Variable[] | null = null;
 
   /** @internal */
   constructor(handle: ModelHandle, project: Project | null, name: string | null) {
@@ -107,72 +212,31 @@ export class Model {
   }
 
   /**
-   * Invalidate all cached data. Called after model edits.
+   * Invalidate cached data. Called after model edits.
    */
   invalidateCaches(): void {
-    this._cachedModelJson = null;
-    this._cachedStocks = null;
-    this._cachedFlows = null;
-    this._cachedAuxs = null;
-    this._cachedTimeSpec = null;
     this._cachedBaseCase = null;
-    this._cachedVariables = null;
   }
 
-  private async getModelJson(): Promise<JsonModel> {
-    if (this._cachedModelJson !== null) {
-      return this._cachedModelJson;
-    }
-
-    if (this._project === null) {
-      throw new Error('Model is not attached to a Project');
-    }
-
-    const projectJson = JSON.parse(await this._project.serializeJson());
-    for (const modelDict of projectJson.models || []) {
-      if (modelDict.name === this._name || !this._name) {
-        this._cachedModelJson = modelDict as JsonModel;
-        return this._cachedModelJson;
-      }
-    }
-
-    throw new Error(`Model '${this._name}' not found in project`);
+  private async getAllVarsJson(): Promise<JsonVarWithType[]> {
+    const bytes = await this.backend.modelGetVarsJson(this._handle);
+    return JSON.parse(new TextDecoder().decode(bytes)) as JsonVarWithType[];
   }
 
-  private extractEquation(
-    topLevel: string | undefined,
-    arrayed: { equation?: string; initialEquation?: string } | undefined,
-    field: 'equation' | 'initialEquation' = 'equation',
-  ): string {
-    if (topLevel) {
-      return topLevel;
+  /**
+   * Get a single variable by name.
+   * @param name Variable name
+   * @returns The variable, or undefined if not found
+   */
+  async getVariable(name: string): Promise<Variable | undefined> {
+    this.checkDisposed();
+    try {
+      const bytes = await this.backend.modelGetVarJson(this._handle, name);
+      const jsonVar = JSON.parse(new TextDecoder().decode(bytes)) as JsonVarWithType;
+      return jsonVarToVariable(jsonVar);
+    } catch {
+      return undefined;
     }
-    if (arrayed) {
-      const value = arrayed[field];
-      if (value) {
-        return value;
-      }
-    }
-    return '';
-  }
-
-  private parseJsonGraphicalFunction(gf: JsonGraphicalFunction): GraphicalFunction {
-    let points: [number, number][] | undefined;
-    let yPoints: number[] | undefined;
-
-    if (gf.points && gf.points.length > 0) {
-      points = gf.points;
-    } else if (gf.yPoints && gf.yPoints.length > 0) {
-      yPoints = gf.yPoints;
-    }
-
-    return {
-      points,
-      yPoints,
-      xScale: gf.xScale ? { min: gf.xScale.min, max: gf.xScale.max } : undefined,
-      yScale: gf.yScale ? { min: gf.yScale.min, max: gf.yScale.max } : undefined,
-      kind: gf.kind,
-    };
   }
 
   /**
@@ -180,24 +244,10 @@ export class Model {
    */
   async stocks(): Promise<readonly Stock[]> {
     this.checkDisposed();
-    if (this._cachedStocks !== null) {
-      return this._cachedStocks;
-    }
-
-    const model = await this.getModelJson();
-    this._cachedStocks = (model.stocks || []).map((s: JsonStock) => ({
-      type: 'stock' as const,
-      name: s.name,
-      initialEquation: this.extractEquation(s.initialEquation, s.arrayedEquation, 'initialEquation'),
-      inflows: s.inflows || [],
-      outflows: s.outflows || [],
-      units: s.units || undefined,
-      documentation: s.documentation || undefined,
-      dimensions: s.arrayedEquation?.dimensions || [],
-      nonNegative: s.nonNegative || false,
-    }));
-
-    return this._cachedStocks;
+    const allVars = await this.getAllVarsJson();
+    return allVars
+      .filter((v): v is Extract<JsonVarWithType, { type: 'stock' }> => v.type === 'stock')
+      .map((v) => jsonVarToVariable(v) as Stock);
   }
 
   /**
@@ -205,30 +255,10 @@ export class Model {
    */
   async flows(): Promise<readonly Flow[]> {
     this.checkDisposed();
-    if (this._cachedFlows !== null) {
-      return this._cachedFlows;
-    }
-
-    const model = await this.getModelJson();
-    this._cachedFlows = (model.flows || []).map((f: JsonFlow) => {
-      let gf: GraphicalFunction | undefined;
-      if (f.graphicalFunction) {
-        gf = this.parseJsonGraphicalFunction(f.graphicalFunction);
-      }
-
-      return {
-        type: 'flow' as const,
-        name: f.name,
-        equation: this.extractEquation(f.equation, f.arrayedEquation),
-        units: f.units || undefined,
-        documentation: f.documentation || undefined,
-        dimensions: f.arrayedEquation?.dimensions || [],
-        nonNegative: f.nonNegative || false,
-        graphicalFunction: gf,
-      };
-    });
-
-    return this._cachedFlows;
+    const allVars = await this.getAllVarsJson();
+    return allVars
+      .filter((v): v is Extract<JsonVarWithType, { type: 'flow' }> => v.type === 'flow')
+      .map((v) => jsonVarToVariable(v) as Flow);
   }
 
   /**
@@ -236,76 +266,38 @@ export class Model {
    */
   async auxs(): Promise<readonly Aux[]> {
     this.checkDisposed();
-    if (this._cachedAuxs !== null) {
-      return this._cachedAuxs;
-    }
-
-    const model = await this.getModelJson();
-    this._cachedAuxs = (model.auxiliaries || []).map((a: JsonAuxiliary) => {
-      let gf: GraphicalFunction | undefined;
-      if (a.graphicalFunction) {
-        gf = this.parseJsonGraphicalFunction(a.graphicalFunction);
-      }
-
-      const equation = this.extractEquation(a.equation, a.arrayedEquation);
-      const initialEquation = this.extractEquation(a.initialEquation, a.arrayedEquation, 'initialEquation');
-
-      return {
-        type: 'aux' as const,
-        name: a.name,
-        equation,
-        initialEquation: initialEquation || undefined,
-        units: a.units || undefined,
-        documentation: a.documentation || undefined,
-        dimensions: a.arrayedEquation?.dimensions || [],
-        graphicalFunction: gf,
-      };
-    });
-
-    return this._cachedAuxs;
+    const allVars = await this.getAllVarsJson();
+    return allVars
+      .filter((v): v is Extract<JsonVarWithType, { type: 'aux' }> => v.type === 'aux')
+      .map((v) => jsonVarToVariable(v) as Aux);
   }
 
   /**
-   * All variables in the model (stocks + flows + auxs).
+   * All variables in the model (stocks + flows + auxs + modules).
    */
   async variables(): Promise<readonly Variable[]> {
     this.checkDisposed();
-    if (this._cachedVariables !== null) {
-      return this._cachedVariables;
-    }
-
-    this._cachedVariables = [...(await this.stocks()), ...(await this.flows()), ...(await this.auxs())];
-    return this._cachedVariables;
+    const allVars = await this.getAllVarsJson();
+    return allVars.map(jsonVarToVariable);
   }
 
   /**
    * Time specification for simulation.
-   * Uses model-level sim_specs if present, otherwise falls back to project-level.
+   * Retrieved directly from the engine via the model handle, which already
+   * resolves the model-level vs project-level sim specs precedence.
    */
   async timeSpec(): Promise<TimeSpec> {
     this.checkDisposed();
-    if (this._cachedTimeSpec !== null) {
-      return this._cachedTimeSpec;
-    }
 
-    if (this._project === null) {
-      throw new Error('Model is not attached to a Project');
-    }
+    const bytes = await this.backend.modelGetSimSpecsJson(this._handle);
+    const simSpecs = JSON.parse(new TextDecoder().decode(bytes)) as JsonSimSpecs;
 
-    const projectJson = JSON.parse(await this._project.serializeJson());
-    const modelJson = await this.getModelJson();
-
-    // Use model-level sim_specs if present, otherwise fall back to project-level
-    const simSpecs = modelJson.simSpecs ?? projectJson.simSpecs;
-
-    this._cachedTimeSpec = {
+    return {
       start: simSpecs.startTime ?? 0,
       stop: simSpecs.endTime ?? 10,
       dt: parseDt(simSpecs.dt ?? '1'),
       units: simSpecs.timeUnits || undefined,
     };
-
-    return this._cachedTimeSpec;
   }
 
   /**
@@ -354,30 +346,27 @@ export class Model {
   async explain(variable: string): Promise<string> {
     this.checkDisposed();
 
-    for (const stock of await this.stocks()) {
-      if (stock.name === variable) {
-        const inflowsStr = stock.inflows.length > 0 ? stock.inflows.join(', ') : 'no inflows';
-        const outflowsStr = stock.outflows.length > 0 ? stock.outflows.join(', ') : 'no outflows';
-        return `${stock.name} is a stock with initial value ${stock.initialEquation}, increased by ${inflowsStr}, decreased by ${outflowsStr}`;
-      }
+    const v = await this.getVariable(variable);
+    if (v === undefined) {
+      throw new Error(`Variable '${variable}' not found in model`);
     }
 
-    for (const flow of await this.flows()) {
-      if (flow.name === variable) {
-        return `${flow.name} is a flow computed as ${flow.equation}`;
+    switch (v.type) {
+      case 'stock': {
+        const inflowsStr = v.inflows.length > 0 ? v.inflows.join(', ') : 'no inflows';
+        const outflowsStr = v.outflows.length > 0 ? v.outflows.join(', ') : 'no outflows';
+        return `${v.name} is a stock with initial value ${v.initialEquation}, increased by ${inflowsStr}, decreased by ${outflowsStr}`;
       }
-    }
-
-    for (const aux of await this.auxs()) {
-      if (aux.name === variable) {
-        if (aux.initialEquation) {
-          return `${aux.name} is an auxiliary variable computed as ${aux.equation} with initial value ${aux.initialEquation}`;
+      case 'flow':
+        return `${v.name} is a flow computed as ${v.equation}`;
+      case 'aux':
+        if (v.initialEquation) {
+          return `${v.name} is an auxiliary variable computed as ${v.equation} with initial value ${v.initialEquation}`;
         }
-        return `${aux.name} is an auxiliary variable computed as ${aux.equation}`;
-      }
+        return `${v.name} is an auxiliary variable computed as ${v.equation}`;
+      case 'module':
+        return `${v.name} is a module instantiating model ${v.modelName}`;
     }
-
-    throw new Error(`Variable '${variable}' not found in model`);
   }
 
   /**
@@ -402,10 +391,15 @@ export class Model {
 
     const errorDetails = await this._project.getErrors();
 
-    // Get the actual model name from JSON for comparison
-    // (handles case where _name is null for main model)
-    const modelJson = await this.getModelJson();
-    const actualModelName = modelJson.name;
+    // Use the model name directly. For the main model (where _name is null),
+    // we need to figure out the actual name from the project model list.
+    let actualModelName = this._name;
+    if (actualModelName === null) {
+      const names = await this._project.getModelNames();
+      if (names.length > 0) {
+        actualModelName = names[0];
+      }
+    }
 
     // Filter to errors for this model only
     const modelErrors = errorDetails.filter((detail) => {
@@ -478,20 +472,35 @@ export class Model {
 
     const { dryRun = false, allowErrors = false } = options;
 
-    // Get current model state as JSON
-    const modelJson = await this.getModelJson();
-    const modelName = modelJson.name;
+    // Get current variables via the targeted FFI call
+    const allVars = await this.getAllVarsJson();
 
-    // Build current variables map
+    // Build current variables map from the JSON variable data
     const currentVars: Record<string, JsonStock | JsonFlow | JsonAuxiliary> = {};
-    for (const stock of modelJson.stocks || []) {
-      currentVars[stock.name] = stock;
+    for (const v of allVars) {
+      switch (v.type) {
+        case 'stock':
+          currentVars[v.name] = v as JsonStock;
+          break;
+        case 'flow':
+          currentVars[v.name] = v as JsonFlow;
+          break;
+        case 'aux':
+          currentVars[v.name] = v as JsonAuxiliary;
+          break;
+        // modules are not included in the edit callback's currentVars
+      }
     }
-    for (const flow of modelJson.flows || []) {
-      currentVars[flow.name] = flow;
-    }
-    for (const aux of modelJson.auxiliaries || []) {
-      currentVars[aux.name] = aux;
+
+    // The model name for the patch. Use _name if available, otherwise
+    // look up the first model name from the project.
+    let modelName = this._name;
+    if (modelName === null) {
+      const names = await this._project.getModelNames();
+      if (names.length === 0) {
+        throw new Error('No models in project');
+      }
+      modelName = names[0];
     }
 
     // Create patch builder

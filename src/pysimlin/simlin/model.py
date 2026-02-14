@@ -1,10 +1,10 @@
 """Model class for working with system dynamics models.
 
 Thread-safety: ``Model`` instances own a ``threading.Lock`` that
-protects cached properties and the underlying ``_ptr``.  For methods
-that call into the parent ``Project`` (which has its own lock), the
-model lock is released before acquiring the project lock to prevent
-lock-ordering deadlocks.
+protects the underlying ``_ptr`` and the ``_cached_base_case`` field.
+The new targeted FFI queries (``model_get_vars_json``, etc.) operate
+directly on the model pointer, so there is no need for double-checked
+locking or cross-lock ordering with the parent ``Project``.
 """
 
 from __future__ import annotations
@@ -21,6 +21,9 @@ from ._ffi import (
     ffi,
     free_c_string,
     lib,
+    model_get_sim_specs_json,
+    model_get_var_json,
+    model_get_vars_json,
     string_to_c,
 )
 from .analysis import Link, LinkPolarity, Loop
@@ -44,12 +47,6 @@ from .json_types import (
 )
 from .json_types import (
     Flow as JsonFlow,
-)
-from .json_types import (
-    GraphicalFunction as JsonGraphicalFunction,
-)
-from .json_types import (
-    Model as JsonModel,
 )
 from .json_types import (
     Module as JsonModule,
@@ -81,6 +78,136 @@ if TYPE_CHECKING:
 
 # Type for variable in the edit context current dict
 JsonVariable = Union[JsonStock, JsonFlow, JsonAuxiliary, JsonModule]
+
+
+def _parse_graphical_function_dict(gf_dict: dict[str, Any]) -> GraphicalFunction:
+    """Parse a graphical function JSON dict into a types dataclass."""
+    points = gf_dict.get("points")
+    if points:
+        x_points: tuple[float, ...] | None = tuple(p[0] for p in points)
+        y_points: tuple[float, ...] = tuple(p[1] for p in points)
+    else:
+        raw_y = gf_dict.get("yPoints", [])
+        x_points = None
+        y_points = tuple(raw_y) if raw_y else ()
+
+    x_scale_dict = gf_dict.get("xScale")
+    y_scale_dict = gf_dict.get("yScale")
+
+    x_scale = GraphicalFunctionScale(
+        min=x_scale_dict["min"] if x_scale_dict else 0.0,
+        max=x_scale_dict["max"]
+        if x_scale_dict
+        else (float(len(y_points) - 1) if y_points else 0.0),
+    )
+    y_scale = GraphicalFunctionScale(
+        min=y_scale_dict["min"] if y_scale_dict else 0.0,
+        max=y_scale_dict["max"] if y_scale_dict else 1.0,
+    )
+
+    return GraphicalFunction(
+        x_points=x_points,
+        y_points=y_points,
+        x_scale=x_scale,
+        y_scale=y_scale,
+        kind=gf_dict.get("kind") or "continuous",
+    )
+
+
+def _stock_from_dict(d: dict[str, Any]) -> Stock:
+    """Convert a tagged JSON variable dict (type=stock) to a Stock."""
+    arrayed = d.get("arrayedEquation")
+    initial_eq = d.get("initialEquation", "")
+    if not initial_eq and arrayed:
+        initial_eq = arrayed.get("equation", "")
+    dimensions: tuple[str, ...] = ()
+    if arrayed:
+        dimensions = tuple(arrayed.get("dimensions", []))
+    return Stock(
+        name=d["name"],
+        initial_equation=initial_eq,
+        inflows=tuple(d.get("inflows", [])),
+        outflows=tuple(d.get("outflows", [])),
+        units=d.get("units") or None,
+        documentation=d.get("documentation") or None,
+        dimensions=dimensions,
+        non_negative=d.get("nonNegative", False),
+    )
+
+
+def _flow_from_dict(d: dict[str, Any]) -> Flow:
+    """Convert a tagged JSON variable dict (type=flow) to a Flow."""
+    arrayed = d.get("arrayedEquation")
+    equation = d.get("equation", "")
+    if not equation and arrayed:
+        equation = arrayed.get("equation", "")
+    dimensions: tuple[str, ...] = ()
+    if arrayed:
+        dimensions = tuple(arrayed.get("dimensions", []))
+    gf = None
+    gf_dict = d.get("graphicalFunction")
+    if gf_dict:
+        gf = _parse_graphical_function_dict(gf_dict)
+    return Flow(
+        name=d["name"],
+        equation=equation,
+        units=d.get("units") or None,
+        documentation=d.get("documentation") or None,
+        dimensions=dimensions,
+        non_negative=d.get("nonNegative", False),
+        graphical_function=gf,
+    )
+
+
+def _aux_from_dict(d: dict[str, Any]) -> Aux:
+    """Convert a tagged JSON variable dict (type=aux) to an Aux."""
+    arrayed = d.get("arrayedEquation")
+    equation = d.get("equation", "")
+    if not equation and arrayed:
+        equation = arrayed.get("equation", "")
+    initial_eq = d.get("initialEquation", "")
+    if not initial_eq and arrayed:
+        initial_eq = arrayed.get("initialEquation", "")
+    dimensions: tuple[str, ...] = ()
+    if arrayed:
+        dimensions = tuple(arrayed.get("dimensions", []))
+    gf = None
+    gf_dict = d.get("graphicalFunction")
+    if gf_dict:
+        gf = _parse_graphical_function_dict(gf_dict)
+    return Aux(
+        name=d["name"],
+        equation=equation,
+        initial_equation=initial_eq or None,
+        units=d.get("units") or None,
+        documentation=d.get("documentation") or None,
+        dimensions=dimensions,
+        graphical_function=gf,
+    )
+
+
+def _var_from_dict(d: dict[str, Any]) -> Stock | Flow | Aux | None:
+    """Convert a tagged JSON variable dict to the appropriate type.
+
+    Returns None for module-type variables since they are not represented
+    in the public Stock/Flow/Aux type hierarchy.
+    """
+    var_type = d.get("type")
+    if var_type == "stock":
+        return _stock_from_dict(d)
+    elif var_type == "flow":
+        return _flow_from_dict(d)
+    elif var_type == "aux":
+        return _aux_from_dict(d)
+    else:
+        return None
+
+
+def _get_all_vars(model_ptr: Any) -> list[dict[str, Any]]:
+    """Call simlin_model_get_vars_json and return the parsed list."""
+    raw = model_get_vars_json(model_ptr)
+    result: list[dict[str, Any]] = json.loads(raw.decode("utf-8"))
+    return result
 
 
 class ModelPatchBuilder:
@@ -139,42 +266,25 @@ class _ModelEditContext:
         self._patch = ModelPatchBuilder(model._name or "")
 
     def __enter__(self) -> tuple[dict[str, JsonVariable], ModelPatchBuilder]:
-        project = self._model._project
-        if project is None:
-            raise SimlinRuntimeError("Model is not attached to a Project")
+        with self._model._lock:
+            self._model._check_alive()
+            all_vars = _get_all_vars(self._model._ptr)
 
-        # Get project state as JSON
-        json_bytes = project.serialize_json()
-        project_dict = json.loads(json_bytes.decode("utf-8"))
+        model_name = self._model._name
+        self._patch = ModelPatchBuilder(model_name)
 
-        model_dict = None
-        for candidate in project_dict.get("models", []):
-            if candidate["name"] == self._model._name or not self._model._name:
-                model_dict = candidate
-                break
-
-        if model_dict is None:
-            raise SimlinRuntimeError(
-                f"Model '{self._model._name or 'default'}' not found in project serialization"
-            )
-
-        self._model._name = model_dict["name"]
-        self._patch = ModelPatchBuilder(model_dict["name"])
-
-        # Build current variable dict from JSON using converter.structure()
         self._current = {}
-        for stock_dict in model_dict.get("stocks", []):
-            stock = converter.structure(stock_dict, JsonStock)
-            self._current[stock.name] = stock
-        for flow_dict in model_dict.get("flows", []):
-            flow = converter.structure(flow_dict, JsonFlow)
-            self._current[flow.name] = flow
-        for aux_dict in model_dict.get("auxiliaries", []):
-            aux = converter.structure(aux_dict, JsonAuxiliary)
-            self._current[aux.name] = aux
-        for module_dict in model_dict.get("modules", []):
-            module = converter.structure(module_dict, JsonModule)
-            self._current[module.name] = module
+        for var_dict in all_vars:
+            var_type = var_dict.get("type")
+            name = var_dict.get("name", "")
+            if var_type == "stock":
+                self._current[name] = converter.structure(var_dict, JsonStock)
+            elif var_type == "flow":
+                self._current[name] = converter.structure(var_dict, JsonFlow)
+            elif var_type == "aux":
+                self._current[name] = converter.structure(var_dict, JsonAuxiliary)
+            elif var_type == "module":
+                self._current[name] = converter.structure(var_dict, JsonModule)
 
         return self._current, self._patch
 
@@ -233,11 +343,6 @@ class Model:
         self._name = name or ""
         _register_finalizer(self, lib.simlin_model_unref, ptr)
 
-        self._cached_model_json: JsonModel | None = None
-        self._cached_stocks: tuple[Stock, ...] | None = None
-        self._cached_flows: tuple[Flow, ...] | None = None
-        self._cached_auxs: tuple[Aux, ...] | None = None
-        self._cached_time_spec: TimeSpec | None = None
         self._cached_base_case: Run | None = None
 
     def _check_alive(self) -> None:
@@ -256,6 +361,26 @@ class Model:
             The parent Project instance, or None if this model is not attached to a project
         """
         return self._project
+
+    def get_variable(self, name: str) -> Stock | Flow | Aux | None:
+        """Get a single variable by name, or None if not found.
+
+        Args:
+            name: The variable name to look up
+
+        Returns:
+            A Stock, Flow, or Aux object, or None if not found.
+            Module-type variables also return None since they are not
+            represented in the public type hierarchy.
+        """
+        with self._lock:
+            self._check_alive()
+            raw = model_get_var_json(self._ptr, name)
+
+        if raw is None:
+            return None
+        var_dict = json.loads(raw.decode("utf-8"))
+        return _var_from_dict(var_dict)
 
     def get_incoming_links(self, var_name: str) -> list[str]:
         """Get the dependencies (incoming links) for a given variable.
@@ -363,110 +488,10 @@ class Model:
         finally:
             lib.simlin_free_links(links_ptr)
 
-    def _get_model_json(self) -> JsonModel:
-        """Get this model's JSON representation as a dataclass (cached).
-
-        Uses double-checked locking: acquires ``_lock`` only to read/write
-        the cache.  The potentially expensive ``serialize_json()`` call on
-        the parent ``Project`` runs *without* holding the model lock to
-        prevent lock-ordering deadlocks.
-        """
-        with self._lock:
-            if self._cached_model_json is not None:
-                return self._cached_model_json
-
-        if self._project is None:
-            raise SimlinRuntimeError("Model is not attached to a Project")
-
-        # Call project.serialize_json() WITHOUT holding self._lock to avoid
-        # lock-ordering issues (project has its own lock).
-        project_json = json.loads(self._project.serialize_json().decode("utf-8"))
-
-        result: JsonModel | None = None
-        for model_dict in project_json.get("models", []):
-            if model_dict["name"] == self._name or not self._name:
-                result = converter.structure(model_dict, JsonModel)
-                break
-
-        if result is None:
-            raise SimlinRuntimeError(f"Model '{self._name}' not found in project")
-
-        with self._lock:
-            # Double-checked: another thread may have populated the cache
-            # while we were computing.
-            if self._cached_model_json is None:
-                self._cached_model_json = result
-            return self._cached_model_json
-
     def _invalidate_caches(self) -> None:
         """Invalidate all cached data. Called after model edits."""
         with self._lock:
-            self._cached_model_json = None
-            self._cached_stocks = None
-            self._cached_flows = None
-            self._cached_auxs = None
-            self._cached_time_spec = None
             self._cached_base_case = None
-
-    def _extract_equation(
-        self,
-        top_level: str,
-        arrayed: Any | None,
-        field: str = "equation",
-    ) -> str:
-        """Extract equation from JSON, handling apply-to-all arrayed equations.
-
-        For arrayed variables with apply-to-all equations, the top-level equation
-        field is empty and the actual equation is in arrayed_equation.equation.
-
-        Note: For stocks, the initial equation is stored in arrayed_equation.equation
-        (not arrayed_equation.initial_equation) because in XMILE, the <eqn> tag
-        for stocks represents the initial value, and the serializer maps this to
-        the "equation" field in ArrayedEquation for consistency.
-
-        Args:
-            top_level: The top-level equation string (may be empty)
-            arrayed: The arrayed_equation object (may be None)
-            field: Which field to read from arrayed - use "equation" for flows/auxs
-                   and also for stock initial equations (see note above)
-
-        Returns:
-            The equation string, preferring top-level if non-empty
-        """
-        if top_level:
-            return top_level
-        if arrayed is not None:
-            arrayed_eq = getattr(arrayed, field, None)
-            if arrayed_eq:
-                return arrayed_eq
-        return ""
-
-    def _parse_json_graphical_function(self, gf: JsonGraphicalFunction) -> GraphicalFunction:
-        """Parse a JSON GraphicalFunction into a types dataclass."""
-        # Handle points format (list of [x, y] pairs)
-        if gf.points:
-            x_points: tuple[float, ...] | None = tuple(p[0] for p in gf.points)
-            y_points: tuple[float, ...] = tuple(p[1] for p in gf.points)
-        else:
-            x_points = None
-            y_points = tuple(gf.y_points) if gf.y_points else ()
-
-        x_scale = GraphicalFunctionScale(
-            min=gf.x_scale.min if gf.x_scale else 0.0,
-            max=gf.x_scale.max if gf.x_scale else float(len(y_points) - 1) if y_points else 0.0,
-        )
-        y_scale = GraphicalFunctionScale(
-            min=gf.y_scale.min if gf.y_scale else 0.0,
-            max=gf.y_scale.max if gf.y_scale else 1.0,
-        )
-
-        return GraphicalFunction(
-            x_points=x_points,
-            y_points=y_points,
-            x_scale=x_scale,
-            y_scale=y_scale,
-            kind=gf.kind or "continuous",
-        )
 
     @property
     def stocks(self) -> tuple[Stock, ...]:
@@ -476,30 +501,10 @@ class Model:
             Tuple of Stock objects representing all stocks in the model
         """
         with self._lock:
-            if self._cached_stocks is not None:
-                return self._cached_stocks
+            self._check_alive()
+            all_vars = _get_all_vars(self._ptr)
 
-        model = self._get_model_json()
-        result = tuple(
-            Stock(
-                name=s.name,
-                initial_equation=self._extract_equation(
-                    s.initial_equation, s.arrayed_equation, "equation"
-                ),
-                inflows=tuple(s.inflows),
-                outflows=tuple(s.outflows),
-                units=s.units or None,
-                documentation=s.documentation or None,
-                dimensions=tuple(s.arrayed_equation.dimensions) if s.arrayed_equation else (),
-                non_negative=s.non_negative,
-            )
-            for s in model.stocks
-        )
-
-        with self._lock:
-            if self._cached_stocks is None:
-                self._cached_stocks = result
-            return self._cached_stocks
+        return tuple(_stock_from_dict(d) for d in all_vars if d.get("type") == "stock")
 
     @property
     def flows(self) -> tuple[Flow, ...]:
@@ -509,34 +514,10 @@ class Model:
             Tuple of Flow objects representing all flows in the model
         """
         with self._lock:
-            if self._cached_flows is not None:
-                return self._cached_flows
+            self._check_alive()
+            all_vars = _get_all_vars(self._ptr)
 
-        model = self._get_model_json()
-        flows_list = []
-
-        for f in model.flows:
-            gf = None
-            if f.graphical_function:
-                gf = self._parse_json_graphical_function(f.graphical_function)
-
-            flow = Flow(
-                name=f.name,
-                equation=self._extract_equation(f.equation, f.arrayed_equation),
-                units=f.units or None,
-                documentation=f.documentation or None,
-                dimensions=tuple(f.arrayed_equation.dimensions) if f.arrayed_equation else (),
-                non_negative=f.non_negative,
-                graphical_function=gf,
-            )
-            flows_list.append(flow)
-
-        result = tuple(flows_list)
-
-        with self._lock:
-            if self._cached_flows is None:
-                self._cached_flows = result
-            return self._cached_flows
+        return tuple(_flow_from_dict(d) for d in all_vars if d.get("type") == "flow")
 
     @property
     def auxs(self) -> tuple[Aux, ...]:
@@ -546,40 +527,10 @@ class Model:
             Tuple of Aux objects representing all auxiliary variables in the model
         """
         with self._lock:
-            if self._cached_auxs is not None:
-                return self._cached_auxs
+            self._check_alive()
+            all_vars = _get_all_vars(self._ptr)
 
-        model = self._get_model_json()
-        auxs_list = []
-
-        for a in model.auxiliaries:
-            gf = None
-            if a.graphical_function:
-                gf = self._parse_json_graphical_function(a.graphical_function)
-
-            # Extract equations, handling apply-to-all arrayed equations
-            equation = self._extract_equation(a.equation, a.arrayed_equation)
-            initial_eq = self._extract_equation(
-                a.initial_equation, a.arrayed_equation, "initial_equation"
-            )
-
-            aux = Aux(
-                name=a.name,
-                equation=equation,
-                initial_equation=initial_eq or None,
-                units=a.units or None,
-                documentation=a.documentation or None,
-                dimensions=tuple(a.arrayed_equation.dimensions) if a.arrayed_equation else (),
-                graphical_function=gf,
-            )
-            auxs_list.append(aux)
-
-        result = tuple(auxs_list)
-
-        with self._lock:
-            if self._cached_auxs is None:
-                self._cached_auxs = result
-            return self._cached_auxs
+        return tuple(_aux_from_dict(d) for d in all_vars if d.get("type") == "aux")
 
     @property
     def variables(self) -> tuple[Stock | Flow | Aux, ...]:
@@ -590,7 +541,16 @@ class Model:
         Returns:
             Tuple of all variable objects (Stock, Flow, or Aux)
         """
-        return self.stocks + self.flows + self.auxs
+        with self._lock:
+            self._check_alive()
+            all_vars = _get_all_vars(self._ptr)
+
+        result: list[Stock | Flow | Aux] = []
+        for d in all_vars:
+            v = _var_from_dict(d)
+            if v is not None:
+                result.append(v)
+        return tuple(result)
 
     @property
     def time_spec(self) -> TimeSpec:
@@ -600,26 +560,17 @@ class Model:
             TimeSpec with simulation time configuration
         """
         with self._lock:
-            if self._cached_time_spec is not None:
-                return self._cached_time_spec
+            self._check_alive()
+            raw = model_get_sim_specs_json(self._ptr)
 
-        if self._project is None:
-            raise SimlinRuntimeError("Model is not attached to a Project")
+        sim_specs = json.loads(raw.decode("utf-8"))
 
-        project_json = json.loads(self._project.serialize_json().decode("utf-8"))
-        sim_specs = project_json["simSpecs"]
-
-        result = TimeSpec(
+        return TimeSpec(
             start=sim_specs.get("startTime", 0.0),
             stop=sim_specs.get("endTime", 10.0),
             dt=parse_dt(sim_specs.get("dt", "1")),
             units=sim_specs.get("timeUnits") or None,
         )
-
-        with self._lock:
-            if self._cached_time_spec is None:
-                self._cached_time_spec = result
-            return self._cached_time_spec
 
     @property
     def loops(self) -> tuple[Loop, ...]:
@@ -805,27 +756,28 @@ class Model:
         Raises:
             SimlinRuntimeError: If variable doesn't exist
         """
-        for stock in self.stocks:
-            if stock.name == variable:
-                inflows_str = ", ".join(stock.inflows) if stock.inflows else "no inflows"
-                outflows_str = ", ".join(stock.outflows) if stock.outflows else "no outflows"
+        var = self.get_variable(variable)
+        if var is None:
+            raise SimlinRuntimeError(f"Variable '{variable}' not found in model")
+
+        if isinstance(var, Stock):
+            inflows_str = ", ".join(var.inflows) if var.inflows else "no inflows"
+            outflows_str = ", ".join(var.outflows) if var.outflows else "no outflows"
+            return (
+                f"{var.name} is a stock with initial value {var.initial_equation}, "
+                f"increased by {inflows_str}, decreased by {outflows_str}"
+            )
+
+        if isinstance(var, Flow):
+            return f"{var.name} is a flow computed as {var.equation}"
+
+        if isinstance(var, Aux):
+            if var.initial_equation:
                 return (
-                    f"{stock.name} is a stock with initial value {stock.initial_equation}, "
-                    f"increased by {inflows_str}, decreased by {outflows_str}"
+                    f"{var.name} is an auxiliary variable computed as {var.equation} "
+                    f"with initial value {var.initial_equation}"
                 )
-
-        for flow in self.flows:
-            if flow.name == variable:
-                return f"{flow.name} is a flow computed as {flow.equation}"
-
-        for aux in self.auxs:
-            if aux.name == variable:
-                if aux.initial_equation:
-                    return (
-                        f"{aux.name} is an auxiliary variable computed as {aux.equation} "
-                        f"with initial value {aux.initial_equation}"
-                    )
-                return f"{aux.name} is an auxiliary variable computed as {aux.equation}"
+            return f"{var.name} is an auxiliary variable computed as {var.equation}"
 
         raise SimlinRuntimeError(f"Variable '{variable}' not found in model")
 

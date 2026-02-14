@@ -422,6 +422,31 @@ export class WorkerBackend implements EngineBackend {
     }));
   }
 
+  modelGetVarJson(handle: ModelHandle, varName: string): Promise<Uint8Array> {
+    return this.sendRequest<Uint8Array>((requestId) => ({
+      type: 'modelGetVarJson',
+      requestId,
+      handle,
+      varName,
+    }));
+  }
+
+  modelGetVarsJson(handle: ModelHandle): Promise<Uint8Array> {
+    return this.sendRequest<Uint8Array>((requestId) => ({
+      type: 'modelGetVarsJson',
+      requestId,
+      handle,
+    }));
+  }
+
+  modelGetSimSpecsJson(handle: ModelHandle): Promise<Uint8Array> {
+    return this.sendRequest<Uint8Array>((requestId) => ({
+      type: 'modelGetSimSpecsJson',
+      requestId,
+      handle,
+    }));
+  }
+
   // ---- Sim operations ----
 
   simNew(modelHandle: ModelHandle, enableLtm: boolean): Promise<SimHandle> {

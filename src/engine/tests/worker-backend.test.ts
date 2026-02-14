@@ -331,6 +331,30 @@ describe('WorkerBackend', () => {
       await backend.modelDispose(modelHandle);
       await backend.modelDispose(modelHandle);
     });
+
+    test('getVarJson returns typed variable', async () => {
+      const bytes = await backend.modelGetVarJson(modelHandle, 'teacup_temperature');
+      expect(bytes).toBeInstanceOf(Uint8Array);
+      const parsed = JSON.parse(new TextDecoder().decode(bytes));
+      expect(parsed.type).toBe('stock');
+      expect(parsed.name).toBe('teacup temperature');
+    });
+
+    test('getVarsJson returns array of typed variables', async () => {
+      const bytes = await backend.modelGetVarsJson(modelHandle);
+      expect(bytes).toBeInstanceOf(Uint8Array);
+      const parsed = JSON.parse(new TextDecoder().decode(bytes));
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed.length).toBeGreaterThan(0);
+    });
+
+    test('getSimSpecsJson returns sim specs', async () => {
+      const bytes = await backend.modelGetSimSpecsJson(modelHandle);
+      expect(bytes).toBeInstanceOf(Uint8Array);
+      const parsed = JSON.parse(new TextDecoder().decode(bytes));
+      expect(typeof parsed.startTime).toBe('number');
+      expect(typeof parsed.endTime).toBe('number');
+    });
   });
 
   describe('sim operations', () => {

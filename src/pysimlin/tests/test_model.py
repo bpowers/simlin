@@ -421,19 +421,19 @@ class TestModelStructuralProperties:
             assert isinstance(loop.variables, tuple)
             assert loop.behavior_time_series is None
 
-    def test_structural_properties_cached(self, test_model: Model) -> None:
-        """Test that structural properties are cached."""
+    def test_structural_properties_consistent(self, test_model: Model) -> None:
+        """Test that structural properties return equal results across calls."""
         stocks1 = test_model.stocks
         stocks2 = test_model.stocks
-        assert stocks1 is stocks2
+        assert stocks1 == stocks2
 
         flows1 = test_model.flows
         flows2 = test_model.flows
-        assert flows1 is flows2
+        assert flows1 == flows2
 
         time_spec1 = test_model.time_spec
         time_spec2 = test_model.time_spec
-        assert time_spec1 is time_spec2
+        assert time_spec1 == time_spec2
 
 
 class TestModelSimulationMethods:
@@ -641,3 +641,131 @@ class TestArrayedEquations:
 
         # The initial equation should be extracted (it's "0" in this model)
         assert stock_a.initial_equation == "0"
+
+
+class TestGetVariable:
+    """Test the get_variable() method for single-variable lookup."""
+
+    def test_get_stock_by_name(self, teacup_stmx_path: Path) -> None:
+        """get_variable should return a Stock for stock variables."""
+        from simlin.types import Stock
+
+        model = simlin.load(teacup_stmx_path)
+        var = model.get_variable("teacup_temperature")
+        assert isinstance(var, Stock)
+        assert var.name == "teacup temperature"
+        assert var.initial_equation == "180"
+
+    def test_get_flow_by_name(self, teacup_stmx_path: Path) -> None:
+        """get_variable should return a Flow for flow variables."""
+        from simlin.types import Flow
+
+        model = simlin.load(teacup_stmx_path)
+        var = model.get_variable("heat_loss_to_room")
+        assert isinstance(var, Flow)
+        assert var.name == "heat loss to room"
+
+    def test_get_aux_by_name(self, teacup_stmx_path: Path) -> None:
+        """get_variable should return an Aux for auxiliary variables."""
+        from simlin.types import Aux
+
+        model = simlin.load(teacup_stmx_path)
+        var = model.get_variable("room_temperature")
+        assert isinstance(var, Aux)
+        assert var.name == "room temperature"
+        assert var.equation == "70"
+
+    def test_get_nonexistent_returns_none(self, teacup_stmx_path: Path) -> None:
+        """get_variable should return None for nonexistent variables."""
+        model = simlin.load(teacup_stmx_path)
+        var = model.get_variable("this_does_not_exist_at_all")
+        assert var is None
+
+    def test_get_variable_with_units(self, teacup_stmx_path: Path) -> None:
+        """get_variable should include units when present."""
+        model = simlin.load(teacup_stmx_path)
+        var = model.get_variable("teacup_temperature")
+        assert var is not None
+        assert var.units == "degrees"
+
+    def test_get_variable_stock_has_flows(self, teacup_stmx_path: Path) -> None:
+        """get_variable for a stock should include inflows and outflows."""
+        from simlin.types import Stock
+
+        model = simlin.load(teacup_stmx_path)
+        var = model.get_variable("teacup_temperature")
+        assert isinstance(var, Stock)
+        assert "heat_loss_to_room" in var.outflows
+
+    def test_get_variable_matches_stocks_property(self, teacup_stmx_path: Path) -> None:
+        """get_variable should return data consistent with the stocks property."""
+        model = simlin.load(teacup_stmx_path)
+        for stock in model.stocks:
+            var = model.get_variable(stock.name)
+            assert var is not None
+            assert var == stock
+
+    def test_get_variable_matches_flows_property(self, teacup_stmx_path: Path) -> None:
+        """get_variable should return data consistent with the flows property."""
+        model = simlin.load(teacup_stmx_path)
+        for flow in model.flows:
+            var = model.get_variable(flow.name)
+            assert var is not None
+            assert var == flow
+
+    def test_get_variable_matches_auxs_property(self, teacup_stmx_path: Path) -> None:
+        """get_variable should return data consistent with the auxs property."""
+        model = simlin.load(teacup_stmx_path)
+        for aux in model.auxs:
+            var = model.get_variable(aux.name)
+            assert var is not None
+            assert var == aux
+
+
+class TestStocksOnlyReturnsStocks:
+    """Verify the stocks property only returns stock-type variables."""
+
+    def test_stocks_are_all_stock_type(self, teacup_stmx_path: Path) -> None:
+        """Every element of stocks should be a Stock instance."""
+        from simlin.types import Stock
+
+        model = simlin.load(teacup_stmx_path)
+        for s in model.stocks:
+            assert isinstance(s, Stock), f"Expected Stock, got {type(s).__name__}"
+
+    def test_no_flows_in_stocks(self, teacup_stmx_path: Path) -> None:
+        """The stocks property should not include flows."""
+        model = simlin.load(teacup_stmx_path)
+        stock_names = {s.name for s in model.stocks}
+        flow_names = {f.name for f in model.flows}
+        assert stock_names.isdisjoint(flow_names)
+
+    def test_no_auxs_in_stocks(self, teacup_stmx_path: Path) -> None:
+        """The stocks property should not include auxiliary variables."""
+        model = simlin.load(teacup_stmx_path)
+        stock_names = {s.name for s in model.stocks}
+        aux_names = {a.name for a in model.auxs}
+        assert stock_names.isdisjoint(aux_names)
+
+
+class TestTimeSpecDirect:
+    """Test the time_spec property using the direct FFI call."""
+
+    def test_time_spec_values(self, teacup_stmx_path: Path) -> None:
+        """time_spec should return correct start, stop, dt, and units."""
+        from simlin.types import TimeSpec
+
+        model = simlin.load(teacup_stmx_path)
+        ts = model.time_spec
+        assert isinstance(ts, TimeSpec)
+        assert ts.start == 0.0
+        assert ts.stop == 30.0
+        assert ts.dt == 0.125
+        assert ts.units is not None
+
+    def test_time_spec_after_edit(self, teacup_stmx_path: Path) -> None:
+        """time_spec should reflect changes after editing sim specs."""
+        model = simlin.load(teacup_stmx_path)
+        model.project.set_sim_specs(stop=50.0)
+        ts = model.time_spec
+        assert ts.stop == 50.0

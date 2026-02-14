@@ -224,6 +224,49 @@ describe('High-Level API', () => {
       expect(teacupTemp!.type).toBe('stock');
     });
 
+    it('should get a single variable by name', async () => {
+      const model = await project.mainModel();
+
+      const teacupTemp = await model.getVariable('teacup temperature');
+      expect(teacupTemp).toBeDefined();
+      expect(teacupTemp!.type).toBe('stock');
+      expect(teacupTemp!.name).toBe('teacup temperature');
+    });
+
+    it('should return undefined for non-existent variable', async () => {
+      const model = await project.mainModel();
+
+      const result = await model.getVariable('nonexistent_variable_xyz');
+      expect(result).toBeUndefined();
+    });
+
+    it('stocks() should return only stocks', async () => {
+      const model = await project.mainModel();
+      const stocks = await model.stocks();
+
+      for (const stock of stocks) {
+        expect(stock.type).toBe('stock');
+      }
+    });
+
+    it('flows() should return only flows', async () => {
+      const model = await project.mainModel();
+      const flows = await model.flows();
+
+      for (const flow of flows) {
+        expect(flow.type).toBe('flow');
+      }
+    });
+
+    it('auxs() should return only auxiliaries', async () => {
+      const model = await project.mainModel();
+      const auxs = await model.auxs();
+
+      for (const aux of auxs) {
+        expect(aux.type).toBe('aux');
+      }
+    });
+
     it('should get time spec', async () => {
       const model = await project.mainModel();
       const timeSpec = await model.timeSpec();
@@ -906,7 +949,7 @@ describe('High-Level API', () => {
       const stock = stocks.find((s) => s.name === 'population');
       expect(stock).toBeDefined();
       expect(stock!.initialEquation).toBe('1000');
-      expect(stock!.dimensions).toEqual(['Region']);
+      expect(stock!.arrayedEquation?.dimensions).toEqual(['Region']);
 
       await project.dispose();
     });
