@@ -144,8 +144,8 @@
 //! For small-to-medium models, [`VdfFile::build_deterministic_ot_map`] maps
 //! names to OT indices using only structural metadata:
 //!
-//! 1. Filter records to model variables: f[0]!=0, f[1]!=23, f[10]>0,
-//!    f[11]>0, f[11]<ot_count.
+//! 1. Filter records to model variables: f[0]!=0, f[1]!=23, f[1]!=15,
+//!    f[10]>0, f[11]>0, f[11]<ot_count.
 //! 2. Sort these records by f[10] (an alphabetical sort key).
 //! 3. Filter names (remove system names, group/unit markers, and Vensim
 //!    builtin function names embedded in the name table).
@@ -322,6 +322,10 @@ pub struct VdfFile {
     pub offset_table_count: usize,
     /// File offset of the first data block (time series).
     pub first_data_block: usize,
+    /// When the traditional offset table can't be found (e.g. medium-sized
+    /// VDFs like the econ model), we build a synthetic OT by walking
+    /// contiguous data blocks. Each entry is a block offset.
+    synthetic_ot: Option<Vec<u32>>,
 }
 
 #[cfg(feature = "file_io")]
@@ -378,7 +382,25 @@ impl VdfFile {
 
         let first_data_block = find_first_data_block(&data, time_point_count, bitmap_size)
             .ok_or("could not find first VDF data block")?;
-        let (offset_table_start, offset_table_count) = find_offset_table(&data, first_data_block);
+        let (mut offset_table_start, mut offset_table_count) =
+            find_offset_table(&data, first_data_block);
+
+        // When the traditional OT isn't found (medium-sized VDFs like the
+        // econ model), build a synthetic OT by walking contiguous blocks.
+        let synthetic_ot = if offset_table_count == 0 {
+            let blocks =
+                enumerate_data_blocks(&data, first_data_block, bitmap_size, time_point_count);
+            if blocks.len() > 1 {
+                let ot: Vec<u32> = blocks.iter().map(|&(off, _, _)| off as u32).collect();
+                offset_table_start = first_data_block;
+                offset_table_count = ot.len();
+                Some(ot)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         Ok(VdfFile {
             data,
@@ -394,6 +416,7 @@ impl VdfFile {
             offset_table_start,
             offset_table_count,
             first_data_block,
+            synthetic_ot,
         })
     }
 
@@ -401,6 +424,9 @@ impl VdfFile {
     pub fn offset_table_entry(&self, index: usize) -> Option<u32> {
         if index >= self.offset_table_count {
             return None;
+        }
+        if let Some(ref synthetic) = self.synthetic_ot {
+            return synthetic.get(index).copied();
         }
         let off = self.offset_table_start + index * 4;
         if off + 4 > self.data.len() {
@@ -501,6 +527,7 @@ impl VdfFile {
         // Collect model variable records using per-record criteria:
         //   f[0] != 0 : non-zero/non-padding record
         //   f[1] != 23 : not a system/control variable (INITIAL TIME, etc.)
+        //   f[1] != 15 : not an INITIAL TIME constant record
         //   f[10] > 0  : has a non-zero alphabetical sort key
         //   f[11] > 0  : OT index > 0 (0 is always the time series)
         //   f[11] < ot_count : valid offset table index
@@ -512,6 +539,7 @@ impl VdfFile {
             let ot_idx = rec.fields[11] as usize;
             if rec.fields[0] != 0
                 && rec.fields[1] != 23
+                && rec.fields[1] != 15
                 && rec.fields[10] > 0
                 && ot_idx > 0
                 && ot_idx < ot_count
@@ -871,17 +899,17 @@ pub fn find_records(data: &[u8], search_start: usize, search_end: usize) -> Vec<
 }
 
 /// Find the first data block (time series). Identified by having u16 count
-/// equal to time_point_count, a fully-set bitmap, and a plausible first value
-/// (a year like 1900 or 0 for models starting at t=0).
+/// equal to time_point_count, a fully-set bitmap, a plausible first value,
+/// and a monotonically increasing sequence (real time series always increase).
 pub fn find_first_data_block(
     data: &[u8],
     time_point_count: usize,
     bitmap_size: usize,
 ) -> Option<usize> {
     let count_bytes = (time_point_count as u16).to_le_bytes();
-    let min_block_size = 2 + bitmap_size + 4;
+    let full_block_size = 2 + bitmap_size + time_point_count * 4;
     let search_start = 0x100;
-    for pos in search_start..data.len().saturating_sub(min_block_size) {
+    for pos in search_start..data.len().saturating_sub(full_block_size) {
         if data[pos..pos + 2] != count_bytes {
             continue;
         }
@@ -891,11 +919,27 @@ pub fn find_first_data_block(
             continue;
         }
         let data_off = pos + 2 + bitmap_size;
-        if data_off + 4 > data.len() {
+        if data_off + time_point_count * 4 > data.len() {
             continue;
         }
         let first_val = read_f32(data, data_off);
-        if (1800.0..2200.0).contains(&first_val) || first_val == 0.0 {
+        if !((0.0..2200.0).contains(&first_val)) {
+            continue;
+        }
+        // Verify the sequence is monotonically increasing -- a real time
+        // series must be. This eliminates false positives where a non-time
+        // block happens to have a plausible first value (e.g. 0.0).
+        let mut monotonic = true;
+        let mut prev = first_val;
+        for i in 1..time_point_count {
+            let val = read_f32(data, data_off + i * 4);
+            if val <= prev {
+                monotonic = false;
+                break;
+            }
+            prev = val;
+        }
+        if monotonic {
             return Some(pos);
         }
     }
@@ -2056,20 +2100,22 @@ mod tests {
         /// fails with a count mismatch: 3 model records but only 2 candidate
         /// names. This documents the limitation.
         #[test]
-        fn test_deterministic_bact_count_mismatch() {
+        fn test_deterministic_bact_mapping_succeeds() {
             let vdf_path =
                 "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/Current.vdf";
             let vdf = vdf_file(vdf_path);
 
-            let result = vdf.build_deterministic_ot_map();
+            // With the f[1]=15 filter, the deterministic mapping should
+            // now succeed for the bact model (2 candidates, 2 records).
+            let det_map = vdf.build_deterministic_ot_map().unwrap();
             assert!(
-                result.is_err(),
-                "bact: expected deterministic map to fail with count mismatch"
+                det_map.contains_key("Time"),
+                "bact: mapping should include Time"
             );
-            let err = result.unwrap_err().to_string();
             assert!(
-                err.contains("candidate name count (2) != model record count (3)"),
-                "bact: unexpected error: {err}"
+                det_map.len() >= 3,
+                "bact: expected at least 3 entries (Time + 2 vars), got {}",
+                det_map.len()
             );
         }
 
@@ -2203,43 +2249,53 @@ mod tests {
         }
 
         /// The econ model (medium-sized, 42 slotted names, 74 records)
-        /// breaks the deterministic mapping because the offset table
-        /// parsing fails (ot_count=0), which causes `f[11] < ot_count`
-        /// to exclude all records. The records DO have nonzero f[10] values,
-        /// but without a valid offset table the mapping can't proceed.
+        /// previously failed OT detection because `find_first_data_block`
+        /// matched a false-positive block starting with 0.0. With the
+        /// monotonicity check, the correct time block (starting at t=1.0)
+        /// is found, and the real OT is located just before it.
         #[test]
-        fn test_deterministic_econ_fails_no_offset_table() {
+        fn test_econ_offset_table_found() {
             let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
 
-            // The offset table parsing fails for this file
-            assert_eq!(
-                vdf.offset_table_count, 0,
-                "econ: expected offset table count to be 0 (parsing limitation)"
+            assert!(
+                vdf.offset_table_count > 0,
+                "econ: expected offset_table_count > 0"
+            );
+            assert!(
+                vdf.synthetic_ot.is_none(),
+                "econ: should use real OT, not synthetic"
             );
 
-            // Records DO have nonzero f[10], but the ot_count=0 filter
-            // eliminates everything via `f[11] < ot_count`
+            // Records have nonzero f[10] values
             let nonzero_f10 = vdf.records.iter().filter(|r| r.fields[10] != 0).count();
             assert!(
                 nonzero_f10 > 0,
                 "econ: records should have nonzero f[10] values"
             );
 
-            // Deterministic mapping fails with count mismatch
-            let result = vdf.build_deterministic_ot_map();
+            // Data extraction should succeed and produce valid entries
+            let vdf_data = vdf.extract_data().unwrap();
             assert!(
-                result.is_err(),
-                "econ: deterministic mapping should fail when OT is empty"
+                vdf_data.entries.len() > 1,
+                "econ: expected multiple data entries, got {}",
+                vdf_data.entries.len()
             );
-            let err = result.unwrap_err().to_string();
+
+            // Time series should start at 1.0 (INITIAL TIME from mark2.mdl)
             assert!(
-                err.contains("model record count (0)"),
-                "econ: expected 0 model records due to OT filter, got: {err}"
+                (vdf_data.time_values[0] - 1.0).abs() < 0.01,
+                "econ: time should start at 1.0, got {}",
+                vdf_data.time_values[0]
+            );
+            let last_time = *vdf_data.time_values.last().unwrap();
+            assert!(
+                (last_time - 300.0).abs() < 0.01,
+                "econ: time should end at 300.0, got {last_time}"
             );
         }
 
         /// The econ VDF was generated from mark2.mdl (per header).
-        /// Test that empirical matching still works when the MDL matches.
+        /// With the synthetic OT, empirical matching should find matches.
         #[test]
         fn test_econ_vdf_from_mark2_mdl() {
             let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
@@ -2249,20 +2305,46 @@ mod tests {
                 .take_while(|&&b| b != 0)
                 .map(|&b| b as char)
                 .collect();
-            // Header confirms the VDF came from mark2.mdl
             assert!(
                 header_text.contains("mark2.mdl"),
                 "econ: expected header to reference mark2.mdl, got: {header_text}"
             );
 
-            // The offset table is empty, so extract_data returns no entries.
-            // This is a parsing limitation for medium-sized VDFs.
             let vdf_data = vdf.extract_data().unwrap();
-            assert_eq!(
-                vdf_data.entries.len(),
-                0,
-                "econ: offset table is empty, so no data entries extracted"
+            assert!(
+                vdf_data.entries.len() > 1,
+                "econ: expected data entries with synthetic OT, got {}",
+                vdf_data.entries.len()
             );
+
+            // Simulate the MDL and check that empirical matching works
+            let contents =
+                std::fs::read_to_string("../../third_party/uib_sd/fall_2008/econ/mark2.mdl")
+                    .unwrap();
+            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+            let project = std::rc::Rc::new(crate::Project::from(datamodel_project));
+            let sim = crate::interpreter::Simulation::new(&project, "main").unwrap();
+            let results = sim.run_to_end().unwrap();
+
+            // Step counts must match for empirical matching
+            if results.step_count == vdf_data.time_values.len() {
+                let emp_map = build_empirical_ot_map(&vdf_data, &results).unwrap();
+                let matched = emp_map.len() - 1; // subtract Time
+                assert!(
+                    matched > 0,
+                    "econ: expected at least some empirical matches, got 0"
+                );
+                eprintln!(
+                    "econ empirical matching: {matched} vars matched out of {} sim vars",
+                    results.offsets.len() - 1
+                );
+            } else {
+                eprintln!(
+                    "econ: step count mismatch (VDF={}, sim={}), skipping empirical check",
+                    vdf_data.time_values.len(),
+                    results.step_count
+                );
+            }
         }
 
         /// Verify f[10] ordering matches alphabetical name order for small
@@ -2295,6 +2377,7 @@ mod tests {
                     let ot_idx = rec.fields[11] as usize;
                     if rec.fields[0] != 0
                         && rec.fields[1] != 23
+                        && rec.fields[1] != 15
                         && rec.fields[10] > 0
                         && ot_idx > 0
                         && ot_idx < ot_count
@@ -2451,6 +2534,7 @@ mod tests {
                     );
                     let passes = rec.fields[0] != 0
                         && rec.fields[1] != 23
+                        && rec.fields[1] != 15
                         && rec.fields[10] > 0
                         && rec.fields[11] > 0
                         && (rec.fields[11] as usize) < ot_count;
@@ -3289,6 +3373,1292 @@ mod tests {
                         f32::from_bits(v)
                     );
                 }
+            }
+        }
+
+        // ---- Chain investigation tests (task #4) ----
+
+        /// For the WATER model (small, all mappings known), trace the complete
+        /// chain: name -> slot_table -> slot_data -> record -> OT -> data.
+        /// Tests every plausible mathematical relationship between slot words
+        /// and record fields to look for a direct name-to-record link.
+        #[test]
+        fn test_chain_water_slot_to_record_relationships() {
+            let vdf = vdf_file(
+                "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/Current.vdf",
+            );
+            let det_map = vdf.build_deterministic_ot_map().unwrap();
+            let sec1 = vdf.slot_section().unwrap();
+            let sec1_off = sec1.data_offset();
+            let ot_count = vdf.offset_table_count;
+
+            let model_records: Vec<&VdfRecord> = vdf
+                .records
+                .iter()
+                .filter(|r| {
+                    r.fields[0] != 0
+                        && r.fields[1] != 23
+                        && r.fields[1] != 15
+                        && r.fields[10] > 0
+                        && r.fields[11] > 0
+                        && (r.fields[11] as usize) < ot_count
+                })
+                .collect();
+
+            let ot_to_rec: HashMap<u32, &VdfRecord> =
+                model_records.iter().map(|r| (r.fields[11], *r)).collect();
+
+            eprintln!(
+                "\n=== WATER chain: {} model vars, {} records, {} OT ===",
+                det_map.len() - 1,
+                model_records.len(),
+                ot_count
+            );
+
+            let mut slot_w_matches_ot = 0usize;
+            let mut slot_w_matches_f10 = 0usize;
+            let mut slot_w_matches_rec_idx = 0usize;
+            let mut slot_w_matches_f2 = 0usize;
+            let mut slot_w_matches_f3 = 0usize;
+            let mut slot_w_matches_rec_file_off = 0usize;
+
+            for (name, &ot_idx) in &det_map {
+                if name == "Time" {
+                    continue;
+                }
+                let name_idx = vdf.names.iter().position(|n| n == name).unwrap();
+                let slot_offset = vdf.slot_table[name_idx];
+                let w = read_slot_words(&vdf.data, sec1_off, slot_offset);
+                let rec = ot_to_rec[&(ot_idx as u32)];
+                let rec_idx = vdf
+                    .records
+                    .iter()
+                    .position(|r| std::ptr::eq(r, rec))
+                    .unwrap();
+
+                eprintln!(
+                    "  {:25} name[{:2}] slot@{:3} w=[{:6},{:6},{:6},{:6}] -> rec[{:2}] f10={:3} f11={} f2={:3} f3={:3} @0x{:x}",
+                    name,
+                    name_idx,
+                    slot_offset,
+                    w[0],
+                    w[1],
+                    w[2],
+                    w[3],
+                    rec_idx,
+                    rec.fields[10],
+                    rec.fields[11],
+                    rec.fields[2],
+                    rec.fields[3],
+                    rec.file_offset
+                );
+
+                for (wi, &wval) in w.iter().enumerate() {
+                    if wval == ot_idx as u32 && wval != 0 {
+                        slot_w_matches_ot += 1;
+                        eprintln!("    ** w[{}]={} == OT index! **", wi, wval);
+                    }
+                    if wval == rec.fields[10] && wval != 0 {
+                        slot_w_matches_f10 += 1;
+                        eprintln!("    ** w[{}]={} == f[10]! **", wi, wval);
+                    }
+                    if wval == rec_idx as u32 {
+                        slot_w_matches_rec_idx += 1;
+                        eprintln!("    ** w[{}]={} == rec_idx! **", wi, wval);
+                    }
+                    if wval == rec.fields[2] && wval != 0 {
+                        slot_w_matches_f2 += 1;
+                        eprintln!("    ** w[{}]={} == f[2]! **", wi, wval);
+                    }
+                    if wval == rec.fields[3] && wval != 0 {
+                        slot_w_matches_f3 += 1;
+                        eprintln!("    ** w[{}]={} == f[3]! **", wi, wval);
+                    }
+                    if wval == rec.file_offset as u32 {
+                        slot_w_matches_rec_file_off += 1;
+                        eprintln!("    ** w[{}]={} == rec.file_offset! **", wi, wval);
+                    }
+                }
+            }
+
+            eprintln!("\n  Hypothesis results (5 vars x 4 words = 20 checks):");
+            eprintln!("    slot_w == OT index:       {}", slot_w_matches_ot);
+            eprintln!("    slot_w == f[10]:           {}", slot_w_matches_f10);
+            eprintln!("    slot_w == rec_idx:         {}", slot_w_matches_rec_idx);
+            eprintln!("    slot_w == f[2]:            {}", slot_w_matches_f2);
+            eprintln!("    slot_w == f[3]:            {}", slot_w_matches_f3);
+            eprintln!(
+                "    slot_w == rec.file_offset: {}",
+                slot_w_matches_rec_file_off
+            );
+
+            eprintln!("\n  Checking additive relationships:");
+            for (name, &ot_idx) in &det_map {
+                if name == "Time" {
+                    continue;
+                }
+                let name_idx = vdf.names.iter().position(|n| n == name).unwrap();
+                let slot_offset = vdf.slot_table[name_idx];
+                let w = read_slot_words(&vdf.data, sec1_off, slot_offset);
+                let rec = ot_to_rec[&(ot_idx as u32)];
+
+                for (wi, &wval) in w.iter().enumerate() {
+                    if wval == 0 {
+                        continue;
+                    }
+                    let diff_from_slot = wval as i64 - slot_offset as i64;
+                    if diff_from_slot == rec.fields[11] as i64 {
+                        eprintln!(
+                            "    {} w[{}]-slot_off = {} = f[11]!",
+                            name, wi, diff_from_slot
+                        );
+                    }
+                    let rec_rel = rec.file_offset as i64 - sec1_off as i64;
+                    if wval as i64 == rec_rel {
+                        eprintln!(
+                            "    {} w[{}] = rec_offset_from_sec1 = {}!",
+                            name, wi, rec_rel
+                        );
+                    }
+                }
+            }
+        }
+
+        /// For WATER, verify that the section 1 header encodes the model
+        /// record cluster: header[0] = f[12] slot offset, header[1] = count.
+        #[test]
+        fn test_chain_water_sec1_header_analysis() {
+            let vdf = vdf_file(
+                "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/Current.vdf",
+            );
+            let sec1 = vdf.slot_section().unwrap();
+            let sec1_off = sec1.data_offset();
+            let mut sorted_slots = vdf.slot_table.clone();
+            sorted_slots.sort();
+            let min_slot = sorted_slots.first().copied().unwrap_or(0) as usize;
+            let header_words = min_slot / 4;
+
+            eprintln!(
+                "\n=== WATER sec1 header: {} bytes = {} u32s ===",
+                min_slot, header_words
+            );
+
+            let header: Vec<u32> = (0..header_words)
+                .map(|i| read_u32(&vdf.data, sec1_off + i * 4))
+                .collect();
+
+            for (i, &v) in header.iter().enumerate() {
+                eprintln!("  hdr[{:2}] = {:6} (0x{:08x})", i, v, v);
+            }
+
+            // header[0] matches the primary f[12] cluster (the one holding
+            // most model records). It's NOT always the only f[12] value.
+            let rec_count_at_f12 = vdf
+                .records
+                .iter()
+                .filter(|r| r.slot_ref() == header[0])
+                .count();
+            // header[1] = number of records in the primary f[12] cluster
+            assert_eq!(
+                header[1] as usize, rec_count_at_f12,
+                "header[1] should equal record count at primary f[12] cluster"
+            );
+
+            eprintln!("\n  header[0]={} = primary f[12] cluster offset", header[0]);
+            eprintln!(
+                "  header[1]={} = record count at that cluster (verified: {})",
+                header[1], rec_count_at_f12
+            );
+
+            let remaining = &header[3..];
+            let mut sorted_remaining: Vec<u32> = remaining.to_vec();
+            sorted_remaining.sort();
+            eprintln!(
+                "\n  Remaining {} values (sorted): {:?}",
+                remaining.len(),
+                sorted_remaining
+            );
+
+            let as_ascii: String = remaining
+                .iter()
+                .filter_map(|&v| {
+                    if (32..127).contains(&v) {
+                        Some(v as u8 as char)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            eprintln!("  As ASCII chars: {:?}", as_ascii);
+        }
+
+        /// For the ECON model (medium, 42 slots), investigate variable-stride
+        /// slot regions and their extended data content.
+        #[test]
+        fn test_chain_econ_extended_slot_data() {
+            let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
+            let sec1 = vdf.slot_section().unwrap();
+            let sec1_off = sec1.data_offset();
+            let slotted = vdf.section_name_count;
+
+            let mut slot_with_idx: Vec<(u32, usize)> = vdf.slot_table[..slotted]
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, off)| (off, i))
+                .collect();
+            slot_with_idx.sort_by_key(|&(off, _)| off);
+
+            eprintln!(
+                "\n=== ECON extended slot data: {} slotted, {} records ===",
+                slotted,
+                vdf.records.len()
+            );
+
+            for (si, &(off, name_idx)) in slot_with_idx.iter().enumerate() {
+                let next_off = slot_with_idx
+                    .get(si + 1)
+                    .map(|&(o, _)| o)
+                    .unwrap_or(sec1.declared_size);
+                let stride = next_off - off;
+                let abs = sec1_off + off as usize;
+                let name = &vdf.names[name_idx];
+                let w = read_slot_words(&vdf.data, sec1_off, off);
+
+                let extra_words = (stride as usize).saturating_sub(16) / 4;
+                let extra: Vec<u32> = (0..extra_words)
+                    .map(|i| read_u32(&vdf.data, abs + 16 + i * 4))
+                    .collect();
+
+                if stride > 16 || si < 15 {
+                    eprintln!(
+                        "  slot[{:3}] {:35} @{:4} stride={:3} w=[{:6},{:6},{:6},{:6}]",
+                        name_idx, name, off, stride, w[0], w[1], w[2], w[3]
+                    );
+                    if !extra.is_empty() {
+                        eprintln!("    extra ({} words):", extra.len());
+                        for (i, &v) in extra.iter().enumerate() {
+                            let f = f32::from_bits(v);
+                            let f_str = if f.is_finite() && f.abs() > 0.001 && f.abs() < 1e10 {
+                                format!(" f32={:.4}", f)
+                            } else {
+                                String::new()
+                            };
+                            eprintln!("      [{:2}] {:10} (0x{:08x}){}", i, v, v, f_str);
+                        }
+                    }
+                }
+            }
+
+            let w3_values: Vec<u32> = (0..slotted)
+                .map(|i| read_slot_words(&vdf.data, sec1_off, vdf.slot_table[i])[3])
+                .collect();
+            let mut w3_sorted = w3_values.clone();
+            w3_sorted.sort();
+            w3_sorted.dedup();
+            eprintln!(
+                "\n  w[3] unique values: {}/{} -> {:?}",
+                w3_sorted.len(),
+                slotted,
+                &w3_sorted[..w3_sorted.len().min(30)]
+            );
+
+            let slot_set: std::collections::HashSet<u32> =
+                vdf.slot_table[..slotted].iter().copied().collect();
+            let f12_set: std::collections::HashSet<u32> =
+                vdf.records.iter().map(|r| r.slot_ref()).collect();
+            let mut overlap: Vec<u32> = f12_set.intersection(&slot_set).copied().collect();
+            overlap.sort();
+            eprintln!(
+                "\n  f[12] values matching slot offsets: {} of {} ({:?})",
+                overlap.len(),
+                f12_set.len(),
+                overlap
+            );
+
+            for &f12 in &overlap {
+                let names_at: Vec<_> = (0..slotted)
+                    .filter(|&i| vdf.slot_table[i] == f12)
+                    .map(|i| &vdf.names[i])
+                    .collect();
+                let recs_at: Vec<usize> = vdf
+                    .records
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.slot_ref() == f12)
+                    .map(|(i, _)| i)
+                    .collect();
+                eprintln!(
+                    "    f[12]={}: names={:?} records={:?}",
+                    f12, names_at, recs_at
+                );
+            }
+
+            let mut non_overlap: Vec<u32> = f12_set.difference(&slot_set).copied().collect();
+            non_overlap.sort();
+            if !non_overlap.is_empty() {
+                eprintln!("\n  f[12] values NOT in slot table: {:?}", non_overlap);
+            }
+        }
+
+        /// Cross-model analysis: for all small models with working
+        /// deterministic mappings, show the full chain and test w[3].
+        #[test]
+        fn test_chain_cross_model_slot_hypothesis() {
+            let models = [
+                (
+                    "water",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/Current.vdf",
+                ),
+                (
+                    "pop",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_6/Current.vdf",
+                ),
+                (
+                    "bact5",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/euler-5.vdf",
+                ),
+                (
+                    "bact10",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/euler-10.vdf",
+                ),
+            ];
+
+            for (label, path) in &models {
+                let vdf = vdf_file(path);
+                let det_map = match vdf.build_deterministic_ot_map() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("\n=== {} ===: det_map failed: {}", label, e);
+                        continue;
+                    }
+                };
+
+                let sec1 = vdf.slot_section().unwrap();
+                let sec1_off = sec1.data_offset();
+                let ot_count = vdf.offset_table_count;
+
+                let model_recs: Vec<(usize, &VdfRecord)> = vdf
+                    .records
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| {
+                        r.fields[0] != 0
+                            && r.fields[1] != 23
+                            && r.fields[1] != 15
+                            && r.fields[10] > 0
+                            && r.fields[11] > 0
+                            && (r.fields[11] as usize) < ot_count
+                    })
+                    .collect();
+
+                let ot_to_rec: HashMap<u32, (usize, &VdfRecord)> = model_recs
+                    .iter()
+                    .map(|&(i, r)| (r.fields[11], (i, r)))
+                    .collect();
+
+                eprintln!(
+                    "\n=== {} ({} vars, {} model_recs, {} OT) ===",
+                    label,
+                    det_map.len() - 1,
+                    model_recs.len(),
+                    ot_count,
+                );
+
+                let mut var_names: Vec<_> = det_map.iter().filter(|(n, _)| *n != "Time").collect();
+                var_names.sort_by_key(|(n, _)| n.to_lowercase());
+
+                for (name, ot_idx) in &var_names {
+                    let name_idx = vdf.names.iter().position(|n| n == *name).unwrap();
+                    let slot_off = vdf.slot_table[name_idx];
+                    let w = read_slot_words(&vdf.data, sec1_off, slot_off);
+                    let ot = **ot_idx;
+                    let (ri, rec) = ot_to_rec[&(ot as u32)];
+
+                    let mut w3_notes = Vec::new();
+                    if w[3] == ot as u32 {
+                        w3_notes.push("=OT".into());
+                    }
+                    if w[3] == ri as u32 {
+                        w3_notes.push(format!("=rec[{}]", ri));
+                    }
+                    if w[3] == rec.fields[10] {
+                        w3_notes.push(format!("=f10({})", rec.fields[10]));
+                    }
+                    if (w[3] as usize) < vdf.names.len() {
+                        w3_notes.push(format!("name[{}]={:?}", w[3], &vdf.names[w[3] as usize]));
+                    }
+                    if vdf.slot_table[..vdf.section_name_count].contains(&w[3]) {
+                        let target = vdf.slot_table[..vdf.section_name_count]
+                            .iter()
+                            .position(|&s| s == w[3])
+                            .unwrap();
+                        w3_notes.push(format!("->slot[{}]={:?}", target, &vdf.names[target]));
+                    }
+
+                    eprintln!(
+                        "  {:25} slot@{:3} w=[{:3},{:5},{:5},{:5}] rec[{:2}] OT={} w3: {:?}",
+                        name, slot_off, w[0], w[1], w[2], w[3], ri, ot, w3_notes
+                    );
+                }
+            }
+        }
+
+        /// Dump the full section 1 content for WATER as annotated u32 values.
+        #[test]
+        fn test_chain_sec1_full_dump_water() {
+            let vdf = vdf_file(
+                "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/Current.vdf",
+            );
+            let sec1 = vdf.slot_section().unwrap();
+            let sec1_off = sec1.data_offset();
+            let sec1_size = sec1.declared_size as usize;
+            let ot_count = vdf.offset_table_count;
+
+            let slot_to_name: HashMap<u32, &str> = (0..vdf.section_name_count)
+                .map(|i| (vdf.slot_table[i], vdf.names[i].as_str()))
+                .collect();
+
+            eprintln!(
+                "\n=== WATER sec1 full dump: {} bytes from 0x{:x} ===",
+                sec1_size, sec1_off
+            );
+            eprintln!("  OT count: {}", ot_count);
+            eprintln!("  Records: {}", vdf.records.len());
+
+            for i in (0..sec1_size).step_by(4) {
+                let v = read_u32(&vdf.data, sec1_off + i);
+                let mut annotations = Vec::new();
+
+                if let Some(name) = slot_to_name.get(&(i as u32)) {
+                    annotations.push(format!("<- slot for {:?}", name));
+                }
+                if v > 0 && (v as usize) < ot_count {
+                    annotations.push(format!("OT[{}]", v));
+                }
+                if v == vdf.records.len() as u32 {
+                    annotations.push("=rec_count".into());
+                }
+
+                let f = f32::from_bits(v);
+                let f_str = if f.is_finite() && f.abs() > 0.001 && f.abs() < 1e6 {
+                    format!(" f32={:.4}", f)
+                } else {
+                    String::new()
+                };
+
+                eprintln!(
+                    "  [{:3}] @{:4}: {:10} (0x{:08x}){} {}",
+                    i / 4,
+                    i,
+                    v,
+                    v,
+                    f_str,
+                    annotations.join(" | ")
+                );
+            }
+        }
+
+        /// Analyze f[12] groups across models to understand grouping.
+        #[test]
+        fn test_chain_f12_group_analysis() {
+            let models = [
+                (
+                    "water",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/Current.vdf",
+                ),
+                (
+                    "bact5",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/euler-5.vdf",
+                ),
+                (
+                    "pop",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_6/Current.vdf",
+                ),
+                ("econ", "../../third_party/uib_sd/fall_2008/econ/base.vdf"),
+            ];
+
+            for (label, path) in &models {
+                let vdf = vdf_file(path);
+                let sec1 = vdf.slot_section().unwrap();
+                let sec1_off = sec1.data_offset();
+
+                let mut by_f12: std::collections::BTreeMap<u32, Vec<(usize, &VdfRecord)>> =
+                    std::collections::BTreeMap::new();
+                for (ri, rec) in vdf.records.iter().enumerate() {
+                    by_f12.entry(rec.slot_ref()).or_default().push((ri, rec));
+                }
+
+                let slot_to_name: HashMap<u32, &str> = (0..vdf.section_name_count)
+                    .map(|i| (vdf.slot_table[i], vdf.names[i].as_str()))
+                    .collect();
+
+                eprintln!(
+                    "\n=== {} f[12] groups: {} unique, {} records ===",
+                    label,
+                    by_f12.len(),
+                    vdf.records.len()
+                );
+
+                for (&f12, recs) in &by_f12 {
+                    let name_at = slot_to_name.get(&f12).copied().unwrap_or("(none)");
+                    let w = if (f12 as usize) + 16 <= sec1.declared_size as usize {
+                        read_slot_words(&vdf.data, sec1_off, f12)
+                    } else {
+                        [0, 0, 0, 0]
+                    };
+                    let f1s: Vec<u32> = recs.iter().map(|(_, r)| r.fields[1]).collect();
+                    let ots: Vec<u32> = recs.iter().map(|(_, r)| r.fields[11]).collect();
+                    eprintln!(
+                        "  f12={:4} ({:20}) recs={:2} w=[{:6},{:6},{:6},{:6}] f1={:?} OTs={:?}",
+                        f12,
+                        name_at,
+                        recs.len(),
+                        w[0],
+                        w[1],
+                        w[2],
+                        w[3],
+                        f1s,
+                        ots
+                    );
+                }
+            }
+        }
+
+        /// Check if extended slot data in ECON contains cross-references to
+        /// records (f[11], f[12]) or other slots.
+        #[test]
+        fn test_chain_econ_extended_vs_records() {
+            let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
+            let sec1 = vdf.slot_section().unwrap();
+            let sec1_off = sec1.data_offset();
+            let slotted = vdf.section_name_count;
+
+            let mut slots_sorted: Vec<(u32, usize)> = vdf.slot_table[..slotted]
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, off)| (off, i))
+                .collect();
+            slots_sorted.sort_by_key(|&(off, _)| off);
+
+            let all_f11: std::collections::HashSet<u32> =
+                vdf.records.iter().map(|r| r.fields[11]).collect();
+            let all_f12: std::collections::HashSet<u32> =
+                vdf.records.iter().map(|r| r.slot_ref()).collect();
+
+            eprintln!(
+                "\n=== ECON slot extended vs records ===\n  {} slotted, {} recs",
+                slotted,
+                vdf.records.len()
+            );
+            eprintln!("  f[11] values: {:?}", {
+                let mut v: Vec<_> = all_f11.iter().copied().collect();
+                v.sort();
+                v
+            });
+            eprintln!("  f[12] values: {:?}", {
+                let mut v: Vec<_> = all_f12.iter().copied().collect();
+                v.sort();
+                v
+            });
+
+            let mut matches_found = Vec::new();
+
+            for (si, &(off, name_idx)) in slots_sorted.iter().enumerate() {
+                let next_off = slots_sorted
+                    .get(si + 1)
+                    .map(|&(o, _)| o)
+                    .unwrap_or(sec1.declared_size);
+                let stride = (next_off - off) as usize;
+                let abs = sec1_off + off as usize;
+                let name = &vdf.names[name_idx];
+                let total_words = stride / 4;
+
+                let words: Vec<u32> = (0..total_words)
+                    .map(|i| read_u32(&vdf.data, abs + i * 4))
+                    .collect();
+
+                for (wi, &val) in words.iter().enumerate() {
+                    if val == 0 || val == VDF_SENTINEL {
+                        continue;
+                    }
+                    if all_f11.contains(&val) && val < 200 {
+                        matches_found.push(format!(
+                            "slot[{}] {:?} w[{}]={} matches f[11]",
+                            name_idx, name, wi, val
+                        ));
+                    }
+                    if all_f12.contains(&val) {
+                        matches_found.push(format!(
+                            "slot[{}] {:?} w[{}]={} matches f[12]",
+                            name_idx, name, wi, val
+                        ));
+                    }
+                    if vdf.slot_table[..slotted].contains(&val) && val != off {
+                        let ref_idx = vdf.slot_table[..slotted]
+                            .iter()
+                            .position(|&s| s == val)
+                            .unwrap();
+                        matches_found.push(format!(
+                            "slot[{}] {:?} w[{}]={} -> slot[{}] {:?}",
+                            name_idx, name, wi, val, ref_idx, &vdf.names[ref_idx]
+                        ));
+                    }
+                }
+            }
+
+            eprintln!("\n  Cross-reference matches:");
+            for m in &matches_found {
+                eprintln!("    {}", m);
+            }
+            eprintln!("  Total matches: {}", matches_found.len());
+        }
+
+        // ---- f[1] and f[0] field semantics investigation (task #6) ----
+
+        /// Collect all unique f[1] values and frequencies across every parseable
+        /// VDF file. Builds a comprehensive picture of what f[1] values exist.
+        #[test]
+        fn test_field_semantics_f1_survey() {
+            let vdf_paths = collect_vdf_files(std::path::Path::new("../../third_party/uib_sd"));
+            assert!(vdf_paths.len() >= 10);
+
+            let mut global_f1: std::collections::BTreeMap<u32, usize> =
+                std::collections::BTreeMap::new();
+            let mut per_file: Vec<(String, std::collections::BTreeMap<u32, usize>)> = Vec::new();
+            let mut total_records = 0usize;
+            let mut parsed_count = 0usize;
+
+            for path in &vdf_paths {
+                let data = match std::fs::read(path) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let vdf = match VdfFile::parse(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                parsed_count += 1;
+                let fname = path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let mut file_f1: std::collections::BTreeMap<u32, usize> =
+                    std::collections::BTreeMap::new();
+                for rec in &vdf.records {
+                    *global_f1.entry(rec.fields[1]).or_default() += 1;
+                    *file_f1.entry(rec.fields[1]).or_default() += 1;
+                    total_records += 1;
+                }
+                per_file.push((fname, file_f1));
+            }
+
+            eprintln!(
+                "\n=== f[1] GLOBAL SURVEY ({parsed_count} files, {total_records} records) ==="
+            );
+            for (val, count) in &global_f1 {
+                eprintln!(
+                    "  f[1]={val:6}: {count:5} records ({:.1}%)",
+                    100.0 * *count as f64 / total_records as f64
+                );
+            }
+            eprintln!("\n=== f[1] per-file breakdown ===");
+            for (fname, file_f1) in &per_file {
+                let vals: Vec<String> = file_f1.iter().map(|(v, c)| format!("{v}:{c}")).collect();
+                eprintln!("  {fname:40}: {}", vals.join(", "));
+            }
+            assert!(total_records > 0);
+            assert!(
+                global_f1.len() >= 3,
+                "expected at least 3 distinct f[1] values, got {}",
+                global_f1.len()
+            );
+        }
+
+        /// Collect all unique f[0] values and frequencies across VDFs.
+        /// Investigate whether f[0]=0 always means "skip this record".
+        #[test]
+        fn test_field_semantics_f0_survey() {
+            let vdf_paths = collect_vdf_files(std::path::Path::new("../../third_party/uib_sd"));
+            assert!(vdf_paths.len() >= 10);
+
+            let mut global_f0: std::collections::BTreeMap<u32, usize> =
+                std::collections::BTreeMap::new();
+            let mut f0_zero_f1: std::collections::BTreeMap<u32, usize> =
+                std::collections::BTreeMap::new();
+            let mut f0_nonzero_f1: std::collections::BTreeMap<u32, usize> =
+                std::collections::BTreeMap::new();
+            let mut total_records = 0usize;
+            let mut f0_zero_count = 0usize;
+            let mut cross_tab: std::collections::BTreeMap<(u32, u32), usize> =
+                std::collections::BTreeMap::new();
+
+            for path in &vdf_paths {
+                let data = match std::fs::read(path) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let vdf = match VdfFile::parse(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                for rec in &vdf.records {
+                    *global_f0.entry(rec.fields[0]).or_default() += 1;
+                    *cross_tab.entry((rec.fields[0], rec.fields[1])).or_default() += 1;
+                    total_records += 1;
+                    if rec.fields[0] == 0 {
+                        f0_zero_count += 1;
+                        *f0_zero_f1.entry(rec.fields[1]).or_default() += 1;
+                    } else {
+                        *f0_nonzero_f1.entry(rec.fields[1]).or_default() += 1;
+                    }
+                }
+            }
+
+            eprintln!("\n=== f[0] GLOBAL SURVEY ({total_records} records) ===");
+            for (val, count) in &global_f0 {
+                eprintln!(
+                    "  f[0]={val:6}: {count:5} records ({:.1}%)",
+                    100.0 * *count as f64 / total_records as f64
+                );
+            }
+            eprintln!("\n=== f[0]=0 records: f[1] breakdown ===");
+            for (val, count) in &f0_zero_f1 {
+                eprintln!("  f[0]=0, f[1]={val:6}: {count}");
+            }
+            eprintln!("\n=== f[0]!=0 records: f[1] breakdown ===");
+            for (val, count) in &f0_nonzero_f1 {
+                eprintln!("  f[0]!=0, f[1]={val:6}: {count}");
+            }
+            // Check if f[0] nonzero values are multiples of 4.
+            // Most are, but some rare values (e.g., 1, 34, 46) break the
+            // pattern, suggesting f[0] is not strictly a byte size.
+            let mut mult4 = 0usize;
+            let mut not_mult4 = Vec::new();
+            for (&val, &count) in &global_f0 {
+                if val != 0 {
+                    if val % 4 == 0 {
+                        mult4 += count;
+                    } else {
+                        not_mult4.push((val, count));
+                    }
+                }
+            }
+            eprintln!(
+                "\n  f[0] mult-of-4: {} records, non-mult-of-4: {:?}",
+                mult4, not_mult4
+            );
+            eprintln!("\n=== (f[0], f[1]) cross-tabulation ===");
+            for ((f0, f1), count) in &cross_tab {
+                eprintln!("  f[0]={f0:3}, f[1]={f1:6}: {count:5}");
+            }
+            eprintln!(
+                "\n  f[0]=0: {f0_zero_count}/{total_records} ({:.1}%)",
+                100.0 * f0_zero_count as f64 / total_records as f64
+            );
+        }
+
+        /// For models with MDL files, simulate the MDL and cross-reference
+        /// f[1] values with variable types (stock, flow, aux, constant).
+        #[test]
+        fn test_field_semantics_f1_vs_variable_type() {
+            let models: &[(&str, &str, &str)] = &[
+                (
+                    "water",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/water.mdl",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/Current.vdf",
+                ),
+                (
+                    "pop",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_6/pop.mdl",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_6/Current.vdf",
+                ),
+            ];
+            let mut f1_type_map: std::collections::BTreeMap<u32, Vec<(String, String, String)>> =
+                std::collections::BTreeMap::new();
+
+            for &(label, mdl_path, vdf_path) in models {
+                eprintln!("\n=== {label}: f[1] vs variable type ===");
+                let contents = std::fs::read_to_string(mdl_path)
+                    .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+                let datamodel_project = crate::compat::open_vensim(&contents)
+                    .unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+                let mut var_types: HashMap<String, String> = HashMap::new();
+                for model in &datamodel_project.models {
+                    for var in &model.variables {
+                        let (name, vtype) = match var {
+                            crate::datamodel::Variable::Stock(s) => {
+                                (s.ident.clone(), "stock".to_string())
+                            }
+                            crate::datamodel::Variable::Flow(f) => {
+                                (f.ident.clone(), "flow".to_string())
+                            }
+                            crate::datamodel::Variable::Aux(a) => {
+                                (a.ident.clone(), "aux".to_string())
+                            }
+                            crate::datamodel::Variable::Module(m) => {
+                                (m.ident.clone(), "module".to_string())
+                            }
+                        };
+                        var_types.insert(name, vtype);
+                    }
+                }
+                eprintln!("  MDL variables: {:?}", var_types);
+                let ref_results = simulate_mdl(mdl_path);
+                let vdf = vdf_file(vdf_path);
+                let vdf_data = vdf
+                    .extract_data()
+                    .unwrap_or_else(|e| panic!("extract_data failed: {e}"));
+                if vdf_data.time_values.len() != ref_results.step_count {
+                    eprintln!(
+                        "  SKIPPING: step count mismatch ({} vs {})",
+                        vdf_data.time_values.len(),
+                        ref_results.step_count
+                    );
+                    continue;
+                }
+                let emp_map = build_empirical_ot_map(&vdf_data, &ref_results)
+                    .unwrap_or_else(|e| panic!("empirical map failed: {e}"));
+                let mut ot_to_records: HashMap<u32, Vec<usize>> = HashMap::new();
+                for (ri, rec) in vdf.records.iter().enumerate() {
+                    ot_to_records.entry(rec.fields[11]).or_default().push(ri);
+                }
+                eprintln!("  Empirical map: {} matches", emp_map.len());
+                for (canonical_name, &ot_idx) in &emp_map {
+                    let vtype = var_types
+                        .get(canonical_name.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| "system".to_string());
+                    if let Some(rec_indices) = ot_to_records.get(&(ot_idx as u32)) {
+                        for &ri in rec_indices {
+                            let rec = &vdf.records[ri];
+                            eprintln!(
+                                "  {canonical_name:30} type={vtype:8} -> OT[{ot_idx:2}] \
+                                 rec[{ri:2}] f[0]={:3} f[1]={:6}",
+                                rec.fields[0], rec.fields[1]
+                            );
+                            f1_type_map.entry(rec.fields[1]).or_default().push((
+                                label.to_string(),
+                                canonical_name.as_str().to_string(),
+                                vtype.clone(),
+                            ));
+                        }
+                    } else {
+                        eprintln!(
+                            "  {canonical_name:30} type={vtype:8} -> OT[{ot_idx:2}] \
+                             (no record with f[11]={ot_idx})"
+                        );
+                    }
+                }
+            }
+            eprintln!("\n=== f[1] -> variable type summary ===");
+            for (f1_val, entries) in &f1_type_map {
+                let mut type_counts: std::collections::BTreeMap<&str, usize> =
+                    std::collections::BTreeMap::new();
+                for (_, _, vtype) in entries {
+                    *type_counts.entry(vtype.as_str()).or_default() += 1;
+                }
+                let summary: Vec<String> = type_counts
+                    .iter()
+                    .map(|(t, c)| format!("{t}:{c}"))
+                    .collect();
+                eprintln!("  f[1]={f1_val:6}: {}", summary.join(", "));
+                for (model, name, vtype) in entries {
+                    eprintln!("    [{model}] {name} ({vtype})");
+                }
+            }
+        }
+
+        /// Analyze f[1] values to determine which should be included vs
+        /// excluded in deterministic mapping, with detailed per-f[1] statistics.
+        #[test]
+        fn test_field_semantics_f1_filter_analysis() {
+            let vdf_paths = collect_vdf_files(std::path::Path::new("../../third_party/uib_sd"));
+            assert!(vdf_paths.len() >= 10);
+            #[derive(Default, Debug)]
+            struct F1Stats {
+                total: usize,
+                f0_zero: usize,
+                f10_zero: usize,
+                f11_zero: usize,
+                f11_valid: usize,
+                f11_out_of_range: usize,
+                sentinel_89: usize,
+            }
+            let mut stats: std::collections::BTreeMap<u32, F1Stats> =
+                std::collections::BTreeMap::new();
+
+            for path in &vdf_paths {
+                let data = match std::fs::read(path) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let vdf = match VdfFile::parse(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let ot_count = vdf.offset_table_count;
+                for rec in &vdf.records {
+                    let s = stats.entry(rec.fields[1]).or_default();
+                    s.total += 1;
+                    if rec.fields[0] == 0 {
+                        s.f0_zero += 1;
+                    }
+                    if rec.fields[10] == 0 {
+                        s.f10_zero += 1;
+                    }
+                    if rec.fields[11] == 0 {
+                        s.f11_zero += 1;
+                    }
+                    let ot_idx = rec.fields[11] as usize;
+                    if ot_count > 0 && ot_idx > 0 && ot_idx < ot_count {
+                        s.f11_valid += 1;
+                    }
+                    if ot_count > 0 && ot_idx >= ot_count {
+                        s.f11_out_of_range += 1;
+                    }
+                    if rec.fields[8] == VDF_SENTINEL && rec.fields[9] == VDF_SENTINEL {
+                        s.sentinel_89 += 1;
+                    }
+                }
+            }
+
+            eprintln!("\n=== f[1] FILTER ANALYSIS ===");
+            eprintln!(
+                "{:>8} {:>6} {:>6} {:>6} {:>6} {:>8} {:>8} {:>8}",
+                "f[1]", "total", "f0=0", "f10=0", "f11=0", "f11_ok", "f11_oor", "sent89"
+            );
+            for (f1, s) in &stats {
+                eprintln!(
+                    "{f1:>8} {:>6} {:>6} {:>6} {:>6} {:>8} {:>8} {:>8}",
+                    s.total,
+                    s.f0_zero,
+                    s.f10_zero,
+                    s.f11_zero,
+                    s.f11_valid,
+                    s.f11_out_of_range,
+                    s.sentinel_89
+                );
+            }
+            // f[1]=23 records in small models always have f[10]=0, but larger
+            // models (zambaqui) have f[1]=23 records with nonzero f[10].
+            // This means f[1]=23 alone is not sufficient to identify system
+            // variables in all models -- the existing filter also requires
+            // f[0]!=0 and other criteria.
+            if let Some(s23) = stats.get(&23) {
+                eprintln!(
+                    "\n  f[1]=23: {}/{} have f[10]=0 ({:.1}%)",
+                    s23.f10_zero,
+                    s23.total,
+                    100.0 * s23.f10_zero as f64 / s23.total as f64
+                );
+            }
+            if let Some(s15) = stats.get(&15) {
+                assert_eq!(s15.f0_zero, 0, "f[1]=15 records should have f[0]!=0");
+            }
+            eprintln!("\n=== FILTER RECOMMENDATIONS ===");
+            for (f1, s) in &stats {
+                let recommendation = if *f1 == 23 {
+                    "EXCLUDE (system variable: FINAL TIME, SAVEPER, etc.)"
+                } else if *f1 == 15 {
+                    "EXCLUDE (system variable: INITIAL TIME constant)"
+                } else if s.f0_zero == s.total {
+                    "EXCLUDE (all records have f[0]=0, padding/header)"
+                } else if s.f11_valid > 0 {
+                    "INCLUDE (has valid OT indices -> maps to data)"
+                } else {
+                    "UNKNOWN (no valid OT indices in test data)"
+                };
+                let pct = if s.total > 0 {
+                    100.0 * s.f11_valid as f64 / s.total as f64
+                } else {
+                    0.0
+                };
+                eprintln!("  f[1]={f1:6}: {recommendation} (model_var_pct={pct:.0}%)");
+            }
+        }
+
+        /// Investigate f[0] as a potential byte size indicator.
+        #[test]
+        fn test_field_semantics_f0_as_size() {
+            let models = [
+                (
+                    "euler-5",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/euler-5.vdf",
+                ),
+                (
+                    "water",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/Current.vdf",
+                ),
+                (
+                    "pop",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_6/Current.vdf",
+                ),
+                ("econ", "../../third_party/uib_sd/fall_2008/econ/base.vdf"),
+                ("zambaqui", "../../third_party/uib_sd/zambaqui/baserun.vdf"),
+            ];
+            eprintln!("\n=== f[0] AS SIZE INDICATOR ===");
+            for (label, vdf_path) in &models {
+                let vdf = vdf_file(vdf_path);
+                eprintln!("\n--- {label} ({} records) ---", vdf.records.len());
+                let mut f0_groups: std::collections::BTreeMap<u32, Vec<(usize, u32)>> =
+                    std::collections::BTreeMap::new();
+                for (ri, rec) in vdf.records.iter().enumerate() {
+                    f0_groups
+                        .entry(rec.fields[0])
+                        .or_default()
+                        .push((ri, rec.fields[1]));
+                }
+                for (f0_val, entries) in &f0_groups {
+                    let f1_vals: std::collections::BTreeSet<u32> =
+                        entries.iter().map(|&(_, f1)| f1).collect();
+                    let f1_list: Vec<String> = f1_vals.iter().map(|v| format!("{v}")).collect();
+                    eprintln!(
+                        "  f[0]={f0_val:3}: {} records, f[1] values: [{}]",
+                        entries.len(),
+                        f1_list.join(", ")
+                    );
+                    if *f0_val > 0 {
+                        let expected_words = *f0_val / 4;
+                        for &(ri, _) in entries.iter().take(3) {
+                            let rec = &vdf.records[ri];
+                            let nonzero_after: usize = rec.fields[2..]
+                                .iter()
+                                .filter(|&&v| v != 0 && v != VDF_SENTINEL)
+                                .count();
+                            eprintln!(
+                                "    rec[{ri:3}]: f[0]={f0_val} ({expected_words} words?), \
+                                 nonzero fields[2..16]={nonzero_after}"
+                            );
+                        }
+                    }
+                }
+                let f0z_f1nz: Vec<_> = vdf
+                    .records
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.fields[0] == 0 && r.fields[1] != 0)
+                    .map(|(i, r)| (i, r.fields[1]))
+                    .collect();
+                if f0z_f1nz.is_empty() {
+                    eprintln!("  f[0]=0 always has f[1]=0 in {label}");
+                } else {
+                    eprintln!(
+                        "  f[0]=0 with f[1]!=0: {} records (e.g., {:?})",
+                        f0z_f1nz.len(),
+                        &f0z_f1nz[..f0z_f1nz.len().min(5)]
+                    );
+                }
+            }
+        }
+
+        /// Full record dump for euler-5/bact showing all 16 fields with
+        /// known f[1] semantics as a reference.
+        #[test]
+        fn test_field_semantics_full_record_dump() {
+            let vdf = vdf_file(
+                "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/euler-5.vdf",
+            );
+            eprintln!(
+                "\n=== euler-5 FULL RECORD DUMP ({} records) ===",
+                vdf.records.len()
+            );
+            eprintln!("  OT count: {}", vdf.offset_table_count);
+            eprintln!("  Names: {:?}", vdf.names);
+            for (ri, rec) in vdf.records.iter().enumerate() {
+                let f1_desc = match rec.fields[1] {
+                    0 => "padding/header",
+                    15 => "INITIAL TIME const",
+                    23 => "system variable",
+                    135 => "stock",
+                    2056 => "flow",
+                    _ => {
+                        if rec.fields[0] == 0 {
+                            "padding (f[0]=0)"
+                        } else {
+                            "model variable"
+                        }
+                    }
+                };
+                eprintln!(
+                    "\n  rec[{ri:2}] @0x{:04x}: f[1]={:6} ({f1_desc})",
+                    rec.file_offset, rec.fields[1]
+                );
+                for i in 0..16 {
+                    let val = rec.fields[i];
+                    let note = match i {
+                        0 => {
+                            if val == 0 {
+                                " (padding/skip)"
+                            } else {
+                                " (type/size)"
+                            }
+                        }
+                        1 => " (variable type code)",
+                        8 | 9 => {
+                            if val == VDF_SENTINEL {
+                                " (SENTINEL)"
+                            } else {
+                                ""
+                            }
+                        }
+                        10 => " (alphabetical sort key)",
+                        11 => " (OT index)",
+                        12 => " (slot reference / f[12])",
+                        14 => {
+                            if val == VDF_SENTINEL {
+                                " (SENTINEL)"
+                            } else {
+                                ""
+                            }
+                        }
+                        _ => "",
+                    };
+                    eprintln!("    f[{i:2}] = {:10} (0x{:08x}){note}", val, val);
+                }
+            }
+            assert_eq!(
+                vdf.records[0].fields[1], 15,
+                "rec[0] should be INITIAL TIME"
+            );
+            assert_eq!(vdf.records[7].fields[1], 135, "rec[7] should be stock");
+            assert_eq!(vdf.records[8].fields[1], 2056, "rec[8] should be flow");
+        }
+
+        /// Cross-reference f[1] values with empirically verified variable types
+        /// for the water model (where deterministic + empirical mapping agree).
+        #[test]
+        fn test_field_semantics_water_ground_truth() {
+            let mdl_path =
+                "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/water.mdl";
+            let vdf_path =
+                "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/Current.vdf";
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+            let mut var_types: HashMap<String, &str> = HashMap::new();
+            for model in &datamodel_project.models {
+                for var in &model.variables {
+                    match var {
+                        crate::datamodel::Variable::Stock(s) => {
+                            var_types.insert(s.ident.clone(), "stock");
+                        }
+                        crate::datamodel::Variable::Flow(f) => {
+                            var_types.insert(f.ident.clone(), "flow");
+                        }
+                        crate::datamodel::Variable::Aux(a) => {
+                            var_types.insert(a.ident.clone(), "aux");
+                        }
+                        crate::datamodel::Variable::Module(m) => {
+                            var_types.insert(m.ident.clone(), "module");
+                        }
+                    }
+                }
+            }
+            let vdf = vdf_file(vdf_path);
+            let det_map = vdf.build_deterministic_ot_map().unwrap();
+            let mut ot_to_rec: HashMap<u32, Vec<usize>> = HashMap::new();
+            for (ri, rec) in vdf.records.iter().enumerate() {
+                ot_to_rec.entry(rec.fields[11]).or_default().push(ri);
+            }
+            eprintln!("\n=== water model: f[1] ground truth ===");
+            let mut det_sorted: Vec<_> = det_map.iter().collect();
+            det_sorted.sort_by_key(|(name, _)| name.to_lowercase());
+            for (name, ot_idx) in &det_sorted {
+                let vtype = var_types
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(if *name == "Time" { "time" } else { "unknown" });
+                if let Some(rec_indices) = ot_to_rec.get(&(**ot_idx as u32)) {
+                    for &ri in rec_indices {
+                        let rec = &vdf.records[ri];
+                        eprintln!(
+                            "  {name:30} type={vtype:8} OT[{ot_idx:2}] -> f[0]={:3} f[1]={:6}",
+                            rec.fields[0], rec.fields[1]
+                        );
+                    }
+                }
+            }
+            // Verify known f[1] types for water model.
+            // The deterministic map uses the VDF name table entries, which
+            // use Vensim display names (spaces, not underscores).
+            let wl_ot = det_map["water level"] as u32;
+            let inflow_ot = det_map["inflow"] as u32;
+            let wl_rec = vdf
+                .records
+                .iter()
+                .find(|r| r.fields[11] == wl_ot && r.fields[0] != 0);
+            let inflow_rec = vdf
+                .records
+                .iter()
+                .find(|r| r.fields[11] == inflow_ot && r.fields[0] != 0);
+            if let Some(wl) = wl_rec {
+                assert_eq!(
+                    wl.fields[1], 135,
+                    "water level (stock) should have f[1]=135"
+                );
+            }
+            if let Some(inflow) = inflow_rec {
+                assert_eq!(
+                    inflow.fields[1], 2056,
+                    "inflow (flow) should have f[1]=2056"
+                );
+            }
+        }
+
+        /// Analyze f[1] values across bact model variants.
+        #[test]
+        fn test_field_semantics_bact_variants() {
+            let bact_files = [
+                (
+                    "euler-5",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/euler-5.vdf",
+                ),
+                (
+                    "euler-10",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/euler-10.vdf",
+                ),
+                (
+                    "Current",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/Current.vdf",
+                ),
+                (
+                    "euler-1",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/euler-1.vdf",
+                ),
+                (
+                    "euler-2",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/euler-2.vdf",
+                ),
+                (
+                    "rk4",
+                    "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/rk4.vdf",
+                ),
+            ];
+            eprintln!("\n=== bact model f[1] across variants ===");
+            for (label, path) in &bact_files {
+                let vdf = vdf_file(path);
+                let mut f1_counts: std::collections::BTreeMap<u32, usize> =
+                    std::collections::BTreeMap::new();
+                for rec in &vdf.records {
+                    *f1_counts.entry(rec.fields[1]).or_default() += 1;
+                }
+                let f1_summary: Vec<String> =
+                    f1_counts.iter().map(|(v, c)| format!("{v}:{c}")).collect();
+                eprintln!(
+                    "  {label:12}: {} recs, {} OT, f[1]=[{}]",
+                    vdf.records.len(),
+                    vdf.offset_table_count,
+                    f1_summary.join(", ")
+                );
+                assert!(
+                    f1_counts.contains_key(&135),
+                    "{label}: expected f[1]=135 (stock)"
+                );
+                assert!(
+                    f1_counts.contains_key(&2056),
+                    "{label}: expected f[1]=2056 (flow)"
+                );
             }
         }
     }
