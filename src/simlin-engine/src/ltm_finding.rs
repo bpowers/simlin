@@ -268,8 +268,8 @@ fn parse_link_offsets(results: &Results<f64>) -> Vec<LinkOffset> {
             // Split on the separator to get from and to
             let parts: Vec<&str> = suffix.split(LTM_SEP).collect();
             if parts.len() == 2 {
-                let from = crate::common::canonicalize(parts[0]);
-                let to = crate::common::canonicalize(parts[1]);
+                let from = Ident::new(parts[0]);
+                let to = Ident::new(parts[1]);
                 link_offsets.push(((from, to), offset));
             }
         }
@@ -284,8 +284,10 @@ fn parse_link_offsets(results: &Results<f64>) -> Vec<LinkOffset> {
 /// We intentionally avoid falling back to arbitrary HashMap iteration
 /// (which is nondeterministic) -- all well-formed projects have a "main" model.
 fn find_main_model(project: &Project) -> Option<&std::sync::Arc<crate::model::ModelStage1>> {
-    let main_ident = crate::common::canonicalize("main");
-    project.models.get(&main_ident).filter(|m| !m.implicit)
+    project
+        .models
+        .get(&*crate::common::canonicalize("main"))
+        .filter(|m| !m.implicit)
 }
 
 /// Identify stock variables from the project's main model.
@@ -547,13 +549,13 @@ mod tests {
     fn edges(tuples: &[(&str, &str, f64)]) -> Vec<(Ident<Canonical>, Ident<Canonical>, f64)> {
         tuples
             .iter()
-            .map(|(from, to, score)| (canonicalize(from), canonicalize(to), *score))
+            .map(|(from, to, score)| (Ident::new(from), Ident::new(to), *score))
             .collect()
     }
 
     /// Helper to build stock list from names
     fn stock_list(names: &[&str]) -> Vec<Ident<Canonical>> {
-        names.iter().map(|n| canonicalize(n)).collect()
+        names.iter().map(|n| Ident::new(n)).collect()
     }
 
     /// Helper to extract sorted node set from a path for comparison
@@ -580,18 +582,18 @@ mod tests {
         );
 
         // Verify adjacency list exists for all source nodes
-        assert!(graph.adj.contains_key(&canonicalize("a")));
-        assert!(graph.adj.contains_key(&canonicalize("b")));
-        assert!(graph.adj.contains_key(&canonicalize("c")));
-        assert!(graph.adj.contains_key(&canonicalize("d")));
+        assert!(graph.adj.contains_key(&*canonicalize("a")));
+        assert!(graph.adj.contains_key(&*canonicalize("b")));
+        assert!(graph.adj.contains_key(&*canonicalize("c")));
+        assert!(graph.adj.contains_key(&*canonicalize("d")));
 
         // Verify edges are sorted by |score| descending
-        let a_edges = &graph.adj[&canonicalize("a")];
+        let a_edges = &graph.adj[&*canonicalize("a")];
         assert_eq!(a_edges.len(), 2);
         assert_eq!(a_edges[0].to.as_str(), "d"); // score 100
         assert_eq!(a_edges[1].to.as_str(), "b"); // score 10
 
-        let d_edges = &graph.adj[&canonicalize("d")];
+        let d_edges = &graph.adj[&*canonicalize("d")];
         assert_eq!(d_edges.len(), 2);
         assert_eq!(d_edges[0].to.as_str(), "b"); // score 100
         assert_eq!(d_edges[1].to.as_str(), "c"); // score 0.1
@@ -850,11 +852,11 @@ mod tests {
     #[test]
     fn test_parse_link_offsets() {
         // Test the link offset parsing from variable names.
-        // Use canonicalize() directly to match how the interpreter stores keys.
+        // Use Ident::new() directly to match how the interpreter stores keys.
         let mut offsets = HashMap::new();
-        offsets.insert(canonicalize("$⁚ltm⁚link_score⁚population⁚births"), 0usize);
-        offsets.insert(canonicalize("$⁚ltm⁚link_score⁚births⁚population"), 1usize);
-        offsets.insert(canonicalize("population"), 2usize);
+        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚population⁚births"), 0usize);
+        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚births⁚population"), 1usize);
+        offsets.insert(Ident::new("population"), 2usize);
 
         let results = Results {
             offsets,
@@ -895,13 +897,13 @@ mod tests {
                     id: String::new(),
                     links: vec![
                         Link {
-                            from: canonicalize("x"),
-                            to: canonicalize("y"),
+                            from: Ident::new("x"),
+                            to: Ident::new("y"),
                             polarity: crate::ltm::LinkPolarity::Positive,
                         },
                         Link {
-                            from: canonicalize("y"),
-                            to: canonicalize("x"),
+                            from: Ident::new("y"),
+                            to: Ident::new("x"),
                             polarity: crate::ltm::LinkPolarity::Positive,
                         },
                     ],
@@ -916,13 +918,13 @@ mod tests {
                     id: String::new(),
                     links: vec![
                         Link {
-                            from: canonicalize("a"),
-                            to: canonicalize("b"),
+                            from: Ident::new("a"),
+                            to: Ident::new("b"),
                             polarity: crate::ltm::LinkPolarity::Negative,
                         },
                         Link {
-                            from: canonicalize("b"),
-                            to: canonicalize("a"),
+                            from: Ident::new("b"),
+                            to: Ident::new("a"),
                             polarity: crate::ltm::LinkPolarity::Positive,
                         },
                     ],
@@ -969,8 +971,8 @@ mod tests {
         let links: Vec<Link> = var_pairs
             .iter()
             .map(|(from, to)| Link {
-                from: canonicalize(from),
-                to: canonicalize(to),
+                from: Ident::new(from),
+                to: Ident::new(to),
                 polarity: crate::ltm::LinkPolarity::Positive,
             })
             .collect();

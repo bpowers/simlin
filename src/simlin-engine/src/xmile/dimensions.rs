@@ -59,15 +59,13 @@ impl ToXml<XmlWriter> for Dimension {
 
 impl From<Dimension> for datamodel::Dimension {
     fn from(dimension: Dimension) -> Self {
-        let name = canonicalize(&dimension.name).as_str().to_string();
-        let maps_to = dimension
-            .maps_to
-            .map(|m| canonicalize(&m).as_str().to_string());
+        let name = canonicalize(&dimension.name).into_owned();
+        let maps_to = dimension.maps_to.map(|m| canonicalize(&m).into_owned());
         let elements = if let Some(elements) = dimension.elements {
             datamodel::DimensionElements::Named(
                 elements
                     .into_iter()
-                    .map(|i| canonicalize(&i.name).as_str().to_string())
+                    .map(|i| canonicalize(&i.name).into_owned())
                     .collect(),
             )
         } else {

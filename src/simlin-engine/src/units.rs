@@ -95,11 +95,8 @@ impl Context {
         let model_unit_identifiers: std::collections::HashSet<String> = units
             .iter()
             .flat_map(|u| {
-                std::iter::once(canonicalize(&u.name).as_str().to_string()).chain(
-                    u.aliases
-                        .iter()
-                        .map(|a| canonicalize(a).as_str().to_string()),
-                )
+                std::iter::once(canonicalize(&u.name).into_owned())
+                    .chain(u.aliases.iter().map(|a| canonicalize(a).into_owned()))
             })
             .collect();
 
@@ -109,11 +106,11 @@ impl Context {
         let mut combined_units: Vec<Unit> = builtin_units
             .iter()
             .filter(|(name, aliases)| {
-                let primary = canonicalize(name).as_str().to_string();
+                let primary = canonicalize(name).into_owned();
                 !model_unit_identifiers.contains(&primary)
                     && !aliases
                         .iter()
-                        .any(|a| model_unit_identifiers.contains(canonicalize(a).as_str()))
+                        .any(|a| model_unit_identifiers.contains(&*canonicalize(a)))
             })
             .map(|(name, aliases)| Unit {
                 name: name.to_string(),
@@ -137,9 +134,9 @@ impl Context {
         let mut aliases = HashMap::new();
         let mut parsed_units = HashMap::new();
         for unit in units.iter().filter(|unit| unit.equation.is_none()) {
-            let unit_name = canonicalize(&unit.name).as_str().to_string();
+            let unit_name = canonicalize(&unit.name).into_owned();
             for alias in unit.aliases.iter() {
-                let alias = canonicalize(alias).as_str().to_string();
+                let alias = canonicalize(alias).into_owned();
                 if let Entry::Vacant(e) = aliases.entry(alias) {
                     e.insert(unit_name.clone());
                 } else {
@@ -178,9 +175,9 @@ impl Context {
 
         // step 2: use this base context to parse our units with equations
         for unit in units.iter().filter(|unit| unit.equation.is_some()) {
-            let unit_name = canonicalize(&unit.name).as_str().to_string();
+            let unit_name = canonicalize(&unit.name).into_owned();
             for alias in unit.aliases.iter() {
-                let alias = canonicalize(alias).as_str().to_string();
+                let alias = canonicalize(alias).into_owned();
                 if let Entry::Vacant(e) = ctx.aliases.entry(alias) {
                     e.insert(unit_name.clone());
                 } else {
@@ -340,7 +337,7 @@ fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> 
             // This is safe because Context::new() stores all alias keys and values
             // in canonical form, so alias resolution also returns canonical names.
             let id_canonical = crate::common::canonicalize(id_str);
-            let id_str = id_canonical.as_str();
+            let id_str = &*id_canonical;
             // Resolve any alias (e.g., "m" -> "meter"). The result is already canonical
             // because aliases are stored with canonical values in Context::new().
             let id_str = ctx

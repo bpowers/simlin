@@ -115,7 +115,7 @@ fn module_deps(
 
                 for var in model.variables.values() {
                     if let Variable::Stock { .. } = var
-                        && let Some(deps) = initial_deps.get(&canonicalize(var.ident()))
+                        && let Some(deps) = initial_deps.get(&*canonicalize(var.ident()))
                     {
                         stock_deps.extend(deps.iter().cloned());
                     }
@@ -134,7 +134,7 @@ fn module_deps(
                             if is_stock(src) {
                                 None
                             } else {
-                                Some(canonicalize(direct_dep))
+                                Some(Ident::new(direct_dep))
                             }
                         } else {
                             None
@@ -157,7 +157,7 @@ fn module_deps(
                     if is_stock(src) {
                         None
                     } else {
-                        Some(canonicalize(direct_dep))
+                        Some(Ident::new(direct_dep))
                     }
                 })
                 .collect()
@@ -191,12 +191,12 @@ fn module_output_deps<'a>(
     }
     let deps = deps.unwrap();
     let canonical_output = canonicalize(output_ident);
-    if !deps.contains_key(&canonical_output) {
+    if !deps.contains_key(&*canonical_output) {
         return model_err!(UnknownDependency, output_ident.to_owned());
     }
 
-    let output_var = &model.variables[&canonical_output];
-    let output_deps = &deps[&canonical_output];
+    let output_var = &model.variables[&*canonical_output];
+    let output_deps = &deps[&*canonical_output];
 
     let mut final_deps: BTreeSet<&str> = BTreeSet::new();
 
@@ -271,10 +271,8 @@ where
     let mut processing: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     let mut all_vars: HashMap<&'a str, &'a Variable> =
         vars.iter().map(|v| (v.ident(), *v)).collect();
-    let mut all_var_deps: HashMap<Ident<Canonical>, Option<BTreeSet<Ident<Canonical>>>> = vars
-        .iter()
-        .map(|v| (canonicalize(v.ident()), None))
-        .collect();
+    let mut all_var_deps: HashMap<Ident<Canonical>, Option<BTreeSet<Ident<Canonical>>>> =
+        vars.iter().map(|v| (Ident::new(v.ident()), None)).collect();
 
     fn all_deps_inner<'a>(
         ctx: &DepContext,
@@ -286,7 +284,7 @@ where
         let var = all_vars[id];
 
         // short circuit if we've already figured this out
-        let canonical_id = canonicalize(id);
+        let canonical_id = Ident::new(id);
         if all_var_deps[&canonical_id].is_some() {
             return Ok(());
         }
@@ -314,7 +312,7 @@ where
                     .get_var_loc(dep.as_str())
                     .unwrap_or_default();
                 return var_eqn_err!(
-                    canonicalize(var.ident()),
+                    Ident::new(var.ident()),
                     NoAbsoluteReferences,
                     loc.start,
                     loc.end
@@ -337,7 +335,7 @@ where
                         .get_var_loc(dep.as_str())
                         .unwrap_or_default();
                     return var_eqn_err!(
-                        canonicalize(var.ident()),
+                        Ident::new(var.ident()),
                         UnknownDependency,
                         loc.start,
                         loc.end
@@ -352,9 +350,9 @@ where
                     //      and then special case modules below (end of this
                     //      for loop)
                     match module_output_deps(ctx, model_name, output_ident, inputs, module_ident) {
-                        Ok(deps) => deps.into_iter().map(canonicalize).collect(),
+                        Ok(deps) => deps.into_iter().map(Ident::new).collect(),
                         Err(err) => {
-                            return Err((canonicalize(var.ident()), err.into()));
+                            return Err((Ident::new(var.ident()), err.into()));
                         }
                     }
                 } else {
@@ -364,7 +362,7 @@ where
                         .get_var_loc(dep.as_str())
                         .unwrap_or_default();
                     return var_eqn_err!(
-                        canonicalize(var.ident()),
+                        Ident::new(var.ident()),
                         ExpectedModule,
                         loc.start,
                         loc.end
@@ -382,7 +380,7 @@ where
                         .get_var_loc(dep.as_str())
                         .unwrap_or_default();
                     return var_eqn_err!(
-                        canonicalize(var.ident()),
+                        Ident::new(var.ident()),
                         UnknownDependency,
                         loc.start,
                         loc.end
@@ -399,7 +397,7 @@ where
                             None => Default::default(),
                         };
                         return var_eqn_err!(
-                            canonicalize(var.ident()),
+                            Ident::new(var.ident()),
                             CircularDependency,
                             loc.start,
                             loc.end
@@ -456,7 +454,7 @@ fn resolve_relative<'a>(
     } else {
         ident
     };
-    let model = models.get(&canonicalize(model_name))?;
+    let model = models.get(&*canonicalize(model_name))?;
 
     let input_prefix = format!("{model_name}·");
     // TODO: this is weird to do here and not before we call into this fn
@@ -469,7 +467,7 @@ fn resolve_relative<'a>(
         let submodel_var = &ident[pos + '·'.len_utf8()..];
         resolve_relative(models, submodel_name, submodel_var)
     } else {
-        Some(model.variables.get(&canonicalize(ident))?)
+        Some(model.variables.get(&*canonicalize(ident))?)
     }
 }
 
@@ -504,7 +502,7 @@ fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Var
         };
         resolve_relative2(&ctx, submodel_var)
     } else {
-        Some(ctx.sibling_vars.get(&canonicalize(ident))?)
+        Some(ctx.sibling_vars.get(&*canonicalize(ident))?)
     }
 }
 
@@ -646,8 +644,8 @@ pub(crate) fn resolve_module_input<'a>(
             s
         }
     };
-    let src = canonicalize(maybe_strip_leading_dot(orig_src));
-    let dst = canonicalize(maybe_strip_leading_dot(orig_dst));
+    let src = Ident::new(maybe_strip_leading_dot(orig_src));
+    let dst = Ident::new(maybe_strip_leading_dot(orig_dst));
 
     // Stella has a bug where if you have one module feeding into another,
     // it writes identical tags to both.  So skip the tag that is non-local
@@ -660,7 +658,7 @@ pub(crate) fn resolve_module_input<'a>(
     if dst_stripped.is_none() {
         return eqn_err!(BadModuleInputDst, 0, 0);
     }
-    let dst = canonicalize(dst_stripped.unwrap());
+    let dst = Ident::new(dst_stripped.unwrap());
 
     // TODO: reevaluate if this is really the best option here
     // if the source is a temporary created by the engine, assume it is OK
@@ -776,11 +774,11 @@ impl ModelStage0 {
 
         let variables: HashMap<Ident<Canonical>, _> = variable_list
             .into_iter()
-            .map(|v| (canonicalize(v.ident()), v))
+            .map(|v| (Ident::new(v.ident()), v))
             .collect();
 
         Self {
-            ident: canonicalize(&x_model.name),
+            ident: Ident::new(&x_model.name),
             display_name: x_model.name.clone(),
             variables,
             errors: None,
@@ -1059,7 +1057,7 @@ pub fn resolve_non_private_dependencies(
             // Module output reference: "module·output"
             // Dependencies are the module's input sources
             let module_name = canonicalize(dep.as_str().split('·').next().unwrap());
-            match model.variables.get(&module_name) {
+            match model.variables.get(&*module_name) {
                 Some(Variable::Module { inputs, .. }) => {
                     inputs.iter().map(|input| input.src.clone()).collect()
                 }
@@ -1129,17 +1127,17 @@ fn test_module_parse() {
     use crate::variable::ModuleInput;
     let inputs: Vec<ModuleInput> = vec![
         ModuleInput {
-            src: canonicalize("area"),
-            dst: canonicalize("area"),
+            src: Ident::new("area"),
+            dst: Ident::new("area"),
         },
         ModuleInput {
-            src: canonicalize("lynxes·lynxes_stock"),
-            dst: canonicalize("lynxes"),
+            src: Ident::new("lynxes·lynxes_stock"),
+            dst: Ident::new("lynxes"),
         },
     ];
     let expected = Variable::Module {
-        model_name: canonicalize("hares"),
-        ident: canonicalize("hares"),
+        model_name: Ident::new("hares"),
+        ident: Ident::new("hares"),
         units: None,
         inputs,
         errors: vec![],
@@ -1189,7 +1187,7 @@ fn test_module_parse() {
     .into_iter()
     .map(|(name, m)| {
         (
-            canonicalize(&name),
+            Ident::new(&name),
             ModelStage0::new(m, &[], &units_ctx, false),
         )
     })
@@ -1217,7 +1215,7 @@ fn test_errors() {
         .into_iter()
         .map(|(name, m)| {
             (
-                canonicalize(&name),
+                Ident::new(&name),
                 ModelStage0::new(m, &[], &units_ctx, false),
             )
         })
@@ -1231,7 +1229,7 @@ fn test_errors() {
             dimensions: &Default::default(),
             model_name: "main",
         };
-        let mut model = ModelStage1::new(&scope, &models[&canonicalize("main")]);
+        let mut model = ModelStage1::new(&scope, &models[&*canonicalize("main")]);
         model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
         model
     };
@@ -1244,7 +1242,7 @@ fn test_errors() {
 
     let var_errors = model.get_variable_errors();
     assert_eq!(1, var_errors.len());
-    let aux_3_key = canonicalize("aux_3");
+    let aux_3_key = Ident::new("aux_3");
     assert!(var_errors.contains_key(&aux_3_key));
     assert_eq!(1, var_errors[&aux_3_key].len());
     let err = &var_errors[&aux_3_key][0];
@@ -1275,8 +1273,8 @@ fn test_all_deps() {
                 .iter()
                 .map(|(v, deps)| {
                     (
-                        canonicalize(v.ident()),
-                        deps.iter().map(|s| canonicalize(s)).collect(),
+                        Ident::new(v.ident()),
+                        deps.iter().map(|s| Ident::new(s)).collect(),
                     )
                 })
                 .collect();
@@ -1303,7 +1301,7 @@ fn test_all_deps() {
                 let mut expected: Vec<_> = expected.to_vec();
                 expected.sort();
                 eprintln!("  expected: {expected:?}");
-                let mut actual: Vec<_> = deps[&canonicalize(v.ident())].iter().collect();
+                let mut actual: Vec<_> = deps[&*canonicalize(v.ident())].iter().collect();
                 actual.sort();
                 eprintln!("  actual  : {actual:?}");
             }
@@ -1355,7 +1353,7 @@ fn test_all_deps() {
     .into_iter()
     .map(|(name, m)| {
         (
-            canonicalize(&name),
+            Ident::new(&name),
             ModelStage0::new(m, &[], &units_ctx, false),
         )
     })
@@ -1364,7 +1362,7 @@ fn test_all_deps() {
     let mut model_list = vec!["mod_1", "main"]
         .into_iter()
         .map(|name| {
-            let model_s0 = &x_models[&canonicalize(name)];
+            let model_s0 = &x_models[&*canonicalize(name)];
             let scope = ScopeStage0 {
                 models: &x_models,
                 dimensions: &Default::default(),
@@ -1485,7 +1483,7 @@ fn test_all_deps() {
         (&aux_false, &[]),
     ];
 
-    let module_inputs = [canonicalize("aux_true")].iter().cloned().collect();
+    let module_inputs = [Ident::new("aux_true")].iter().cloned().collect();
     verify_all_deps(&expected_deps_list, true, &models, Some(&module_inputs));
 
     // test non-existant variables

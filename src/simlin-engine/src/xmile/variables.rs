@@ -128,16 +128,16 @@ macro_rules! convert_equation(
     ($var:expr) => {{
         if let Some(elements) = $var.elements {
             let dimensions = match $var.dimensions {
-                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name).as_str().to_string()).collect(),
+                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name).into_owned()).collect(),
                 None => vec![],
             };
             let elements = elements.into_iter().map(|e| {
-                let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).as_str().to_string()).collect();
+                let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).into_owned()).collect();
                 (canonical_subscripts.join(","), e.eqn, e.initial_eqn, e.gf.map(datamodel::GraphicalFunction::from))
             }).collect();
             datamodel::Equation::Arrayed(dimensions, elements)
         } else if let Some(dimensions) = $var.dimensions {
-            let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name).as_str().to_string()).collect();
+            let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name).into_owned()).collect();
             datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default(), $var.initial_eqn)
         } else {
             datamodel::Equation::Scalar($var.eqn.unwrap_or_default(), $var.initial_eqn)
@@ -150,16 +150,16 @@ macro_rules! convert_stock_equation(
     ($var:expr) => {{
         if let Some(elements) = $var.elements {
             let dimensions = match $var.dimensions {
-                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name).as_str().to_string()).collect(),
+                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name).into_owned()).collect(),
                 None => vec![],
             };
             let elements = elements.into_iter().map(|e| {
-                let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).as_str().to_string()).collect();
+                let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).into_owned()).collect();
                 (canonical_subscripts.join(","), e.eqn, e.initial_eqn, e.gf.map(datamodel::GraphicalFunction::from))
             }).collect();
             datamodel::Equation::Arrayed(dimensions, elements)
         } else if let Some(dimensions) = $var.dimensions {
-            let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name).as_str().to_string()).collect();
+            let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name).into_owned()).collect();
             datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default(), None)
         } else {
             datamodel::Equation::Scalar($var.eqn.unwrap_or_default(), None)
@@ -190,13 +190,13 @@ impl From<Stock> for datamodel::Stock {
             .inflows
             .unwrap_or_default()
             .into_iter()
-            .map(|id| canonicalize(&id).as_str().to_string())
+            .map(|id| canonicalize(&id).into_owned())
             .collect();
         let outflows = stock
             .outflows
             .unwrap_or_default()
             .into_iter()
-            .map(|id| canonicalize(&id).as_str().to_string())
+            .map(|id| canonicalize(&id).into_owned())
             .collect();
         datamodel::Stock {
             ident: stock.name.clone(),

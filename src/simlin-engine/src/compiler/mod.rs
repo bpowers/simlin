@@ -16,9 +16,7 @@ use ordered_float::OrderedFloat;
 
 use crate::ast::{Ast, Loc};
 use crate::bytecode::CompiledModule;
-use crate::common::{
-    Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize,
-};
+use crate::common::{Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result};
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
 use crate::float::SimFloat;
 use crate::model::ModelStage1;
@@ -52,12 +50,12 @@ fn test_fold_flows() {
         HashMap::new();
     let mut metadata: HashMap<Ident<Canonical>, VariableMetadata> = HashMap::new();
     metadata.insert(
-        canonicalize("a"),
+        Ident::new("a"),
         VariableMetadata {
             offset: 1,
             size: 1,
             var: Variable::Var {
-                ident: canonicalize(""),
+                ident: Ident::new(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -72,12 +70,12 @@ fn test_fold_flows() {
         },
     );
     metadata.insert(
-        canonicalize("b"),
+        Ident::new("b"),
         VariableMetadata {
             offset: 2,
             size: 1,
             var: Variable::Var {
-                ident: canonicalize(""),
+                ident: Ident::new(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -92,12 +90,12 @@ fn test_fold_flows() {
         },
     );
     metadata.insert(
-        canonicalize("c"),
+        Ident::new("c"),
         VariableMetadata {
             offset: 3,
             size: 1,
             var: Variable::Var {
-                ident: canonicalize(""),
+                ident: Ident::new(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -112,12 +110,12 @@ fn test_fold_flows() {
         },
     );
     metadata.insert(
-        canonicalize("d"),
+        Ident::new("d"),
         VariableMetadata {
             offset: 4,
             size: 1,
             var: Variable::Var {
-                ident: canonicalize(""),
+                ident: Ident::new(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -132,8 +130,8 @@ fn test_fold_flows() {
         },
     );
     let mut metadata2 = HashMap::new();
-    let main_ident = canonicalize("main");
-    let test_ident = canonicalize("test");
+    let main_ident = Ident::new("main");
+    let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
     let ctx = Context {
@@ -153,7 +151,7 @@ fn test_fold_flows() {
     assert_eq!(Ok(None), ctx.fold_flows::<f64>(&[]));
     assert_eq!(
         Ok(Some(Expr::Var(1, Loc::default()))),
-        ctx.fold_flows::<f64>(&[canonicalize("a")])
+        ctx.fold_flows::<f64>(&[Ident::new("a")])
     );
     assert_eq!(
         Ok(Some(Expr::Op2(
@@ -162,11 +160,11 @@ fn test_fold_flows() {
             Box::new(Expr::Var(4, Loc::default())),
             Loc::default(),
         ))),
-        ctx.fold_flows::<f64>(&[canonicalize("a"), canonicalize("d")])
+        ctx.fold_flows::<f64>(&[Ident::new("a"), Ident::new("d")])
     );
 
     // Test that fold_flows returns an error for non-existent flows
-    let result = ctx.fold_flows::<f64>(&[canonicalize("nonexistent")]);
+    let result = ctx.fold_flows::<f64>(&[Ident::new("nonexistent")]);
     assert!(result.is_err(), "Expected error for non-existent flow");
 }
 
@@ -180,7 +178,7 @@ impl<F: SimFloat> Var<F> {
             .find(|(_i, n)| n.as_str() == var.ident())
         {
             vec![Expr::AssignCurr(
-                ctx.get_offset(&canonicalize(var.ident()))?,
+                ctx.get_offset(&Ident::new(var.ident()))?,
                 Box::new(Expr::ModuleInput(off, Loc::default())),
             )]
         } else {
@@ -208,7 +206,7 @@ impl<F: SimFloat> Var<F> {
                     )]
                 }
                 Variable::Stock { init_ast: ast, .. } => {
-                    let off = ctx.get_base_offset(&canonicalize(var.ident()))?;
+                    let off = ctx.get_base_offset(&Ident::new(var.ident()))?;
                     if ctx.is_initial {
                         if ast.is_none() {
                             return sim_err!(EmptyEquation, var.ident().to_string());
@@ -292,7 +290,7 @@ impl<F: SimFloat> Var<F> {
                                                 .collect(),
                                         );
                                         let update_expr = ctx.build_stock_update_expr(
-                                            ctx.get_offset(&canonicalize(var.ident()))?,
+                                            ctx.get_offset(&Ident::new(var.ident()))?,
                                             var,
                                         )?;
                                         Ok(Expr::AssignNext(off + i, Box::new(update_expr)))
@@ -304,7 +302,7 @@ impl<F: SimFloat> Var<F> {
                     }
                 }
                 Variable::Var { tables, .. } => {
-                    let off = ctx.get_base_offset(&canonicalize(var.ident()))?;
+                    let off = ctx.get_base_offset(&Ident::new(var.ident()))?;
                     let ast = if ctx.is_initial {
                         var.init_ast()
                     } else {
@@ -384,7 +382,7 @@ impl<F: SimFloat> Var<F> {
             }
         };
         Ok(Var {
-            ident: canonicalize(var.ident()),
+            ident: Ident::new(var.ident()),
             ast,
         })
     }
@@ -569,7 +567,7 @@ pub(crate) fn calc_module_model_map(
     let mut current_mapping: HashMap<Ident<Canonical>, Ident<Canonical>> = HashMap::new();
 
     for ident in var_names.iter() {
-        let canonical_ident = canonicalize(ident);
+        let canonical_ident = Ident::new(ident);
         if let Variable::Module {
             model_name: module_model_name,
             ..
@@ -599,12 +597,12 @@ pub(crate) fn build_metadata(
     let mut i = 0;
     if is_root {
         offsets.insert(
-            canonicalize("time"),
+            Ident::new("time"),
             VariableMetadata {
                 offset: 0,
                 size: 1,
                 var: Variable::Var {
-                    ident: canonicalize("time"),
+                    ident: Ident::new("time"),
                     ast: None,
                     init_ast: None,
                     eqn: None,
@@ -619,12 +617,12 @@ pub(crate) fn build_metadata(
             },
         );
         offsets.insert(
-            canonicalize("dt"),
+            Ident::new("dt"),
             VariableMetadata {
                 offset: 1,
                 size: 1,
                 var: Variable::Var {
-                    ident: canonicalize("dt"),
+                    ident: Ident::new("dt"),
                     ast: None,
                     init_ast: None,
                     eqn: None,
@@ -639,12 +637,12 @@ pub(crate) fn build_metadata(
             },
         );
         offsets.insert(
-            canonicalize("initial_time"),
+            Ident::new("initial_time"),
             VariableMetadata {
                 offset: 2,
                 size: 1,
                 var: Variable::Var {
-                    ident: canonicalize("initial_time"),
+                    ident: Ident::new("initial_time"),
                     ast: None,
                     init_ast: None,
                     eqn: None,
@@ -659,12 +657,12 @@ pub(crate) fn build_metadata(
             },
         );
         offsets.insert(
-            canonicalize("final_time"),
+            Ident::new("final_time"),
             VariableMetadata {
                 offset: 3,
                 size: 1,
                 var: Variable::Var {
-                    ident: canonicalize("final_time"),
+                    ident: Ident::new("final_time"),
                     ast: None,
                     init_ast: None,
                     eqn: None,
@@ -876,7 +874,7 @@ impl<F: SimFloat> Module<F> {
         let tables: Result<HashMap<Ident<Canonical>, Vec<Table<F>>>> = var_names
             .iter()
             .map(|id| {
-                let canonical_id = canonicalize(id);
+                let canonical_id = Ident::new(id);
                 (id, &model.variables[&canonical_id])
             })
             .filter(|(_, v)| !v.tables().is_empty())
@@ -886,7 +884,7 @@ impl<F: SimFloat> Module<F> {
                 (id, tables_result)
             })
             .map(|(id, tables_result)| match tables_result {
-                Ok(tables) => Ok((canonicalize(id), tables)),
+                Ok(tables) => Ok((Ident::new(id), tables)),
                 Err(err) => Err(err),
             })
             .collect();
@@ -936,8 +934,7 @@ impl<F: SimFloat> Module<F> {
     /// Get flow expressions for a variable (may be multiple for A2A arrays).
     /// Returns all AssignCurr expressions that target offsets within this variable's range.
     pub fn get_flow_exprs(&self, var_name: &str) -> Vec<&Expr<F>> {
-        use crate::common::canonicalize;
-        let canonical_name = canonicalize(var_name);
+        let canonical_name = Ident::new(var_name);
 
         // Look up the variable's offset range
         let Some(model_offsets) = self.offsets.get(&self.ident) else {
@@ -964,8 +961,7 @@ impl<F: SimFloat> Module<F> {
     /// Get initial expressions for a variable (may be multiple for A2A arrays).
     /// Returns all AssignCurr expressions in the initials runlist for this variable.
     pub fn get_initial_exprs(&self, var_name: &str) -> Vec<&Expr<F>> {
-        use crate::common::canonicalize;
-        let canonical_name = canonicalize(var_name);
+        let canonical_name = Ident::new(var_name);
 
         // Look up the variable's offset range
         let Some(model_offsets) = self.offsets.get(&self.ident) else {

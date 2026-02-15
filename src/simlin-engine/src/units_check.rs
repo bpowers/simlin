@@ -335,9 +335,8 @@ pub fn check(
     // for each variable, evaluate the equation given the unit context
     // if the result doesn't match the expected thing, accumulate an error
 
-    let time_units_name = canonicalize(ctx.sim_specs.time_units.as_deref().unwrap_or("time"))
-        .as_str()
-        .to_string();
+    let time_units_name =
+        canonicalize(ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
     let time_units: UnitMap = ctx
         .lookup(&time_units_name)
         .cloned()
@@ -349,7 +348,7 @@ pub fn check(
         model,
         inferred_units,
         time: Variable::Var {
-            ident: canonicalize("time"),
+            ident: Ident::new("time"),
             ast: None,
             init_ast: None,
             eqn: None,
@@ -433,7 +432,7 @@ pub fn check(
                                 "expected units '{units}' to match the units expected by the attached stock {stock_ident} ({expected_flow_units})"
                             );
                             errors.push((
-                                canonicalize(var.ident()),
+                                Ident::new(var.ident()),
                                 DefinitionError(
                                     EquationError {
                                         code: ErrorCode::UnitMismatch,

@@ -1556,10 +1556,10 @@ impl From<datamodel::Model> for Model {
         }
 
         // Sort all arrays by canonical identifier for determinism
-        stocks.sort_by_key(|s: &Stock| canonicalize(&s.name));
-        flows.sort_by_key(|f: &Flow| canonicalize(&f.name));
-        auxiliaries.sort_by_key(|a: &Auxiliary| canonicalize(&a.name));
-        modules.sort_by_key(|m: &Module| canonicalize(&m.name));
+        stocks.sort_by_key(|s: &Stock| canonicalize(&s.name).into_owned());
+        flows.sort_by_key(|f: &Flow| canonicalize(&f.name).into_owned());
+        auxiliaries.sort_by_key(|a: &Auxiliary| canonicalize(&a.name).into_owned());
+        modules.sort_by_key(|m: &Module| canonicalize(&m.name).into_owned());
 
         Model {
             name: model.name,

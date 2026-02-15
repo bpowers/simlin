@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use simlin_engine::common::Ident;
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{CompiledSimulation, Project as CompiledProject, Simulation, Vm};
 
@@ -76,7 +77,7 @@ fn bench_slider_interaction(c: &mut Criterion) {
 
     for &steps in &[1_000, 10_000, 100_000, 1_000_000] {
         let compiled = compile_population(steps as f64);
-        let ident = simlin_engine::canonicalize("birth_rate");
+        let ident = Ident::new("birth_rate");
 
         group.bench_with_input(
             BenchmarkId::from_parameter(steps),

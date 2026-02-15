@@ -686,7 +686,7 @@ where
 
                 // so are module builtins
                 if let BuiltinFn::IsModuleInput(ident, _loc) = builtin {
-                    let id = if self.module.inputs.contains(&canonicalize(ident)) {
+                    let id = if self.module.inputs.contains(&*canonicalize(ident)) {
                         self.curr_code.intern_literal(F::one())
                     } else {
                         self.curr_code.intern_literal(F::zero())

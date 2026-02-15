@@ -566,7 +566,7 @@ mod tests {
         // Create a Module and compile it
         let model = project
             .models
-            .get(&canonicalize("main"))
+            .get(&*canonicalize("main"))
             .expect("main model should exist");
         let module: super::super::Module<f64> = super::super::Module::new(
             &project,
@@ -682,7 +682,7 @@ mod tests {
 
         let model = project
             .models
-            .get(&canonicalize("main"))
+            .get(&*canonicalize("main"))
             .expect("main model should exist");
         let module: super::super::Module<f64> = super::super::Module::new(
             &project,
@@ -775,7 +775,7 @@ mod tests {
 
         let model = project
             .models
-            .get(&canonicalize("main"))
+            .get(&*canonicalize("main"))
             .expect("main model should exist");
         let module: super::super::Module<f64> = super::super::Module::new(
             &project,

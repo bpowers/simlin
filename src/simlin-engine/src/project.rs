@@ -50,7 +50,7 @@ impl Project {
         for model in &mut new_datamodel.models {
             let model_name = canonicalize(&model.name);
 
-            if let Some(synthetic_vars) = ltm_vars.get(&model_name) {
+            if let Some(synthetic_vars) = ltm_vars.get(&*model_name) {
                 for (_, var) in synthetic_vars {
                     model.variables.push(var.clone());
                 }
@@ -83,7 +83,7 @@ impl Project {
         for model in &mut new_datamodel.models {
             let model_name = canonicalize(&model.name);
 
-            if let Some(synthetic_vars) = ltm_vars.get(&model_name) {
+            if let Some(synthetic_vars) = ltm_vars.get(&*model_name) {
                 for (_, var) in synthetic_vars {
                     model.variables.push(var.clone());
                 }
