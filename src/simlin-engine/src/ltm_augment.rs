@@ -12,7 +12,7 @@
 use crate::canonicalize;
 use crate::common::{Canonical, Ident, Result};
 use crate::datamodel::{self, Equation};
-use crate::ltm::{Link, Loop, detect_loops};
+use crate::ltm::{CausalGraph, Link, Loop, detect_loops};
 use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
@@ -85,46 +85,76 @@ fn is_word_char(c: char) -> bool {
 pub fn generate_ltm_variables(
     project: &Project,
 ) -> Result<HashMap<Ident<Canonical>, SyntheticVariables>> {
-    // First, detect all loops in the project
-    let loops = detect_loops(project)?;
+    generate_ltm_variables_inner(project, false)
+}
 
+/// Augment a project with link score variables for ALL causal links (discovery mode).
+///
+/// Unlike `generate_ltm_variables()` which only generates variables for links
+/// participating in detected loops, this generates link score variables for every
+/// causal connection in the model. Loop score and relative loop score variables
+/// are NOT generated -- those are computed post-simulation by `discover_loops()`.
+pub fn generate_ltm_variables_all_links(
+    project: &Project,
+) -> Result<HashMap<Ident<Canonical>, SyntheticVariables>> {
+    generate_ltm_variables_inner(project, true)
+}
+
+fn generate_ltm_variables_inner(
+    project: &Project,
+    all_links_mode: bool,
+) -> Result<HashMap<Ident<Canonical>, SyntheticVariables>> {
     let mut result = HashMap::new();
 
-    // For each model, generate synthetic variables
-    for (model_name, model_loops) in &loops {
-        if let Some(model) = project.models.get(model_name) {
-            // Skip implicit models
+    if all_links_mode {
+        // Discovery mode: generate link score variables for ALL causal links
+        for (model_name, model) in &project.models {
             if model.implicit {
                 continue;
             }
 
-            let mut synthetic_vars = Vec::new();
+            let graph = CausalGraph::from_model(model, project)?;
+            let links: HashSet<Link> = graph.all_links().into_iter().collect();
 
-            // Collect all unique links from all loops
-            let mut all_links = HashSet::new();
-            for loop_item in model_loops {
-                for link in &loop_item.links {
-                    all_links.insert(link.clone());
-                }
-            }
+            let link_score_vars = generate_link_score_variables(&links, &model.variables);
 
-            // Generate link score variables
-            let link_score_vars = generate_link_score_variables(&all_links, &model.variables);
-
-            // Generate loop score variables
-            let loop_score_vars = generate_loop_score_variables(model_loops);
-
-            // Collect all synthetic variables
-            for (var_name, var) in link_score_vars {
-                synthetic_vars.push((var_name, var));
-            }
-
-            for (var_name, var) in loop_score_vars {
-                synthetic_vars.push((var_name, var));
-            }
-
+            let synthetic_vars: Vec<_> = link_score_vars.into_iter().collect();
             if !synthetic_vars.is_empty() {
                 result.insert(model_name.clone(), synthetic_vars);
+            }
+        }
+    } else {
+        // Existing behavior: detect loops, generate for loop links only
+        let loops = detect_loops(project)?;
+
+        for (model_name, model_loops) in &loops {
+            if let Some(model) = project.models.get(model_name) {
+                if model.implicit {
+                    continue;
+                }
+
+                let mut synthetic_vars = Vec::new();
+
+                let mut loop_links = HashSet::new();
+                for loop_item in model_loops {
+                    for link in &loop_item.links {
+                        loop_links.insert(link.clone());
+                    }
+                }
+
+                let link_score_vars = generate_link_score_variables(&loop_links, &model.variables);
+                let loop_score_vars = generate_loop_score_variables(model_loops);
+
+                for (var_name, var) in link_score_vars {
+                    synthetic_vars.push((var_name, var));
+                }
+                for (var_name, var) in loop_score_vars {
+                    synthetic_vars.push((var_name, var));
+                }
+
+                if !synthetic_vars.is_empty() {
+                    result.insert(model_name.clone(), synthetic_vars);
+                }
             }
         }
     }
@@ -1642,5 +1672,92 @@ mod tests {
             // "ab + ab" - both should be replaced
             assert_eq!(replace_whole_word("ab + ab", "ab", "XY"), "XY + XY");
         }
+    }
+
+    #[test]
+    fn test_generate_ltm_variables_all_links() {
+        // Test that all_links mode generates link score variables for ALL causal
+        // links, not just those in loops. The logistic growth model has links
+        // like carrying_capacity -> fraction_of_carrying_capacity_used that are
+        // NOT in any loop but should get link score variables in all_links mode.
+        use crate::project::Project;
+        use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
+
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("population", "100", &["births"], &[], None),
+                x_flow("births", "population * birth_rate", None),
+                x_aux("birth_rate", "fractional_growth_rate", None),
+                x_aux("fractional_growth_rate", "0.02 * (1 - fraction_used)", None),
+                x_aux("fraction_used", "population / carrying_capacity", None),
+                x_aux("carrying_capacity", "1000", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[model]);
+        let project = Project::from(project);
+
+        // Standard mode: only loop links get link score variables
+        let standard_vars = generate_ltm_variables(&project).unwrap();
+        // All-links mode: every causal link gets a link score variable
+        let all_link_vars = generate_ltm_variables_all_links(&project).unwrap();
+
+        let main_ident = crate::common::canonicalize("main");
+
+        // All-links mode should have MORE link score variables than standard mode
+        let standard_link_count = standard_vars
+            .get(&main_ident)
+            .map(|v| {
+                v.iter()
+                    .filter(|(name, _)| name.as_str().contains("link_score"))
+                    .count()
+            })
+            .unwrap_or(0);
+
+        let all_link_count = all_link_vars
+            .get(&main_ident)
+            .map(|v| {
+                v.iter()
+                    .filter(|(name, _)| name.as_str().contains("link_score"))
+                    .count()
+            })
+            .unwrap_or(0);
+
+        assert!(
+            all_link_count >= standard_link_count,
+            "All-links mode should have at least as many link scores ({}) as standard mode ({})",
+            all_link_count,
+            standard_link_count
+        );
+
+        // All-links mode should NOT have loop score variables
+        let has_loop_scores = all_link_vars
+            .get(&main_ident)
+            .map(|v| {
+                v.iter()
+                    .any(|(name, _)| name.as_str().contains("abs_loop_score"))
+            })
+            .unwrap_or(false);
+
+        assert!(
+            !has_loop_scores,
+            "All-links mode should NOT generate loop score variables"
+        );
+
+        // Standard mode SHOULD have loop score variables
+        let has_standard_loop_scores = standard_vars
+            .get(&main_ident)
+            .map(|v| {
+                v.iter()
+                    .any(|(name, _)| name.as_str().contains("abs_loop_score"))
+            })
+            .unwrap_or(false);
+
+        assert!(
+            has_standard_loop_scores,
+            "Standard mode should generate loop score variables"
+        );
     }
 }

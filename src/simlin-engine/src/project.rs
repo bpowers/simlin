@@ -8,7 +8,7 @@ use crate::canonicalize;
 use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident};
 use crate::datamodel::{self, Equation};
 use crate::dimensions::DimensionsContext;
-use crate::ltm_augment::generate_ltm_variables;
+use crate::ltm_augment::{generate_ltm_variables, generate_ltm_variables_all_links};
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0};
 use crate::units::Context;
 use crate::variable::Variable;
@@ -58,6 +58,38 @@ impl Project {
         }
 
         // Rebuild the Project with the added LTM variables
+        Ok(Project::from(new_datamodel))
+    }
+
+    /// Create a new project with link score variables for ALL causal links.
+    ///
+    /// Unlike `with_ltm()` which only instruments detected loops, this generates
+    /// link score variables for every causal connection in the model. Used as a
+    /// prerequisite for `ltm_finding::discover_loops()` which finds important
+    /// loops heuristically from the simulation results.
+    ///
+    /// No loop score or relative loop score variables are generated -- those
+    /// are computed post-simulation by `discover_loops()`.
+    pub fn with_ltm_all_links(self) -> crate::common::Result<Self> {
+        abort_if_arrayed(&self)?;
+
+        let ltm_vars = generate_ltm_variables_all_links(&self)?;
+        if ltm_vars.is_empty() {
+            return Ok(self);
+        }
+
+        let mut new_datamodel = self.datamodel.clone();
+
+        for model in &mut new_datamodel.models {
+            let model_name = canonicalize(&model.name);
+
+            if let Some(synthetic_vars) = ltm_vars.get(&model_name) {
+                for (_, var) in synthetic_vars {
+                    model.variables.push(var.clone());
+                }
+            }
+        }
+
         Ok(Project::from(new_datamodel))
     }
 }
@@ -341,44 +373,8 @@ mod tests {
         // Apply LTM augmentation
         let ltm_project = project.with_ltm().expect("Should augment with LTM");
 
-        // Debug: Print the generated LTM equations
-        for model in &ltm_project.datamodel.models {
-            for var in &model.variables {
-                if var.get_ident().starts_with("$⁚ltm⁚") {
-                    println!(
-                        "LTM variable: {} = {:?}",
-                        var.get_ident(),
-                        var.get_equation()
-                    );
-                }
-            }
-        }
-
         // Build and run the simulation
         let project_rc = Arc::new(ltm_project);
-
-        // Check all variables for errors before building simulation
-        for (model_name, model) in &project_rc.models {
-            println!("Checking model: {model_name}");
-            for (var_name, var) in &model.variables {
-                println!("  Variable: {var_name}");
-                if let Some(_ast) = var.ast() {
-                    println!("    Has AST: yes");
-                } else {
-                    println!("    Has AST: no");
-                }
-                if let Some(errors) = var.equation_errors()
-                    && !errors.is_empty()
-                {
-                    println!("    EQUATION ERRORS: {errors:?}");
-                }
-                if let Some(unit_errors) = var.unit_errors()
-                    && !unit_errors.is_empty()
-                {
-                    println!("    UNIT ERRORS: {unit_errors:?}");
-                }
-            }
-        }
 
         let sim = crate::interpreter::Simulation::new(&project_rc, "main")
             .expect("Should create simulation");
@@ -620,5 +616,74 @@ mod tests {
                 "Reinforcing loop score should be positive, got {score}"
             );
         }
+    }
+
+    #[test]
+    fn test_project_with_ltm_all_links() {
+        use crate::test_common::TestProject;
+
+        let project = TestProject::new("test_all_links")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * birth_rate", None)
+            .aux("birth_rate", "fractional_growth_rate", None)
+            .aux("fractional_growth_rate", "0.02 * (1 - fraction_used)", None)
+            .aux("fraction_used", "population / carrying_capacity", None)
+            .aux("carrying_capacity", "1000", None)
+            .compile()
+            .expect("Project should compile");
+
+        // Apply all-links LTM augmentation
+        let ltm_project = project
+            .with_ltm_all_links()
+            .expect("Should augment with all-links LTM");
+
+        let main_model = ltm_project
+            .datamodel
+            .models
+            .iter()
+            .find(|m| m.name == "main")
+            .expect("Should have main model");
+
+        // Should have link score variables
+        let link_score_count = main_model
+            .variables
+            .iter()
+            .filter(|v| v.get_ident().starts_with("$⁚ltm⁚link_score⁚"))
+            .count();
+        assert!(
+            link_score_count > 0,
+            "Should have link score variables in all-links mode"
+        );
+
+        // Should NOT have loop score variables (those are computed post-sim)
+        let loop_score_count = main_model
+            .variables
+            .iter()
+            .filter(|v| v.get_ident().starts_with("$⁚ltm⁚abs_loop_score⁚"))
+            .count();
+        assert_eq!(
+            loop_score_count, 0,
+            "All-links mode should not have loop score variables"
+        );
+
+        // Should be simulatable
+        let project_rc = std::sync::Arc::new(ltm_project);
+        let sim = crate::interpreter::Simulation::new(&project_rc, "main")
+            .expect("Should create simulation");
+        let results = sim
+            .run_to_end()
+            .expect("Simulation with all-links LTM should run successfully");
+
+        // Verify link score variables are in results
+        let link_score_vars: Vec<_> = results
+            .offsets
+            .keys()
+            .filter(|k| k.as_str().starts_with("$⁚ltm⁚link_score⁚"))
+            .collect();
+        assert!(
+            !link_score_vars.is_empty(),
+            "Should have link score variables in simulation results"
+        );
     }
 }
