@@ -37,7 +37,6 @@ import {
   simlin_model_get_latex_equation,
   simlin_model_get_var_names,
   simlin_model_get_var_json,
-  simlin_model_get_vars_json,
   simlin_model_get_sim_specs_json,
 } from './internal/model';
 import {
@@ -50,6 +49,7 @@ import {
   simlin_sim_get_value,
   simlin_sim_set_value,
   simlin_sim_get_series,
+  simlin_sim_get_var_names as simlin_sim_get_var_names_fn,
 } from './internal/sim';
 import {
   simlin_analyze_get_loops,
@@ -120,8 +120,6 @@ interface HandleEntry {
   disposed: boolean;
   // For model/sim handles, track which project they belong to
   projectHandle?: number;
-  // For sim handles, store the model ptr (needed for simGetVarNames)
-  modelPtr?: SimlinModelPtr;
 }
 
 export class DirectBackend implements EngineBackend {
@@ -132,7 +130,7 @@ export class DirectBackend implements EngineBackend {
   private allocHandle(
     kind: HandleKind,
     ptr: number,
-    extra?: { projectHandle?: number; modelPtr?: SimlinModelPtr },
+    extra?: { projectHandle?: number },
   ): number {
     const handle = this._nextHandle++;
     this._handles.set(handle, {
@@ -140,7 +138,6 @@ export class DirectBackend implements EngineBackend {
       ptr,
       disposed: false,
       projectHandle: extra?.projectHandle,
-      modelPtr: extra?.modelPtr,
     });
     if (kind === 'project') {
       this._projectChildren.set(handle, new Set());
@@ -367,8 +364,8 @@ export class DirectBackend implements EngineBackend {
     return simlin_model_get_var_json(this.getModelPtr(handle), varName);
   }
 
-  modelGetVarsJson(handle: ModelHandle): Uint8Array {
-    return simlin_model_get_vars_json(this.getModelPtr(handle));
+  modelGetVarNames(handle: ModelHandle, typeMask: number = 0, filter: string | null = null): string[] {
+    return simlin_model_get_var_names(this.getModelPtr(handle), typeMask, filter);
   }
 
   modelGetSimSpecsJson(handle: ModelHandle): Uint8Array {
@@ -382,7 +379,6 @@ export class DirectBackend implements EngineBackend {
     const ptr = simlin_sim_new(modelEntry.ptr, enableLtm);
     return this.allocHandle('sim', ptr, {
       projectHandle: modelEntry.projectHandle,
-      modelPtr: modelEntry.ptr,
     }) as SimHandle;
   }
 
@@ -432,11 +428,7 @@ export class DirectBackend implements EngineBackend {
   }
 
   simGetVarNames(handle: SimHandle): string[] {
-    const entry = this.getEntry(handle as number, 'sim');
-    if (!entry.modelPtr) {
-      throw new Error('Sim handle missing model pointer');
-    }
-    return simlin_model_get_var_names(entry.modelPtr);
+    return simlin_sim_get_var_names_fn(this.getSimPtr(handle));
   }
 
   simGetLinks(handle: SimHandle): Link[] {

@@ -439,11 +439,13 @@ export class WorkerBackend implements EngineBackend {
     }));
   }
 
-  modelGetVarsJson(handle: ModelHandle): Promise<Uint8Array> {
-    return this.sendRequest<Uint8Array>((requestId) => ({
-      type: 'modelGetVarsJson',
+  modelGetVarNames(handle: ModelHandle, typeMask: number = 0, filter: string | null = null): Promise<string[]> {
+    return this.sendRequest<string[]>((requestId) => ({
+      type: 'modelGetVarNames',
       requestId,
       handle,
+      typeMask,
+      filter,
     }));
   }
 

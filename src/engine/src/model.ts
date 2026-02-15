@@ -55,8 +55,14 @@ function canonicalizeModelName(name: string): string {
   return name.trim().toLowerCase().replace(/[\s_]+/g, '_');
 }
 
+/** Type mask constants matching SIMLIN_VARTYPE_* from the C FFI. */
+export const SIMLIN_VARTYPE_STOCK = 1 << 0;
+export const SIMLIN_VARTYPE_FLOW = 1 << 1;
+export const SIMLIN_VARTYPE_AUX = 1 << 2;
+export const SIMLIN_VARTYPE_MODULE = 1 << 3;
+
 /**
- * JSON shape returned by the simlin_model_get_var_json / simlin_model_get_vars_json FFI.
+ * JSON shape returned by the simlin_model_get_var_json FFI.
  * Each variable has a "type" discriminator field alongside the camelCase fields
  * matching the json-types.ts interfaces.
  */
@@ -255,11 +261,6 @@ export class Model {
     this._cachedBaseCase = null;
   }
 
-  private async getAllVarsJson(): Promise<JsonVarWithType[]> {
-    const bytes = await this.backend.modelGetVarsJson(this._handle);
-    return JSON.parse(new TextDecoder().decode(bytes)) as JsonVarWithType[];
-  }
-
   /**
    * Get a single variable by name.
    * @param name Variable name
@@ -281,33 +282,14 @@ export class Model {
   }
 
   /**
-   * Stock variables in the model.
+   * Get variable names from the model, optionally filtered by type and/or substring.
+   * @param typeMask Bitmask of SIMLIN_VARTYPE_STOCK | FLOW | AUX | MODULE. 0 means all.
+   * @param filter Substring filter on canonicalized names. null means no filter.
+   * @returns Array of canonical variable names
    */
-  async stocks(): Promise<readonly Stock[]> {
-    return (await this.variables()).filter((v): v is Stock => v.type === 'stock');
-  }
-
-  /**
-   * Flow variables in the model.
-   */
-  async flows(): Promise<readonly Flow[]> {
-    return (await this.variables()).filter((v): v is Flow => v.type === 'flow');
-  }
-
-  /**
-   * Auxiliary variables in the model.
-   */
-  async auxs(): Promise<readonly Aux[]> {
-    return (await this.variables()).filter((v): v is Aux => v.type === 'aux');
-  }
-
-  /**
-   * All variables in the model (stocks + flows + auxs + modules).
-   */
-  async variables(): Promise<readonly Variable[]> {
+  async getVarNames(typeMask: number = 0, filter: string | null = null): Promise<string[]> {
     this.checkDisposed();
-    const allVars = await this.getAllVarsJson();
-    return allVars.map(jsonVarToVariable);
+    return await this.backend.modelGetVarNames(this._handle, typeMask, filter);
   }
 
   /**
@@ -347,14 +329,6 @@ export class Model {
    */
   async getIncomingLinks(varName: string): Promise<string[]> {
     this.checkDisposed();
-
-    // Validate variable exists
-    const vars = await this.variables();
-    const varNames = vars.map((v) => v.name);
-    if (!varNames.includes(varName)) {
-      throw new Error(`Variable not found: ${varName}`);
-    }
-
     return await this.backend.modelGetIncomingLinks(this._handle, varName);
   }
 
@@ -508,12 +482,15 @@ export class Model {
 
     const { dryRun = false, allowErrors = false } = options;
 
-    // Get current variables via the targeted FFI call
-    const allVars = await this.getAllVarsJson();
+    // Get current editable variable names (stocks + flows + auxs)
+    const varNames = await this.getVarNames(
+      SIMLIN_VARTYPE_STOCK | SIMLIN_VARTYPE_FLOW | SIMLIN_VARTYPE_AUX,
+    );
 
-    // Build current variables map from the JSON variable data
     const currentVars: Record<string, JsonStock | JsonFlow | JsonAuxiliary> = {};
-    for (const v of allVars) {
+    for (const name of varNames) {
+      const bytes = await this.backend.modelGetVarJson(this._handle, name);
+      const v = JSON.parse(new TextDecoder().decode(bytes)) as JsonVarWithType;
       switch (v.type) {
         case 'stock':
           currentVars[v.name] = v as JsonStock;
@@ -524,7 +501,6 @@ export class Model {
         case 'aux':
           currentVars[v.name] = v as JsonAuxiliary;
           break;
-        // modules are not included in the edit callback's currentVars
       }
     }
 

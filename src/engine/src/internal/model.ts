@@ -81,17 +81,20 @@ export function simlin_model_get_name(model: SimlinModelPtr): string {
 /**
  * Get the number of variables in a model.
  * @param model Model pointer
+ * @param typeMask Bitmask of variable types (0 = all)
+ * @param filter Substring filter (null = no filter)
  * @returns Number of variables
  */
-export function simlin_model_get_var_count(model: SimlinModelPtr): number {
+export function simlin_model_get_var_count(model: SimlinModelPtr, typeMask: number = 0, filter: string | null = null): number {
   const exports = getExports();
-  const fn = exports.simlin_model_get_var_count as (model: number, outCount: number, outErr: number) => void;
+  const fn = exports.simlin_model_get_var_count as (model: number, typeMask: number, filter: number, outCount: number, outErr: number) => void;
 
   const outCountPtr = allocOutUsize();
   const outErrPtr = allocOutPtr();
+  const filterPtr = filter !== null ? stringToWasm(filter) : 0;
 
   try {
-    fn(model, outCountPtr, outErrPtr);
+    fn(model, typeMask, filterPtr, outCountPtr, outErrPtr);
     const errPtr = readOutPtr(outErrPtr);
 
     if (errPtr !== 0) {
@@ -104,6 +107,7 @@ export function simlin_model_get_var_count(model: SimlinModelPtr): number {
 
     return readOutUsize(outCountPtr);
   } finally {
+    if (filterPtr !== 0) free(filterPtr);
     free(outCountPtr);
     free(outErrPtr);
   }
@@ -177,12 +181,16 @@ export function simlin_model_get_links(model: SimlinModelPtr): SimlinLinksPtr {
 /**
  * Get variable names from a model.
  * @param model Model pointer
+ * @param typeMask Bitmask of variable types (0 = all)
+ * @param filter Substring filter (null = no filter)
  * @returns Array of variable names
  */
-export function simlin_model_get_var_names(model: SimlinModelPtr): string[] {
+export function simlin_model_get_var_names(model: SimlinModelPtr, typeMask: number = 0, filter: string | null = null): string[] {
   const exports = getExports();
   const fn = exports.simlin_model_get_var_names as (
     model: number,
+    typeMask: number,
+    filter: number,
     result: number,
     max: number,
     outWritten: number,
@@ -190,10 +198,12 @@ export function simlin_model_get_var_names(model: SimlinModelPtr): string[] {
   ) => void;
 
   // First get the count
-  const count = simlin_model_get_var_count(model);
+  const count = simlin_model_get_var_count(model, typeMask, filter);
   if (count === 0) {
     return [];
   }
+
+  const filterPtr = filter !== null ? stringToWasm(filter) : 0;
 
   // Allocate array of pointers (4 bytes each on wasm32)
   const resultPtr = malloc(count * 4);
@@ -201,7 +211,7 @@ export function simlin_model_get_var_names(model: SimlinModelPtr): string[] {
   const outErrPtr = allocOutPtr();
 
   try {
-    fn(model, resultPtr, count, outWrittenPtr, outErrPtr);
+    fn(model, typeMask, filterPtr, resultPtr, count, outWrittenPtr, outErrPtr);
     const errPtr = readOutPtr(outErrPtr);
 
     if (errPtr !== 0) {
@@ -229,6 +239,7 @@ export function simlin_model_get_var_names(model: SimlinModelPtr): string[] {
 
     return names;
   } finally {
+    if (filterPtr !== 0) free(filterPtr);
     free(resultPtr);
     free(outWrittenPtr);
     free(outErrPtr);
@@ -371,20 +382,6 @@ export function simlin_model_get_var_json(model: SimlinModelPtr, varName: string
   } finally {
     free(varNamePtr);
   }
-}
-
-/**
- * Get all variables' data as a JSON array.
- */
-export function simlin_model_get_vars_json(model: SimlinModelPtr): Uint8Array {
-  const fn = getExports().simlin_model_get_vars_json as (
-    model: number,
-    outBuf: number,
-    outLen: number,
-    outErr: number,
-  ) => void;
-
-  return callBufferReturningFn((outBuf, outLen, outErr) => fn(model, outBuf, outLen, outErr));
 }
 
 /**

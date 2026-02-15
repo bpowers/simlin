@@ -57,9 +57,13 @@ function createRejectingBackend(): EngineBackend {
     projectGetErrors: () => Promise.reject(new Error('not implemented')),
     projectApplyPatch: () => Promise.reject(new Error('not implemented')),
     modelDispose: () => Promise.reject(new Error('model dispose failed')),
+    modelGetName: () => Promise.reject(new Error('not implemented')),
     modelGetIncomingLinks: () => Promise.reject(new Error('not implemented')),
     modelGetLinks: () => Promise.reject(new Error('not implemented')),
     modelGetLatexEquation: () => Promise.reject(new Error('not implemented')),
+    modelGetVarJson: () => Promise.reject(new Error('not implemented')),
+    modelGetVarNames: () => Promise.reject(new Error('not implemented')),
+    modelGetSimSpecsJson: () => Promise.reject(new Error('not implemented')),
     simNew: () => Promise.resolve(99 as SimHandle),
     simDispose: () => Promise.reject(new Error('sim dispose failed')),
     simRunTo: () => Promise.reject(new Error('not implemented')),
@@ -180,13 +184,13 @@ describe('cleanup on dispose', () => {
     const model = await project.mainModel();
 
     // Verify model works before dispose
-    expect((await model.stocks()).length).toBeGreaterThan(0);
+    expect((await model.getVarNames()).length).toBeGreaterThan(0);
 
     // Dispose project
     await project.dispose();
 
     // Model should be disposed (throws on use)
-    await expect(model.stocks()).rejects.toThrow();
+    await expect(model.getVarNames()).rejects.toThrow();
   });
 
   it('operations on disposed project throw', async () => {
@@ -204,9 +208,8 @@ describe('cleanup on dispose', () => {
     const model = await project.mainModel();
     await model.dispose();
 
-    await expect(model.stocks()).rejects.toThrow();
-    await expect(model.flows()).rejects.toThrow();
-    await expect(model.variables()).rejects.toThrow();
+    await expect(model.getVarNames()).rejects.toThrow();
+    await expect(model.getVariable('teacup temperature')).rejects.toThrow();
     await expect(model.getLinks()).rejects.toThrow();
 
     await project.dispose();

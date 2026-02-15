@@ -25,7 +25,7 @@ from .errors import (
     SimlinRuntimeError,
     error_code_to_string,
 )
-from .model import Model
+from .model import Model, VARTYPE_AUX, VARTYPE_FLOW, VARTYPE_MODULE, VARTYPE_STOCK
 from .project import JSON_FORMAT_SDAI, JSON_FORMAT_SIMLIN, Project
 from .run import (
     DominantPeriod,
@@ -61,7 +61,7 @@ def load(path: Union[str, Path]) -> Model:
     Example:
         >>> import simlin
         >>> model = simlin.load("population.stmx")
-        >>> print(f"Model has {len(model.stocks)} stocks")
+        >>> print(f"Model has {len(model.get_var_names())} variables")
         >>> model.base_case.results["population"].plot()
     """
     from pathlib import Path as PathlibPath
@@ -133,6 +133,10 @@ __all__ = [
     "Stock",
     "TimeSpec",
     "UnitIssue",
+    "VARTYPE_AUX",
+    "VARTYPE_FLOW",
+    "VARTYPE_MODULE",
+    "VARTYPE_STOCK",
     "error_code_to_string",
     "load",
 ]

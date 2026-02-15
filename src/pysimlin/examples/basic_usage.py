@@ -17,9 +17,7 @@ def load_and_run_model():
     model = simlin.load(model_path)
 
     # Get information about the model
-    print(f"Number of variables: {len(model.variables)}")
-    print(f"Number of stocks: {len(model.stocks)}")
-    print(f"Number of flows: {len(model.flows)}")
+    print(f"Number of variables: {len(model.get_var_names())}")
 
     # Run simulation using the high-level API
     run = model.run(analyze_loops=False)
@@ -41,7 +39,7 @@ def analyze_model_structure():
     model = simlin.load(model_path)
 
     # Get all variable names using the new API
-    var_names = [v.name for v in model.variables]
+    var_names = model.get_var_names()
     print(f"Variables in model: {', '.join(var_names[:5])}...")
 
     # Analyze dependencies for a variable
@@ -78,7 +76,7 @@ def work_with_dataframes():
     df = run.results
 
     # Select a subset of variables for display
-    var_names = [v.name for v in model.variables]
+    var_names = model.get_var_names()
     selected_vars = var_names[:min(5, len(var_names))]
     df_subset = df[[v for v in selected_vars if v in df.columns]]
 

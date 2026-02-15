@@ -2,7 +2,7 @@
 
 Thread-safety: ``Model`` instances own a ``threading.Lock`` that
 protects the underlying ``_ptr`` and the ``_cached_base_case`` field.
-The new targeted FFI queries (``model_get_vars_json``, etc.) operate
+The targeted FFI queries (``model_get_var_json``, etc.) operate
 directly on the model pointer, so there is no need for double-checked
 locking or cross-lock ordering with the parent ``Project``.
 """
@@ -23,11 +23,17 @@ from ._ffi import (
     lib,
     model_get_sim_specs_json,
     model_get_var_json,
-    model_get_vars_json,
+    model_get_var_names,
     string_to_c,
 )
 from .analysis import Link, LinkPolarity, Loop
 from .errors import ErrorCode, SimlinRuntimeError
+
+# Variable type bitmask constants, matching SIMLIN_VARTYPE_* from the C FFI.
+VARTYPE_STOCK: int = 1 << 0
+VARTYPE_FLOW: int = 1 << 1
+VARTYPE_AUX: int = 1 << 2
+VARTYPE_MODULE: int = 1 << 3
 from .json_converter import converter
 from .json_types import (
     Auxiliary as JsonAuxiliary,
@@ -208,13 +214,6 @@ def _var_from_dict(d: dict[str, Any]) -> Stock | Flow | Aux | None:
         raise SimlinRuntimeError(f"unknown variable type: {var_type!r}")
 
 
-def _get_all_vars(model_ptr: Any) -> list[dict[str, Any]]:
-    """Call simlin_model_get_vars_json and return the parsed list."""
-    raw = model_get_vars_json(model_ptr)
-    result: list[dict[str, Any]] = json.loads(raw.decode("utf-8"))
-    return result
-
-
 class ModelPatchBuilder:
     """Accumulates model operations before applying them as JSON."""
 
@@ -273,23 +272,29 @@ class _ModelEditContext:
     def __enter__(self) -> tuple[dict[str, JsonVariable], ModelPatchBuilder]:
         with self._model._lock:
             self._model._check_alive()
-            all_vars = _get_all_vars(self._model._ptr)
+            names = model_get_var_names(self._model._ptr)
 
         model_name = self._model._name
         self._patch = ModelPatchBuilder(model_name)
 
         self._current = {}
-        for var_dict in all_vars:
+        for name in names:
+            with self._model._lock:
+                self._model._check_alive()
+                raw = model_get_var_json(self._model._ptr, name)
+            if raw is None:
+                continue
+            var_dict = json.loads(raw.decode("utf-8"))
             var_type = var_dict.get("type")
-            name = var_dict.get("name", "")
+            display_name = var_dict.get("name", "")
             if var_type == "stock":
-                self._current[name] = converter.structure(var_dict, JsonStock)
+                self._current[display_name] = converter.structure(var_dict, JsonStock)
             elif var_type == "flow":
-                self._current[name] = converter.structure(var_dict, JsonFlow)
+                self._current[display_name] = converter.structure(var_dict, JsonFlow)
             elif var_type == "aux":
-                self._current[name] = converter.structure(var_dict, JsonAuxiliary)
+                self._current[display_name] = converter.structure(var_dict, JsonAuxiliary)
             elif var_type == "module":
-                self._current[name] = converter.structure(var_dict, JsonModule)
+                self._current[display_name] = converter.structure(var_dict, JsonModule)
 
         return self._current, self._patch
 
@@ -402,11 +407,6 @@ class Model:
         Raises:
             SimlinRuntimeError: If the variable doesn't exist or operation fails
         """
-        # Validate variable exists to provide a clear Pythonic error
-        names = [v.name for v in self.variables]
-        if var_name not in names:
-            raise SimlinRuntimeError(f"Variable not found: {var_name}")
-
         with self._lock:
             self._check_alive()
             c_var_name = string_to_c(var_name)
@@ -498,51 +498,37 @@ class Model:
         with self._lock:
             self._cached_base_case = None
 
-    @property
-    def stocks(self) -> tuple[Stock, ...]:
-        """Stock variables (immutable tuple).
+    def get_var_names(self, type_mask: int = 0, filter_str: str | None = None) -> list[str]:
+        """Get canonical variable names, optionally filtered.
+
+        Args:
+            type_mask: Bitmask of variable types (0 = all).
+                Compose with ``VARTYPE_STOCK | VARTYPE_FLOW | VARTYPE_AUX | VARTYPE_MODULE``.
+            filter_str: Substring filter on canonicalized names. None = no filter.
 
         Returns:
-            Tuple of Stock objects representing all stocks in the model
+            List of canonical variable name strings
         """
-        return tuple(v for v in self.variables if isinstance(v, Stock))
-
-    @property
-    def flows(self) -> tuple[Flow, ...]:
-        """Flow variables (immutable tuple).
-
-        Returns:
-            Tuple of Flow objects representing all flows in the model
-        """
-        return tuple(v for v in self.variables if isinstance(v, Flow))
-
-    @property
-    def auxs(self) -> tuple[Aux, ...]:
-        """Auxiliary variables (immutable tuple).
-
-        Returns:
-            Tuple of Aux objects representing all auxiliary variables in the model
-        """
-        return tuple(v for v in self.variables if isinstance(v, Aux))
+        with self._lock:
+            self._check_alive()
+            return model_get_var_names(self._ptr, type_mask, filter_str)
 
     @property
     def variables(self) -> tuple[Stock | Flow | Aux, ...]:
-        """All variables in the model.
-
-        Returns stocks + flows + auxs combined as an immutable tuple.
+        """All variables in the model (stocks, flows, and auxs).
 
         Returns:
             Tuple of all variable objects (Stock, Flow, or Aux)
         """
         with self._lock:
             self._check_alive()
-            all_vars = _get_all_vars(self._ptr)
+            names = model_get_var_names(self._ptr)
 
         result: list[Stock | Flow | Aux] = []
-        for d in all_vars:
-            v = _var_from_dict(d)
-            if v is not None:
-                result.append(v)
+        for name in names:
+            var = self.get_variable(name)
+            if var is not None:
+                result.append(var)
         return tuple(result)
 
     @property
@@ -801,7 +787,7 @@ class Model:
     def __repr__(self) -> str:
         """Return a string representation of the Model."""
         try:
-            var_count = len(self.variables)
+            var_count = len(self.get_var_names())
             name = f" '{self._name}'" if self._name else ""
             return f"<Model{name} with {var_count} variable(s)>"
         except Exception:

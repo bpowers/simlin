@@ -28,6 +28,7 @@ Rust components are standard cargo projects in a cargo workspace, and TypeScript
 
 **`src/libsimlin` (Rust)**: Flat "C" FFI to simlin-engine
 - Used from TypeScript, also usable from Go via CGo and from C/C++ through `simlin.h`.
+- **API design principle**: keep the FFI surface small and orthogonal. Prefer composable primitives (e.g. `get_var_names` + `get_var_json`) over bulk convenience endpoints. Each FFI function is individually thread-safe (holds the project lock for its duration), but callers that need snapshot consistency across multiple calls must coordinate externally. Do NOT add bulk/batch variants of existing APIs to paper over caller-side concurrency issues.
 
 **`src/engine` (TypeScript)**: TypeScript API for interacting with WASM libsimlin
 - Provides clear, idiomatic TypeScript interface to the simulation engine

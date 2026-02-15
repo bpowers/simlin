@@ -9,7 +9,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project as Project, configureWasm, ready, resetWasm } from '@simlin/engine';
+import { Project as Project, configureWasm, ready, resetWasm, SIMLIN_VARTYPE_STOCK, SIMLIN_VARTYPE_FLOW } from '@simlin/engine';
 
 import type { EditorProps, ProtobufProjectData, JsonProjectData, ProjectData } from '../Editor';
 
@@ -115,8 +115,8 @@ describe('Editor input format types', () => {
 
       const protobufModel = await projectFromProtobuf.mainModel();
       const jsonModel = await projectFromJson.mainModel();
-      const protobufVars = (await protobufModel.variables()).map((v) => v.name).sort();
-      const jsonVars = (await jsonModel.variables()).map((v) => v.name).sort();
+      const protobufVars = (await protobufModel.getVarNames()).sort();
+      const jsonVars = (await jsonModel.getVarNames()).sort();
       expect(protobufVars).toEqual(jsonVars);
 
       await originalProject.dispose();
@@ -233,7 +233,7 @@ describe('Editor input format types', () => {
       expect(project).toBeDefined();
       expect(await project.isSimulatable()).toBe(true);
       const model = await project.mainModel();
-      expect((await model.variables()).length).toBeGreaterThan(0);
+      expect((await model.getVarNames()).length).toBeGreaterThan(0);
 
       await project.dispose();
     });
@@ -256,7 +256,7 @@ describe('Editor input format types', () => {
       expect(project).toBeDefined();
       expect(await project.isSimulatable()).toBe(true);
       const model = await project.mainModel();
-      expect((await model.variables()).length).toBeGreaterThan(0);
+      expect((await model.getVarNames()).length).toBeGreaterThan(0);
 
       await project.dispose();
     });
@@ -278,18 +278,18 @@ describe('Editor input format types', () => {
       const originalProject = await Project.open(xmileData);
 
       const origModel = await originalProject.mainModel();
-      const originalVars = (await origModel.variables()).map((v) => v.name).sort();
-      const originalStocks = (await origModel.stocks()).map((s) => s.name).sort();
-      const originalFlows = (await origModel.flows()).map((f) => f.name).sort();
+      const originalVars = (await origModel.getVarNames()).sort();
+      const originalStocks = (await origModel.getVarNames(SIMLIN_VARTYPE_STOCK)).sort();
+      const originalFlows = (await origModel.getVarNames(SIMLIN_VARTYPE_FLOW)).sort();
 
       const protobuf = await originalProject.serializeProtobuf();
       const json = await originalProject.serializeJson();
 
       const projectFromProtobuf = await Project.openProtobuf(protobuf);
       const pbModel = await projectFromProtobuf.mainModel();
-      const varsFromProtobuf = (await pbModel.variables()).map((v) => v.name).sort();
-      const stocksFromProtobuf = (await pbModel.stocks()).map((s) => s.name).sort();
-      const flowsFromProtobuf = (await pbModel.flows()).map((f) => f.name).sort();
+      const varsFromProtobuf = (await pbModel.getVarNames()).sort();
+      const stocksFromProtobuf = (await pbModel.getVarNames(SIMLIN_VARTYPE_STOCK)).sort();
+      const flowsFromProtobuf = (await pbModel.getVarNames(SIMLIN_VARTYPE_FLOW)).sort();
 
       expect(varsFromProtobuf).toEqual(originalVars);
       expect(stocksFromProtobuf).toEqual(originalStocks);
@@ -297,9 +297,9 @@ describe('Editor input format types', () => {
 
       const projectFromJson = await Project.openJson(json);
       const jsonModel = await projectFromJson.mainModel();
-      const varsFromJson = (await jsonModel.variables()).map((v) => v.name).sort();
-      const stocksFromJson = (await jsonModel.stocks()).map((s) => s.name).sort();
-      const flowsFromJson = (await jsonModel.flows()).map((f) => f.name).sort();
+      const varsFromJson = (await jsonModel.getVarNames()).sort();
+      const stocksFromJson = (await jsonModel.getVarNames(SIMLIN_VARTYPE_STOCK)).sort();
+      const flowsFromJson = (await jsonModel.getVarNames(SIMLIN_VARTYPE_FLOW)).sort();
 
       expect(varsFromJson).toEqual(originalVars);
       expect(stocksFromJson).toEqual(originalStocks);

@@ -20,7 +20,7 @@ include = []
 # Explicitly include the types we want
 include = ["SimlinErrorCode", "SimlinErrorKind", "SimlinUnitErrorKind", "SimlinLoopPolarity", "SimlinLoop", "SimlinLoops", "SimlinProject", "SimlinModel", "SimlinSim", "SimlinError", "SimlinErrorDetail", "SimlinJsonFormat"]
 exclude = []
-item_types = ["enums", "structs", "unions", "typedefs", "opaque", "functions"]
+item_types = ["constants", "enums", "structs", "unions", "typedefs", "opaque", "functions"]
 
 [export.rename]
 # Keep type names unchanged

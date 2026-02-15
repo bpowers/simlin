@@ -173,17 +173,24 @@ describe('DirectBackend', () => {
       expect(parsed.name).toBe('teacup temperature');
     });
 
-    it('should get all variables JSON', () => {
-      const bytes = backend.modelGetVarsJson(modelHandle);
-      expect(bytes).toBeInstanceOf(Uint8Array);
-      expect(bytes.length).toBeGreaterThan(0);
-      const parsed = JSON.parse(new TextDecoder().decode(bytes));
-      expect(Array.isArray(parsed)).toBe(true);
-      expect(parsed.length).toBeGreaterThan(0);
-      for (const v of parsed) {
-        expect(['stock', 'flow', 'aux', 'module']).toContain(v.type);
-        expect(typeof v.name).toBe('string');
+    it('should get variable names', () => {
+      const names = backend.modelGetVarNames(modelHandle);
+      expect(Array.isArray(names)).toBe(true);
+      expect(names.length).toBeGreaterThan(0);
+      for (const name of names) {
+        expect(typeof name).toBe('string');
       }
+    });
+
+    it('should get variable names with type mask', () => {
+      const allNames = backend.modelGetVarNames(modelHandle);
+      const stockNames = backend.modelGetVarNames(modelHandle, 1);  // SIMLIN_VARTYPE_STOCK
+      const flowNames = backend.modelGetVarNames(modelHandle, 2);   // SIMLIN_VARTYPE_FLOW
+      const auxNames = backend.modelGetVarNames(modelHandle, 4);    // SIMLIN_VARTYPE_AUX
+      const moduleNames = backend.modelGetVarNames(modelHandle, 8); // SIMLIN_VARTYPE_MODULE
+
+      expect(stockNames.length).toBeGreaterThan(0);
+      expect(allNames.length).toBe(stockNames.length + flowNames.length + auxNames.length + moduleNames.length);
     });
 
     it('should get sim specs JSON', () => {

@@ -310,7 +310,7 @@ with model.edit() as (_, patch):
     patch.upsert_aux(Auxiliary(name="birth_rate", equation="0.03"))
     patch.upsert_aux(Auxiliary(name="death_rate", equation="0.02"))
 
-print(f"Created model with {len(model.variables)} variables")
+print(f"Created model with {len(model.get_var_names())} variables")
 ```
 
 You can also load models from files:
@@ -325,18 +325,19 @@ project = model.project
 ### Working with Models
 
 ```python
-# Access model structure via properties
-stocks = model.stocks        # Tuple of Stock objects
-flows = model.flows          # Tuple of Flow objects
-auxs = model.auxs            # Tuple of Aux objects
-variables = model.variables  # All variables (stocks + flows + auxs)
+from simlin import VARTYPE_STOCK, VARTYPE_FLOW, VARTYPE_AUX
 
-# Access individual variable properties
-for stock in model.stocks:
-    print(f"{stock.name}: initial = {stock.initial_equation}")
+# Get variable names, optionally filtered by type
+all_names = model.get_var_names()                          # All variable names
+stock_names = model.get_var_names(type_mask=VARTYPE_STOCK) # Stock names only
+flow_names = model.get_var_names(type_mask=VARTYPE_FLOW)   # Flow names only
+aux_names = model.get_var_names(type_mask=VARTYPE_AUX)     # Aux names only
 
-for flow in model.flows:
-    print(f"{flow.name}: {flow.equation}")
+# Get detailed variable information
+for name in model.get_var_names():
+    var = model.get_variable(name)
+    if var is not None:
+        print(f"{var.name} ({type(var).__name__})")
 
 # Get time configuration
 time_spec = model.time_spec

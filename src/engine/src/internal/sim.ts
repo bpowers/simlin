@@ -5,9 +5,11 @@
 // Simulation functions
 
 import { getExports } from '@simlin/engine/internal/wasm';
+import { getMemory } from '@simlin/engine/internal/wasm';
 import {
   free,
   stringToWasm,
+  wasmToStringAndFree,
   allocOutPtr,
   readOutPtr,
   allocOutUsize,
@@ -358,6 +360,96 @@ export function simlin_sim_get_offset(sim: SimlinSimPtr, name: string): number {
   } finally {
     free(namePtr);
     free(outOffsetPtr);
+    free(outErrPtr);
+  }
+}
+
+/**
+ * Get the number of simulation-level variable names.
+ * @param sim Simulation pointer
+ * @returns Number of variables
+ */
+export function simlin_sim_get_var_count(sim: SimlinSimPtr): number {
+  const exports = getExports();
+  const fn = exports.simlin_sim_get_var_count as (sim: number, outCount: number, outErr: number) => void;
+
+  const outCountPtr = allocOutUsize();
+  const outErrPtr = allocOutPtr();
+
+  try {
+    fn(sim, outCountPtr, outErrPtr);
+    const errPtr = readOutPtr(outErrPtr);
+
+    if (errPtr !== 0) {
+      const code = simlin_error_get_code(errPtr);
+      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
+      simlin_error_free(errPtr);
+      throw new SimlinError(message, code, details);
+    }
+
+    return readOutUsize(outCountPtr);
+  } finally {
+    free(outCountPtr);
+    free(outErrPtr);
+  }
+}
+
+/**
+ * Get simulation-level variable names.
+ * @param sim Simulation pointer
+ * @returns Array of variable names
+ */
+export function simlin_sim_get_var_names(sim: SimlinSimPtr): string[] {
+  const exports = getExports();
+  const fn = exports.simlin_sim_get_var_names as (
+    sim: number,
+    result: number,
+    max: number,
+    outWritten: number,
+    outErr: number,
+  ) => void;
+
+  const count = simlin_sim_get_var_count(sim);
+  if (count === 0) {
+    return [];
+  }
+
+  const resultPtr = malloc(count * 4);
+  const outWrittenPtr = allocOutUsize();
+  const outErrPtr = allocOutPtr();
+
+  try {
+    fn(sim, resultPtr, count, outWrittenPtr, outErrPtr);
+    const errPtr = readOutPtr(outErrPtr);
+
+    if (errPtr !== 0) {
+      const code = simlin_error_get_code(errPtr);
+      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
+      simlin_error_free(errPtr);
+      throw new SimlinError(message, code, details);
+    }
+
+    const written = readOutUsize(outWrittenPtr);
+    const names: string[] = [];
+    const memory = getMemory();
+    const view = new DataView(memory.buffer);
+
+    for (let i = 0; i < written; i++) {
+      const strPtr = view.getUint32(resultPtr + i * 4, true);
+      if (strPtr !== 0) {
+        const name = wasmToStringAndFree(strPtr);
+        if (name !== null) {
+          names.push(name);
+        }
+      }
+    }
+
+    return names;
+  } finally {
+    free(resultPtr);
+    free(outWrittenPtr);
     free(outErrPtr);
   }
 }

@@ -1,7 +1,14 @@
-"""CFFI build configuration for simlin."""
+"""CFFI build configuration for simlin.
+
+Reads the cbindgen-generated simlin.h directly rather than maintaining
+a hand-written copy of the C declarations.  The header is lightly
+transformed to strip preprocessor directives that CFFI's cdef parser
+cannot handle (#include, include guards, extern "C").
+"""
 
 import os
 import platform
+import re
 from pathlib import Path
 
 from cffi import FFI
@@ -13,176 +20,77 @@ repo_root = Path(__file__).resolve().parents[3]
 libsimlin_dir = repo_root / "src" / "libsimlin"
 header_path = libsimlin_dir / "simlin.h"
 
-# C declarations for CFFI (subset matching the public header)
-cdef_content = """
-typedef size_t uintptr_t;  // align with header semantics for cffi
 
-typedef enum {
-  SIMLIN_ERROR_CODE_NO_ERROR = 0,
-  SIMLIN_ERROR_CODE_DOES_NOT_EXIST = 1,
-  SIMLIN_ERROR_CODE_XML_DESERIALIZATION = 2,
-  SIMLIN_ERROR_CODE_VENSIM_CONVERSION = 3,
-  SIMLIN_ERROR_CODE_PROTOBUF_DECODE = 4,
-  SIMLIN_ERROR_CODE_INVALID_TOKEN = 5,
-  SIMLIN_ERROR_CODE_UNRECOGNIZED_EOF = 6,
-  SIMLIN_ERROR_CODE_UNRECOGNIZED_TOKEN = 7,
-  SIMLIN_ERROR_CODE_EXTRA_TOKEN = 8,
-  SIMLIN_ERROR_CODE_UNCLOSED_COMMENT = 9,
-  SIMLIN_ERROR_CODE_UNCLOSED_QUOTED_IDENT = 10,
-  SIMLIN_ERROR_CODE_EXPECTED_NUMBER = 11,
-  SIMLIN_ERROR_CODE_UNKNOWN_BUILTIN = 12,
-  SIMLIN_ERROR_CODE_BAD_BUILTIN_ARGS = 13,
-  SIMLIN_ERROR_CODE_EMPTY_EQUATION = 14,
-  SIMLIN_ERROR_CODE_BAD_MODULE_INPUT_DST = 15,
-  SIMLIN_ERROR_CODE_BAD_MODULE_INPUT_SRC = 16,
-  SIMLIN_ERROR_CODE_NOT_SIMULATABLE = 17,
-  SIMLIN_ERROR_CODE_BAD_TABLE = 18,
-  SIMLIN_ERROR_CODE_BAD_SIM_SPECS = 19,
-  SIMLIN_ERROR_CODE_NO_ABSOLUTE_REFERENCES = 20,
-  SIMLIN_ERROR_CODE_CIRCULAR_DEPENDENCY = 21,
-  SIMLIN_ERROR_CODE_ARRAYS_NOT_IMPLEMENTED = 22,
-  SIMLIN_ERROR_CODE_MULTI_DIMENSIONAL_ARRAYS_NOT_IMPLEMENTED = 23,
-  SIMLIN_ERROR_CODE_BAD_DIMENSION_NAME = 24,
-  SIMLIN_ERROR_CODE_BAD_MODEL_NAME = 25,
-  SIMLIN_ERROR_CODE_MISMATCHED_DIMENSIONS = 26,
-  SIMLIN_ERROR_CODE_ARRAY_REFERENCE_NEEDS_EXPLICIT_SUBSCRIPTS = 27,
-  SIMLIN_ERROR_CODE_DUPLICATE_VARIABLE = 28,
-  SIMLIN_ERROR_CODE_UNKNOWN_DEPENDENCY = 29,
-  SIMLIN_ERROR_CODE_VARIABLES_HAVE_ERRORS = 30,
-  SIMLIN_ERROR_CODE_UNIT_DEFINITION_ERRORS = 31,
-  SIMLIN_ERROR_CODE_GENERIC = 32,
-  SIMLIN_ERROR_CODE_UNIT_MISMATCH = 33,
-} SimlinErrorCode;
+def _header_to_cdef(header_text: str) -> str:
+    """Transform a cbindgen-generated header into CFFI-compatible cdef text.
 
-typedef enum {
-  SIMLIN_LINK_POLARITY_POSITIVE = 0,
-  SIMLIN_LINK_POLARITY_NEGATIVE = 1,
-  SIMLIN_LINK_POLARITY_UNKNOWN = 2,
-} SimlinLinkPolarity;
+    Strips preprocessor directives that CFFI cannot handle while
+    preserving type definitions, struct layouts, and function
+    declarations.  ``#define NAME (expr)`` constants are converted to
+    the CFFI ``#define NAME ...`` placeholder form so their values are
+    resolved at compile time from the real header.
+    """
+    lines = header_text.split("\n")
+    result_lines: list[str] = []
+    skip_depth = 0
 
-typedef enum {
-  SIMLIN_LOOP_POLARITY_REINFORCING = 0,
-  SIMLIN_LOOP_POLARITY_BALANCING = 1,
-  SIMLIN_LOOP_POLARITY_UNDETERMINED = 2,
-} SimlinLoopPolarity;
+    for line in lines:
+        stripped = line.strip()
 
-typedef enum {
-  SIMLIN_JSON_FORMAT_NATIVE = 0,
-  SIMLIN_JSON_FORMAT_SDAI = 1,
-} SimlinJsonFormat;
+        # Skip include guard (#ifndef / #define GUARD / #endif at end)
+        if stripped.startswith("#ifndef"):
+            continue
+        if re.match(r"#define\s+SIMLIN_ENGINE", stripped):
+            continue
 
-typedef enum {
-  SIMLIN_ERROR_KIND_PROJECT = 0,
-  SIMLIN_ERROR_KIND_MODEL = 1,
-  SIMLIN_ERROR_KIND_VARIABLE = 2,
-  SIMLIN_ERROR_KIND_UNITS = 3,
-  SIMLIN_ERROR_KIND_SIMULATION = 4,
-} SimlinErrorKind;
+        # Skip #include directives
+        if stripped.startswith("#include"):
+            continue
 
-typedef enum {
-  SIMLIN_UNIT_ERROR_KIND_NOT_APPLICABLE = 0,
-  SIMLIN_UNIT_ERROR_KIND_DEFINITION = 1,
-  SIMLIN_UNIT_ERROR_KIND_CONSISTENCY = 2,
-  SIMLIN_UNIT_ERROR_KIND_INFERENCE = 3,
-} SimlinUnitErrorKind;
+        # Skip #ifdef __cplusplus / extern "C" blocks
+        if stripped == "#ifdef __cplusplus":
+            skip_depth += 1
+            continue
+        if skip_depth > 0:
+            if stripped.startswith("#endif"):
+                skip_depth -= 1
+            continue
 
-typedef struct SimlinModel SimlinModel;
-typedef struct SimlinProject SimlinProject;
-typedef struct SimlinSim SimlinSim;
+        # Skip bare extern "C" and its closing brace
+        if 'extern "C"' in stripped:
+            continue
+        if stripped.startswith("}") and "extern" in stripped:
+            continue
 
-typedef struct {
-  char *from;
-  char *to;
-  SimlinLinkPolarity polarity;
-  double *score;
-  uintptr_t score_len;
-} SimlinLink;
+        # Skip trailing #endif (close of include guard)
+        if stripped.startswith("#endif"):
+            continue
 
-typedef struct {
-  SimlinLink *links;
-  uintptr_t count;
-} SimlinLinks;
+        # Convert #define constants to CFFI placeholder syntax
+        m = re.match(r"#define\s+(SIMLIN_\w+)\s+.+", stripped)
+        if m:
+            result_lines.append(f"#define {m.group(1)} ...")
+            continue
 
-typedef struct {
-  char *id;
-  char **variables;
-  uintptr_t var_count;
-  SimlinLoopPolarity polarity;
-} SimlinLoop;
+        result_lines.append(line)
 
-typedef struct {
-  SimlinLoop *loops;
-  uintptr_t count;
-} SimlinLoops;
+    text = "\n".join(result_lines)
 
-typedef struct {
-  SimlinErrorCode code;
-  const char *message;
-  const char *model_name;
-  const char *variable_name;
-  uint16_t start_offset;
-  uint16_t end_offset;
-  SimlinErrorKind kind;
-  SimlinUnitErrorKind unit_error_kind;
-} SimlinErrorDetail;
+    # Convert opaque cbindgen structs (uint8_t _private[0]) to simple
+    # forward declarations that CFFI treats as opaque pointer targets.
+    text = re.sub(
+        r"typedef struct \{\s*uint8_t _private\[0\];\s*\} (\w+);",
+        r"typedef struct \1 \1;",
+        text,
+    )
 
-typedef struct SimlinError SimlinError;
-typedef SimlinError **OutError;
+    # CFFI needs uintptr_t mapped to size_t since it doesn't process
+    # <stdint.h>.
+    return "typedef size_t uintptr_t;\n\n" + text
 
-const char *simlin_error_str(SimlinErrorCode err);
-void simlin_error_free(SimlinError *err);
-SimlinErrorCode simlin_error_get_code(const SimlinError *err);
-const char *simlin_error_get_message(const SimlinError *err);
-uintptr_t simlin_error_get_detail_count(const SimlinError *err);
-const SimlinErrorDetail *simlin_error_get_details(const SimlinError *err);
-const SimlinErrorDetail *simlin_error_get_detail(const SimlinError *err, uintptr_t index);
-SimlinProject *simlin_project_open_protobuf(const uint8_t *data, uintptr_t len, OutError out_error);
-SimlinProject *simlin_project_open_json(const uint8_t *data, uintptr_t len, SimlinJsonFormat format, OutError out_error);
-void simlin_project_ref(SimlinProject *project);
-void simlin_project_unref(SimlinProject *project);
-void simlin_project_get_model_count(SimlinProject *project, uintptr_t *out_count, OutError out_error);
-void simlin_project_get_model_names(SimlinProject *project, char **result, uintptr_t max, uintptr_t *out_written, OutError out_error);
-void simlin_project_add_model(SimlinProject *project, const char *model_name, OutError out_error);
-SimlinModel *simlin_project_get_model(SimlinProject *project, const char *model_name, OutError out_error);
-void simlin_model_ref(SimlinModel *model);
-void simlin_model_unref(SimlinModel *model);
-void simlin_model_get_var_count(SimlinModel *model, uintptr_t *out_count, OutError out_error);
-void simlin_model_get_var_names(SimlinModel *model, char **result, uintptr_t max, uintptr_t *out_written, OutError out_error);
-void simlin_model_get_incoming_links(SimlinModel *model, const char *var_name, char **result, uintptr_t max, uintptr_t *out_written, OutError out_error);
-SimlinLinks *simlin_model_get_links(SimlinModel *model, OutError out_error);
-void simlin_model_get_var_json(SimlinModel *model, const char *var_name, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
-void simlin_model_get_vars_json(SimlinModel *model, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
-void simlin_model_get_sim_specs_json(SimlinModel *model, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
-SimlinSim *simlin_sim_new(SimlinModel *model, bool enable_ltm, OutError out_error);
-void simlin_sim_ref(SimlinSim *sim);
-void simlin_sim_unref(SimlinSim *sim);
-void simlin_sim_run_to(SimlinSim *sim, double time, OutError out_error);
-void simlin_sim_run_to_end(SimlinSim *sim, OutError out_error);
-void simlin_sim_get_stepcount(SimlinSim *sim, uintptr_t *out_count, OutError out_error);
-void simlin_sim_reset(SimlinSim *sim, OutError out_error);
-void simlin_sim_get_value(SimlinSim *sim, const char *name, double *out_value, OutError out_error);
-void simlin_sim_set_value(SimlinSim *sim, const char *name, double val, OutError out_error);
-void simlin_sim_set_value_by_offset(SimlinSim *sim, uintptr_t offset, double val, OutError out_error);
-void simlin_sim_get_offset(SimlinSim *sim, const char *name, uintptr_t *out_offset, OutError out_error);
-void simlin_sim_get_series(SimlinSim *sim, const char *name, double *results_ptr, uintptr_t len, uintptr_t *out_written, OutError out_error);
-void simlin_free_string(char *s);
-SimlinLoops *simlin_analyze_get_loops(SimlinProject *project, OutError out_error);
-void simlin_free_loops(SimlinLoops *loops);
-SimlinLinks *simlin_analyze_get_links(SimlinSim *sim, OutError out_error);
-void simlin_free_links(SimlinLinks *links);
-void simlin_analyze_get_relative_loop_score(SimlinSim *sim, const char *loop_id, double *results_ptr, uintptr_t len, uintptr_t *out_written, OutError out_error);
-void simlin_analyze_get_rel_loop_score(SimlinSim *sim, const char *loop_id, double *results_ptr, uintptr_t len, uintptr_t *out_written, OutError out_error);
-uint8_t *simlin_malloc(uintptr_t size);
-void simlin_free(uint8_t *ptr);
-SimlinProject *simlin_project_open_xmile(const uint8_t *data, uintptr_t len, OutError out_error);
-SimlinProject *simlin_project_open_vensim(const uint8_t *data, uintptr_t len, OutError out_error);
-void simlin_project_serialize_xmile(SimlinProject *project, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
-void simlin_project_serialize_protobuf(SimlinProject *project, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
-void simlin_project_serialize_json(SimlinProject *project, SimlinJsonFormat format, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
-void simlin_project_apply_patch(SimlinProject *project, const uint8_t *patch_data, uintptr_t patch_len, bool dry_run, bool allow_errors, SimlinError **out_collected_errors, OutError out_error);
-SimlinError *simlin_project_get_errors(SimlinProject *project, OutError out_error);
-"""
 
+header_text = header_path.read_text()
+cdef_content = _header_to_cdef(header_text)
 ffibuilder.cdef(cdef_content)
 
 

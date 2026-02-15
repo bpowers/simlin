@@ -12,7 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder, configureWasm, ready, resetWasm } from '../src';
+import { Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder, configureWasm, ready, resetWasm, SIMLIN_VARTYPE_STOCK, SIMLIN_VARTYPE_FLOW, SIMLIN_VARTYPE_AUX, SIMLIN_VARTYPE_MODULE } from '../src';
 import { JsonStock, JsonFlow, JsonAuxiliary } from '../src/json-types';
 
 // Helper to load the WASM module
@@ -180,65 +180,76 @@ describe('High-Level API', () => {
       expect(model.project).toBe(project);
     });
 
-    it('should get stocks', async () => {
+    it('should get stock variable names', async () => {
       const model = await project.mainModel();
-      const stocks = await model.stocks();
+      const stockNames = await model.getVarNames(SIMLIN_VARTYPE_STOCK);
 
-      expect(Array.isArray(stocks)).toBe(true);
+      expect(Array.isArray(stockNames)).toBe(true);
       // teacup model has at least one stock (teacup temperature)
-      expect(stocks.length).toBeGreaterThan(0);
+      expect(stockNames.length).toBeGreaterThan(0);
 
-      const stock = stocks[0];
-      expect(stock.type).toBe('stock');
-      expect(typeof stock.name).toBe('string');
-      expect(typeof stock.initialEquation).toBe('string');
-      expect(Array.isArray(stock.inflows)).toBe(true);
-      expect(Array.isArray(stock.outflows)).toBe(true);
+      const stock = await model.getVariable(stockNames[0]);
+      expect(stock).toBeDefined();
+      expect(stock!.type).toBe('stock');
+      expect(typeof stock!.name).toBe('string');
+      if (stock!.type === 'stock') {
+        expect(typeof stock!.initialEquation).toBe('string');
+        expect(Array.isArray(stock!.inflows)).toBe(true);
+        expect(Array.isArray(stock!.outflows)).toBe(true);
+      }
     });
 
-    it('should get flows', async () => {
+    it('should get flow variable names', async () => {
       const model = await project.mainModel();
-      const flows = await model.flows();
+      const flowNames = await model.getVarNames(SIMLIN_VARTYPE_FLOW);
 
-      expect(Array.isArray(flows)).toBe(true);
+      expect(Array.isArray(flowNames)).toBe(true);
       // teacup model has flows
 
-      for (const flow of flows) {
-        expect(flow.type).toBe('flow');
-        expect(typeof flow.name).toBe('string');
-        expect(typeof flow.equation).toBe('string');
+      for (const name of flowNames) {
+        const flow = await model.getVariable(name);
+        expect(flow).toBeDefined();
+        expect(flow!.type).toBe('flow');
+        expect(typeof flow!.name).toBe('string');
+        if (flow!.type === 'flow') {
+          expect(typeof flow!.equation).toBe('string');
+        }
       }
     });
 
-    it('should get auxiliaries', async () => {
+    it('should get auxiliary variable names', async () => {
       const model = await project.mainModel();
-      const auxs = await model.auxs();
+      const auxNames = await model.getVarNames(SIMLIN_VARTYPE_AUX);
 
-      expect(Array.isArray(auxs)).toBe(true);
+      expect(Array.isArray(auxNames)).toBe(true);
 
-      for (const aux of auxs) {
-        expect(aux.type).toBe('aux');
-        expect(typeof aux.name).toBe('string');
-        expect(typeof aux.equation).toBe('string');
+      for (const name of auxNames) {
+        const aux = await model.getVariable(name);
+        expect(aux).toBeDefined();
+        expect(aux!.type).toBe('aux');
+        expect(typeof aux!.name).toBe('string');
+        if (aux!.type === 'aux') {
+          expect(typeof aux!.equation).toBe('string');
+        }
       }
     });
 
-    it('should get all variables', async () => {
+    it('should get all variable names', async () => {
       const model = await project.mainModel();
-      const variables = await model.variables();
-      const stocks = await model.stocks();
-      const flows = await model.flows();
-      const auxs = await model.auxs();
+      const allNames = await model.getVarNames();
+      const stockNames = await model.getVarNames(SIMLIN_VARTYPE_STOCK);
+      const flowNames = await model.getVarNames(SIMLIN_VARTYPE_FLOW);
+      const auxNames = await model.getVarNames(SIMLIN_VARTYPE_AUX);
+      const moduleNames = await model.getVarNames(SIMLIN_VARTYPE_MODULE);
 
-      expect(Array.isArray(variables)).toBe(true);
-      expect(variables.length).toBe(stocks.length + flows.length + auxs.length);
+      expect(Array.isArray(allNames)).toBe(true);
+      expect(allNames.length).toBe(stockNames.length + flowNames.length + auxNames.length + moduleNames.length);
     });
 
     it('should include teacup temperature variable', async () => {
       const model = await project.mainModel();
-      const variables = await model.variables();
 
-      const teacupTemp = variables.find((v) => v.name === 'teacup temperature');
+      const teacupTemp = await model.getVariable('teacup temperature');
       expect(teacupTemp).toBeDefined();
       expect(teacupTemp!.type).toBe('stock');
     });
@@ -259,30 +270,33 @@ describe('High-Level API', () => {
       expect(result).toBeUndefined();
     });
 
-    it('stocks() should return only stocks', async () => {
+    it('getVarNames with stock type mask returns only stocks', async () => {
       const model = await project.mainModel();
-      const stocks = await model.stocks();
+      const stockNames = await model.getVarNames(SIMLIN_VARTYPE_STOCK);
 
-      for (const stock of stocks) {
-        expect(stock.type).toBe('stock');
+      for (const name of stockNames) {
+        const v = await model.getVariable(name);
+        expect(v!.type).toBe('stock');
       }
     });
 
-    it('flows() should return only flows', async () => {
+    it('getVarNames with flow type mask returns only flows', async () => {
       const model = await project.mainModel();
-      const flows = await model.flows();
+      const flowNames = await model.getVarNames(SIMLIN_VARTYPE_FLOW);
 
-      for (const flow of flows) {
-        expect(flow.type).toBe('flow');
+      for (const name of flowNames) {
+        const v = await model.getVariable(name);
+        expect(v!.type).toBe('flow');
       }
     });
 
-    it('auxs() should return only auxiliaries', async () => {
+    it('getVarNames with aux type mask returns only auxiliaries', async () => {
       const model = await project.mainModel();
-      const auxs = await model.auxs();
+      const auxNames = await model.getVarNames(SIMLIN_VARTYPE_AUX);
 
-      for (const aux of auxs) {
-        expect(aux.type).toBe('aux');
+      for (const name of auxNames) {
+        const v = await model.getVariable(name);
+        expect(v!.type).toBe('aux');
       }
     });
 
@@ -306,12 +320,11 @@ describe('High-Level API', () => {
 
     it('should get incoming links for a variable', async () => {
       const model = await project.mainModel();
-      const flows = await model.flows();
+      const flowNames = await model.getVarNames(SIMLIN_VARTYPE_FLOW);
 
       // Find a flow that has dependencies
-      const flow = flows[0];
-      if (flow) {
-        const incomingLinks = await model.getIncomingLinks(flow.name);
+      if (flowNames.length > 0) {
+        const incomingLinks = await model.getIncomingLinks(flowNames[0]);
         expect(Array.isArray(incomingLinks)).toBe(true);
       }
     });
@@ -754,27 +767,29 @@ describe('High-Level API', () => {
       });
 
       // After edit, the model should have the new variable
-      const auxs = await model.auxs();
-      const newConst = auxs.find((a) => a.name === 'new_constant');
+      const newConst = await model.getVariable('new_constant');
       expect(newConst).toBeDefined();
-      expect(newConst!.equation).toBe('42');
+      expect(newConst!.type).toBe('aux');
+      if (newConst!.type === 'aux') {
+        expect(newConst!.equation).toBe('42');
+      }
     });
 
     it('should not apply patch if no operations added', async () => {
       const model = await project.mainModel();
-      const originalAuxCount = (await model.auxs()).length;
+      const originalAuxCount = (await model.getVarNames(SIMLIN_VARTYPE_AUX)).length;
 
       await model.edit(() => {
         // Don't add any operations
       });
 
       // No change should occur
-      expect((await model.auxs()).length).toBe(originalAuxCount);
+      expect((await model.getVarNames(SIMLIN_VARTYPE_AUX)).length).toBe(originalAuxCount);
     });
 
     it('should support dry run mode', async () => {
       const model = await project.mainModel();
-      const originalAuxCount = (await model.auxs()).length;
+      const originalAuxCount = (await model.getVarNames(SIMLIN_VARTYPE_AUX)).length;
 
       await model.edit(
         (currentVars, patch) => {
@@ -787,16 +802,17 @@ describe('High-Level API', () => {
       );
 
       // In dry run mode, changes should NOT be applied
-      expect((await model.auxs()).length).toBe(originalAuxCount);
-      expect((await model.auxs()).find((a) => a.name === 'dry_run_aux')).toBeUndefined();
+      expect((await model.getVarNames(SIMLIN_VARTYPE_AUX)).length).toBe(originalAuxCount);
+      const dryRunAux = await model.getVariable('dry_run_aux');
+      expect(dryRunAux).toBeUndefined();
     });
 
     it('should invalidate caches after edit', async () => {
       const model = await project.mainModel();
 
-      // Access stocks to populate cache
-      const stocksBefore = await model.stocks();
-      expect(stocksBefore.length).toBeGreaterThan(0);
+      // Get stock count before
+      const stockNamesBefore = await model.getVarNames(SIMLIN_VARTYPE_STOCK);
+      expect(stockNamesBefore.length).toBeGreaterThan(0);
 
       // Add a new stock
       await model.edit((currentVars, patch) => {
@@ -808,10 +824,11 @@ describe('High-Level API', () => {
         });
       });
 
-      // Cache should be invalidated, stocks should include new stock
-      const stocksAfter = await model.stocks();
-      expect(stocksAfter.length).toBe(stocksBefore.length + 1);
-      expect(stocksAfter.find((s) => s.name === 'new_stock')).toBeDefined();
+      // Stocks should include new stock
+      const stockNamesAfter = await model.getVarNames(SIMLIN_VARTYPE_STOCK);
+      expect(stockNamesAfter.length).toBe(stockNamesBefore.length + 1);
+      const newStock = await model.getVariable('new_stock');
+      expect(newStock).toBeDefined();
     });
   });
 
@@ -821,7 +838,8 @@ describe('High-Level API', () => {
       const model = await project.mainModel();
 
       expect(model).toBeInstanceOf(Model);
-      expect((await model.variables()).find((v) => v.name === 'teacup temperature')).toBeDefined();
+      const teacupTemp = await model.getVariable('teacup temperature');
+      expect(teacupTemp).toBeDefined();
 
       await project.dispose();
     });
@@ -964,11 +982,13 @@ describe('High-Level API', () => {
       const project = await Project.openJson(JSON.stringify(projectJson));
       const model = await project.mainModel();
 
-      const stocks = await model.stocks();
-      const stock = stocks.find((s) => s.name === 'population');
+      const stock = await model.getVariable('population');
       expect(stock).toBeDefined();
-      expect(stock!.initialEquation).toBe('1000');
-      expect(stock!.arrayedEquation?.dimensions).toEqual(['Region']);
+      expect(stock!.type).toBe('stock');
+      if (stock!.type === 'stock') {
+        expect(stock!.initialEquation).toBe('1000');
+        expect(stock!.arrayedEquation?.dimensions).toEqual(['Region']);
+      }
 
       await project.dispose();
     });
@@ -990,10 +1010,12 @@ describe('High-Level API', () => {
       const project = await Project.open(xmileData);
       const model = await project.mainModel();
 
-      const stocks = await model.stocks();
-      const stockA = stocks.find((s) => s.name === 'Stock A');
+      const stockA = await model.getVariable('Stock A');
       expect(stockA).toBeDefined();
-      expect(stockA!.initialEquation).toBe('0');
+      expect(stockA!.type).toBe('stock');
+      if (stockA!.type === 'stock') {
+        expect(stockA!.initialEquation).toBe('0');
+      }
 
       await project.dispose();
     });
@@ -1139,8 +1161,8 @@ describe('High-Level API', () => {
       ).rejects.toThrow('Simulated user error');
 
       // Model should still be usable after failed edit
-      expect((await model.stocks()).length).toBeGreaterThan(0);
-      await expect(model.variables()).resolves.toBeDefined();
+      expect((await model.getVarNames(SIMLIN_VARTYPE_STOCK)).length).toBeGreaterThan(0);
+      await expect(model.getVarNames()).resolves.toBeDefined();
 
       await project.dispose();
     });
@@ -1158,7 +1180,7 @@ describe('High-Level API', () => {
 
       // Accessing the model after project disposal should throw
       // (because the model was disposed along with the project)
-      await expect(model.variables()).rejects.toThrow();
+      await expect(model.getVarNames()).rejects.toThrow();
     });
 
     // Test for: Link polarity should be validated at runtime
@@ -1255,8 +1277,8 @@ describe('High-Level API', () => {
         patch.upsertAux({ name: 'new_var', equation: '42' });
       }, { allowErrors: true });
 
-      const auxs = await model.auxs();
-      expect(auxs.find((a) => a.name === 'new_var')).toBeDefined();
+      const newVar = await model.getVariable('new_var');
+      expect(newVar).toBeDefined();
 
       await project.dispose();
     });
@@ -1311,8 +1333,7 @@ describe('High-Level API', () => {
 
       // The teacup model should have the expected variables
       const model = await project.mainModel();
-      const variables = await model.variables();
-      const varNames = variables.map((v) => v.name.toLowerCase());
+      const varNames = await model.getVarNames();
       expect(varNames).toContain('teacup_temperature');
 
       await project.dispose();

@@ -78,7 +78,7 @@ describe('applyPatch with variable creation', () => {
 
     // Variable should be created
     const model = await project.mainModel();
-    const vars = (await model.variables()).map((v) => v.name);
+    const vars = await model.getVarNames();
     expect(vars).toContain('new_var');
 
     // Should return collected errors (empty equation warning)
