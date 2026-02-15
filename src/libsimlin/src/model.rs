@@ -7,18 +7,63 @@
 //! Functions for inspecting models: reference counting, listing variables,
 //! querying dependencies, retrieving causal links, and getting LaTeX equations.
 
-use simlin_engine::{self as engine, canonicalize};
+use simlin_engine::{self as engine, canonicalize, datamodel};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
+use std::sync::MutexGuard;
 
 use crate::ffi::{SimlinLink, SimlinLinkPolarity, SimlinLinks};
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
+use crate::memory::simlin_malloc;
 use crate::{
     clear_out_error, drop_c_string, drop_links_vec, require_model, store_anyhow_error, store_error,
     SimlinErrorCode, SimlinModel,
 };
+
+/// Allocate an FFI output buffer and copy `bytes` into it.
+///
+/// On success, writes the buffer pointer and length to `out_buffer`/`out_len`
+/// and returns `true`. On allocation failure, stores an error and returns `false`.
+///
+/// # Safety
+/// `out_buffer` and `out_len` must be valid, non-null pointers.
+unsafe fn write_bytes_to_ffi_output(
+    bytes: &[u8],
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+    context: &str,
+) -> bool {
+    let len = bytes.len();
+    let buf = simlin_malloc(len);
+    if buf.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message(format!("allocation failed while serializing {context}")),
+        );
+        return false;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+    *out_buffer = buf;
+    *out_len = len;
+    true
+}
+
+/// Find a model by name in a locked project.
+pub(crate) fn find_model_in_project<'a>(
+    project: &'a MutexGuard<'_, engine::Project>,
+    model_name: &str,
+) -> Option<&'a datamodel::Model> {
+    let canonical = canonicalize(model_name);
+    project
+        .datamodel
+        .models
+        .iter()
+        .find(|m| canonicalize(&m.name) == canonical)
+}
 
 /// Increments the reference count of a model
 ///
@@ -36,6 +81,39 @@ pub unsafe extern "C" fn simlin_model_ref(model: *mut SimlinModel) {
 #[no_mangle]
 pub unsafe extern "C" fn simlin_model_unref(model: *mut SimlinModel) {
     crate::model_unref(model);
+}
+
+/// Returns the resolved display name of this model.
+///
+/// The returned string is owned by the caller and must be freed with
+/// `simlin_free_string`.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_name(
+    model: *mut SimlinModel,
+    out_error: *mut *mut SimlinError,
+) -> *mut c_char {
+    clear_out_error(out_error);
+    let model_ref = match require_model(model) {
+        Ok(m) => m,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return ptr::null_mut();
+        }
+    };
+    match CString::new(model_ref.model_name.as_str()) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("model name contains interior NUL byte"),
+            );
+            ptr::null_mut()
+        }
+    }
 }
 
 /// Gets the number of variables in the model
@@ -506,4 +584,226 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
         Ok(s) => s.into_raw(),
         Err(_) => ptr::null_mut(),
     }
+}
+
+/// Gets a single variable from the model as tagged JSON.
+///
+/// Returns JSON with a `"type"` discriminator (`"stock"`, `"flow"`, `"aux"`, `"module"`).
+/// Caller must free the output buffer with `simlin_free`.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `var_name` must be a valid C string
+/// - `out_buffer` and `out_len` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_var_json(
+    model: *mut SimlinModel,
+    var_name: *const c_char,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    if var_name.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("variable name pointer must not be NULL"),
+        );
+        return;
+    }
+
+    let model_ref = ffi_try!(out_error, require_model(model));
+    let project_locked = (*model_ref.project).project.lock().unwrap();
+
+    let name_str = match CStr::from_ptr(var_name).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("variable name is not valid UTF-8"),
+            );
+            return;
+        }
+    };
+    let canonical_name = canonicalize(name_str);
+
+    let dm_model = match find_model_in_project(&project_locked, &model_ref.model_name) {
+        Some(m) => m,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName)
+                    .with_message(format!("model '{}' not found", model_ref.model_name)),
+            );
+            return;
+        }
+    };
+
+    let dm_var = match dm_model
+        .variables
+        .iter()
+        .find(|v| canonicalize(v.get_ident()) == canonical_name)
+    {
+        Some(v) => v,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                    "variable '{}' does not exist in model '{}'",
+                    name_str, model_ref.model_name
+                )),
+            );
+            return;
+        }
+    };
+
+    let tagged: engine::json::TaggedVariable = dm_var.clone().into();
+    let bytes = match serde_json::to_vec(&tagged) {
+        Ok(b) => b,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to serialize variable JSON: {err}")),
+            );
+            return;
+        }
+    };
+
+    write_bytes_to_ffi_output(&bytes, out_buffer, out_len, out_error, "variable");
+}
+
+/// Gets all variables from the model as a tagged JSON array.
+///
+/// Each element has a `"type"` discriminator (`"stock"`, `"flow"`, `"aux"`, `"module"`).
+/// Caller must free the output buffer with `simlin_free`.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `out_buffer` and `out_len` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_vars_json(
+    model: *mut SimlinModel,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let model_ref = ffi_try!(out_error, require_model(model));
+    let project_locked = (*model_ref.project).project.lock().unwrap();
+
+    let dm_model = match find_model_in_project(&project_locked, &model_ref.model_name) {
+        Some(m) => m,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName)
+                    .with_message(format!("model '{}' not found", model_ref.model_name)),
+            );
+            return;
+        }
+    };
+
+    let tagged_vars: Vec<engine::json::TaggedVariable> = dm_model
+        .variables
+        .iter()
+        .map(|v| v.clone().into())
+        .collect();
+
+    let bytes = match serde_json::to_vec(&tagged_vars) {
+        Ok(b) => b,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to serialize variables JSON: {err}")),
+            );
+            return;
+        }
+    };
+
+    write_bytes_to_ffi_output(&bytes, out_buffer, out_len, out_error, "variables");
+}
+
+/// Gets the effective sim specs for a model as JSON.
+///
+/// Uses model-level sim_specs if present, otherwise falls back to
+/// the project-level sim_specs.
+/// Caller must free the output buffer with `simlin_free`.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `out_buffer` and `out_len` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_sim_specs_json(
+    model: *mut SimlinModel,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let model_ref = ffi_try!(out_error, require_model(model));
+    let project_locked = (*model_ref.project).project.lock().unwrap();
+
+    let dm_model = find_model_in_project(&project_locked, &model_ref.model_name);
+
+    // Sim specs are project-global with optional per-model overrides, so a
+    // missing model name is not an error here (unlike get_var_json/get_vars_json).
+    let dm_sim_specs = dm_model
+        .and_then(|m| m.sim_specs.as_ref())
+        .unwrap_or(&project_locked.datamodel.sim_specs);
+
+    let json_sim_specs: engine::json::SimSpecs = dm_sim_specs.clone().into();
+
+    let bytes = match serde_json::to_vec(&json_sim_specs) {
+        Ok(b) => b,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to serialize sim specs JSON: {err}")),
+            );
+            return;
+        }
+    };
+
+    write_bytes_to_ffi_output(&bytes, out_buffer, out_len, out_error, "sim specs");
 }

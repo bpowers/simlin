@@ -314,6 +314,11 @@ export class WorkerServer {
       }
 
       // Model operations
+      case 'modelGetName': {
+        const handle = this.getModelHandle(request.handle);
+        this.sendSuccess(requestId, this.backend.modelGetName(handle));
+        return;
+      }
       case 'modelDispose': {
         this.disposeModel(request.handle);
         this.sendSuccess(requestId, undefined);
@@ -332,6 +337,24 @@ export class WorkerServer {
       case 'modelGetLatexEquation': {
         const handle = this.getModelHandle(request.handle);
         this.sendSuccess(requestId, this.backend.modelGetLatexEquation(handle, request.ident));
+        return;
+      }
+      case 'modelGetVarJson': {
+        const handle = this.getModelHandle(request.handle);
+        const result = this.backend.modelGetVarJson(handle, request.varName);
+        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        return;
+      }
+      case 'modelGetVarsJson': {
+        const handle = this.getModelHandle(request.handle);
+        const result = this.backend.modelGetVarsJson(handle);
+        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        return;
+      }
+      case 'modelGetSimSpecsJson': {
+        const handle = this.getModelHandle(request.handle);
+        const result = this.backend.modelGetSimSpecsJson(handle);
+        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
         return;
       }
 

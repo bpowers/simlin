@@ -87,6 +87,25 @@ describe('High-Level API', () => {
       await project.dispose();
     });
 
+    it('should get the default model with null name', async () => {
+      const project = await openTestProject();
+
+      const model = await project.getModel(null);
+      expect(model).toBeInstanceOf(Model);
+
+      await project.dispose();
+    });
+
+    it('should throw for nonexistent model name', async () => {
+      const project = await openTestProject();
+
+      await expect(project.getModel('nonexistent_model_xyz')).rejects.toThrow(
+        /not found/,
+      );
+
+      await project.dispose();
+    });
+
     it('should check if project is simulatable', async () => {
       const project = await openTestProject();
 
@@ -222,6 +241,49 @@ describe('High-Level API', () => {
       const teacupTemp = variables.find((v) => v.name === 'teacup temperature');
       expect(teacupTemp).toBeDefined();
       expect(teacupTemp!.type).toBe('stock');
+    });
+
+    it('should get a single variable by name', async () => {
+      const model = await project.mainModel();
+
+      const teacupTemp = await model.getVariable('teacup temperature');
+      expect(teacupTemp).toBeDefined();
+      expect(teacupTemp!.type).toBe('stock');
+      expect(teacupTemp!.name).toBe('teacup temperature');
+    });
+
+    it('should return undefined for non-existent variable', async () => {
+      const model = await project.mainModel();
+
+      const result = await model.getVariable('nonexistent_variable_xyz');
+      expect(result).toBeUndefined();
+    });
+
+    it('stocks() should return only stocks', async () => {
+      const model = await project.mainModel();
+      const stocks = await model.stocks();
+
+      for (const stock of stocks) {
+        expect(stock.type).toBe('stock');
+      }
+    });
+
+    it('flows() should return only flows', async () => {
+      const model = await project.mainModel();
+      const flows = await model.flows();
+
+      for (const flow of flows) {
+        expect(flow.type).toBe('flow');
+      }
+    });
+
+    it('auxs() should return only auxiliaries', async () => {
+      const model = await project.mainModel();
+      const auxs = await model.auxs();
+
+      for (const aux of auxs) {
+        expect(aux.type).toBe('aux');
+      }
     });
 
     it('should get time spec', async () => {
@@ -906,7 +968,32 @@ describe('High-Level API', () => {
       const stock = stocks.find((s) => s.name === 'population');
       expect(stock).toBeDefined();
       expect(stock!.initialEquation).toBe('1000');
-      expect(stock!.dimensions).toEqual(['Region']);
+      expect(stock!.arrayedEquation?.dimensions).toEqual(['Region']);
+
+      await project.dispose();
+    });
+
+    // Test for: XMILE-sourced arrayed stocks store initial value in arrayedEquation.equation
+    it('should read XMILE-sourced arrayed stock initialEquation from equation field', async () => {
+      const subscriptedPath = path.join(
+        __dirname,
+        '..',
+        '..',
+        '..',
+        'test',
+        'test-models',
+        'tests',
+        'subscript_multiples',
+        'test_multiple_subscripts.stmx',
+      );
+      const xmileData = fs.readFileSync(subscriptedPath);
+      const project = await Project.open(xmileData);
+      const model = await project.mainModel();
+
+      const stocks = await model.stocks();
+      const stockA = stocks.find((s) => s.name === 'Stock A');
+      expect(stockA).toBeDefined();
+      expect(stockA!.initialEquation).toBe('0');
 
       await project.dispose();
     });
@@ -1130,6 +1217,85 @@ describe('High-Level API', () => {
       const linkElem = view.elements.find((e: { type: string }) => e.type === 'link');
       expect(linkElem).toBeDefined();
       expect(linkElem.polarity).toBe('+');
+
+      await project.dispose();
+    });
+  });
+
+  describe('Canonical model name resolution', () => {
+    // The Rust FFI resolves canonical name variants (e.g. "my_model" -> "My Model"),
+    // and the Model class must store the resolved display name so that edit()
+    // patches and check() error filtering work correctly.
+
+    function makeMultiModelProject(modelName: string): string {
+      return JSON.stringify({
+        name: 'test_project',
+        simSpecs: { startTime: 0, endTime: 10, dt: '1' },
+        models: [
+          {
+            name: modelName,
+            stocks: [],
+            flows: [],
+            auxiliaries: [{ name: 'x', equation: '1' }],
+          },
+        ],
+      });
+    }
+
+    it('should resolve model name for edit()', async () => {
+      const project = await Project.openJson(makeMultiModelProject('My Model'));
+
+      // Fetch via canonical alias -- the Rust FFI resolves this
+      const model = await project.getModel('my_model');
+
+      // edit() must use the resolved display name in the patch, not the alias.
+      // allowErrors because the engine may report compilation warnings for
+      // non-standard model names.
+      await model.edit((_currentVars, patch) => {
+        patch.upsertAux({ name: 'new_var', equation: '42' });
+      }, { allowErrors: true });
+
+      const auxs = await model.auxs();
+      expect(auxs.find((a) => a.name === 'new_var')).toBeDefined();
+
+      await project.dispose();
+    });
+
+    it('should resolve model name for check()', async () => {
+      // Create a model with an error (unknown reference).
+      // Use "Main" (capitalized) so the engine can still resolve and compile
+      // the model, while we fetch via the lowercase canonical alias "main".
+      const projectJson = JSON.stringify({
+        name: 'test_project',
+        simSpecs: { startTime: 0, endTime: 10, dt: '1' },
+        models: [
+          {
+            name: 'Main',
+            stocks: [],
+            flows: [],
+            auxiliaries: [{ name: 'bad_var', equation: 'unknown_ref' }],
+          },
+        ],
+      });
+
+      const project = await Project.openJson(projectJson);
+
+      // Fetch via lowercase canonical alias
+      const model = await project.getModel('main');
+      const issues = await model.check();
+
+      // check() should find the error despite the name casing difference
+      expect(issues.length).toBeGreaterThan(0);
+      expect(issues.some((i) => i.variable === 'bad_var')).toBe(true);
+
+      await project.dispose();
+    });
+
+    it('should expose the resolved display name via model.name', async () => {
+      const project = await Project.openJson(makeMultiModelProject('My Model'));
+
+      const model = await project.getModel('my_model');
+      expect(model.name).toBe('My Model');
 
       await project.dispose();
     });

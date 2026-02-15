@@ -4670,3 +4670,404 @@ fn test_libsimlin_multiple_reset_set_value_cycles() {
         simlin_project_unref(proj);
     }
 }
+
+#[test]
+fn test_model_get_var_json_stock() {
+    let datamodel = TestProject::new("get_var_json")
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * 0.02", None)
+        .flow("deaths", "population * 0.01", None)
+        .aux("birth_rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        assert!(!model.is_null());
+
+        let var_name = CString::new("population").unwrap();
+        let mut out_buffer: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        simlin_model_get_var_json(
+            model,
+            var_name.as_ptr(),
+            &mut out_buffer,
+            &mut out_len,
+            &mut out_error,
+        );
+
+        assert!(out_error.is_null(), "expected no error");
+        assert!(!out_buffer.is_null());
+        assert!(out_len > 0);
+
+        let slice = std::slice::from_raw_parts(out_buffer, out_len);
+        let json: Value = serde_json::from_slice(slice).expect("valid JSON");
+
+        assert_eq!(json["type"], "stock");
+        assert_eq!(json["name"], "population");
+        assert_eq!(json["initialEquation"], "100");
+        assert!(json["inflows"].as_array().unwrap().contains(&Value::String("births".to_string())));
+        assert!(json["outflows"].as_array().unwrap().contains(&Value::String("deaths".to_string())));
+
+        simlin_free(out_buffer);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_model_get_var_json_flow() {
+    let datamodel = TestProject::new("get_var_json_flow")
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * 0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+
+        let var_name = CString::new("births").unwrap();
+        let mut out_buffer: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        simlin_model_get_var_json(
+            model,
+            var_name.as_ptr(),
+            &mut out_buffer,
+            &mut out_len,
+            &mut out_error,
+        );
+
+        assert!(out_error.is_null());
+        let slice = std::slice::from_raw_parts(out_buffer, out_len);
+        let json: Value = serde_json::from_slice(slice).expect("valid JSON");
+
+        assert_eq!(json["type"], "flow");
+        assert_eq!(json["name"], "births");
+
+        simlin_free(out_buffer);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_model_get_var_json_aux() {
+    let datamodel = TestProject::new("get_var_json_aux")
+        .aux("rate", "0.05", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+
+        let var_name = CString::new("rate").unwrap();
+        let mut out_buffer: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        simlin_model_get_var_json(
+            model,
+            var_name.as_ptr(),
+            &mut out_buffer,
+            &mut out_len,
+            &mut out_error,
+        );
+
+        assert!(out_error.is_null());
+        let slice = std::slice::from_raw_parts(out_buffer, out_len);
+        let json: Value = serde_json::from_slice(slice).expect("valid JSON");
+
+        assert_eq!(json["type"], "aux");
+        assert_eq!(json["name"], "rate");
+
+        simlin_free(out_buffer);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_model_get_var_json_not_found() {
+    let datamodel = TestProject::new("get_var_not_found")
+        .aux("rate", "0.05", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+
+        let var_name = CString::new("nonexistent").unwrap();
+        let mut out_buffer: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        simlin_model_get_var_json(
+            model,
+            var_name.as_ptr(),
+            &mut out_buffer,
+            &mut out_len,
+            &mut out_error,
+        );
+
+        assert!(!out_error.is_null(), "expected error for nonexistent variable");
+        assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::DoesNotExist);
+        assert!(out_buffer.is_null());
+
+        simlin_error_free(out_error);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_model_get_var_json_null_var_name() {
+    let datamodel = TestProject::new("get_var_null_name")
+        .aux("rate", "0.05", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+
+        let mut out_buffer: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        simlin_model_get_var_json(
+            model,
+            ptr::null(),
+            &mut out_buffer,
+            &mut out_len,
+            &mut out_error,
+        );
+
+        assert!(!out_error.is_null(), "expected error for NULL var_name");
+        simlin_error_free(out_error);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_model_get_vars_json() {
+    let datamodel = TestProject::new("get_vars_json")
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * 0.02", None)
+        .flow("deaths", "population * 0.01", None)
+        .aux("birth_rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+
+        let mut out_buffer: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        simlin_model_get_vars_json(
+            model,
+            &mut out_buffer,
+            &mut out_len,
+            &mut out_error,
+        );
+
+        assert!(out_error.is_null(), "expected no error");
+        assert!(!out_buffer.is_null());
+
+        let slice = std::slice::from_raw_parts(out_buffer, out_len);
+        let vars: Vec<Value> = serde_json::from_slice(slice).expect("valid JSON array");
+
+        assert_eq!(vars.len(), 4, "expected 4 variables (1 stock + 2 flows + 1 aux)");
+
+        let types: Vec<&str> = vars.iter().map(|v| v["type"].as_str().unwrap()).collect();
+        assert!(types.contains(&"stock"));
+        assert!(types.contains(&"flow"));
+        assert!(types.contains(&"aux"));
+
+        let names: Vec<&str> = vars.iter().map(|v| v["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"population"));
+        assert!(names.contains(&"births"));
+        assert!(names.contains(&"deaths"));
+        assert!(names.contains(&"birth_rate"));
+
+        simlin_free(out_buffer);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_model_get_sim_specs_json() {
+    let datamodel = TestProject::new("get_sim_specs_json")
+        .aux("rate", "0.05", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+
+        let mut out_buffer: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        simlin_model_get_sim_specs_json(
+            model,
+            &mut out_buffer,
+            &mut out_len,
+            &mut out_error,
+        );
+
+        assert!(out_error.is_null(), "expected no error");
+        assert!(!out_buffer.is_null());
+
+        let slice = std::slice::from_raw_parts(out_buffer, out_len);
+        let sim_specs: Value = serde_json::from_slice(slice).expect("valid JSON");
+
+        assert!(sim_specs["startTime"].is_number(), "startTime should be a number");
+        assert!(sim_specs["endTime"].is_number(), "endTime should be a number");
+        assert!(
+            sim_specs["startTime"].as_f64().unwrap() < sim_specs["endTime"].as_f64().unwrap(),
+            "startTime should be less than endTime"
+        );
+
+        simlin_free(out_buffer);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_model_get_var_json_case_insensitive() {
+    let datamodel = TestProject::new("get_var_case")
+        .stock("Population", "100", &[], &[], None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+
+        let var_name = CString::new("population").unwrap();
+        let mut out_buffer: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        simlin_model_get_var_json(
+            model,
+            var_name.as_ptr(),
+            &mut out_buffer,
+            &mut out_len,
+            &mut out_error,
+        );
+
+        assert!(out_error.is_null(), "should find variable with different casing");
+        assert!(!out_buffer.is_null());
+
+        let slice = std::slice::from_raw_parts(out_buffer, out_len);
+        let json: Value = serde_json::from_slice(slice).expect("valid JSON");
+        assert_eq!(json["type"], "stock");
+
+        simlin_free(out_buffer);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_get_model_null_name_returns_default() {
+    let datamodel = TestProject::new("default_model")
+        .stock("population", "100", &[], &[], None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null(), "null name should return default model");
+        assert!(!model.is_null());
+
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_get_model_valid_name() {
+    let datamodel = TestProject::new("named_model")
+        .stock("population", "100", &[], &[], None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let name = CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, name.as_ptr(), &mut err);
+        assert!(err.is_null(), "exact model name should succeed");
+        assert!(!model.is_null());
+
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_get_model_canonical_name_match() {
+    let mut datamodel = TestProject::new("canonical_test")
+        .stock("population", "100", &[], &[], None)
+        .build_datamodel();
+    // Rename the model to have mixed case so we can test canonical matching
+    datamodel.models[0].name = "My Model".to_string();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // "my_model" is the canonical form of "My Model"
+        let name = CString::new("my_model").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, name.as_ptr(), &mut err);
+        assert!(err.is_null(), "canonical name variant should succeed");
+        assert!(!model.is_null());
+
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_get_model_nonexistent_name_returns_error() {
+    let datamodel = TestProject::new("model_lookup")
+        .stock("population", "100", &[], &[], None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let name = CString::new("nonexistent_model").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, name.as_ptr(), &mut err);
+        assert!(model.is_null(), "nonexistent model name should return null");
+        assert!(!err.is_null(), "should set error for missing model");
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::BadModelName);
+
+        simlin_error_free(err);
+        simlin_project_unref(proj);
+    }
+}

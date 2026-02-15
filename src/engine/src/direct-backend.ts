@@ -31,10 +31,14 @@ import {
 } from './internal/import-export';
 import {
   simlin_model_unref,
+  simlin_model_get_name,
   simlin_model_get_incoming_links,
   simlin_model_get_links as simlin_model_get_links_fn,
   simlin_model_get_latex_equation,
   simlin_model_get_var_names,
+  simlin_model_get_var_json,
+  simlin_model_get_vars_json,
+  simlin_model_get_sim_specs_json,
 } from './internal/model';
 import {
   simlin_sim_new,
@@ -330,6 +334,10 @@ export class DirectBackend implements EngineBackend {
 
   // Model operations
 
+  modelGetName(handle: ModelHandle): string {
+    return simlin_model_get_name(this.getModelPtr(handle));
+  }
+
   modelDispose(handle: ModelHandle): void {
     const entry = this._handles.get(handle as number);
     if (!entry || entry.disposed) {
@@ -353,6 +361,18 @@ export class DirectBackend implements EngineBackend {
 
   modelGetLatexEquation(handle: ModelHandle, ident: string): string | null {
     return simlin_model_get_latex_equation(this.getModelPtr(handle), ident);
+  }
+
+  modelGetVarJson(handle: ModelHandle, varName: string): Uint8Array {
+    return simlin_model_get_var_json(this.getModelPtr(handle), varName);
+  }
+
+  modelGetVarsJson(handle: ModelHandle): Uint8Array {
+    return simlin_model_get_vars_json(this.getModelPtr(handle));
+  }
+
+  modelGetSimSpecsJson(handle: ModelHandle): Uint8Array {
+    return simlin_model_get_sim_specs_json(this.getModelPtr(handle));
   }
 
   // Sim operations

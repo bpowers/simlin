@@ -388,6 +388,47 @@ char *simlin_model_get_latex_equation(SimlinModel *model,
                                       const char *ident,
                                       SimlinError **out_error);
 
+// Gets a single variable from the model as tagged JSON
+//
+// Returns JSON with a "type" discriminator ("stock", "flow", "aux", "module").
+// Caller must free the output buffer with simlin_free.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `var_name` must be a valid C string
+// - `out_buffer` and `out_len` must be valid pointers
+void simlin_model_get_var_json(SimlinModel *model,
+                               const char *var_name,
+                               uint8_t **out_buffer,
+                               uintptr_t *out_len,
+                               SimlinError **out_error);
+
+// Gets all variables from the model as a tagged JSON array
+//
+// Each element has a "type" discriminator ("stock", "flow", "aux", "module").
+// Caller must free the output buffer with simlin_free.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `out_buffer` and `out_len` must be valid pointers
+void simlin_model_get_vars_json(SimlinModel *model,
+                                uint8_t **out_buffer,
+                                uintptr_t *out_len,
+                                SimlinError **out_error);
+
+// Gets the effective sim specs for a model as JSON
+//
+// Uses model-level sim_specs if present, otherwise falls back to project-level.
+// Caller must free the output buffer with simlin_free.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `out_buffer` and `out_len` must be valid pointers
+void simlin_model_get_sim_specs_json(SimlinModel *model,
+                                     uint8_t **out_buffer,
+                                     uintptr_t *out_len,
+                                     SimlinError **out_error);
+
 // Creates a new simulation context
 //
 // # Safety

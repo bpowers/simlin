@@ -210,6 +210,112 @@ def apply_patch_json(
             lib.simlin_error_free(errors_ptr)
 
 
+def model_get_var_json(model_ptr: Any, var_name: str) -> bytes | None:
+    """Get a single variable from a model as tagged JSON.
+
+    Args:
+        model_ptr: Pointer to a SimlinModel
+        var_name: Name of the variable to query
+
+    Returns:
+        JSON bytes for the variable, or None if the variable does not exist
+
+    Raises:
+        SimlinRuntimeError: If the operation fails for a reason other than
+            the variable not existing
+    """
+    output_ptr = ffi.new("uint8_t **")
+    output_len_ptr = ffi.new("uintptr_t *")
+    err_ptr = ffi.new("SimlinError **")
+    c_name = string_to_c(var_name)
+
+    lib.simlin_model_get_var_json(
+        model_ptr,
+        c_name,
+        output_ptr,
+        output_len_ptr,
+        err_ptr,
+    )
+
+    if err_ptr[0] != ffi.NULL:
+        err = err_ptr[0]
+        code = lib.simlin_error_get_code(err)
+        from .errors import ErrorCode
+
+        if code == ErrorCode.DOES_NOT_EXIST.value:
+            lib.simlin_error_free(err)
+            return None
+        # Re-pack and let check_out_error raise
+        err_ptr_recheck = ffi.new("SimlinError **")
+        err_ptr_recheck[0] = err
+        check_out_error(err_ptr_recheck, f"Get variable JSON for '{var_name}'")
+
+    try:
+        return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))
+    finally:
+        lib.simlin_free(output_ptr[0])
+
+
+def model_get_vars_json(model_ptr: Any) -> bytes:
+    """Get all variables from a model as a tagged JSON array.
+
+    Args:
+        model_ptr: Pointer to a SimlinModel
+
+    Returns:
+        JSON-encoded array of variable objects (UTF-8 bytes)
+
+    Raises:
+        SimlinRuntimeError: If the operation fails
+    """
+    output_ptr = ffi.new("uint8_t **")
+    output_len_ptr = ffi.new("uintptr_t *")
+    err_ptr = ffi.new("SimlinError **")
+
+    lib.simlin_model_get_vars_json(
+        model_ptr,
+        output_ptr,
+        output_len_ptr,
+        err_ptr,
+    )
+    check_out_error(err_ptr, "Get all variables JSON")
+
+    try:
+        return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))
+    finally:
+        lib.simlin_free(output_ptr[0])
+
+
+def model_get_sim_specs_json(model_ptr: Any) -> bytes:
+    """Get the effective sim specs for a model as JSON.
+
+    Args:
+        model_ptr: Pointer to a SimlinModel
+
+    Returns:
+        JSON-encoded sim specs (UTF-8 bytes)
+
+    Raises:
+        SimlinRuntimeError: If the operation fails
+    """
+    output_ptr = ffi.new("uint8_t **")
+    output_len_ptr = ffi.new("uintptr_t *")
+    err_ptr = ffi.new("SimlinError **")
+
+    lib.simlin_model_get_sim_specs_json(
+        model_ptr,
+        output_ptr,
+        output_len_ptr,
+        err_ptr,
+    )
+    check_out_error(err_ptr, "Get sim specs JSON")
+
+    try:
+        return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))
+    finally:
+        lib.simlin_free(output_ptr[0])
+
+
 def serialize_json(project_ptr: Any) -> bytes:
     """Serialize a project to JSON format.
 
@@ -277,6 +383,9 @@ __all__ = [
     "free_c_string",
     "get_error_string",
     "lib",
+    "model_get_sim_specs_json",
+    "model_get_var_json",
+    "model_get_vars_json",
     "open_json",
     "serialize_json",
     "string_to_c",

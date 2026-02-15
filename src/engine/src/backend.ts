@@ -71,10 +71,14 @@ export interface EngineBackend {
   ): MaybePromise<ErrorDetail[]>;
 
   // Model operations
+  modelGetName(handle: ModelHandle): MaybePromise<string>;
   modelDispose(handle: ModelHandle): MaybePromise<void>;
   modelGetIncomingLinks(handle: ModelHandle, varName: string): MaybePromise<string[]>;
   modelGetLinks(handle: ModelHandle): MaybePromise<Link[]>;
   modelGetLatexEquation(handle: ModelHandle, ident: string): MaybePromise<string | null>;
+  modelGetVarJson(handle: ModelHandle, varName: string): MaybePromise<Uint8Array>;
+  modelGetVarsJson(handle: ModelHandle): MaybePromise<Uint8Array>;
+  modelGetSimSpecsJson(handle: ModelHandle): MaybePromise<Uint8Array>;
 
   // Sim operations
   simNew(modelHandle: ModelHandle, enableLtm: boolean): MaybePromise<SimHandle>;

@@ -539,6 +539,45 @@ pub fn generate_schema_json() -> String {
     serde_json::to_string_pretty(&schema).expect("schema serialization should never fail")
 }
 
+/// A variable with a `"type"` discriminator for targeted model queries.
+///
+/// Serializes with `#[serde(tag = "type")]` so the JSON output includes
+/// e.g. `{"type": "stock", "name": "population", ...}`.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TaggedVariable {
+    Stock(Stock),
+    Flow(Flow),
+    #[serde(rename = "aux")]
+    Auxiliary(Auxiliary),
+    Module(Module),
+}
+
+impl From<datamodel::Variable> for TaggedVariable {
+    fn from(var: datamodel::Variable) -> Self {
+        match var {
+            datamodel::Variable::Stock(s) => TaggedVariable::Stock(s.into()),
+            datamodel::Variable::Flow(f) => TaggedVariable::Flow(f.into()),
+            datamodel::Variable::Aux(a) => TaggedVariable::Auxiliary(a.into()),
+            datamodel::Variable::Module(m) => TaggedVariable::Module(m.into()),
+        }
+    }
+}
+
+impl TaggedVariable {
+    /// The display name of this variable.
+    pub fn name(&self) -> &str {
+        match self {
+            TaggedVariable::Stock(s) => &s.name,
+            TaggedVariable::Flow(f) => &f.name,
+            TaggedVariable::Auxiliary(a) => &a.name,
+            TaggedVariable::Module(m) => &m.name,
+        }
+    }
+}
+
 // Conversions FROM json types TO datamodel types
 
 impl From<GraphicalFunctionScale> for datamodel::GraphicalFunctionScale {
@@ -2805,6 +2844,209 @@ mod tests {
                 "Content mismatch for: {}",
                 name
             );
+        }
+    }
+
+    #[test]
+    fn test_tagged_variable_stock_serialization() {
+        let stock = Stock {
+            uid: 1,
+            name: "population".to_string(),
+            initial_equation: "100".to_string(),
+            units: "people".to_string(),
+            inflows: vec!["births".to_string()],
+            outflows: vec!["deaths".to_string()],
+            non_negative: false,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: None,
+        };
+
+        let tagged = TaggedVariable::Stock(stock.clone());
+        let json_str = serde_json::to_string(&tagged).unwrap();
+
+        assert!(
+            json_str.contains("\"type\":\"stock\""),
+            "missing type discriminator: {}",
+            json_str
+        );
+        assert!(
+            json_str.contains("\"name\":\"population\""),
+            "missing name: {}",
+            json_str
+        );
+
+        let roundtrip: TaggedVariable = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(tagged, roundtrip);
+        assert_eq!(roundtrip.name(), "population");
+    }
+
+    #[test]
+    fn test_tagged_variable_flow_serialization() {
+        let flow = Flow {
+            uid: 2,
+            name: "births".to_string(),
+            equation: "population * birth_rate".to_string(),
+            units: "people/year".to_string(),
+            non_negative: false,
+            graphical_function: None,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: None,
+        };
+
+        let tagged = TaggedVariable::Flow(flow);
+        let json_str = serde_json::to_string(&tagged).unwrap();
+
+        assert!(
+            json_str.contains("\"type\":\"flow\""),
+            "missing type discriminator: {}",
+            json_str
+        );
+
+        let roundtrip: TaggedVariable = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(tagged, roundtrip);
+        assert_eq!(roundtrip.name(), "births");
+    }
+
+    #[test]
+    fn test_tagged_variable_aux_serialization() {
+        let aux = Auxiliary {
+            uid: 3,
+            name: "birth_rate".to_string(),
+            equation: "0.02".to_string(),
+            initial_equation: String::new(),
+            units: "1/year".to_string(),
+            graphical_function: None,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: None,
+        };
+
+        let tagged = TaggedVariable::Auxiliary(aux);
+        let json_str = serde_json::to_string(&tagged).unwrap();
+
+        // aux variant uses #[serde(rename = "aux")]
+        assert!(
+            json_str.contains("\"type\":\"aux\""),
+            "missing/wrong type discriminator: {}",
+            json_str
+        );
+
+        let roundtrip: TaggedVariable = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(tagged, roundtrip);
+        assert_eq!(roundtrip.name(), "birth_rate");
+    }
+
+    #[test]
+    fn test_tagged_variable_module_serialization() {
+        let module = Module {
+            uid: 4,
+            name: "submodel".to_string(),
+            model_name: "SubModel".to_string(),
+            units: String::new(),
+            documentation: String::new(),
+            references: vec![],
+            can_be_module_input: false,
+            is_public: false,
+        };
+
+        let tagged = TaggedVariable::Module(module);
+        let json_str = serde_json::to_string(&tagged).unwrap();
+
+        assert!(
+            json_str.contains("\"type\":\"module\""),
+            "missing type discriminator: {}",
+            json_str
+        );
+
+        let roundtrip: TaggedVariable = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(tagged, roundtrip);
+        assert_eq!(roundtrip.name(), "submodel");
+    }
+
+    #[test]
+    fn test_tagged_variable_from_datamodel() {
+        let dm_stock = datamodel::Variable::Stock(datamodel::Stock {
+            ident: "inventory".to_string(),
+            equation: datamodel::Equation::Scalar("50".to_string(), None),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["production".to_string()],
+            outflows: vec!["sales".to_string()],
+            non_negative: false,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+            ai_state: None,
+            uid: Some(10),
+        });
+
+        let tagged: TaggedVariable = dm_stock.into();
+        match &tagged {
+            TaggedVariable::Stock(s) => {
+                assert_eq!(s.name, "inventory");
+                assert_eq!(s.uid, 10);
+                assert_eq!(s.inflows, vec!["production"]);
+                assert_eq!(s.outflows, vec!["sales"]);
+            }
+            _ => panic!("expected Stock variant"),
+        }
+
+        let json_str = serde_json::to_string(&tagged).unwrap();
+        assert!(json_str.contains("\"type\":\"stock\""));
+    }
+
+    #[test]
+    fn test_tagged_variable_array_serialization() {
+        let vars = vec![
+            TaggedVariable::Stock(Stock {
+                uid: 1,
+                name: "pop".to_string(),
+                initial_equation: "100".to_string(),
+                units: String::new(),
+                inflows: vec![],
+                outflows: vec![],
+                non_negative: false,
+                documentation: String::new(),
+                can_be_module_input: false,
+                is_public: false,
+                arrayed_equation: None,
+            }),
+            TaggedVariable::Flow(Flow {
+                uid: 2,
+                name: "rate".to_string(),
+                equation: "10".to_string(),
+                units: String::new(),
+                non_negative: false,
+                graphical_function: None,
+                documentation: String::new(),
+                can_be_module_input: false,
+                is_public: false,
+                arrayed_equation: None,
+            }),
+            TaggedVariable::Auxiliary(Auxiliary {
+                uid: 3,
+                name: "constant".to_string(),
+                equation: "5".to_string(),
+                initial_equation: String::new(),
+                units: String::new(),
+                graphical_function: None,
+                documentation: String::new(),
+                can_be_module_input: false,
+                is_public: false,
+                arrayed_equation: None,
+            }),
+        ];
+
+        let json_str = serde_json::to_string(&vars).unwrap();
+        let roundtrip: Vec<TaggedVariable> = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(vars.len(), roundtrip.len());
+        for (orig, rt) in vars.iter().zip(roundtrip.iter()) {
+            assert_eq!(orig, rt);
         }
     }
 }

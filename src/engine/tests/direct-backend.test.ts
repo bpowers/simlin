@@ -163,6 +163,37 @@ describe('DirectBackend', () => {
       const latex = backend.modelGetLatexEquation(modelHandle, 'nonexistent_xyz');
       expect(latex).toBeNull();
     });
+
+    it('should get single variable JSON', () => {
+      const bytes = backend.modelGetVarJson(modelHandle, 'teacup_temperature');
+      expect(bytes).toBeInstanceOf(Uint8Array);
+      expect(bytes.length).toBeGreaterThan(0);
+      const parsed = JSON.parse(new TextDecoder().decode(bytes));
+      expect(parsed.type).toBe('stock');
+      expect(parsed.name).toBe('teacup temperature');
+    });
+
+    it('should get all variables JSON', () => {
+      const bytes = backend.modelGetVarsJson(modelHandle);
+      expect(bytes).toBeInstanceOf(Uint8Array);
+      expect(bytes.length).toBeGreaterThan(0);
+      const parsed = JSON.parse(new TextDecoder().decode(bytes));
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed.length).toBeGreaterThan(0);
+      for (const v of parsed) {
+        expect(['stock', 'flow', 'aux', 'module']).toContain(v.type);
+        expect(typeof v.name).toBe('string');
+      }
+    });
+
+    it('should get sim specs JSON', () => {
+      const bytes = backend.modelGetSimSpecsJson(modelHandle);
+      expect(bytes).toBeInstanceOf(Uint8Array);
+      expect(bytes.length).toBeGreaterThan(0);
+      const parsed = JSON.parse(new TextDecoder().decode(bytes));
+      expect(typeof parsed.startTime).toBe('number');
+      expect(typeof parsed.endTime).toBe('number');
+    });
   });
 
   describe('sim operations', () => {

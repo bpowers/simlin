@@ -2511,7 +2511,7 @@ mod tests {
             assert!(!model_default.is_null());
             assert_eq!((*model_default).model_name.as_str(), "model1");
 
-            // Test simlin_project_get_model with non-existent name (should get first model)
+            // Test simlin_project_get_model with non-existent name (should return error)
             let bad_name = CString::new("nonexistent").unwrap();
             err = ptr::null_mut();
             let model_fallback = simlin_project_get_model(
@@ -2519,9 +2519,10 @@ mod tests {
                 bad_name.as_ptr(),
                 &mut err as *mut *mut SimlinError,
             );
-            assert!(!model_fallback.is_null());
-            assert!(err.is_null());
-            assert_eq!((*model_fallback).model_name.as_str(), "model1");
+            assert!(model_fallback.is_null());
+            assert!(!err.is_null());
+            assert_eq!(simlin_error_get_code(err), SimlinErrorCode::BadModelName);
+            simlin_error_free(err);
 
             // Test simlin_model_get_var_count
             let model2_name = CString::new("model2").unwrap();
@@ -2618,7 +2619,6 @@ mod tests {
             simlin_model_unref(model1);
             simlin_model_unref(model2);
             simlin_model_unref(model_default);
-            simlin_model_unref(model_fallback);
             simlin_project_unref(proj);
         }
     }

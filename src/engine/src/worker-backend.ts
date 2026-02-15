@@ -388,6 +388,14 @@ export class WorkerBackend implements EngineBackend {
 
   // ---- Model operations ----
 
+  modelGetName(handle: ModelHandle): Promise<string> {
+    return this.sendRequest<string>((requestId) => ({
+      type: 'modelGetName',
+      requestId,
+      handle,
+    }));
+  }
+
   modelDispose(handle: ModelHandle): Promise<void> {
     return this.sendRequest<void>((requestId) => ({
       type: 'modelDispose',
@@ -419,6 +427,31 @@ export class WorkerBackend implements EngineBackend {
       requestId,
       handle,
       ident,
+    }));
+  }
+
+  modelGetVarJson(handle: ModelHandle, varName: string): Promise<Uint8Array> {
+    return this.sendRequest<Uint8Array>((requestId) => ({
+      type: 'modelGetVarJson',
+      requestId,
+      handle,
+      varName,
+    }));
+  }
+
+  modelGetVarsJson(handle: ModelHandle): Promise<Uint8Array> {
+    return this.sendRequest<Uint8Array>((requestId) => ({
+      type: 'modelGetVarsJson',
+      requestId,
+      handle,
+    }));
+  }
+
+  modelGetSimSpecsJson(handle: ModelHandle): Promise<Uint8Array> {
+    return this.sendRequest<Uint8Array>((requestId) => ({
+      type: 'modelGetSimSpecsJson',
+      requestId,
+      handle,
     }));
   }
 
