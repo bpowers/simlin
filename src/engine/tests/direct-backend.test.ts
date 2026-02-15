@@ -184,12 +184,13 @@ describe('DirectBackend', () => {
 
     it('should get variable names with type mask', () => {
       const allNames = backend.modelGetVarNames(modelHandle);
-      const stockNames = backend.modelGetVarNames(modelHandle, 1); // SIMLIN_VARTYPE_STOCK
-      const flowNames = backend.modelGetVarNames(modelHandle, 2);  // SIMLIN_VARTYPE_FLOW
-      const auxNames = backend.modelGetVarNames(modelHandle, 4);   // SIMLIN_VARTYPE_AUX
+      const stockNames = backend.modelGetVarNames(modelHandle, 1);  // SIMLIN_VARTYPE_STOCK
+      const flowNames = backend.modelGetVarNames(modelHandle, 2);   // SIMLIN_VARTYPE_FLOW
+      const auxNames = backend.modelGetVarNames(modelHandle, 4);    // SIMLIN_VARTYPE_AUX
+      const moduleNames = backend.modelGetVarNames(modelHandle, 8); // SIMLIN_VARTYPE_MODULE
 
       expect(stockNames.length).toBeGreaterThan(0);
-      expect(allNames.length).toBe(stockNames.length + flowNames.length + auxNames.length);
+      expect(allNames.length).toBe(stockNames.length + flowNames.length + auxNames.length + moduleNames.length);
     });
 
     it('should get sim specs JSON', () => {

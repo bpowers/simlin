@@ -12,7 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder, configureWasm, ready, resetWasm, SIMLIN_VARTYPE_STOCK, SIMLIN_VARTYPE_FLOW, SIMLIN_VARTYPE_AUX } from '../src';
+import { Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder, configureWasm, ready, resetWasm, SIMLIN_VARTYPE_STOCK, SIMLIN_VARTYPE_FLOW, SIMLIN_VARTYPE_AUX, SIMLIN_VARTYPE_MODULE } from '../src';
 import { JsonStock, JsonFlow, JsonAuxiliary } from '../src/json-types';
 
 // Helper to load the WASM module
@@ -240,9 +240,10 @@ describe('High-Level API', () => {
       const stockNames = await model.getVarNames(SIMLIN_VARTYPE_STOCK);
       const flowNames = await model.getVarNames(SIMLIN_VARTYPE_FLOW);
       const auxNames = await model.getVarNames(SIMLIN_VARTYPE_AUX);
+      const moduleNames = await model.getVarNames(SIMLIN_VARTYPE_MODULE);
 
       expect(Array.isArray(allNames)).toBe(true);
-      expect(allNames.length).toBe(stockNames.length + flowNames.length + auxNames.length);
+      expect(allNames.length).toBe(stockNames.length + flowNames.length + auxNames.length + moduleNames.length);
     });
 
     it('should include teacup temperature variable', async () => {
