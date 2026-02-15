@@ -289,6 +289,10 @@ fn is_canonical(name: &str) -> bool {
 ///
 /// Returns `Cow::Borrowed` when the input is already canonical (avoiding
 /// allocation), or `Cow::Owned` when transformations were needed.
+///
+/// Note: the borrowed slice may be a sub-slice of the input when there is
+/// leading/trailing whitespace but the trimmed content is already canonical.
+/// The returned `Cow` borrows from the input `&str` in all borrowed cases.
 pub fn canonicalize(name: &str) -> Cow<'_, str> {
     // Fast path: if the name is already trimmed and canonical, avoid allocation.
     let trimmed = name.trim();
@@ -390,6 +394,50 @@ fn test_canonicalize_tab_handling() {
     assert!(matches!(canonicalize("a\tb"), Cow::Owned(_)));
     // Leading/trailing tabs are stripped by trim()
     assert_eq!("tab", &*canonicalize("\ttab\t"));
+}
+
+/// Verify that `is_canonical` and the full canonicalization slow path agree:
+/// when `is_canonical` returns true, the slow path must produce the same string.
+#[cfg(test)]
+mod canonicalize_invariant_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Force the slow path of canonicalize by bypassing the is_canonical check.
+    fn canonicalize_slow_path(name: &str) -> String {
+        let trimmed = name.trim();
+        let mut result = String::with_capacity(trimmed.len());
+        for part in super::IdentifierPartIterator::new(trimmed) {
+            let bytes = part.as_bytes();
+            let quoted = bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"';
+            let part = if quoted {
+                Cow::Borrowed(&part[1..bytes.len() - 1])
+            } else {
+                Cow::Owned(part.replace('.', "\u{00B7}"))
+            };
+            let part = part.replace("\\\\", "\\");
+            let part = super::replace_whitespace_with_underscore(&part);
+            let part = part.to_lowercase();
+            result.push_str(&part);
+        }
+        result
+    }
+
+    proptest! {
+        #[test]
+        fn fast_path_agrees_with_slow_path(s in "\\PC{0,100}") {
+            let cow = canonicalize(&s);
+            let slow = canonicalize_slow_path(&s);
+            // The Cow result must always equal the slow path result
+            prop_assert_eq!(&*cow, &*slow,
+                "canonicalize fast/slow path mismatch for {:?}", s);
+            // When Cow::Borrowed, it must equal the trimmed input
+            if let Cow::Borrowed(b) = &cow {
+                prop_assert_eq!(*b, s.trim(),
+                    "Borrowed result should equal trimmed input for {:?}", s);
+            }
+        }
+    }
 }
 
 #[test]
@@ -984,11 +1032,6 @@ impl Ident<Canonical> {
             inner: canonicalize(s).into_owned(),
             _phantom: PhantomData,
         }
-    }
-
-    /// Create a canonical identifier from a raw string (alias for `new`).
-    pub fn from_raw(s: &str) -> Self {
-        Self::new(s)
     }
 
     /// Create from an already-canonicalized string

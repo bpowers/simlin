@@ -772,11 +772,9 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Inf => f64::INFINITY,
                     BuiltinFn::Pi => std::f64::consts::PI,
                     BuiltinFn::Int(a) => self.eval(a).floor(),
-                    BuiltinFn::IsModuleInput(ident, _) => self.module.inputs.contains(&Ident::<
-                        Canonical,
-                    >::from_raw(
-                        ident
-                    )) as i8 as f64,
+                    BuiltinFn::IsModuleInput(ident, _) => {
+                        self.module.inputs.contains(&Ident::<Canonical>::new(ident)) as i8 as f64
+                    }
                     BuiltinFn::Ln(a) => self.eval(a).ln(),
                     BuiltinFn::Log10(a) => self.eval(a).log10(),
                     BuiltinFn::SafeDiv(a, b, default) => {
