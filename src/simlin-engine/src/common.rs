@@ -267,7 +267,7 @@ fn is_canonical(name: &str) -> bool {
             // Unquoted periods become middle dots
             '.' => return false,
             // Whitespace characters become underscores
-            ' ' | '\n' | '\r' | '\u{00A0}' => return false,
+            ' ' | '\n' | '\r' | '\t' | '\u{00A0}' => return false,
             // Consecutive backslashes get collapsed
             '\\' => {
                 if let Some(&next) = chars.peek()
@@ -377,6 +377,19 @@ fn test_is_canonical() {
     assert!(!is_canonical("has\\\\escape"));
     assert!(!is_canonical(" leading"));
     assert!(!is_canonical("trailing "));
+    assert!(!is_canonical("a\tb"));
+    assert!(!is_canonical("\ttab"));
+}
+
+#[test]
+fn test_canonicalize_tab_handling() {
+    // Tabs should be treated as whitespace and replaced with underscores,
+    // matching the behavior for spaces, newlines, etc.
+    assert_eq!("a_b", &*canonicalize("a\tb"));
+    assert_eq!("a_b_c", &*canonicalize("a\t\tb\tc"));
+    assert!(matches!(canonicalize("a\tb"), Cow::Owned(_)));
+    // Leading/trailing tabs are stripped by trim()
+    assert_eq!("tab", &*canonicalize("\ttab\t"));
 }
 
 #[test]
@@ -998,17 +1011,6 @@ impl Ident<Canonical> {
         }
     }
 
-    /// Create from a `Cow<str>` that is already in canonical form.
-    ///
-    /// Avoids allocation when the Cow is borrowed by copying only when
-    /// needed.
-    pub fn from_canonical_cow(cow: Cow<'_, str>) -> Self {
-        Ident {
-            inner: cow.into_owned(),
-            _phantom: PhantomData,
-        }
-    }
-
     /// Get a borrowed reference to this identifier
     pub fn as_ref(&self) -> IdentRef<'_, Canonical> {
         IdentRef {
@@ -1137,20 +1139,6 @@ impl std::borrow::Borrow<str> for Ident<Canonical> {
     }
 }
 
-// Cross-type equality between Cow<str> and Ident<Canonical>
-// so that canonicalize() results can be compared directly with Idents
-impl PartialEq<Ident<Canonical>> for Cow<'_, str> {
-    fn eq(&self, other: &Ident<Canonical>) -> bool {
-        &**self == other.as_str()
-    }
-}
-
-impl PartialEq<Cow<'_, str>> for Ident<Canonical> {
-    fn eq(&self, other: &Cow<'_, str>) -> bool {
-        self.as_str() == &**other
-    }
-}
-
 impl<'a> AsRef<str> for IdentRef<'a, Canonical> {
     fn as_ref(&self) -> &str {
         self.inner
@@ -1186,7 +1174,7 @@ impl<'a> fmt::Display for CanonicalStr<'a> {
 
 /// Replace whitespace sequences with underscores.
 /// Handles: literal `\n` and `\r` (two-character sequences), actual newlines/carriage returns,
-/// spaces, and non-breaking spaces (U+00A0). Consecutive matches become a single underscore.
+/// tabs, spaces, and non-breaking spaces (U+00A0). Consecutive matches become a single underscore.
 fn replace_whitespace_with_underscore(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -1208,7 +1196,7 @@ fn replace_whitespace_with_underscore(s: &str) -> String {
             // Not an escape sequence we handle, pass through
             in_whitespace = false;
             result.push(c);
-        } else if c == '\n' || c == '\r' || c == ' ' || c == '\u{00A0}' {
+        } else if c == '\n' || c == '\r' || c == '\t' || c == ' ' || c == '\u{00A0}' {
             // Actual whitespace characters
             if !in_whitespace {
                 result.push('_');
@@ -1323,6 +1311,13 @@ mod whitespace_replacement_tests {
     fn test_replace_non_breaking_space() {
         // U+00A0 non-breaking space
         assert_eq!(replace_whitespace_with_underscore("a\u{00A0}b"), "a_b");
+    }
+
+    #[test]
+    fn test_replace_tab() {
+        assert_eq!(replace_whitespace_with_underscore("a\tb"), "a_b");
+        // Tabs collapse with other whitespace
+        assert_eq!(replace_whitespace_with_underscore("a\t \nb"), "a_b");
     }
 
     #[test]

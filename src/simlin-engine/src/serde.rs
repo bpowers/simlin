@@ -1528,7 +1528,7 @@ impl From<Model> for project_io::Model {
         // This ensures consistent proto serialization regardless of file order or variable type
         model
             .variables
-            .sort_by_key(|a| canonicalize(a.get_ident()).into_owned());
+            .sort_by_cached_key(|a| canonicalize(a.get_ident()).into_owned());
 
         project_io::Model {
             name: model.name,
@@ -1643,7 +1643,7 @@ impl From<project_io::Model> for Model {
         let mut variables: Vec<Variable> =
             model.variables.into_iter().map(Variable::from).collect();
         // Sort variables by canonical identifier for deterministic ordering
-        variables.sort_by_key(|a| canonicalize(a.get_ident()).into_owned());
+        variables.sort_by_cached_key(|a| canonicalize(a.get_ident()).into_owned());
 
         Model {
             name: model.name,
