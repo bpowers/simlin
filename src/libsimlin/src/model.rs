@@ -39,6 +39,22 @@ fn matches_type_mask(var: &datamodel::Variable, type_mask: u32) -> bool {
     }
 }
 
+/// Parse an optional C filter string into a canonicalized Rust string.
+///
+/// Returns `Ok(None)` for NULL or empty filters, `Ok(Some(..))` for valid
+/// non-empty filters, and `Err(SimlinError)` for invalid UTF-8.
+unsafe fn parse_filter(filter: *const c_char) -> Result<Option<String>, SimlinError> {
+    if filter.is_null() {
+        return Ok(None);
+    }
+    match CStr::from_ptr(filter).to_str() {
+        Ok("") => Ok(None),
+        Ok(s) => Ok(Some(canonicalize(s).to_string())),
+        Err(_) => Err(SimlinError::new(SimlinErrorCode::Generic)
+            .with_message("filter string is not valid UTF-8")),
+    }
+}
+
 /// Allocate an FFI output buffer and copy `bytes` into it.
 ///
 /// On success, writes the buffer pointer and length to `out_buffer`/`out_len`
@@ -159,6 +175,14 @@ pub unsafe extern "C" fn simlin_model_get_var_count(
         return;
     }
 
+    let filter_str = match parse_filter(filter) {
+        Ok(f) => f,
+        Err(err) => {
+            store_error(out_error, err);
+            return;
+        }
+    };
+
     let model_ref = ffi_try!(out_error, require_model(model));
     let project_locked = (*model_ref.project).project.lock().unwrap();
 
@@ -171,23 +195,6 @@ pub unsafe extern "C" fn simlin_model_get_var_count(
                     .with_message(format!("model '{}' not found", model_ref.model_name)),
             );
             return;
-        }
-    };
-
-    let filter_str = if filter.is_null() {
-        None
-    } else {
-        match CStr::from_ptr(filter).to_str() {
-            Ok("") => None,
-            Ok(s) => Some(canonicalize(s)),
-            Err(_) => {
-                store_error(
-                    out_error,
-                    SimlinError::new(SimlinErrorCode::Generic)
-                        .with_message("filter string is not valid UTF-8"),
-                );
-                return;
-            }
         }
     };
 
@@ -235,6 +242,14 @@ pub unsafe extern "C" fn simlin_model_get_var_names(
         return;
     }
 
+    let filter_str = match parse_filter(filter) {
+        Ok(f) => f,
+        Err(err) => {
+            store_error(out_error, err);
+            return;
+        }
+    };
+
     let model_ref = ffi_try!(out_error, require_model(model));
     let project_locked = (*model_ref.project).project.lock().unwrap();
 
@@ -247,23 +262,6 @@ pub unsafe extern "C" fn simlin_model_get_var_names(
                     .with_message(format!("model '{}' not found", model_ref.model_name)),
             );
             return;
-        }
-    };
-
-    let filter_str = if filter.is_null() {
-        None
-    } else {
-        match CStr::from_ptr(filter).to_str() {
-            Ok("") => None,
-            Ok(s) => Some(canonicalize(s)),
-            Err(_) => {
-                store_error(
-                    out_error,
-                    SimlinError::new(SimlinErrorCode::Generic)
-                        .with_message("filter string is not valid UTF-8"),
-                );
-                return;
-            }
         }
     };
 

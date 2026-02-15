@@ -487,7 +487,9 @@ export class Model {
       SIMLIN_VARTYPE_STOCK | SIMLIN_VARTYPE_FLOW | SIMLIN_VARTYPE_AUX,
     );
 
-    // Build current variables map by fetching each individually
+    // Fetch each variable individually. This is an intentional N+1 pattern:
+    // the orthogonal get_var_names + get_var_json API keeps the FFI surface
+    // small and composable, at the cost of extra calls here.
     const currentVars: Record<string, JsonStock | JsonFlow | JsonAuxiliary> = {};
     for (const name of varNames) {
       const bytes = await this.backend.modelGetVarJson(this._handle, name);

@@ -18,16 +18,16 @@ use std::sync::Mutex;
 
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
+use crate::{
+    clear_out_error, compile_simulation, drop_c_string, ffi_error_from_engine, require_model,
+    require_sim, store_error, store_ffi_error, SimState, SimlinErrorCode, SimlinModel, SimlinSim,
+};
 
 /// Internal/instrumentation variables (e.g. LTM `$time`, `$dt`) start
 /// with `$` and should not be visible to callers.
 fn is_internal_var(name: &str) -> bool {
     name.starts_with('$')
 }
-use crate::{
-    clear_out_error, compile_simulation, drop_c_string, ffi_error_from_engine, require_model,
-    require_sim, store_error, store_ffi_error, SimState, SimlinErrorCode, SimlinModel, SimlinSim,
-};
 
 /// Creates a new simulation context
 ///

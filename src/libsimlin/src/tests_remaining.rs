@@ -5126,3 +5126,77 @@ fn test_get_model_nonexistent_name_returns_error() {
         simlin_project_unref(proj);
     }
 }
+
+#[test]
+fn test_sim_get_var_count_and_names() {
+    let datamodel = TestProject::new("sim_vars")
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * 0.02", None)
+        .flow("deaths", "population * 0.01", None)
+        .aux("growth_rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, false, &mut err);
+        assert!(err.is_null());
+        assert!(!sim.is_null());
+
+        // Get count
+        let mut count: usize = 0;
+        simlin_sim_get_var_count(sim, &mut count, &mut err);
+        assert!(err.is_null(), "get_var_count should succeed");
+        assert!(count > 0, "expected at least one sim var");
+
+        // Verify no internal ($-prefixed) vars are counted: the count
+        // should match the number of names returned.
+        let mut name_ptrs: Vec<*mut c_char> = vec![ptr::null_mut(); count];
+        let mut written: usize = 0;
+        simlin_sim_get_var_names(
+            sim,
+            name_ptrs.as_mut_ptr(),
+            count,
+            &mut written,
+            &mut err,
+        );
+        assert!(err.is_null(), "get_var_names should succeed");
+        assert_eq!(written, count, "written count must match var count");
+
+        let mut names: Vec<String> = Vec::with_capacity(written);
+        for &p in &name_ptrs[..written] {
+            assert!(!p.is_null());
+            let s = CStr::from_ptr(p).to_string_lossy().into_owned();
+            assert!(
+                !s.starts_with('$'),
+                "internal var '{}' should be filtered out",
+                s,
+            );
+            names.push(s);
+            simlin_free_string(p);
+        }
+
+        // Names should be sorted
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "sim var names should be sorted");
+
+        // All model-level variables should appear (possibly flattened)
+        for expected in &["population", "births", "deaths", "growth_rate"] {
+            assert!(
+                names.iter().any(|n| n.contains(expected)),
+                "expected '{}' in sim var names {:?}",
+                expected,
+                names,
+            );
+        }
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
