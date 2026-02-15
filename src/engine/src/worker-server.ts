@@ -345,10 +345,9 @@ export class WorkerServer {
         this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
         return;
       }
-      case 'modelGetVarsJson': {
+      case 'modelGetVarNames': {
         const handle = this.getModelHandle(request.handle);
-        const result = this.backend.modelGetVarsJson(handle);
-        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        this.sendSuccess(requestId, this.backend.modelGetVarNames(handle, request.typeMask, request.filter));
         return;
       }
       case 'modelGetSimSpecsJson': {

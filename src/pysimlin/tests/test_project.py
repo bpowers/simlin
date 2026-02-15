@@ -57,7 +57,7 @@ class TestProjectModels:
         model = project.get_model()
         # A blank model has no user-defined variables (builtin simulation variables
         # like time, dt, etc. are not exposed through the variables property)
-        assert len(model.variables) == 0
+        assert len(model.get_var_names()) == 0
 
     def test_get_nonexistent_model_raises(self, xmile_model_path) -> None:
         """Test that getting a nonexistent model raises an error."""

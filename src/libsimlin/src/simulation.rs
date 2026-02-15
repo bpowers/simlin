@@ -10,7 +10,7 @@
 
 use simlin_engine::{self as engine, canonicalize, Vm};
 use std::collections::HashMap;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double};
 use std::ptr;
 use std::sync::atomic::AtomicUsize;
@@ -19,8 +19,8 @@ use std::sync::Mutex;
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
 use crate::{
-    clear_out_error, compile_simulation, ffi_error_from_engine, require_model, require_sim,
-    store_error, store_ffi_error, SimState, SimlinErrorCode, SimlinModel, SimlinSim,
+    clear_out_error, compile_simulation, drop_c_string, ffi_error_from_engine, require_model,
+    require_sim, store_error, store_ffi_error, SimState, SimlinErrorCode, SimlinModel, SimlinSim,
 };
 
 /// Creates a new simulation context
@@ -567,6 +567,146 @@ pub unsafe extern "C" fn simlin_sim_get_offset(
         SimlinError::new(SimlinErrorCode::DoesNotExist)
             .with_message(format!("variable '{}' was not found", canon_name)),
     );
+}
+
+/// Gets the number of simulation-level variable names (flattened offsets).
+///
+/// Available immediately after `simlin_sim_new` (no simulation run needed).
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim
+#[no_mangle]
+pub unsafe extern "C" fn simlin_sim_get_var_count(
+    sim: *mut SimlinSim,
+    out_count: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_count.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("out_count pointer must not be NULL"),
+        );
+        return;
+    }
+
+    let sim_ref = ffi_try!(out_error, require_sim(sim));
+    let state = sim_ref.state.lock().unwrap();
+
+    if let Some(ref vm) = state.vm {
+        *out_count = vm
+            .names_as_strs()
+            .iter()
+            .filter(|n| !n.starts_with('$'))
+            .count();
+    } else if let Some(ref results) = state.results {
+        *out_count = results
+            .offsets
+            .keys()
+            .filter(|k| !k.as_str().starts_with('$'))
+            .count();
+    } else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("simulation was never successfully compiled"),
+        );
+    }
+}
+
+/// Gets the simulation-level variable names (flattened offsets).
+///
+/// Available immediately after `simlin_sim_new` (no simulation run needed).
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim
+/// - `result` must be a valid pointer to an array of at least `max` char pointers
+/// - The returned strings are owned by the caller and must be freed with simlin_free_string
+#[no_mangle]
+pub unsafe extern "C" fn simlin_sim_get_var_names(
+    sim: *mut SimlinSim,
+    result: *mut *mut c_char,
+    max: usize,
+    out_written: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_written.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("out_written pointer must not be NULL"),
+        );
+        return;
+    }
+
+    let sim_ref = ffi_try!(out_error, require_sim(sim));
+    let state = sim_ref.state.lock().unwrap();
+
+    let names_vec: Vec<String> = if let Some(ref vm) = state.vm {
+        vm.names_as_strs()
+            .into_iter()
+            .filter(|n| !n.starts_with('$'))
+            .collect()
+    } else if let Some(ref results) = state.results {
+        results
+            .offsets
+            .keys()
+            .filter(|k| !k.as_str().starts_with('$'))
+            .map(|k| k.as_str().to_string())
+            .collect()
+    } else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("simulation was never successfully compiled"),
+        );
+        return;
+    };
+
+    if max == 0 {
+        *out_written = names_vec.len();
+        return;
+    }
+
+    if result.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("result pointer must not be NULL when max > 0"),
+        );
+        return;
+    }
+
+    let mut names: Vec<&str> = names_vec.iter().map(|s| s.as_str()).collect();
+    names.sort();
+
+    let count = names.len().min(max);
+    let mut allocated: Vec<*mut c_char> = Vec::with_capacity(count);
+
+    for (i, name) in names.iter().take(count).enumerate() {
+        let c_string = match CString::new(*name) {
+            Ok(s) => s,
+            Err(_) => {
+                for ptr in allocated {
+                    drop_c_string(ptr);
+                }
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic).with_message(
+                        "variable name contains interior NUL byte and cannot be converted",
+                    ),
+                );
+                return;
+            }
+        };
+        let raw = c_string.into_raw();
+        allocated.push(raw);
+        *result.add(i) = raw;
+    }
+
+    *out_written = count;
 }
 
 /// Gets a time series for a variable

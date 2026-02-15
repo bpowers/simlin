@@ -350,56 +350,67 @@ class TestModelRepr:
 
 
 class TestModelStructuralProperties:
-    """Test the new structural properties of Model."""
-
-    def test_stocks_property(self, test_model: Model) -> None:
-        """Test that stocks property returns tuple of Stock objects."""
-        stocks = test_model.stocks
-        assert isinstance(stocks, tuple)
-
-        for stock in stocks:
-            from simlin.types import Stock
-
-            assert isinstance(stock, Stock)
-            assert isinstance(stock.name, str)
-            assert isinstance(stock.initial_equation, str)
-            assert isinstance(stock.inflows, tuple)
-            assert isinstance(stock.outflows, tuple)
-
-    def test_flows_property(self, test_model: Model) -> None:
-        """Test that flows property returns tuple of Flow objects."""
-        flows = test_model.flows
-        assert isinstance(flows, tuple)
-
-        for flow in flows:
-            from simlin.types import Flow
-
-            assert isinstance(flow, Flow)
-            assert isinstance(flow.name, str)
-            assert isinstance(flow.equation, str)
-
-    def test_auxs_property(self, test_model: Model) -> None:
-        """Test that auxs property returns tuple of Aux objects."""
-        auxs = test_model.auxs
-        assert isinstance(auxs, tuple)
-
-        for aux in auxs:
-            from simlin.types import Aux
-
-            assert isinstance(aux, Aux)
-            assert isinstance(aux.name, str)
-            assert isinstance(aux.equation, str)
+    """Test structural properties of Model."""
 
     def test_variables_property(self, test_model: Model) -> None:
-        """Test that variables property combines stocks, flows, and auxs."""
+        """Test that variables property returns tuple of Stock/Flow/Aux objects."""
         variables = test_model.variables
         assert isinstance(variables, tuple)
+        assert len(variables) > 0
 
-        stocks_count = len(test_model.stocks)
-        flows_count = len(test_model.flows)
-        auxs_count = len(test_model.auxs)
+        from simlin.types import Aux, Flow, Stock
 
-        assert len(variables) == stocks_count + flows_count + auxs_count
+        for var in variables:
+            assert isinstance(var, (Stock, Flow, Aux))
+            assert isinstance(var.name, str)
+            assert len(var.name) > 0
+
+    def test_get_var_names(self, test_model: Model) -> None:
+        """Test get_var_names returns canonical variable names."""
+        names = test_model.get_var_names()
+        assert isinstance(names, list)
+        assert len(names) > 0
+        for name in names:
+            assert isinstance(name, str)
+
+    def test_get_var_names_with_type_mask(self, teacup_stmx_path) -> None:
+        """Test get_var_names with type_mask filtering."""
+        model = simlin.load(teacup_stmx_path)
+
+        # VARTYPE_STOCK=1
+        stock_names = model.get_var_names(type_mask=1)
+        assert len(stock_names) > 0
+        # Verify they are actually stocks
+        for name in stock_names:
+            var = model.get_variable(name)
+            from simlin.types import Stock
+            assert isinstance(var, Stock)
+
+        # VARTYPE_FLOW=2
+        flow_names = model.get_var_names(type_mask=2)
+        assert len(flow_names) > 0
+        for name in flow_names:
+            var = model.get_variable(name)
+            from simlin.types import Flow
+            assert isinstance(var, Flow)
+
+        # VARTYPE_AUX=4
+        aux_names = model.get_var_names(type_mask=4)
+        assert len(aux_names) > 0
+        for name in aux_names:
+            var = model.get_variable(name)
+            from simlin.types import Aux
+            assert isinstance(var, Aux)
+
+    def test_get_var_names_with_filter(self, teacup_stmx_path) -> None:
+        """Test get_var_names with substring filter."""
+        model = simlin.load(teacup_stmx_path)
+
+        # Filter for variables containing "temperature"
+        temp_names = model.get_var_names(filter_str="temperature")
+        assert len(temp_names) > 0
+        for name in temp_names:
+            assert "temperature" in name
 
     def test_time_spec_property(self, test_model: Model) -> None:
         """Test that time_spec property returns TimeSpec."""
@@ -426,13 +437,13 @@ class TestModelStructuralProperties:
 
     def test_structural_properties_consistent(self, test_model: Model) -> None:
         """Test that structural properties return equal results across calls."""
-        stocks1 = test_model.stocks
-        stocks2 = test_model.stocks
-        assert stocks1 == stocks2
+        vars1 = test_model.variables
+        vars2 = test_model.variables
+        assert vars1 == vars2
 
-        flows1 = test_model.flows
-        flows2 = test_model.flows
-        assert flows1 == flows2
+        names1 = test_model.get_var_names()
+        names2 = test_model.get_var_names()
+        assert names1 == names2
 
         time_spec1 = test_model.time_spec
         time_spec2 = test_model.time_spec
@@ -544,38 +555,41 @@ class TestModelUtilities:
 
     def test_explain_stock(self, test_model: Model) -> None:
         """Test explain() for a stock variable."""
-        stocks = test_model.stocks
-        if not stocks:
+        from simlin.types import Stock
+
+        stock = next((v for v in test_model.variables if isinstance(v, Stock)), None)
+        if stock is None:
             pytest.skip("No stocks in test model")
 
-        stock_name = stocks[0].name
-        explanation = test_model.explain(stock_name)
+        explanation = test_model.explain(stock.name)
         assert isinstance(explanation, str)
-        assert stock_name in explanation
+        assert stock.name in explanation
         assert "stock" in explanation
 
     def test_explain_flow(self, test_model: Model) -> None:
         """Test explain() for a flow variable."""
-        flows = test_model.flows
-        if not flows:
+        from simlin.types import Flow
+
+        flow = next((v for v in test_model.variables if isinstance(v, Flow)), None)
+        if flow is None:
             pytest.skip("No flows in test model")
 
-        flow_name = flows[0].name
-        explanation = test_model.explain(flow_name)
+        explanation = test_model.explain(flow.name)
         assert isinstance(explanation, str)
-        assert flow_name in explanation
+        assert flow.name in explanation
         assert "flow" in explanation
 
     def test_explain_aux(self, test_model: Model) -> None:
         """Test explain() for an auxiliary variable."""
-        auxs = test_model.auxs
-        if not auxs:
+        from simlin.types import Aux
+
+        aux = next((v for v in test_model.variables if isinstance(v, Aux)), None)
+        if aux is None:
             pytest.skip("No auxiliary variables in test model")
 
-        aux_name = auxs[0].name
-        explanation = test_model.explain(aux_name)
+        explanation = test_model.explain(aux.name)
         assert isinstance(explanation, str)
-        assert aux_name in explanation
+        assert aux.name in explanation
         assert "auxiliary" in explanation
 
     def test_explain_nonexistent_raises(self, test_model: Model) -> None:
@@ -588,22 +602,24 @@ class TestModelUtilities:
 
     def test_explain_includes_initial_equation_for_stocks(self, test_model: Model) -> None:
         """Test that stock explanation includes initial value."""
-        stocks = test_model.stocks
-        if not stocks:
+        from simlin.types import Stock
+
+        stock = next((v for v in test_model.variables if isinstance(v, Stock)), None)
+        if stock is None:
             pytest.skip("No stocks in test model")
 
-        stock_name = stocks[0].name
-        explanation = test_model.explain(stock_name)
+        explanation = test_model.explain(stock.name)
         assert "initial value" in explanation
 
     def test_explain_includes_equation_for_flows(self, test_model: Model) -> None:
         """Test that flow explanation includes equation."""
-        flows = test_model.flows
-        if not flows:
+        from simlin.types import Flow
+
+        flow = next((v for v in test_model.variables if isinstance(v, Flow)), None)
+        if flow is None:
             pytest.skip("No flows in test model")
 
-        flow_name = flows[0].name
-        explanation = test_model.explain(flow_name)
+        explanation = test_model.explain(flow.name)
         assert "computed as" in explanation
 
 
@@ -618,31 +634,31 @@ class TestArrayedEquations:
         subscript elements), the equation is stored in arrayed_equation.equation
         rather than the top-level equation field.
         """
+        from simlin.types import Flow
+
         model = simlin.load(subscripted_model_path)
 
-        # Find the arrayed flows
-        flows_by_name = {f.name: f for f in model.flows}
+        flows_by_name = {v.name: v for v in model.variables if isinstance(v, Flow)}
 
-        # These flows have apply-to-all equations in the test model
         assert "Inflow A" in flows_by_name or "inflow_a" in flows_by_name
         inflow_a = flows_by_name.get("Inflow A") or flows_by_name.get("inflow_a")
         assert inflow_a is not None
 
-        # The equation should be non-empty (extracted from arrayed_equation)
         assert inflow_a.equation, "Arrayed flow equation should not be empty"
         assert "Rate_A" in inflow_a.equation or "rate_a" in inflow_a.equation.lower()
 
     def test_stock_with_apply_to_all_initial(self, subscripted_model_path: Path) -> None:
         """Arrayed stocks should expose their initial equation."""
+        from simlin.types import Stock
+
         model = simlin.load(subscripted_model_path)
 
-        stocks_by_name = {s.name: s for s in model.stocks}
+        stocks_by_name = {v.name: v for v in model.variables if isinstance(v, Stock)}
 
         assert "Stock A" in stocks_by_name or "stock_a" in stocks_by_name
         stock_a = stocks_by_name.get("Stock A") or stocks_by_name.get("stock_a")
         assert stock_a is not None
 
-        # The initial equation should be extracted (it's "0" in this model)
         assert stock_a.initial_equation == "0"
 
 
@@ -700,55 +716,35 @@ class TestGetVariable:
         assert isinstance(var, Stock)
         assert "heat_loss_to_room" in var.outflows
 
-    def test_get_variable_matches_stocks_property(self, teacup_stmx_path: Path) -> None:
-        """get_variable should return data consistent with the stocks property."""
+    def test_get_variable_matches_variables_property(self, teacup_stmx_path: Path) -> None:
+        """get_variable should return data consistent with the variables property."""
         model = simlin.load(teacup_stmx_path)
-        for stock in model.stocks:
-            var = model.get_variable(stock.name)
-            assert var is not None
-            assert var == stock
+        for var in model.variables:
+            looked_up = model.get_variable(var.name)
+            assert looked_up is not None
+            assert looked_up == var
 
-    def test_get_variable_matches_flows_property(self, teacup_stmx_path: Path) -> None:
-        """get_variable should return data consistent with the flows property."""
+
+class TestGetVarNamesTypeMask:
+    """Verify get_var_names type_mask correctly partitions variable types."""
+
+    def test_type_masks_disjoint(self, teacup_stmx_path: Path) -> None:
+        """Stock, flow, and aux type masks should produce disjoint name sets."""
         model = simlin.load(teacup_stmx_path)
-        for flow in model.flows:
-            var = model.get_variable(flow.name)
-            assert var is not None
-            assert var == flow
-
-    def test_get_variable_matches_auxs_property(self, teacup_stmx_path: Path) -> None:
-        """get_variable should return data consistent with the auxs property."""
-        model = simlin.load(teacup_stmx_path)
-        for aux in model.auxs:
-            var = model.get_variable(aux.name)
-            assert var is not None
-            assert var == aux
-
-
-class TestStocksOnlyReturnsStocks:
-    """Verify the stocks property only returns stock-type variables."""
-
-    def test_stocks_are_all_stock_type(self, teacup_stmx_path: Path) -> None:
-        """Every element of stocks should be a Stock instance."""
-        from simlin.types import Stock
-
-        model = simlin.load(teacup_stmx_path)
-        for s in model.stocks:
-            assert isinstance(s, Stock), f"Expected Stock, got {type(s).__name__}"
-
-    def test_no_flows_in_stocks(self, teacup_stmx_path: Path) -> None:
-        """The stocks property should not include flows."""
-        model = simlin.load(teacup_stmx_path)
-        stock_names = {s.name for s in model.stocks}
-        flow_names = {f.name for f in model.flows}
+        stock_names = set(model.get_var_names(type_mask=1))
+        flow_names = set(model.get_var_names(type_mask=2))
+        aux_names = set(model.get_var_names(type_mask=4))
         assert stock_names.isdisjoint(flow_names)
-
-    def test_no_auxs_in_stocks(self, teacup_stmx_path: Path) -> None:
-        """The stocks property should not include auxiliary variables."""
-        model = simlin.load(teacup_stmx_path)
-        stock_names = {s.name for s in model.stocks}
-        aux_names = {a.name for a in model.auxs}
         assert stock_names.isdisjoint(aux_names)
+        assert flow_names.isdisjoint(aux_names)
+
+    def test_combined_mask_is_union(self, teacup_stmx_path: Path) -> None:
+        """Combined type mask should return union of individual masks."""
+        model = simlin.load(teacup_stmx_path)
+        stock_names = set(model.get_var_names(type_mask=1))
+        flow_names = set(model.get_var_names(type_mask=2))
+        combined = set(model.get_var_names(type_mask=1 | 2))
+        assert combined == stock_names | flow_names
 
 
 class TestStockFromDict:

@@ -85,7 +85,7 @@ class TestErrorStringHandling:
         # Test error when accessing non-existent variable
         with pytest.raises(SimlinRuntimeError) as exc_info:
             model.get_incoming_links("nonexistent_variable_xyz_123")
-        assert "Variable not found" in str(exc_info.value)
+        assert "does not exist" in str(exc_info.value)
 
     def test_error_detail_collection(self, tmp_path) -> None:
         """Test that error details are collected properly without memory issues."""

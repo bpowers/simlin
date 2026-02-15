@@ -1255,11 +1255,11 @@ fn test_interactive_set_get() {
             panic!("sim_run_to failed with error {:?}: {}", code, msg);
         }
 
-        // Fetch var names from model
+        // Fetch var names from sim
         err = ptr::null_mut();
         let mut count: usize = 0;
-        simlin_model_get_var_count(
-            model,
+        simlin_sim_get_var_count(
+            sim,
             &mut count as *mut usize,
             &mut err as *mut *mut SimlinError,
         );
@@ -1279,8 +1279,8 @@ fn test_interactive_set_get() {
         let mut name_ptrs: Vec<*mut c_char> = vec![std::ptr::null_mut(); count];
         let _written: usize = 0;
         err = ptr::null_mut();
-        simlin_model_get_var_names(
-            model,
+        simlin_sim_get_var_names(
+            sim,
             name_ptrs.as_mut_ptr(),
             name_ptrs.len(),
             &mut count as *mut usize,
@@ -1437,8 +1437,8 @@ fn test_set_value_phases() {
         // Get variable names to find a valid variable
         err = ptr::null_mut();
         let mut count: usize = 0;
-        simlin_model_get_var_count(
-            model,
+        simlin_sim_get_var_count(
+            sim,
             &mut count as *mut usize,
             &mut err as *mut *mut SimlinError,
         );
@@ -1457,8 +1457,8 @@ fn test_set_value_phases() {
         let mut name_ptrs: Vec<*mut c_char> = vec![std::ptr::null_mut(); count];
         let _written: usize = 0;
         err = ptr::null_mut();
-        simlin_model_get_var_names(
-            model,
+        simlin_sim_get_var_names(
+            sim,
             name_ptrs.as_mut_ptr(),
             name_ptrs.len(),
             &mut count as *mut usize,
@@ -1773,6 +1773,8 @@ fn test_import_xmile() {
         let mut var_count: usize = 0;
         simlin_model_get_var_count(
             model,
+            0,
+            ptr::null(),
             &mut var_count as *mut usize,
             &mut err as *mut *mut SimlinError,
         );
@@ -1859,6 +1861,8 @@ fn test_import_mdl() {
         let mut var_count: usize = 0;
         simlin_model_get_var_count(
             model,
+            0,
+            ptr::null(),
             &mut var_count as *mut usize,
             &mut err as *mut *mut SimlinError,
         );
@@ -2699,6 +2703,8 @@ fn test_project_json_open() {
         let mut err_get_var_count: *mut SimlinError = ptr::null_mut();
         simlin_model_get_var_count(
             model,
+            0,
+            ptr::null(),
             &mut var_count as *mut usize,
             &mut err_get_var_count as *mut *mut SimlinError,
         );
@@ -2833,6 +2839,8 @@ fn test_project_json_open_sdai_format() {
         let mut err_get_var_count: *mut SimlinError = ptr::null_mut();
         simlin_model_get_var_count(
             model,
+            0,
+            ptr::null(),
             &mut var_count as *mut usize,
             &mut err_get_var_count as *mut *mut SimlinError,
         );
@@ -3069,6 +3077,8 @@ fn test_concurrent_model_creation() {
                     let mut err_count: *mut SimlinError = ptr::null_mut();
                     simlin_model_get_var_count(
                         model,
+                        0,
+                        ptr::null(),
                         &mut var_count as *mut usize,
                         &mut err_count as *mut *mut SimlinError,
                     );
@@ -4863,8 +4873,8 @@ fn test_model_get_var_json_null_var_name() {
 }
 
 #[test]
-fn test_model_get_vars_json() {
-    let datamodel = TestProject::new("get_vars_json")
+fn test_model_get_var_names_with_type_mask() {
+    let datamodel = TestProject::new("var_names_filtered")
         .stock("population", "100", &["births"], &["deaths"], None)
         .flow("births", "population * 0.02", None)
         .flow("deaths", "population * 0.01", None)
@@ -4877,37 +4887,82 @@ fn test_model_get_vars_json() {
         let model = simlin_project_get_model(proj, ptr::null(), &mut err);
         assert!(err.is_null());
 
-        let mut out_buffer: *mut u8 = ptr::null_mut();
-        let mut out_len: usize = 0;
-        let mut out_error: *mut SimlinError = ptr::null_mut();
+        // All variables (type_mask=0)
+        let mut count: usize = 0;
+        err = ptr::null_mut();
+        simlin_model_get_var_count(model, 0, ptr::null(), &mut count, &mut err);
+        assert!(err.is_null());
+        assert_eq!(count, 4, "expected 4 variables (1 stock + 2 flows + 1 aux)");
 
-        simlin_model_get_vars_json(
-            model,
-            &mut out_buffer,
-            &mut out_len,
-            &mut out_error,
-        );
+        let mut name_ptrs: Vec<*mut c_char> = vec![ptr::null_mut(); count];
+        let mut written: usize = 0;
+        err = ptr::null_mut();
+        simlin_model_get_var_names(model, 0, ptr::null(), name_ptrs.as_mut_ptr(), count, &mut written, &mut err);
+        assert!(err.is_null());
+        assert_eq!(written, 4);
+        let all_names: Vec<String> = name_ptrs.iter().map(|&p| {
+            let s = CStr::from_ptr(p).to_string_lossy().into_owned();
+            simlin_free_string(p);
+            s
+        }).collect();
+        assert!(all_names.contains(&"population".to_string()));
+        assert!(all_names.contains(&"births".to_string()));
+        assert!(all_names.contains(&"deaths".to_string()));
+        assert!(all_names.contains(&"birth_rate".to_string()));
 
-        assert!(out_error.is_null(), "expected no error");
-        assert!(!out_buffer.is_null());
+        // Stocks only (type_mask=SIMLIN_VARTYPE_STOCK)
+        count = 0;
+        err = ptr::null_mut();
+        simlin_model_get_var_count(model, SIMLIN_VARTYPE_STOCK, ptr::null(), &mut count, &mut err);
+        assert!(err.is_null());
+        assert_eq!(count, 1, "expected 1 stock");
 
-        let slice = std::slice::from_raw_parts(out_buffer, out_len);
-        let vars: Vec<Value> = serde_json::from_slice(slice).expect("valid JSON array");
+        let mut stock_ptrs: Vec<*mut c_char> = vec![ptr::null_mut(); count];
+        written = 0;
+        err = ptr::null_mut();
+        simlin_model_get_var_names(model, SIMLIN_VARTYPE_STOCK, ptr::null(), stock_ptrs.as_mut_ptr(), count, &mut written, &mut err);
+        assert!(err.is_null());
+        assert_eq!(written, 1);
+        let stock_name = CStr::from_ptr(stock_ptrs[0]).to_string_lossy().into_owned();
+        simlin_free_string(stock_ptrs[0]);
+        assert_eq!(stock_name, "population");
 
-        assert_eq!(vars.len(), 4, "expected 4 variables (1 stock + 2 flows + 1 aux)");
+        // Flows only (type_mask=SIMLIN_VARTYPE_FLOW)
+        count = 0;
+        err = ptr::null_mut();
+        simlin_model_get_var_count(model, SIMLIN_VARTYPE_FLOW, ptr::null(), &mut count, &mut err);
+        assert!(err.is_null());
+        assert_eq!(count, 2, "expected 2 flows");
 
-        let types: Vec<&str> = vars.iter().map(|v| v["type"].as_str().unwrap()).collect();
-        assert!(types.contains(&"stock"));
-        assert!(types.contains(&"flow"));
-        assert!(types.contains(&"aux"));
+        // Auxs only (type_mask=SIMLIN_VARTYPE_AUX)
+        count = 0;
+        err = ptr::null_mut();
+        simlin_model_get_var_count(model, SIMLIN_VARTYPE_AUX, ptr::null(), &mut count, &mut err);
+        assert!(err.is_null());
+        assert_eq!(count, 1, "expected 1 aux");
 
-        let names: Vec<&str> = vars.iter().map(|v| v["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"population"));
-        assert!(names.contains(&"births"));
-        assert!(names.contains(&"deaths"));
-        assert!(names.contains(&"birth_rate"));
+        // Combined: stocks + flows
+        count = 0;
+        err = ptr::null_mut();
+        simlin_model_get_var_count(model, SIMLIN_VARTYPE_STOCK | SIMLIN_VARTYPE_FLOW, ptr::null(), &mut count, &mut err);
+        assert!(err.is_null());
+        assert_eq!(count, 3, "expected 1 stock + 2 flows");
 
-        simlin_free(out_buffer);
+        // Substring filter
+        let filter = CString::new("birth").unwrap();
+        count = 0;
+        err = ptr::null_mut();
+        simlin_model_get_var_count(model, 0, filter.as_ptr(), &mut count, &mut err);
+        assert!(err.is_null());
+        assert_eq!(count, 2, "expected births + birth_rate");
+
+        // Combined: type_mask + filter
+        count = 0;
+        err = ptr::null_mut();
+        simlin_model_get_var_count(model, SIMLIN_VARTYPE_FLOW, filter.as_ptr(), &mut count, &mut err);
+        assert!(err.is_null());
+        assert_eq!(count, 1, "expected only flow 'births' matching filter 'birth'");
+
         simlin_model_unref(model);
         simlin_project_unref(proj);
     }

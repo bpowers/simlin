@@ -129,7 +129,7 @@ class TestSimDataFrame:
         sim.run_to_end()
 
         # Get variable names from model
-        var_names = [v.name for v in model.variables]
+        var_names = model.get_var_names()
 
         # Get all results then filter to subset of variables
         if len(var_names) > 2:
@@ -157,11 +157,11 @@ class TestSimDataFrame:
         df = sim.get_run().results
         assert isinstance(df, pd.DataFrame)
 
-        # Should have the same number of columns as variables in the model
+        # Should have the same number of columns as simulation variables
         # (minus time which becomes the index)
-        var_names = [v.name for v in model.variables]
+        var_names = sim.get_var_names()
         expected_cols = len([v for v in var_names if v.lower() != "time"])
-        assert len(df.columns) <= expected_cols
+        assert len(df.columns) == expected_cols
 
     def test_get_results_filters_invalid_variables(self, xmile_model_path) -> None:
         """Test that results include valid variables."""
@@ -174,7 +174,7 @@ class TestSimDataFrame:
         assert isinstance(df, pd.DataFrame)
 
         # Check that valid variables are present
-        var_names = [v.name for v in model.variables]
+        var_names = model.get_var_names()
         if var_names:
             # At least one variable should be in the results
             valid_vars_in_results = [v for v in var_names if v in df.columns or v.lower() == "time"]
@@ -295,7 +295,7 @@ class TestSimContextManager:
         model = simlin.load(xmile_model_path)
         with model, model.simulate() as sim:
             # All should be usable inside their contexts
-            assert len(model.variables) > 0
+            assert len(model.get_var_names()) > 0
             sim.run_to_end()
             assert sim.get_step_count() > 0
             results = sim.get_run().results

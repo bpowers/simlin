@@ -61,7 +61,7 @@ def load(path: Union[str, Path]) -> Model:
     Example:
         >>> import simlin
         >>> model = simlin.load("population.stmx")
-        >>> print(f"Model has {len(model.stocks)} stocks")
+        >>> print(f"Model has {len(model.get_var_names())} variables")
         >>> model.base_case.results["population"].plot()
     """
     from pathlib import Path as PathlibPath

@@ -22,6 +22,23 @@ use crate::{
     SimlinErrorCode, SimlinModel,
 };
 
+pub const SIMLIN_VARTYPE_STOCK: u32 = 1 << 0;
+pub const SIMLIN_VARTYPE_FLOW: u32 = 1 << 1;
+pub const SIMLIN_VARTYPE_AUX: u32 = 1 << 2;
+pub const SIMLIN_VARTYPE_MODULE: u32 = 1 << 3;
+
+fn matches_type_mask(var: &datamodel::Variable, type_mask: u32) -> bool {
+    if type_mask == 0 {
+        return true;
+    }
+    match var {
+        datamodel::Variable::Stock(_) => type_mask & SIMLIN_VARTYPE_STOCK != 0,
+        datamodel::Variable::Flow(_) => type_mask & SIMLIN_VARTYPE_FLOW != 0,
+        datamodel::Variable::Aux(_) => type_mask & SIMLIN_VARTYPE_AUX != 0,
+        datamodel::Variable::Module(_) => type_mask & SIMLIN_VARTYPE_MODULE != 0,
+    }
+}
+
 /// Allocate an FFI output buffer and copy `bytes` into it.
 ///
 /// On success, writes the buffer pointer and length to `out_buffer`/`out_len`
@@ -116,13 +133,19 @@ pub unsafe extern "C" fn simlin_model_get_name(
     }
 }
 
-/// Gets the number of variables in the model
+/// Gets the number of datamodel-level variables in the model.
+///
+/// # Parameters
+/// - `type_mask`: bitmask of `SIMLIN_VARTYPE_STOCK | FLOW | AUX | MODULE`. 0 means all types.
+/// - `filter`: canonicalized substring match. NULL or empty = no filter.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
 #[no_mangle]
 pub unsafe extern "C" fn simlin_model_get_var_count(
     model: *mut SimlinModel,
+    type_mask: u32,
+    filter: *const c_char,
     out_count: *mut usize,
     out_error: *mut *mut SimlinError,
 ) {
@@ -138,12 +161,55 @@ pub unsafe extern "C" fn simlin_model_get_var_count(
 
     let model_ref = ffi_try!(out_error, require_model(model));
     let project_locked = (*model_ref.project).project.lock().unwrap();
-    let offsets =
-        engine::interpreter::calc_flattened_offsets(&project_locked, &model_ref.model_name);
-    *out_count = offsets.len();
+
+    let dm_model = match find_model_in_project(&project_locked, &model_ref.model_name) {
+        Some(m) => m,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName)
+                    .with_message(format!("model '{}' not found", model_ref.model_name)),
+            );
+            return;
+        }
+    };
+
+    let filter_str = if filter.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(filter).to_str() {
+            Ok("") => None,
+            Ok(s) => Some(canonicalize(s)),
+            Err(_) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("filter string is not valid UTF-8"),
+                );
+                return;
+            }
+        }
+    };
+
+    let count = dm_model
+        .variables
+        .iter()
+        .filter(|v| matches_type_mask(v, type_mask))
+        .filter(|v| {
+            filter_str
+                .as_ref()
+                .is_none_or(|f| canonicalize(v.get_ident()).as_str().contains(f.as_str()))
+        })
+        .count();
+
+    *out_count = count;
 }
 
-/// Gets the variable names from the model
+/// Gets the datamodel-level variable names from the model.
+///
+/// # Parameters
+/// - `type_mask`: bitmask of `SIMLIN_VARTYPE_STOCK | FLOW | AUX | MODULE`. 0 means all types.
+/// - `filter`: canonicalized substring match. NULL or empty = no filter.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
@@ -152,6 +218,8 @@ pub unsafe extern "C" fn simlin_model_get_var_count(
 #[no_mangle]
 pub unsafe extern "C" fn simlin_model_get_var_names(
     model: *mut SimlinModel,
+    type_mask: u32,
+    filter: *const c_char,
     result: *mut *mut c_char,
     max: usize,
     out_written: *mut usize,
@@ -169,11 +237,51 @@ pub unsafe extern "C" fn simlin_model_get_var_names(
 
     let model_ref = ffi_try!(out_error, require_model(model));
     let project_locked = (*model_ref.project).project.lock().unwrap();
-    let offsets =
-        engine::interpreter::calc_flattened_offsets(&project_locked, &model_ref.model_name);
+
+    let dm_model = match find_model_in_project(&project_locked, &model_ref.model_name) {
+        Some(m) => m,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName)
+                    .with_message(format!("model '{}' not found", model_ref.model_name)),
+            );
+            return;
+        }
+    };
+
+    let filter_str = if filter.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(filter).to_str() {
+            Ok("") => None,
+            Ok(s) => Some(canonicalize(s)),
+            Err(_) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("filter string is not valid UTF-8"),
+                );
+                return;
+            }
+        }
+    };
+
+    let mut names: Vec<String> = dm_model
+        .variables
+        .iter()
+        .filter(|v| matches_type_mask(v, type_mask))
+        .filter(|v| {
+            filter_str
+                .as_ref()
+                .is_none_or(|f| canonicalize(v.get_ident()).as_str().contains(f.as_str()))
+        })
+        .map(|v| canonicalize(v.get_ident()).to_string())
+        .collect();
+    names.sort();
 
     if max == 0 {
-        *out_written = offsets.len();
+        *out_written = names.len();
         return;
     }
 
@@ -185,9 +293,6 @@ pub unsafe extern "C" fn simlin_model_get_var_names(
         );
         return;
     }
-
-    let mut names: Vec<_> = offsets.keys().collect();
-    names.sort();
 
     let count = names.len().min(max);
     let mut allocated: Vec<*mut c_char> = Vec::with_capacity(count);
@@ -687,70 +792,6 @@ pub unsafe extern "C" fn simlin_model_get_var_json(
     write_bytes_to_ffi_output(&bytes, out_buffer, out_len, out_error, "variable");
 }
 
-/// Gets all variables from the model as a tagged JSON array.
-///
-/// Each element has a `"type"` discriminator (`"stock"`, `"flow"`, `"aux"`, `"module"`).
-/// Caller must free the output buffer with `simlin_free`.
-///
-/// # Safety
-/// - `model` must be a valid pointer to a SimlinModel
-/// - `out_buffer` and `out_len` must be valid pointers
-#[no_mangle]
-pub unsafe extern "C" fn simlin_model_get_vars_json(
-    model: *mut SimlinModel,
-    out_buffer: *mut *mut u8,
-    out_len: *mut usize,
-    out_error: *mut *mut SimlinError,
-) {
-    clear_out_error(out_error);
-    if out_buffer.is_null() || out_len.is_null() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("output pointers must not be NULL"),
-        );
-        return;
-    }
-
-    *out_buffer = ptr::null_mut();
-    *out_len = 0;
-
-    let model_ref = ffi_try!(out_error, require_model(model));
-    let project_locked = (*model_ref.project).project.lock().unwrap();
-
-    let dm_model = match find_model_in_project(&project_locked, &model_ref.model_name) {
-        Some(m) => m,
-        None => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::BadModelName)
-                    .with_message(format!("model '{}' not found", model_ref.model_name)),
-            );
-            return;
-        }
-    };
-
-    let tagged_vars: Vec<engine::json::TaggedVariable> = dm_model
-        .variables
-        .iter()
-        .map(|v| v.clone().into())
-        .collect();
-
-    let bytes = match serde_json::to_vec(&tagged_vars) {
-        Ok(b) => b,
-        Err(err) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic)
-                    .with_message(format!("failed to serialize variables JSON: {err}")),
-            );
-            return;
-        }
-    };
-
-    write_bytes_to_ffi_output(&bytes, out_buffer, out_len, out_error, "variables");
-}
-
 /// Gets the effective sim specs for a model as JSON.
 ///
 /// Uses model-level sim_specs if present, otherwise falls back to
@@ -786,7 +827,7 @@ pub unsafe extern "C" fn simlin_model_get_sim_specs_json(
     let dm_model = find_model_in_project(&project_locked, &model_ref.model_name);
 
     // Sim specs are project-global with optional per-model overrides, so a
-    // missing model name is not an error here (unlike get_var_json/get_vars_json).
+    // missing model name is not an error here (unlike get_var_json).
     let dm_sim_specs = dm_model
         .and_then(|m| m.sim_specs.as_ref())
         .unwrap_or(&project_locked.datamodel.sim_specs);

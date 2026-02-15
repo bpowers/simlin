@@ -51,9 +51,7 @@ class TestConcurrentDistinctObjects:
         def load_model(path: Path) -> None:
             try:
                 model = simlin.load(path)
-                _ = model.stocks
-                _ = model.flows
-                _ = model.auxs
+                _ = model.variables
             except Exception as exc:
                 errors.append(exc)
 
@@ -113,19 +111,15 @@ class TestSharedObjectAccess:
         # Ensure caches are cold
         model._invalidate_caches()
 
-        results: dict[str, list[int]] = {"stocks": [], "flows": [], "auxs": []}
+        results: list[int] = []
         errors: list[Exception] = []
         lock = threading.Lock()
 
         def read_properties() -> None:
             try:
-                stocks = model.stocks
-                flows = model.flows
-                auxs = model.auxs
+                variables = model.variables
                 with lock:
-                    results["stocks"].append(len(stocks))
-                    results["flows"].append(len(flows))
-                    results["auxs"].append(len(auxs))
+                    results.append(len(variables))
             except Exception as exc:
                 with lock:
                     errors.append(exc)
@@ -137,10 +131,8 @@ class TestSharedObjectAccess:
             t.join(timeout=30)
 
         assert not errors, f"Concurrent property reads produced errors: {errors}"
-        # All threads should see the same counts
-        assert len(set(results["stocks"])) == 1
-        assert len(set(results["flows"])) == 1
-        assert len(set(results["auxs"])) == 1
+        # All threads should see the same count
+        assert len(set(results)) == 1
 
     def test_concurrent_project_serialize(self, xmile_model_path: Path) -> None:
         """Serializing the same project from multiple threads must be safe."""
@@ -222,7 +214,7 @@ class TestContextManagerThreadSafety:
                     # SimlinRuntimeError after close is expected; the
                     # important thing is that we never crash.
                     with contextlib.suppress(Exception):
-                        _ = model.stocks
+                        _ = model.variables
             except Exception as exc:
                 errors.append(exc)
 
@@ -258,7 +250,7 @@ class TestFinalizerRegistryThreadSafety:
             try:
                 for _ in range(5):
                     model = simlin.load(xmile_model_path)
-                    _ = model.stocks
+                    _ = model.variables
                     del model
                 gc.collect()
             except Exception as exc:

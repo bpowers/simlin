@@ -13,7 +13,15 @@ from typing import TYPE_CHECKING, Any, Self
 
 import numpy as np
 
-from ._ffi import _register_finalizer, c_to_string, check_out_error, ffi, lib, string_to_c
+from ._ffi import (
+    _register_finalizer,
+    c_to_string,
+    check_out_error,
+    ffi,
+    free_c_string,
+    lib,
+    string_to_c,
+)
 from .analysis import Link, LinkPolarity
 from .errors import SimlinRuntimeError
 
@@ -121,8 +129,33 @@ class Sim:
             self._ran = False
 
     def get_var_names(self) -> list[str]:
-        """Return the model's variable names (convenience method)."""
-        return [v.name for v in self._model.variables]
+        """Return the simulation's flattened variable names."""
+        with self._lock:
+            self._check_alive()
+            count_ptr = ffi.new("uintptr_t *")
+            err_ptr = ffi.new("SimlinError **")
+            lib.simlin_sim_get_var_count(self._ptr, count_ptr, err_ptr)
+            check_out_error(err_ptr, "Get sim variable count")
+
+            count = int(count_ptr[0])
+            if count == 0:
+                return []
+
+            name_ptrs = ffi.new("char *[]", count)
+            written_ptr = ffi.new("uintptr_t *")
+            err_ptr2 = ffi.new("SimlinError **")
+            lib.simlin_sim_get_var_names(
+                self._ptr, name_ptrs, count, written_ptr, err_ptr2
+            )
+            check_out_error(err_ptr2, "Get sim variable names")
+
+            names: list[str] = []
+            for i in range(written_ptr[0]):
+                if name_ptrs[i] != ffi.NULL:
+                    name = ffi.string(name_ptrs[i]).decode("utf-8")
+                    free_c_string(name_ptrs[i])
+                    names.append(name)
+            return names
 
     def get_step_count(self) -> int:
         """Get the number of time steps in the simulation results.

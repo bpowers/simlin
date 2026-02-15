@@ -146,12 +146,11 @@ void simlin_project_add_model(SimlinProject *project, const char *model_name, Ou
 SimlinModel *simlin_project_get_model(SimlinProject *project, const char *model_name, OutError out_error);
 void simlin_model_ref(SimlinModel *model);
 void simlin_model_unref(SimlinModel *model);
-void simlin_model_get_var_count(SimlinModel *model, uintptr_t *out_count, OutError out_error);
-void simlin_model_get_var_names(SimlinModel *model, char **result, uintptr_t max, uintptr_t *out_written, OutError out_error);
+void simlin_model_get_var_count(SimlinModel *model, uint32_t type_mask, const char *filter, uintptr_t *out_count, OutError out_error);
+void simlin_model_get_var_names(SimlinModel *model, uint32_t type_mask, const char *filter, char **result, uintptr_t max, uintptr_t *out_written, OutError out_error);
 void simlin_model_get_incoming_links(SimlinModel *model, const char *var_name, char **result, uintptr_t max, uintptr_t *out_written, OutError out_error);
 SimlinLinks *simlin_model_get_links(SimlinModel *model, OutError out_error);
 void simlin_model_get_var_json(SimlinModel *model, const char *var_name, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
-void simlin_model_get_vars_json(SimlinModel *model, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
 void simlin_model_get_sim_specs_json(SimlinModel *model, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
 SimlinSim *simlin_sim_new(SimlinModel *model, bool enable_ltm, OutError out_error);
 void simlin_sim_ref(SimlinSim *sim);
@@ -165,6 +164,8 @@ void simlin_sim_set_value(SimlinSim *sim, const char *name, double val, OutError
 void simlin_sim_set_value_by_offset(SimlinSim *sim, uintptr_t offset, double val, OutError out_error);
 void simlin_sim_get_offset(SimlinSim *sim, const char *name, uintptr_t *out_offset, OutError out_error);
 void simlin_sim_get_series(SimlinSim *sim, const char *name, double *results_ptr, uintptr_t len, uintptr_t *out_written, OutError out_error);
+void simlin_sim_get_var_count(SimlinSim *sim, uintptr_t *out_count, OutError out_error);
+void simlin_sim_get_var_names(SimlinSim *sim, char **result, uintptr_t max, uintptr_t *out_written, OutError out_error);
 void simlin_free_string(char *s);
 SimlinLoops *simlin_analyze_get_loops(SimlinProject *project, OutError out_error);
 void simlin_free_loops(SimlinLoops *loops);

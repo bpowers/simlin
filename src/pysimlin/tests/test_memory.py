@@ -101,7 +101,7 @@ class TestObjectCreationDestruction:
                 for _k in range(3):
                     sim = model.simulate()
                     # Use the sim to ensure it's not optimized away
-                    var_names = [v.name for v in model.variables]
+                    var_names = model.get_var_names()
                     if var_names:
                         with contextlib.suppress(SimlinRuntimeError):
                             sim.run_to_end()
@@ -340,7 +340,7 @@ class TestContextManagerCleanup:
                 assert model_ptr != ffi.NULL
 
                 # Objects should be valid inside context
-                assert len(model.variables) > 0
+                assert len(model.get_var_names()) > 0
 
             # Model should be cleaned up after context exit
             assert model._ptr == ffi.NULL
@@ -374,7 +374,7 @@ class TestContextManagerCleanup:
         with project as p1:
             assert p1 is project
             assert project._ptr != ffi.NULL
-            len(project.get_model().variables)
+            len(project.get_model().get_var_names())
 
         # Should be cleaned up
         assert project._ptr == ffi.NULL
@@ -395,7 +395,7 @@ class TestContextManagerCleanup:
 
         with project, project.get_model() as model:
             sim = model.simulate()
-            var_names = [v.name for v in model.variables]
+            var_names = model.get_var_names()
 
             if var_names:
                 try:
@@ -540,9 +540,9 @@ class TestMemoryStressTesting:
 
             # Use objects to prevent optimization
             for obj in objects[::10]:  # Sample every 10th object
-                if hasattr(obj, "variables"):
+                if hasattr(obj, "get_var_names"):
                     with contextlib.suppress(BaseException):
-                        len(obj.variables)
+                        len(obj.get_var_names())
 
             # Clear batch
             objects.clear()
@@ -586,7 +586,7 @@ class TestMemoryStressTesting:
             for j in range(1, len(models), 3):
                 if j < len(models):
                     with contextlib.suppress(BaseException):
-                        [v.name for v in models[j].variables]
+                        models[j].get_var_names()
 
             for j in range(2, len(sims), 3):
                 if j < len(sims):
@@ -645,12 +645,12 @@ class TestMemoryLeakDetection:
             model = project.get_model()
 
             # Perform various operations
-            [v.name for v in model.variables]
+            model.get_var_names()
             model.get_links()
             try:
                 sim = model.simulate()
                 sim.get_var_names()
-                var_names = [v.name for v in model.variables]
+                var_names = model.get_var_names()
                 if var_names:
                     sim.run_to_end()
             except SimlinRuntimeError:
@@ -678,7 +678,7 @@ class TestMemoryLeakDetection:
 
         # Exercise string operations heavily
         for _ in range(1000):
-            var_names = [v.name for v in model.variables]
+            var_names = model.get_var_names()
             for name in var_names[:5]:  # Limit to first 5 to avoid timeout
                 try:
                     links = model.get_incoming_links(name)

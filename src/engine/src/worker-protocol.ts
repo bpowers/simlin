@@ -69,7 +69,7 @@ export type WorkerRequest =
   | { type: 'modelGetLinks'; requestId: number; handle: WorkerModelHandle }
   | { type: 'modelGetLatexEquation'; requestId: number; handle: WorkerModelHandle; ident: string }
   | { type: 'modelGetVarJson'; requestId: number; handle: WorkerModelHandle; varName: string }
-  | { type: 'modelGetVarsJson'; requestId: number; handle: WorkerModelHandle }
+  | { type: 'modelGetVarNames'; requestId: number; handle: WorkerModelHandle; typeMask: number; filter: string | null }
   | { type: 'modelGetSimSpecsJson'; requestId: number; handle: WorkerModelHandle }
   // Sim operations
   | { type: 'simNew'; requestId: number; modelHandle: WorkerModelHandle; enableLtm: boolean }
@@ -174,7 +174,7 @@ export const VALID_REQUEST_TYPES: ReadonlySet<string> = new Set([
   'modelGetLinks',
   'modelGetLatexEquation',
   'modelGetVarJson',
-  'modelGetVarsJson',
+  'modelGetVarNames',
   'modelGetSimSpecsJson',
   'simNew',
   'simDispose',

@@ -256,34 +256,50 @@ def model_get_var_json(model_ptr: Any, var_name: str) -> bytes | None:
         lib.simlin_free(output_ptr[0])
 
 
-def model_get_vars_json(model_ptr: Any) -> bytes:
-    """Get all variables from a model as a tagged JSON array.
+def model_get_var_names(
+    model_ptr: Any, type_mask: int = 0, filter_str: str | None = None
+) -> list[str]:
+    """Get variable names from a model, optionally filtered.
 
     Args:
         model_ptr: Pointer to a SimlinModel
+        type_mask: Bitmask of variable types (0 = all). Use VARTYPE_STOCK=1,
+            VARTYPE_FLOW=2, VARTYPE_AUX=4, VARTYPE_MODULE=8.
+        filter_str: Substring filter on canonicalized names. None = no filter.
 
     Returns:
-        JSON-encoded array of variable objects (UTF-8 bytes)
+        List of canonical variable name strings
 
     Raises:
         SimlinRuntimeError: If the operation fails
     """
-    output_ptr = ffi.new("uint8_t **")
-    output_len_ptr = ffi.new("uintptr_t *")
+    c_filter = string_to_c(filter_str)
+    count_ptr = ffi.new("uintptr_t *")
     err_ptr = ffi.new("SimlinError **")
 
-    lib.simlin_model_get_vars_json(
-        model_ptr,
-        output_ptr,
-        output_len_ptr,
-        err_ptr,
-    )
-    check_out_error(err_ptr, "Get all variables JSON")
+    lib.simlin_model_get_var_count(model_ptr, type_mask, c_filter, count_ptr, err_ptr)
+    check_out_error(err_ptr, "Get model variable count")
 
-    try:
-        return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))
-    finally:
-        lib.simlin_free(output_ptr[0])
+    count = count_ptr[0]
+    if count == 0:
+        return []
+
+    name_ptrs = ffi.new("char *[]", count)
+    written_ptr = ffi.new("uintptr_t *")
+    err_ptr2 = ffi.new("SimlinError **")
+
+    lib.simlin_model_get_var_names(
+        model_ptr, type_mask, c_filter, name_ptrs, count, written_ptr, err_ptr2
+    )
+    check_out_error(err_ptr2, "Get model variable names")
+
+    names: list[str] = []
+    for i in range(written_ptr[0]):
+        if name_ptrs[i] != ffi.NULL:
+            name = ffi.string(name_ptrs[i]).decode("utf-8")
+            lib.simlin_free_string(name_ptrs[i])
+            names.append(name)
+    return names
 
 
 def model_get_sim_specs_json(model_ptr: Any) -> bytes:
@@ -385,7 +401,7 @@ __all__ = [
     "lib",
     "model_get_sim_specs_json",
     "model_get_var_json",
-    "model_get_vars_json",
+    "model_get_var_names",
     "open_json",
     "serialize_json",
     "string_to_c",

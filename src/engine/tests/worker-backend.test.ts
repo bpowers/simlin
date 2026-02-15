@@ -340,12 +340,10 @@ describe('WorkerBackend', () => {
       expect(parsed.name).toBe('teacup temperature');
     });
 
-    test('getVarsJson returns array of typed variables', async () => {
-      const bytes = await backend.modelGetVarsJson(modelHandle);
-      expect(bytes).toBeInstanceOf(Uint8Array);
-      const parsed = JSON.parse(new TextDecoder().decode(bytes));
-      expect(Array.isArray(parsed)).toBe(true);
-      expect(parsed.length).toBeGreaterThan(0);
+    test('getVarNames returns variable names', async () => {
+      const names = await backend.modelGetVarNames(modelHandle);
+      expect(Array.isArray(names)).toBe(true);
+      expect(names.length).toBeGreaterThan(0);
     });
 
     test('getSimSpecsJson returns sim specs', async () => {

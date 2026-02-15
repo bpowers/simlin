@@ -58,9 +58,6 @@ class TestLoadFunction:
         model = simlin.load(teacup_stmx_path)
 
         # Should have structural properties
-        assert isinstance(model.stocks, tuple)
-        assert isinstance(model.flows, tuple)
-        assert isinstance(model.auxs, tuple)
         assert isinstance(model.variables, tuple)
         assert isinstance(model.loops, tuple)
 
@@ -104,7 +101,6 @@ class TestCompleteWorkflow:
         model = simlin.load(teacup_stmx_path)
 
         # Access structure
-        assert len(model.stocks) > 0
         assert len(model.variables) > 0
 
         # Check that we have expected variables
@@ -226,23 +222,11 @@ class TestCompleteWorkflow:
 
         model = simlin.load(teacup_stmx_path)
 
-        # Stocks are frozen dataclasses
-        if model.stocks:
-            stock = model.stocks[0]
+        # Variables are frozen dataclasses
+        if model.variables:
+            var = model.variables[0]
             with pytest.raises(AttributeError):
-                stock.name = "modified"
-
-        # Flows are frozen dataclasses
-        if model.flows:
-            flow = model.flows[0]
-            with pytest.raises(AttributeError):
-                flow.name = "modified"
-
-        # Auxs are frozen dataclasses
-        if model.auxs:
-            aux = model.auxs[0]
-            with pytest.raises(AttributeError):
-                aux.name = "modified"
+                var.name = "modified"
 
     def test_workflow_results_dataframe_properties(self, teacup_stmx_path: Path) -> None:
         """Test properties of the results DataFrame."""

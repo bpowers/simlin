@@ -33,7 +33,7 @@
 
 // High-level API classes
 export { Project } from './project';
-export { Model } from './model';
+export { Model, SIMLIN_VARTYPE_STOCK, SIMLIN_VARTYPE_FLOW, SIMLIN_VARTYPE_AUX, SIMLIN_VARTYPE_MODULE } from './model';
 export { Sim } from './sim';
 export { Run } from './run';
 export type { RunData } from './run';

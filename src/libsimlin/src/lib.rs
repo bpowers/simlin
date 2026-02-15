@@ -2052,6 +2052,8 @@ mod tests {
             err = ptr::null_mut();
             simlin_model_get_var_count(
                 model1,
+                0,
+                ptr::null(),
                 &mut var_count1 as *mut usize,
                 &mut err as *mut *mut SimlinError,
             );
@@ -2060,6 +2062,8 @@ mod tests {
             err = ptr::null_mut();
             simlin_model_get_var_count(
                 model2,
+                0,
+                ptr::null(),
                 &mut var_count2 as *mut usize,
                 &mut err as *mut *mut SimlinError,
             );
@@ -2170,6 +2174,8 @@ mod tests {
             err = ptr::null_mut();
             simlin_model_get_var_count(
                 model1,
+                0,
+                ptr::null(),
                 &mut var_count1 as *mut usize,
                 &mut err as *mut *mut SimlinError,
             );
@@ -2178,6 +2184,8 @@ mod tests {
             err = ptr::null_mut();
             simlin_model_get_var_count(
                 model2,
+                0,
+                ptr::null(),
                 &mut var_count2 as *mut usize,
                 &mut err as *mut *mut SimlinError,
             );
@@ -2539,6 +2547,8 @@ mod tests {
             err = ptr::null_mut();
             simlin_model_get_var_count(
                 model2,
+                0,
+                ptr::null(),
                 &mut var_count as *mut usize,
                 &mut err as *mut *mut SimlinError,
             );
@@ -2554,6 +2564,8 @@ mod tests {
             err = ptr::null_mut();
             simlin_model_get_var_names(
                 model2,
+                0,
+                ptr::null(),
                 var_names.as_mut_ptr(),
                 var_count,
                 &mut written as *mut usize,
@@ -2665,6 +2677,8 @@ mod tests {
             err = ptr::null_mut();
             simlin_model_get_var_count(
                 ptr::null_mut(),
+                0,
+                ptr::null(),
                 &mut count as *mut usize,
                 &mut err as *mut *mut SimlinError,
             );
@@ -2674,6 +2688,8 @@ mod tests {
             err = ptr::null_mut();
             simlin_model_get_var_names(
                 ptr::null_mut(),
+                0,
+                ptr::null(),
                 var_names.as_mut_ptr(),
                 2,
                 &mut count as *mut usize,
