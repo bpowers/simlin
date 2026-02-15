@@ -284,33 +284,21 @@ export class Model {
    * Stock variables in the model.
    */
   async stocks(): Promise<readonly Stock[]> {
-    this.checkDisposed();
-    const allVars = await this.getAllVarsJson();
-    return allVars
-      .filter((v): v is Extract<JsonVarWithType, { type: 'stock' }> => v.type === 'stock')
-      .map((v) => jsonVarToVariable(v) as Stock);
+    return (await this.variables()).filter((v): v is Stock => v.type === 'stock');
   }
 
   /**
    * Flow variables in the model.
    */
   async flows(): Promise<readonly Flow[]> {
-    this.checkDisposed();
-    const allVars = await this.getAllVarsJson();
-    return allVars
-      .filter((v): v is Extract<JsonVarWithType, { type: 'flow' }> => v.type === 'flow')
-      .map((v) => jsonVarToVariable(v) as Flow);
+    return (await this.variables()).filter((v): v is Flow => v.type === 'flow');
   }
 
   /**
    * Auxiliary variables in the model.
    */
   async auxs(): Promise<readonly Aux[]> {
-    this.checkDisposed();
-    const allVars = await this.getAllVarsJson();
-    return allVars
-      .filter((v): v is Extract<JsonVarWithType, { type: 'aux' }> => v.type === 'aux')
-      .map((v) => jsonVarToVariable(v) as Aux);
+    return (await this.variables()).filter((v): v is Aux => v.type === 'aux');
   }
 
   /**

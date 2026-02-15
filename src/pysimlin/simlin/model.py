@@ -505,11 +505,7 @@ class Model:
         Returns:
             Tuple of Stock objects representing all stocks in the model
         """
-        with self._lock:
-            self._check_alive()
-            all_vars = _get_all_vars(self._ptr)
-
-        return tuple(_stock_from_dict(d) for d in all_vars if d.get("type") == "stock")
+        return tuple(v for v in self.variables if isinstance(v, Stock))
 
     @property
     def flows(self) -> tuple[Flow, ...]:
@@ -518,11 +514,7 @@ class Model:
         Returns:
             Tuple of Flow objects representing all flows in the model
         """
-        with self._lock:
-            self._check_alive()
-            all_vars = _get_all_vars(self._ptr)
-
-        return tuple(_flow_from_dict(d) for d in all_vars if d.get("type") == "flow")
+        return tuple(v for v in self.variables if isinstance(v, Flow))
 
     @property
     def auxs(self) -> tuple[Aux, ...]:
@@ -531,11 +523,7 @@ class Model:
         Returns:
             Tuple of Aux objects representing all auxiliary variables in the model
         """
-        with self._lock:
-            self._check_alive()
-            all_vars = _get_all_vars(self._ptr)
-
-        return tuple(_aux_from_dict(d) for d in all_vars if d.get("type") == "aux")
+        return tuple(v for v in self.variables if isinstance(v, Aux))
 
     @property
     def variables(self) -> tuple[Stock | Flow | Aux, ...]:
