@@ -325,11 +325,13 @@ project = model.project
 ### Working with Models
 
 ```python
+from simlin import VARTYPE_STOCK, VARTYPE_FLOW, VARTYPE_AUX
+
 # Get variable names, optionally filtered by type
-all_names = model.get_var_names()                    # All variable names
-stock_names = model.get_var_names(type_mask=1)       # Stock names only
-flow_names = model.get_var_names(type_mask=2)        # Flow names only
-aux_names = model.get_var_names(type_mask=4)          # Aux names only
+all_names = model.get_var_names()                          # All variable names
+stock_names = model.get_var_names(type_mask=VARTYPE_STOCK) # Stock names only
+flow_names = model.get_var_names(type_mask=VARTYPE_FLOW)   # Flow names only
+aux_names = model.get_var_names(type_mask=VARTYPE_AUX)     # Aux names only
 
 # Get detailed variable information
 for name in model.get_var_names():

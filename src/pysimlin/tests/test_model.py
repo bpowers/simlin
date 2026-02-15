@@ -9,7 +9,14 @@ from typing import Any
 import pytest
 
 import simlin
-from simlin import Model, SimlinCompilationError, SimlinRuntimeError
+from simlin import (
+    Model,
+    SimlinCompilationError,
+    SimlinRuntimeError,
+    VARTYPE_AUX,
+    VARTYPE_FLOW,
+    VARTYPE_STOCK,
+)
 from simlin.json_types import Auxiliary as JsonAuxiliary
 
 
@@ -377,25 +384,21 @@ class TestModelStructuralProperties:
         """Test get_var_names with type_mask filtering."""
         model = simlin.load(teacup_stmx_path)
 
-        # VARTYPE_STOCK=1
-        stock_names = model.get_var_names(type_mask=1)
+        stock_names = model.get_var_names(type_mask=VARTYPE_STOCK)
         assert len(stock_names) > 0
-        # Verify they are actually stocks
         for name in stock_names:
             var = model.get_variable(name)
             from simlin.types import Stock
             assert isinstance(var, Stock)
 
-        # VARTYPE_FLOW=2
-        flow_names = model.get_var_names(type_mask=2)
+        flow_names = model.get_var_names(type_mask=VARTYPE_FLOW)
         assert len(flow_names) > 0
         for name in flow_names:
             var = model.get_variable(name)
             from simlin.types import Flow
             assert isinstance(var, Flow)
 
-        # VARTYPE_AUX=4
-        aux_names = model.get_var_names(type_mask=4)
+        aux_names = model.get_var_names(type_mask=VARTYPE_AUX)
         assert len(aux_names) > 0
         for name in aux_names:
             var = model.get_variable(name)
@@ -731,9 +734,9 @@ class TestGetVarNamesTypeMask:
     def test_type_masks_disjoint(self, teacup_stmx_path: Path) -> None:
         """Stock, flow, and aux type masks should produce disjoint name sets."""
         model = simlin.load(teacup_stmx_path)
-        stock_names = set(model.get_var_names(type_mask=1))
-        flow_names = set(model.get_var_names(type_mask=2))
-        aux_names = set(model.get_var_names(type_mask=4))
+        stock_names = set(model.get_var_names(type_mask=VARTYPE_STOCK))
+        flow_names = set(model.get_var_names(type_mask=VARTYPE_FLOW))
+        aux_names = set(model.get_var_names(type_mask=VARTYPE_AUX))
         assert stock_names.isdisjoint(flow_names)
         assert stock_names.isdisjoint(aux_names)
         assert flow_names.isdisjoint(aux_names)
@@ -741,10 +744,30 @@ class TestGetVarNamesTypeMask:
     def test_combined_mask_is_union(self, teacup_stmx_path: Path) -> None:
         """Combined type mask should return union of individual masks."""
         model = simlin.load(teacup_stmx_path)
-        stock_names = set(model.get_var_names(type_mask=1))
-        flow_names = set(model.get_var_names(type_mask=2))
-        combined = set(model.get_var_names(type_mask=1 | 2))
+        stock_names = set(model.get_var_names(type_mask=VARTYPE_STOCK))
+        flow_names = set(model.get_var_names(type_mask=VARTYPE_FLOW))
+        combined = set(model.get_var_names(type_mask=VARTYPE_STOCK | VARTYPE_FLOW))
         assert combined == stock_names | flow_names
+
+
+class TestVartypeConstants:
+    """Verify VARTYPE_* constants match the C FFI values."""
+
+    def test_constants_match_ffi(self) -> None:
+        """Constants must match the SIMLIN_VARTYPE_* values from C header."""
+        from simlin._ffi import lib
+
+        assert VARTYPE_STOCK == lib.SIMLIN_VARTYPE_STOCK
+        assert VARTYPE_FLOW == lib.SIMLIN_VARTYPE_FLOW
+        assert VARTYPE_AUX == lib.SIMLIN_VARTYPE_AUX
+
+    def test_constants_are_powers_of_two(self) -> None:
+        """Each constant should be a single bit so they compose via bitwise OR."""
+        from simlin import VARTYPE_MODULE
+
+        for val in (VARTYPE_STOCK, VARTYPE_FLOW, VARTYPE_AUX, VARTYPE_MODULE):
+            assert val > 0
+            assert val & (val - 1) == 0, f"{val} is not a power of two"
 
 
 class TestStockFromDict:

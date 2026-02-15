@@ -18,6 +18,12 @@ use std::sync::Mutex;
 
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
+
+/// Internal/instrumentation variables (e.g. LTM `$time`, `$dt`) start
+/// with `$` and should not be visible to callers.
+fn is_internal_var(name: &str) -> bool {
+    name.starts_with('$')
+}
 use crate::{
     clear_out_error, compile_simulation, drop_c_string, ffi_error_from_engine, require_model,
     require_sim, store_error, store_ffi_error, SimState, SimlinErrorCode, SimlinModel, SimlinSim,
@@ -598,13 +604,13 @@ pub unsafe extern "C" fn simlin_sim_get_var_count(
         *out_count = vm
             .names_as_strs()
             .iter()
-            .filter(|n| !n.starts_with('$'))
+            .filter(|n| !is_internal_var(n))
             .count();
     } else if let Some(ref results) = state.results {
         *out_count = results
             .offsets
             .keys()
-            .filter(|k| !k.as_str().starts_with('$'))
+            .filter(|k| !is_internal_var(k.as_str()))
             .count();
     } else {
         store_error(
@@ -644,16 +650,16 @@ pub unsafe extern "C" fn simlin_sim_get_var_names(
     let sim_ref = ffi_try!(out_error, require_sim(sim));
     let state = sim_ref.state.lock().unwrap();
 
-    let names_vec: Vec<String> = if let Some(ref vm) = state.vm {
+    let mut names_vec: Vec<String> = if let Some(ref vm) = state.vm {
         vm.names_as_strs()
             .into_iter()
-            .filter(|n| !n.starts_with('$'))
+            .filter(|n| !is_internal_var(n))
             .collect()
     } else if let Some(ref results) = state.results {
         results
             .offsets
             .keys()
-            .filter(|k| !k.as_str().starts_with('$'))
+            .filter(|k| !is_internal_var(k.as_str()))
             .map(|k| k.as_str().to_string())
             .collect()
     } else {
@@ -679,14 +685,13 @@ pub unsafe extern "C" fn simlin_sim_get_var_names(
         return;
     }
 
-    let mut names: Vec<&str> = names_vec.iter().map(|s| s.as_str()).collect();
-    names.sort();
+    names_vec.sort();
 
-    let count = names.len().min(max);
+    let count = names_vec.len().min(max);
     let mut allocated: Vec<*mut c_char> = Vec::with_capacity(count);
 
-    for (i, name) in names.iter().take(count).enumerate() {
-        let c_string = match CString::new(*name) {
+    for (i, name) in names_vec.iter().take(count).enumerate() {
+        let c_string = match CString::new(name.as_str()) {
             Ok(s) => s,
             Err(_) => {
                 for ptr in allocated {

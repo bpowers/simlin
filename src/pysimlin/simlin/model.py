@@ -28,6 +28,12 @@ from ._ffi import (
 )
 from .analysis import Link, LinkPolarity, Loop
 from .errors import ErrorCode, SimlinRuntimeError
+
+# Variable type bitmask constants, matching SIMLIN_VARTYPE_* from the C FFI.
+VARTYPE_STOCK: int = 1 << 0
+VARTYPE_FLOW: int = 1 << 1
+VARTYPE_AUX: int = 1 << 2
+VARTYPE_MODULE: int = 1 << 3
 from .json_converter import converter
 from .json_types import (
     Auxiliary as JsonAuxiliary,
@@ -497,7 +503,7 @@ class Model:
 
         Args:
             type_mask: Bitmask of variable types (0 = all).
-                Use VARTYPE_STOCK=1, VARTYPE_FLOW=2, VARTYPE_AUX=4, VARTYPE_MODULE=8.
+                Compose with ``VARTYPE_STOCK | VARTYPE_FLOW | VARTYPE_AUX | VARTYPE_MODULE``.
             filter_str: Substring filter on canonicalized names. None = no filter.
 
         Returns:
