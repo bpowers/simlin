@@ -475,19 +475,19 @@ where
                 }
             };
             Variable::Stock {
-                ident: canonicalize(&ident),
+                ident: Ident::new(&ident),
                 init_ast: ast,
                 eqn: Some(v.equation.clone()),
                 units,
-                inflows: v.inflows.iter().map(|i| canonicalize(i)).collect(),
-                outflows: v.outflows.iter().map(|o| canonicalize(o)).collect(),
+                inflows: v.inflows.iter().map(|i| Ident::new(i)).collect(),
+                outflows: v.outflows.iter().map(|o| Ident::new(o)).collect(),
                 non_negative: v.non_negative,
                 errors,
                 unit_errors,
             }
         }
         datamodel::Variable::Flow(v) => {
-            let ident = canonicalize(&v.ident);
+            let ident = Ident::new(&v.ident);
 
             let (ast, mut errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, false);
             let (init_ast, init_errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, true);
@@ -520,7 +520,7 @@ where
             }
         }
         datamodel::Variable::Aux(v) => {
-            let ident = canonicalize(&v.ident);
+            let ident = Ident::new(&v.ident);
 
             let (ast, mut errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, false);
             let (init_ast, init_errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, true);
@@ -553,7 +553,7 @@ where
             }
         }
         datamodel::Variable::Module(v) => {
-            let ident = canonicalize(&v.ident);
+            let ident = Ident::new(&v.ident);
             let inputs = v.references.iter().map(module_input_mapper);
             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
             let inputs: Vec<MI> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
@@ -570,7 +570,7 @@ where
             };
 
             Variable::Module {
-                model_name: canonicalize(&v.model_name),
+                model_name: Ident::new(&v.model_name),
                 ident,
                 units,
                 inputs,
@@ -592,7 +592,7 @@ impl IdentifierSetVisitor<'_> {
     fn is_dimension_or_element(&self, ident: &str) -> bool {
         for dim in self.dimensions.iter() {
             // Check if it's the dimension name itself
-            if ident == canonicalize(dim.name()).as_str() {
+            if ident == &*canonicalize(dim.name()) {
                 return true;
             }
             // Check if it's an element of a named dimension using O(1) hash lookup
@@ -641,7 +641,7 @@ impl IdentifierSetVisitor<'_> {
                 // If so, don't add it as a dependency since it will be resolved during compilation
                 let is_dimension = self.dimensions.iter().any(|dim| {
                     let canonicalized_dim = canonicalize(dim.name());
-                    id.as_str() == canonicalized_dim.as_str()
+                    id.as_str() == &*canonicalized_dim
                 });
 
                 if !is_dimension {
@@ -651,7 +651,7 @@ impl IdentifierSetVisitor<'_> {
             Expr2::App(builtin, _, _) => {
                 walk_builtin_expr(builtin, |contents| match contents {
                     BuiltinContents::Ident(id, _loc) => {
-                        self.identifiers.insert(canonicalize(id));
+                        self.identifiers.insert(Ident::new(id));
                     }
                     BuiltinContents::Expr(expr) => self.walk(expr),
                 });
@@ -671,7 +671,7 @@ impl IdentifierSetVisitor<'_> {
                 if let Some(module_inputs) = self.module_inputs
                     && let Expr2::App(BuiltinFn::IsModuleInput(ident, _), _, _) = cond.as_ref()
                 {
-                    if module_inputs.contains(&canonicalize(ident)) {
+                    if module_inputs.contains(&*canonicalize(ident)) {
                         self.walk(t);
                     } else {
                         self.walk(f);
@@ -728,8 +728,8 @@ fn test_identifier_sets() {
     ))];
 
     let module_inputs: &[ModuleInput] = &[ModuleInput {
-        src: canonicalize("whatever"),
-        dst: canonicalize("input"),
+        src: Ident::new("whatever"),
+        dst: Ident::new("input"),
     }];
 
     use crate::ast::lower_ast;
@@ -777,7 +777,7 @@ fn test_identifier_sets() {
 fn test_tables() {
     use crate::common::canonicalize;
     let input = datamodel::Variable::Aux(datamodel::Aux {
-        ident: canonicalize("lookup function table").as_str().to_string(),
+        ident: canonicalize("lookup function table").into_owned(),
         equation: datamodel::Equation::Scalar("0".to_string(), None),
         documentation: "".to_string(),
         units: None,
@@ -801,7 +801,7 @@ fn test_tables() {
     });
 
     let expected = Variable::Var {
-        ident: canonicalize("lookup_function_table"),
+        ident: Ident::new("lookup_function_table"),
         ast: Some(Ast::Scalar(Expr0::Const(
             "0".to_string(),
             0.0,

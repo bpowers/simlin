@@ -132,8 +132,7 @@ pub fn apply_patch(project: &mut datamodel::Project, patch: ProjectPatch) -> Res
 }
 
 fn canonicalize_ident(ident: &mut String) {
-    let canonical = canonicalize(ident.as_str());
-    *ident = canonical.as_str().to_string();
+    *ident = canonicalize(ident.as_str()).into_owned();
 }
 
 fn canonicalize_stock(stock: &mut datamodel::Stock) {
@@ -162,7 +161,7 @@ fn canonicalize_module(module: &mut datamodel::Module) {
 
 fn upsert_variable(model: &mut datamodel::Model, variable: Variable) {
     let ident = canonicalize(variable.get_ident());
-    if let Some(existing) = model.get_variable_mut(ident.as_str()) {
+    if let Some(existing) = model.get_variable_mut(&ident) {
         *existing = variable;
     } else {
         model.variables.push(variable);
@@ -233,11 +232,11 @@ fn apply_update_stock_flows(
 
     stock.inflows = inflows
         .iter()
-        .map(|s| canonicalize(s).into_string())
+        .map(|s| canonicalize(s).into_owned())
         .collect();
     stock.outflows = outflows
         .iter()
-        .map(|s| canonicalize(s).into_string())
+        .map(|s| canonicalize(s).into_owned())
         .collect();
     stock.inflows.sort_unstable();
     stock.outflows.sort_unstable();
@@ -285,18 +284,17 @@ fn apply_rename_variable(
     from: &str,
     to: &str,
 ) -> Result<()> {
-    let old_ident = canonicalize(from);
-    let new_ident = canonicalize(to);
+    let old_ident = Ident::new(from);
+    let new_ident = Ident::new(to);
 
     if old_ident == new_ident {
         return Ok(());
     }
 
     let compiled_project = CompiledProject::from(project.clone());
-    let canonical_model_name = canonicalize(model_name);
     let compiled_model = compiled_project
         .models
-        .get(&canonical_model_name)
+        .get(&*canonicalize(model_name))
         .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::BadModelName, None))?
         .clone();
 
@@ -315,7 +313,7 @@ fn apply_rename_variable(
         .iter()
         .enumerate()
         .find_map(|(idx, var)| {
-            if canonicalize(var.get_ident()) == old_ident {
+            if canonicalize(var.get_ident()) == old_ident.as_str() {
                 Some((idx, matches!(var, Variable::Flow(_))))
             } else {
                 None
@@ -347,8 +345,8 @@ fn rename_model_equations(
     new_ident: &Ident<Canonical>,
 ) {
     for datamodel_var in model.variables.iter_mut() {
-        let canonical_var_ident = canonicalize(datamodel_var.get_ident());
-        let Some(compiled_var) = compiled_vars.get(&canonical_var_ident) else {
+        let Some(compiled_var) = compiled_vars.get(&*canonicalize(datamodel_var.get_ident()))
+        else {
             continue;
         };
 
@@ -817,7 +815,7 @@ fn rename_identifier_string(
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
 ) -> String {
-    let canonical = canonicalize(ident);
+    let canonical = Ident::new(ident);
     let renamed = rename_canonical_ident(&canonical, old_ident, new_ident);
     renamed.as_str().to_string()
 }
@@ -842,7 +840,7 @@ fn rename_module_reference_string(
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
 ) {
-    let canonical = canonicalize(value.as_str());
+    let canonical = Ident::new(value.as_str());
     let renamed = rename_canonical_ident(&canonical, old_ident, new_ident);
     if renamed != canonical {
         *value = renamed.to_source_repr();
@@ -856,8 +854,7 @@ fn rename_group_members(
 ) {
     for group in model.groups.iter_mut() {
         for member in group.members.iter_mut() {
-            let canonical = canonicalize(member.as_str());
-            if canonical == *old_ident {
+            if canonicalize(member.as_str()) == old_ident.as_str() {
                 *member = new_ident.to_source_repr();
             }
         }
@@ -872,12 +869,12 @@ fn update_stock_flow_references(
     for var in model.variables.iter_mut() {
         if let Variable::Stock(stock) = var {
             for inflow in stock.inflows.iter_mut() {
-                if canonicalize(inflow.as_str()) == *old_ident {
+                if canonicalize(inflow.as_str()) == old_ident.as_str() {
                     *inflow = new_ident.to_source_repr();
                 }
             }
             for outflow in stock.outflows.iter_mut() {
-                if canonicalize(outflow.as_str()) == *old_ident {
+                if canonicalize(outflow.as_str()) == old_ident.as_str() {
                     *outflow = new_ident.to_source_repr();
                 }
             }

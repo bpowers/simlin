@@ -1677,11 +1677,11 @@ impl ViewObject {
 
     pub fn ident(&self) -> Option<String> {
         match self {
-            ViewObject::Aux(aux) => Some(canonicalize(&aux.name).as_str().to_string()),
-            ViewObject::Stock(stock) => Some(canonicalize(&stock.name).as_str().to_string()),
-            ViewObject::Flow(flow) => Some(canonicalize(&flow.name).as_str().to_string()),
+            ViewObject::Aux(aux) => Some(canonicalize(&aux.name).into_owned()),
+            ViewObject::Stock(stock) => Some(canonicalize(&stock.name).into_owned()),
+            ViewObject::Flow(flow) => Some(canonicalize(&flow.name).into_owned()),
             ViewObject::Link(_link) => None,
-            ViewObject::Module(module) => Some(canonicalize(&module.name).as_str().to_string()),
+            ViewObject::Module(module) => Some(canonicalize(&module.name).into_owned()),
             ViewObject::Cloud(_cloud) => None,
             ViewObject::Alias(_alias) => None,
             // Groups are organizational containers, not model variables
@@ -1855,17 +1855,17 @@ impl View {
         for o in self.objects.iter_mut() {
             if let ViewObject::Link(link) = o {
                 link.from_uid = match &link.from {
-                    LinkEnd::Named(name) => uid_map.get(canonicalize(name).as_str()).cloned(),
+                    LinkEnd::Named(name) => uid_map.get(&*canonicalize(name)).cloned(),
                     LinkEnd::Alias(orig_alias) => orig_uid_map.get(&orig_alias.uid).cloned(),
                 };
                 link.to_uid = match &link.to {
-                    LinkEnd::Named(name) => uid_map.get(canonicalize(name).as_str()).cloned(),
+                    LinkEnd::Named(name) => uid_map.get(&*canonicalize(name)).cloned(),
                     LinkEnd::Alias(orig_alias) => orig_uid_map.get(&orig_alias.uid).cloned(),
                 };
             } else if let ViewObject::Alias(alias) = o {
                 let of_ident = canonicalize(&alias.of);
-                alias.of_uid = if !of_ident.as_str().is_empty() {
-                    uid_map.get(of_ident.as_str()).cloned()
+                alias.of_uid = if !of_ident.is_empty() {
+                    uid_map.get(&*of_ident).cloned()
                 } else {
                     None
                 };
@@ -1938,7 +1938,7 @@ impl View {
             if let Some(Var::Stock(stock)) = model.get_var(&ident) {
                 if let Some(outflows) = &stock.outflows {
                     for outflow in outflows {
-                        let outflow_ident = canonicalize(outflow).as_str().to_string();
+                        let outflow_ident = canonicalize(outflow).into_owned();
                         if !uid_map.contains_key(&outflow_ident) {
                             continue;
                         }
@@ -1949,7 +1949,7 @@ impl View {
                 }
                 if let Some(inflows) = &stock.inflows {
                     for inflow in inflows {
-                        let inflow_ident = canonicalize(inflow).as_str().to_string();
+                        let inflow_ident = canonicalize(inflow).into_owned();
                         if !uid_map.contains_key(&inflow_ident) {
                             continue;
                         }

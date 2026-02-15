@@ -412,11 +412,7 @@ impl Context<'_> {
                 if let Some(target_idx) = source_to_target[source_idx] {
                     let active_dim = &active_dims[target_idx];
                     // Create a dimension reference to the matched active dimension
-                    ast::IndexExpr2::Expr(ast::Expr2::Var(
-                        canonicalize(active_dim.name()),
-                        None,
-                        loc,
-                    ))
+                    ast::IndexExpr2::Expr(ast::Expr2::Var(Ident::new(active_dim.name()), None, loc))
                 } else {
                     // Source dimension didn't match any active dimension - use wildcard
                     // (needed for reductions like SUM where we iterate over non-matched dims)
@@ -772,7 +768,7 @@ impl Context<'_> {
 impl Expr3LowerContext for Context<'_> {
     fn get_dimensions(&self, ident: &str) -> Option<Vec<Dimension>> {
         let metadata = self.metadata.get(self.model_name)?;
-        let var_metadata = metadata.get(&canonicalize(ident))?;
+        let var_metadata = metadata.get(&*canonicalize(ident))?;
         var_metadata.var.get_dimensions().map(|dims| dims.to_vec())
     }
 
@@ -780,7 +776,7 @@ impl Expr3LowerContext for Context<'_> {
         let canonical = canonicalize(ident);
         self.dimensions
             .iter()
-            .any(|dim| canonicalize(dim.name()).as_str() == canonical.as_str())
+            .any(|dim| *canonicalize(dim.name()) == *canonical)
     }
 }
 
@@ -851,7 +847,7 @@ impl Context<'_> {
                 let is_dimension = self
                     .dimensions
                     .iter()
-                    .any(|dim| id.as_str() == canonicalize(dim.name()).as_str());
+                    .any(|dim| id.as_str() == &*canonicalize(dim.name()));
 
                 if is_dimension {
                     // This is a dimension name
@@ -860,7 +856,7 @@ impl Context<'_> {
                             // We're in an array context - find the matching dimension
                             for (dim, subscript) in active_dims.iter().zip(active_subscripts.iter())
                             {
-                                if id.as_str() == canonicalize(dim.name()).as_str() {
+                                if id.as_str() == &*canonicalize(dim.name()) {
                                     let index = Self::subscript_to_index(dim, subscript);
                                     return Ok(Expr::Const(F::from_f64(index), *loc));
                                 }
@@ -1835,7 +1831,7 @@ impl Context<'_> {
                     let is_dim_name = self
                         .dimensions
                         .iter()
-                        .any(|d| canonicalize(d.name()).as_str() == ident.as_str());
+                        .any(|d| &*canonicalize(d.name()) == ident.as_str());
 
                     if is_dim_name {
                         if self.active_dimension.is_none() {
@@ -1850,7 +1846,7 @@ impl Context<'_> {
                         for (active_dim, active_subscript) in
                             active_dims.iter().zip(active_subscripts)
                         {
-                            if canonicalize(active_dim.name()).as_str() == ident.as_str() {
+                            if &*canonicalize(active_dim.name()) == ident.as_str() {
                                 if let Some(offset) = dim.get_offset(active_subscript) {
                                     return Ok(SubscriptIndex::Single(Expr::Const(
                                         F::from_usize(offset + 1),
@@ -1900,7 +1896,7 @@ impl Context<'_> {
 
                 // Find the matching active dimension
                 for (active_dim, active_subscript) in active_dims.iter().zip(active_subscripts) {
-                    if canonicalize(active_dim.name()).as_str() == name.as_str() {
+                    if &*canonicalize(active_dim.name()) == name.as_str() {
                         // Found the matching dimension
                         if let Some(offset) = dim.get_offset(active_subscript) {
                             return Ok(SubscriptIndex::Single(Expr::Const(
@@ -1931,8 +1927,8 @@ fn test_lower() {
         Box::new(If(
             Box::new(Op2(
                 And,
-                Box::new(Var(canonicalize("true_input"), None, Loc::default())),
-                Box::new(Var(canonicalize("false_input"), None, Loc::default())),
+                Box::new(Var(Ident::new("true_input"), None, Loc::default())),
+                Box::new(Var(Ident::new("false_input"), None, Loc::default())),
                 None,
                 Loc::default(),
             )),
@@ -1948,12 +1944,12 @@ fn test_lower() {
         HashMap::new();
     let mut metadata: HashMap<Ident<Canonical>, VariableMetadata> = HashMap::new();
     metadata.insert(
-        canonicalize("true_input"),
+        Ident::new("true_input"),
         VariableMetadata {
             offset: 7,
             size: 1,
             var: Variable::Var {
-                ident: canonicalize(""),
+                ident: Ident::new(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1968,12 +1964,12 @@ fn test_lower() {
         },
     );
     metadata.insert(
-        canonicalize("false_input"),
+        Ident::new("false_input"),
         VariableMetadata {
             offset: 8,
             size: 1,
             var: Variable::Var {
-                ident: canonicalize(""),
+                ident: Ident::new(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1988,8 +1984,8 @@ fn test_lower() {
         },
     );
     let mut metadata2 = HashMap::new();
-    let main_ident = canonicalize("main");
-    let test_ident = canonicalize("test");
+    let main_ident = Ident::new("main");
+    let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
     let context = Context {
@@ -2029,8 +2025,8 @@ fn test_lower() {
         Box::new(If(
             Box::new(Op2(
                 Or,
-                Box::new(Var(canonicalize("true_input"), None, Loc::default())),
-                Box::new(Var(canonicalize("false_input"), None, Loc::default())),
+                Box::new(Var(Ident::new("true_input"), None, Loc::default())),
+                Box::new(Var(Ident::new("false_input"), None, Loc::default())),
                 None,
                 Loc::default(),
             )),
@@ -2046,12 +2042,12 @@ fn test_lower() {
         HashMap::new();
     let mut metadata: HashMap<Ident<Canonical>, VariableMetadata> = HashMap::new();
     metadata.insert(
-        canonicalize("true_input"),
+        Ident::new("true_input"),
         VariableMetadata {
             offset: 7,
             size: 1,
             var: Variable::Var {
-                ident: canonicalize(""),
+                ident: Ident::new(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -2066,12 +2062,12 @@ fn test_lower() {
         },
     );
     metadata.insert(
-        canonicalize("false_input"),
+        Ident::new("false_input"),
         VariableMetadata {
             offset: 8,
             size: 1,
             var: Variable::Var {
-                ident: canonicalize(""),
+                ident: Ident::new(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -2086,8 +2082,8 @@ fn test_lower() {
         },
     );
     let mut metadata2 = HashMap::new();
-    let main_ident = canonicalize("main");
-    let test_ident = canonicalize("test");
+    let main_ident = Ident::new("main");
+    let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
     let context = Context {

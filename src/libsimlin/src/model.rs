@@ -49,7 +49,7 @@ unsafe fn parse_filter(filter: *const c_char) -> Result<Option<String>, SimlinEr
     }
     match CStr::from_ptr(filter).to_str() {
         Ok("") => Ok(None),
-        Ok(s) => Ok(Some(canonicalize(s).to_string())),
+        Ok(s) => Ok(Some(canonicalize(s).into_owned())),
         Err(_) => Err(SimlinError::new(SimlinErrorCode::Generic)
             .with_message("filter string is not valid UTF-8")),
     }
@@ -95,7 +95,7 @@ pub(crate) fn find_model_in_project<'a>(
         .datamodel
         .models
         .iter()
-        .find(|m| canonicalize(&m.name) == canonical)
+        .find(|m| *canonicalize(&m.name) == *canonical)
 }
 
 /// Increments the reference count of a model
@@ -205,7 +205,7 @@ pub unsafe extern "C" fn simlin_model_get_var_count(
         .filter(|v| {
             filter_str
                 .as_ref()
-                .is_none_or(|f| canonicalize(v.get_ident()).as_str().contains(f.as_str()))
+                .is_none_or(|f| canonicalize(v.get_ident()).contains(f.as_str()))
         })
         .count();
 
@@ -272,9 +272,9 @@ pub unsafe extern "C" fn simlin_model_get_var_names(
         .filter(|v| {
             filter_str
                 .as_ref()
-                .is_none_or(|f| canonicalize(v.get_ident()).as_str().contains(f.as_str()))
+                .is_none_or(|f| canonicalize(v.get_ident()).contains(f.as_str()))
         })
-        .map(|v| canonicalize(v.get_ident()).to_string())
+        .map(|v| canonicalize(v.get_ident()).into_owned())
         .collect();
     names.sort();
 
@@ -376,7 +376,7 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
 
     let eng_model = match project_locked
         .models
-        .get(&canonicalize(&model_ref.model_name))
+        .get(&*canonicalize(&model_ref.model_name))
     {
         Some(m) => m,
         None => {
@@ -389,7 +389,7 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         }
     };
 
-    let var = match eng_model.variables.get(&var_name) {
+    let var = match eng_model.variables.get(&*var_name) {
         Some(v) => v,
         None => {
             store_error(
@@ -506,7 +506,7 @@ pub unsafe extern "C" fn simlin_model_get_links(
 
     let eng_model = match project_locked
         .models
-        .get(&canonicalize(&model_ref.model_name))
+        .get(&*canonicalize(&model_ref.model_name))
     {
         Some(m) => m,
         None => {
@@ -660,7 +660,7 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
 
     let eng_model = match project_locked
         .models
-        .get(&canonicalize(&model_ref.model_name))
+        .get(&*canonicalize(&model_ref.model_name))
     {
         Some(m) => m,
         None => {
@@ -668,7 +668,7 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
         }
     };
 
-    let var = match eng_model.variables.get(&ident_str) {
+    let var = match eng_model.variables.get(&*ident_str) {
         Some(v) => v,
         None => {
             return ptr::null_mut();
@@ -759,7 +759,7 @@ pub unsafe extern "C" fn simlin_model_get_var_json(
     let dm_var = match dm_model
         .variables
         .iter()
-        .find(|v| canonicalize(v.get_ident()) == canonical_name)
+        .find(|v| *canonicalize(v.get_ident()) == *canonical_name)
     {
         Some(v) => v,
         None => {

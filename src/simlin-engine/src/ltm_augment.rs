@@ -184,12 +184,12 @@ fn generate_link_score_variables(
             // Generate module-aware link score
             let equation = generate_module_link_score_equation(&link.from, &link.to, variables);
             let ltm_var = create_aux_variable(&var_name, &equation);
-            link_vars.insert(crate::common::canonicalize(&var_name), ltm_var);
+            link_vars.insert(Ident::new(&var_name), ltm_var);
         } else if let Some(to_var) = variables.get(&link.to) {
             // Generate regular link score
             let equation = generate_link_score_equation(&link.from, &link.to, to_var, variables);
             let ltm_var = create_aux_variable(&var_name, &equation);
-            link_vars.insert(crate::common::canonicalize(&var_name), ltm_var);
+            link_vars.insert(Ident::new(&var_name), ltm_var);
         }
     }
 
@@ -292,7 +292,7 @@ fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, da
 
         // Create the synthetic variable
         let ltm_var = create_aux_variable(&var_name, &equation);
-        loop_vars.insert(crate::common::canonicalize(&var_name), ltm_var);
+        loop_vars.insert(Ident::new(&var_name), ltm_var);
     }
 
     // Then, generate relative loop scores for all loops
@@ -309,7 +309,7 @@ fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, da
 
         // Create the synthetic variable
         let ltm_var = create_aux_variable(&var_name, &equation);
-        loop_vars.insert(crate::common::canonicalize(&var_name), ltm_var);
+        loop_vars.insert(Ident::new(&var_name), ltm_var);
     }
 
     loop_vars
@@ -563,7 +563,7 @@ fn create_aux_variable(name: &str, equation: &str) -> crate::datamodel::Variable
     use crate::datamodel;
 
     datamodel::Variable::Aux(datamodel::Aux {
-        ident: canonicalize(name).to_string(),
+        ident: canonicalize(name).into_owned(),
         equation: datamodel::Equation::Scalar(equation.to_string(), None),
         documentation: "LTM".to_string(),
         units: None, // LTM scores are dimensionless by design, no need to declare
@@ -588,13 +588,13 @@ mod tests {
             id: "R1".to_string(),
             links: vec![
                 Link {
-                    from: crate::common::canonicalize("x"),
-                    to: crate::common::canonicalize("y"),
+                    from: Ident::new("x"),
+                    to: Ident::new("y"),
                     polarity: crate::ltm::LinkPolarity::Positive,
                 },
                 Link {
-                    from: crate::common::canonicalize("y"),
-                    to: crate::common::canonicalize("x"),
+                    from: Ident::new("y"),
+                    to: Ident::new("x"),
                     polarity: crate::ltm::LinkPolarity::Positive,
                 },
             ],
@@ -665,7 +665,7 @@ mod tests {
         let ltm_vars = generate_ltm_variables(&project).unwrap();
 
         // Check that we have generated variables for the main model
-        let main_ident = crate::common::canonicalize("main");
+        let main_ident = Ident::new("main");
         assert!(
             ltm_vars.contains_key(&main_ident),
             "Should have variables for main model"
@@ -713,12 +713,12 @@ mod tests {
 
         let model = project
             .models
-            .get(&crate::common::canonicalize("main"))
+            .get(&Ident::new("main"))
             .expect("Model should exist");
         let all_vars = &model.variables;
 
-        let from = crate::common::canonicalize("x");
-        let to = crate::common::canonicalize("y");
+        let from = Ident::new("x");
+        let to = Ident::new("y");
         let y_var = all_vars.get(&to).expect("Y variable should exist");
 
         let equation = generate_link_score_equation(&from, &to, y_var, all_vars);
@@ -751,12 +751,12 @@ mod tests {
 
         let model = project
             .models
-            .get(&crate::common::canonicalize("main"))
+            .get(&Ident::new("main"))
             .expect("Model should exist");
         let all_vars = &model.variables;
 
-        let from = crate::common::canonicalize("inflow_rate");
-        let to = crate::common::canonicalize("water_in_tank");
+        let from = Ident::new("inflow_rate");
+        let to = Ident::new("water_in_tank");
         let stock_var = all_vars.get(&to).expect("Stock variable should exist");
 
         let equation = generate_link_score_equation(&from, &to, stock_var, all_vars);
@@ -790,12 +790,12 @@ mod tests {
 
         let model = project
             .models
-            .get(&crate::common::canonicalize("main"))
+            .get(&Ident::new("main"))
             .expect("Model should exist");
         let all_vars = &model.variables;
 
-        let from = crate::common::canonicalize("outflow_rate");
-        let to = crate::common::canonicalize("water_in_tank");
+        let from = Ident::new("outflow_rate");
+        let to = Ident::new("water_in_tank");
         let stock_var = all_vars.get(&to).expect("Stock variable should exist");
 
         let equation = generate_link_score_equation(&from, &to, stock_var, all_vars);
@@ -846,7 +846,7 @@ mod tests {
         // Generate LTM variables
         let ltm_vars = generate_ltm_variables(&project).unwrap();
 
-        let main_ident = crate::common::canonicalize("main");
+        let main_ident = Ident::new("main");
         assert!(ltm_vars.contains_key(&main_ident));
 
         let vars = &ltm_vars[&main_ident];
@@ -875,22 +875,22 @@ mod tests {
 
         // Create a module variable
         let module_var = Variable::Module {
-            ident: crate::common::canonicalize("smoother"),
-            model_name: crate::common::canonicalize("smooth"),
+            ident: Ident::new("smoother"),
+            model_name: Ident::new("smooth"),
             units: None,
             inputs: vec![ModuleInput {
-                src: crate::common::canonicalize("raw_input"),
-                dst: crate::common::canonicalize("input"),
+                src: Ident::new("raw_input"),
+                dst: Ident::new("input"),
             }],
             errors: vec![],
             unit_errors: vec![],
         };
 
-        variables.insert(crate::common::canonicalize("smoother"), module_var);
+        variables.insert(Ident::new("smoother"), module_var);
 
         // Create an input variable
         let input_var = Variable::Var {
-            ident: crate::common::canonicalize("raw_input"),
+            ident: Ident::new("raw_input"),
             ast: None,
             init_ast: None,
             eqn: Some(Equation::Scalar("10 + SIN(TIME)".to_string(), None)),
@@ -903,13 +903,13 @@ mod tests {
             unit_errors: vec![],
         };
 
-        variables.insert(crate::common::canonicalize("raw_input"), input_var);
+        variables.insert(Ident::new("raw_input"), input_var);
 
         // Create a link from raw_input to the module
         let mut links = HashSet::new();
         links.insert(Link {
-            from: crate::common::canonicalize("raw_input"),
-            to: crate::common::canonicalize("smoother"),
+            from: Ident::new("raw_input"),
+            to: Ident::new("smoother"),
             polarity: LinkPolarity::Positive,
         });
 
@@ -920,7 +920,7 @@ mod tests {
         assert!(!link_vars.is_empty(), "Should generate module link score");
 
         // Check the variable name
-        let expected_name = crate::common::canonicalize("$⁚ltm⁚link_score⁚raw_input⁚smoother");
+        let expected_name = Ident::new("$⁚ltm⁚link_score⁚raw_input⁚smoother");
         assert!(
             link_vars.contains_key(&expected_name),
             "Should have link score for module connection"
@@ -937,8 +937,8 @@ mod tests {
 
         // Create a module variable (acts as output)
         let module_var = Variable::Module {
-            ident: crate::common::canonicalize("smoother"),
-            model_name: crate::common::canonicalize("smooth"),
+            ident: Ident::new("smoother"),
+            model_name: Ident::new("smooth"),
             units: None,
             inputs: vec![],
             errors: vec![],
@@ -947,7 +947,7 @@ mod tests {
 
         // Create a dependent variable
         let dependent_var = Variable::Var {
-            ident: crate::common::canonicalize("processed"),
+            ident: Ident::new("processed"),
             ast: None,
             init_ast: None,
             eqn: Some(Equation::Scalar("smoother * 2".to_string(), None)),
@@ -960,11 +960,11 @@ mod tests {
             unit_errors: vec![],
         };
 
-        variables.insert(crate::common::canonicalize("smoother"), module_var);
-        variables.insert(crate::common::canonicalize("processed"), dependent_var);
+        variables.insert(Ident::new("smoother"), module_var);
+        variables.insert(Ident::new("processed"), dependent_var);
 
-        let from = crate::common::canonicalize("smoother");
-        let to = crate::common::canonicalize("processed");
+        let from = Ident::new("smoother");
+        let to = Ident::new("processed");
 
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
@@ -999,7 +999,7 @@ mod tests {
 
         // Create an input variable
         let input_var = Variable::Var {
-            ident: crate::common::canonicalize("raw_data"),
+            ident: Ident::new("raw_data"),
             ast: None,
             init_ast: None,
             eqn: Some(Equation::Scalar("TIME * 2".to_string(), None)),
@@ -1014,22 +1014,22 @@ mod tests {
 
         // Create a module variable with an input
         let module_var = Variable::Module {
-            ident: crate::common::canonicalize("processor"),
-            model_name: crate::common::canonicalize("process"),
+            ident: Ident::new("processor"),
+            model_name: Ident::new("process"),
             units: None,
             inputs: vec![ModuleInput {
-                src: crate::common::canonicalize("raw_data"),
-                dst: crate::common::canonicalize("input"),
+                src: Ident::new("raw_data"),
+                dst: Ident::new("input"),
             }],
             errors: vec![],
             unit_errors: vec![],
         };
 
-        variables.insert(crate::common::canonicalize("raw_data"), input_var);
-        variables.insert(crate::common::canonicalize("processor"), module_var);
+        variables.insert(Ident::new("raw_data"), input_var);
+        variables.insert(Ident::new("processor"), module_var);
 
-        let from = crate::common::canonicalize("raw_data");
-        let to = crate::common::canonicalize("processor");
+        let from = Ident::new("raw_data");
+        let to = Ident::new("processor");
 
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
@@ -1063,8 +1063,8 @@ mod tests {
 
         // Create first module (output)
         let module_a = Variable::Module {
-            ident: crate::common::canonicalize("filter_a"),
-            model_name: crate::common::canonicalize("filter"),
+            ident: Ident::new("filter_a"),
+            model_name: Ident::new("filter"),
             units: None,
             inputs: vec![],
             errors: vec![],
@@ -1073,22 +1073,22 @@ mod tests {
 
         // Create second module (input from first)
         let module_b = Variable::Module {
-            ident: crate::common::canonicalize("filter_b"),
-            model_name: crate::common::canonicalize("filter"),
+            ident: Ident::new("filter_b"),
+            model_name: Ident::new("filter"),
             units: None,
             inputs: vec![ModuleInput {
-                src: crate::common::canonicalize("filter_a"),
-                dst: crate::common::canonicalize("input"),
+                src: Ident::new("filter_a"),
+                dst: Ident::new("input"),
             }],
             errors: vec![],
             unit_errors: vec![],
         };
 
-        variables.insert(crate::common::canonicalize("filter_a"), module_a);
-        variables.insert(crate::common::canonicalize("filter_b"), module_b);
+        variables.insert(Ident::new("filter_a"), module_a);
+        variables.insert(Ident::new("filter_b"), module_b);
 
-        let from = crate::common::canonicalize("filter_a");
-        let to = crate::common::canonicalize("filter_b");
+        let from = Ident::new("filter_a");
+        let to = Ident::new("filter_b");
 
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
@@ -1125,22 +1125,22 @@ mod tests {
 
         // Create a module with proper inputs
         let module_var = Variable::Module {
-            ident: crate::common::canonicalize("processor"),
-            model_name: crate::common::canonicalize("process_model"),
+            ident: Ident::new("processor"),
+            model_name: Ident::new("process_model"),
             units: None,
             inputs: vec![ModuleInput {
-                src: crate::common::canonicalize("input_value"),
-                dst: crate::common::canonicalize("input"),
+                src: Ident::new("input_value"),
+                dst: Ident::new("input"),
             }],
             errors: vec![],
             unit_errors: vec![],
         };
 
-        variables.insert(crate::common::canonicalize("processor"), module_var);
+        variables.insert(Ident::new("processor"), module_var);
 
         // Create variables that connect to the module
         let input_var = Variable::Var {
-            ident: crate::common::canonicalize("input_value"),
+            ident: Ident::new("input_value"),
             ast: None,
             init_ast: None,
             eqn: Some(Equation::Scalar("10".to_string(), None)),
@@ -1154,7 +1154,7 @@ mod tests {
         };
 
         let output_var = Variable::Var {
-            ident: crate::common::canonicalize("output_value"),
+            ident: Ident::new("output_value"),
             ast: None,
             init_ast: None,
             eqn: Some(Equation::Scalar("processor * 2".to_string(), None)),
@@ -1167,8 +1167,8 @@ mod tests {
             unit_errors: vec![],
         };
 
-        variables.insert(crate::common::canonicalize("input_value"), input_var);
-        variables.insert(crate::common::canonicalize("output_value"), output_var);
+        variables.insert(Ident::new("input_value"), input_var);
+        variables.insert(Ident::new("output_value"), output_var);
 
         // Test that we can generate module link score equations correctly
         use crate::ltm::{Link, LinkPolarity};
@@ -1179,15 +1179,15 @@ mod tests {
 
         // Link from input_value to processor (module input)
         links.insert(Link {
-            from: crate::common::canonicalize("input_value"),
-            to: crate::common::canonicalize("processor"),
+            from: Ident::new("input_value"),
+            to: Ident::new("processor"),
             polarity: LinkPolarity::Positive,
         });
 
         // Link from processor to output_value (module output)
         links.insert(Link {
-            from: crate::common::canonicalize("processor"),
-            to: crate::common::canonicalize("output_value"),
+            from: Ident::new("processor"),
+            to: Ident::new("output_value"),
             polarity: LinkPolarity::Positive,
         });
 
@@ -1197,12 +1197,10 @@ mod tests {
         // Check that module link scores were generated
         assert_eq!(link_vars.len(), 2, "Should generate 2 link score variables");
 
-        let has_input_link = link_vars.contains_key(&crate::common::canonicalize(
-            "$⁚ltm⁚link_score⁚input_value⁚processor",
-        ));
-        let has_output_link = link_vars.contains_key(&crate::common::canonicalize(
-            "$⁚ltm⁚link_score⁚processor⁚output_value",
-        ));
+        let has_input_link =
+            link_vars.contains_key(&Ident::new("$⁚ltm⁚link_score⁚input_value⁚processor"));
+        let has_output_link =
+            link_vars.contains_key(&Ident::new("$⁚ltm⁚link_score⁚processor⁚output_value"));
 
         assert!(
             has_input_link,
@@ -1244,12 +1242,12 @@ mod tests {
 
         let model = project
             .models
-            .get(&crate::common::canonicalize("main"))
+            .get(&Ident::new("main"))
             .expect("Model should exist");
         let all_vars = &model.variables;
 
-        let from = crate::common::canonicalize("population");
-        let to = crate::common::canonicalize("deaths");
+        let from = Ident::new("population");
+        let to = Ident::new("deaths");
         let flow_var = all_vars.get(&to).expect("Flow variable should exist");
 
         let equation = generate_link_score_equation(&from, &to, flow_var, all_vars);
@@ -1290,12 +1288,12 @@ mod tests {
         // Get the model and its variables
         let model = project
             .models
-            .get(&crate::common::canonicalize("main"))
+            .get(&Ident::new("main"))
             .expect("Model should exist");
         let all_vars = &model.variables;
 
-        let stock = crate::common::canonicalize("inventory");
-        let flow = crate::common::canonicalize("production");
+        let stock = Ident::new("inventory");
+        let flow = Ident::new("production");
         let flow_var = all_vars.get(&flow).expect("Flow variable should exist");
 
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
@@ -1336,12 +1334,12 @@ mod tests {
 
         let model = project
             .models
-            .get(&crate::common::canonicalize("main"))
+            .get(&Ident::new("main"))
             .expect("Model should exist");
         let all_vars = &model.variables;
 
-        let stock = crate::common::canonicalize("water_tank");
-        let flow = crate::common::canonicalize("drainage");
+        let stock = Ident::new("water_tank");
+        let flow = Ident::new("drainage");
         let flow_var = all_vars.get(&flow).expect("Flow variable should exist");
 
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
@@ -1380,12 +1378,12 @@ mod tests {
 
         let model = project
             .models
-            .get(&crate::common::canonicalize("main"))
+            .get(&Ident::new("main"))
             .expect("Model should exist");
         let all_vars = &model.variables;
 
-        let stock = crate::common::canonicalize("population");
-        let flow = crate::common::canonicalize("births");
+        let stock = Ident::new("population");
+        let flow = Ident::new("births");
         let flow_var = all_vars.get(&flow).expect("Flow variable should exist");
 
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
@@ -1422,12 +1420,12 @@ mod tests {
 
         let model = project
             .models
-            .get(&crate::common::canonicalize("main"))
+            .get(&Ident::new("main"))
             .expect("Model should exist");
         let all_vars = &model.variables;
 
-        let stock = crate::common::canonicalize("unrelated_stock");
-        let flow = crate::common::canonicalize("constant_flow");
+        let stock = Ident::new("unrelated_stock");
+        let flow = Ident::new("constant_flow");
         let flow_var = all_vars.get(&flow).expect("Flow variable should exist");
 
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
@@ -1516,12 +1514,12 @@ mod tests {
 
         let model = project
             .models
-            .get(&crate::common::canonicalize("main"))
+            .get(&Ident::new("main"))
             .expect("Model should exist");
         let all_vars = &model.variables;
 
-        let stock = crate::common::canonicalize("S");
-        let flow = crate::common::canonicalize("inflow");
+        let stock = Ident::new("S");
+        let flow = Ident::new("inflow");
         let flow_var = all_vars.get(&flow).expect("Flow variable should exist");
 
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
@@ -1704,7 +1702,7 @@ mod tests {
         // All-links mode: every causal link gets a link score variable
         let all_link_vars = generate_ltm_variables_all_links(&project).unwrap();
 
-        let main_ident = crate::common::canonicalize("main");
+        let main_ident = Ident::new("main");
 
         // All-links mode should have MORE link score variables than standard mode
         let standard_link_count = standard_vars

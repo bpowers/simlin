@@ -818,21 +818,20 @@ fn analyze_expr_polarity_with_context(
                 _ => None,
             };
 
-            if let (Some(vars), Some(table_name)) = (variables, table_name) {
-                let table_ident = crate::common::canonicalize(table_name);
-                if let Some(Variable::Var { tables, .. }) = vars.get(&table_ident)
-                    && let Some(t) = tables.first()
-                {
-                    let table_polarity = analyze_graphical_function_polarity(t);
-                    // Combine the polarities
-                    return match (arg_polarity, table_polarity) {
-                        (LinkPolarity::Positive, LinkPolarity::Positive) => LinkPolarity::Positive,
-                        (LinkPolarity::Positive, LinkPolarity::Negative) => LinkPolarity::Negative,
-                        (LinkPolarity::Negative, LinkPolarity::Positive) => LinkPolarity::Negative,
-                        (LinkPolarity::Negative, LinkPolarity::Negative) => LinkPolarity::Positive,
-                        _ => LinkPolarity::Unknown,
-                    };
-                }
+            if let (Some(vars), Some(table_name)) = (variables, table_name)
+                && let Some(Variable::Var { tables, .. }) =
+                    vars.get(&*crate::common::canonicalize(table_name))
+                && let Some(t) = tables.first()
+            {
+                let table_polarity = analyze_graphical_function_polarity(t);
+                // Combine the polarities
+                return match (arg_polarity, table_polarity) {
+                    (LinkPolarity::Positive, LinkPolarity::Positive) => LinkPolarity::Positive,
+                    (LinkPolarity::Positive, LinkPolarity::Negative) => LinkPolarity::Negative,
+                    (LinkPolarity::Negative, LinkPolarity::Positive) => LinkPolarity::Negative,
+                    (LinkPolarity::Negative, LinkPolarity::Negative) => LinkPolarity::Positive,
+                    _ => LinkPolarity::Unknown,
+                };
             }
             LinkPolarity::Unknown
         }
@@ -1087,7 +1086,7 @@ mod tests {
         let loops = detect_loops(&project).unwrap();
 
         // The model name should match what we provided to x_model
-        let main_ident: Ident<Canonical> = crate::common::canonicalize("main");
+        let main_ident: Ident<Canonical> = Ident::new("main");
         assert!(loops.contains_key(&main_ident), "Should have main model");
         let model_loops = &loops[&main_ident];
         assert_eq!(model_loops.len(), 1);
@@ -1132,7 +1131,7 @@ mod tests {
         let loops1 = detect_loops(&project1).unwrap();
         let loops2 = detect_loops(&project2).unwrap();
 
-        let main_ident = crate::common::canonicalize("main");
+        let main_ident = Ident::new("main");
         let main_loops1 = loops1.get(&main_ident).unwrap();
         let main_loops2 = loops2.get(&main_ident).unwrap();
 
@@ -1166,7 +1165,7 @@ mod tests {
         let project = Project::from(project);
         let loops = detect_loops(&project).unwrap();
 
-        let main_ident: Ident<Canonical> = crate::common::canonicalize("main");
+        let main_ident: Ident<Canonical> = Ident::new("main");
         assert!(loops.contains_key(&main_ident), "Should have main model");
         let model_loops = &loops[&main_ident];
         assert_eq!(model_loops.len(), 0);
@@ -1192,7 +1191,7 @@ mod tests {
         let project = Project::from(project);
         let loops = detect_loops(&project).unwrap();
 
-        let main_ident: Ident<Canonical> = crate::common::canonicalize("main");
+        let main_ident: Ident<Canonical> = Ident::new("main");
         assert!(loops.contains_key(&main_ident), "Should have main model");
         let model_loops = &loops[&main_ident];
 
@@ -1249,7 +1248,7 @@ mod tests {
         let loops = detect_loops(&project).unwrap();
 
         // Check that loops were detected in the main model
-        let main_ident: Ident<Canonical> = crate::common::canonicalize("main");
+        let main_ident: Ident<Canonical> = Ident::new("main");
         assert!(loops.contains_key(&main_ident), "Should have main model");
         let _model_loops = &loops[&main_ident];
 
@@ -1303,7 +1302,7 @@ mod tests {
         // Test should complete without crashing
         let loops = detect_loops(&project).unwrap();
 
-        let main_ident: Ident<Canonical> = crate::common::canonicalize("main");
+        let main_ident: Ident<Canonical> = Ident::new("main");
         assert!(loops.contains_key(&main_ident), "Should have main model");
 
         // The enhanced detection might find cross-module loops
@@ -1314,10 +1313,9 @@ mod tests {
     fn test_link_polarity_detection() {
         // Test polarity detection in simple expressions
         use crate::ast::{Ast, Expr2};
-        use crate::common::canonicalize;
 
         // Test positive link: y = x * 2
-        let x_var = canonicalize("x");
+        let x_var = Ident::new("x");
         let expr = Expr2::Op2(
             BinaryOp::Mul,
             Box::new(Expr2::Var(x_var.clone(), None, crate::ast::Loc::default())),
@@ -1387,19 +1385,19 @@ mod tests {
         // Test get_variable_dependencies for Module type (covers lines 70-72)
         use crate::variable::ModuleInput;
 
-        let input_var = crate::common::canonicalize("input_signal");
+        let input_var = Ident::new("input_signal");
         let module = Variable::Module {
-            ident: crate::common::canonicalize("processor"),
-            model_name: crate::common::canonicalize("process_model"),
+            ident: Ident::new("processor"),
+            model_name: Ident::new("process_model"),
             units: None,
             inputs: vec![
                 ModuleInput {
                     src: input_var.clone(),
-                    dst: crate::common::canonicalize("input"),
+                    dst: Ident::new("input"),
                 },
                 ModuleInput {
-                    src: crate::common::canonicalize("control"),
-                    dst: crate::common::canonicalize("param"),
+                    src: Ident::new("control"),
+                    dst: Ident::new("param"),
                 },
             ],
             errors: vec![],
@@ -1410,7 +1408,7 @@ mod tests {
         assert_eq!(deps.len(), 2, "Module should have 2 dependencies");
         assert!(deps.contains(&input_var), "Should contain input_signal");
         assert!(
-            deps.contains(&crate::common::canonicalize("control")),
+            deps.contains(&Ident::new("control")),
             "Should contain control"
         );
     }
@@ -1419,7 +1417,7 @@ mod tests {
     fn test_get_variable_dependencies_no_ast() {
         // Test get_variable_dependencies when AST is None (covers line 83)
         let var = Variable::Var {
-            ident: crate::common::canonicalize("empty_var"),
+            ident: Ident::new("empty_var"),
             ast: None,
             init_ast: None,
             eqn: None,
@@ -1458,18 +1456,18 @@ mod tests {
             id: "R1".to_string(),
             links: vec![
                 Link {
-                    from: crate::common::canonicalize("z"),
-                    to: crate::common::canonicalize("x"),
+                    from: Ident::new("z"),
+                    to: Ident::new("x"),
                     polarity: LinkPolarity::Positive,
                 },
                 Link {
-                    from: crate::common::canonicalize("x"),
-                    to: crate::common::canonicalize("y"),
+                    from: Ident::new("x"),
+                    to: Ident::new("y"),
                     polarity: LinkPolarity::Positive,
                 },
                 Link {
-                    from: crate::common::canonicalize("y"),
-                    to: crate::common::canonicalize("z"),
+                    from: Ident::new("y"),
+                    to: Ident::new("z"),
                     polarity: LinkPolarity::Positive,
                 },
             ],
@@ -1489,13 +1487,13 @@ mod tests {
             id: "R2".to_string(),
             links: vec![
                 Link {
-                    from: crate::common::canonicalize("a"),
-                    to: crate::common::canonicalize("b"),
+                    from: Ident::new("a"),
+                    to: Ident::new("b"),
                     polarity: LinkPolarity::Positive,
                 },
                 Link {
-                    from: crate::common::canonicalize("b"),
-                    to: crate::common::canonicalize("a"),
+                    from: Ident::new("b"),
+                    to: Ident::new("a"),
                     polarity: LinkPolarity::Positive,
                 },
             ],
@@ -1517,9 +1515,9 @@ mod tests {
             module_graphs: HashMap::new(),
         };
 
-        let module_var = crate::common::canonicalize("smoother");
-        let output_var = crate::common::canonicalize("smoothed_output");
-        let unconnected_var = crate::common::canonicalize("unrelated");
+        let module_var = Ident::new("smoother");
+        let output_var = Ident::new("smoothed_output");
+        let unconnected_var = Ident::new("unrelated");
 
         // Add edge from module to output
         graph
@@ -1541,7 +1539,7 @@ mod tests {
         );
 
         // Test non-existent module
-        let non_existent = crate::common::canonicalize("non_existent");
+        let non_existent = Ident::new("non_existent");
         assert!(
             !graph.is_connected_through_parent(&non_existent, &output_var),
             "Non-existent module should not be connected"
@@ -1582,7 +1580,7 @@ mod tests {
             "0.0 should not be positive"
         );
 
-        let var_expr = Expr2::Var(crate::common::canonicalize("x"), None, Loc::default());
+        let var_expr = Expr2::Var(Ident::new("x"), None, Loc::default());
         assert!(
             !is_positive_constant(&var_expr),
             "Variable should not be positive constant"
@@ -1609,7 +1607,7 @@ mod tests {
             "0.0 should not be negative"
         );
 
-        let var_expr = Expr2::Var(crate::common::canonicalize("y"), None, Loc::default());
+        let var_expr = Expr2::Var(Ident::new("y"), None, Loc::default());
         assert!(
             !is_negative_constant(&var_expr),
             "Variable should not be negative constant"
@@ -1623,7 +1621,7 @@ mod tests {
         use crate::common::CanonicalElementName;
         use std::collections::HashMap;
 
-        let x_var = crate::common::canonicalize("x");
+        let x_var = Ident::new("x");
 
         // Create arrayed AST with consistent positive polarity
         let mut elements = HashMap::new();
@@ -1687,7 +1685,7 @@ mod tests {
         // Test analyze_expr_polarity with If-Then-Else (covers lines 1033-1042)
         use crate::ast::{Expr2, Loc};
 
-        let x_var = crate::common::canonicalize("x");
+        let x_var = Ident::new("x");
 
         // If with same polarity in both branches
         let if_expr = Expr2::If(
@@ -1740,7 +1738,7 @@ mod tests {
         // Test analyze_expr_polarity with unary NOT operator (covers lines 1026-1031)
         use crate::ast::{Expr2, Loc, UnaryOp};
 
-        let x_var = crate::common::canonicalize("x");
+        let x_var = Ident::new("x");
 
         let not_expr = Expr2::Op1(
             UnaryOp::Not,
@@ -1771,20 +1769,20 @@ mod tests {
         };
 
         // Create a module with inputs
-        let input_dst = crate::common::canonicalize("input");
+        let input_dst = Ident::new("input");
         let module_var = Variable::Module {
-            ident: crate::common::canonicalize("processor"),
-            model_name: crate::common::canonicalize("process_model"),
+            ident: Ident::new("processor"),
+            model_name: Ident::new("process_model"),
             units: None,
             inputs: vec![ModuleInput {
-                src: crate::common::canonicalize("external_input"),
+                src: Ident::new("external_input"),
                 dst: input_dst.clone(),
             }],
             errors: vec![],
             unit_errors: vec![],
         };
 
-        let module_ident = crate::common::canonicalize("processor");
+        let module_ident = Ident::new("processor");
         graph.variables.insert(module_ident.clone(), module_var);
 
         // Create a loop that includes the module input
@@ -1793,11 +1791,11 @@ mod tests {
             links: vec![
                 Link {
                     from: input_dst.clone(),
-                    to: crate::common::canonicalize("internal_var"),
+                    to: Ident::new("internal_var"),
                     polarity: LinkPolarity::Positive,
                 },
                 Link {
-                    from: crate::common::canonicalize("internal_var"),
+                    from: Ident::new("internal_var"),
                     to: input_dst.clone(),
                     polarity: LinkPolarity::Positive,
                 },
@@ -1816,13 +1814,13 @@ mod tests {
             id: "R2".to_string(),
             links: vec![
                 Link {
-                    from: crate::common::canonicalize("var1"),
-                    to: crate::common::canonicalize("var2"),
+                    from: Ident::new("var1"),
+                    to: Ident::new("var2"),
                     polarity: LinkPolarity::Positive,
                 },
                 Link {
-                    from: crate::common::canonicalize("var2"),
-                    to: crate::common::canonicalize("var1"),
+                    from: Ident::new("var2"),
+                    to: Ident::new("var1"),
                     polarity: LinkPolarity::Positive,
                 },
             ],
@@ -1841,8 +1839,8 @@ mod tests {
         // Test division polarity analysis edge cases (covers lines 1013-1022)
         use crate::ast::{Expr2, Loc};
 
-        let x_var = crate::common::canonicalize("x");
-        let y_var = crate::common::canonicalize("y");
+        let x_var = Ident::new("x");
+        let y_var = Ident::new("y");
 
         // Division with variable in numerator
         let div_num = Expr2::Op2(
@@ -1972,7 +1970,7 @@ mod tests {
         let project = Project::from(project);
 
         // Build causal graph
-        let main_ident = crate::common::canonicalize("main");
+        let main_ident = Ident::new("main");
         let main_model = project
             .models
             .get(&main_ident)
@@ -1981,8 +1979,8 @@ mod tests {
             CausalGraph::from_model(main_model, &project).expect("Should build causal graph");
 
         // Get the link polarity for water -> outflow (through lookup table)
-        let water = crate::common::canonicalize("water");
-        let outflow = crate::common::canonicalize("outflow");
+        let water = Ident::new("water");
+        let outflow = Ident::new("outflow");
         let polarity = graph.get_link_polarity(&water, &outflow);
 
         // Since lookup table is monotonically increasing and water appears positively in the equation,
@@ -2247,13 +2245,13 @@ mod tests {
 
         let links = vec![
             Link {
-                from: crate::common::canonicalize("a"),
-                to: crate::common::canonicalize("b"),
+                from: Ident::new("a"),
+                to: Ident::new("b"),
                 polarity: LinkPolarity::Unknown,
             },
             Link {
-                from: crate::common::canonicalize("b"),
-                to: crate::common::canonicalize("a"),
+                from: Ident::new("b"),
+                to: Ident::new("a"),
                 polarity: LinkPolarity::Unknown,
             },
         ];
@@ -2279,13 +2277,13 @@ mod tests {
         // One negative link, one unknown -> should be Undetermined
         let links_one_negative = vec![
             Link {
-                from: crate::common::canonicalize("a"),
-                to: crate::common::canonicalize("b"),
+                from: Ident::new("a"),
+                to: Ident::new("b"),
                 polarity: LinkPolarity::Negative,
             },
             Link {
-                from: crate::common::canonicalize("b"),
-                to: crate::common::canonicalize("a"),
+                from: Ident::new("b"),
+                to: Ident::new("a"),
                 polarity: LinkPolarity::Unknown,
             },
         ];
@@ -2300,18 +2298,18 @@ mod tests {
         // Two positive links, one unknown -> should also be Undetermined
         let links_two_positive = vec![
             Link {
-                from: crate::common::canonicalize("a"),
-                to: crate::common::canonicalize("b"),
+                from: Ident::new("a"),
+                to: Ident::new("b"),
                 polarity: LinkPolarity::Positive,
             },
             Link {
-                from: crate::common::canonicalize("b"),
-                to: crate::common::canonicalize("c"),
+                from: Ident::new("b"),
+                to: Ident::new("c"),
                 polarity: LinkPolarity::Positive,
             },
             Link {
-                from: crate::common::canonicalize("c"),
-                to: crate::common::canonicalize("a"),
+                from: Ident::new("c"),
+                to: Ident::new("a"),
                 polarity: LinkPolarity::Unknown,
             },
         ];
@@ -2337,13 +2335,13 @@ mod tests {
         // All positive links -> Reinforcing (even number of negatives: 0)
         let links_all_positive = vec![
             Link {
-                from: crate::common::canonicalize("a"),
-                to: crate::common::canonicalize("b"),
+                from: Ident::new("a"),
+                to: Ident::new("b"),
                 polarity: LinkPolarity::Positive,
             },
             Link {
-                from: crate::common::canonicalize("b"),
-                to: crate::common::canonicalize("a"),
+                from: Ident::new("b"),
+                to: Ident::new("a"),
                 polarity: LinkPolarity::Positive,
             },
         ];
@@ -2358,13 +2356,13 @@ mod tests {
         // One negative, one positive -> Balancing (odd number of negatives: 1)
         let links_one_negative = vec![
             Link {
-                from: crate::common::canonicalize("a"),
-                to: crate::common::canonicalize("b"),
+                from: Ident::new("a"),
+                to: Ident::new("b"),
                 polarity: LinkPolarity::Negative,
             },
             Link {
-                from: crate::common::canonicalize("b"),
-                to: crate::common::canonicalize("a"),
+                from: Ident::new("b"),
+                to: Ident::new("a"),
                 polarity: LinkPolarity::Positive,
             },
         ];
@@ -2379,13 +2377,13 @@ mod tests {
         // Two negative links -> Reinforcing (even number of negatives: 2)
         let links_two_negatives = vec![
             Link {
-                from: crate::common::canonicalize("a"),
-                to: crate::common::canonicalize("b"),
+                from: Ident::new("a"),
+                to: Ident::new("b"),
                 polarity: LinkPolarity::Negative,
             },
             Link {
-                from: crate::common::canonicalize("b"),
-                to: crate::common::canonicalize("a"),
+                from: Ident::new("b"),
+                to: Ident::new("a"),
                 polarity: LinkPolarity::Negative,
             },
         ];
@@ -2413,13 +2411,13 @@ mod tests {
                 id: String::new(),
                 links: vec![
                     Link {
-                        from: crate::common::canonicalize("a"),
-                        to: crate::common::canonicalize("b"),
+                        from: Ident::new("a"),
+                        to: Ident::new("b"),
                         polarity: LinkPolarity::Unknown,
                     },
                     Link {
-                        from: crate::common::canonicalize("b"),
-                        to: crate::common::canonicalize("a"),
+                        from: Ident::new("b"),
+                        to: Ident::new("a"),
                         polarity: LinkPolarity::Unknown,
                     },
                 ],
@@ -2430,13 +2428,13 @@ mod tests {
                 id: String::new(),
                 links: vec![
                     Link {
-                        from: crate::common::canonicalize("x"),
-                        to: crate::common::canonicalize("y"),
+                        from: Ident::new("x"),
+                        to: Ident::new("y"),
                         polarity: LinkPolarity::Positive,
                     },
                     Link {
-                        from: crate::common::canonicalize("y"),
-                        to: crate::common::canonicalize("x"),
+                        from: Ident::new("y"),
+                        to: Ident::new("x"),
                         polarity: LinkPolarity::Positive,
                     },
                 ],
@@ -2494,7 +2492,7 @@ mod tests {
         let project = x_project(sim_specs, &[model]);
         let project = Project::from(project);
 
-        let main_ident = crate::common::canonicalize("main");
+        let main_ident = Ident::new("main");
         let main_model = project.models.get(&main_ident).unwrap();
         let graph = CausalGraph::from_model(main_model, &project).unwrap();
 

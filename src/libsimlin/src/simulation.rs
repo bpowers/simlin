@@ -8,7 +8,8 @@
 //! initials), resetting, setting/clearing constant values, and reading values
 //! and time series from simulation results.
 
-use simlin_engine::{self as engine, canonicalize, Vm};
+use simlin_engine::common::Ident;
+use simlin_engine::{self as engine, Vm};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double};
@@ -314,7 +315,7 @@ pub unsafe extern "C" fn simlin_sim_get_value(
 
     let sim_ref = ffi_try!(out_error, require_sim(sim));
     let canon_name = match CStr::from_ptr(name).to_str() {
-        Ok(s) => canonicalize(s),
+        Ok(s) => Ident::new(s),
         Err(_) => {
             store_error(
                 out_error,
@@ -397,7 +398,7 @@ pub unsafe extern "C" fn simlin_sim_set_value(
 
     let sim_ref = ffi_try!(out_error, require_sim(sim));
     let canon_name = match CStr::from_ptr(name).to_str() {
-        Ok(s) => canonicalize(s),
+        Ok(s) => Ident::new(s),
         Err(_) => {
             store_error(
                 out_error,
@@ -544,7 +545,7 @@ pub unsafe extern "C" fn simlin_sim_get_offset(
 
     let sim_ref = ffi_try!(out_error, require_sim(sim));
     let canon_name = match CStr::from_ptr(name).to_str() {
-        Ok(s) => canonicalize(s),
+        Ok(s) => Ident::new(s),
         Err(_) => {
             store_error(
                 out_error,
@@ -757,7 +758,7 @@ pub unsafe extern "C" fn simlin_sim_get_series(
 
     let sim_ref = ffi_try!(out_error, require_sim(sim));
     let name = match CStr::from_ptr(name).to_str() {
-        Ok(s) => canonicalize(s),
+        Ok(s) => Ident::new(s),
         Err(_) => {
             store_error(
                 out_error,

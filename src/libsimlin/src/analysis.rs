@@ -205,7 +205,7 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
 
     let model = match project_locked
         .models
-        .get(&canonicalize(&model_ref.model_name))
+        .get(&*canonicalize(&model_ref.model_name))
     {
         Some(m) => m,
         None => {
@@ -330,7 +330,7 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
 
             let state = sim_ref.state.lock().unwrap();
             if let Some(ref results) = state.results {
-                if let Some(&offset) = results.offsets.get(&var_ident) {
+                if let Some(&offset) = results.offsets.get(&*var_ident) {
                     let mut scores = Vec::with_capacity(results.step_count);
                     for row in results.iter() {
                         scores.push(row[offset]);
@@ -450,7 +450,7 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
 
     let state = sim_ref.state.lock().unwrap();
     if let Some(ref results) = state.results {
-        if let Some(&offset) = results.offsets.get(&var_ident) {
+        if let Some(&offset) = results.offsets.get(&*var_ident) {
             let count = std::cmp::min(results.step_count, len);
             for (i, row) in results.iter().take(count).enumerate() {
                 *results_ptr.add(i) = row[offset];

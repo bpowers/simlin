@@ -9,7 +9,7 @@ use std::io::BufReader;
 use std::rc::Rc;
 use std::result::Result as StdResult;
 
-use simlin_engine::common::{Canonical, Ident, canonicalize};
+use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::interpreter::Simulation;
 use simlin_engine::xmile;
 use simlin_engine::{Project, Results, Vm, ltm, ltm_finding};
@@ -83,7 +83,7 @@ fn ensure_ltm_results(
     for (loop_id, expected_scores) in &expected.loop_scores {
         let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_id);
         let var_ident =
-            Ident::<Canonical>::from_str_unchecked(&canonicalize(&var_name).to_source_repr());
+            Ident::<Canonical>::from_str_unchecked(&Ident::new(&var_name).to_source_repr());
 
         if !actual_results.offsets.contains_key(&var_ident) {
             panic!("LTM results missing loop score variable '{}'", var_name);

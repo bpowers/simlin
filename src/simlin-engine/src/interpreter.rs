@@ -772,11 +772,9 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Inf => f64::INFINITY,
                     BuiltinFn::Pi => std::f64::consts::PI,
                     BuiltinFn::Int(a) => self.eval(a).floor(),
-                    BuiltinFn::IsModuleInput(ident, _) => self.module.inputs.contains(&Ident::<
-                        Canonical,
-                    >::from_raw(
-                        ident
-                    )) as i8 as f64,
+                    BuiltinFn::IsModuleInput(ident, _) => {
+                        self.module.inputs.contains(&Ident::<Canonical>::new(ident)) as i8 as f64
+                    }
                     BuiltinFn::Ln(a) => self.eval(a).ln(),
                     BuiltinFn::Log10(a) => self.eval(a).log10(),
                     BuiltinFn::SafeDiv(a, b, default) => {
@@ -1332,7 +1330,7 @@ pub struct Simulation {
 
 impl Simulation {
     pub fn new(project: &Project, main_model_name: &str) -> crate::Result<Self> {
-        let main_model_ident = canonicalize(main_model_name);
+        let main_model_ident = Ident::new(main_model_name);
         if !project.models.contains_key(&main_model_ident) {
             return sim_err!(
                 NotSimulatable,
@@ -1616,7 +1614,7 @@ pub fn compile_project<F: SimFloat>(
 where
     OrderedFloat<F>: Eq + std::hash::Hash,
 {
-    let main_model_ident = canonicalize(main_model_name);
+    let main_model_ident = Ident::new(main_model_name);
     if !project.models.contains_key(&main_model_ident) {
         return sim_err!(
             NotSimulatable,
@@ -1695,14 +1693,14 @@ pub fn calc_flattened_offsets(
     let mut offsets: HashMap<Ident<Canonical>, (usize, usize)> = HashMap::new();
     let mut i = 0;
     if is_root {
-        offsets.insert(canonicalize("time"), (0, 1));
-        offsets.insert(canonicalize("dt"), (1, 1));
-        offsets.insert(canonicalize("initial_time"), (2, 1));
-        offsets.insert(canonicalize("final_time"), (3, 1));
+        offsets.insert(Ident::new("time"), (0, 1));
+        offsets.insert(Ident::new("dt"), (1, 1));
+        offsets.insert(Ident::new("initial_time"), (2, 1));
+        offsets.insert(Ident::new("final_time"), (3, 1));
         i += IMPLICIT_VAR_COUNT;
     }
 
-    let model = Arc::clone(&project.models[&canonicalize(model_name)]);
+    let model = Arc::clone(&project.models[&*canonicalize(model_name)]);
     let var_names: Vec<&str> = {
         let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
         var_names.sort_unstable();
@@ -1711,15 +1709,15 @@ pub fn calc_flattened_offsets(
 
     for ident in var_names.iter() {
         let size = if let Variable::Module { model_name, .. } =
-            &model.variables[&canonicalize(ident)]
+            &model.variables[&*canonicalize(ident)]
         {
             let sub_offsets = calc_flattened_offsets(project, model_name.as_str());
             let mut sub_var_names: Vec<&Ident<Canonical>> = sub_offsets.keys().collect();
             sub_var_names.sort_unstable();
             for sub_name in sub_var_names {
                 let (sub_off, sub_size) = sub_offsets[sub_name];
-                let ident_canonical = canonicalize(ident);
-                let sub_canonical = canonicalize(sub_name.as_str());
+                let ident_canonical = Ident::new(ident);
+                let sub_canonical = Ident::new(sub_name.as_str());
                 offsets.insert(
                     Ident::<Canonical>::from_unchecked(format!(
                         "{}.{}",
@@ -1731,11 +1729,11 @@ pub fn calc_flattened_offsets(
             }
             let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
             sub_size
-        } else if let Some(Ast::ApplyToAll(dims, _)) = &model.variables[&canonicalize(ident)].ast()
+        } else if let Some(Ast::ApplyToAll(dims, _)) = &model.variables[&*canonicalize(ident)].ast()
         {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
-                let ident_canonical = canonicalize(ident);
+                let ident_canonical = Ident::new(ident);
                 let subscripted_ident = Ident::<Canonical>::from_unchecked(format!(
                     "{}[{}]",
                     ident_canonical.to_source_repr(),
@@ -1744,10 +1742,10 @@ pub fn calc_flattened_offsets(
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
             dims.iter().map(|dim| dim.len()).product()
-        } else if let Some(Ast::Arrayed(dims, _)) = &model.variables[&canonicalize(ident)].ast() {
+        } else if let Some(Ast::Arrayed(dims, _)) = &model.variables[&*canonicalize(ident)].ast() {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
-                let ident_canonical = canonicalize(ident);
+                let ident_canonical = Ident::new(ident);
                 let subscripted_ident = Ident::<Canonical>::from_unchecked(format!(
                     "{}[{}]",
                     ident_canonical.to_source_repr(),
@@ -1757,7 +1755,7 @@ pub fn calc_flattened_offsets(
             }
             dims.iter().map(|dim| dim.len()).product()
         } else {
-            let ident_canonical = canonicalize(ident);
+            let ident_canonical = Ident::new(ident);
             offsets.insert(
                 Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
                 (i, 1),
@@ -1779,7 +1777,7 @@ fn calc_flattened_order(sim: &Simulation, module_key: &ModuleKey) -> Vec<Ident<C
     let mut offsets: Vec<Ident<Canonical>> = Vec::with_capacity(module.runlist_order.len() + 1);
 
     if is_root {
-        offsets.push(canonicalize("time"));
+        offsets.push(Ident::new("time"));
     }
 
     for ident in module.runlist_order.iter() {
@@ -2001,40 +1999,40 @@ fn test_arrays() {
     {
         let actual = calc_flattened_offsets(&parsed_project, "main");
         let expected: HashMap<_, _> = vec![
-            (canonicalize("time"), (0, 1)),
-            (canonicalize("dt"), (1, 1)),
-            (canonicalize("initial_time"), (2, 1)),
-            (canonicalize("final_time"), (3, 1)),
-            (canonicalize("aux[a]"), (4, 1)),
-            (canonicalize("aux[b]"), (5, 1)),
-            (canonicalize("aux[c]"), (6, 1)),
-            (canonicalize("constants[a]"), (7, 1)),
-            (canonicalize("constants[b]"), (8, 1)),
-            (canonicalize("constants[c]"), (9, 1)),
-            (canonicalize("picked"), (10, 1)),
-            (canonicalize("picked2"), (11, 1)),
+            (Ident::new("time"), (0, 1)),
+            (Ident::new("dt"), (1, 1)),
+            (Ident::new("initial_time"), (2, 1)),
+            (Ident::new("final_time"), (3, 1)),
+            (Ident::new("aux[a]"), (4, 1)),
+            (Ident::new("aux[b]"), (5, 1)),
+            (Ident::new("aux[c]"), (6, 1)),
+            (Ident::new("constants[a]"), (7, 1)),
+            (Ident::new("constants[b]"), (8, 1)),
+            (Ident::new("constants[c]"), (9, 1)),
+            (Ident::new("picked"), (10, 1)),
+            (Ident::new("picked2"), (11, 1)),
         ]
         .into_iter()
         .collect();
         assert_eq!(actual, expected);
     }
 
-    let main_ident = canonicalize("main");
+    let main_ident = Ident::new("main");
     let metadata = compiler::build_metadata(&parsed_project, &main_ident, true);
     let main_metadata = &metadata[&main_ident];
-    assert_eq!(main_metadata[&canonicalize("aux")].offset, 4);
-    assert_eq!(main_metadata[&canonicalize("aux")].size, 3);
-    assert_eq!(main_metadata[&canonicalize("constants")].offset, 7);
-    assert_eq!(main_metadata[&canonicalize("constants")].size, 3);
-    assert_eq!(main_metadata[&canonicalize("picked")].offset, 10);
-    assert_eq!(main_metadata[&canonicalize("picked")].size, 1);
-    assert_eq!(main_metadata[&canonicalize("picked2")].offset, 11);
-    assert_eq!(main_metadata[&canonicalize("picked2")].size, 1);
+    assert_eq!(main_metadata[&*canonicalize("aux")].offset, 4);
+    assert_eq!(main_metadata[&*canonicalize("aux")].size, 3);
+    assert_eq!(main_metadata[&*canonicalize("constants")].offset, 7);
+    assert_eq!(main_metadata[&*canonicalize("constants")].size, 3);
+    assert_eq!(main_metadata[&*canonicalize("picked")].offset, 10);
+    assert_eq!(main_metadata[&*canonicalize("picked")].size, 1);
+    assert_eq!(main_metadata[&*canonicalize("picked2")].offset, 11);
+    assert_eq!(main_metadata[&*canonicalize("picked2")].size, 1);
 
     let module_models = compiler::calc_module_model_map(&parsed_project, &main_ident);
 
     let arrayed_constants_var =
-        &parsed_project.models[&main_ident].variables[&canonicalize("constants")];
+        &parsed_project.models[&main_ident].variables[&*canonicalize("constants")];
     let parsed_var = Var::<f64>::new(
         &Context {
             dimensions: parsed_project
@@ -2060,7 +2058,7 @@ fn test_arrays() {
     assert!(parsed_var.is_ok());
 
     let expected = Var {
-        ident: canonicalize(arrayed_constants_var.ident()),
+        ident: Ident::new(arrayed_constants_var.ident()),
         ast: vec![
             Expr::AssignCurr(7, Box::new(Expr::Const(9.0, Loc::default()))),
             Expr::AssignCurr(8, Box::new(Expr::Const(7.0, Loc::default()))),
@@ -2073,7 +2071,7 @@ fn test_arrays() {
     }
     assert_eq!(expected, parsed_var);
 
-    let arrayed_aux_var = &parsed_project.models[&main_ident].variables[&canonicalize("aux")];
+    let arrayed_aux_var = &parsed_project.models[&main_ident].variables[&*canonicalize("aux")];
     let parsed_var: crate::common::Result<Var<f64>> = Var::new(
         &Context {
             dimensions: parsed_project
@@ -2098,7 +2096,7 @@ fn test_arrays() {
 
     assert!(parsed_var.is_ok());
     let expected: Var<f64> = Var {
-        ident: canonicalize(arrayed_aux_var.ident()),
+        ident: Ident::new(arrayed_aux_var.ident()),
         ast: vec![
             Expr::AssignCurr(4, Box::new(Expr::Var(7, Loc::default()))),
             Expr::AssignCurr(5, Box::new(Expr::Var(8, Loc::default()))),
@@ -2111,7 +2109,7 @@ fn test_arrays() {
     }
     assert_eq!(expected, parsed_var);
 
-    let var = &parsed_project.models[&main_ident].variables[&canonicalize("picked2")];
+    let var = &parsed_project.models[&main_ident].variables[&*canonicalize("picked2")];
     let parsed_var = Var::<f64>::new(
         &Context {
             dimensions: parsed_project
@@ -2136,7 +2134,7 @@ fn test_arrays() {
 
     assert!(parsed_var.is_ok());
     let expected = Var {
-        ident: canonicalize(var.ident()),
+        ident: Ident::new(var.ident()),
         ast: vec![Expr::AssignCurr(
             11,
             Box::new(Expr::StaticSubscript(
@@ -2159,7 +2157,7 @@ fn test_arrays() {
     }
     assert_eq!(expected, parsed_var);
 
-    let var = &parsed_project.models[&main_ident].variables[&canonicalize("picked")];
+    let var = &parsed_project.models[&main_ident].variables[&*canonicalize("picked")];
     let parsed_var = Var::<f64>::new(
         &Context {
             dimensions: parsed_project
@@ -2184,7 +2182,7 @@ fn test_arrays() {
 
     assert!(parsed_var.is_ok());
     let expected = Var {
-        ident: canonicalize(var.ident()),
+        ident: Ident::new(var.ident()),
         ast: vec![Expr::AssignCurr(
             10,
             Box::new(Expr::Subscript(
@@ -2337,7 +2335,7 @@ fn simulation_defaults_to_project_sim_specs_without_model_override() {
 
 #[cfg(test)]
 mod compile_project_tests {
-    use crate::common::canonicalize;
+    use crate::common::Ident;
     use crate::test_common::TestProject;
     use crate::vm::Vm;
     use std::sync::Arc;
@@ -2355,7 +2353,7 @@ mod compile_project_tests {
         let compiled_via_sim = sim.compile().expect("compile");
         let mut vm1 = Vm::new(compiled_via_sim).expect("vm1");
         vm1.run_to_end().expect("vm1 run");
-        let s1 = vm1.get_series(&canonicalize("s")).expect("s series");
+        let s1 = vm1.get_series(&Ident::new("s")).expect("s series");
 
         // Via compile_project::<f64>()
         let datamodel = tp.build_datamodel();
@@ -2364,7 +2362,7 @@ mod compile_project_tests {
             super::compile_project::<f64>(&project, "main").expect("compile_project");
         let mut vm2 = Vm::new(compiled_generic).expect("vm2");
         vm2.run_to_end().expect("vm2 run");
-        let s2 = vm2.get_series(&canonicalize("s")).expect("s series");
+        let s2 = vm2.get_series(&Ident::new("s")).expect("s series");
 
         assert_eq!(s1.len(), s2.len());
         for (i, (a, b)) in s1.iter().zip(s2.iter()).enumerate() {
@@ -2422,7 +2420,7 @@ mod compile_project_tests {
         let compiled = super::Simulation::compile_as::<f64>(&project, "main").expect("compile_as");
         let mut vm = Vm::new(compiled).expect("vm");
         vm.run_to_end().expect("run");
-        let x = vm.get_series(&canonicalize("x")).expect("x series");
+        let x = vm.get_series(&Ident::new("x")).expect("x series");
 
         assert_eq!(x.len(), 6); // steps 0,1,2,3,4,5
         assert!((x[0] - 0.0).abs() < 1e-10);

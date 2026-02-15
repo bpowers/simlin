@@ -517,9 +517,8 @@ impl UnitInferer<'_> {
         prefix: &str,
         constraints: &mut Vec<LocatedConstraint>,
     ) {
-        let time_units = canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time"))
-            .as_str()
-            .to_string();
+        let time_units =
+            canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
 
         for (id, var) in model.variables.iter() {
             let current_var = format!("{prefix}{id}");
@@ -850,7 +849,7 @@ fn test_inference() {
                     crate::units::parse_units(&units_ctx, Some(expected_units))
                         .unwrap()
                         .unwrap();
-                if let Some(computed_units) = results.get(&canonicalize(ident)) {
+                if let Some(computed_units) = results.get(&*canonicalize(ident)) {
                     assert_eq!(expected_units, *computed_units);
                 } else {
                     panic!("inference results don't contain variable '{ident}'");
@@ -994,15 +993,14 @@ pub(crate) fn infer(
     units_ctx: &Context,
     model: &ModelStage1,
 ) -> UnitResult<HashMap<Ident<Canonical>, UnitMap>> {
-    let time_units = canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time"))
-        .as_str()
-        .to_string();
+    let time_units =
+        canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
 
     let units = UnitInferer {
         ctx: units_ctx,
         models,
         time: Variable::Var {
-            ident: canonicalize("time"),
+            ident: Ident::new("time"),
             ast: None,
             init_ast: None,
             eqn: None,
@@ -1031,7 +1029,7 @@ fn test_constraint_generation_consistency() {
 
     // When it becomes an Ident<Canonical> key in the HashMap
     let map_key = canonicalize(xmile_var_name);
-    assert_eq!(map_key.as_str(), "output", "Map key should be lowercase");
+    assert_eq!(&*map_key, "output", "Map key should be lowercase");
 
     // When used in constraint generation in line 366/376
     let constraint_var = format!("@{map_key}");
@@ -1338,7 +1336,7 @@ fn test_rank_builtin_unit_inference() {
         let expected_units: UnitMap = crate::units::parse_units(&units_ctx, Some(expected_units))
             .unwrap()
             .unwrap();
-        if let Some(computed_units) = results.get(&canonicalize(ident)) {
+        if let Some(computed_units) = results.get(&*canonicalize(ident)) {
             assert_eq!(
                 expected_units, *computed_units,
                 "Units for {} should match",

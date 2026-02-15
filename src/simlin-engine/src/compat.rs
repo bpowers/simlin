@@ -19,8 +19,6 @@ use std::fs::File;
 use std::result::Result as StdResult;
 
 #[cfg(feature = "file_io")]
-use crate::canonicalize;
-#[cfg(feature = "file_io")]
 use crate::common::{Canonical, Ident};
 #[cfg(feature = "file_io")]
 use crate::results::Method;
@@ -88,7 +86,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
                 if let Some(id) = ident.take() {
                     assert!(unprocessed.insert(id, std::mem::take(&mut curr)).is_none());
                 }
-                let name = canonicalize(line.trim());
+                let name = Ident::<Canonical>::new(line.trim());
                 ident = Some(name.to_source_repr());
             }
         }
@@ -183,7 +181,7 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
         .map(|(i, r)| {
             // stella outputs the first 'time' column as the time _units_, which is bonkers
             let name = if i == 0 { "time" } else { r };
-            let ident = canonicalize(name);
+            let ident = Ident::<Canonical>::new(name);
             (
                 Ident::<Canonical>::from_unchecked(ident.to_source_repr()),
                 i,
