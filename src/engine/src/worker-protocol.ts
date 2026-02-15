@@ -63,6 +63,7 @@ export type WorkerRequest =
       allowErrors: boolean;
     }
   // Model operations
+  | { type: 'modelGetName'; requestId: number; handle: WorkerModelHandle }
   | { type: 'modelDispose'; requestId: number; handle: WorkerModelHandle }
   | { type: 'modelGetIncomingLinks'; requestId: number; handle: WorkerModelHandle; varName: string }
   | { type: 'modelGetLinks'; requestId: number; handle: WorkerModelHandle }

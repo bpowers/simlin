@@ -180,7 +180,11 @@ export class Project {
     }
 
     const modelHandle = await this._backend.projectGetModel(this._handle, name);
-    const model = new Model(modelHandle, this, name);
+    // The Rust FFI resolves canonical name variants (e.g. "my_model" -> "My Model").
+    // Query the resolved display name so that edit() patches and check() error
+    // filtering use the correct name, not the caller-supplied alias.
+    const resolvedName = await this._backend.modelGetName(modelHandle);
+    const model = new Model(modelHandle, this, resolvedName);
     this._models.set(cacheKey, model);
     return model;
   }

@@ -83,6 +83,39 @@ pub unsafe extern "C" fn simlin_model_unref(model: *mut SimlinModel) {
     crate::model_unref(model);
 }
 
+/// Returns the resolved display name of this model.
+///
+/// The returned string is owned by the caller and must be freed with
+/// `simlin_free_string`.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_name(
+    model: *mut SimlinModel,
+    out_error: *mut *mut SimlinError,
+) -> *mut c_char {
+    clear_out_error(out_error);
+    let model_ref = match require_model(model) {
+        Ok(m) => m,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return ptr::null_mut();
+        }
+    };
+    match CString::new(model_ref.model_name.as_str()) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("model name contains interior NUL byte"),
+            );
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Gets the number of variables in the model
 ///
 /// # Safety

@@ -46,6 +46,39 @@ export function simlin_model_unref(model: SimlinModelPtr): void {
 }
 
 /**
+ * Get the resolved display name of this model.
+ * @param model Model pointer
+ * @returns The model's display name
+ */
+export function simlin_model_get_name(model: SimlinModelPtr): string {
+  const exports = getExports();
+  const fn = exports.simlin_model_get_name as (model: number, outErr: number) => number;
+
+  const outErrPtr = allocOutPtr();
+
+  try {
+    const result = fn(model, outErrPtr);
+    const errPtr = readOutPtr(outErrPtr);
+
+    if (errPtr !== 0) {
+      const code = simlin_error_get_code(errPtr);
+      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
+      simlin_error_free(errPtr);
+      throw new SimlinError(message, code, details);
+    }
+
+    const name = wasmToStringAndFree(result);
+    if (name === null) {
+      throw new SimlinError('model name returned null pointer', 0);
+    }
+    return name;
+  } finally {
+    free(outErrPtr);
+  }
+}
+
+/**
  * Get the number of variables in a model.
  * @param model Model pointer
  * @returns Number of variables

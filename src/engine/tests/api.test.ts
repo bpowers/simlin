@@ -1222,6 +1222,85 @@ describe('High-Level API', () => {
     });
   });
 
+  describe('Canonical model name resolution', () => {
+    // The Rust FFI resolves canonical name variants (e.g. "my_model" -> "My Model"),
+    // and the Model class must store the resolved display name so that edit()
+    // patches and check() error filtering work correctly.
+
+    function makeMultiModelProject(modelName: string): string {
+      return JSON.stringify({
+        name: 'test_project',
+        simSpecs: { startTime: 0, endTime: 10, dt: '1' },
+        models: [
+          {
+            name: modelName,
+            stocks: [],
+            flows: [],
+            auxiliaries: [{ name: 'x', equation: '1' }],
+          },
+        ],
+      });
+    }
+
+    it('should resolve model name for edit()', async () => {
+      const project = await Project.openJson(makeMultiModelProject('My Model'));
+
+      // Fetch via canonical alias -- the Rust FFI resolves this
+      const model = await project.getModel('my_model');
+
+      // edit() must use the resolved display name in the patch, not the alias.
+      // allowErrors because the engine may report compilation warnings for
+      // non-standard model names.
+      await model.edit((_currentVars, patch) => {
+        patch.upsertAux({ name: 'new_var', equation: '42' });
+      }, { allowErrors: true });
+
+      const auxs = await model.auxs();
+      expect(auxs.find((a) => a.name === 'new_var')).toBeDefined();
+
+      await project.dispose();
+    });
+
+    it('should resolve model name for check()', async () => {
+      // Create a model with an error (unknown reference).
+      // Use "Main" (capitalized) so the engine can still resolve and compile
+      // the model, while we fetch via the lowercase canonical alias "main".
+      const projectJson = JSON.stringify({
+        name: 'test_project',
+        simSpecs: { startTime: 0, endTime: 10, dt: '1' },
+        models: [
+          {
+            name: 'Main',
+            stocks: [],
+            flows: [],
+            auxiliaries: [{ name: 'bad_var', equation: 'unknown_ref' }],
+          },
+        ],
+      });
+
+      const project = await Project.openJson(projectJson);
+
+      // Fetch via lowercase canonical alias
+      const model = await project.getModel('main');
+      const issues = await model.check();
+
+      // check() should find the error despite the name casing difference
+      expect(issues.length).toBeGreaterThan(0);
+      expect(issues.some((i) => i.variable === 'bad_var')).toBe(true);
+
+      await project.dispose();
+    });
+
+    it('should expose the resolved display name via model.name', async () => {
+      const project = await Project.openJson(makeMultiModelProject('My Model'));
+
+      const model = await project.getModel('my_model');
+      expect(model.name).toBe('My Model');
+
+      await project.dispose();
+    });
+  });
+
   describe('Vensim MDL support', () => {
     it('should load MDL file', async () => {
       const mdlData = loadTestMdl();

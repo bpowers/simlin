@@ -388,6 +388,14 @@ export class WorkerBackend implements EngineBackend {
 
   // ---- Model operations ----
 
+  modelGetName(handle: ModelHandle): Promise<string> {
+    return this.sendRequest<string>((requestId) => ({
+      type: 'modelGetName',
+      requestId,
+      handle,
+    }));
+  }
+
   modelDispose(handle: ModelHandle): Promise<void> {
     return this.sendRequest<void>((requestId) => ({
       type: 'modelDispose',

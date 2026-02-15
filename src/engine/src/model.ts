@@ -47,6 +47,15 @@ function parseDt(dt: string): number {
 }
 
 /**
+ * Normalize a model name for comparison.
+ * The engine reports canonical model names in error details (lowercase, underscored),
+ * while models store their display names. This lets check() match them correctly.
+ */
+function canonicalizeModelName(name: string): string {
+  return name.trim().toLowerCase().replace(/[\s_]+/g, '_');
+}
+
+/**
  * JSON shape returned by the simlin_model_get_var_json / simlin_model_get_vars_json FFI.
  * Each variable has a "type" discriminator field alongside the camelCase fields
  * matching the json-types.ts interfaces.
@@ -425,7 +434,7 @@ export class Model {
 
     // Use the model name directly. For the main model (where _name is null),
     // we need to figure out the actual name from the project model list.
-    let actualModelName = this._name;
+    let actualModelName: string | null = this._name;
     if (actualModelName === null) {
       const names = await this._project.getModelNames();
       if (names.length > 0) {
@@ -433,12 +442,19 @@ export class Model {
       }
     }
 
-    // Filter to errors for this model only
+    if (actualModelName === null) {
+      return [];
+    }
+
+    const canonicalName = canonicalizeModelName(actualModelName);
+
+    // Filter to errors for this model only, using canonical comparison
+    // since error details report model names in canonical form.
     const modelErrors = errorDetails.filter((detail) => {
       if (!detail.modelName) {
         return false;
       }
-      return detail.modelName === actualModelName;
+      return canonicalizeModelName(detail.modelName) === canonicalName;
     });
 
     return modelErrors.map((detail) => ({

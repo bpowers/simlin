@@ -71,6 +71,7 @@ export interface EngineBackend {
   ): MaybePromise<ErrorDetail[]>;
 
   // Model operations
+  modelGetName(handle: ModelHandle): MaybePromise<string>;
   modelDispose(handle: ModelHandle): MaybePromise<void>;
   modelGetIncomingLinks(handle: ModelHandle, varName: string): MaybePromise<string[]>;
   modelGetLinks(handle: ModelHandle): MaybePromise<Link[]>;

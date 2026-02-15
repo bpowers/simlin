@@ -314,6 +314,11 @@ export class WorkerServer {
       }
 
       // Model operations
+      case 'modelGetName': {
+        const handle = this.getModelHandle(request.handle);
+        this.sendSuccess(requestId, this.backend.modelGetName(handle));
+        return;
+      }
       case 'modelDispose': {
         this.disposeModel(request.handle);
         this.sendSuccess(requestId, undefined);

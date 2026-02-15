@@ -31,6 +31,7 @@ import {
 } from './internal/import-export';
 import {
   simlin_model_unref,
+  simlin_model_get_name,
   simlin_model_get_incoming_links,
   simlin_model_get_links as simlin_model_get_links_fn,
   simlin_model_get_latex_equation,
@@ -332,6 +333,10 @@ export class DirectBackend implements EngineBackend {
   }
 
   // Model operations
+
+  modelGetName(handle: ModelHandle): string {
+    return simlin_model_get_name(this.getModelPtr(handle));
+  }
 
   modelDispose(handle: ModelHandle): void {
     const entry = this._handles.get(handle as number);
