@@ -82,7 +82,7 @@ with open(counts_path) as f:
 
 for e in errors:
     print(e)
-sys.exit(len(errors))
+sys.exit(1 if errors else 0)
 " "$BASELINE_FILE" "$CURRENT_COUNTS" 2>/dev/null) || true
 
     if [ -n "$RATCHET_OUTPUT" ]; then
