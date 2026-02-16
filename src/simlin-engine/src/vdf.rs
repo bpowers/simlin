@@ -5,169 +5,19 @@
 //! Parser for Vensim VDF (binary data file) format.
 //!
 //! VDF is Vensim's proprietary binary format for simulation output. The format
-//! is completely undocumented and no open-source parser exists. This
-//! implementation is based on reverse-engineering multiple VDF files of
-//! varying complexity:
-//!   - `test/metasd/WRLD3-03/SCEN01.VDF` (World3-03 model, 333KB, ~420 variables)
-//!   - `test/xmutil_test_models/Ref.vdf` (C-LEARN model, 1.8MB)
-//!   - Small models from `~/uib_sd/fall_2008/` (3-7KB, 8-13 variables)
+//! is completely undocumented. See `doc/design/vdf.md` for the full format
+//! specification, field-level analysis, and known pitfalls.
 //!
-//! # File layout
-//!
-//! ## 1. File header (0x00..0x7F)
-//!
-//! ```text
-//!   0x00  Magic bytes: 7f f7 17 52
-//!   0x04  ASCII timestamp, e.g. "(Sun Nov 30 23:28:16 2008) From bact.mdl"
-//!         Null-terminated, zero-padded to offset 0x78.
-//!   0x78  u32 time_point_count (e.g. 401 for WRLD3-03, 61 for bact)
-//!   0x7C  u32 time_point_count (duplicate)
-//! ```
-//!
-//! ## 2. Sections
-//!
-//! The file contains multiple sections, each delimited by a 4-byte magic
-//! value 0xbf4c37a1 (which is f32 -0.797724). Each section has a 24-byte
-//! header followed by variable-length data:
-//!
-//! ```text
-//!   +0   u32  magic (0xbf4c37a1)
-//!   +4   u32  declared_size (byte count of "core" section data)
-//!   +8   u32  size2 (always equals declared_size)
-//!   +12  u32  field3 (often 0x1F4 = 500)
-//!   +16  u32  field4 (section type: 19=model info, 2=variable slots, etc.)
-//!   +20  u32  field5 (for name table section: high 16 bits = first name length)
-//!   +24  ...  section data (extends to next section's magic, not just declared_size)
-//! ```
-//!
-//! ### Section with field4=2 ("Section 1"): Variable slot table
-//!
-//! This section contains one 16-byte "slot" per variable name. The slots
-//! are packed at stride 16. A small pre-slot header (typically 28-44 bytes)
-//! precedes the first slot; the header size equals the minimum slot offset.
-//!
-//! Each slot is 4 x u32 whose meaning is still under investigation. Variable
-//! metadata records reference slots via byte offset (see field[13] below).
-//!
-//! ### Name table section
-//!
-//! Identified by: field5's high 16 bits give a non-zero length for the first
-//! name entry, and the data starts with printable ASCII text. Contains:
-//!
-//! - **First entry**: NO u16 length prefix. Length from field5 >> 16.
-//!   Always the primary output variable name (e.g. "Time").
-//! - **Subsequent entries**: u16 length prefix + that many bytes of
-//!   null-terminated, zero-padded string data.
-//! - **u16 = 0**: Group separator (between model groups, builtins, etc.).
-//!   These are skipped during parsing.
-//!
-//! Names include: variable names, system constants (INITIAL TIME, FINAL TIME,
-//! TIME STEP, SAVEPER), model/view group names (prefixed with "." or "-"),
-//! and unit names.
-//!
-//! ## 3. Variable metadata records
-//!
-//! Between section 1's data end and the name-mapping region, there are N
-//! records of 64 bytes each (16 x u32 fields). These records encode the
-//! mapping between variable names and their time series data.
-//!
-//! Key fields identified so far:
-//!
-//! ```text
-//!   field[0]  (offset +0):   Variable type or flags. Values seen: 0, 32, 36, 40, 44.
-//!   field[2]  (offset +8):   Monotonically increasing across records. Possibly a
-//!                            byte offset into some internal table.
-//!   field[8]  (offset +32):  Often the sentinel value 0xf6800000. Some records
-//!   field[9]  (offset +36):  have both f[8] and f[9] as sentinel (common for
-//!                            "real" variable records). Non-sentinel records may
-//!                            represent lookup tables or structural metadata.
-//!   field[11] (offset +44):  For small models (bact), this appears to be the
-//!                            offset table index. For large models (WRLD3), some
-//!                            values exceed the OT count, suggesting the field
-//!                            meaning may vary by file version or record type.
-//!   field[12] (offset +48):  A byte offset into section 1 data. Groups records
-//!                            into clusters (multiple records share a value).
-//!                            NOT a direct name reference (values don't match
-//!                            the name-mapping table entries for large models).
-//!   field[13] (offset +52):  Always 0 in observed files.
-//!   field[14] (offset +56):  Sometimes sentinel 0xf6800000.
-//! ```
-//!
-//! The sentinel value 0xf6800000 appears in fields 8, 9, and sometimes 14.
-//! Not all records have sentinels; non-sentinel records at the end of the
-//! record sequence may represent lookup tables or model structure metadata.
-//!
-//! ## 4. Name-mapping table (slot table)
-//!
-//! An array of N u32 values (one per name in the name table), located between
-//! the last variable record and the name table section. A few bytes of padding
-//! (typically 4) separate the table from the section magic.
-//!
-//! Each value is a byte offset (relative to section 1's data start). For small
-//! models (like bact with 10 names), the offsets have uniform stride 16 (fixed
-//! 16-byte "slots" per variable). For larger models (like WRLD3 with 138 names),
-//! the stride varies because each slot region holds variable-length metadata.
-//!
-//! Example (bact model, 10 names, stride 16):
-//!   table = [156, 124, 140, 172, 76, 60, 188, 108, 44, 92]
-//!   Sorted: 44, 60, 76, 92, 108, 124, 140, 156, 172, 188
-//!
-//! ## 5. Offset table
-//!
-//! N u32 entries immediately preceding the first data block. Entry 0 always
-//! points to the first data block (the time series). Other entries are either:
-//!   - File offsets to data blocks (>= first_block_offset)
-//!   - Inline f32 constant values (for variables that don't change over time)
-//!
-//! ## 6. Data blocks
-//!
-//! Each block stores a sparse time series:
-//!
-//! ```text
-//!   u16    count (number of stored values, <= time_point_count)
-//!   [u8]   bitmap (ceil(time_point_count / 8) bytes)
-//!          Each bit indicates whether that time point has a stored value.
-//!   [f32]  count values, in time order
-//! ```
-//!
-//! Block 0 is always the time series itself (values like 1900.0, 1900.5, ...).
-//! Blocks are packed contiguously with no alignment padding.
-//!
-//! # Name-to-data mapping
-//!
-//! The metadata chain linking names to data entries has not been fully decoded
-//! despite extensive reverse engineering. No single record field or slot data
-//! value reliably maps names to offset table entries across all file sizes.
-//!
-//! ## Deterministic approach (small models)
-//!
-//! For small-to-medium models, [`VdfFile::build_deterministic_ot_map`] maps
-//! names to OT indices using only structural metadata:
-//!
-//! 1. Filter records to model variables: f[0]!=0, f[1]!=23, f[1]!=15,
-//!    f[10]>0, f[11]>0, f[11]<ot_count.
-//! 2. Sort these records by f[10] (an alphabetical sort key).
-//! 3. Filter names (remove system names, group/unit markers, and Vensim
-//!    builtin function names embedded in the name table).
-//! 4. Sort names alphabetically, pair 1:1 with sorted records.
-//!
-//! f[10] is NOT alphabetically ordered for large models (Kendall's tau = 0.46
-//! for WRLD3), so this only works reliably for smaller VDFs.
-//!
-//! ## Empirical approach (all models)
-//!
-//! For large models or when a reference simulation is available:
-//!
-//! 1. [`load_vdf`] parses the raw data: time series, offset table entries
-//!    (each yielding either a full time series or a constant), and the
-//!    name table.
-//! 2. [`build_vdf_results`] takes the parsed VDF data and a reference
-//!    `Results` (e.g. from a simulation run) and matches VDF entries to
-//!    simulation variables by comparing time series values at sample points.
-//!    Only matches with < 1% relative error are accepted.
-//!
-//! This approach successfully matches 290+ variables for the WRLD3-03 model
-//! with < 0.5% maximum relative error vs Vensim's output.
+//! This module handles:
+//! - Parsing the file header, sections, records, slot table, name table,
+//!   offset table, and sparse data blocks.
+//! - Deterministic name-to-OT mapping for small models via
+//!   [`VdfFile::build_deterministic_ot_map`] (sorts records by f[10] and
+//!   names alphabetically, pairs 1:1). This does not work for large models
+//!   where f[10] is not alphabetically ordered.
+//! - Time series correlation (`build_vdf_results`, `build_empirical_ot_map`)
+//!   for validating mapping hypotheses against a reference simulation. These
+//!   are testing/validation tools, not production decoding strategies.
 
 #[cfg(feature = "file_io")]
 use std::collections::{HashMap, HashSet};
@@ -224,7 +74,7 @@ pub fn read_f32(data: &[u8], offset: usize) -> f32 {
 /// Each section has a 24-byte header followed by data. The header's `declared_size`
 /// field describes only a "core" portion of the section's data. The actual extent
 /// of a section runs from its header to the start of the next section header
-/// (magic-to-magic), captured by `region_end`. See `vdf_analysis.md` for details.
+/// (magic-to-magic), captured by `region_end`. See `doc/design/vdf.md` for details.
 #[derive(Debug, Clone)]
 pub struct Section {
     /// Absolute file offset of the section magic bytes.
