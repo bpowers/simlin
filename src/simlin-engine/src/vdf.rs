@@ -1,4 +1,4 @@
-// Copyright 2025 The Simlin Authors. All rights reserved.
+// Copyright 2026 The Simlin Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -456,7 +456,7 @@ impl VdfFile {
     /// engineering found no consistent decoding. This method uses empirical
     /// matching instead: for each variable in `reference`, it finds the VDF entry
     /// whose time series best matches by sum of squared relative errors.
-    pub fn to_results(&self, reference: &Results) -> StdResult<Results, Box<dyn Error>> {
+    pub fn to_results(&self, reference: &Results<f64>) -> StdResult<Results<f64>, Box<dyn Error>> {
         let vdf_data = self.extract_data()?;
         build_vdf_results(&vdf_data, reference)
     }
@@ -1018,7 +1018,10 @@ pub fn load_vdf(file_path: &str) -> StdResult<VdfData, Box<dyn Error>> {
 /// multiple sample points). This avoids needing to decode the VDF metadata
 /// that maps names to offset table positions.
 #[cfg(feature = "file_io")]
-pub fn build_vdf_results(vdf: &VdfData, reference: &Results) -> StdResult<Results, Box<dyn Error>> {
+pub fn build_vdf_results(
+    vdf: &VdfData,
+    reference: &Results<f64>,
+) -> StdResult<Results<f64>, Box<dyn Error>> {
     let step_count = vdf.time_values.len();
     let ref_step_count = reference.step_count;
 
@@ -1121,6 +1124,7 @@ pub fn build_vdf_results(vdf: &VdfData, reference: &Results) -> StdResult<Result
             dt: saveper,
             save_step: saveper,
             method: Method::Euler,
+            n_chunks: step_count,
         },
         is_vensim: true,
     })
@@ -1134,7 +1138,7 @@ pub fn build_vdf_results(vdf: &VdfData, reference: &Results) -> StdResult<Result
 #[cfg(feature = "file_io")]
 pub fn build_empirical_ot_map(
     vdf: &VdfData,
-    reference: &Results,
+    reference: &Results<f64>,
 ) -> StdResult<HashMap<Ident<Canonical>, usize>, Box<dyn Error>> {
     let step_count = vdf.time_values.len();
     if step_count != reference.step_count {
@@ -2074,7 +2078,7 @@ mod tests {
 
             for (det_name, det_ot) in &det_sorted {
                 let canonical = crate::common::canonicalize(det_name);
-                if let Some(&emp_ot) = emp_map.get(&canonical) {
+                if let Some(&emp_ot) = emp_map.get(canonical.as_ref()) {
                     if **det_ot == emp_ot {
                         matches += 1;
                         eprintln!("  OK   {det_name:30} -> OT[{det_ot}]");

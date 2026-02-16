@@ -2,7 +2,7 @@
 
 ## Error Handling
 
-- **Strongly** prefer idiomatic use of `Result`/`Option` rather than `.unwrap()` or `.unwrap_or_default()`. `unwrap_or_default` masks unexpected conditions; it is valuable to know when assumptions are wrong.
+- **Strongly** prefer idiomatic use of `Result`/`Option` rather than `.unwrap()`. Avoid `.unwrap_or_default()` when it would silently mask an error condition; use it when the default is genuinely the correct value (e.g. `map.get(&key).unwrap_or_default()` for missing keys).
 - If a case (e.g. match arm) is expected to be unreachable, use `unreachable!()`, not a comment.
 
 ## Testing
