@@ -100,13 +100,14 @@ else
 fi
 
 # Rule 4: Copyright headers on all Rust and TypeScript source files
+# check-copyright.py writes one error per line to stdout; summary to stderr.
 COPYRIGHT_OUTPUT=$(mktemp)
-if ! python3 scripts/check-copyright.py > "$COPYRIGHT_OUTPUT" 2>&1; then
+if ! python3 scripts/check-copyright.py > "$COPYRIGHT_OUTPUT"; then
     while IFS= read -r line; do
+        [ -z "$line" ] && continue
         echo "ERROR: copyright header: $line"
         ERRORS=$((ERRORS + 1))
     done < "$COPYRIGHT_OUTPUT"
-    echo "  Fix: Run 'python3 scripts/check-copyright.py --fix' to auto-fix."
 fi
 rm -f "$COPYRIGHT_OUTPUT"
 

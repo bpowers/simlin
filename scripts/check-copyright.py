@@ -162,10 +162,12 @@ def main() -> int:
         return 0
 
     if errors:
+        # Per-file errors to stdout (one per line) for machine consumption.
         for err in errors:
-            print(err, file=sys.stderr)
+            print(err)
+        # Human-readable summary to stderr (not captured by lint-project.sh).
         print(
-            f"\n{len(errors)} file(s) with copyright header issues.",
+            f"{len(errors)} file(s) with copyright header issues.",
             file=sys.stderr,
         )
         print(
