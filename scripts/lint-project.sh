@@ -50,41 +50,25 @@ if [ -f "$BASELINE_FILE" ]; then
     rg 'unwrap_or_default\(\)' --type rust -c src/simlin-engine/ 2>/dev/null | \
         sort > "$CURRENT_COUNTS" || true
 
-    # Compare against baseline
+    # Compare against baseline: check for increases and new files in a single pass
     while IFS=: read -r file count; do
-        # Get baseline count for this file
-        # The baseline JSON has relative paths as keys
-        rel_file="$file"
         baseline_count=$(python3 -c "
 import json, sys
-with open('$BASELINE_FILE') as f:
+with open(sys.argv[1]) as f:
     data = json.load(f)
 counts = data.get('unwrap_or_default', {}).get('counts', {})
-print(counts.get('$rel_file', 0))
-" 2>/dev/null || echo "0")
+print(counts.get(sys.argv[2], -1))
+" "$BASELINE_FILE" "$file" 2>/dev/null || echo "-1")
 
-        if [ "$count" -gt "$baseline_count" ]; then
+        if [ "$baseline_count" = "-1" ]; then
+            # File not in baseline -- new unwrap_or_default usage
+            echo "ERROR: New unwrap_or_default() usage in $file ($count occurrences)"
+            echo "  Fix: Use explicit Result/Option handling instead of unwrap_or_default()."
+            ERRORS=$((ERRORS + 1))
+        elif [ "$count" -gt "$baseline_count" ]; then
             echo "ERROR: unwrap_or_default() count increased in $file: $baseline_count -> $count"
             echo "  Fix: Use explicit Result/Option handling instead of unwrap_or_default()."
             echo "  See doc/dev/rust.md for error handling guidelines."
-            ERRORS=$((ERRORS + 1))
-        fi
-    done < "$CURRENT_COUNTS"
-
-    # Check for new files not in baseline
-    while IFS=: read -r file count; do
-        rel_file="$file"
-        in_baseline=$(python3 -c "
-import json
-with open('$BASELINE_FILE') as f:
-    data = json.load(f)
-counts = data.get('unwrap_or_default', {}).get('counts', {})
-print('yes' if '$rel_file' in counts else 'no')
-" 2>/dev/null || echo "no")
-
-        if [ "$in_baseline" = "no" ] && [ "$count" -gt 0 ]; then
-            echo "ERROR: New unwrap_or_default() usage in $file ($count occurrences)"
-            echo "  Fix: Use explicit Result/Option handling instead of unwrap_or_default()."
             ERRORS=$((ERRORS + 1))
         fi
     done < "$CURRENT_COUNTS"

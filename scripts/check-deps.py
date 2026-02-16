@@ -4,9 +4,13 @@
 Checks:
   - Rust: workspace `path` dependencies in [dependencies] only
     (not [dev-dependencies] or [build-dependencies]).
-    Optional deps gated behind features are included.
+    Optional dependencies gated behind features are included.
   - TypeScript: @simlin/* entries in both dependencies and devDependencies.
     Policy keys match the `name` field in package.json.
+  - Bidirectional: all actual workspace packages must appear in the policy,
+    and all policy entries must correspond to actual packages.
+
+Workspace members are auto-discovered from Cargo.toml and pnpm-workspace.yaml.
 
 Exit code 0 on success, 1 on any violation.
 """
@@ -18,17 +22,53 @@ import re
 import sys
 from pathlib import Path
 
-
 def load_policy(repo_root: Path) -> dict[str, dict[str, list[str]]]:
     policy_path = repo_root / "scripts" / "dep-policy.json"
     with open(policy_path) as f:
         return json.load(f)
 
 
+def discover_rust_members(repo_root: Path) -> list[str]:
+    """Auto-discover Rust workspace members from root Cargo.toml."""
+    cargo_path = repo_root / "Cargo.toml"
+    content = cargo_path.read_text()
+    # Parse the members array from [workspace] section
+    members: list[str] = []
+    in_members = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("members"):
+            in_members = True
+            continue
+        if in_members:
+            if stripped == "]":
+                break
+            # Extract quoted path: "src/simlin-engine",
+            match = re.match(r'"([^"]+)"', stripped)
+            if match:
+                members.append(match.group(1))
+    return members
+
+
+def discover_typescript_members(repo_root: Path) -> list[Path]:
+    """Auto-discover TypeScript workspace members from pnpm-workspace.yaml."""
+    workspace_path = repo_root / "pnpm-workspace.yaml"
+    # Simple parser for the pnpm-workspace.yaml format (list of quoted paths)
+    members: list[Path] = []
+    for line in workspace_path.read_text().splitlines():
+        stripped = line.strip()
+        # Match lines like:   - 'src/engine'  or  - "src/engine"
+        match = re.match(r"-\s+['\"]([^'\"]+)['\"]", stripped)
+        if match:
+            members.append(repo_root / match.group(1))
+    return members
+
+
 def check_rust_deps(repo_root: Path, policy: dict[str, list[str]]) -> list[str]:
     """Check Rust workspace path dependencies against policy."""
     errors: list[str] = []
-    workspace_members = ["src/libsimlin", "src/simlin-cli", "src/simlin-engine", "src/xmutil"]
+    workspace_members = discover_rust_members(repo_root)
+    actual_pkg_names: set[str] = set()
 
     for member in workspace_members:
         cargo_path = repo_root / member / "Cargo.toml"
@@ -44,10 +84,11 @@ def check_rust_deps(repo_root: Path, policy: dict[str, list[str]]) -> list[str]:
             errors.append(f"ERROR: Could not find package name in {cargo_path}")
             continue
         pkg_name = name_match.group(1)
+        actual_pkg_names.add(pkg_name)
 
         if pkg_name not in policy:
             errors.append(
-                f"ERROR: Package '{pkg_name}' from {cargo_path} not found in dep-policy.json. "
+                f"ERROR: Rust package '{pkg_name}' from {cargo_path} not found in dep-policy.json. "
                 f"Add it to scripts/dep-policy.json."
             )
             continue
@@ -55,7 +96,6 @@ def check_rust_deps(repo_root: Path, policy: dict[str, list[str]]) -> list[str]:
         allowed = set(policy[pkg_name])
 
         # Parse [dependencies] section only (not dev-dependencies or build-dependencies).
-        # We look for lines with `path = "..."` that reference workspace members.
         in_deps = False
         actual_deps: set[str] = set()
         for line in content.splitlines():
@@ -79,7 +119,6 @@ def check_rust_deps(repo_root: Path, policy: dict[str, list[str]]) -> list[str]:
                 dep_name = path_match.group(1)
                 actual_deps.add(dep_name)
 
-        # Check for violations
         for dep in sorted(actual_deps):
             if dep not in allowed:
                 errors.append(
@@ -89,22 +128,22 @@ def check_rust_deps(repo_root: Path, policy: dict[str, list[str]]) -> list[str]:
                     f"  To add a new allowed dependency, update scripts/dep-policy.json."
                 )
 
+    # Check for stale policy entries (packages in policy but not in workspace)
+    for policy_name in sorted(policy):
+        if policy_name not in actual_pkg_names:
+            errors.append(
+                f"ERROR: Rust policy entry '{policy_name}' has no corresponding workspace package. "
+                f"Remove it from scripts/dep-policy.json or add the package to the workspace."
+            )
+
     return errors
 
 
 def check_typescript_deps(repo_root: Path, policy: dict[str, list[str]]) -> list[str]:
     """Check TypeScript @simlin/* dependencies against policy."""
     errors: list[str] = []
-
-    # Find all package.json files in workspace packages
-    package_dirs = [
-        repo_root / "src" / "engine",
-        repo_root / "src" / "core",
-        repo_root / "src" / "diagram",
-        repo_root / "src" / "app",
-        repo_root / "src" / "server",
-        repo_root / "website",
-    ]
+    package_dirs = discover_typescript_members(repo_root)
+    actual_pkg_names: set[str] = set()
 
     for pkg_dir in package_dirs:
         pkg_path = pkg_dir / "package.json"
@@ -119,10 +158,11 @@ def check_typescript_deps(repo_root: Path, policy: dict[str, list[str]]) -> list
         if not pkg_name:
             errors.append(f"ERROR: No 'name' field in {pkg_path}")
             continue
+        actual_pkg_names.add(pkg_name)
 
         if pkg_name not in policy:
             errors.append(
-                f"ERROR: Package '{pkg_name}' from {pkg_path} not found in dep-policy.json. "
+                f"ERROR: TypeScript package '{pkg_name}' from {pkg_path} not found in dep-policy.json. "
                 f"Add it to scripts/dep-policy.json."
             )
             continue
@@ -137,7 +177,6 @@ def check_typescript_deps(repo_root: Path, policy: dict[str, list[str]]) -> list
                 if dep_name.startswith("@simlin/"):
                     actual_deps.add(dep_name)
 
-        # Check for violations
         for dep in sorted(actual_deps):
             if dep not in allowed:
                 errors.append(
@@ -146,6 +185,14 @@ def check_typescript_deps(repo_root: Path, policy: dict[str, list[str]]) -> list
                     f"  See doc/architecture.md for the dependency graph.\n"
                     f"  To add a new allowed dependency, update scripts/dep-policy.json."
                 )
+
+    # Check for stale policy entries
+    for policy_name in sorted(policy):
+        if policy_name not in actual_pkg_names:
+            errors.append(
+                f"ERROR: TypeScript policy entry '{policy_name}' has no corresponding workspace package. "
+                f"Remove it from scripts/dep-policy.json or add the package to the workspace."
+            )
 
     return errors
 
