@@ -39,9 +39,15 @@ def discover_rust_members(repo_root: Path) -> list[str]:
 
 
 def discover_typescript_members(repo_root: Path) -> list[Path]:
-    """Auto-discover TypeScript workspace members from pnpm-workspace.yaml."""
+    """Auto-discover TypeScript workspace members from pnpm-workspace.yaml.
+
+    Assumes the standard format with quoted paths:
+        packages:
+          - 'src/engine'
+          - 'src/core'
+    Does not handle unquoted entries or YAML flow syntax.
+    """
     workspace_path = repo_root / "pnpm-workspace.yaml"
-    # Simple parser for the pnpm-workspace.yaml format (list of quoted paths)
     members: list[Path] = []
     for line in workspace_path.read_text().splitlines():
         stripped = line.strip()

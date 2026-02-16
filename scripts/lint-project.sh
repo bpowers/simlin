@@ -49,36 +49,50 @@ done < <(find src -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' \
     -not -name '*.gen.rs' -not -path '*/tests/*')
 
 # Rule 3: Ratchet for unwrap_or_default() in simlin-engine
-# Compares current per-file counts against the committed baseline.
+# Compares current per-file counts against the committed baseline in a single
+# Python invocation (avoids spawning a process per file).
 BASELINE_FILE="$REPO_ROOT/.lint-baseline.json"
 if [ -f "$BASELINE_FILE" ]; then
-    # Generate current counts
     CURRENT_COUNTS=$(mktemp)
     rg 'unwrap_or_default\(\)' --type rust -c src/simlin-engine/ 2>/dev/null | \
         sort > "$CURRENT_COUNTS" || true
 
-    # Compare against baseline: check for increases and new files in a single pass
-    while IFS=: read -r file count; do
-        baseline_count=$(python3 -c "
+    RATCHET_OUTPUT=$(python3 -c "
 import json, sys
-with open(sys.argv[1]) as f:
-    data = json.load(f)
-counts = data.get('unwrap_or_default', {}).get('counts', {})
-print(counts.get(sys.argv[2], -1))
-" "$BASELINE_FILE" "$file" 2>/dev/null || echo "-1")
 
-        if [ "$baseline_count" = "-1" ]; then
-            # File not in baseline -- new unwrap_or_default usage
-            echo "ERROR: New unwrap_or_default() usage in $file ($count occurrences)"
-            echo "  Fix: Use explicit Result/Option handling instead of unwrap_or_default()."
-            ERRORS=$((ERRORS + 1))
-        elif [ "$count" -gt "$baseline_count" ]; then
-            echo "ERROR: unwrap_or_default() count increased in $file: $baseline_count -> $count"
+baseline_path = sys.argv[1]
+counts_path = sys.argv[2]
+
+with open(baseline_path) as f:
+    baseline = json.load(f).get('unwrap_or_default', {}).get('counts', {})
+
+errors = []
+with open(counts_path) as f:
+    for line in f:
+        line = line.strip()
+        if not line or ':' not in line:
+            continue
+        file_path, count_str = line.rsplit(':', 1)
+        count = int(count_str)
+        baseline_count = baseline.get(file_path)
+        if baseline_count is None:
+            errors.append(f'New unwrap_or_default() usage in {file_path} ({count} occurrences)')
+        elif count > baseline_count:
+            errors.append(f'unwrap_or_default() count increased in {file_path}: {baseline_count} -> {count}')
+
+for e in errors:
+    print(e)
+sys.exit(len(errors))
+" "$BASELINE_FILE" "$CURRENT_COUNTS" 2>/dev/null) || true
+
+    if [ -n "$RATCHET_OUTPUT" ]; then
+        while IFS= read -r line; do
+            echo "ERROR: $line"
             echo "  Fix: Use explicit Result/Option handling instead of unwrap_or_default()."
             echo "  See doc/dev/rust.md for error handling guidelines."
             ERRORS=$((ERRORS + 1))
-        fi
-    done < "$CURRENT_COUNTS"
+        done <<< "$RATCHET_OUTPUT"
+    fi
 
     rm -f "$CURRENT_COUNTS"
 else
