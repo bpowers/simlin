@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use crate::ast::{
     self, ArrayView, BinaryOp, Expr3, Expr3LowerContext, IndexExpr3, Loc, Pass1Context,
@@ -34,25 +35,85 @@ pub(crate) struct VariableMetadata {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub(crate) struct Context<'a> {
-    pub(crate) dimensions: Vec<Dimension>,
-    #[allow(dead_code)]
-    pub(crate) dimensions_ctx: &'a DimensionsContext,
-    pub(crate) model_name: &'a Ident<Canonical>,
+    pub(crate) core: ContextCore<'a>,
     #[allow(dead_code)]
     pub(crate) ident: &'a Ident<Canonical>,
-    pub(crate) active_dimension: Option<Vec<Dimension>>,
+    pub(crate) active_dimension: Option<Arc<[Dimension]>>,
     pub(crate) active_subscript: Option<Vec<CanonicalElementName>>,
-    pub(crate) metadata: &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata>>,
-    pub(crate) module_models:
-        &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>>,
     pub(crate) is_initial: bool,
-    pub(crate) inputs: &'a BTreeSet<Ident<Canonical>>,
     /// When true, wildcards should always be preserved for iteration (inside SUM, etc.)
     /// rather than being collapsed based on active_dimension matching.
     pub(crate) preserve_wildcards_for_iteration: bool,
 }
 
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy)]
+pub(crate) struct ContextCore<'a> {
+    pub(crate) dimensions: &'a [Dimension],
+    #[allow(dead_code)]
+    pub(crate) dimensions_ctx: &'a DimensionsContext,
+    pub(crate) model_name: &'a Ident<Canonical>,
+    pub(crate) metadata: &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata>>,
+    pub(crate) module_models:
+        &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>>,
+    pub(crate) inputs: &'a BTreeSet<Ident<Canonical>>,
+}
+
+impl<'a> std::ops::Deref for Context<'a> {
+    type Target = ContextCore<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
 impl Context<'_> {
+    pub(crate) fn new<'a>(
+        core: ContextCore<'a>,
+        ident: &'a Ident<Canonical>,
+        is_initial: bool,
+    ) -> Context<'a> {
+        Context {
+            core,
+            ident,
+            active_dimension: None,
+            active_subscript: None,
+            is_initial,
+            preserve_wildcards_for_iteration: false,
+        }
+    }
+
+    fn with_active_context(
+        &self,
+        active_dimension: Option<Arc<[Dimension]>>,
+        active_subscript: Option<Vec<CanonicalElementName>>,
+    ) -> Self {
+        Context {
+            core: self.core,
+            ident: self.ident,
+            active_dimension,
+            active_subscript,
+            is_initial: self.is_initial,
+            preserve_wildcards_for_iteration: self.preserve_wildcards_for_iteration,
+        }
+    }
+
+    pub(crate) fn with_active_subscripts<S: AsRef<str>>(
+        &self,
+        active_dimension: Arc<[Dimension]>,
+        subscripts: &[S],
+    ) -> Self {
+        self.with_active_context(
+            Some(active_dimension),
+            Some(
+                subscripts
+                    .iter()
+                    .map(|s| CanonicalElementName::from_raw(s.as_ref()))
+                    .collect(),
+            ),
+        )
+    }
+
     pub(super) fn get_offset(&self, ident: &Ident<Canonical>) -> Result<usize> {
         self.get_submodel_offset(self.model_name, ident, false)
     }
@@ -795,26 +856,30 @@ impl Context<'_> {
     /// Create a context with transposed active dimensions for transpose operations.
     /// Used when processing expressions under a Transpose operator in A2A context.
     fn with_transposed_active_context(&self) -> Self {
-        let mut ctx = self.clone();
-        if let Some(ref active_dims) = ctx.active_dimension {
-            let mut reversed = active_dims.clone();
+        let reversed_dims = self.active_dimension.as_ref().map(|active_dims| {
+            let mut reversed: Vec<Dimension> = active_dims.iter().cloned().collect();
             reversed.reverse();
-            ctx.active_dimension = Some(reversed);
-        }
-        if let Some(ref active_subs) = ctx.active_subscript {
+            Arc::<[Dimension]>::from(reversed)
+        });
+        let reversed_subscripts = self.active_subscript.as_ref().map(|active_subs| {
             let mut reversed = active_subs.clone();
             reversed.reverse();
-            ctx.active_subscript = Some(reversed);
-        }
-        ctx
+            reversed
+        });
+        self.with_active_context(reversed_dims, reversed_subscripts)
     }
 
     /// Create a context that preserves wildcards for array iteration.
     /// Used for array reduction builtins (SUM, MAX, MIN, MEAN, STDDEV, SIZE).
     fn with_preserved_wildcards(&self) -> Self {
-        let mut ctx = self.clone();
-        ctx.preserve_wildcards_for_iteration = true;
-        ctx
+        Context {
+            core: self.core,
+            ident: self.ident,
+            active_dimension: self.active_dimension.clone(),
+            active_subscript: self.active_subscript.clone(),
+            is_initial: self.is_initial,
+            preserve_wildcards_for_iteration: true,
+        }
     }
 
     /// Lower an Expr3 to compiler's Expr representation.
@@ -1003,7 +1068,7 @@ impl Context<'_> {
                 // Try to normalize subscripts to static operations
                 let config = Subscript3Config {
                     dims,
-                    all_dimensions: &self.dimensions,
+                    all_dimensions: self.dimensions,
                     dimensions_ctx: self.dimensions_ctx,
                     active_dimension: self.active_dimension.as_deref(),
                 };
@@ -1988,19 +2053,18 @@ fn test_lower() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
-    let context = Context {
-        dimensions: vec![],
-        dimensions_ctx: &dims_ctx,
-        model_name: &main_ident,
-        ident: &test_ident,
-        active_dimension: None,
-        active_subscript: None,
-        metadata: &metadata2,
-        module_models: &module_models,
-        is_initial: false,
-        inputs,
-        preserve_wildcards_for_iteration: false,
-    };
+    let context = Context::new(
+        ContextCore {
+            dimensions: &[],
+            dimensions_ctx: &dims_ctx,
+            model_name: &main_ident,
+            metadata: &metadata2,
+            module_models: &module_models,
+            inputs,
+        },
+        &test_ident,
+        false,
+    );
     let expected = Expr::If(
         Box::new(Expr::Op2(
             BinaryOp::And,
@@ -2086,19 +2150,18 @@ fn test_lower() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
-    let context = Context {
-        dimensions: vec![],
-        dimensions_ctx: &dims_ctx,
-        model_name: &main_ident,
-        ident: &test_ident,
-        active_dimension: None,
-        active_subscript: None,
-        metadata: &metadata2,
-        module_models: &module_models,
-        is_initial: false,
-        inputs,
-        preserve_wildcards_for_iteration: false,
-    };
+    let context = Context::new(
+        ContextCore {
+            dimensions: &[],
+            dimensions_ctx: &dims_ctx,
+            model_name: &main_ident,
+            metadata: &metadata2,
+            module_models: &module_models,
+            inputs,
+        },
+        &test_ident,
+        false,
+    );
     let expected = Expr::If(
         Box::new(Expr::Op2(
             BinaryOp::Or,
@@ -2116,4 +2179,46 @@ fn test_lower() {
     let mut output_exprs = output.unwrap();
     // The last element is the main expression
     assert_eq!(expected, output_exprs.pop().unwrap());
+}
+
+#[test]
+fn test_with_active_subscripts_reuses_dimension_storage() {
+    use crate::common::CanonicalDimensionName;
+
+    let model_name = Ident::new("main");
+    let ident = Ident::new("aux");
+    let dims_ctx = DimensionsContext::default();
+    let dims = vec![Dimension::Indexed(
+        CanonicalDimensionName::from_raw("letters"),
+        3,
+    )];
+    let metadata: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata>> =
+        HashMap::new();
+    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
+        HashMap::new();
+    let inputs = BTreeSet::new();
+
+    let base = Context::new(
+        ContextCore {
+            dimensions: &dims,
+            dimensions_ctx: &dims_ctx,
+            model_name: &model_name,
+            metadata: &metadata,
+            module_models: &module_models,
+            inputs: &inputs,
+        },
+        &ident,
+        false,
+    );
+
+    let active_dims = Arc::<[Dimension]>::from(dims.clone());
+    let ctx_a = base.with_active_subscripts(active_dims.clone(), &["1"]);
+    let ctx_b = base.with_active_subscripts(active_dims.clone(), &["2"]);
+
+    assert!(Arc::ptr_eq(
+        ctx_a.active_dimension.as_ref().unwrap(),
+        ctx_b.active_dimension.as_ref().unwrap()
+    ));
+    assert_eq!(ctx_a.active_subscript.as_ref().unwrap()[0].as_str(), "1");
+    assert_eq!(ctx_b.active_subscript.as_ref().unwrap()[0].as_str(), "2");
 }

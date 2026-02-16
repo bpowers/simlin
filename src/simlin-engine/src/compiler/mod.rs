@@ -26,7 +26,7 @@ use crate::vm::{IMPLICIT_VAR_COUNT, ModuleKey};
 use crate::{Error, sim_err};
 
 // Re-exports for crate-internal API
-pub(crate) use self::context::{Context, VariableMetadata};
+pub(crate) use self::context::{Context, ContextCore, VariableMetadata};
 pub(crate) use self::dimensions::UnaryOp;
 pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table};
 pub(crate) use self::pretty::pretty;
@@ -134,19 +134,18 @@ fn test_fold_flows() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
-    let ctx = Context {
-        dimensions: vec![],
-        dimensions_ctx: &dims_ctx,
-        model_name: &main_ident,
-        ident: &test_ident,
-        active_dimension: None,
-        active_subscript: None,
-        metadata: &metadata2,
-        module_models: &module_models,
-        is_initial: false,
-        inputs,
-        preserve_wildcards_for_iteration: false,
-    };
+    let ctx = Context::new(
+        ContextCore {
+            dimensions: &[],
+            dimensions_ctx: &dims_ctx,
+            model_name: &main_ident,
+            metadata: &metadata2,
+            module_models: &module_models,
+            inputs,
+        },
+        &test_ident,
+        false,
+    );
 
     assert_eq!(Ok(None), ctx.fold_flows::<f64>(&[]));
     assert_eq!(
@@ -219,16 +218,13 @@ impl<F: SimFloat> Var<F> {
                                 exprs
                             }
                             Ast::ApplyToAll(dims, ast) => {
+                                let active_dims = Arc::<[Dimension]>::from(dims.clone());
                                 let exprs: Result<Vec<Vec<Expr<F>>>> = SubscriptIterator::new(dims)
                                     .enumerate()
                                     .map(|(i, subscripts)| {
-                                        let mut ctx = ctx.clone();
-                                        ctx.active_dimension = Some(dims.clone());
-                                        ctx.active_subscript = Some(
-                                            subscripts
-                                                .iter()
-                                                .map(|s| CanonicalElementName::from_raw(s))
-                                                .collect(),
+                                        let ctx = ctx.with_active_subscripts(
+                                            active_dims.clone(),
+                                            &subscripts,
                                         );
                                         ctx.lower(ast).map(|mut exprs| {
                                             let main_expr = exprs.pop().unwrap();
@@ -243,6 +239,7 @@ impl<F: SimFloat> Var<F> {
                                 exprs?.into_iter().flatten().collect()
                             }
                             Ast::Arrayed(dims, elements) => {
+                                let active_dims = Arc::<[Dimension]>::from(dims.clone());
                                 let exprs: Result<Vec<Vec<Expr<F>>>> = SubscriptIterator::new(dims)
                                     .enumerate()
                                     .map(|(i, subscripts)| {
@@ -250,13 +247,9 @@ impl<F: SimFloat> Var<F> {
                                         let canonical_key =
                                             CanonicalElementName::from_raw(&subscript_str);
                                         let ast = &elements[&canonical_key];
-                                        let mut ctx = ctx.clone();
-                                        ctx.active_dimension = Some(dims.clone());
-                                        ctx.active_subscript = Some(
-                                            subscripts
-                                                .iter()
-                                                .map(|s| CanonicalElementName::from_raw(s))
-                                                .collect(),
+                                        let ctx = ctx.with_active_subscripts(
+                                            active_dims.clone(),
+                                            &subscripts,
                                         );
                                         ctx.lower(ast).map(|mut exprs| {
                                             let main_expr = exprs.pop().unwrap();
@@ -278,16 +271,13 @@ impl<F: SimFloat> Var<F> {
                                 Box::new(ctx.build_stock_update_expr(off, var)?),
                             )],
                             Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _) => {
+                                let active_dims = Arc::<[Dimension]>::from(dims.clone());
                                 let exprs: Result<Vec<Expr<F>>> = SubscriptIterator::new(dims)
                                     .enumerate()
                                     .map(|(i, subscripts)| {
-                                        let mut ctx = ctx.clone();
-                                        ctx.active_dimension = Some(dims.clone());
-                                        ctx.active_subscript = Some(
-                                            subscripts
-                                                .iter()
-                                                .map(|s| CanonicalElementName::from_raw(s))
-                                                .collect(),
+                                        let ctx = ctx.with_active_subscripts(
+                                            active_dims.clone(),
+                                            &subscripts,
                                         );
                                         let update_expr = ctx.build_stock_update_expr(
                                             ctx.get_offset(&Ident::new(var.ident()))?,
@@ -332,17 +322,12 @@ impl<F: SimFloat> Var<F> {
                             exprs
                         }
                         Ast::ApplyToAll(dims, ast) => {
+                            let active_dims = Arc::<[Dimension]>::from(dims.clone());
                             let exprs: Result<Vec<Vec<Expr<F>>>> = SubscriptIterator::new(dims)
                                 .enumerate()
                                 .map(|(i, subscripts)| {
-                                    let mut ctx = ctx.clone();
-                                    ctx.active_dimension = Some(dims.clone());
-                                    ctx.active_subscript = Some(
-                                        subscripts
-                                            .iter()
-                                            .map(|s| CanonicalElementName::from_raw(s))
-                                            .collect(),
-                                    );
+                                    let ctx = ctx
+                                        .with_active_subscripts(active_dims.clone(), &subscripts);
                                     ctx.lower(ast).map(|mut exprs| {
                                         let main_expr = exprs.pop().unwrap();
                                         exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
@@ -353,6 +338,7 @@ impl<F: SimFloat> Var<F> {
                             exprs?.into_iter().flatten().collect()
                         }
                         Ast::Arrayed(dims, elements) => {
+                            let active_dims = Arc::<[Dimension]>::from(dims.clone());
                             let exprs: Result<Vec<Vec<Expr<F>>>> = SubscriptIterator::new(dims)
                                 .enumerate()
                                 .map(|(i, subscripts)| {
@@ -360,14 +346,8 @@ impl<F: SimFloat> Var<F> {
                                     let canonical_key =
                                         CanonicalElementName::from_raw(&subscript_str);
                                     let ast = &elements[&canonical_key];
-                                    let mut ctx = ctx.clone();
-                                    ctx.active_dimension = Some(dims.clone());
-                                    ctx.active_subscript = Some(
-                                        subscripts
-                                            .iter()
-                                            .map(|s| CanonicalElementName::from_raw(s))
-                                            .collect(),
-                                    );
+                                    let ctx = ctx
+                                        .with_active_subscripts(active_dims.clone(), &subscripts);
                                     ctx.lower(ast).map(|mut exprs| {
                                         let main_expr = exprs.pop().unwrap();
                                         exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
@@ -787,19 +767,18 @@ impl<F: SimFloat> Module<F> {
 
         let build_var = |ident: &Ident<Canonical>, is_initial| {
             Var::new(
-                &Context {
-                    dimensions: converted_dims.clone(),
-                    dimensions_ctx: &project.dimensions_ctx,
-                    model_name,
+                &Context::new(
+                    ContextCore {
+                        dimensions: &converted_dims,
+                        dimensions_ctx: &project.dimensions_ctx,
+                        model_name,
+                        metadata: &metadata,
+                        module_models: &module_models,
+                        inputs,
+                    },
                     ident,
-                    active_dimension: None,
-                    active_subscript: None,
-                    metadata: &metadata,
-                    module_models: &module_models,
                     is_initial,
-                    inputs,
-                    preserve_wildcards_for_iteration: false,
-                },
+                ),
                 &model.variables[ident],
             )
         };

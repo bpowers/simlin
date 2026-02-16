@@ -1905,7 +1905,7 @@ mod transpose_tests {
 #[test]
 fn test_arrays() {
     use crate::ast::Loc;
-    use crate::compiler::{Context, Var};
+    use crate::compiler::{Context, ContextCore, Var};
     use std::collections::BTreeSet;
 
     let project = {
@@ -2030,28 +2030,29 @@ fn test_arrays() {
     assert_eq!(main_metadata[&*canonicalize("picked2")].size, 1);
 
     let module_models = compiler::calc_module_model_map(&parsed_project, &main_ident);
+    let converted_dims: Vec<crate::dimensions::Dimension> = parsed_project
+        .datamodel
+        .dimensions
+        .iter()
+        .map(crate::dimensions::Dimension::from)
+        .collect();
+    let empty_inputs = BTreeSet::new();
 
     let arrayed_constants_var =
         &parsed_project.models[&main_ident].variables[&*canonicalize("constants")];
     let parsed_var = Var::<f64>::new(
-        &Context {
-            dimensions: parsed_project
-                .datamodel
-                .dimensions
-                .iter()
-                .map(crate::dimensions::Dimension::from)
-                .collect(),
-            dimensions_ctx: &parsed_project.dimensions_ctx,
-            model_name: &main_ident,
-            ident: arrayed_constants_var.canonical_ident(),
-            active_dimension: None,
-            active_subscript: None,
-            metadata: &metadata,
-            module_models: &module_models,
-            is_initial: false,
-            inputs: &BTreeSet::new(),
-            preserve_wildcards_for_iteration: false,
-        },
+        &Context::new(
+            ContextCore {
+                dimensions: &converted_dims,
+                dimensions_ctx: &parsed_project.dimensions_ctx,
+                model_name: &main_ident,
+                metadata: &metadata,
+                module_models: &module_models,
+                inputs: &empty_inputs,
+            },
+            arrayed_constants_var.canonical_ident(),
+            false,
+        ),
         arrayed_constants_var,
     );
 
@@ -2073,24 +2074,18 @@ fn test_arrays() {
 
     let arrayed_aux_var = &parsed_project.models[&main_ident].variables[&*canonicalize("aux")];
     let parsed_var: crate::common::Result<Var<f64>> = Var::new(
-        &Context {
-            dimensions: parsed_project
-                .datamodel
-                .dimensions
-                .iter()
-                .map(crate::dimensions::Dimension::from)
-                .collect(),
-            dimensions_ctx: &parsed_project.dimensions_ctx,
-            model_name: &main_ident,
-            ident: arrayed_aux_var.canonical_ident(),
-            active_dimension: None,
-            active_subscript: None,
-            metadata: &metadata,
-            module_models: &module_models,
-            is_initial: false,
-            inputs: &BTreeSet::new(),
-            preserve_wildcards_for_iteration: false,
-        },
+        &Context::new(
+            ContextCore {
+                dimensions: &converted_dims,
+                dimensions_ctx: &parsed_project.dimensions_ctx,
+                model_name: &main_ident,
+                metadata: &metadata,
+                module_models: &module_models,
+                inputs: &empty_inputs,
+            },
+            arrayed_aux_var.canonical_ident(),
+            false,
+        ),
         arrayed_aux_var,
     );
 
@@ -2111,24 +2106,18 @@ fn test_arrays() {
 
     let var = &parsed_project.models[&main_ident].variables[&*canonicalize("picked2")];
     let parsed_var = Var::<f64>::new(
-        &Context {
-            dimensions: parsed_project
-                .datamodel
-                .dimensions
-                .iter()
-                .map(crate::dimensions::Dimension::from)
-                .collect(),
-            dimensions_ctx: &parsed_project.dimensions_ctx,
-            model_name: &main_ident,
-            ident: var.canonical_ident(),
-            active_dimension: None,
-            active_subscript: None,
-            metadata: &metadata,
-            module_models: &module_models,
-            is_initial: false,
-            inputs: &BTreeSet::new(),
-            preserve_wildcards_for_iteration: false,
-        },
+        &Context::new(
+            ContextCore {
+                dimensions: &converted_dims,
+                dimensions_ctx: &parsed_project.dimensions_ctx,
+                model_name: &main_ident,
+                metadata: &metadata,
+                module_models: &module_models,
+                inputs: &empty_inputs,
+            },
+            var.canonical_ident(),
+            false,
+        ),
         var,
     );
 
@@ -2159,24 +2148,18 @@ fn test_arrays() {
 
     let var = &parsed_project.models[&main_ident].variables[&*canonicalize("picked")];
     let parsed_var = Var::<f64>::new(
-        &Context {
-            dimensions: parsed_project
-                .datamodel
-                .dimensions
-                .iter()
-                .map(crate::dimensions::Dimension::from)
-                .collect(),
-            dimensions_ctx: &parsed_project.dimensions_ctx,
-            model_name: &main_ident,
-            ident: var.canonical_ident(),
-            active_dimension: None,
-            active_subscript: None,
-            metadata: &metadata,
-            module_models: &module_models,
-            is_initial: false,
-            inputs: &BTreeSet::new(),
-            preserve_wildcards_for_iteration: false,
-        },
+        &Context::new(
+            ContextCore {
+                dimensions: &converted_dims,
+                dimensions_ctx: &parsed_project.dimensions_ctx,
+                model_name: &main_ident,
+                metadata: &metadata,
+                module_models: &module_models,
+                inputs: &empty_inputs,
+            },
+            var.canonical_ident(),
+            false,
+        ),
         var,
     );
 
