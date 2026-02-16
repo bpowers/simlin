@@ -20,7 +20,9 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
+
 
 def load_policy(repo_root: Path) -> dict[str, dict[str, list[str]]]:
     policy_path = repo_root / "scripts" / "dep-policy.json"
@@ -31,23 +33,9 @@ def load_policy(repo_root: Path) -> dict[str, dict[str, list[str]]]:
 def discover_rust_members(repo_root: Path) -> list[str]:
     """Auto-discover Rust workspace members from root Cargo.toml."""
     cargo_path = repo_root / "Cargo.toml"
-    content = cargo_path.read_text()
-    # Parse the members array from [workspace] section
-    members: list[str] = []
-    in_members = False
-    for line in content.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("members"):
-            in_members = True
-            continue
-        if in_members:
-            if stripped == "]":
-                break
-            # Extract quoted path: "src/simlin-engine",
-            match = re.match(r'"([^"]+)"', stripped)
-            if match:
-                members.append(match.group(1))
-    return members
+    with open(cargo_path, "rb") as f:
+        data = tomllib.load(f)
+    return data.get("workspace", {}).get("members", [])
 
 
 def discover_typescript_members(repo_root: Path) -> list[Path]:
@@ -64,6 +52,22 @@ def discover_typescript_members(repo_root: Path) -> list[Path]:
     return members
 
 
+def extract_path_deps(cargo_path: Path) -> tuple[str, set[str]]:
+    """Extract package name and path dependencies from a Cargo.toml using tomllib."""
+    with open(cargo_path, "rb") as f:
+        data = tomllib.load(f)
+
+    pkg_name = data.get("package", {}).get("name", "")
+    deps = data.get("dependencies", {})
+
+    path_deps: set[str] = set()
+    for dep_name, dep_val in deps.items():
+        if isinstance(dep_val, dict) and "path" in dep_val:
+            path_deps.add(dep_name)
+
+    return pkg_name, path_deps
+
+
 def check_rust_deps(repo_root: Path, policy: dict[str, list[str]]) -> list[str]:
     """Check Rust workspace path dependencies against policy."""
     errors: list[str] = []
@@ -76,14 +80,10 @@ def check_rust_deps(repo_root: Path, policy: dict[str, list[str]]) -> list[str]:
             errors.append(f"ERROR: {cargo_path} not found")
             continue
 
-        content = cargo_path.read_text()
-
-        # Extract the package name
-        name_match = re.search(r'^name\s*=\s*"([^"]+)"', content, re.MULTILINE)
-        if not name_match:
+        pkg_name, actual_deps = extract_path_deps(cargo_path)
+        if not pkg_name:
             errors.append(f"ERROR: Could not find package name in {cargo_path}")
             continue
-        pkg_name = name_match.group(1)
         actual_pkg_names.add(pkg_name)
 
         if pkg_name not in policy:
@@ -94,30 +94,6 @@ def check_rust_deps(repo_root: Path, policy: dict[str, list[str]]) -> list[str]:
             continue
 
         allowed = set(policy[pkg_name])
-
-        # Parse [dependencies] section only (not dev-dependencies or build-dependencies).
-        in_deps = False
-        actual_deps: set[str] = set()
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped == "[dependencies]":
-                in_deps = True
-                continue
-            if stripped.startswith("[") and in_deps:
-                in_deps = False
-                continue
-            if not in_deps:
-                continue
-
-            # Match both inline table and separate key forms:
-            #   simlin-engine = { path = "../simlin-engine", ... }
-            #   simlin-engine.path = "../simlin-engine"
-            path_match = re.match(r'^(\S+)\s*=\s*\{.*path\s*=\s*"([^"]*)"', stripped)
-            if not path_match:
-                path_match = re.match(r'^(\S+)\.path\s*=\s*"([^"]*)"', stripped)
-            if path_match:
-                dep_name = path_match.group(1)
-                actual_deps.add(dep_name)
 
         for dep in sorted(actual_deps):
             if dep not in allowed:

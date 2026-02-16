@@ -48,7 +48,7 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Component**: diagram
 - **Severity**: low
 - **Description**: Project preference is class components, but hooks usage exists in the diagram package. When touching these files, prefer migrating to class components.
-- **Measure**: `rg 'use(State|Effect|Ref|Memo|Callback|Context)\b' --type tsx src/diagram/`
+- **Measure**: `rg 'use(State|Effect|Ref|Memo|Callback|Context)\b' --glob '*.tsx' src/diagram/`
 - **Owner**: unassigned
 - **Last reviewed**: 2026-02-15
 

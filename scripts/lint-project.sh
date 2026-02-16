@@ -8,6 +8,13 @@ set -e
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# Fail fast if rg is not installed (required for ratchet checks)
+if ! command -v rg > /dev/null 2>&1; then
+    echo "ERROR: ripgrep (rg) is required but not installed."
+    echo "  Install: cargo install ripgrep, or brew install ripgrep"
+    exit 1
+fi
+
 ERRORS=0
 
 # Rule 1: No --no-verify in any script or config file (excluding this lint script itself).
