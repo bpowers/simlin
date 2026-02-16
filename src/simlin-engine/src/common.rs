@@ -276,8 +276,11 @@ fn is_canonical(name: &str) -> bool {
                     return false;
                 }
             }
-            // Uppercase letters get lowercased
-            c if c.is_uppercase() => return false,
+            // Reject any character that to_lowercase() would change.
+            // This covers both uppercase (Lu) and titlecase (Lt) Unicode
+            // categories -- titlecase letters like ǅ are NOT uppercase but
+            // to_lowercase() still maps them to a different character (ǆ).
+            c if c.to_lowercase().ne(std::iter::once(c)) => return false,
             _ => {}
         }
     }
@@ -436,6 +439,35 @@ mod canonicalize_invariant_tests {
                 prop_assert_eq!(*b, s.trim(),
                     "Borrowed result should equal trimmed input for {:?}", s);
             }
+        }
+    }
+
+    #[test]
+    fn titlecase_letters_are_lowered() {
+        // Unicode titlecase letters (General Category Lt) are not uppercase
+        // but to_lowercase() still changes them (e.g. ǅ -> ǆ).
+        // is_canonical must reject them so the slow path can lower them.
+        let titlecase_inputs = [
+            "\u{01C5}", // ǅ -> ǆ
+            "\u{01C8}", // ǈ -> ǉ
+            "\u{01CB}", // ǋ -> ǌ
+            "\u{01F2}", // ǲ -> ǳ
+        ];
+        for input in titlecase_inputs {
+            let result = canonicalize(input);
+            let slow = canonicalize_slow_path(input);
+            assert_eq!(
+                &*result, &*slow,
+                "titlecase mismatch for {:?}: fast={:?}, slow={:?}",
+                input, result, slow
+            );
+            // The slow path should have lowered it, so the result should differ
+            // from the input.
+            assert_ne!(
+                &*result, input,
+                "titlecase char {:?} should be lowered",
+                input
+            );
         }
     }
 }
