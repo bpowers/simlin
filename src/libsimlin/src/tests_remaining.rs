@@ -1,3 +1,7 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
 #[test]
 fn test_project_json_roundtrip_sdai() {
     let original_datamodel = TestProject::new("sdai_roundtrip")

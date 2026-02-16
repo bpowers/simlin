@@ -1,3 +1,7 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
 // Static CSS content for SVG export rendering.
 // These styles use hardcoded color values (not CSS variables) because standalone SVGs
 // don't support CSS custom properties. The class names (simlin-*) are static and match

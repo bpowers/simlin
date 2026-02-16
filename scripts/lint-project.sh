@@ -99,6 +99,18 @@ else
     echo "WARNING: No baseline file found at $BASELINE_FILE. Run scripts/generate-lint-baseline.py to create it."
 fi
 
+# Rule 4: Copyright headers on all Rust and TypeScript source files
+# check-copyright.py writes one error per line to stdout; summary to stderr.
+COPYRIGHT_OUTPUT=$(mktemp)
+if ! python3 scripts/check-copyright.py > "$COPYRIGHT_OUTPUT"; then
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        echo "ERROR: copyright header: $line"
+        ERRORS=$((ERRORS + 1))
+    done < "$COPYRIGHT_OUTPUT"
+fi
+rm -f "$COPYRIGHT_OUTPUT"
+
 if [ "$ERRORS" -gt 0 ]; then
     echo ""
     echo "Project lint check failed with $ERRORS error(s)."
