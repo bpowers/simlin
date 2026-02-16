@@ -1,0 +1,26 @@
+{
+  "unwrap_or_default": {
+    "description": "unwrap_or_default() usage in simlin-engine (ratchet: counts must not increase)",
+    "as_of": "2026-02-15",
+    "total": 99,
+    "counts": {
+      "src/simlin-engine/src/datamodel.rs": 2,
+      "src/simlin-engine/src/json.rs": 15,
+      "src/simlin-engine/src/json_sdai.rs": 9,
+      "src/simlin-engine/src/mdl/convert/helpers.rs": 1,
+      "src/simlin-engine/src/mdl/convert/types.rs": 1,
+      "src/simlin-engine/src/mdl/convert/variables.rs": 2,
+      "src/simlin-engine/src/mdl/xmile_compat.rs": 1,
+      "src/simlin-engine/src/model.rs": 9,
+      "src/simlin-engine/src/project.rs": 2,
+      "src/simlin-engine/src/serde.rs": 30,
+      "src/simlin-engine/src/units_check.rs": 1,
+      "src/simlin-engine/src/units_infer.rs": 1,
+      "src/simlin-engine/src/xmile/dimensions.rs": 3,
+      "src/simlin-engine/src/xmile/mod.rs": 6,
+      "src/simlin-engine/src/xmile/model.rs": 4,
+      "src/simlin-engine/src/xmile/variables.rs": 11,
+      "src/simlin-engine/src/xmile/views.rs": 1
+    }
+  }
+}

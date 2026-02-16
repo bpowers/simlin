@@ -42,8 +42,8 @@ Equation text flows through these stages in order:
 - **`src/mdl/`** - Native Rust Vensim MDL parser (replaces C++ xmutil):
   - `lexer.rs` -> `normalizer.rs` -> `parser.rs` -> `reader.rs` (pipeline)
   - `ast.rs`, `builtins.rs` (Vensim function recognition)
-  - `convert/` - Multi-pass AST to datamodel conversion (`variables.rs`, `stocks.rs`, `dimensions.rs`, `types.rs`, `helpers.rs`)
-  - `view/` - Sketch/diagram parsing (`elements.rs`, `types.rs`, `convert.rs`, `processing.rs`)
+  - convert/ subdir - Multi-pass AST to datamodel conversion
+  - view/ subdir - Sketch/diagram parsing
   - `xmile_compat.rs` - Expression formatting for XMILE output
   - `settings.rs` - Integration settings parser
 - **`src/json.rs`** - JSON serialization matching Go `sd` package schema

@@ -174,3 +174,27 @@ jobs:
 
       - name: Run TypeScript tests
         run: pnpm test
+
+  policy:
+    name: Policy checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check dependency policy
+        run: python3 scripts/check-deps.py
+
+      - name: Check documentation links
+        run: python3 scripts/check-docs.py
+
+      - name: Run project lint rules
+        run: bash scripts/lint-project.sh
