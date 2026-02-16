@@ -96,7 +96,7 @@ fn append_model(s: &mut String, prefix: &str, mut i: i32, sample: i32, model: &M
         .iter()
         .map(|v| v.get_ident())
         .collect::<Vec<_>>();
-    var_names.sort_by_cached_key(|v| canonicalize(v));
+    var_names.sort_by_cached_key(|v| canonicalize(v).into_owned());
 
     for var_name in var_names.iter() {
         let var = model.get_variable(var_name).unwrap();
@@ -134,7 +134,7 @@ fn append_ai_state(s: &mut String, mut need_initial_space: bool, project: &Proje
         .iter()
         .map(|v| v.get_ident())
         .collect::<Vec<_>>();
-    var_names.sort_by_cached_key(|v| canonicalize(v));
+    var_names.sort_by_cached_key(|v| canonicalize(v).into_owned());
 
     for var_name in var_names.iter() {
         let var = model.get_variable(var_name).unwrap();

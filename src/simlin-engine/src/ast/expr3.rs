@@ -1049,7 +1049,7 @@ impl IndexExpr3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::canonicalize;
+    use crate::common::Ident;
 
     #[test]
     fn test_expr3_const() {
@@ -1061,7 +1061,7 @@ mod tests {
 
     #[test]
     fn test_expr3_var_scalar() {
-        let expr = Expr3::Var(canonicalize("x"), None, Loc::new(0, 1));
+        let expr = Expr3::Var(Ident::new("x"), None, Loc::new(0, 1));
         assert_eq!(expr.get_loc(), Loc::new(0, 1));
         assert!(expr.get_array_bounds().is_none());
     }
@@ -1073,7 +1073,7 @@ mod tests {
             dims: vec![3, 4],
             dim_names: None,
         };
-        let expr = Expr3::Var(canonicalize("arr"), Some(bounds), Loc::new(0, 3));
+        let expr = Expr3::Var(Ident::new("arr"), Some(bounds), Loc::new(0, 3));
         assert!(expr.get_array_bounds().is_some());
         assert_eq!(expr.get_array_bounds().unwrap().dims(), &[3, 4]);
     }
@@ -1081,8 +1081,7 @@ mod tests {
     #[test]
     fn test_expr3_static_subscript() {
         let view = ArrayView::contiguous(vec![3, 4]);
-        let expr =
-            Expr3::StaticSubscript(canonicalize("matrix"), view.clone(), 100, Loc::new(0, 6));
+        let expr = Expr3::StaticSubscript(Ident::new("matrix"), view.clone(), 100, Loc::new(0, 6));
 
         assert_eq!(expr.get_loc(), Loc::new(0, 6));
         assert!(expr.get_array_bounds().is_none());
@@ -1234,7 +1233,7 @@ mod tests {
     #[test]
     fn test_lower_scalar_var() {
         let ctx = TestLowerContext::new();
-        let expr2 = Expr2::Var(canonicalize("x"), None, Loc::new(0, 1));
+        let expr2 = Expr2::Var(Ident::new("x"), None, Loc::new(0, 1));
 
         let expr3 = Expr3::from_expr2(&expr2, &ctx).unwrap();
 
@@ -1258,7 +1257,7 @@ mod tests {
             dims: vec![3, 4],
             dim_names: Some(vec!["dim0".to_string(), "dim1".to_string()]),
         };
-        let expr2 = Expr2::Var(canonicalize("arr"), Some(bounds), Loc::new(0, 3));
+        let expr2 = Expr2::Var(Ident::new("arr"), Some(bounds), Loc::new(0, 3));
 
         let expr3 = Expr3::from_expr2(&expr2, &ctx).unwrap();
 
@@ -1291,7 +1290,7 @@ mod tests {
         let ctx = TestLowerContext::new().with_var("vec", indexed_dims(&[5]));
 
         let expr2 = Expr2::Subscript(
-            canonicalize("vec"),
+            Ident::new("vec"),
             vec![IndexExpr2::Wildcard(Loc::new(4, 5))],
             None,
             Loc::new(0, 6),
@@ -1323,7 +1322,7 @@ mod tests {
 
         let subdim_name = CanonicalDimensionName::from_raw("SubDim");
         let expr2 = Expr2::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![IndexExpr2::StarRange(subdim_name.clone(), Loc::new(4, 10))],
             None,
             Loc::new(0, 11),
@@ -1351,7 +1350,7 @@ mod tests {
         let ctx = TestLowerContext::new(); // No dimensions for "scalar"
 
         let expr2 = Expr2::Subscript(
-            canonicalize("scalar"),
+            Ident::new("scalar"),
             vec![IndexExpr2::Wildcard(Loc::new(7, 8))],
             None,
             Loc::new(0, 9),
@@ -1372,7 +1371,7 @@ mod tests {
         let ctx = TestLowerContext::new().with_var("matrix", indexed_dims(&[3, 4]));
 
         let expr2 = Expr2::Subscript(
-            canonicalize("matrix"),
+            Ident::new("matrix"),
             vec![
                 IndexExpr2::Wildcard(Loc::new(7, 8)),
                 IndexExpr2::Expr(Expr2::Const("2".to_string(), 2.0, Loc::new(10, 11))),
@@ -1429,12 +1428,12 @@ mod tests {
         let expr2 = Expr2::Op2(
             BinaryOp::Add,
             Box::new(Expr2::Var(
-                canonicalize("arr1"),
+                Ident::new("arr1"),
                 Some(bounds1),
                 Loc::new(0, 4),
             )),
             Box::new(Expr2::Var(
-                canonicalize("arr2"),
+                Ident::new("arr2"),
                 Some(bounds2),
                 Loc::new(7, 11),
             )),
@@ -1475,7 +1474,7 @@ mod tests {
         let ctx = TestLowerContext::new().with_var("sales", vec![cities]);
 
         let expr2 = Expr2::Subscript(
-            canonicalize("sales"),
+            Ident::new("sales"),
             vec![IndexExpr2::Wildcard(Loc::new(6, 7))],
             None,
             Loc::new(0, 8),
@@ -1500,7 +1499,7 @@ mod tests {
         let ctx = TestLowerContext::new().with_var("cube", indexed_dims(&[3, 4, 5]));
 
         let expr2 = Expr2::Subscript(
-            canonicalize("cube"),
+            Ident::new("cube"),
             vec![
                 IndexExpr2::Wildcard(Loc::new(5, 6)),
                 IndexExpr2::Wildcard(Loc::new(8, 9)),
@@ -1543,7 +1542,7 @@ mod tests {
         let ctx = TestLowerContext::new().with_var("matrix", indexed_dims(&[3, 4]));
 
         let expr2 = Expr2::Subscript(
-            canonicalize("matrix"),
+            Ident::new("matrix"),
             vec![
                 IndexExpr2::Wildcard(Loc::new(7, 8)),
                 IndexExpr2::Wildcard(Loc::new(10, 11)),
@@ -1574,9 +1573,9 @@ mod tests {
 
         // arr[MyDim] - MyDim is a dimension name, not a variable
         let expr2 = Expr2::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![IndexExpr2::Expr(Expr2::Var(
-                canonicalize("MyDim"),
+                Ident::new("MyDim"),
                 None,
                 Loc::new(4, 9),
             ))],
@@ -1613,9 +1612,9 @@ mod tests {
 
         // arr[x] - x is not a dimension name
         let expr2 = Expr2::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![IndexExpr2::Expr(Expr2::Var(
-                canonicalize("x"),
+                Ident::new("x"),
                 None,
                 Loc::new(4, 5),
             ))],
@@ -1647,10 +1646,10 @@ mod tests {
 
         // arr[*, Row] - has a dimension reference in second position
         let expr2 = Expr2::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![
                 IndexExpr2::Wildcard(Loc::new(4, 5)),
-                IndexExpr2::Expr(Expr2::Var(canonicalize("Row"), None, Loc::new(7, 10))),
+                IndexExpr2::Expr(Expr2::Var(Ident::new("Row"), None, Loc::new(7, 10))),
             ],
             None,
             Loc::new(0, 11),
@@ -1663,7 +1662,7 @@ mod tests {
 
         // arr[*, *] - no dimension reference
         let expr2_no_dim = Expr2::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![
                 IndexExpr2::Wildcard(Loc::new(4, 5)),
                 IndexExpr2::Wildcard(Loc::new(7, 8)),
@@ -1691,7 +1690,7 @@ mod tests {
         };
 
         let subscript = Expr3::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![IndexExpr3::StarRange(
                 CanonicalDimensionName::from_raw("dim"),
                 Loc::new(4, 5),
@@ -1728,7 +1727,7 @@ mod tests {
         };
 
         let subscript = Expr3::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![IndexExpr3::StarRange(
                 CanonicalDimensionName::from_raw("dim"),
                 Loc::new(4, 5),
@@ -1795,7 +1794,7 @@ mod tests {
         };
 
         let subscript = Expr3::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![
                 IndexExpr3::StarRange(CanonicalDimensionName::from_raw("row"), Loc::new(4, 5)),
                 IndexExpr3::Dimension(CanonicalDimensionName::from_raw("col"), Loc::new(7, 10)),
@@ -1845,7 +1844,7 @@ mod tests {
         };
 
         let inner_sub = Expr3::Subscript(
-            canonicalize("inner"),
+            Ident::new("inner"),
             vec![IndexExpr3::StarRange(
                 CanonicalDimensionName::from_raw("a"),
                 Loc::new(0, 1),
@@ -1864,7 +1863,7 @@ mod tests {
         };
 
         let outer_sub = Expr3::Subscript(
-            canonicalize("outer"),
+            Ident::new("outer"),
             vec![IndexExpr3::StarRange(
                 CanonicalDimensionName::from_raw("b"),
                 Loc::new(0, 1),
@@ -1925,7 +1924,7 @@ mod tests {
 
         // a[*] + 1
         let a_sub = Expr3::Subscript(
-            canonicalize("a"),
+            Ident::new("a"),
             vec![IndexExpr3::StarRange(
                 CanonicalDimensionName::from_raw("x"),
                 Loc::new(0, 1),
@@ -1943,7 +1942,7 @@ mod tests {
 
         // b[*] * 2
         let b_sub = Expr3::Subscript(
-            canonicalize("b"),
+            Ident::new("b"),
             vec![IndexExpr3::StarRange(
                 CanonicalDimensionName::from_raw("y"),
                 Loc::new(0, 1),
@@ -2026,11 +2025,11 @@ mod tests {
             dim_names: None,
         };
 
-        let cond = Expr3::Var(canonicalize("cond"), None, Loc::new(0, 4));
+        let cond = Expr3::Var(Ident::new("cond"), None, Loc::new(0, 4));
 
         // true branch: arr[*, DimName] - has A2A reference
         let true_branch = Expr3::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![
                 IndexExpr3::StarRange(CanonicalDimensionName::from_raw("row"), Loc::new(0, 1)),
                 IndexExpr3::Dimension(CanonicalDimensionName::from_raw("col"), Loc::new(3, 6)),
@@ -2046,7 +2045,7 @@ mod tests {
             dim_names: None,
         };
         let arr2_sub = Expr3::Subscript(
-            canonicalize("arr2"),
+            Ident::new("arr2"),
             vec![IndexExpr3::StarRange(
                 CanonicalDimensionName::from_raw("x"),
                 Loc::new(0, 1),
@@ -2099,7 +2098,7 @@ mod tests {
         };
 
         let subscript = Expr3::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![IndexExpr3::DimPosition(1, Loc::new(4, 6))],
             Some(arr_bounds.clone()),
             Loc::new(0, 7),
@@ -2151,7 +2150,7 @@ mod tests {
         };
 
         let arr_sub = Expr3::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![IndexExpr3::StarRange(
                 CanonicalDimensionName::from_raw("x"),
                 Loc::new(0, 1),
@@ -2161,7 +2160,7 @@ mod tests {
         );
 
         let arr2_sub = Expr3::Subscript(
-            canonicalize("arr2"),
+            Ident::new("arr2"),
             vec![IndexExpr3::StarRange(
                 CanonicalDimensionName::from_raw("x"),
                 Loc::new(0, 1),
@@ -2244,7 +2243,7 @@ mod tests {
 
         // Create arr[*, Col] - has Dimension reference
         let subscript = Expr3::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![
                 IndexExpr3::StarRange(CanonicalDimensionName::from_raw("row"), Loc::new(4, 5)),
                 IndexExpr3::Dimension(CanonicalDimensionName::from_raw("col"), Loc::new(7, 10)),
@@ -2321,7 +2320,7 @@ mod tests {
         };
 
         let subscript = Expr3::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![
                 IndexExpr3::StarRange(CanonicalDimensionName::from_raw("row"), Loc::new(4, 5)),
                 IndexExpr3::Dimension(CanonicalDimensionName::from_raw("col"), Loc::new(7, 10)),
@@ -2374,7 +2373,7 @@ mod tests {
         };
 
         let subscript = Expr3::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![IndexExpr3::DimPosition(1, Loc::new(4, 6))],
             Some(arr_bounds.clone()),
             Loc::new(0, 7),
@@ -2458,9 +2457,9 @@ mod tests {
 
         // arr[Row] - Row is both an element of Region and a dimension name
         let expr2 = Expr2::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![IndexExpr2::Expr(Expr2::Var(
-                canonicalize("Row"),
+                Ident::new("Row"),
                 None,
                 Loc::new(4, 7),
             ))],
@@ -2522,7 +2521,7 @@ mod tests {
 
         // Create arr[Row, UnknownDim] - UnknownDim won't be in A2A context
         let subscript = Expr3::Subscript(
-            canonicalize("arr"),
+            Ident::new("arr"),
             vec![
                 IndexExpr3::Dimension(CanonicalDimensionName::from_raw("row"), Loc::new(4, 7)),
                 IndexExpr3::Dimension(

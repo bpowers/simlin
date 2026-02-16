@@ -247,14 +247,68 @@ impl error::Error for Error {}
 pub type Result<T> = result::Result<T, Error>;
 pub type EquationResult<T> = result::Result<T, EquationError>;
 
-pub fn canonicalize(name: &str) -> Ident<Canonical> {
-    // remove leading and trailing whitespace, do this before testing
-    // for quotedness as we should treat a quoted string as sacrosanct
-    let name = name.trim();
+/// Returns true if the string is already in canonical form, meaning no
+/// transformations (trimming, lowercasing, quote stripping, period-to-middle-dot
+/// conversion, whitespace-to-underscore, or backslash unescaping) would change it.
+fn is_canonical(name: &str) -> bool {
+    // Must not have leading/trailing whitespace
+    let bytes = name.as_bytes();
+    if !bytes.is_empty()
+        && (bytes[0].is_ascii_whitespace() || bytes[bytes.len() - 1].is_ascii_whitespace())
+    {
+        return false;
+    }
 
-    let mut canonicalized_name = String::with_capacity(name.len());
+    let mut chars = name.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // Quotes would trigger the quoted-part stripping path
+            '"' => return false,
+            // Unquoted periods become middle dots
+            '.' => return false,
+            // Whitespace characters become underscores
+            ' ' | '\n' | '\r' | '\t' | '\u{00A0}' => return false,
+            // Consecutive backslashes get collapsed
+            '\\' => {
+                if let Some(&next) = chars.peek()
+                    && (next == '\\' || next == 'n' || next == 'r')
+                {
+                    return false;
+                }
+            }
+            // Reject any character that to_lowercase() would change.
+            // This covers both uppercase (Lu) and titlecase (Lt) Unicode
+            // categories -- titlecase letters like ǅ are NOT uppercase but
+            // to_lowercase() still maps them to a different character (ǆ).
+            c if c.to_lowercase().ne(std::iter::once(c)) => return false,
+            _ => {}
+        }
+    }
 
-    for part in IdentifierPartIterator::new(name) {
+    true
+}
+
+/// Canonicalize a variable/model name into a normalized form.
+///
+/// Returns `Cow::Borrowed` when the input is already canonical (avoiding
+/// allocation), or `Cow::Owned` when transformations were needed.
+///
+/// Note: the borrowed slice may be a sub-slice of the input when there is
+/// leading/trailing whitespace but the trimmed content is already canonical.
+/// The returned `Cow` borrows from the input `&str` in all borrowed cases.
+pub fn canonicalize(name: &str) -> Cow<'_, str> {
+    // Fast path: if the name is already trimmed and canonical, avoid allocation.
+    let trimmed = name.trim();
+    if is_canonical(trimmed) {
+        // Return the trimmed slice (which may equal the original if there was
+        // no leading/trailing whitespace).
+        return Cow::Borrowed(trimmed);
+    }
+
+    // Slow path: full canonicalization with allocation.
+    let mut canonicalized_name = String::with_capacity(trimmed.len());
+
+    for part in IdentifierPartIterator::new(trimmed) {
         let bytes = part.as_bytes();
         let quoted: bool =
             { bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' };
@@ -276,24 +330,146 @@ pub fn canonicalize(name: &str) -> Ident<Canonical> {
         canonicalized_name.push_str(&part);
     }
 
-    Ident::from_unchecked(canonicalized_name)
+    Cow::Owned(canonicalized_name)
 }
 
 #[test]
 fn test_canonicalize() {
-    assert_eq!("a.b", canonicalize("\"a.b\"").as_str());
-    assert_eq!(
-        "a/d·b_\\\"c\\\"",
-        canonicalize("\"a/d\".\"b \\\"c\\\"\"").as_str()
-    );
-    assert_eq!("a/d·b_c", canonicalize("\"a/d\".\"b c\"").as_str());
-    assert_eq!("a·b_c", canonicalize("a.\"b c\"").as_str());
-    assert_eq!("a/d·b", canonicalize("\"a/d\".b").as_str());
-    assert_eq!("quoted", canonicalize("\"quoted\"").as_str());
-    assert_eq!("a_b", canonicalize("   a b").as_str());
-    assert_eq!("å_b", canonicalize("Å\nb").as_str());
-    assert_eq!("a_b", canonicalize("a \n b").as_str());
-    assert_eq!("a·b", canonicalize("a.b").as_str());
+    assert_eq!("a.b", &*canonicalize("\"a.b\""));
+    assert_eq!("a/d·b_\\\"c\\\"", &*canonicalize("\"a/d\".\"b \\\"c\\\"\""));
+    assert_eq!("a/d·b_c", &*canonicalize("\"a/d\".\"b c\""));
+    assert_eq!("a·b_c", &*canonicalize("a.\"b c\""));
+    assert_eq!("a/d·b", &*canonicalize("\"a/d\".b"));
+    assert_eq!("quoted", &*canonicalize("\"quoted\""));
+    assert_eq!("a_b", &*canonicalize("   a b"));
+    assert_eq!("å_b", &*canonicalize("Å\nb"));
+    assert_eq!("a_b", &*canonicalize("a \n b"));
+    assert_eq!("a·b", &*canonicalize("a.b"));
+}
+
+#[test]
+fn test_canonicalize_returns_borrowed_when_already_canonical() {
+    // Already-canonical strings should return Cow::Borrowed
+    assert!(matches!(canonicalize("hello_world"), Cow::Borrowed(_)));
+    assert!(matches!(canonicalize("population"), Cow::Borrowed(_)));
+    assert!(matches!(canonicalize("a_b_c"), Cow::Borrowed(_)));
+    assert!(matches!(canonicalize("stdlib⁚smth1"), Cow::Borrowed(_)));
+    assert!(matches!(canonicalize("model·variable"), Cow::Borrowed(_)));
+    assert!(matches!(canonicalize(""), Cow::Borrowed(_)));
+
+    // Strings with only leading/trailing whitespace still borrow the
+    // trimmed slice when the trimmed content is canonical.
+    assert!(matches!(canonicalize("  trimmed  "), Cow::Borrowed(_)));
+
+    // Non-canonical strings should return Cow::Owned
+    assert!(matches!(canonicalize("Hello"), Cow::Owned(_)));
+    assert!(matches!(canonicalize("a.b"), Cow::Owned(_)));
+    assert!(matches!(canonicalize("a b"), Cow::Owned(_)));
+    assert!(matches!(canonicalize("\"quoted\""), Cow::Owned(_)));
+}
+
+#[test]
+fn test_is_canonical() {
+    assert!(is_canonical("hello_world"));
+    assert!(is_canonical("population"));
+    assert!(is_canonical("model·variable"));
+    assert!(is_canonical("stdlib⁚smth1"));
+    assert!(is_canonical(""));
+    assert!(is_canonical("a_b_c_123"));
+
+    assert!(!is_canonical("Hello"));
+    assert!(!is_canonical("a.b"));
+    assert!(!is_canonical("a b"));
+    assert!(!is_canonical("\"quoted\""));
+    assert!(!is_canonical("has\\\\escape"));
+    assert!(!is_canonical(" leading"));
+    assert!(!is_canonical("trailing "));
+    assert!(!is_canonical("a\tb"));
+    assert!(!is_canonical("\ttab"));
+}
+
+#[test]
+fn test_canonicalize_tab_handling() {
+    // Tabs should be treated as whitespace and replaced with underscores,
+    // matching the behavior for spaces, newlines, etc.
+    assert_eq!("a_b", &*canonicalize("a\tb"));
+    assert_eq!("a_b_c", &*canonicalize("a\t\tb\tc"));
+    assert!(matches!(canonicalize("a\tb"), Cow::Owned(_)));
+    // Leading/trailing tabs are stripped by trim()
+    assert_eq!("tab", &*canonicalize("\ttab\t"));
+}
+
+/// Verify that `is_canonical` and the full canonicalization slow path agree:
+/// when `is_canonical` returns true, the slow path must produce the same string.
+#[cfg(test)]
+mod canonicalize_invariant_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Force the slow path of canonicalize by bypassing the is_canonical check.
+    fn canonicalize_slow_path(name: &str) -> String {
+        let trimmed = name.trim();
+        let mut result = String::with_capacity(trimmed.len());
+        for part in super::IdentifierPartIterator::new(trimmed) {
+            let bytes = part.as_bytes();
+            let quoted = bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"';
+            let part = if quoted {
+                Cow::Borrowed(&part[1..bytes.len() - 1])
+            } else {
+                Cow::Owned(part.replace('.', "\u{00B7}"))
+            };
+            let part = part.replace("\\\\", "\\");
+            let part = super::replace_whitespace_with_underscore(&part);
+            let part = part.to_lowercase();
+            result.push_str(&part);
+        }
+        result
+    }
+
+    proptest! {
+        #[test]
+        fn fast_path_agrees_with_slow_path(s in "\\PC{0,100}") {
+            let cow = canonicalize(&s);
+            let slow = canonicalize_slow_path(&s);
+            // The Cow result must always equal the slow path result
+            prop_assert_eq!(&*cow, &*slow,
+                "canonicalize fast/slow path mismatch for {:?}", s);
+            // When Cow::Borrowed, it must equal the trimmed input
+            if let Cow::Borrowed(b) = &cow {
+                prop_assert_eq!(*b, s.trim(),
+                    "Borrowed result should equal trimmed input for {:?}", s);
+            }
+        }
+    }
+
+    #[test]
+    fn titlecase_letters_are_lowered() {
+        // Unicode titlecase letters (General Category Lt) are not uppercase
+        // but to_lowercase() still changes them (e.g. ǅ -> ǆ).
+        // is_canonical must reject them so the slow path can lower them.
+        let titlecase_inputs = [
+            "\u{01C5}", // ǅ -> ǆ
+            "\u{01C8}", // ǈ -> ǉ
+            "\u{01CB}", // ǋ -> ǌ
+            "\u{01F2}", // ǲ -> ǳ
+        ];
+        for input in titlecase_inputs {
+            let result = canonicalize(input);
+            let slow = canonicalize_slow_path(input);
+            assert_eq!(
+                &*result, &*slow,
+                "titlecase mismatch for {:?}: fast={:?}, slow={:?}",
+                input, result, slow
+            );
+            // The slow path should have lowered it, so the result should differ
+            // from the input.
+            assert_ne!(
+                &*result, input,
+                "titlecase char {:?} should be lowered",
+                input
+            );
+        }
+    }
 }
 
 #[test]
@@ -303,12 +479,12 @@ fn test_canonical_ident() {
     let canonical = raw.canonicalize();
     assert_eq!(canonical.as_str(), "hello_world");
 
-    // Test direct creation with new type
-    let canonical2 = canonicalize("Hello World");
+    // Test direct creation with Ident::new
+    let canonical2 = Ident::new("Hello World");
     assert_eq!(canonical.as_str(), canonical2.as_str());
 
-    // Test to_source_repr with new type
-    let canonical3 = canonicalize("a.b");
+    // Test to_source_repr with Ident::new
+    let canonical3 = Ident::new("a.b");
     assert_eq!(canonical3.as_str(), "a·b");
     assert_eq!(canonical3.to_source_repr(), "a.b");
 
@@ -340,16 +516,13 @@ fn test_canonical_element_name() {
 #[test]
 fn test_canonical_ident_with_dots() {
     // Test that dots outside quotes become middle dots
-    let c1 = canonicalize("a.d");
-    assert_eq!(c1.as_str(), "a·d");
+    assert_eq!("a·d", &*canonicalize("a.d"));
 
     // Test that quoted identifiers with dots keep them as middle dots after canonicalization
-    let c2 = canonicalize("\"a.d\"");
-    assert_eq!(c2.as_str(), "a.d");
+    assert_eq!("a.d", &*canonicalize("\"a.d\""));
 
     // Test mixed case
-    let c3 = canonicalize("a.\"b.c\"");
-    assert_eq!(c3.as_str(), "a·b.c");
+    assert_eq!("a·b.c", &*canonicalize("a.\"b.c\""));
 }
 
 #[test]
@@ -357,10 +530,10 @@ fn test_stdlib_model_name_canonicalization() {
     // Test canonicalization of stdlib model names
     let stdlib_name = "stdlib⁚smth1";
     let canonical = canonicalize(stdlib_name);
-    assert_eq!(canonical.as_str(), "stdlib⁚smth1");
+    assert_eq!(&*canonical, "stdlib⁚smth1");
 
-    // Test that the Display trait's to_string() preserves the name
-    assert_eq!(canonical.to_string(), "stdlib⁚smth1");
+    // Already-canonical stdlib name should borrow, not allocate
+    assert!(matches!(canonical, Cow::Borrowed(_)));
 }
 
 #[test]
@@ -370,26 +543,26 @@ fn test_stdlib_variable_canonicalization() {
     for name in names {
         let canonical = canonicalize(name);
         let expected = canonicalize(name);
-        assert_eq!(canonical.as_str(), expected.as_str(), "Failed for {name}");
+        assert_eq!(&*canonical, &*expected, "Failed for {name}");
     }
 
     // Specifically test Output -> output conversion
-    assert_eq!(canonicalize("Output").as_str(), "output");
+    assert_eq!(&*canonicalize("Output"), "output");
 }
 
 #[test]
 fn test_new_ident_basic_operations() {
     // Test basic creation and conversion
-    let ident = canonicalize("Hello World");
+    let ident = Ident::new("Hello World");
     assert_eq!(ident.as_str(), "hello_world");
 
     // Test source representation conversion
-    let ident2 = canonicalize("a.b");
+    let ident2 = Ident::new("a.b");
     assert_eq!(ident2.as_str(), "a·b");
     assert_eq!(ident2.to_source_repr(), "a.b");
 
     // Test that quoted sections are preserved
-    let ident3 = canonicalize("\"a.b\"");
+    let ident3 = Ident::new("\"a.b\"");
     assert_eq!(ident3.as_str(), "a.b");
 }
 
@@ -405,13 +578,13 @@ fn test_ident_join_operation() {
 
 #[test]
 fn test_ident_with_subscript() {
-    let ident = canonicalize("my_array");
+    let ident = Ident::new("my_array");
     let subscripted = ident.with_subscript("1,2");
     assert_eq!(subscripted.as_str(), "my_array[1,2]");
     assert_eq!(subscripted.to_source_repr(), "my_array[1,2]");
 
     // Test with identifier containing middle dot
-    let ident2 = canonicalize("model.var");
+    let ident2 = Ident::new("model.var");
     let subscripted2 = ident2.with_subscript("i");
     assert_eq!(subscripted2.as_str(), "model.var[i]");
     assert_eq!(subscripted2.to_source_repr(), "model.var[i]");
@@ -419,7 +592,7 @@ fn test_ident_with_subscript() {
 
 #[test]
 fn test_ident_strip_prefix() {
-    let ident = canonicalize("model.variable");
+    let ident = Ident::new("model.variable");
 
     // Test successful prefix stripping
     if let Some(stripped) = ident.strip_prefix("model·") {
@@ -441,7 +614,7 @@ fn test_ident_strip_prefix() {
 
 #[test]
 fn test_canonical_str_operations() {
-    let canonical = canonicalize("module.sub.variable");
+    let canonical = Ident::new("module.sub.variable");
     let canonical_str = canonical.as_canonical_str();
 
     // Test split_at_dot
@@ -461,13 +634,13 @@ fn test_canonical_str_operations() {
     }
 
     // Test with no dots
-    let no_dots = canonicalize("simple");
+    let no_dots = Ident::new("simple");
     assert!(no_dots.as_canonical_str().split_at_dot().is_none());
 }
 
 #[test]
 fn test_canonical_str_strip_prefix() {
-    let ident = canonicalize("stdlib⁚smooth");
+    let ident = Ident::new("stdlib⁚smooth");
     let canonical_str = ident.as_canonical_str();
 
     if let Some(stripped) = canonical_str.strip_prefix("stdlib⁚") {
@@ -477,7 +650,7 @@ fn test_canonical_str_strip_prefix() {
     }
 
     // Test that stripped result maintains canonical form
-    let ident2 = canonicalize("model.Sub Module");
+    let ident2 = Ident::new("model.Sub Module");
     let canonical_str2 = ident2.as_canonical_str();
     if let Some(stripped) = canonical_str2.strip_prefix("model·") {
         assert_eq!(stripped.as_str(), "sub_module");
@@ -488,7 +661,7 @@ fn test_canonical_str_strip_prefix() {
 
 #[test]
 fn test_ident_ref_operations() {
-    let owned = canonicalize("model.variable");
+    let owned = Ident::new("model.variable");
     let borrowed = owned.as_ref();
 
     // Test basic operations
@@ -510,7 +683,7 @@ fn test_ident_ref_operations() {
 #[test]
 fn test_ident_ref_zero_copy() {
     // This test verifies that IdentRef provides zero-copy substring operations
-    let owned = canonicalize("very.long.module.path.to.variable");
+    let owned = Ident::new("very.long.module.path.to.variable");
     let borrowed = owned.as_ref();
 
     // Strip multiple prefixes without allocation
@@ -530,7 +703,7 @@ fn test_ident_ref_zero_copy() {
 
 #[test]
 fn test_canonical_str_utility_methods() {
-    let ident = canonicalize("model.variable");
+    let ident = Ident::new("model.variable");
     let canonical_str = ident.as_canonical_str();
 
     // Test starts_with
@@ -557,17 +730,15 @@ fn test_canonical_str_utility_methods() {
 fn test_display_format_edge_cases() {
     // Test empty string
     let empty = canonicalize("");
-    assert_eq!(empty.as_str(), "");
-    assert_eq!(empty.to_source_repr(), "");
+    assert_eq!(&*empty, "");
 
     // Test string with only spaces
     let spaces = canonicalize("   ");
-    assert_eq!(spaces.as_str(), "");
+    assert_eq!(&*spaces, "");
 
     // Test string with mixed dots and quotes
     let complex = canonicalize("a.\"b.c\".d");
-    assert_eq!(complex.as_str(), "a·b.c·d");
-    assert_eq!(complex.to_source_repr(), "a.b.c.d");
+    assert_eq!(&*complex, "a·b.c·d");
 }
 
 #[test]
@@ -589,7 +760,7 @@ fn test_unchecked_constructors() {
 
 #[test]
 fn test_as_ref_implementations() {
-    let ident = canonicalize("test");
+    let ident = Ident::new("test");
     let _str_ref: &str = <Ident<Canonical> as AsRef<str>>::as_ref(&ident);
     assert_eq!(_str_ref, "test");
 
@@ -604,7 +775,7 @@ fn test_as_ref_implementations() {
 
 #[test]
 fn test_fmt_display_implementations() {
-    let ident = canonicalize("Model.Var");
+    let ident = Ident::new("Model.Var");
     assert_eq!(format!("{ident}"), "model·var");
 
     let ident_ref = ident.as_ref();
@@ -629,7 +800,7 @@ impl RawIdent {
 
     /// Canonicalize this identifier (returns new type)
     pub fn canonicalize(&self) -> Ident<Canonical> {
-        canonicalize(&self.0)
+        Ident::new(&self.0)
     }
 
     /// Get the underlying raw string
@@ -647,7 +818,7 @@ impl CanonicalDimensionName {
 
     /// Create from a raw string, canonicalizing it
     pub fn from_raw(s: &str) -> Self {
-        CanonicalDimensionName(canonicalize(s).as_str().to_string())
+        CanonicalDimensionName(canonicalize(s).into_owned())
     }
 
     /// Get the underlying canonical string
@@ -669,7 +840,7 @@ impl RawDimensionName {
 
     /// Canonicalize this dimension name
     pub fn canonicalize(&self) -> CanonicalDimensionName {
-        CanonicalDimensionName(canonicalize(&self.0).as_str().to_string())
+        CanonicalDimensionName(canonicalize(&self.0).into_owned())
     }
 
     /// Get the underlying raw string
@@ -687,7 +858,7 @@ impl CanonicalElementName {
 
     /// Create from a raw string, canonicalizing it
     pub fn from_raw(s: &str) -> Self {
-        CanonicalElementName(canonicalize(s).as_str().to_string())
+        CanonicalElementName(canonicalize(s).into_owned())
     }
 
     /// Get the underlying canonical string
@@ -709,7 +880,7 @@ impl RawElementName {
 
     /// Canonicalize this element name
     pub fn canonicalize(&self) -> CanonicalElementName {
-        CanonicalElementName(canonicalize(&self.0).as_str().to_string())
+        CanonicalElementName(canonicalize(&self.0).into_owned())
     }
 
     /// Get the underlying raw string
@@ -883,9 +1054,16 @@ impl<'a> CanonicalStr<'a> {
 }
 
 impl Ident<Canonical> {
-    /// Create a canonical identifier from a raw string
-    pub fn from_raw(s: &str) -> Self {
-        canonicalize(s)
+    /// Create a canonical identifier from a raw string.
+    ///
+    /// This is the primary constructor: it canonicalizes the input and wraps
+    /// the result in an owned `Ident`. Internally uses `canonicalize()` which
+    /// avoids allocation when the input is already canonical.
+    pub fn new(s: &str) -> Self {
+        Ident {
+            inner: canonicalize(s).into_owned(),
+            _phantom: PhantomData,
+        }
     }
 
     /// Create from an already-canonicalized string
@@ -1071,7 +1249,7 @@ impl<'a> fmt::Display for CanonicalStr<'a> {
 
 /// Replace whitespace sequences with underscores.
 /// Handles: literal `\n` and `\r` (two-character sequences), actual newlines/carriage returns,
-/// spaces, and non-breaking spaces (U+00A0). Consecutive matches become a single underscore.
+/// tabs, spaces, and non-breaking spaces (U+00A0). Consecutive matches become a single underscore.
 fn replace_whitespace_with_underscore(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -1093,7 +1271,7 @@ fn replace_whitespace_with_underscore(s: &str) -> String {
             // Not an escape sequence we handle, pass through
             in_whitespace = false;
             result.push(c);
-        } else if c == '\n' || c == '\r' || c == ' ' || c == '\u{00A0}' {
+        } else if c == '\n' || c == '\r' || c == '\t' || c == ' ' || c == '\u{00A0}' {
             // Actual whitespace characters
             if !in_whitespace {
                 result.push('_');
@@ -1208,6 +1386,13 @@ mod whitespace_replacement_tests {
     fn test_replace_non_breaking_space() {
         // U+00A0 non-breaking space
         assert_eq!(replace_whitespace_with_underscore("a\u{00A0}b"), "a_b");
+    }
+
+    #[test]
+    fn test_replace_tab() {
+        assert_eq!(replace_whitespace_with_underscore("a\tb"), "a_b");
+        // Tabs collapse with other whitespace
+        assert_eq!(replace_whitespace_with_underscore("a\t \nb"), "a_b");
     }
 
     #[test]

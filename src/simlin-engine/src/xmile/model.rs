@@ -5,7 +5,7 @@
 use quick_xml::Writer;
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Result, canonicalize};
+use crate::common::{Canonical, Ident, Result, canonicalize};
 use crate::datamodel;
 use crate::datamodel::Visibility;
 use crate::xmile::variables::{Var, ai_state_from};
@@ -244,7 +244,7 @@ impl Model {
 
         for var in self.variables.as_ref().unwrap().variables.iter() {
             let name = var.get_noncanonical_name();
-            if ident == name || ident == canonicalize(name).as_str() {
+            if ident == name || ident == &*canonicalize(name) {
                 return Some(var);
             }
         }
@@ -351,8 +351,8 @@ impl From<Module> for datamodel::Module {
             .map(|r| {
                 if let Reference::Connect(r) = r {
                     datamodel::ModuleReference {
-                        src: canonicalize(&r.src).as_str().to_string(),
-                        dst: canonicalize(&r.dst).as_str().to_string(),
+                        src: canonicalize(&r.src).into_owned(),
+                        dst: canonicalize(&r.dst).into_owned(),
                     }
                 } else {
                     unreachable!();
@@ -362,8 +362,8 @@ impl From<Module> for datamodel::Module {
         datamodel::Module {
             ident,
             model_name: match module.model_name {
-                Some(model_name) => canonicalize(&model_name).as_str().to_string(),
-                None => canonicalize(&module.name).as_str().to_string(),
+                Some(model_name) => canonicalize(&model_name).into_owned(),
+                None => canonicalize(&module.name).into_owned(),
             },
             documentation: module.doc.unwrap_or_default(),
             units: module.units,
@@ -383,8 +383,8 @@ impl From<datamodel::Module> for Module {
             .into_iter()
             .map(|mi| {
                 Reference::Connect(Connect {
-                    src: canonicalize(&mi.src).to_source_repr(),
-                    dst: canonicalize(&mi.dst).to_source_repr(),
+                    src: Ident::<Canonical>::new(&mi.src).to_source_repr(),
+                    dst: Ident::<Canonical>::new(&mi.dst).to_source_repr(),
                 })
             })
             .collect();

@@ -103,7 +103,7 @@ pub(crate) fn normalize_subscripts3(
                     // which is Range(0, size) in 0-based internal representation.
                     let subdim_canonical = canonicalize(subdim_name.as_str());
                     let indexed_dim_size = config.all_dimensions.iter().find_map(|d| {
-                        if canonicalize(d.name()).as_str() == subdim_canonical.as_str() {
+                        if *canonicalize(d.name()) == *subdim_canonical {
                             if let Dimension::Indexed(_, size) = d {
                                 Some(*size as usize)
                             } else {
@@ -211,12 +211,12 @@ pub(crate) fn normalize_subscripts3(
                                 let is_dim_name = config
                                     .all_dimensions
                                     .iter()
-                                    .any(|d| canonicalize(d.name()).as_str() == ident.as_str());
+                                    .any(|d| &*canonicalize(d.name()) == ident.as_str());
 
                                 if is_dim_name {
                                     let active_dims = config.active_dimension?;
                                     let active_idx = active_dims.iter().position(|ad| {
-                                        canonicalize(ad.name()).as_str() == ident.as_str()
+                                        &*canonicalize(ad.name()) == ident.as_str()
                                     })?;
                                     IndexOp::ActiveDimRef(active_idx)
                                 } else {
@@ -228,14 +228,14 @@ pub(crate) fn normalize_subscripts3(
                             let is_dim_name = config
                                 .all_dimensions
                                 .iter()
-                                .any(|d| canonicalize(d.name()).as_str() == ident.as_str());
+                                .any(|d| &*canonicalize(d.name()) == ident.as_str());
 
                             if is_dim_name {
                                 // It's a dimension name - find matching active dimension
                                 let active_dims = config.active_dimension?;
-                                let active_idx = active_dims.iter().position(|ad| {
-                                    canonicalize(ad.name()).as_str() == ident.as_str()
-                                })?;
+                                let active_idx = active_dims
+                                    .iter()
+                                    .position(|ad| &*canonicalize(ad.name()) == ident.as_str())?;
                                 IndexOp::ActiveDimRef(active_idx)
                             } else {
                                 // Not a known element or dimension - need dynamic handling
@@ -263,7 +263,7 @@ pub(crate) fn normalize_subscripts3(
                 let active_dims = config.active_dimension?;
                 let active_idx = active_dims
                     .iter()
-                    .position(|ad| canonicalize(ad.name()).as_str() == name.as_str())?;
+                    .position(|ad| &*canonicalize(ad.name()) == name.as_str())?;
                 IndexOp::ActiveDimRef(active_idx)
             }
         };

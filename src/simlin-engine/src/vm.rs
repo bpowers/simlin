@@ -2946,7 +2946,7 @@ mod vm_reset_and_run_initials_tests {
         vm3.run_to_end().unwrap();
         let results3 = vm3.into_results();
 
-        let pop_off = *results1.offsets.get(&canonicalize("population")).unwrap();
+        let pop_off = *results1.offsets.get(&*canonicalize("population")).unwrap();
         for step in 0..results1.step_count {
             let idx = step * results1.step_size + pop_off;
             let v1 = results1.data[idx];
@@ -2982,7 +2982,7 @@ mod vm_reset_and_run_initials_tests {
 
         let pop_off = *ref_results
             .offsets
-            .get(&canonicalize("population"))
+            .get(&*canonicalize("population"))
             .unwrap();
         for step in 0..ref_results.step_count {
             let idx = step * ref_results.step_size + pop_off;
@@ -3009,7 +3009,7 @@ mod vm_reset_and_run_initials_tests {
         vm2.run_to_end().unwrap();
         let results2 = vm2.into_results();
 
-        let pop_off = *results1.offsets.get(&canonicalize("population")).unwrap();
+        let pop_off = *results1.offsets.get(&*canonicalize("population")).unwrap();
         for step in 0..results1.step_count {
             let idx = step * results1.step_size + pop_off;
             assert!(
@@ -3035,7 +3035,7 @@ mod vm_reset_and_run_initials_tests {
         vm_b.run_to_end().unwrap();
         let results_b = vm_b.into_results();
 
-        let pop_off = *results_a.offsets.get(&canonicalize("population")).unwrap();
+        let pop_off = *results_a.offsets.get(&*canonicalize("population")).unwrap();
         for step in 0..results_a.step_count {
             let idx = step * results_a.step_size + pop_off;
             assert!(
@@ -3056,7 +3056,7 @@ mod vm_reset_and_run_initials_tests {
         vm.run_to_end().unwrap();
         let results = vm.into_results();
 
-        let pop_off = *results.offsets.get(&canonicalize("population")).unwrap();
+        let pop_off = *results.offsets.get(&*canonicalize("population")).unwrap();
         let initial_pop = results.data[pop_off];
         assert_eq!(initial_pop, 100.0, "population initial should be 100");
     }
@@ -3074,8 +3074,8 @@ mod vm_reset_and_run_initials_tests {
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_initials().unwrap();
 
-        let s_off = vm.get_offset(&canonicalize("s")).unwrap();
-        let rate_off = vm.get_offset(&canonicalize("rate")).unwrap();
+        let s_off = vm.get_offset(&Ident::new("s")).unwrap();
+        let rate_off = vm.get_offset(&Ident::new("rate")).unwrap();
 
         assert_eq!(
             vm.get_value_now(s_off),
@@ -3102,7 +3102,7 @@ mod vm_reset_and_run_initials_tests {
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
 
-        let series = vm.get_series(&canonicalize("population")).unwrap();
+        let series = vm.get_series(&Ident::new("population")).unwrap();
         // With start=0, stop=100, save_step=1: 101 steps (0,1,...,100)
         assert_eq!(series.len(), 101, "should have 101 data points");
         assert_eq!(series[0], 100.0, "initial population should be 100");
@@ -3123,7 +3123,7 @@ mod vm_reset_and_run_initials_tests {
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to(50.0).unwrap();
 
-        let series = vm.get_series(&canonicalize("population")).unwrap();
+        let series = vm.get_series(&Ident::new("population")).unwrap();
         // With start=0, stop=100 but run_to(50): should have 51 steps (0..=50)
         assert_eq!(
             series.len(),
@@ -3135,7 +3135,7 @@ mod vm_reset_and_run_initials_tests {
         // After reset, the VM should still work
         vm.reset();
         vm.run_to_end().unwrap();
-        let full_series = vm.get_series(&canonicalize("population")).unwrap();
+        let full_series = vm.get_series(&Ident::new("population")).unwrap();
         assert_eq!(
             full_series.len(),
             101,
@@ -3151,7 +3151,7 @@ mod vm_reset_and_run_initials_tests {
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_initials().unwrap();
 
-        let series = vm.get_series(&canonicalize("population")).unwrap();
+        let series = vm.get_series(&Ident::new("population")).unwrap();
         assert_eq!(
             series.len(),
             1,
@@ -3172,7 +3172,7 @@ mod vm_reset_and_run_initials_tests {
         vm.run_to_end().unwrap();
 
         assert!(
-            vm.get_series(&canonicalize("nonexistent_var")).is_none(),
+            vm.get_series(&Ident::new("nonexistent_var")).is_none(),
             "unknown variable should return None"
         );
     }
@@ -3183,7 +3183,7 @@ mod vm_reset_and_run_initials_tests {
         let (_, compiled) = build_compiled(&tp);
 
         let vm = Vm::new(compiled).unwrap();
-        let series = vm.get_series(&canonicalize("population")).unwrap();
+        let series = vm.get_series(&Ident::new("population")).unwrap();
         assert!(series.is_empty(), "before any run, series should be empty");
     }
 }
@@ -3191,7 +3191,6 @@ mod vm_reset_and_run_initials_tests {
 #[cfg(test)]
 mod set_value_tests {
     use super::*;
-    use crate::canonicalize;
     use crate::test_common::TestProject;
 
     /// Model: rate=0.1, scaled_rate=rate*10, stock initial=scaled_rate.
@@ -3217,12 +3216,12 @@ mod set_value_tests {
         let mut vm = Vm::new(compiled).unwrap();
 
         // Override rate from 0.1 to 0.2
-        vm.set_value(&canonicalize("rate"), 0.2).unwrap();
+        vm.set_value(&Ident::new("rate"), 0.2).unwrap();
         vm.run_initials().unwrap();
 
-        let rate_off = vm.get_offset(&canonicalize("rate")).unwrap();
-        let sr_off = vm.get_offset(&canonicalize("scaled_rate")).unwrap();
-        let pop_off = vm.get_offset(&canonicalize("population")).unwrap();
+        let rate_off = vm.get_offset(&Ident::new("rate")).unwrap();
+        let sr_off = vm.get_offset(&Ident::new("scaled_rate")).unwrap();
+        let pop_off = vm.get_offset(&Ident::new("population")).unwrap();
 
         assert_eq!(
             vm.get_value_now(rate_off),
@@ -3248,13 +3247,13 @@ mod set_value_tests {
         // Run without override
         let mut vm1 = Vm::new(compiled.clone()).unwrap();
         vm1.run_to_end().unwrap();
-        let series1 = vm1.get_series(&canonicalize("population")).unwrap();
+        let series1 = vm1.get_series(&Ident::new("population")).unwrap();
 
         // Run with override: higher rate means more growth
         let mut vm2 = Vm::new(compiled).unwrap();
-        vm2.set_value(&canonicalize("rate"), 0.2).unwrap();
+        vm2.set_value(&Ident::new("rate"), 0.2).unwrap();
         vm2.run_to_end().unwrap();
-        let series2 = vm2.get_series(&canonicalize("population")).unwrap();
+        let series2 = vm2.get_series(&Ident::new("population")).unwrap();
 
         assert!(
             series2.last().unwrap() > series1.last().unwrap(),
@@ -3264,7 +3263,7 @@ mod set_value_tests {
         );
 
         // Verify the override affects flows: rate should be 0.2 throughout
-        let rate_series = vm2.get_series(&canonicalize("rate")).unwrap();
+        let rate_series = vm2.get_series(&Ident::new("rate")).unwrap();
         for (i, &val) in rate_series.iter().enumerate() {
             assert!(
                 (val - 0.2).abs() < 1e-10,
@@ -3280,13 +3279,13 @@ mod set_value_tests {
         let compiled = build_compiled(&rate_model());
         let mut vm = Vm::new(compiled).unwrap();
 
-        vm.set_value(&canonicalize("rate"), 0.2).unwrap();
+        vm.set_value(&Ident::new("rate"), 0.2).unwrap();
         vm.run_to_end().unwrap();
-        let series_before = vm.get_series(&canonicalize("population")).unwrap();
+        let series_before = vm.get_series(&Ident::new("population")).unwrap();
 
         vm.reset();
         vm.run_to_end().unwrap();
-        let series_after = vm.get_series(&canonicalize("population")).unwrap();
+        let series_after = vm.get_series(&Ident::new("population")).unwrap();
 
         for (i, (a, b)) in series_before.iter().zip(series_after.iter()).enumerate() {
             assert!(
@@ -3303,19 +3302,19 @@ mod set_value_tests {
         // Baseline run
         let mut vm_baseline = Vm::new(compiled.clone()).unwrap();
         vm_baseline.run_to_end().unwrap();
-        let baseline = vm_baseline.get_series(&canonicalize("population")).unwrap();
+        let baseline = vm_baseline.get_series(&Ident::new("population")).unwrap();
 
         // Run with override
         let mut vm = Vm::new(compiled).unwrap();
-        vm.set_value(&canonicalize("rate"), 0.5).unwrap();
+        vm.set_value(&Ident::new("rate"), 0.5).unwrap();
         vm.run_to_end().unwrap();
-        let overridden = vm.get_series(&canonicalize("population")).unwrap();
+        let overridden = vm.get_series(&Ident::new("population")).unwrap();
 
         // Clear and re-run
         vm.clear_values();
         vm.reset();
         vm.run_to_end().unwrap();
-        let restored = vm.get_series(&canonicalize("population")).unwrap();
+        let restored = vm.get_series(&Ident::new("population")).unwrap();
 
         // Overridden should differ from baseline
         assert!(
@@ -3339,10 +3338,10 @@ mod set_value_tests {
         let mut prev_final = 0.0;
         for i in 1..=10 {
             let rate_val = i as f64 * 0.01;
-            vm.set_value(&canonicalize("rate"), rate_val).unwrap();
+            vm.set_value(&Ident::new("rate"), rate_val).unwrap();
             vm.reset();
             vm.run_to_end().unwrap();
-            let series = vm.get_series(&canonicalize("population")).unwrap();
+            let series = vm.get_series(&Ident::new("population")).unwrap();
             let final_val = *series.last().unwrap();
             if i > 1 {
                 assert!(
@@ -3358,7 +3357,7 @@ mod set_value_tests {
     fn test_override_nonexistent_variable_returns_error() {
         let compiled = build_compiled(&rate_model());
         let mut vm = Vm::new(compiled).unwrap();
-        let result = vm.set_value(&canonicalize("nonexistent_var"), 1.0);
+        let result = vm.set_value(&Ident::new("nonexistent_var"), 1.0);
         assert!(
             result.is_err(),
             "overriding nonexistent variable should fail"
@@ -3369,7 +3368,7 @@ mod set_value_tests {
     fn test_set_value_returns_correct_offset() {
         let compiled = build_compiled(&rate_model());
         let mut vm = Vm::new(compiled).unwrap();
-        let rate_ident = canonicalize("rate");
+        let rate_ident = Ident::new("rate");
 
         let expected_off = vm.get_offset(&rate_ident).unwrap();
         let returned_off = vm.set_value(&rate_ident, 0.5).unwrap();
@@ -3401,10 +3400,10 @@ mod set_value_tests {
         let mut vm = Vm::new(compiled).unwrap();
 
         // birth_rate IS a simple constant, so set_value should succeed
-        vm.set_value(&canonicalize("birth_rate"), 0.5).unwrap();
+        vm.set_value(&Ident::new("birth_rate"), 0.5).unwrap();
 
         // births is a computed flow (not a constant), so set_value should fail
-        let err = vm.set_value(&canonicalize("births"), 42.0).unwrap_err();
+        let err = vm.set_value(&Ident::new("births"), 42.0).unwrap_err();
         assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
     }
 
@@ -3422,11 +3421,11 @@ mod set_value_tests {
         let mut vm = Vm::new(compiled).unwrap();
 
         // "computed" depends on "rate", so it's not a simple constant
-        let err = vm.set_value(&canonicalize("computed"), 5.0).unwrap_err();
+        let err = vm.set_value(&Ident::new("computed"), 5.0).unwrap_err();
         assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
 
         // Stocks also cannot be set via set_value
-        let err = vm.set_value(&canonicalize("pop"), 500.0).unwrap_err();
+        let err = vm.set_value(&Ident::new("pop"), 500.0).unwrap_err();
         assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
     }
 
@@ -3439,16 +3438,16 @@ mod set_value_tests {
         vm.run_initials().unwrap();
 
         // Set value AFTER initials
-        vm.set_value(&canonicalize("rate"), 0.5).unwrap();
+        vm.set_value(&Ident::new("rate"), 0.5).unwrap();
 
         // The stock initial is already set (from rate=0.1), but flows will use rate=0.5
         vm.run_to_end().unwrap();
-        let series1 = vm.get_series(&canonicalize("population")).unwrap();
+        let series1 = vm.get_series(&Ident::new("population")).unwrap();
 
         // Now reset and run - BOTH initials and flows use rate=0.5
         vm.reset();
         vm.run_to_end().unwrap();
-        let series2 = vm.get_series(&canonicalize("population")).unwrap();
+        let series2 = vm.get_series(&Ident::new("population")).unwrap();
 
         // series1 used rate=0.1 for initials but rate=0.5 for flows
         // series2 used rate=0.5 for both
@@ -3466,7 +3465,7 @@ mod set_value_tests {
         let compiled = build_compiled(&rate_model());
         let mut vm = Vm::new(compiled).unwrap();
 
-        let rate_off = vm.get_offset(&canonicalize("rate")).unwrap();
+        let rate_off = vm.get_offset(&Ident::new("rate")).unwrap();
 
         // Two writes to the same offset - last one wins
         vm.set_value_by_offset(rate_off, 0.1).unwrap();
@@ -3516,7 +3515,7 @@ mod set_value_tests {
         let compiled = sim.compile().unwrap();
         let mut vm = Vm::new(compiled).unwrap();
 
-        let arr_b_ident = canonicalize("arr[b]");
+        let arr_b_ident = Ident::new("arr[b]");
         let arr_b_off = vm
             .get_offset(&arr_b_ident)
             .expect("arr[b] should exist in offsets");
@@ -3527,7 +3526,7 @@ mod set_value_tests {
             99.0,
             "arr[b] should be overridden to 99"
         );
-        let s_off = vm.get_offset(&canonicalize("s")).unwrap();
+        let s_off = vm.get_offset(&Ident::new("s")).unwrap();
         // total = arr[A]+arr[B]+arr[C] = 1+99+3 = 103
         assert_eq!(
             vm.get_value_now(s_off),
@@ -3551,13 +3550,13 @@ mod set_value_tests {
         // Run without override
         let mut vm1 = Vm::new(compiled.clone()).unwrap();
         vm1.run_to_end().unwrap();
-        let series1 = vm1.get_series(&canonicalize("pop")).unwrap();
+        let series1 = vm1.get_series(&Ident::new("pop")).unwrap();
 
         // Run with override
         let mut vm2 = Vm::new(compiled).unwrap();
-        vm2.set_value(&canonicalize("birth_rate"), 0.5).unwrap();
+        vm2.set_value(&Ident::new("birth_rate"), 0.5).unwrap();
         vm2.run_to_end().unwrap();
-        let series2 = vm2.get_series(&canonicalize("pop")).unwrap();
+        let series2 = vm2.get_series(&Ident::new("pop")).unwrap();
 
         // Higher birth_rate should produce higher final population
         assert!(
@@ -3568,7 +3567,7 @@ mod set_value_tests {
         );
 
         // Verify birth_rate shows the overridden value
-        let br_series = vm2.get_series(&canonicalize("birth_rate")).unwrap();
+        let br_series = vm2.get_series(&Ident::new("birth_rate")).unwrap();
         for (i, &val) in br_series.iter().enumerate() {
             assert!(
                 (val - 0.5).abs() < 1e-10,
@@ -3597,11 +3596,11 @@ mod set_value_tests {
         let mut vm = Vm::new(compiled).unwrap();
 
         // Override rate_a only, then run the full simulation
-        vm.set_value(&canonicalize("rate_a"), 0.5).unwrap();
+        vm.set_value(&Ident::new("rate_a"), 0.5).unwrap();
         vm.run_to_end().unwrap();
 
-        let rate_a_series = vm.get_series(&canonicalize("rate_a")).unwrap();
-        let rate_b_series = vm.get_series(&canonicalize("rate_b")).unwrap();
+        let rate_a_series = vm.get_series(&Ident::new("rate_a")).unwrap();
+        let rate_b_series = vm.get_series(&Ident::new("rate_b")).unwrap();
 
         for (i, &val) in rate_a_series.iter().enumerate() {
             assert!(
@@ -3632,10 +3631,10 @@ mod set_value_tests {
         let compiled = sim.compile().unwrap();
         let mut vm = Vm::new(compiled).unwrap();
 
-        vm.set_value(&canonicalize("rate"), 0.9).unwrap();
+        vm.set_value(&Ident::new("rate"), 0.9).unwrap();
         vm.run_to_end().unwrap();
 
-        let scaled_series = vm.get_series(&canonicalize("scaled")).unwrap();
+        let scaled_series = vm.get_series(&Ident::new("scaled")).unwrap();
         // At t=0, stock_val = 100, so scaled = 100 * 0.1 = 10.0
         // If the literal 0.1 was corrupted to 0.9, scaled would be 90.0
         assert!(
@@ -3703,11 +3702,11 @@ mod set_value_tests {
         let compiled = sim.compile().unwrap();
         let mut vm = Vm::new(compiled).unwrap();
 
-        vm.set_value(&canonicalize("rate_a"), 0.5).unwrap();
+        vm.set_value(&Ident::new("rate_a"), 0.5).unwrap();
         vm.run_to_end().unwrap();
 
-        let rate_a_series = vm.get_series(&canonicalize("rate_a")).unwrap();
-        let rate_b_series = vm.get_series(&canonicalize("rate_b")).unwrap();
+        let rate_a_series = vm.get_series(&Ident::new("rate_a")).unwrap();
+        let rate_b_series = vm.get_series(&Ident::new("rate_b")).unwrap();
         assert!(
             (rate_a_series[0] - 0.5).abs() < 1e-10,
             "rate_a should be 0.5"
@@ -3722,8 +3721,8 @@ mod set_value_tests {
         vm.reset();
         vm.run_to_end().unwrap();
 
-        let rate_a_restored = vm.get_series(&canonicalize("rate_a")).unwrap();
-        let rate_b_restored = vm.get_series(&canonicalize("rate_b")).unwrap();
+        let rate_a_restored = vm.get_series(&Ident::new("rate_a")).unwrap();
+        let rate_b_restored = vm.get_series(&Ident::new("rate_b")).unwrap();
         assert!(
             (rate_a_restored[0] - 0.1).abs() < 1e-10,
             "rate_a should be restored to 0.1, got {}",
@@ -4427,7 +4426,6 @@ mod superinstruction_tests {
 #[cfg(test)]
 mod vm_reset_run_to_and_constants_tests {
     use super::*;
-    use crate::canonicalize;
     use crate::datamodel;
     use crate::test_common::TestProject;
 
@@ -4455,12 +4453,12 @@ mod vm_reset_run_to_and_constants_tests {
         let mut vm = Vm::new(compiled).unwrap();
 
         vm.run_to_end().unwrap();
-        let ref_series = vm.get_series(&canonicalize("population")).unwrap();
+        let ref_series = vm.get_series(&Ident::new("population")).unwrap();
 
         for cycle in 1..=5 {
             vm.reset();
             vm.run_to_end().unwrap();
-            let series = vm.get_series(&canonicalize("population")).unwrap();
+            let series = vm.get_series(&Ident::new("population")).unwrap();
             assert_eq!(
                 series.len(),
                 ref_series.len(),
@@ -4491,13 +4489,13 @@ mod vm_reset_run_to_and_constants_tests {
 
         let mut vm_ref = Vm::new(compiled.clone()).unwrap();
         vm_ref.run_to_end().unwrap();
-        let ref_series = vm_ref.get_series(&canonicalize("stock")).unwrap();
+        let ref_series = vm_ref.get_series(&Ident::new("stock")).unwrap();
 
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to(5.0).unwrap();
         vm.reset();
         vm.run_to_end().unwrap();
-        let series = vm.get_series(&canonicalize("stock")).unwrap();
+        let series = vm.get_series(&Ident::new("stock")).unwrap();
 
         assert_eq!(series.len(), ref_series.len());
         for (step, (a, b)) in ref_series.iter().zip(series.iter()).enumerate() {
@@ -4520,13 +4518,13 @@ mod vm_reset_run_to_and_constants_tests {
 
         let mut vm_ref = Vm::new(compiled.clone()).unwrap();
         vm_ref.run_to_end().unwrap();
-        let ref_series = vm_ref.get_series(&canonicalize("stock")).unwrap();
+        let ref_series = vm_ref.get_series(&Ident::new("stock")).unwrap();
 
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to(10.0).unwrap();
         vm.reset();
         vm.run_to_end().unwrap();
-        let series = vm.get_series(&canonicalize("stock")).unwrap();
+        let series = vm.get_series(&Ident::new("stock")).unwrap();
 
         assert_eq!(series.len(), ref_series.len());
         for (step, (a, b)) in ref_series.iter().zip(series.iter()).enumerate() {
@@ -4878,7 +4876,7 @@ mod vm_reset_run_to_and_constants_tests {
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_initials().unwrap();
 
-        let stock_off = vm.get_offset(&canonicalize("stock")).unwrap();
+        let stock_off = vm.get_offset(&Ident::new("stock")).unwrap();
 
         assert_eq!(vm.get_value_now(stock_off), 100.0);
 
@@ -4920,14 +4918,14 @@ mod vm_reset_run_to_and_constants_tests {
 
         let mut vm1 = Vm::new(compiled.clone()).unwrap();
         vm1.run_to_end().unwrap();
-        let series1 = vm1.get_series(&canonicalize("stock")).unwrap();
+        let series1 = vm1.get_series(&Ident::new("stock")).unwrap();
 
         let mut vm2 = Vm::new(compiled).unwrap();
         vm2.run_initials().unwrap();
-        let stock_off = vm2.get_offset(&canonicalize("stock")).unwrap();
+        let stock_off = vm2.get_offset(&Ident::new("stock")).unwrap();
         vm2.set_value_now(stock_off, 200.0);
         vm2.run_to_end().unwrap();
-        let series2 = vm2.get_series(&canonicalize("stock")).unwrap();
+        let series2 = vm2.get_series(&Ident::new("stock")).unwrap();
 
         assert_eq!(series1[0], 100.0);
         assert_eq!(series2[0], 200.0);
@@ -4952,12 +4950,12 @@ mod vm_reset_run_to_and_constants_tests {
 
         let mut vm_full = Vm::new(compiled.clone()).unwrap();
         vm_full.run_to_end().unwrap();
-        let full_series = vm_full.get_series(&canonicalize("population")).unwrap();
+        let full_series = vm_full.get_series(&Ident::new("population")).unwrap();
 
         let mut vm_partial = Vm::new(compiled).unwrap();
         vm_partial.run_to(50.0).unwrap();
         vm_partial.run_to_end().unwrap();
-        let partial_series = vm_partial.get_series(&canonicalize("population")).unwrap();
+        let partial_series = vm_partial.get_series(&Ident::new("population")).unwrap();
 
         assert_eq!(full_series.len(), partial_series.len());
         for (step, (a, b)) in full_series.iter().zip(partial_series.iter()).enumerate() {
@@ -4975,14 +4973,14 @@ mod vm_reset_run_to_and_constants_tests {
 
         let mut vm_full = Vm::new(compiled.clone()).unwrap();
         vm_full.run_to_end().unwrap();
-        let full_series = vm_full.get_series(&canonicalize("population")).unwrap();
+        let full_series = vm_full.get_series(&Ident::new("population")).unwrap();
 
         let mut vm_seg = Vm::new(compiled).unwrap();
         vm_seg.run_to(25.0).unwrap();
         vm_seg.run_to(50.0).unwrap();
         vm_seg.run_to(75.0).unwrap();
         vm_seg.run_to_end().unwrap();
-        let seg_series = vm_seg.get_series(&canonicalize("population")).unwrap();
+        let seg_series = vm_seg.get_series(&Ident::new("population")).unwrap();
 
         assert_eq!(full_series.len(), seg_series.len());
         for (step, (a, b)) in full_series.iter().zip(seg_series.iter()).enumerate() {
@@ -5016,7 +5014,7 @@ mod vm_reset_run_to_and_constants_tests {
         let compiled = build_compiled(&tp);
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
-        let series = vm.get_series(&canonicalize("s")).unwrap();
+        let series = vm.get_series(&Ident::new("s")).unwrap();
 
         // save_step=2, dt=1, start=0, stop=10: saved at t=0,2,4,6,8,10 => 6 points
         assert_eq!(series.len(), 6, "should have 6 saved points");
@@ -5048,7 +5046,7 @@ mod vm_reset_run_to_and_constants_tests {
         let compiled = build_compiled(&tp);
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
-        let series = vm.get_series(&canonicalize("s")).unwrap();
+        let series = vm.get_series(&Ident::new("s")).unwrap();
 
         // save_step=1, dt=0.5, start=0, stop=4: saved at t=0,1,2,3,4 => 5 points
         assert_eq!(series.len(), 5, "should have 5 saved points");
@@ -5073,7 +5071,7 @@ mod vm_reset_run_to_and_constants_tests {
         let compiled = build_compiled(&tp);
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
-        let series = vm.get_series(&canonicalize("s")).unwrap();
+        let series = vm.get_series(&Ident::new("s")).unwrap();
 
         assert_eq!(series.len(), 6, "should have 6 saved points");
         let expected = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
@@ -5118,7 +5116,7 @@ mod vm_reset_run_to_and_constants_tests {
         let compiled = build_compiled(&tp);
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
-        let series = vm.get_series(&canonicalize("s")).unwrap();
+        let series = vm.get_series(&Ident::new("s")).unwrap();
 
         // Euler: s(t+1) = s(t) * 1.1
         let expected = [100.0, 110.0, 121.0, 133.1, 146.41, 161.051];
@@ -5151,7 +5149,7 @@ mod vm_reset_run_to_and_constants_tests {
         let compiled = build_compiled(&tp);
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
-        let series = vm.get_series(&canonicalize("s")).unwrap();
+        let series = vm.get_series(&Ident::new("s")).unwrap();
 
         // s(t+dt) = s(t) * (1 - 0.1*0.25) = s(t) * 0.975
         assert_eq!(series.len(), 5, "5 saved points at dt=0.25 from 0 to 1");
@@ -5190,13 +5188,13 @@ mod vm_reset_run_to_and_constants_tests {
 
         let mut vm_ref = Vm::new(compiled.clone()).unwrap();
         vm_ref.run_to_end().unwrap();
-        let ref_series = vm_ref.get_series(&canonicalize("s")).unwrap();
+        let ref_series = vm_ref.get_series(&Ident::new("s")).unwrap();
 
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
         vm.reset();
         vm.run_to_end().unwrap();
-        let series = vm.get_series(&canonicalize("s")).unwrap();
+        let series = vm.get_series(&Ident::new("s")).unwrap();
 
         assert_eq!(ref_series.len(), series.len());
         for (step, (a, b)) in ref_series.iter().zip(series.iter()).enumerate() {

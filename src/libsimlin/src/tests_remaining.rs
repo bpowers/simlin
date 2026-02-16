@@ -3812,7 +3812,7 @@ fn test_patch_with_preexisting_unit_warnings_succeeds() {
         let project_locked = unsafe { (*proj).project.lock().unwrap() };
         let model = project_locked
             .models
-            .get(&engine::canonicalize("main"))
+            .get(&*engine::canonicalize("main"))
             .unwrap();
         assert!(
             model.unit_warnings.is_some(),
@@ -3896,7 +3896,7 @@ fn test_patch_introducing_new_unit_warning_rejected() {
         let project_locked = unsafe { (*proj).project.lock().unwrap() };
         let model = project_locked
             .models
-            .get(&engine::canonicalize("main"))
+            .get(&*engine::canonicalize("main"))
             .unwrap();
         assert!(
             model.unit_warnings.is_none(),

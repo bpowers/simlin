@@ -241,7 +241,7 @@ fn normalize_variable(var: &mut Variable) {
 
 /// Canonicalize an identifier to lowercase with underscores.
 fn canonical_ident(ident: &str) -> String {
-    canonicalize(ident).to_string()
+    canonicalize(ident).into_owned()
 }
 
 /// Normalize documentation by removing line continuations and collapsing whitespace.
