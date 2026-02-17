@@ -17,7 +17,7 @@
 //! ## Notes
 //!
 //! Not all models support bytecode compilation (some use unsupported builtins).
-//! The `bytecode_compile` and `full_pipeline_models` groups skip models that
+//! The `bytecode_compile` and `full_pipeline` groups skip models that
 //! return `NotSimulatable`.
 //!
 //! ## Profiling with external tools
@@ -25,6 +25,7 @@
 //! See `doc/dev/benchmarks.md` for instructions on using valgrind/callgrind,
 //! perf, and gperftools/heaptrack to analyze allocations and CPU time.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,30 +36,34 @@ use simlin_engine::{Simulation, open_vensim};
 /// Model metadata for benchmark parameterization.
 struct ModelFixture {
     name: &'static str,
-    path: &'static str,
+    /// Path relative to the workspace root (i.e. the repo's `test/` directory).
+    rel_path: &'static str,
 }
 
 static MODELS: &[ModelFixture] = &[
     ModelFixture {
         name: "wrld3",
-        path: "../../test/metasd/WRLD3-03/wrld3-03.mdl",
+        rel_path: "test/metasd/WRLD3-03/wrld3-03.mdl",
     },
     ModelFixture {
         name: "clearn",
-        path: "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl",
+        rel_path: "test/xmutil_test_models/C-LEARN v77 for Vensim.mdl",
     },
 ];
+
+/// Resolve a fixture path to an absolute path using CARGO_MANIFEST_DIR.
+fn fixture_path(fixture: &ModelFixture) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(fixture.rel_path)
+}
 
 /// Load model contents at benchmark setup time.  Panics on missing files so
 /// CI catches missing test data immediately.
 fn load_model(fixture: &ModelFixture) -> String {
-    std::fs::read_to_string(fixture.path).unwrap_or_else(|e| {
-        panic!(
-            "failed to read model file '{}': {e}\n\
-             (run from src/simlin-engine/ or the repo root)",
-            fixture.path
-        )
-    })
+    let path = fixture_path(fixture);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read model file '{}': {e}", path.display()))
 }
 
 /// Check whether a compiled project can be compiled to bytecode.
@@ -163,7 +168,7 @@ fn bench_bytecode_compile(c: &mut Criterion) {
 /// wall-clock cost and for comparing against the sum of individual stages.
 /// Models that cannot be compiled to bytecode are skipped.
 fn bench_full_pipeline(c: &mut Criterion) {
-    let mut group = c.benchmark_group("full_pipeline_models");
+    let mut group = c.benchmark_group("full_pipeline");
     group.measurement_time(Duration::from_secs(15));
 
     for fixture in MODELS {
@@ -174,7 +179,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
         let project = CompiledProject::from(datamodel);
         if !is_simulatable(&project) {
             eprintln!(
-                "skipping full_pipeline_models/{}: model is not simulatable",
+                "skipping full_pipeline/{}: model is not simulatable",
                 fixture.name
             );
             continue;

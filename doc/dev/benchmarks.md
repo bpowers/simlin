@@ -35,13 +35,13 @@ The `compiler` suite measures each stage of the compilation pipeline independent
 - **`parse_mdl`** — MDL text to `datamodel::Project` (lexing, parsing, conversion)
 - **`project_build`** — `datamodel::Project` to engine `Project` (unit inference, dependency resolution, topological sort)
 - **`bytecode_compile`** — engine `Project` to `CompiledSimulation` (bytecode generation)
-- **`full_pipeline_models`** — all stages end-to-end
+- **`full_pipeline`** — all stages end-to-end
 
 Models used:
 - `wrld3` — World3 model (151 KB, ~3,800 lines), a classic system dynamics model
 - `clearn` — C-LEARN climate model (1.4 MB, ~53,000 lines), a stress test for the compiler
 
-C-LEARN currently uses builtins that are not yet implemented in the bytecode compiler, so it is automatically skipped for `bytecode_compile` and `full_pipeline_models`. It still participates in `parse_mdl` and `project_build`, which are the most allocation-heavy stages.
+C-LEARN currently uses builtins that are not yet implemented in the bytecode compiler, so it is automatically skipped for `bytecode_compile` and `full_pipeline`. It still participates in `parse_mdl` and `project_build`, which are the most allocation-heavy stages.
 
 ## Profiling
 
