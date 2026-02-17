@@ -105,6 +105,8 @@ pub struct Section {
     /// many names have slot table entries. Purpose in other sections is
     /// unknown. Not a section size (regions extend past this).
     pub field1: u32,
+    // field2 (header offset +8) is omitted: it always equals field1 in
+    // every observed VDF file, so storing both adds no information.
     /// Field3 in header (often 0x1F4 = 500).
     pub field3: u32,
     /// Field4: section type identifier (e.g. 19=model info, 2=variable slots).
