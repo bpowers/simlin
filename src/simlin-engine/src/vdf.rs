@@ -41,6 +41,14 @@ pub const VDF_SECTION_MAGIC: [u8; 4] = [0xa1, 0x37, 0x4c, 0xbf];
 /// Sentinel value appearing in record fields 8, 9, and sometimes 14.
 pub const VDF_SENTINEL: u32 = 0xf6800000;
 
+/// Record field[1] value identifying system/control variables (INITIAL TIME,
+/// FINAL TIME, TIME STEP, SAVEPER).
+const RECORD_F1_SYSTEM: u32 = 23;
+
+/// Record field[1] value identifying INITIAL TIME constant records. These
+/// pass the standard model-variable filter but aren't model variables.
+const RECORD_F1_INITIAL_TIME_CONST: u32 = 15;
+
 /// Size of a VDF section header in bytes (magic + 5 u32 fields).
 pub const SECTION_HEADER_SIZE: usize = 24;
 
@@ -356,13 +364,7 @@ impl VdfFile {
                 .ok_or("offset table entry out of bounds")?;
 
             let series = if self.is_data_block_offset(raw_val) {
-                extract_block_series(
-                    &self.data,
-                    raw_val as usize,
-                    self.bitmap_size,
-                    &time_values,
-                    step_count,
-                )?
+                extract_block_series(&self.data, raw_val as usize, self.bitmap_size, &time_values)?
             } else {
                 let const_val = f32::from_le_bytes(raw_val.to_le_bytes()) as f64;
                 vec![const_val; step_count]
@@ -402,22 +404,15 @@ impl VdfFile {
     pub fn build_deterministic_ot_map(&self) -> StdResult<HashMap<String, usize>, Box<dyn Error>> {
         let ot_count = self.offset_table_count;
 
-        // Collect model variable records using per-record criteria:
-        //   f[0] != 0 : non-zero/non-padding record
-        //   f[1] != 23 : not a system/control variable (INITIAL TIME, etc.)
-        //   f[1] != 15 : not an INITIAL TIME constant record
-        //   f[10] > 0  : has a non-zero alphabetical sort key
-        //   f[11] > 0  : OT index > 0 (0 is always the time series)
-        //   f[11] < ot_count : valid offset table index
-        //
-        // Note: we filter individual records rather than whole f[12] groups
+        // Collect model variable records using per-record criteria.
+        // We filter individual records rather than whole f[12] groups
         // because some VDFs mix control and model records in the same group.
         let mut model_records: Vec<(u32, u32)> = Vec::new(); // (f10, f11=OT_idx)
         for rec in &self.records {
             let ot_idx = rec.fields[11] as usize;
             if rec.fields[0] != 0
-                && rec.fields[1] != 23
-                && rec.fields[1] != 15
+                && rec.fields[1] != RECORD_F1_SYSTEM
+                && rec.fields[1] != RECORD_F1_INITIAL_TIME_CONST
                 && rec.fields[10] > 0
                 && ot_idx > 0
                 && ot_idx < ot_count
@@ -888,19 +883,7 @@ pub fn build_vdf_results(
 
     let mut next_col = 1;
 
-    let sample_indices: Vec<usize> = {
-        let mut indices = vec![0];
-        if step_count > 10 {
-            indices.push(step_count / 4);
-            indices.push(step_count / 2);
-            indices.push(3 * step_count / 4);
-        }
-        if step_count > 1 {
-            indices.push(step_count - 1);
-        }
-        indices
-    };
-
+    let sample_indices = build_sample_indices(step_count);
     const MATCH_THRESHOLD: f64 = 0.01;
 
     for (ident, &ref_off) in &reference.offsets {
@@ -988,19 +971,7 @@ pub fn build_empirical_ot_map(
         .into());
     }
 
-    let sample_indices: Vec<usize> = {
-        let mut indices = vec![0];
-        if step_count > 10 {
-            indices.push(step_count / 4);
-            indices.push(step_count / 2);
-            indices.push(3 * step_count / 4);
-        }
-        if step_count > 1 {
-            indices.push(step_count - 1);
-        }
-        indices
-    };
-
+    let sample_indices = build_sample_indices(step_count);
     const MATCH_THRESHOLD: f64 = 0.01;
     let time_ident = Ident::<Canonical>::from_str_unchecked("time");
 
@@ -1046,6 +1017,22 @@ pub fn build_empirical_ot_map(
     }
 
     Ok(ot_map)
+}
+
+/// Build sample indices for time series correlation. Picks first, last,
+/// and quartile points to avoid comparing every time step.
+#[cfg(feature = "file_io")]
+fn build_sample_indices(step_count: usize) -> Vec<usize> {
+    let mut indices = vec![0];
+    if step_count > 10 {
+        indices.push(step_count / 4);
+        indices.push(step_count / 2);
+        indices.push(3 * step_count / 4);
+    }
+    if step_count > 1 {
+        indices.push(step_count - 1);
+    }
+    indices
 }
 
 /// Compute a match error between a reference series and a VDF entry,
@@ -1104,8 +1091,8 @@ fn extract_block_series(
     block_offset: usize,
     bitmap_size: usize,
     time_values: &[f64],
-    step_count: usize,
 ) -> StdResult<Vec<f64>, Box<dyn Error>> {
+    let step_count = time_values.len();
     let count = u16::from_le_bytes(data[block_offset..block_offset + 2].try_into()?) as usize;
     let bm = &data[block_offset + 2..block_offset + 2 + bitmap_size];
     let data_start = block_offset + 2 + bitmap_size;
@@ -1521,16 +1508,19 @@ mod tests {
             );
 
             let mut parsed_count = 0;
+            let mut skipped_count = 0;
             for path in &vdf_paths {
                 let data = std::fs::read(path)
                     .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
                 let file_len = data.len();
                 // Some .vdf files use a different format variant (e.g. magic
-                // 0x41 instead of 0x52). Skip those rather than failing.
-                let vdf = match VdfFile::parse(data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+                // byte 0x41 instead of 0x52). Skip those rather than failing.
+                if data.len() >= 4 && data[0..4] != VDF_FILE_MAGIC {
+                    skipped_count += 1;
+                    continue;
+                }
+                let vdf = VdfFile::parse(data)
+                    .unwrap_or_else(|e| panic!("failed to parse {}: {}", path.display(), e));
                 parsed_count += 1;
 
                 assert!(
@@ -1576,8 +1566,9 @@ mod tests {
             }
             assert!(
                 parsed_count >= 10,
-                "expected at least 10 parseable VDF files, only {} succeeded",
-                parsed_count
+                "expected at least 10 parseable VDF files, only {} succeeded ({} skipped for different magic)",
+                parsed_count,
+                skipped_count
             );
         }
 
@@ -1681,20 +1672,12 @@ mod tests {
                 if let Some(&emp_ot) = emp_map.get(canonical.as_ref()) {
                     if **det_ot == emp_ot {
                         matches += 1;
-                        eprintln!("  OK   {det_name:30} -> OT[{det_ot}]");
                     } else {
                         mismatches.push((det_name.to_string(), **det_ot, emp_ot));
-                        eprintln!("  FAIL {det_name:30} -> det OT[{det_ot}] vs emp OT[{emp_ot}]");
                     }
-                } else {
-                    eprintln!("  SKIP {det_name:30} -> OT[{det_ot}] (no empirical match)");
                 }
             }
 
-            eprintln!(
-                "  total: {matches} matches, {} mismatches",
-                mismatches.len()
-            );
             (matches, mismatches)
         }
 
@@ -1730,7 +1713,6 @@ mod tests {
         /// water level = TIME STEP = SAVEPER = 1.0).
         #[test]
         fn test_deterministic_vs_empirical_water() {
-            eprintln!("\n=== water model (assignment_4) ===");
             let (matches, mismatches) = compare_det_vs_emp(
                 "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/water.mdl",
                 "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/Current.vdf",
@@ -1739,9 +1721,6 @@ mod tests {
             // same value. "desired water level" (1.0) gets matched to a
             // different OT entry than the deterministic map chooses, but
             // both entries hold constant 1.0.
-            for (name, det_ot, emp_ot) in &mismatches {
-                eprintln!("  mismatch: {name} det=OT[{det_ot}] emp=OT[{emp_ot}]");
-            }
             assert!(matches >= 2, "water: expected at least 2 matches");
             assert!(
                 mismatches.len() <= 1,
@@ -1755,7 +1734,6 @@ mod tests {
         /// RK4 integrator and our sim uses Euler, so dynamic variables diverge.
         #[test]
         fn test_deterministic_vs_empirical_pop() {
-            eprintln!("\n=== pop model (assignment_6) ===");
             let (matches, mismatches) = compare_det_vs_emp(
                 "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_6/pop.mdl",
                 "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_6/Current.vdf",
@@ -1938,13 +1916,9 @@ mod tests {
                     matched > 0,
                     "econ: expected at least some empirical matches, got 0"
                 );
-                eprintln!(
-                    "econ empirical matching: {matched} vars matched out of {} sim vars",
-                    results.offsets.len() - 1
-                );
             } else {
-                eprintln!(
-                    "econ: step count mismatch (VDF={}, sim={}), skipping empirical check",
+                panic!(
+                    "econ: step count mismatch (VDF={}, sim={})",
                     vdf_data.time_values.len(),
                     results.step_count
                 );
@@ -1980,8 +1954,8 @@ mod tests {
                 for (i, rec) in vdf.records.iter().enumerate() {
                     let ot_idx = rec.fields[11] as usize;
                     if rec.fields[0] != 0
-                        && rec.fields[1] != 23
-                        && rec.fields[1] != 15
+                        && rec.fields[1] != RECORD_F1_SYSTEM
+                        && rec.fields[1] != RECORD_F1_INITIAL_TIME_CONST
                         && rec.fields[10] > 0
                         && ot_idx > 0
                         && ot_idx < ot_count
@@ -2088,7 +2062,7 @@ mod tests {
 
             // f[11] IS the correct OT index:
             // Record 0: f[1]=15 -> OT 3 = const 0 (INITIAL TIME)
-            assert_eq!(euler5.records[0].fields[1], 15);
+            assert_eq!(euler5.records[0].fields[1], RECORD_F1_INITIAL_TIME_CONST);
             assert_eq!(euler5.records[0].ot_index(), 3);
             let ot3 = euler5.offset_table_entry(3).unwrap();
             assert!(!euler5.is_data_block_offset(ot3));
@@ -2108,7 +2082,7 @@ mod tests {
                 .iter()
                 .filter(|r| {
                     r.fields[0] != 0
-                        && r.fields[1] != 23
+                        && r.fields[1] != RECORD_F1_SYSTEM
                         && r.fields[10] > 0
                         && r.fields[11] > 0
                         && (r.fields[11] as usize) < euler5.offset_table_count
@@ -2120,8 +2094,8 @@ mod tests {
                 .iter()
                 .filter(|r| {
                     r.fields[0] != 0
-                        && r.fields[1] != 23
-                        && r.fields[1] != 15
+                        && r.fields[1] != RECORD_F1_SYSTEM
+                        && r.fields[1] != RECORD_F1_INITIAL_TIME_CONST
                         && r.fields[10] > 0
                         && r.fields[11] > 0
                         && (r.fields[11] as usize) < euler5.offset_table_count
@@ -2139,7 +2113,7 @@ mod tests {
                 .iter()
                 .filter(|r| {
                     r.fields[0] != 0
-                        && r.fields[1] != 23
+                        && r.fields[1] != RECORD_F1_SYSTEM
                         && r.fields[10] > 0
                         && r.fields[11] > 0
                         && (r.fields[11] as usize) < euler10.offset_table_count
@@ -2151,8 +2125,8 @@ mod tests {
                 .iter()
                 .filter(|r| {
                     r.fields[0] != 0
-                        && r.fields[1] != 23
-                        && r.fields[1] != 15
+                        && r.fields[1] != RECORD_F1_SYSTEM
+                        && r.fields[1] != RECORD_F1_INITIAL_TIME_CONST
                         && r.fields[10] > 0
                         && r.fields[11] > 0
                         && (r.fields[11] as usize) < euler10.offset_table_count
@@ -2186,13 +2160,18 @@ mod tests {
             let water = vdf_file(
                 "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_4/Current.vdf",
             );
-            assert!(!water.records.iter().any(|r| r.fields[1] == 15));
+            assert!(
+                !water
+                    .records
+                    .iter()
+                    .any(|r| r.fields[1] == RECORD_F1_INITIAL_TIME_CONST)
+            );
             let water_model: Vec<_> = water
                 .records
                 .iter()
                 .filter(|r| {
                     r.fields[0] != 0
-                        && r.fields[1] != 23
+                        && r.fields[1] != RECORD_F1_SYSTEM
                         && r.fields[10] > 0
                         && r.fields[11] > 0
                         && (r.fields[11] as usize) < water.offset_table_count
@@ -2212,8 +2191,8 @@ mod tests {
                     .iter()
                     .filter(|r| {
                         r.fields[0] != 0
-                            && r.fields[1] != 23
-                            && r.fields[1] != 15
+                            && r.fields[1] != RECORD_F1_SYSTEM
+                            && r.fields[1] != RECORD_F1_INITIAL_TIME_CONST
                             && r.fields[10] > 0
                             && r.fields[11] > 0
                             && (r.fields[11] as usize) < ot_count
