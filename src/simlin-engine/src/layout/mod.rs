@@ -13,7 +13,7 @@ pub mod sfdp;
 pub mod text;
 pub mod uid;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::f64::consts::PI;
 
 use crate::common::canonicalize;
@@ -98,6 +98,9 @@ struct LayoutEngine<'a> {
     metadata: ComputedMetadata,
     uid_manager: UidManager,
 
+    /// Canonical ident -> original display name (pre-built for O(1) lookup).
+    display_names: HashMap<String, String>,
+
     elements: Vec<ViewElement>,
     positions: HashMap<i32, Position>,
 
@@ -112,16 +115,21 @@ struct LayoutEngine<'a> {
 impl<'a> LayoutEngine<'a> {
     fn new(config: LayoutConfig, model: &'a datamodel::Model, metadata: ComputedMetadata) -> Self {
         let mut uid_manager = UidManager::new();
+        let mut display_names = HashMap::new();
 
-        // Seed the UID manager from existing model variable UIDs
         for var in &model.variables {
+            let ident = var.get_ident();
+            let canonical = canonicalize(ident).into_owned();
+            display_names.insert(canonical, ident.to_string());
+
+            // Seed the UID manager from existing model variable UIDs
             if let Some(uid) = match var {
                 datamodel::Variable::Stock(s) => s.uid,
                 datamodel::Variable::Flow(f) => f.uid,
                 datamodel::Variable::Aux(a) => a.uid,
                 datamodel::Variable::Module(m) => m.uid,
             } {
-                uid_manager.add(uid, var.get_ident());
+                uid_manager.add(uid, ident);
             }
         }
 
@@ -130,6 +138,7 @@ impl<'a> LayoutEngine<'a> {
             model,
             metadata,
             uid_manager,
+            display_names,
             elements: Vec::new(),
             positions: HashMap::new(),
             flow_templates: HashMap::new(),
@@ -243,15 +252,14 @@ impl<'a> LayoutEngine<'a> {
         let mut positioned: HashMap<String, Position> = HashMap::new();
         positioned.insert(start_stock.clone(), base_position);
 
-        let mut queue = vec![WorkItem {
+        let mut queue = VecDeque::from([WorkItem {
             id: start_stock.clone(),
             item_type: WorkItemType::Stock,
             position: base_position,
             connected_to: String::new(),
-        }];
+        }]);
 
-        while !queue.is_empty() {
-            let item = queue.remove(0);
+        while let Some(item) = queue.pop_front() {
             match item.item_type {
                 WorkItemType::Stock => {
                     if let Some(&existing) = positioned.get(&item.id) {
@@ -273,7 +281,7 @@ impl<'a> LayoutEngine<'a> {
                         .unwrap_or_default();
                     for inflow_id in &inflows {
                         if !positioned.contains_key(inflow_id) {
-                            queue.push(WorkItem {
+                            queue.push_back(WorkItem {
                                 id: inflow_id.clone(),
                                 item_type: WorkItemType::Flow,
                                 position: stock_pos,
@@ -291,7 +299,7 @@ impl<'a> LayoutEngine<'a> {
                         .unwrap_or_default();
                     for outflow_id in &outflows {
                         if !positioned.contains_key(outflow_id) {
-                            queue.push(WorkItem {
+                            queue.push_back(WorkItem {
                                 id: outflow_id.clone(),
                                 item_type: WorkItemType::Flow,
                                 position: stock_pos,
@@ -321,7 +329,7 @@ impl<'a> LayoutEngine<'a> {
                                         item.position.y,
                                     );
                                     positioned.insert(to.clone(), other_pos);
-                                    queue.push(WorkItem {
+                                    queue.push_back(WorkItem {
                                         id: to.clone(),
                                         item_type: WorkItemType::Stock,
                                         position: other_pos,
@@ -342,7 +350,7 @@ impl<'a> LayoutEngine<'a> {
                                         item.position.y,
                                     );
                                     positioned.insert(from.clone(), other_pos);
-                                    queue.push(WorkItem {
+                                    queue.push_back(WorkItem {
                                         id: from.clone(),
                                         item_type: WorkItemType::Stock,
                                         position: other_pos,
@@ -876,7 +884,9 @@ impl<'a> LayoutEngine<'a> {
             }
         }
 
-        // Place unpositioned auxiliaries in a circle around the center
+        // Average the accumulated positions with the start position (which was
+        // used as the initial accumulator value) to bias the center toward the
+        // configured origin when few nodes are positioned.
         if count > 0 {
             center_x /= (count + 1) as f64;
             center_y /= (count + 1) as f64;
@@ -1459,13 +1469,10 @@ impl<'a> LayoutEngine<'a> {
 
     /// Get the display name for a variable, preferring the original case.
     fn display_name(&self, canonical_ident: &str) -> String {
-        for var in &self.model.variables {
-            let ident = var.get_ident();
-            if canonicalize(ident).as_ref() == canonical_ident {
-                return ident.to_string();
-            }
-        }
-        canonical_ident.to_string()
+        self.display_names
+            .get(canonical_ident)
+            .cloned()
+            .unwrap_or_else(|| canonical_ident.to_string())
     }
 }
 
@@ -1837,6 +1844,10 @@ pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
     annealing::count_crossings(&segments)
 }
 
+/// Seeds for parallel layout generation. Each seed produces a different SFDP
+/// layout; the one with fewest connector crossings is selected.
+const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
+
 /// Generate a complete stock-flow diagram layout for a model.
 ///
 /// Computes metadata (dependency graph, chains) from the model variables,
@@ -1867,7 +1878,7 @@ pub fn generate_best_layout(model: &datamodel::Model) -> Result<datamodel::Stock
     use rayon::prelude::*;
 
     let config = LayoutConfig::default();
-    let seeds = [42u64, 123, 456, 789];
+    let seeds = LAYOUT_SEEDS;
 
     let results: Vec<Result<LayoutResult, String>> = seeds
         .par_iter()
@@ -1892,7 +1903,7 @@ pub fn generate_best_layout(model: &datamodel::Model) -> Result<datamodel::Stock
 #[cfg(target_arch = "wasm32")]
 pub fn generate_best_layout(model: &datamodel::Model) -> Result<datamodel::StockFlow, String> {
     let config = LayoutConfig::default();
-    let seeds = [42u64, 123, 456, 789];
+    let seeds = LAYOUT_SEEDS;
 
     let results: Vec<Result<LayoutResult, String>> = seeds
         .iter()

@@ -76,7 +76,7 @@ pub fn count_crossings(segments: &[LineSegment]) -> usize {
 }
 
 /// Sample from the standard normal distribution using the Box-Muller transform.
-fn norm_float64(rng: &mut StdRng) -> f64 {
+fn sample_standard_normal(rng: &mut StdRng) -> f64 {
     // Avoid ln(0) by clamping u1 away from zero. random() returns [0, 1),
     // so u1=0 is possible and would produce -infinity.
     let u1: f64 = rng.random::<f64>().max(f64::MIN_POSITIVE);
@@ -87,8 +87,8 @@ fn norm_float64(rng: &mut StdRng) -> f64 {
 /// Generate a perturbation step using the same hybrid strategy as the Go
 /// implementation: 65% Gaussian steps, 35% uniform-radius polar steps.
 fn generate_step(rng: &mut StdRng, temperature: f64) -> (f64, f64) {
-    let gauss_x = norm_float64(rng) * temperature;
-    let gauss_y = norm_float64(rng) * temperature;
+    let gauss_x = sample_standard_normal(rng) * temperature;
+    let gauss_y = sample_standard_normal(rng) * temperature;
     if rng.random::<f64>() < 0.35 {
         let angle = rng.random::<f64>() * 2.0 * PI;
         let radius = (0.4 + rng.random::<f64>() * 0.8) * temperature;
@@ -225,7 +225,7 @@ where
 /// has no measurable edges.
 fn derive_initial_temperature<N, F>(
     layout: &Layout<N>,
-    _build_segments: &F,
+    build_segments: &F,
     config: &LayoutConfig,
 ) -> f64
 where
@@ -241,7 +241,7 @@ where
     // (matching the Go implementation which iterates over graph edges).
     // Without direct access to the graph edges here, we approximate by
     // using the segments the caller constructs.
-    let segments = _build_segments(layout);
+    let segments = build_segments(layout);
     if segments.is_empty() {
         return config.annealing_temperature;
     }
@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn test_norm_float64_distribution() {
+    fn test_sample_standard_normal_distribution() {
         // Smoke test: sample many values and check mean/stddev are roughly
         // correct for a standard normal.
         let mut rng = StdRng::seed_from_u64(12345);
@@ -506,7 +506,7 @@ mod tests {
         let mut sum = 0.0;
         let mut sum_sq = 0.0;
         for _ in 0..n {
-            let v = norm_float64(&mut rng);
+            let v = sample_standard_normal(&mut rng);
             sum += v;
             sum_sq += v * v;
         }

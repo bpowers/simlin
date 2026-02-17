@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::{Add, Sub};
@@ -341,15 +341,16 @@ impl<N: NodeId> Graph<N> {
             in_degree.insert(node.clone(), degree);
         }
 
-        let mut queue: Vec<N> = in_degree
+        let mut initial: Vec<N> = in_degree
             .iter()
             .filter(|(_, d)| **d == 0)
             .map(|(n, _)| n.clone())
             .collect();
+        initial.sort();
+        let mut queue: VecDeque<N> = initial.into();
 
         let mut result = Vec::new();
-        while let Some(node) = queue.first().cloned() {
-            queue.remove(0);
+        while let Some(node) = queue.pop_front() {
             result.push(node.clone());
 
             if let Some(neighbors) = self.adj.get(&node) {
@@ -364,7 +365,6 @@ impl<N: NodeId> Graph<N> {
                 }
                 next.sort();
                 queue.extend(next);
-                queue.sort();
             }
         }
 
