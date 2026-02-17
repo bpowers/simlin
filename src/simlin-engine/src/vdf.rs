@@ -22,14 +22,13 @@
 #[cfg(feature = "file_io")]
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "file_io")]
-use std::error::Error;
-#[cfg(feature = "file_io")]
-use std::result::Result as StdResult;
+use std::{error::Error, result::Result as StdResult};
 
 #[cfg(feature = "file_io")]
-use crate::common::{Canonical, Ident};
-#[cfg(feature = "file_io")]
-use crate::results::{Method, Results, Specs};
+use crate::{
+    common::{Canonical, Ident},
+    results::{Method, Results, Specs},
+};
 
 /// VDF file magic bytes (first 4 bytes of every VDF file).
 pub const VDF_FILE_MAGIC: [u8; 4] = [0x7f, 0xf7, 0x17, 0x52];
@@ -279,6 +278,9 @@ impl VdfFile {
                 enumerate_data_blocks(&data, first_data_block, bitmap_size, time_point_count);
             if blocks.len() > 1 {
                 let ot: Vec<u32> = blocks.iter().map(|&(off, _, _)| off as u32).collect();
+                // Overwrite offset_table_start/count so that callers (like
+                // vdf-dump) can report a consistent location and entry count
+                // regardless of whether the OT is real or synthetic.
                 offset_table_start = first_data_block;
                 offset_table_count = ot.len();
                 Some(ot)
@@ -1097,18 +1099,13 @@ fn extract_block_series(
     let bm = &data[block_offset + 2..block_offset + 2 + bitmap_size];
     let data_start = block_offset + 2 + bitmap_size;
 
-    let initial_time = time_values[0];
-    let saveper = if time_values.len() > 1 {
-        time_values[1] - time_values[0]
-    } else {
-        1.0
-    };
-
     let mut series = vec![f64::NAN; step_count];
     let mut data_idx = 0;
     let mut last_val = f64::NAN;
 
-    for (time_idx, &t) in time_values.iter().enumerate() {
+    // time_values is the full evenly-spaced time grid from block 0, so
+    // time_idx corresponds directly to the step index.
+    for (time_idx, _) in time_values.iter().enumerate() {
         let bit_set = (bm[time_idx / 8] >> (time_idx % 8)) & 1 == 1;
         if bit_set && data_idx < count {
             let off = data_start + data_idx * 4;
@@ -1116,10 +1113,7 @@ fn extract_block_series(
             data_idx += 1;
         }
 
-        let step = ((t - initial_time) / saveper).round() as usize;
-        if step < step_count {
-            series[step] = last_val;
-        }
+        series[time_idx] = last_val;
     }
 
     Ok(series)
@@ -1908,21 +1902,17 @@ mod tests {
             let sim = crate::interpreter::Simulation::new(&project, "main").unwrap();
             let results = sim.run_to_end().unwrap();
 
-            // Step counts must match for empirical matching
-            if results.step_count == vdf_data.time_values.len() {
-                let emp_map = build_empirical_ot_map(&vdf_data, &results).unwrap();
-                let matched = emp_map.len() - 1; // subtract Time
-                assert!(
-                    matched > 0,
-                    "econ: expected at least some empirical matches, got 0"
-                );
-            } else {
-                panic!(
-                    "econ: step count mismatch (VDF={}, sim={})",
-                    vdf_data.time_values.len(),
-                    results.step_count
-                );
-            }
+            assert_eq!(
+                results.step_count,
+                vdf_data.time_values.len(),
+                "econ: step count mismatch between VDF and simulation"
+            );
+            let emp_map = build_empirical_ot_map(&vdf_data, &results).unwrap();
+            let matched = emp_map.len() - 1; // subtract Time
+            assert!(
+                matched > 0,
+                "econ: expected at least some empirical matches, got 0"
+            );
         }
 
         /// Verify f[10] ordering matches alphabetical name order for small
