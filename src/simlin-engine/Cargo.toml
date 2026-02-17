@@ -72,4 +72,8 @@ harness = false
 name = "simulation"
 harness = false
 
+[[bench]]
+name = "compiler"
+harness = false
+
 [build-dependencies]

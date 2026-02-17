@@ -41,6 +41,8 @@ See [doc/dev/commands.md](/doc/dev/commands.md) for the full command reference.
 
 Quick reference: `pnpm build`, `cargo test`, `pnpm test`, `pnpm lint`, `pnpm format`.
 
+For benchmarks and profiling, see [doc/dev/benchmarks.md](/doc/dev/benchmarks.md).
+
 ## Pre-commit Hooks
 
 The pre-commit hook (`scripts/pre-commit`) runs automatically and performs:
