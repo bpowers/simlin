@@ -46,6 +46,7 @@ Equation text flows through these stages in order:
   - view/ subdir - Sketch/diagram parsing
   - `xmile_compat.rs` - Expression formatting for XMILE output
   - `settings.rs` - Integration settings parser
+- **`src/vdf.rs`** - Vensim VDF (binary data file) parser. Parses all structural elements (sections, records, name/slot/offset tables, data blocks). Deterministic name-to-OT mapping works for small models; the full metadata chain for large models is not yet decoded. See `doc/design/vdf.md` for the format specification.
 - **`src/json.rs`** - JSON serialization matching Go `sd` package schema
 - **`src/json_sdai.rs`** - JSON schema for AI metadata augmentation
 - **`src/serde.rs`** - Generic serde utilities

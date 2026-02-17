@@ -18,7 +18,7 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: simlin-engine
 - **Severity**: medium
-- **Description**: `unwrap_or_default()` masks unexpected conditions by silently substituting default values. Should be replaced with explicit error handling or `Option`/`Result` propagation. A ratchet is in place (scripts/pre-commit) to prevent new occurrences.
+- **Description**: `unwrap_or_default()` can mask unexpected conditions by silently substituting default values. Many uses are idiomatic (e.g. `map.get().unwrap_or_default()` for missing keys), but others should be replaced with explicit error handling or `Option`/`Result` propagation. Tracked as a measurement, not enforced by ratchet -- automated grep-based enforcement cannot distinguish idiomatic from problematic uses and incentivizes worse code.
 - **Measure**: `rg 'unwrap_or_default\(\)' --type rust -c src/simlin-engine/`
 - **Count**: 99 occurrences across 17 files (as of 2026-02-15)
 - **Owner**: unassigned

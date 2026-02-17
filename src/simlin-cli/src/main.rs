@@ -23,6 +23,7 @@ use simlin_engine::{
 use simlin_engine::{load_csv, load_dat, open_vensim, open_xmile, to_xmile};
 
 mod gen_stdlib;
+mod vdf_dump;
 
 const VERSION: &str = "1.0";
 const EXIT_FAILURE: i32 = 1;
@@ -65,6 +66,7 @@ fn usage() -> ! {
             "    equations        Print the equations out\n",
             "    debug            Output model equations interleaved with a reference run\n",
             "    gen-stdlib       Generate Rust code for stdlib models\n",
+            "    vdf-dump         Pretty-print VDF file structure and contents\n",
         ),
         VERSION,
         argv0
@@ -87,6 +89,7 @@ struct Args {
     is_debug: bool,
     is_ltm: bool,
     is_gen_stdlib: bool,
+    is_vdf_dump: bool,
 }
 
 fn parse_args() -> StdResult<Args, Box<dyn std::error::Error>> {
@@ -113,6 +116,8 @@ fn parse_args() -> StdResult<Args, Box<dyn std::error::Error>> {
         args.is_debug = true;
     } else if subcommand == "gen-stdlib" {
         args.is_gen_stdlib = true;
+    } else if subcommand == "vdf-dump" {
+        args.is_vdf_dump = true;
     } else {
         eprintln!("error: unknown subcommand {}", subcommand);
         usage();
@@ -277,6 +282,17 @@ fn main() {
             .unwrap_or_else(|| "src/simlin-engine/src/stdlib.gen.rs".to_string());
         if let Err(err) = gen_stdlib::generate(&stdlib_dir, &output_path) {
             die!("gen-stdlib failed: {}", err);
+        }
+        return;
+    }
+
+    if args.is_vdf_dump {
+        let file_path = args.path.unwrap_or_else(|| {
+            eprintln!("error: VDF file path required");
+            std::process::exit(EXIT_FAILURE);
+        });
+        if let Err(err) = vdf_dump::dump_vdf(&file_path) {
+            die!("vdf-dump failed: {}", err);
         }
         return;
     }
