@@ -8,7 +8,7 @@ use std::io::BufReader;
 
 use simlin_engine::common::canonicalize;
 use simlin_engine::datamodel::ViewElement;
-use simlin_engine::layout::generate_layout;
+use simlin_engine::layout::{generate_best_layout, generate_layout};
 use simlin_engine::open_xmile;
 
 fn load_model(path: &str) -> simlin_engine::datamodel::Model {
@@ -350,6 +350,13 @@ fn test_layout_connectors_present() {
         link_count > 0,
         "SIR model should have dependency connectors (links)"
     );
+}
+
+#[test]
+fn test_best_layout_sir() {
+    let model = load_model("test/test-models/samples/SIR/SIR.stmx");
+    let view = generate_best_layout(&model).expect("best layout generation should succeed");
+    verify_layout(&view, &model, "SIR_best");
 }
 
 #[test]

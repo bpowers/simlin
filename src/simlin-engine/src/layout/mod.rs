@@ -1637,7 +1637,12 @@ pub fn compute_metadata(model: &datamodel::Model) -> ComputedMetadata {
     }
 }
 
-/// Extract variable dependencies from an equation.
+/// Extract variable dependencies from an equation using word-boundary
+/// matching on the equation text. This is a heuristic that avoids requiring
+/// full model compilation; it can produce false positives for identifiers
+/// that collide with builtin function names and doesn't handle subscripted
+/// references. A future improvement would wire in the engine's AST-based
+/// dependency resolution (which requires a compiled model).
 fn extract_equation_deps(var: &datamodel::Variable, all_idents: &HashSet<String>) -> Vec<String> {
     let equation = match var.get_equation() {
         Some(eq) => eq,
@@ -1737,9 +1742,9 @@ fn detect_chains(
         let mut chain_stocks = Vec::new();
         let mut chain_flows = Vec::new();
         let mut seen_flows: HashSet<String> = HashSet::new();
-        let mut queue = vec![start_stock.clone()];
+        let mut queue = VecDeque::from([start_stock.clone()]);
 
-        while let Some(stock) = queue.pop() {
+        while let Some(stock) = queue.pop_front() {
             if !visited.insert(stock.clone()) {
                 continue;
             }
@@ -1754,7 +1759,7 @@ fn detect_chains(
                     if let Some((Some(from_stock), _)) = flow_to_stocks.get(flow)
                         && !visited.contains(from_stock)
                     {
-                        queue.push(from_stock.clone());
+                        queue.push_back(from_stock.clone());
                     }
                 }
             }
@@ -1767,7 +1772,7 @@ fn detect_chains(
                     if let Some((_, Some(to_stock))) = flow_to_stocks.get(flow)
                         && !visited.contains(to_stock)
                     {
-                        queue.push(to_stock.clone());
+                        queue.push_back(to_stock.clone());
                     }
                 }
             }
