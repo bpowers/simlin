@@ -6,7 +6,8 @@ use std::collections::HashSet;
 use std::error::Error;
 
 use simlin_engine::vdf::{
-    FILE_HEADER_SIZE, RECORD_SIZE, Section, VDF_SENTINEL, VdfFile, read_f32, read_u16, read_u32,
+    FILE_HEADER_SIZE, RECORD_SIZE, SYSTEM_NAMES, Section, VDF_SENTINEL, VENSIM_BUILTINS, VdfFile,
+    read_f32, read_u16, read_u32,
 };
 
 const SECTION_ROLES: [&str; 8] = [
@@ -18,14 +19,6 @@ const SECTION_ROLES: [&str; 8] = [
     "degenerate/marker",
     "unknown metadata",
     "display settings",
-];
-
-const SYSTEM_NAMES: [&str; 5] = ["Time", "INITIAL TIME", "FINAL TIME", "TIME STEP", "SAVEPER"];
-
-const VENSIM_BUILTINS: [&str; 28] = [
-    "abs", "cos", "exp", "integer", "ln", "log", "max", "min", "modulo", "pi", "sin", "sqrt",
-    "tan", "step", "pulse", "ramp", "delay", "delay1", "delay3", "smooth", "smooth3", "trend",
-    "sum", "prod", "product", "vmin", "vmax", "elmcount",
 ];
 
 /// Max bytes of section data to hexdump.
@@ -159,7 +152,7 @@ fn hexdump(data: &[u8], base_offset: usize, max_bytes: usize) {
     }
 }
 
-fn print_section_header(sec: &Section, _data: &[u8], index: usize) {
+fn print_section_header(sec: &Section, index: usize) {
     let role = SECTION_ROLES.get(index).copied().unwrap_or("unknown");
     println!();
     println!("Section {} @ 0x{:08x}  [{}]", index, sec.file_offset, role);
@@ -179,7 +172,7 @@ fn print_sections(vdf: &VdfFile) {
     println!("=== Sections ({}) ===", vdf.sections.len());
 
     for (i, sec) in vdf.sections.iter().enumerate() {
-        print_section_header(sec, &vdf.data, i);
+        print_section_header(sec, i);
 
         let data_start = sec.data_offset();
         let region_end = sec.region_end.min(vdf.data.len());
@@ -206,7 +199,7 @@ fn classify_name(name: &str) -> &'static str {
         "group"
     } else if name.starts_with('-') {
         "unit"
-    } else if (name.len() == 1 && name.chars().next().is_some_and(|c| !c.is_alphanumeric()))
+    } else if (name.len() == 1 && name.starts_with(|c: char| !c.is_alphanumeric()))
         || VENSIM_BUILTINS
             .iter()
             .any(|&b| b.eq_ignore_ascii_case(name))
@@ -607,8 +600,7 @@ fn print_summary(vdf: &VdfFile, file_size: usize) {
                 && (VENSIM_BUILTINS
                     .iter()
                     .any(|&b| b.eq_ignore_ascii_case(name))
-                    || (name.len() == 1
-                        && name.chars().next().is_some_and(|c| !c.is_alphanumeric())))
+                    || (name.len() == 1 && name.starts_with(|c: char| !c.is_alphanumeric())))
         })
         .count();
     let n_model_names = vdf.names.len() - n_system - n_groups - n_units - n_builtins;
