@@ -331,7 +331,7 @@ impl<N: NodeId> Graph<N> {
     /// Topological sort for directed acyclic graphs. Returns `None` if the graph
     /// is undirected or contains cycles.
     pub fn topological_sort(&self) -> Option<Vec<N>> {
-        if !self.is_directed || self.has_cycle() {
+        if !self.is_directed {
             return None;
         }
 
