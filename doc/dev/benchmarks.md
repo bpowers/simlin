@@ -63,7 +63,7 @@ cargo bench -p simlin-engine --bench compiler --no-run 2>&1 | grep -o 'target/[^
 
 ```bash
 # Record a profile (run a single benchmark to keep the profile focused)
-perf record -g -- target/release/deps/compiler-* --bench --profile-time 10 parse_mdl/clearn
+perf record -g -- target/release/deps/compiler-* --bench parse_mdl/clearn
 
 # View the report
 perf report
@@ -76,7 +76,7 @@ Alternatively, use `cargo-flamegraph`:
 
 ```bash
 cargo install flamegraph
-cargo flamegraph --bench compiler -- --bench --profile-time 10 parse_mdl/clearn
+cargo flamegraph --bench compiler -- --bench parse_mdl/clearn
 ```
 
 ### CPU profiling with callgrind (valgrind)
@@ -84,9 +84,9 @@ cargo flamegraph --bench compiler -- --bench --profile-time 10 parse_mdl/clearn
 Callgrind provides instruction-level profiling and call graphs. It runs the program under emulation, so it's slower but gives precise, deterministic results unaffected by system load.
 
 ```bash
-# Profile a specific benchmark (use --profile-time to run long enough)
+# Profile a specific benchmark
 valgrind --tool=callgrind --callgrind-out-file=callgrind.out \
-    target/release/deps/compiler-* --bench --profile-time 5 parse_mdl/clearn
+    target/release/deps/compiler-* --bench parse_mdl/clearn
 
 # Analyze results
 callgrind_annotate callgrind.out
@@ -100,7 +100,7 @@ DHAT tracks every allocation: size, lifetime, and access patterns. Useful for fi
 
 ```bash
 valgrind --tool=dhat \
-    target/release/deps/compiler-* --bench --profile-time 5 parse_mdl/clearn
+    target/release/deps/compiler-* --bench parse_mdl/clearn
 
 # Opens an interactive viewer in Firefox/Chrome
 # The output file is dhat-out-<pid>.txt
@@ -113,7 +113,7 @@ View results at https://valgrind.org/docs/manual/dh-manual.html or use `dh_view.
 [heaptrack](https://github.com/KDE/heaptrack) is lighter-weight than DHAT and produces flamegraphs of allocation sites.
 
 ```bash
-heaptrack target/release/deps/compiler-* --bench --profile-time 5 parse_mdl/clearn
+heaptrack target/release/deps/compiler-* --bench parse_mdl/clearn
 
 # Analyze (TUI)
 heaptrack_print heaptrack.compiler-*.zst
@@ -129,11 +129,11 @@ heaptrack_gui heaptrack.compiler-*.zst
 ```bash
 # CPU profile
 LD_PRELOAD=/usr/lib/libprofiler.so CPUPROFILE=cpu.prof \
-    target/release/deps/compiler-* --bench --profile-time 10 parse_mdl/clearn
+    target/release/deps/compiler-* --bench parse_mdl/clearn
 
 # Heap profile
 LD_PRELOAD=/usr/lib/libtcmalloc.so HEAPPROFILE=heap.prof \
-    target/release/deps/compiler-* --bench --profile-time 10 parse_mdl/clearn
+    target/release/deps/compiler-* --bench parse_mdl/clearn
 
 # View (requires google-pprof or go tool pprof)
 pprof --web target/release/deps/compiler-* cpu.prof
@@ -183,8 +183,8 @@ HTML comparison reports are generated in `target/criterion/<group>/report/index.
 
 ## Tips
 
-- Use `--profile-time <seconds>` with criterion to run the benchmark loop for a fixed duration (useful for profiling tools that need sustained CPU activity).
 - Use `-- <filter>` to run only matching benchmarks (e.g., `-- parse_mdl/clearn`).
 - Build in release mode (`cargo bench` does this automatically) for representative profiles.
-- When using valgrind tools, the 10-30x slowdown means you should reduce iteration counts or use `--profile-time` with a shorter duration.
+- The benchmarks configure `measurement_time` (10-15s) in code, which gives external profilers enough sustained CPU activity to collect meaningful data.
+- When using valgrind tools, the 10-30x slowdown means you may want to reduce `measurement_time` in the benchmark source or filter to a single benchmark.
 - For allocation analysis, compare total allocation counts before and after a change rather than absolute numbers — the counts are deterministic across runs.

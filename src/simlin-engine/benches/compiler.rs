@@ -107,7 +107,11 @@ fn bench_project_build(c: &mut Criterion) {
             BenchmarkId::from_parameter(fixture.name),
             &datamodel,
             |b, datamodel| {
-                b.iter(|| black_box(CompiledProject::from(datamodel.clone())));
+                b.iter_batched(
+                    || datamodel.clone(),
+                    |dm| black_box(CompiledProject::from(dm)),
+                    criterion::BatchSize::SmallInput,
+                );
             },
         );
     }
