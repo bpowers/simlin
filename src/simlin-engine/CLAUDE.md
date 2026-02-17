@@ -82,4 +82,6 @@ Equation text flows through these stages in order:
 - **`tests/roundtrip.rs`** - XMILE/MDL roundtrip tests
 - **`tests/vm_alloc.rs`** - VM memory allocation tests
 - **`tests/mdl_equivalence.rs`** - MDL parser equivalence vs C++ xmutil
-- **`benches/simulation.rs`**, **`benches/array_ops.rs`** - Performance benchmarks
+- **`benches/compiler.rs`** - Compiler pipeline benchmarks on real models (WRLD3, C-LEARN)
+- **`benches/simulation.rs`** - VM execution and compilation benchmarks (synthetic models)
+- **`benches/array_ops.rs`** - Array operation benchmarks (sum, broadcast, element-wise)

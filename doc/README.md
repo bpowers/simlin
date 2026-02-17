@@ -8,6 +8,7 @@
 ## Development Standards
 
 - [dev/commands.md](dev/commands.md) -- Build, test, lint commands for all languages
+- [dev/benchmarks.md](dev/benchmarks.md) -- Running and profiling benchmarks (criterion, valgrind, perf, gperftools)
 - [dev/rust.md](dev/rust.md) -- Rust development standards
 - [dev/typescript.md](dev/typescript.md) -- TypeScript/React development standards
 - [dev/python.md](dev/python.md) -- Python (pysimlin) development standards

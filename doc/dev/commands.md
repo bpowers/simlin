@@ -42,6 +42,17 @@ Run at the start of every session:
 
 Install: `cargo install cargo-llvm-cov`
 
+## Benchmarks
+
+| Command | Description |
+|---------|-------------|
+| `cargo bench -p simlin-engine` | Run all Rust benchmarks |
+| `cargo bench -p simlin-engine --bench compiler` | Compiler pipeline benchmarks (real models) |
+| `cargo bench -p simlin-engine --bench simulation` | Simulation/VM benchmarks |
+| `cargo bench -p simlin-engine --bench array_ops` | Array operation benchmarks |
+
+Results are saved in `target/criterion/` with HTML reports. See [benchmarks.md](benchmarks.md) for profiling instructions.
+
 ## Protobuf
 
 | Command | Description |
