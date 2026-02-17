@@ -3,4 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 pub mod graph;
+pub mod metadata;
 pub mod sfdp;
+pub mod text;
+pub mod uid;
