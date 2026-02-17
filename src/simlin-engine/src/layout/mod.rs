@@ -1892,14 +1892,14 @@ pub fn generate_best_layout(model: &datamodel::Model) -> Result<datamodel::Stock
 
     let config = LayoutConfig::default();
     let seeds = LAYOUT_SEEDS;
+    let metadata = compute_metadata(model);
 
     let results: Vec<Result<LayoutResult, String>> = seeds
         .par_iter()
         .map(|&seed| {
             let mut cfg = config.clone();
             cfg.annealing_random_seed = seed;
-            let metadata = compute_metadata(model);
-            let engine = LayoutEngine::new(cfg, model, metadata);
+            let engine = LayoutEngine::new(cfg, model, metadata.clone());
             let view = engine.generate_layout()?;
             let crossings = count_view_crossings(&view);
             Ok(LayoutResult {

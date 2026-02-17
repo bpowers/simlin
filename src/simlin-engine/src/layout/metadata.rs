@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// A stock-flow chain: one or more stocks connected by flows.
+#[derive(Clone)]
 pub struct StockFlowChain {
     pub stocks: Vec<String>,
     pub flows: Vec<String>,
@@ -13,12 +14,14 @@ pub struct StockFlowChain {
 }
 
 /// A dominant period discovered via LTM analysis.
+#[derive(Clone)]
 pub struct DominantPeriod {
     pub period: f64,
     pub strength: f64,
 }
 
 /// A feedback loop discovered via LTM analysis.
+#[derive(Clone)]
 pub struct FeedbackLoop {
     pub name: String,
     pub polarity: LoopPolarity,
@@ -51,6 +54,7 @@ impl FeedbackLoop {
 }
 
 /// Pre-computed metadata for driving layout.
+#[derive(Clone)]
 pub struct ComputedMetadata {
     pub chains: Vec<StockFlowChain>,
     pub feedback_loops: Vec<FeedbackLoop>,
