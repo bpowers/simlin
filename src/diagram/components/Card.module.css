@@ -20,12 +20,8 @@
   padding: 16px;
 }
 
-.cardContent:last-child {
-  padding-bottom: 24px;
-}
-
 .cardActions {
   display: flex;
   align-items: center;
-  padding: 8px;
+  padding: 8px 16px;
 }

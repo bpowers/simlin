@@ -25,9 +25,8 @@
 .menuItem {
   display: flex;
   align-items: center;
-  padding: 6px 16px;
-  min-height: 48px;
-  font-size: 1rem;
+  padding: 8px 16px;
+  font-size: 0.875rem;
   line-height: 1.5;
   cursor: pointer;
   color: rgba(0, 0, 0, 0.87);

@@ -3,20 +3,21 @@
 }
 
 .outer {
-  display: table;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   position: absolute;
   height: 100%;
   width: 100%;
 }
 
 .middle {
-  display: table-cell;
-  vertical-align: middle;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .inner {
-  margin-left: auto;
-  margin-right: auto;
   text-align: center;
 }
 
@@ -24,10 +25,16 @@
   display: inline-block;
 }
 
+.optionsButtons {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
 .optionsButtons button {
-  margin: var(--spacing-1);
-  width: 220px;
-  justify-content: left;
+  width: 240px;
+  justify-content: flex-start;
 }
 
 .recoverInstructions {
@@ -43,8 +50,28 @@
 .logo {
   width: 160px;
   height: 160px;
+  margin-bottom: 24px;
+}
+
+.appleButton {
+  background-color: black;
+}
+
+.appleButton:hover {
+  background-color: #333;
+}
+
+.emailButton {
+  background-color: #db4437;
+}
+
+.emailButton:hover {
+  background-color: #c33d2e;
 }
 
 .emailForm {
   text-align: left;
+  min-width: 275px;
+  max-width: 360px;
+  width: 100%;
 }
