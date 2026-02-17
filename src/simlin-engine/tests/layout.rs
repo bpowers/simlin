@@ -12,9 +12,13 @@ use simlin_engine::layout::{generate_best_layout, generate_layout};
 use simlin_engine::open_xmile;
 
 fn load_model(path: &str) -> simlin_engine::datamodel::Model {
-    let file_path = format!("../../{}", path);
-    let file =
-        File::open(&file_path).unwrap_or_else(|e| panic!("failed to open {}: {}", file_path, e));
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("could not determine repo root");
+    let file_path = repo_root.join(path);
+    let file = File::open(&file_path)
+        .unwrap_or_else(|e| panic!("failed to open {}: {}", file_path.display(), e));
     let mut reader = BufReader::new(file);
     let project = open_xmile(&mut reader).unwrap_or_else(|e| {
         panic!("failed to parse {}: {:?}", path, e);

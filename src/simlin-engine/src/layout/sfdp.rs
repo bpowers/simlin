@@ -322,6 +322,8 @@ impl<'a, N: NodeId> Sfdp<'a, N> {
         let mut parents: BTreeMap<N, N> = BTreeMap::new();
         for node in self.graph.nodes() {
             if self.graph.degree(node) == 1
+                && !self.graph.is_pinned(node)
+                && self.graph.is_in_rigid_group(node).is_none()
                 && let Some(mut neighbors) = self.graph.neighbors(node)
                 && let Some((neighbor, _weight)) = neighbors.next()
             {
@@ -558,5 +560,45 @@ mod tests {
         let config = SfdpConfig::default();
         let layout = compute_layout(&cg, &config, 0);
         assert!(layout.is_empty());
+    }
+
+    #[test]
+    fn test_beautify_leaves_skips_pinned() {
+        // Star graph: hub with 3 leaves, one leaf is pinned
+        let mut gb = GraphBuilder::new_undirected();
+        gb.add_edge("hub".into(), "leaf1".into(), 1.0);
+        gb.add_edge("hub".into(), "leaf2".into(), 1.0);
+        gb.add_edge("hub".into(), "pinned_leaf".into(), 1.0);
+
+        let mut cb = ConstrainedGraphBuilder::new(gb.build());
+        cb.pin(&["pinned_leaf".into()]);
+        let cg = cb.build();
+
+        let pinned_pos = Position::new(99.0, 99.0);
+        let mut initial = BTreeMap::new();
+        initial.insert("hub".to_string(), Position::new(0.0, 0.0));
+        initial.insert("leaf1".to_string(), Position::new(1.0, 0.0));
+        initial.insert("leaf2".to_string(), Position::new(0.0, 1.0));
+        initial.insert("pinned_leaf".to_string(), pinned_pos);
+
+        let config = SfdpConfig {
+            beautify_leaves: true,
+            ..SfdpConfig::default()
+        };
+        let layout = compute_layout_from_initial(&cg, &config, &initial, 42);
+
+        let pos = layout.get("pinned_leaf").unwrap();
+        assert!(
+            (pos.x - pinned_pos.x).abs() < 1e-15,
+            "pinned leaf x should not change: expected {}, got {}",
+            pinned_pos.x,
+            pos.x
+        );
+        assert!(
+            (pos.y - pinned_pos.y).abs() < 1e-15,
+            "pinned leaf y should not change: expected {}, got {}",
+            pinned_pos.y,
+            pos.y
+        );
     }
 }
