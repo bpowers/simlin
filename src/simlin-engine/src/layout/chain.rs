@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use super::annealing::{LineSegment, run_annealing_with_filter};
 use super::config::LayoutConfig;
 use super::graph::{ConstrainedGraphBuilder, GraphBuilder, Position};
 use super::metadata::{ComputedMetadata, StockFlowChain};
@@ -207,6 +208,35 @@ pub fn compute_chain_positions(
     };
 
     let layout = compute_layout_from_initial(&graph, &sfdp_config, &initial, 42);
+
+    let build_segments = |candidate_layout: &BTreeMap<String, Position>| -> Vec<LineSegment> {
+        let mut segments = Vec::new();
+        for edge in graph.edges() {
+            if let (Some(&from), Some(&to)) = (
+                candidate_layout.get(&edge.from),
+                candidate_layout.get(&edge.to),
+            ) {
+                segments.push(LineSegment {
+                    start: from,
+                    end: to,
+                    from_node: edge.from.clone(),
+                    to_node: edge.to.clone(),
+                });
+            }
+        }
+        segments
+    };
+
+    // During chain-level annealing only move chain nodes; synthetic chain cloud
+    // nodes stay anchored to preserve endpoint semantics.
+    let layout = run_annealing_with_filter(
+        &layout,
+        build_segments,
+        config,
+        config.annealing_random_seed,
+        |node_id: &String| node_id.starts_with("chain_"),
+    )
+    .layout;
 
     // Extract only the chain node positions
     let chain_positions: BTreeMap<usize, Position> = (0..n)

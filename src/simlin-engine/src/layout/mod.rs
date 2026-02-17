@@ -21,14 +21,14 @@ use crate::datamodel;
 use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
 use crate::datamodel::{Rect, ViewElement};
 
-use self::annealing::{FlowTemplate, LineSegment};
+use self::annealing::{FlowTemplate, LineSegment, run_annealing_with_filter};
 use self::chain::{DIAGRAM_ORIGIN_MARGIN, compute_chain_positions, make_cloud_node_ident};
 use self::config::LayoutConfig;
 use self::connector::{
     FlowOrientation, calc_stock_flow_arc_angle, calculate_loop_arc_angle, compute_flow_orientation,
 };
 use self::graph::{ConstrainedGraphBuilder, Graph, GraphBuilder, Layout, Position};
-use self::metadata::{ComputedMetadata, StockFlowChain};
+use self::metadata::{ComputedMetadata, LoopPolarity, StockFlowChain};
 use self::placement::{
     calculate_optimal_label_side, calculate_restricted_label_side, normalize_coordinates,
 };
@@ -118,6 +118,9 @@ impl<'a> LayoutEngine<'a> {
         let mut display_names = HashMap::new();
 
         for var in &model.variables {
+            if matches!(var, datamodel::Variable::Module(_)) {
+                continue;
+            }
             let ident = var.get_ident();
             let canonical = canonicalize(ident).into_owned();
             display_names.insert(canonical, ident.to_string());
@@ -195,6 +198,8 @@ impl<'a> LayoutEngine<'a> {
 
         // Phase 6: Apply feedback loop curvature
         self.apply_feedback_loop_curvature();
+
+        self.validate_view_completeness()?;
 
         // Phase 7: Compute ViewBox
         let view_box = if !self.elements.is_empty() && self.bounds.min_x != f64::MAX {
@@ -645,7 +650,8 @@ impl<'a> LayoutEngine<'a> {
             .iter()
             .filter_map(|var| match var {
                 datamodel::Variable::Flow(f) => {
-                    f.uid.map(|uid| (uid, canonicalize(&f.ident).into_owned()))
+                    let ident = canonicalize(&f.ident).into_owned();
+                    self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
                 }
                 _ => None,
             })
@@ -709,7 +715,8 @@ impl<'a> LayoutEngine<'a> {
             .iter()
             .filter_map(|var| match var {
                 datamodel::Variable::Flow(f) => {
-                    f.uid.map(|uid| (uid, canonicalize(&f.ident).into_owned()))
+                    let ident = canonicalize(&f.ident).into_owned();
+                    self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
                 }
                 _ => None,
             })
@@ -758,7 +765,12 @@ impl<'a> LayoutEngine<'a> {
             if let ViewElement::Cloud(cloud) = elem {
                 let flow_ident = match flow_uid_to_ident.get(&cloud.flow_uid) {
                     Some(ident) => ident.clone(),
-                    None => continue,
+                    None => {
+                        return Err(format!(
+                            "build_full_graph: cloud {} references unknown flow UID {}",
+                            cloud.uid, cloud.flow_uid
+                        ));
+                    }
                 };
 
                 let cloud_ident = make_cloud_node_ident(cloud.uid);
@@ -770,10 +782,11 @@ impl<'a> LayoutEngine<'a> {
                     node_index += 1;
                 }
 
-                if let Some(flow_node) = var_to_node.get(&flow_ident) {
-                    let cloud_node = var_to_node[&cloud_ident].clone();
-                    builder.add_edge(flow_node.clone(), cloud_node, 1.0);
-                }
+                let flow_node = var_to_node.get(&flow_ident).ok_or_else(|| {
+                    format!("build_full_graph: missing node for flow '{}'", flow_ident)
+                })?;
+                let cloud_node = var_to_node[&cloud_ident].clone();
+                builder.add_edge(flow_node.clone(), cloud_node, 1.0);
 
                 self.cloud_ident_to_uid
                     .insert(cloud_ident.clone(), cloud.uid);
@@ -931,7 +944,104 @@ impl<'a> LayoutEngine<'a> {
             self.config.annealing_random_seed,
         );
 
-        Ok(final_layout)
+        let node_to_ident: HashMap<String, String> = var_to_node
+            .iter()
+            .map(|(ident, node_id)| (node_id.clone(), ident.clone()))
+            .collect();
+        let stock_inflows: HashMap<String, HashSet<String>> = self
+            .metadata
+            .stock_to_inflows
+            .iter()
+            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+            .collect();
+        let stock_outflows: HashMap<String, HashSet<String>> = self
+            .metadata
+            .stock_to_outflows
+            .iter()
+            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+            .collect();
+        let aux_node_ids: HashSet<String> = self
+            .model
+            .variables
+            .iter()
+            .filter_map(|var| {
+                if let datamodel::Variable::Aux(aux) = var {
+                    let canonical = canonicalize(&aux.ident);
+                    var_to_node.get(canonical.as_ref()).cloned()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let build_segments = |candidate_layout: &Layout<String>| -> Vec<LineSegment> {
+            let mut segments = Vec::new();
+
+            for edge in constrained_graph.edges() {
+                let (Some(&from_pos), Some(&to_pos)) = (
+                    candidate_layout.get(&edge.from),
+                    candidate_layout.get(&edge.to),
+                ) else {
+                    continue;
+                };
+
+                if let (Some(from_ident), Some(to_ident)) =
+                    (node_to_ident.get(&edge.from), node_to_ident.get(&edge.to))
+                    // In dep_graph orientation (var -> dependencies), structural
+                    // stock bookkeeping edges are stock -> flow and are not
+                    // rendered as connectors.
+                    && is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows)
+                {
+                    continue;
+                }
+
+                segments.push(LineSegment {
+                    start: from_pos,
+                    end: to_pos,
+                    from_node: edge.from.clone(),
+                    to_node: edge.to.clone(),
+                });
+            }
+
+            for (flow_ident, tmpl) in &self.flow_templates {
+                if tmpl.offsets.len() < 2 {
+                    continue;
+                }
+                let Some(node_id) = var_to_node.get(flow_ident) else {
+                    continue;
+                };
+                let Some(&center) = candidate_layout.get(node_id) else {
+                    continue;
+                };
+
+                let points: Vec<Position> = tmpl
+                    .offsets
+                    .iter()
+                    .map(|offset| Position::new(center.x + offset.x, center.y + offset.y))
+                    .collect();
+
+                for i in 0..points.len() - 1 {
+                    segments.push(LineSegment {
+                        start: points[i],
+                        end: points[i + 1],
+                        from_node: format!("{}#{}", flow_ident, i),
+                        to_node: format!("{}#{}", flow_ident, i + 1),
+                    });
+                }
+            }
+
+            segments
+        };
+
+        let annealed = run_annealing_with_filter(
+            &final_layout,
+            build_segments,
+            &self.config,
+            self.config.annealing_random_seed,
+            |node_id: &String| aux_node_ids.contains(node_id),
+        );
+
+        Ok(annealed.layout)
     }
 
     /// Update all element coordinates from SFDP results.
@@ -952,13 +1062,11 @@ impl<'a> LayoutEngine<'a> {
             .variables
             .iter()
             .filter_map(|var| {
-                let uid = match var {
-                    datamodel::Variable::Stock(s) => s.uid,
-                    datamodel::Variable::Flow(f) => f.uid,
-                    datamodel::Variable::Aux(a) => a.uid,
-                    datamodel::Variable::Module(m) => m.uid,
-                }?;
-                Some((uid, canonicalize(var.get_ident()).into_owned()))
+                if matches!(var, datamodel::Variable::Module(_)) {
+                    return None;
+                }
+                let ident = canonicalize(var.get_ident()).into_owned();
+                self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
             })
             .collect();
 
@@ -1083,8 +1191,13 @@ impl<'a> LayoutEngine<'a> {
             .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
             .collect();
 
-        for (from_ident, to_idents) in &dep_entries {
-            for to_ident in to_idents {
+        for (dependent_ident, dependencies) in &dep_entries {
+            for dependency_ident in dependencies {
+                // Metadata stores var -> dependencies, but view connectors are
+                // dependency -> dependent.
+                let from_ident = dependency_ident.as_str();
+                let to_ident = dependent_ident.as_str();
+
                 // Skip structural flow-to-stock connections
                 if is_structural_flow_stock(from_ident, to_ident, &stock_inflows, &stock_outflows) {
                     continue;
@@ -1095,17 +1208,18 @@ impl<'a> LayoutEngine<'a> {
                     continue;
                 }
 
-                let from_uid = match self.uid_manager.get_uid(from_ident) {
-                    Some(uid) => uid,
-                    None => continue,
-                };
-                let to_uid = match self.uid_manager.get_uid(to_ident) {
-                    Some(uid) => uid,
-                    None => continue,
-                };
+                let from_uid = self.uid_manager.get_uid(from_ident).ok_or_else(|| {
+                    format!("create_connectors: missing UID for source '{}'", from_ident)
+                })?;
+                let to_uid = self.uid_manager.get_uid(to_ident).ok_or_else(|| {
+                    format!("create_connectors: missing UID for target '{}'", to_ident)
+                })?;
 
                 if from_uid == 0 || to_uid == 0 {
-                    continue;
+                    return Err(format!(
+                        "create_connectors: invalid UID 0 in edge {} -> {}",
+                        from_ident, to_ident
+                    ));
                 }
 
                 let link_uid = self.uid_manager.alloc("");
@@ -1145,13 +1259,11 @@ impl<'a> LayoutEngine<'a> {
             .variables
             .iter()
             .filter_map(|var| {
-                let uid = match var {
-                    datamodel::Variable::Stock(s) => s.uid,
-                    datamodel::Variable::Flow(f) => f.uid,
-                    datamodel::Variable::Aux(a) => a.uid,
-                    datamodel::Variable::Module(m) => m.uid,
-                }?;
-                Some((uid, canonicalize(var.get_ident()).into_owned()))
+                if matches!(var, datamodel::Variable::Module(_)) {
+                    return None;
+                }
+                let ident = canonicalize(var.get_ident()).into_owned();
+                self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
             })
             .collect();
 
@@ -1321,13 +1433,11 @@ impl<'a> LayoutEngine<'a> {
             .variables
             .iter()
             .filter_map(|var| {
-                let uid = match var {
-                    datamodel::Variable::Stock(s) => s.uid,
-                    datamodel::Variable::Flow(f) => f.uid,
-                    datamodel::Variable::Aux(a) => a.uid,
-                    datamodel::Variable::Module(m) => m.uid,
-                }?;
-                Some((uid, canonicalize(var.get_ident()).into_owned()))
+                if matches!(var, datamodel::Variable::Module(_)) {
+                    return None;
+                }
+                let ident = canonicalize(var.get_ident()).into_owned();
+                self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
             })
             .collect();
 
@@ -1481,6 +1591,68 @@ impl<'a> LayoutEngine<'a> {
             .cloned()
             .unwrap_or_else(|| canonical_ident.to_string())
     }
+
+    /// Ensure every stock/flow/aux variable in the model has a corresponding
+    /// rendered view element.
+    fn validate_view_completeness(&self) -> Result<(), String> {
+        let mut expected_stocks = BTreeSet::new();
+        let mut expected_flows = BTreeSet::new();
+        let mut expected_auxes = BTreeSet::new();
+
+        for var in &self.model.variables {
+            match var {
+                datamodel::Variable::Stock(s) => {
+                    expected_stocks.insert(canonicalize(&s.ident).into_owned());
+                }
+                datamodel::Variable::Flow(f) => {
+                    expected_flows.insert(canonicalize(&f.ident).into_owned());
+                }
+                datamodel::Variable::Aux(a) => {
+                    expected_auxes.insert(canonicalize(&a.ident).into_owned());
+                }
+                datamodel::Variable::Module(_) => {}
+            }
+        }
+
+        let mut found_stocks = BTreeSet::new();
+        let mut found_flows = BTreeSet::new();
+        let mut found_auxes = BTreeSet::new();
+
+        for elem in &self.elements {
+            match elem {
+                ViewElement::Stock(s) => {
+                    found_stocks.insert(canonicalize(&s.name).into_owned());
+                }
+                ViewElement::Flow(f) => {
+                    found_flows.insert(canonicalize(&f.name).into_owned());
+                }
+                ViewElement::Aux(a) => {
+                    found_auxes.insert(canonicalize(&a.name).into_owned());
+                }
+                _ => {}
+            }
+        }
+
+        let mut missing = Vec::new();
+        for ident in expected_stocks.difference(&found_stocks) {
+            missing.push(format!("stock '{}'", ident));
+        }
+        for ident in expected_flows.difference(&found_flows) {
+            missing.push(format!("flow '{}'", ident));
+        }
+        for ident in expected_auxes.difference(&found_auxes) {
+            missing.push(format!("aux '{}'", ident));
+        }
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+        missing.sort();
+        Err(format!(
+            "layout incomplete: missing view elements for {}",
+            missing.join(", ")
+        ))
+    }
 }
 
 /// Check if a dependency edge is a structural flow->stock connection (already
@@ -1534,33 +1706,59 @@ pub fn compute_metadata(model: &datamodel::Model) -> ComputedMetadata {
     let mut stock_to_inflows: HashMap<String, Vec<String>> = HashMap::new();
     let mut stock_to_outflows: HashMap<String, Vec<String>> = HashMap::new();
     let mut flow_to_stocks: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    let mut all_flows: BTreeSet<String> = BTreeSet::new();
+    let mut uid_to_ident: HashMap<i32, String> = HashMap::new();
 
-    // Collect stock inflows/outflows
+    // Collect stock inflows/outflows and known flow identities.
     for var in &model.variables {
-        if let datamodel::Variable::Stock(stock) = var {
-            let stock_ident = canonicalize(&stock.ident).into_owned();
-            let inflows: Vec<String> = stock
-                .inflows
-                .iter()
-                .map(|f| canonicalize(f).into_owned())
-                .collect();
-            let outflows: Vec<String> = stock
-                .outflows
-                .iter()
-                .map(|f| canonicalize(f).into_owned())
-                .collect();
+        match var {
+            datamodel::Variable::Stock(stock) => {
+                let stock_ident = canonicalize(&stock.ident).into_owned();
+                if let Some(uid) = stock.uid {
+                    uid_to_ident.insert(uid, stock_ident.clone());
+                }
 
-            for f in &inflows {
-                let entry = flow_to_stocks.entry(f.clone()).or_insert((None, None));
-                entry.1 = Some(stock_ident.clone());
-            }
-            for f in &outflows {
-                let entry = flow_to_stocks.entry(f.clone()).or_insert((None, None));
-                entry.0 = Some(stock_ident.clone());
-            }
+                let inflows: Vec<String> = stock
+                    .inflows
+                    .iter()
+                    .map(|f| canonicalize(f).into_owned())
+                    .collect();
+                let outflows: Vec<String> = stock
+                    .outflows
+                    .iter()
+                    .map(|f| canonicalize(f).into_owned())
+                    .collect();
 
-            stock_to_inflows.insert(stock_ident.clone(), inflows);
-            stock_to_outflows.insert(stock_ident, outflows);
+                for f in &inflows {
+                    let entry = flow_to_stocks.entry(f.clone()).or_insert((None, None));
+                    entry.1 = Some(stock_ident.clone());
+                    all_flows.insert(f.clone());
+                }
+                for f in &outflows {
+                    let entry = flow_to_stocks.entry(f.clone()).or_insert((None, None));
+                    entry.0 = Some(stock_ident.clone());
+                    all_flows.insert(f.clone());
+                }
+
+                stock_to_inflows.insert(stock_ident.clone(), inflows);
+                stock_to_outflows.insert(stock_ident, outflows);
+            }
+            datamodel::Variable::Flow(flow) => {
+                let flow_ident = canonicalize(&flow.ident).into_owned();
+                all_flows.insert(flow_ident.clone());
+                flow_to_stocks
+                    .entry(flow_ident.clone())
+                    .or_insert((None, None));
+                if let Some(uid) = flow.uid {
+                    uid_to_ident.insert(uid, flow_ident);
+                }
+            }
+            datamodel::Variable::Aux(aux) => {
+                if let Some(uid) = aux.uid {
+                    uid_to_ident.insert(uid, canonicalize(&aux.ident).into_owned());
+                }
+            }
+            datamodel::Variable::Module(_) => {}
         }
     }
 
@@ -1569,10 +1767,14 @@ pub fn compute_metadata(model: &datamodel::Model) -> ComputedMetadata {
     let all_idents: HashSet<String> = model
         .variables
         .iter()
+        .filter(|v| !matches!(v, datamodel::Variable::Module(_)))
         .map(|v| canonicalize(v.get_ident()).into_owned())
         .collect();
 
     for var in &model.variables {
+        if matches!(var, datamodel::Variable::Module(_)) {
+            continue;
+        }
         let var_ident = canonicalize(var.get_ident()).into_owned();
         dep_graph.entry(var_ident.clone()).or_default();
 
@@ -1597,39 +1799,78 @@ pub fn compute_metadata(model: &datamodel::Model) -> ComputedMetadata {
                 .insert(var_ident.clone());
         }
 
-        // Add structural stock-flow dependencies
+        // Add structural stock-flow dependencies. In this metadata shape,
+        // dep_graph stores var -> dependencies, so stocks depend on their
+        // inflow/outflow variables.
         if let datamodel::Variable::Stock(stock) = var {
             for inflow in &stock.inflows {
                 let flow_ident = canonicalize(inflow).into_owned();
                 dep_graph
-                    .entry(flow_ident.clone())
-                    .or_default()
-                    .insert(var_ident.clone());
-                reverse_dep_graph
                     .entry(var_ident.clone())
                     .or_default()
-                    .insert(flow_ident);
+                    .insert(flow_ident.clone());
+                reverse_dep_graph
+                    .entry(flow_ident)
+                    .or_default()
+                    .insert(var_ident.clone());
             }
             for outflow in &stock.outflows {
                 let flow_ident = canonicalize(outflow).into_owned();
                 dep_graph
-                    .entry(flow_ident.clone())
-                    .or_default()
-                    .insert(var_ident.clone());
-                reverse_dep_graph
                     .entry(var_ident.clone())
                     .or_default()
-                    .insert(flow_ident);
+                    .insert(flow_ident.clone());
+                reverse_dep_graph
+                    .entry(flow_ident)
+                    .or_default()
+                    .insert(var_ident.clone());
             }
         }
     }
 
     // Detect stock-flow chains
-    let chains = detect_chains(&stock_to_inflows, &stock_to_outflows, &flow_to_stocks);
+    let chains = detect_chains(
+        &stock_to_inflows,
+        &stock_to_outflows,
+        &flow_to_stocks,
+        &all_flows,
+    );
+
+    let mut feedback_loops = Vec::new();
+    for (idx, loop_md) in model.loop_metadata.iter().enumerate() {
+        if loop_md.deleted {
+            continue;
+        }
+        let mut variables: Vec<String> = loop_md
+            .uids
+            .iter()
+            .filter_map(|uid| uid_to_ident.get(uid).cloned())
+            .collect();
+        if variables.len() < 2 {
+            continue;
+        }
+        if variables.first() != variables.last()
+            && let Some(first) = variables.first().cloned()
+        {
+            variables.push(first);
+        }
+
+        feedback_loops.push(metadata::FeedbackLoop {
+            name: if loop_md.name.is_empty() {
+                format!("loop_{}", idx + 1)
+            } else {
+                loop_md.name.clone()
+            },
+            polarity: LoopPolarity::Undetermined,
+            variables,
+            importance_series: Vec::new(),
+            dominant_period: None,
+        });
+    }
 
     ComputedMetadata {
         chains,
-        feedback_loops: Vec::new(), // LTM integration is a follow-up
+        feedback_loops,
         dep_graph,
         reverse_dep_graph,
         constants,
@@ -1651,30 +1892,34 @@ fn extract_equation_deps(var: &datamodel::Variable, all_idents: &HashSet<String>
         None => return Vec::new(),
     };
 
-    let equation_text = match equation {
-        datamodel::Equation::Scalar(text, _) => text.as_str(),
-        datamodel::Equation::ApplyToAll(_, text, _) => text.as_str(),
-        datamodel::Equation::Arrayed(_, entries) => {
-            // Use first equation as representative
-            if let Some((_, text, _, _)) = entries.first() {
-                text.as_str()
-            } else {
-                return Vec::new();
-            }
-        }
+    let equation_texts: Vec<&str> = match equation {
+        datamodel::Equation::Scalar(text, _) => vec![text.as_str()],
+        datamodel::Equation::ApplyToAll(_, text, _) => vec![text.as_str()],
+        datamodel::Equation::Arrayed(_, entries) => entries
+            .iter()
+            .map(|(_, text, _, _)| text.as_str())
+            .collect(),
     };
+    if equation_texts.is_empty() {
+        return Vec::new();
+    }
 
     // Tokenize equation and find references to known variables
     let mut deps = Vec::new();
-    let lower = equation_text.to_lowercase();
+    let lowered_texts: Vec<String> = equation_texts
+        .iter()
+        .map(|text| text.to_lowercase())
+        .collect();
+    let var_ident = canonicalize(var.get_ident());
 
     for ident in all_idents {
-        let var_ident = canonicalize(var.get_ident());
         if ident == var_ident.as_ref() {
             continue; // Skip self-references
         }
-        // Check if the ident appears as a word in the equation
-        if contains_ident(&lower, ident) {
+        if lowered_texts
+            .iter()
+            .any(|equation_lower| contains_ident(equation_lower, ident))
+        {
             deps.push(ident.clone());
         }
     }
@@ -1710,6 +1955,7 @@ fn detect_chains(
     stock_to_inflows: &HashMap<String, Vec<String>>,
     stock_to_outflows: &HashMap<String, Vec<String>>,
     flow_to_stocks: &HashMap<String, (Option<String>, Option<String>)>,
+    all_flows: &BTreeSet<String>,
 ) -> Vec<StockFlowChain> {
     // Collect all stocks
     let all_stocks: BTreeSet<String> = stock_to_inflows
@@ -1719,9 +1965,9 @@ fn detect_chains(
         .collect();
 
     if all_stocks.is_empty() {
-        // Create chains for flows with no stocks
+        // Create chains for all flows when there are no stocks.
         let mut chains = Vec::new();
-        for flow_ident in flow_to_stocks.keys() {
+        for flow_ident in all_flows {
             chains.push(StockFlowChain {
                 stocks: Vec::new(),
                 flows: vec![flow_ident.clone()],
@@ -1734,6 +1980,7 @@ fn detect_chains(
 
     // Build connected components via BFS
     let mut visited: HashSet<String> = HashSet::new();
+    let mut flows_in_chains: HashSet<String> = HashSet::new();
     let mut chains = Vec::new();
 
     for start_stock in &all_stocks {
@@ -1757,6 +2004,7 @@ fn detect_chains(
                 for flow in inflows {
                     if seen_flows.insert(flow.clone()) {
                         chain_flows.push(flow.clone());
+                        flows_in_chains.insert(flow.clone());
                     }
                     if let Some((Some(from_stock), _)) = flow_to_stocks.get(flow)
                         && !visited.contains(from_stock)
@@ -1770,6 +2018,7 @@ fn detect_chains(
                 for flow in outflows {
                     if seen_flows.insert(flow.clone()) {
                         chain_flows.push(flow.clone());
+                        flows_in_chains.insert(flow.clone());
                     }
                     if let Some((_, Some(to_stock))) = flow_to_stocks.get(flow)
                         && !visited.contains(to_stock)
@@ -1791,6 +2040,19 @@ fn detect_chains(
             stocks: chain_stocks,
             flows: chain_flows,
             all_vars,
+            importance: 0.0,
+        });
+    }
+
+    // Append isolated flows that are not connected to any stock chain.
+    for flow_ident in all_flows {
+        if flows_in_chains.contains(flow_ident) {
+            continue;
+        }
+        chains.push(StockFlowChain {
+            stocks: Vec::new(),
+            flows: vec![flow_ident.clone()],
+            all_vars: vec![flow_ident.clone()],
             importance: 0.0,
         });
     }
@@ -1839,8 +2101,8 @@ pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
                     segments.push(LineSegment {
                         start: from_pos,
                         end: to_pos,
-                        from_node: format!("link_from_{}", link.from_uid),
-                        to_node: format!("link_to_{}", link.to_uid),
+                        from_node: format!("elem_{}", link.from_uid),
+                        to_node: format!("elem_{}", link.to_uid),
                     });
                 }
             }
@@ -2244,17 +2506,24 @@ mod tests {
         let mut stock_to_inflows: HashMap<String, Vec<String>> = HashMap::new();
         let mut stock_to_outflows: HashMap<String, Vec<String>> = HashMap::new();
         let mut flow_to_stocks: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        let mut all_flows: BTreeSet<String> = BTreeSet::new();
 
         // Chain 1: A -> f1 -> B
         stock_to_inflows.insert("b".into(), vec!["f1".into()]);
         stock_to_outflows.insert("a".into(), vec!["f1".into()]);
         flow_to_stocks.insert("f1".into(), (Some("a".into()), Some("b".into())));
+        all_flows.insert("f1".into());
 
         // Chain 2: C (isolated stock)
         stock_to_inflows.insert("c".into(), vec![]);
         stock_to_outflows.insert("c".into(), vec![]);
 
-        let chains = detect_chains(&stock_to_inflows, &stock_to_outflows, &flow_to_stocks);
+        let chains = detect_chains(
+            &stock_to_inflows,
+            &stock_to_outflows,
+            &flow_to_stocks,
+            &all_flows,
+        );
         assert_eq!(chains.len(), 2);
     }
 
@@ -2548,5 +2817,370 @@ mod tests {
             .filter(|e| matches!(e, ViewElement::Stock(_)))
             .collect();
         assert_eq!(stocks.len(), 2);
+    }
+
+    #[test]
+    fn test_connector_direction_dependency_to_dependent() {
+        let model = simple_model();
+        let result = generate_layout(&model).unwrap();
+
+        let uid_to_ident: HashMap<i32, String> = model
+            .variables
+            .iter()
+            .filter_map(|var| match var {
+                datamodel::Variable::Stock(s) => {
+                    s.uid.map(|uid| (uid, canonicalize(&s.ident).into_owned()))
+                }
+                datamodel::Variable::Flow(f) => {
+                    f.uid.map(|uid| (uid, canonicalize(&f.ident).into_owned()))
+                }
+                datamodel::Variable::Aux(a) => {
+                    a.uid.map(|uid| (uid, canonicalize(&a.ident).into_owned()))
+                }
+                datamodel::Variable::Module(_) => None,
+            })
+            .collect();
+
+        let link_pairs: HashSet<(String, String)> = result
+            .elements
+            .iter()
+            .filter_map(|elem| {
+                if let ViewElement::Link(link) = elem {
+                    let from = uid_to_ident.get(&link.from_uid)?.clone();
+                    let to = uid_to_ident.get(&link.to_uid)?.clone();
+                    Some((from, to))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            link_pairs.contains(&("birth_rate".to_string(), "births".to_string())),
+            "expected dependency link birth_rate -> births"
+        );
+        assert!(
+            !link_pairs.contains(&("births".to_string(), "birth_rate".to_string())),
+            "did not expect reversed dependency link births -> birth_rate"
+        );
+    }
+
+    #[test]
+    fn test_compute_metadata_includes_isolated_flows_when_stocks_exist() {
+        let model = datamodel::Model {
+            name: "mixed".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "stock".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec!["connected_flow".to_string()],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "connected_flow".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "isolated_flow".to_string(),
+                    equation: datamodel::Equation::Scalar("5".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(3),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        let metadata = compute_metadata(&model);
+
+        assert!(
+            metadata
+                .chains
+                .iter()
+                .any(|chain| chain.flows.contains(&"isolated_flow".to_string())),
+            "expected isolated_flow to be represented in some chain"
+        );
+    }
+
+    #[test]
+    fn test_generate_layout_includes_isolated_flows_when_stocks_exist() {
+        let model = datamodel::Model {
+            name: "mixed".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "stock".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec!["connected_flow".to_string()],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "connected_flow".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "isolated_flow".to_string(),
+                    equation: datamodel::Equation::Scalar("5".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(3),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        let result = generate_layout(&model).unwrap();
+        let flow_count = result
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Flow(_)))
+            .count();
+        assert_eq!(flow_count, 2, "expected both flows to be laid out");
+    }
+
+    #[test]
+    fn test_generate_layout_ignores_module_dependencies_for_connectors() {
+        let model = datamodel::Model {
+            name: "module_dep".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "x".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Module(datamodel::Module {
+                    ident: "m".to_string(),
+                    model_name: "submodel".to_string(),
+                    documentation: String::new(),
+                    units: None,
+                    references: Vec::new(),
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "y".to_string(),
+                    equation: datamodel::Equation::Scalar("x + m".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(3),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        let result = generate_layout(&model).unwrap();
+        let element_uids: HashSet<i32> = result.elements.iter().map(|e| e.get_uid()).collect();
+
+        for elem in &result.elements {
+            if let ViewElement::Link(link) = elem {
+                assert!(
+                    element_uids.contains(&link.from_uid),
+                    "link from_uid {} should reference a rendered element",
+                    link.from_uid
+                );
+                assert!(
+                    element_uids.contains(&link.to_uid),
+                    "link to_uid {} should reference a rendered element",
+                    link.to_uid
+                );
+            }
+        }
+
+        let aux_count = result
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Aux(_)))
+            .count();
+        assert_eq!(aux_count, 2, "only non-module variables should be rendered");
+    }
+
+    #[test]
+    fn test_extract_equation_deps_arrayed_uses_all_entries() {
+        let var = datamodel::Variable::Aux(datamodel::Aux {
+            ident: "arr".to_string(),
+            equation: datamodel::Equation::Arrayed(
+                vec!["dim".to_string()],
+                vec![
+                    ("a".to_string(), "foo".to_string(), None, None),
+                    ("b".to_string(), "bar".to_string(), None, None),
+                ],
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Public,
+            ai_state: None,
+            uid: None,
+        });
+        let idents: HashSet<String> = ["arr", "foo", "bar"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let mut deps = extract_equation_deps(&var, &idents);
+        deps.sort();
+        assert_eq!(deps, vec!["bar", "foo"]);
+    }
+
+    #[test]
+    fn test_count_view_crossings_shared_endpoint_bidirectional_links() {
+        let view = datamodel::StockFlow {
+            elements: vec![
+                ViewElement::Aux(view_element::Aux {
+                    name: "a".to_string(),
+                    uid: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "b".to_string(),
+                    uid: 2,
+                    x: 10.0,
+                    y: 10.0,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "c".to_string(),
+                    uid: 3,
+                    x: 10.0,
+                    y: -10.0,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Link(view_element::Link {
+                    uid: 4,
+                    from_uid: 1,
+                    to_uid: 2,
+                    shape: LinkShape::Straight,
+                    polarity: None,
+                }),
+                ViewElement::Link(view_element::Link {
+                    uid: 5,
+                    from_uid: 3,
+                    to_uid: 1,
+                    shape: LinkShape::Straight,
+                    polarity: None,
+                }),
+            ],
+            view_box: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            zoom: 1.0,
+            use_lettered_polarity: false,
+        };
+
+        assert_eq!(count_view_crossings(&view), 0);
+    }
+
+    #[test]
+    fn test_compute_metadata_populates_feedback_loops_from_model_metadata() {
+        let model = datamodel::Model {
+            name: "loops".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "x".to_string(),
+                    equation: datamodel::Equation::Scalar("y".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "y".to_string(),
+                    equation: datamodel::Equation::Scalar("x".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: vec![datamodel::LoopMetadata {
+                uids: vec![1, 2],
+                deleted: false,
+                name: "R1".to_string(),
+                description: String::new(),
+            }],
+            groups: Vec::new(),
+        };
+
+        let metadata = compute_metadata(&model);
+        assert_eq!(metadata.feedback_loops.len(), 1);
+        assert_eq!(metadata.feedback_loops[0].name, "R1");
+        assert_eq!(
+            metadata.feedback_loops[0].causal_chain(),
+            &["x".to_string(), "y".to_string(), "x".to_string()]
+        );
     }
 }
