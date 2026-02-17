@@ -1,0 +1,120 @@
+{UTF-8}
+age when first child=
+	16
+	~	
+	~		|
+
+births=
+	producing population*births per person
+	~	
+	~		|
+
+births per person=
+	0.5
+	~	
+	~		|
+
+ending=
+	producing population/years giving birth
+	~	
+	~		|
+
+producing population= INTEG (
+	starting-ending,
+		1.6e+007)
+	~	
+	~		|
+
+starting=
+	young population/age when first child
+	~	
+	~		|
+
+years giving birth=
+	2.2
+	~	
+	~		|
+
+young population= INTEG (
+	births-starting,
+		1e+008)
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Year
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Year
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 1
+	~	Year [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.125
+	~	Year [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,young population,329,146,53,30,3,131,0,0,0,0,0,0
+10,2,producing population,561,146,50,27,3,131,0,0,0,0,0,0
+1,4,6,2,4,0,0,22,0,0,0,-1--1--1,,1|(481,146)|
+1,5,6,1,100,0,0,22,0,0,0,-1--1--1,,1|(411,146)|
+11,6,0,446,146,6,8,34,3,0,0,1,0,0,0
+10,7,starting,446,166,29,12,40,3,0,0,-1,0,0,0
+10,8,age when first child,405,45,53,21,8,3,0,0,0,0,0,0
+10,9,births per person,178,57,36,21,8,3,0,0,0,0,0,0
+10,10,years giving birth,651,45,45,21,8,3,0,0,0,0,0,0
+12,11,48,118,141,10,8,0,3,0,0,-1,0,0,0
+1,13,15,1,4,0,0,22,0,0,0,-1--1--1,,1|(242,141)|
+1,14,15,11,100,0,0,22,0,0,0,-1--1--1,,1|(162,141)|
+11,15,0,202,141,6,8,34,3,0,0,1,0,0,0
+10,16,births,202,161,22,12,40,3,0,0,-1,0,0,0
+12,17,48,804,136,10,8,0,3,0,0,-1,0,0,0
+1,19,21,17,4,0,0,22,0,0,0,-1--1--1,,1|(751,136)|
+1,20,21,2,100,0,0,22,0,0,0,-1--1--1,,1|(653,136)|
+11,21,0,702,136,6,8,34,3,0,0,1,0,0,0
+10,22,ending,702,156,25,12,40,3,0,0,-1,0,0,0
+1,23,9,15,1,0,0,0,0,64,0,-1--1--1,,1|(203,98)|
+1,24,8,6,1,0,0,0,0,64,0,-1--1--1,,1|(440,101)|
+1,25,1,7,1,0,0,0,0,64,0,-1--1--1,,1|(400,200)|
+1,26,2,22,1,0,0,0,0,64,0,-1--1--1,,1|(662,194)|
+1,27,10,21,1,0,0,0,0,64,0,-1--1--1,,1|(701,102)|
+1,28,2,16,1,0,0,0,0,64,0,-1--1--1,,1|(391,231)|
+///---\\\
+:L<%^E!@
+1:16-2.vdf
+1:25-2.vdf
+9:16-2
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+15:0,0,0,1,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Young Population
+24:0
+25:100
+26:100
