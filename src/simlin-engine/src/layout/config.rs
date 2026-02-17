@@ -18,6 +18,8 @@ pub struct LayoutConfig {
     pub stock_height: f64,
     pub flow_width: f64,
     pub flow_height: f64,
+    pub aux_width: f64,
+    pub aux_height: f64,
     pub cloud_width: f64,
     pub cloud_height: f64,
 
@@ -26,9 +28,6 @@ pub struct LayoutConfig {
     pub start_x: f64,
     /// Starting Y position for first chain.
     pub start_y: f64,
-
-    /// Number of parallel layout attempts to generate.
-    pub parallel_attempts: usize,
 
     // Feedback loop visualization
     /// How much to curve connectors in feedback loops (0.0-1.0).
@@ -68,11 +67,12 @@ impl Default for LayoutConfig {
             stock_height: 35.0,
             flow_width: 12.0,
             flow_height: 12.0,
+            aux_width: 18.0,
+            aux_height: 18.0,
             cloud_width: 20.0,
             cloud_height: 20.0,
             start_x: 100.0,
             start_y: 100.0,
-            parallel_attempts: 4,
             loop_curvature_factor: 0.3,
             annealing_iterations: 200,
             annealing_temperature: 30.0,
@@ -101,6 +101,8 @@ mod tests {
         assert!((config.stock_height - 35.0).abs() < f64::EPSILON);
         assert!((config.flow_width - 12.0).abs() < f64::EPSILON);
         assert!((config.flow_height - 12.0).abs() < f64::EPSILON);
+        assert!((config.aux_width - 18.0).abs() < f64::EPSILON);
+        assert!((config.aux_height - 18.0).abs() < f64::EPSILON);
         assert!((config.cloud_width - 20.0).abs() < f64::EPSILON);
         assert!((config.cloud_height - 20.0).abs() < f64::EPSILON);
 
@@ -111,9 +113,6 @@ mod tests {
         // Canvas positioning
         assert!((config.start_x - 100.0).abs() < f64::EPSILON);
         assert!((config.start_y - 100.0).abs() < f64::EPSILON);
-
-        // Parallel layout
-        assert_eq!(config.parallel_attempts, 4);
 
         // Feedback loop
         assert!((config.loop_curvature_factor - 0.3).abs() < f64::EPSILON);

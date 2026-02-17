@@ -75,7 +75,7 @@ pub fn mid_gap_angle(angles: &[f64]) -> f64 {
     }
 
     let mut sorted = angles.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.total_cmp(b));
 
     if sorted.len() == 1 {
         return normalize_to_two_pi(sorted[0] + PI);

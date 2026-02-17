@@ -211,9 +211,9 @@ pub fn compute_chain_positions(
 
     // Find bounding box of chain positions
     let mut min_x = f64::MAX;
-    let mut max_x = f64::MIN;
+    let mut max_x = f64::NEG_INFINITY;
     let mut min_y = f64::MAX;
-    let mut max_y = f64::MIN;
+    let mut max_y = f64::NEG_INFINITY;
     for pos in chain_positions.values() {
         min_x = min_x.min(pos.x);
         max_x = max_x.max(pos.x);

@@ -49,8 +49,8 @@ impl Bounds {
         Self {
             min_x: f64::MAX,
             min_y: f64::MAX,
-            max_x: f64::MIN,
-            max_y: f64::MIN,
+            max_x: f64::NEG_INFINITY,
+            max_y: f64::NEG_INFINITY,
         }
     }
 
@@ -893,7 +893,7 @@ impl<'a> LayoutEngine<'a> {
         }
 
         let mut aux_index = 0;
-        for (var_ident, node_id) in var_to_node {
+        for node_id in var_to_node.values() {
             if initial_layout.contains_key(node_id) {
                 continue;
             }
@@ -907,7 +907,6 @@ impl<'a> LayoutEngine<'a> {
                     center_y + radius * angle.sin(),
                 ),
             );
-            let _ = var_ident; // used implicitly through the loop
             aux_index += 1;
         }
 
@@ -1438,7 +1437,13 @@ impl<'a> LayoutEngine<'a> {
                     }
                 }
                 ViewElement::Aux(a) => {
-                    update(&mut bounds, a.x, a.y, 18.0, 18.0);
+                    update(
+                        &mut bounds,
+                        a.x,
+                        a.y,
+                        self.config.aux_width,
+                        self.config.aux_height,
+                    );
                 }
                 ViewElement::Cloud(c) => {
                     update(

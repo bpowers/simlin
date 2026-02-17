@@ -453,7 +453,6 @@ impl<N: NodeId> GraphBuilder<N> {
 /// A group of nodes that move together as a rigid unit during layout.
 pub struct RigidGroup<N: NodeId> {
     pub members: Vec<N>,
-    pub offsets: BTreeMap<N, Position>,
 }
 
 /// A graph augmented with layout constraints (pinned nodes, rigid groups).
@@ -541,10 +540,7 @@ impl<N: NodeId> ConstrainedGraphBuilder<N> {
             for member in &members {
                 node_to_group.insert(member.clone(), i);
             }
-            rigid_groups.push(RigidGroup {
-                members,
-                offsets: BTreeMap::new(),
-            });
+            rigid_groups.push(RigidGroup { members });
         }
 
         ConstrainedGraph {

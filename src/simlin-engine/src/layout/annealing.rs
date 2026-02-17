@@ -251,20 +251,20 @@ where
     }
 
     let mut total = 0.0;
-    let mut count = 0.0;
+    let mut count: usize = 0;
     for seg in &segments {
         let dist = (seg.end - seg.start).length();
         if dist > 0.0 {
             total += dist;
-            count += 1.0;
+            count += 1;
         }
     }
 
-    if count == 0.0 {
+    if count == 0 {
         return config.annealing_temperature;
     }
 
-    (total / count) * scale
+    (total / count as f64) * scale
 }
 
 /// Perturb 1..4 random nodes, clamping each to a maximum displacement from
