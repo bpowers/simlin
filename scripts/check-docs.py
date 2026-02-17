@@ -119,7 +119,8 @@ def main() -> int:
         # Skip generated/noise directories
         rel = claude_md.relative_to(repo_root)
         parts = rel.parts
-        if any(p in ("node_modules", "target", "build", "lib", "lib.browser", "lib.module")
+        if any(p in ("node_modules", "target", "build", "lib", "lib.browser", "lib.module",
+                     "third_party")
                for p in parts):
             continue
         files_to_check.append(claude_md)
