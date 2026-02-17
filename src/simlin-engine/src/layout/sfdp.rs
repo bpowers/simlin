@@ -27,9 +27,9 @@ pub struct SfdpConfig {
     /// increases between iterations.
     pub cooling_factor: f64,
     /// Repulsive exponent controlling how repulsion scales with distance.
-    p: f64,
+    pub p: f64,
     /// Attractive constant scaling the spring forces along edges.
-    c: f64,
+    pub c: f64,
     /// Whether to rearrange degree-1 nodes evenly around their parent after
     /// the main loop finishes.
     pub beautify_leaves: bool,
