@@ -262,11 +262,10 @@ impl<'a> LayoutEngine<'a> {
         while let Some(item) = queue.pop_front() {
             match item.item_type {
                 WorkItemType::Stock => {
-                    if let Some(&existing) = positioned.get(&item.id) {
-                        if existing != item.position && item.id != start_stock {
-                            // Position conflict - use existing
-                        }
-                    } else {
+                    // First-positioned-wins: if this stock was already placed
+                    // (via a different BFS path), keep its existing position
+                    // to preserve the order in which chains are laid out.
+                    if !positioned.contains_key(&item.id) {
                         positioned.insert(item.id.clone(), item.position);
                     }
 
@@ -910,7 +909,10 @@ impl<'a> LayoutEngine<'a> {
             aux_index += 1;
         }
 
-        // Configure SFDP
+        // Tighter spacing (k=75) and stronger attraction (c=3.0) than chain
+        // positioning because auxiliaries are individual nodes that should
+        // cluster near their dependencies.  Higher iteration count and
+        // slower cooling give the optimizer time to untangle dense graphs.
         let sfdp_config = SfdpConfig {
             k: 75.0,
             max_iterations: 5000,
@@ -2256,6 +2258,81 @@ mod tests {
         assert!(!contains_ident("abc", "b"));
         assert!(contains_ident("birth_rate * population", "birth_rate"));
         assert!(!contains_ident("high_birth_rate * x", "birth_rate"));
+    }
+
+    fn make_aux(ident: &str, equation: &str) -> datamodel::Variable {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::Scalar(equation.to_string(), None),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Public,
+            ai_state: None,
+            uid: None,
+        })
+    }
+
+    #[test]
+    fn test_extract_equation_deps_simple() {
+        let var = make_aux("births", "population * birth_rate");
+        let idents: HashSet<String> = ["population", "birth_rate", "births", "death_rate"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut deps = extract_equation_deps(&var, &idents);
+        deps.sort();
+        assert_eq!(deps, vec!["birth_rate", "population"]);
+    }
+
+    #[test]
+    fn test_extract_equation_deps_excludes_self() {
+        let var = make_aux("x", "x + y");
+        let idents: HashSet<String> = ["x", "y"].iter().map(|s| s.to_string()).collect();
+        let deps = extract_equation_deps(&var, &idents);
+        assert_eq!(deps, vec!["y"]);
+    }
+
+    #[test]
+    fn test_extract_equation_deps_builtin_function() {
+        let var = make_aux("result", "MAX(a, b)");
+        let idents: HashSet<String> = ["a", "b", "result"].iter().map(|s| s.to_string()).collect();
+        let mut deps = extract_equation_deps(&var, &idents);
+        deps.sort();
+        assert_eq!(deps, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_extract_equation_deps_if_then_else() {
+        let var = make_aux("output", "IF THEN ELSE(flag > 0, alpha, beta)");
+        let idents: HashSet<String> = ["flag", "alpha", "beta", "output"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut deps = extract_equation_deps(&var, &idents);
+        deps.sort();
+        assert_eq!(deps, vec!["alpha", "beta", "flag"]);
+    }
+
+    #[test]
+    fn test_extract_equation_deps_no_equation() {
+        let var = datamodel::Variable::Stock(datamodel::Stock {
+            ident: "stock".to_string(),
+            equation: datamodel::Equation::Scalar(String::new(), None),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            non_negative: false,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Public,
+            ai_state: None,
+            uid: None,
+        });
+        let idents: HashSet<String> = ["stock", "x"].iter().map(|s| s.to_string()).collect();
+        let deps = extract_equation_deps(&var, &idents);
+        assert!(deps.is_empty());
     }
 
     #[test]

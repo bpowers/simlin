@@ -197,6 +197,9 @@ pub fn compute_chain_positions(
         }
     }
 
+    // Large ideal edge length (k=150) and weak attraction (c=0.5) keep
+    // chains well-separated, since each chain node represents an entire
+    // stock-flow group that will be expanded later.
     let sfdp_config = SfdpConfig {
         k: 150.0,
         c: 0.5,
