@@ -89,36 +89,27 @@ Every observed VDF file has exactly **8 sections**.
   Offset  Size  Description
   ------  ----  -----------
   +0      4     Section magic: A1 37 4C BF (= f32 -0.797724 = u32 0xBF4C37A1)
-  +4      4     u32 declared_size (byte count of "core" section data)
-  +8      4     u32 size2 (always equals declared_size)
+  +4      4     u32 (purpose unknown; not a reliable section size)
+  +8      4     u32 (always equals field at +4)
   +12     4     u32 field3
   +16     4     u32 field4 (varies per section; not a reliable type identifier)
   +20     4     u32 field5 (for name table: high 16 bits = first name length)
 ```
 
-### Regions vs declared size
+### Section extent
 
-The header's `declared_size` describes only a "core" or "initial" portion of
-a section's data. The real extent of a section -- its **region** -- runs from
-its header to the start of the next section's header (magic-to-magic).
+A section's data runs from its 24-byte header to the start of the next
+section's header (magic-to-magic). The parser's `Section` struct captures
+this as `region_end` / `region_data_size()`.
 
-The `Section` struct in the parser captures both views:
+All structural data within a section falls within this region:
 
-- `declared_size` / `declared_data_end()` -- the header's size field
-- `region_end` / `region_data_size()` -- the full magic-to-magic extent
-
-Structures that appear to be in "gaps" between sections are within their
-section's region:
-
-- **Section 1** (slot table): `declared_size` covers initial slot entries.
-  Variable metadata records and the slot lookup table are in the rest of
-  section 1's region (past `declared_data_end()`, before `region_end`).
-- **Section 2** (name table): `declared_size` covers a subset of names.
-  The remaining names are in the region past the declared boundary.
-  `section_name_count` tracks how many names fit within `declared_size`
-  (this count determines slot table sizing).
-- **Section 7** (display/graph settings): full graph data arrays extend
-  past the declared size within the region.
+- **Section 1** (slot table): contains initial slot entries, variable
+  metadata records, and the slot lookup table.
+- **Section 2** (name table): contains all variable names. The slot table
+  count is auto-detected by trying decreasing name counts against
+  validation criteria.
+- **Section 7** (display/graph settings): graph data arrays fill the region.
 
 ### Section ordering
 
@@ -145,15 +136,14 @@ The `field3` values are more consistent:
 | 2 | Name table | 500 | Variable names; identified by field5 high bits |
 | 3 | Unknown (all zeros) | 135 | Always 32 bytes of zeros |
 | 4 | Unknown metadata | 500 | Variable-length; content unclear |
-| 5 | Degenerate/marker | 500 | Always 6 bytes; contains section magic within data (see note) |
+| 5 | Degenerate/marker | 500 | Tiny region; next section header starts before data offset (see note) |
 | 6 | Unknown metadata | 100 | Variable-length |
 | 7 | Display settings | 500 | Graph/display configuration data |
 
-**Note on section 5**: This is a degenerate section whose `declared_size`
-(always 6) extends into the next section's header. Its data begins with the
-section magic bytes `A1 37 4C BF` for section 6. This appears to be an
-intentional structural quirk rather than a parsing error. In the zambaqui
-model, section 5 has real content (`declared_size=477`).
+**Note on section 5**: In small models, this is a degenerate section where
+the next section's header starts before this section's data offset, yielding
+`region_data_size() == 0`. This appears to be an intentional structural quirk
+rather than a parsing error. In the zambaqui model, section 5 has real content.
 
 **Identifying sections by position, not field4**: The slot table section is
 always at index 1 and the name table section is always at index 2. Their
@@ -164,35 +154,35 @@ so identification must be by position.
 
 ```
 small (Current.vdf, 3814 bytes):
-  [0] 0x0000a8  declared_size=    40  f3= 500  f4=          19       f5=0x001a0000
-  [1] 0x000148  declared_size=   236  f3= 500  f4=           2       f5=0x00000000
-  [2] 0x000528  declared_size=   505  f3= 500  f4=          31       f5=0x00060000
-  [3] 0x000d0c  declared_size=    32  f3= 135  f4=           0       f5=0x00000001
-  [4] 0x000d8c  declared_size=    11  f3= 500  f4=           8       f5=0x00000000
-  [5] 0x000db8  declared_size=     6  f3= 500  f4=           0       f5=0x00000000
-  [6] 0x000dd0  declared_size=    15  f3= 100  f4=           1       f5=0x0000002c
-  [7] 0x000e34  declared_size=    10  f3= 500  f4=           0       f5=0x00000000
+  [0] 0x0000a8  f3= 500  f4=          19       f5=0x001a0000
+  [1] 0x000148  f3= 500  f4=           2       f5=0x00000000
+  [2] 0x000528  f3= 500  f4=          31       f5=0x00060000
+  [3] 0x000d0c  f3= 135  f4=           0       f5=0x00000001
+  [4] 0x000d8c  f3= 500  f4=           8       f5=0x00000000
+  [5] 0x000db8  f3= 500  f4=           0       f5=0x00000000
+  [6] 0x000dd0  f3= 100  f4=           1       f5=0x0000002c
+  [7] 0x000e34  f3= 500  f4=           0       f5=0x00000000
 
 econ (base.vdf, 71960 bytes):
-  [0] 0x0000a8  declared_size=    41  f3= 500  f4=          20       f5=0x001a0000
-  [1] 0x00014c  declared_size=  1532  f3= 500  f4=          12       f5=0x00000000
-  [2] 0x001ab0  declared_size=  1016  f3= 500  f4=         682       f5=0x00060000
-  [3] 0x002a90  declared_size=    32  f3= 135  f4=           0       f5=0x00000001
-  [4] 0x002b10  declared_size=    28  f3= 500  f4=          25       f5=0x00000000
-  [5] 0x002b80  declared_size=     6  f3= 500  f4=           0       f5=0x00000000
-  [6] 0x002b98  declared_size=   187  f3= 100  f4=           2       f5=0x000005ac
-  [7] 0x0030da  declared_size=   956  f3= 500  f4=           0       f5=0x3f800000 (1.0)
+  [0] 0x0000a8  f3= 500  f4=          20       f5=0x001a0000
+  [1] 0x00014c  f3= 500  f4=          12       f5=0x00000000
+  [2] 0x001ab0  f3= 500  f4=         682       f5=0x00060000
+  [3] 0x002a90  f3= 135  f4=           0       f5=0x00000001
+  [4] 0x002b10  f3= 500  f4=          25       f5=0x00000000
+  [5] 0x002b80  f3= 500  f4=           0       f5=0x00000000
+  [6] 0x002b98  f3= 100  f4=           2       f5=0x000005ac
+  [7] 0x0030da  f3= 500  f4=           0       f5=0x3f800000 (1.0)
 
 zambaqui (baserun.vdf, 369470 bytes):
-  [0] 0x0000a8  declared_size=    43  f3= 500  f4=          22       f5=0x001a0000
-  [1] 0x000154  declared_size=  7612  f3= 500  f4=         192       f5=0x00000006
-  [2] 0x007fa8  declared_size=  3554  f3= 500  f4=        3191       f5=0x00060000
-  [3] 0x00b730  declared_size=   113  f3= 135  f4=          32       f5=0x00000001
-  [4] 0x00b8f4  declared_size=   189  f3= 500  f4=         185       f5=0x00000000
-  [5] 0x00bbe8  declared_size=   477  f3= 500  f4=           1       f5=0x0000065c
-  [6] 0x00c35c  declared_size=   928  f3= 100  f4=           1       f5=0x00001d7c
-  [7] 0x011300  declared_size=  9356  f3= 500  f4=  1097859072       f5=0x41a00000
-                                                    (f32=15.0)        (f32=20.0)
+  [0] 0x0000a8  f3= 500  f4=          22       f5=0x001a0000
+  [1] 0x000154  f3= 500  f4=         192       f5=0x00000006
+  [2] 0x007fa8  f3= 500  f4=        3191       f5=0x00060000
+  [3] 0x00b730  f3= 135  f4=          32       f5=0x00000001
+  [4] 0x00b8f4  f3= 500  f4=         185       f5=0x00000000
+  [5] 0x00bbe8  f3= 500  f4=           1       f5=0x0000065c
+  [6] 0x00c35c  f3= 100  f4=           1       f5=0x00001d7c
+  [7] 0x011300  f3= 500  f4=  1097859072       f5=0x41a00000
+                               (f32=15.0)        (f32=20.0)
 ```
 
 Consistent patterns:
@@ -200,7 +190,7 @@ Consistent patterns:
 - **Section 1** f3=500, f4 is a small integer (2-192)
 - **Section 2** (name table) f3=500, f5=0x00060000 (high 16 bits = 6 = length of "Time\0\0")
 - **Section 3** always f3=135 (not 500), f5=0x00000001
-- **Section 5** always tiny declared_size (6 in small/econ), degenerate in 2 of 3 files
+- **Section 5** degenerate (zero region data) in small/econ, has real content in zambaqui
 - **Section 6** always f3=100 (not 500)
 - **Section 7** field4/field5 are f32 values in zambaqui (15.0 and 20.0), zero/1.0 in smaller files
 
@@ -274,25 +264,25 @@ variable names but do not correspond to any simulation variable or OT entry.
 
 ### Name completeness
 
-For small models, the name table contains all model variables. For WRLD3,
-only 83 of 290+ variables appear in the name table's declared region;
-the remaining names exist in an "extended" region between the section's
-declared data end and the offset table. This extended region uses the same
-u16-length-prefixed encoding.
+For small models, the name table contains all model variables and all names
+have slot table entries. For larger models (WRLD3), additional names exist
+past the slotted portion within the section's region. The slot table count
+is auto-detected rather than relying on the section header.
 
 ### Observed counts
 
-| Model | Names in section | Extended names | Total | System | Groups | Units | Builtins | Model vars |
-|-------|-----------------|----------------|-------|--------|--------|-------|----------|------------|
-| bact  | 10              | 0              | 10    | 5      | 2      | 0     | 2        | 3          |
-| water | 14              | 0              | 14    | 5      | 2      | 2     | 1        | 5          |
-| pop   | 16              | 0              | 16    | 5      | 2      | 1     | 0        | 8          |
-| WRLD3 | 138             | ~40            | ~178  | 5      | ~20    | ?     | 6+       | ~104       |
+| Model | Slotted names | Total names | System | Groups | Units | Builtins | Model vars |
+|-------|--------------|-------------|--------|--------|-------|----------|------------|
+| bact  | 10           | 10          | 5      | 2      | 0     | 2        | 3          |
+| water | 14           | 14          | 5      | 2      | 2     | 1        | 5          |
+| pop   | 16           | 16          | 5      | 2      | 1     | 0        | 8          |
+| WRLD3 | 138          | ~178        | 5      | ~20    | ?     | 6+       | ~104       |
 
 
 ## 6. Variable metadata records
 
-Located between section 1's data end and the slot table. Each record is
+Located within section 1's region, between the slot data and the slot
+lookup table. Each record is
 64 bytes (16 x u32 fields). Records are found by scanning for sentinel pairs
 (two consecutive `0xf6800000` values at offsets +32 and +36 within a record),
 then extending to fill the entire available space at 64-byte alignment.
@@ -669,19 +659,18 @@ within a plausible file-offset range. The only reliable way to distinguish
 constants from data block offsets is to compare against the known first data
 block offset.
 
-### Section 5 overlap
+### Section 5 degenerate
 
-Section 5 is always 6 bytes and its data contains the section magic for
-section 6. This is a structural quirk; the section's declared size extends
-into section 6's header. Parsers should handle this gracefully.
+In small models, section 5's next section header starts before section 5's
+data offset, yielding `region_data_size() == 0`. This is a structural quirk.
+Parsers should handle degenerate sections gracefully.
 
-### Extended name region (WRLD3)
+### Unslotted names (WRLD3)
 
-For WRLD3, the name table section's declared data size covers only 138 names,
-but ~40 additional names exist between the section's data end and the offset
-table. These extended names use the same u16-length-prefixed encoding and
-include variable names not found in the section proper. A complete parser
-should scan beyond the section boundary.
+For WRLD3, the name table section contains ~178 names but only 138 have
+slot table entries. The remaining ~40 names use the same u16-length-prefixed
+encoding and include variable names. The slot table count is auto-detected
+by the parser.
 
 ### f[11] overflow in large models
 
@@ -726,7 +715,6 @@ and field5 meaning changes based on section position.
    data that hasn't been decoded. Section 7 appears to contain display/graph
    settings (f32 values matching axis ranges have been observed).
 
-6. **How does the extended name region work?** For WRLD3, ~40 names exist
-   beyond the name table section's declared boundary. It's unclear whether
-   this is intentional or a Vensim serialization bug, and whether the slot
-   table accounts for these extra names.
+6. **What determines the slot table count?** For WRLD3, ~40 of ~178 names
+   lack slot table entries. The parser auto-detects the slot count. It's
+   unclear what determines which names get slot entries.

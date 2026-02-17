@@ -6,8 +6,7 @@ use std::collections::HashSet;
 use std::error::Error;
 
 use simlin_engine::vdf::{
-    FILE_HEADER_SIZE, RECORD_SIZE, SECTION_HEADER_SIZE, Section, VDF_SENTINEL, VdfFile, read_f32,
-    read_u16, read_u32,
+    FILE_HEADER_SIZE, RECORD_SIZE, Section, VDF_SENTINEL, VdfFile, read_f32, read_u16, read_u32,
 };
 
 const SECTION_ROLES: [&str; 8] = [
@@ -79,13 +78,7 @@ fn print_layout(vdf: &VdfFile) {
         let region_size = sec.region_end - sec.file_offset;
         entries.push((
             sec.file_offset,
-            format!(
-                "Section {}: {} (declared {}B, region {}B)",
-                i,
-                role,
-                SECTION_HEADER_SIZE as u32 + sec.declared_size,
-                region_size
-            ),
+            format!("Section {}: {} (region {}B)", i, role, region_size),
         ));
     }
 
@@ -166,25 +159,19 @@ fn hexdump(data: &[u8], base_offset: usize, max_bytes: usize) {
     }
 }
 
-fn print_section_header(sec: &Section, data: &[u8], index: usize) {
+fn print_section_header(sec: &Section, _data: &[u8], index: usize) {
     let role = SECTION_ROLES.get(index).copied().unwrap_or("unknown");
-    let size2 = read_u32(data, sec.file_offset + 8);
     println!();
     println!("Section {} @ 0x{:08x}  [{}]", index, sec.file_offset, role);
-    print!(
-        "  declared_size={}  size2={}  field3={}  field4={}  field5=0x{:08x}",
-        sec.declared_size, size2, sec.field3, sec.field4, sec.field5
-    );
-    if size2 != sec.declared_size {
-        print!("  WARNING: size2 != declared_size");
-    }
-    println!();
     println!(
-        "  region: 0x{:08x}..0x{:08x} ({}B data, declared {}B)",
+        "  field3={}  field4={}  field5=0x{:08x}",
+        sec.field3, sec.field4, sec.field5
+    );
+    println!(
+        "  region: 0x{:08x}..0x{:08x} ({}B data)",
         sec.data_offset(),
         sec.region_end,
         sec.region_data_size(),
-        sec.declared_size
     );
 }
 
@@ -235,18 +222,19 @@ fn print_names(vdf: &VdfFile) {
         .name_section_idx
         .map(|i| format!("section {}", i))
         .unwrap_or_else(|| "unknown section".to_string());
-    let unslotted = vdf.names.len() - vdf.section_name_count;
+    let slotted = vdf.slot_table.len();
+    let unslotted = vdf.names.len().saturating_sub(slotted);
     println!(
         "=== Name Table ({} names: {} with slots, {} without, {}) ===",
         vdf.names.len(),
-        vdf.section_name_count,
+        slotted,
         unslotted,
         sec_label
     );
 
     for (i, name) in vdf.names.iter().enumerate() {
         let class = classify_name(name);
-        if i == vdf.section_name_count && vdf.section_name_count < vdf.names.len() {
+        if i == slotted && slotted < vdf.names.len() {
             println!("  --- names without slot table entries ---");
         }
         if class.is_empty() {
@@ -653,7 +641,7 @@ fn print_summary(vdf: &VdfFile, file_size: usize) {
         n_builtins,
         n_model_names
     );
-    let unslotted_count = vdf.names.len() - vdf.section_name_count;
+    let unslotted_count = vdf.names.len().saturating_sub(vdf.slot_table.len());
     if unslotted_count > 0 {
         println!(
             "  Unslotted names: {} (no slot table entry)",

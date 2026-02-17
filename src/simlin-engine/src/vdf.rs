@@ -71,21 +71,21 @@ pub fn read_f32(data: &[u8], offset: usize) -> f32 {
 
 /// A section within a VDF file, delimited by section magic bytes.
 ///
-/// Each section has a 24-byte header followed by data. The header's `declared_size`
-/// field describes only a "core" portion of the section's data. The actual extent
-/// of a section runs from its header to the start of the next section header
-/// (magic-to-magic), captured by `region_end`. See `doc/design/vdf.md` for details.
+/// Each section has a 24-byte header followed by data. A section's extent runs
+/// from its header to the start of the next section header (magic-to-magic),
+/// captured by `region_end`. See `doc/design/vdf.md` for details.
 #[derive(Debug, Clone)]
 pub struct Section {
     /// Absolute file offset of the section magic bytes.
     pub file_offset: usize,
-    /// Declared size of section data in bytes (from the header). This describes
-    /// only a "core" or "initial" portion; the real extent is `region_end`.
-    pub declared_size: u32,
     /// Absolute file offset where this section's region ends. For sections
     /// 0..n-1, this is the next section's `file_offset`. For the last
     /// section, this is the file length.
     pub region_end: usize,
+    /// Header field at +4. For the name table section, this determines how
+    /// many names have slot table entries. Purpose in other sections is
+    /// unknown. Not a section size (regions extend past this).
+    pub field1: u32,
     /// Field3 in header (often 0x1F4 = 500).
     pub field3: u32,
     /// Field4: section type identifier (e.g. 19=model info, 2=variable slots).
@@ -100,15 +100,9 @@ impl Section {
         self.file_offset + SECTION_HEADER_SIZE
     }
 
-    /// Absolute file offset where the declared section data ends.
-    /// This is the header's `declared_size` extent, not the full region.
-    pub fn declared_data_end(&self) -> usize {
-        self.data_offset() + self.declared_size as usize
-    }
-
     /// Size in bytes of the section's full region data (after the header).
     /// For degenerate sections (like section 5 in small models, whose
-    /// declared data overlaps the next section's header), this returns 0.
+    /// header overlaps the next section's header), this returns 0.
     pub fn region_data_size(&self) -> usize {
         self.region_end.saturating_sub(self.data_offset())
     }
@@ -151,13 +145,7 @@ pub struct VdfFile {
     /// All sections found in the file.
     pub sections: Vec<Section>,
     /// All parsed variable names from the name table section's region.
-    /// The first `section_name_count` names fall within the section's
-    /// `declared_size`; the rest are in the region but past that boundary.
     pub names: Vec<String>,
-    /// How many names fall within the name table section's `declared_size`.
-    /// The slot table has exactly this many entries, paired 1:1 with
-    /// `names[..section_name_count]`.
-    pub section_name_count: usize,
     /// Index into `sections` for the name table section.
     pub name_section_idx: Option<usize>,
     /// Slot table: one u32 per name, each a byte offset into section 1 data.
@@ -195,9 +183,7 @@ impl VdfFile {
         let sections = find_sections(&data);
         let name_section_idx = find_name_table_section_idx(&data, &sections);
 
-        // Parse names up to the section's region boundary. The name table
-        // extends past declared_size within the region.
-        let (names, section_name_count) = name_section_idx
+        let names = name_section_idx
             .map(|ns_idx| {
                 parse_name_table_extended(&data, &sections[ns_idx], sections[ns_idx].region_end)
             })
@@ -208,20 +194,51 @@ impl VdfFile {
         // by position rather than field4.
         let sec1_data_size = sections.get(1).map(|s| s.region_data_size()).unwrap_or(0);
 
+        // The name table section's field1 determines how many names have
+        // corresponding slot table entries.  Parse names up to that
+        // boundary using the same validation as the full name parse,
+        // capped at the total name count.
+        let slot_name_count = name_section_idx
+            .map(|ns_idx| {
+                let ns = &sections[ns_idx];
+                let boundary = ns.data_offset() + ns.field1 as usize;
+                parse_name_table_extended(&data, ns, boundary).len()
+            })
+            .unwrap_or(0)
+            .min(names.len());
+
         let (slot_table_offset, slot_table) = name_section_idx
             .map(|ns_idx| {
                 let ns = &sections[ns_idx];
-                find_slot_table(&data, ns, section_name_count, sec1_data_size)
+                find_slot_table(&data, ns, slot_name_count, sec1_data_size)
             })
             .unwrap_or((0, Vec::new()));
 
-        // Find records between section 1's declared data end and the name
-        // table section boundary. Records live within section 1's region
-        // but past its declared data extent.
-        let search_start = sections
-            .get(1)
-            .map(|s| s.declared_data_end())
-            .unwrap_or(FILE_HEADER_SIZE);
+        // Find records between the slot data end and the slot/name table
+        // boundary within section 1's region.  The slot table entries are
+        // byte offsets into section 1's data area; the maximum sorted
+        // entry plus one stride marks where records begin.
+        let search_start = if !slot_table.is_empty() {
+            let sec1_data_start = sections
+                .get(1)
+                .map(|s| s.data_offset())
+                .unwrap_or(FILE_HEADER_SIZE);
+            let mut sorted_slots: Vec<u32> = slot_table.clone();
+            sorted_slots.sort();
+            let max_offset = *sorted_slots.last().unwrap() as usize;
+            let last_stride = if sorted_slots.len() >= 2 {
+                let n = sorted_slots.len();
+                (sorted_slots[n - 1] - sorted_slots[n - 2]) as usize
+            } else {
+                max_offset
+            };
+            sec1_data_start + max_offset + last_stride
+        } else {
+            sections
+                .get(1)
+                .map(|s| s.data_offset())
+                .unwrap_or(FILE_HEADER_SIZE)
+        };
         let search_bound = sections.get(1).map(|s| s.region_end).unwrap_or(data.len());
         let records_end = if slot_table_offset > 0 && slot_table_offset < search_bound {
             slot_table_offset
@@ -258,7 +275,6 @@ impl VdfFile {
             bitmap_size,
             sections,
             names,
-            section_name_count,
             name_section_idx,
             slot_table,
             slot_table_offset,
@@ -406,9 +422,7 @@ impl VdfFile {
                 .into_iter()
                 .collect();
 
-        // Only use slotted names (those within declared_size, which have
-        // slot table entries) for the deterministic mapping.
-        let mut candidates: Vec<String> = self.names[..self.section_name_count]
+        let mut candidates: Vec<String> = self.names[..self.slot_table.len()]
             .iter()
             .filter(|name| {
                 !name.is_empty()
@@ -479,8 +493,8 @@ pub fn find_sections(data: &[u8]) -> Vec<Section> {
             if offset + SECTION_HEADER_SIZE <= data.len() {
                 sections.push(Section {
                     file_offset: offset,
-                    declared_size: read_u32(data, offset + 4),
                     region_end: 0, // filled in below
+                    field1: read_u32(data, offset + 4),
                     field3: read_u32(data, offset + 12),
                     field4: read_u32(data, offset + 16),
                     field5: read_u32(data, offset + 20),
@@ -505,38 +519,24 @@ pub fn find_sections(data: &[u8]) -> Vec<Section> {
     sections
 }
 
-/// Parse the name table from a section, stopping at the declared section
-/// boundary. The first entry has no u16 length prefix; its length comes
-/// from field5's high 16 bits. Subsequent entries are u16-length-prefixed.
-/// u16=0 entries are group separators (skipped).
-pub fn parse_name_table(data: &[u8], section: &Section) -> Vec<String> {
-    let section_end = section.declared_data_end().min(data.len());
-    parse_name_table_extended(data, section, section_end).0
-}
-
-/// Parse the name table up to `parse_end`. The name table typically extends
-/// past the section's `declared_size` within its region. `parse_end` should
+/// Parse the name table up to `parse_end`. The name table may extend past
+/// the section header's size field within its region. `parse_end` should
 /// be the section's `region_end`.
+///
+/// The first entry has no u16 length prefix; its length comes from field5's
+/// high 16 bits. Subsequent entries are u16-length-prefixed. u16=0 entries
+/// are group separators (skipped).
 ///
 /// Validates each entry (max 256 bytes, printable ASCII) and stops when it
 /// encounters data that doesn't look like a name entry.
-///
-/// Returns `(all_names, section_name_count)` where `section_name_count` is
-/// the number of names within the section's `declared_size`. The slot table
-/// has exactly `section_name_count` entries, paired 1:1 with those names.
-pub fn parse_name_table_extended(
-    data: &[u8],
-    section: &Section,
-    parse_end: usize,
-) -> (Vec<String>, usize) {
+pub fn parse_name_table_extended(data: &[u8], section: &Section, parse_end: usize) -> Vec<String> {
     let mut names = Vec::new();
     let data_start = section.data_offset();
-    let section_end = section.declared_data_end().min(data.len());
     let parse_end = parse_end.min(data.len());
 
     let first_len = (section.field5 >> 16) as usize;
     if first_len == 0 || data_start + first_len > data.len() {
-        return (names, 0);
+        return names;
     }
     let s: String = data[data_start..data_start + first_len]
         .iter()
@@ -546,25 +546,12 @@ pub fn parse_name_table_extended(
     names.push(s);
 
     let mut pos = data_start + first_len;
-    let mut section_name_count: Option<usize> = None;
 
     while pos + 2 <= parse_end {
-        // Track when we've crossed the section boundary. The old
-        // parse_name_table stops in two cases: (1) can't read a u16
-        // prefix because pos+2 > section_end, or (2) the name data
-        // extends past section_end. Record the count at that point.
-        if section_name_count.is_none() && pos + 2 > section_end {
-            section_name_count = Some(names.len());
-        }
-
         let len = read_u16(data, pos) as usize;
         pos += 2;
         if len == 0 {
             continue;
-        }
-
-        if section_name_count.is_none() && pos + len > section_end {
-            section_name_count = Some(names.len());
         }
 
         if pos + len > parse_end {
@@ -594,8 +581,7 @@ pub fn parse_name_table_extended(
         pos += len;
     }
 
-    let section_name_count = section_name_count.unwrap_or(names.len());
-    (names, section_name_count)
+    names
 }
 
 /// Find the name table section index. Heuristic: it's the section where
@@ -1174,35 +1160,32 @@ mod tests {
     }
 
     #[test]
-    fn test_section_offsets() {
+    fn test_section_data_offset_and_region() {
         let s = Section {
             file_offset: 100,
-            declared_size: 50,
+            field1: 0,
             region_end: 300,
             field3: 0,
             field4: 0,
             field5: 0,
         };
         assert_eq!(s.data_offset(), 124);
-        assert_eq!(s.declared_data_end(), 174);
         assert_eq!(s.region_data_size(), 176); // 300 - 124
     }
 
     #[test]
     fn test_section_degenerate_region() {
-        // Section 5 in small models has declared_size=6 but its data
-        // overlaps with the next section's header, so region_end <=
-        // data_offset, yielding region_data_size() == 0.
+        // Section 5 in small models has its next section's header
+        // starting before data_offset, yielding region_data_size() == 0.
         let s = Section {
             file_offset: 100,
-            declared_size: 6,
+            field1: 0,
             region_end: 118, // next section starts before data_offset (124)
             field3: 0,
             field4: 0,
             field5: 0,
         };
         assert_eq!(s.data_offset(), 124);
-        assert_eq!(s.declared_data_end(), 130);
         assert_eq!(s.region_data_size(), 0);
     }
 
@@ -1230,7 +1213,6 @@ mod tests {
         let sections = find_sections(&data);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].file_offset, 10);
-        assert_eq!(sections[0].declared_size, 10);
         assert_eq!(sections[0].field4, 2);
         // Last section's region_end should be the file length
         assert_eq!(sections[0].region_end, data.len());
@@ -1290,10 +1272,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_name_table_extended_past_declared_size() {
-        // Names extend past declared_size within the section's region.
-        // Only "Time" fits within declared_size (20 bytes); the other
-        // names are in the region but past that boundary.
+    fn test_parse_name_table_extended_multiple_names() {
         let mut data = vec![0u8; 256];
 
         data[0..4].copy_from_slice(&VDF_SECTION_MAGIC);
@@ -1310,9 +1289,7 @@ mod tests {
         data[28..30].copy_from_slice(&[0, 0]);
 
         // Second name: u16 len = 14, "hello world\0\0\0"
-        // u16 prefix at offset 30 (inside declared_size, which ends at 44)
         data[30..32].copy_from_slice(&14u16.to_le_bytes());
-        // Name data at 32..46, extends past declared_size boundary
         data[32..43].copy_from_slice(b"hello world");
         data[43..46].copy_from_slice(&[0, 0, 0]);
 
@@ -1323,25 +1300,18 @@ mod tests {
 
         let section = Section {
             file_offset: 0,
-            declared_size: 20,
+            field1: 0,
             region_end: 80,
             field3: 500,
             field4: 0,
             field5: 6u32 << 16,
         };
 
-        // parse_name_table stops at declared_size
-        let section_only = parse_name_table(&data, &section);
-        assert_eq!(section_only.len(), 1);
-        assert_eq!(section_only[0], "Time");
-
-        // parse_name_table_extended parses the full region
-        let (all_names, section_name_count) = parse_name_table_extended(&data, &section, 80);
-        assert_eq!(section_name_count, 1); // only "Time" within declared_size
-        assert_eq!(all_names.len(), 3);
-        assert_eq!(all_names[0], "Time");
-        assert_eq!(all_names[1], "hello world");
-        assert_eq!(all_names[2], "foo");
+        let names = parse_name_table_extended(&data, &section, 80);
+        assert_eq!(names.len(), 3);
+        assert_eq!(names[0], "Time");
+        assert_eq!(names[1], "hello world");
+        assert_eq!(names[2], "foo");
     }
 
     #[test]
@@ -1371,16 +1341,14 @@ mod tests {
 
         let section = Section {
             file_offset: 0,
-            declared_size: 40,
+            field1: 0,
             region_end: 200,
             field3: 500,
             field4: 0,
             field5: 6u32 << 16,
         };
 
-        let (names, section_name_count) = parse_name_table_extended(&data, &section, 200);
-        // Both names are within the section
-        assert_eq!(section_name_count, 2);
+        let names = parse_name_table_extended(&data, &section, 200);
         assert_eq!(names.len(), 2);
         assert_eq!(names[0], "Time");
         assert_eq!(names[1], "test var");
@@ -1391,7 +1359,7 @@ mod tests {
         let mut data = vec![0u8; 256];
 
         data[0..4].copy_from_slice(&VDF_SECTION_MAGIC);
-        data[4..8].copy_from_slice(&10u32.to_le_bytes()); // small section
+        data[4..8].copy_from_slice(&10u32.to_le_bytes());
         data[8..12].copy_from_slice(&10u32.to_le_bytes());
         data[12..16].copy_from_slice(&500u32.to_le_bytes());
         data[16..20].copy_from_slice(&0u32.to_le_bytes());
@@ -1401,29 +1369,26 @@ mod tests {
         data[24..28].copy_from_slice(b"Time");
         data[28..30].copy_from_slice(&[0, 0]);
 
-        // Section ends at 24 + 10 = 34
-
         // u16 separator at offset 30
         data[30..32].copy_from_slice(&0u16.to_le_bytes());
         // u16 separator at offset 32
         data[32..34].copy_from_slice(&0u16.to_le_bytes());
 
-        // Extended name after section boundary: u16=6, "abc\0\0\0"
+        // Another name: u16=6, "abc\0\0\0"
         data[34..36].copy_from_slice(&6u16.to_le_bytes());
         data[36..39].copy_from_slice(b"abc");
         data[39..42].copy_from_slice(&[0, 0, 0]);
 
         let section = Section {
             file_offset: 0,
-            declared_size: 10,
+            field1: 0,
             region_end: 80,
             field3: 500,
             field4: 0,
             field5: 6u32 << 16,
         };
 
-        let (names, section_name_count) = parse_name_table_extended(&data, &section, 80);
-        assert_eq!(section_name_count, 1); // only "Time" in section
+        let names = parse_name_table_extended(&data, &section, 80);
         assert_eq!(names.len(), 2);
         assert_eq!(names[0], "Time");
         assert_eq!(names[1], "abc");
@@ -1441,19 +1406,19 @@ mod tests {
         }
 
         #[test]
-        fn test_econ_base_names_past_declared_size() {
+        fn test_econ_base_names_and_slots() {
             let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
 
-            // 42 names within the section boundary have slot table entries
-            assert_eq!(vdf.section_name_count, 42);
+            // 42 names have slot table entries
+            assert_eq!(vdf.slot_table.len(), 42);
             assert_eq!(vdf.names[0], "Time");
             assert_eq!(
                 vdf.names[41],
                 "effect of hud policies on risk taking behavior"
             );
 
-            // Names past declared_size don't have slot table entries
-            let unslotted = &vdf.names[vdf.section_name_count..];
+            // Names past the slot table don't have slot table entries
+            let unslotted = &vdf.names[vdf.slot_table.len()..];
             assert!(
                 !unslotted.is_empty(),
                 "expected unslotted names for econ model"
@@ -1472,19 +1437,16 @@ mod tests {
             );
 
             assert!(vdf.names.len() >= 92);
-
-            // Slot table has entries only for names within declared_size
-            assert_eq!(vdf.slot_table.len(), 42);
         }
 
         #[test]
-        fn test_zambaqui_baserun_names_past_declared_size() {
+        fn test_zambaqui_baserun_names_and_slots() {
             let vdf = vdf_file("../../third_party/uib_sd/zambaqui/baserun.vdf");
 
-            assert_eq!(vdf.section_name_count, 178);
+            assert_eq!(vdf.slot_table.len(), 178);
             assert_eq!(vdf.names[0], "Time");
 
-            let unslotted = &vdf.names[vdf.section_name_count..];
+            let unslotted = &vdf.names[vdf.slot_table.len()..];
             assert!(
                 !unslotted.is_empty(),
                 "expected unslotted names for zambaqui model"
@@ -1508,25 +1470,22 @@ mod tests {
                 "expected at least 250 unslotted names, got {}",
                 unslotted.len()
             );
-
-            // Slot table has entries only for names within declared_size
-            assert_eq!(vdf.slot_table.len(), 178);
         }
 
         #[test]
-        fn test_small_vdf_all_names_slotted() {
-            // Small models should have all names within declared_size
+        fn test_small_vdf_names_parsed() {
             let vdf = vdf_file(
                 "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_2/Current.vdf",
             );
 
-            assert!(!vdf.names.is_empty());
-            assert_eq!(
-                vdf.section_name_count,
-                vdf.names.len(),
-                "small VDF should have all names within declared_size, got {} total vs {} slotted",
-                vdf.names.len(),
-                vdf.section_name_count
+            assert!(
+                vdf.names.len() >= 10,
+                "expected at least 10 names, got {}",
+                vdf.names.len()
+            );
+            assert!(
+                vdf.names.contains(&"Time".to_string()),
+                "expected 'Time' in names"
             );
         }
 
@@ -1583,7 +1542,7 @@ mod tests {
                     path.display()
                 );
 
-                for name in &vdf.names[vdf.section_name_count..] {
+                for name in &vdf.names[vdf.slot_table.len()..] {
                     assert!(
                         !name.is_empty() && name.chars().all(|c| c.is_ascii_graphic() || c == ' '),
                         "{}: invalid unslotted name: {:?}",
@@ -1633,7 +1592,6 @@ mod tests {
             );
 
             let sec5 = &vdf.sections[5];
-            assert_eq!(sec5.declared_size, 6);
             assert_eq!(
                 sec5.region_data_size(),
                 0,
@@ -1647,11 +1605,11 @@ mod tests {
             if let Some(sec1) = vdf.sections.get(1) {
                 for rec in &vdf.records {
                     assert!(
-                        rec.file_offset >= sec1.declared_data_end()
+                        rec.file_offset >= sec1.data_offset()
                             && rec.file_offset + RECORD_SIZE <= sec1.region_end,
                         "record at 0x{:x} outside section 1 region (0x{:x}..0x{:x})",
                         rec.file_offset,
-                        sec1.declared_data_end(),
+                        sec1.data_offset(),
                         sec1.region_end,
                     );
                 }
@@ -1668,13 +1626,12 @@ mod tests {
                     "expected names in the name table section"
                 );
                 assert!(
-                    vdf.names.len() > vdf.section_name_count,
-                    "econ model should have names past declared_size"
+                    vdf.names.len() > vdf.slot_table.len(),
+                    "econ model should have names past slotted count"
                 );
-                // The region should be large enough to hold the name data
                 assert!(
-                    sec.region_data_size() > sec.declared_size as usize,
-                    "name table region should be larger than declared size"
+                    sec.region_data_size() > 0,
+                    "name table section should have data"
                 );
             }
         }
@@ -1715,7 +1672,7 @@ mod tests {
                 };
                 let sec1_data_start = sec1.data_offset();
                 let ot_count = vdf.offset_table_count;
-                let slotted_count = vdf.section_name_count.min(vdf.slot_table.len());
+                let slotted_count = vdf.slot_table.len().min(vdf.names.len());
 
                 let fname = path
                     .file_name()
@@ -1726,7 +1683,7 @@ mod tests {
                     "\n=== {} ({} names, {} slotted, {} slot_table, {} records, {} OT, first_block=0x{:x}) ===",
                     fname,
                     vdf.names.len(),
-                    vdf.section_name_count,
+                    vdf.slot_table.len(),
                     vdf.slot_table.len(),
                     vdf.records.len(),
                     ot_count,
@@ -2360,14 +2317,14 @@ mod tests {
                 eprintln!(
                     "names: {} (slotted: {}), records: {}, OT entries: {}",
                     vdf.names.len(),
-                    vdf.section_name_count,
+                    vdf.slot_table.len(),
                     vdf.records.len(),
                     ot_count
                 );
 
                 eprintln!("\nall names:");
                 for (i, name) in vdf.names.iter().enumerate() {
-                    let marker = if i < vdf.section_name_count {
+                    let marker = if i < vdf.slot_table.len() {
                         "slotted"
                     } else {
                         "UNSLOTTED"
@@ -2458,13 +2415,13 @@ mod tests {
                 .extract_data()
                 .unwrap_or_else(|e| panic!("extract_data failed: {e}"));
 
-            let slotted = &vdf.names[..vdf.section_name_count];
-            let unslotted = &vdf.names[vdf.section_name_count..];
+            let slotted = &vdf.names[..vdf.slot_table.len()];
+            let unslotted = &vdf.names[vdf.slot_table.len()..];
 
             eprintln!("=== econ base.vdf name analysis ===");
             eprintln!("total names: {}", vdf.names.len());
             eprintln!("slotted: {} (with slot table entries)", slotted.len());
-            eprintln!("unslotted: {} (past declared_size)", unslotted.len());
+            eprintln!("unslotted: {} (past slot table)", unslotted.len());
             eprintln!("OT entries: {}", vdf_data.entries.len());
             eprintln!("records: {}", vdf.records.len());
 
@@ -2545,7 +2502,7 @@ mod tests {
                 "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_3/euler-5.vdf",
             );
             assert_eq!(euler5.names.len(), 10);
-            assert_eq!(euler5.section_name_count, 10);
+            assert_eq!(euler5.slot_table.len(), 10);
             assert_eq!(euler5.slot_table.len(), 10);
             assert_eq!(euler5.records.len(), 9);
             assert_eq!(euler5.offset_table_count, 7);
@@ -2743,7 +2700,7 @@ mod tests {
                 eprintln!(
                     "  names={} slotted={} records={} OT={}",
                     vdf.names.len(),
-                    vdf.section_name_count,
+                    vdf.slot_table.len(),
                     vdf.records.len(),
                     vdf.offset_table_count,
                 );
@@ -2828,14 +2785,11 @@ mod tests {
                 "../../third_party/uib_sd/fall_2008/econ/rk.vdf",
             ];
             let vdfs: Vec<VdfFile> = files.iter().map(|p| vdf_file(p)).collect();
-            assert_eq!(vdfs[0].section_name_count, vdfs[1].section_name_count);
+            assert_eq!(vdfs[0].slot_table.len(), vdfs[1].slot_table.len());
 
             let mut identical = 0;
             let mut different = Vec::new();
-            for (idx, name) in vdfs[0].names[..vdfs[0].section_name_count]
-                .iter()
-                .enumerate()
-            {
+            for (idx, name) in vdfs[0].names[..vdfs[0].slot_table.len()].iter().enumerate() {
                 let w0 = read_slot_words(
                     &vdfs[0].data,
                     vdfs[0].slot_section().unwrap().data_offset(),
@@ -2854,7 +2808,8 @@ mod tests {
             }
             eprintln!(
                 "\necon base vs rk: {}/{} identical",
-                identical, vdfs[0].section_name_count
+                identical,
+                vdfs[0].slot_table.len()
             );
             for (i, n, w0, w1) in &different {
                 eprintln!("  slot[{}] {:?}: base={:?} rk={:?}", i, n, w0, w1);
@@ -2890,7 +2845,7 @@ mod tests {
                     sot.entry(rec.slot_ref()).or_default().push(rec.fields[11]);
                 }
                 for (idx, &soff) in vdf.slot_table.iter().enumerate() {
-                    if idx >= vdf.section_name_count {
+                    if idx >= vdf.slot_table.len() {
                         break;
                     }
                     let w = read_slot_words(&vdf.data, so, soff);
@@ -2983,7 +2938,7 @@ mod tests {
             let vdf = vdf_file("../../third_party/uib_sd/zambaqui/baserun.vdf");
             eprintln!(
                 "\nzambaqui: {} slotted, {} total, {} recs, {} OT",
-                vdf.section_name_count,
+                vdf.slot_table.len(),
                 vdf.names.len(),
                 vdf.records.len(),
                 vdf.offset_table_count
@@ -2997,12 +2952,7 @@ mod tests {
             }
             eprintln!("  bracketed: {}", brackets.len());
             for (i, n) in brackets.iter().take(20) {
-                eprintln!(
-                    "    [{}] {:?} slotted={}",
-                    i,
-                    n,
-                    *i < vdf.section_name_count
-                );
+                eprintln!("    [{}] {:?} slotted={}", i, n, *i < vdf.slot_table.len());
             }
 
             let sec1_off = vdf.slot_section().unwrap().data_offset();
@@ -3013,7 +2963,7 @@ mod tests {
 
             eprintln!("\n  multi-record slots:");
             for (idx, &soff) in vdf.slot_table.iter().enumerate() {
-                if idx >= vdf.section_name_count {
+                if idx >= vdf.slot_table.len() {
                     break;
                 }
                 let rc = srecs.get(&soff).map(|v| v.len()).unwrap_or(0);
@@ -3118,7 +3068,7 @@ mod tests {
             );
             let sec1 = vdf.slot_section().unwrap();
             let sec1_off = sec1.data_offset();
-            let sec1_size = sec1.declared_size as usize;
+            let sec1_size = sec1.region_data_size();
             let mut srecs: HashMap<u32, Vec<usize>> = HashMap::new();
             for (ri, rec) in vdf.records.iter().enumerate() {
                 srecs.entry(rec.slot_ref()).or_default().push(ri);
@@ -3132,7 +3082,7 @@ mod tests {
             );
 
             for (idx, &soff) in vdf.slot_table.iter().enumerate() {
-                if idx >= vdf.section_name_count {
+                if idx >= vdf.slot_table.len() {
                     break;
                 }
                 let w = read_slot_words(&vdf.data, sec1_off, soff);
@@ -3210,9 +3160,8 @@ mod tests {
                 let min_slot = sorted.first().copied().unwrap_or(0) as usize;
                 eprintln!("\n=== {} ===", path);
                 eprintln!(
-                    "  sec1: off=0x{:x} decl={} region={}",
+                    "  sec1: off=0x{:x} region={}",
                     sec1_off,
-                    sec1.declared_size,
                     sec1.region_data_size()
                 );
                 eprintln!("  header: {} bytes ({} u32s)", min_slot, min_slot / 4);
@@ -3453,7 +3402,7 @@ mod tests {
             let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
             let sec1 = vdf.slot_section().unwrap();
             let sec1_off = sec1.data_offset();
-            let slotted = vdf.section_name_count;
+            let slotted = vdf.slot_table.len();
 
             let mut slot_with_idx: Vec<(u32, usize)> = vdf.slot_table[..slotted]
                 .iter()
@@ -3473,7 +3422,7 @@ mod tests {
                 let next_off = slot_with_idx
                     .get(si + 1)
                     .map(|&(o, _)| o)
-                    .unwrap_or(sec1.declared_size);
+                    .unwrap_or(sec1.region_data_size() as u32);
                 let stride = next_off - off;
                 let abs = sec1_off + off as usize;
                 let name = &vdf.names[name_idx];
@@ -3642,8 +3591,8 @@ mod tests {
                     if (w[3] as usize) < vdf.names.len() {
                         w3_notes.push(format!("name[{}]={:?}", w[3], &vdf.names[w[3] as usize]));
                     }
-                    if vdf.slot_table[..vdf.section_name_count].contains(&w[3]) {
-                        let target = vdf.slot_table[..vdf.section_name_count]
+                    if vdf.slot_table[..vdf.slot_table.len()].contains(&w[3]) {
+                        let target = vdf.slot_table[..vdf.slot_table.len()]
                             .iter()
                             .position(|&s| s == w[3])
                             .unwrap();
@@ -3666,10 +3615,10 @@ mod tests {
             );
             let sec1 = vdf.slot_section().unwrap();
             let sec1_off = sec1.data_offset();
-            let sec1_size = sec1.declared_size as usize;
+            let sec1_size = sec1.region_data_size();
             let ot_count = vdf.offset_table_count;
 
-            let slot_to_name: HashMap<u32, &str> = (0..vdf.section_name_count)
+            let slot_to_name: HashMap<u32, &str> = (0..vdf.slot_table.len())
                 .map(|i| (vdf.slot_table[i], vdf.names[i].as_str()))
                 .collect();
 
@@ -3743,7 +3692,7 @@ mod tests {
                     by_f12.entry(rec.slot_ref()).or_default().push((ri, rec));
                 }
 
-                let slot_to_name: HashMap<u32, &str> = (0..vdf.section_name_count)
+                let slot_to_name: HashMap<u32, &str> = (0..vdf.slot_table.len())
                     .map(|i| (vdf.slot_table[i], vdf.names[i].as_str()))
                     .collect();
 
@@ -3756,7 +3705,7 @@ mod tests {
 
                 for (&f12, recs) in &by_f12 {
                     let name_at = slot_to_name.get(&f12).copied().unwrap_or("(none)");
-                    let w = if (f12 as usize) + 16 <= sec1.declared_size as usize {
+                    let w = if (f12 as usize) + 16 <= sec1.region_data_size() {
                         read_slot_words(&vdf.data, sec1_off, f12)
                     } else {
                         [0, 0, 0, 0]
@@ -3786,7 +3735,7 @@ mod tests {
             let vdf = vdf_file("../../third_party/uib_sd/fall_2008/econ/base.vdf");
             let sec1 = vdf.slot_section().unwrap();
             let sec1_off = sec1.data_offset();
-            let slotted = vdf.section_name_count;
+            let slotted = vdf.slot_table.len();
 
             let mut slots_sorted: Vec<(u32, usize)> = vdf.slot_table[..slotted]
                 .iter()
@@ -3823,7 +3772,7 @@ mod tests {
                 let next_off = slots_sorted
                     .get(si + 1)
                     .map(|&(o, _)| o)
-                    .unwrap_or(sec1.declared_size);
+                    .unwrap_or(sec1.region_data_size() as u32);
                 let stride = (next_off - off) as usize;
                 let abs = sec1_off + off as usize;
                 let name = &vdf.names[name_idx];
