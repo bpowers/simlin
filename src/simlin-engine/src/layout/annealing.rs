@@ -63,6 +63,10 @@ pub fn do_segments_intersect(s1: &LineSegment, s2: &LineSegment) -> bool {
 }
 
 /// Count the number of edge crossings among a set of line segments.
+///
+/// Uses brute-force O(n^2) pairwise comparison. This is sufficient for
+/// typical SD models (tens to low hundreds of elements) but would need
+/// spatial indexing (e.g. sweep line) for very large diagrams.
 pub fn count_crossings(segments: &[LineSegment]) -> usize {
     let mut count = 0;
     for i in 0..segments.len() {

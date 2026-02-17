@@ -1731,6 +1731,7 @@ fn detect_chains(
 
         let mut chain_stocks = Vec::new();
         let mut chain_flows = Vec::new();
+        let mut seen_flows: HashSet<String> = HashSet::new();
         let mut queue = vec![start_stock.clone()];
 
         while let Some(stock) = queue.pop() {
@@ -1742,7 +1743,7 @@ fn detect_chains(
             // Follow inflows to connected stocks
             if let Some(inflows) = stock_to_inflows.get(&stock) {
                 for flow in inflows {
-                    if !chain_flows.contains(flow) {
+                    if seen_flows.insert(flow.clone()) {
                         chain_flows.push(flow.clone());
                     }
                     if let Some((Some(from_stock), _)) = flow_to_stocks.get(flow)
@@ -1755,7 +1756,7 @@ fn detect_chains(
             // Follow outflows to connected stocks
             if let Some(outflows) = stock_to_outflows.get(&stock) {
                 for flow in outflows {
-                    if !chain_flows.contains(flow) {
+                    if seen_flows.insert(flow.clone()) {
                         chain_flows.push(flow.clone());
                     }
                     if let Some((_, Some(to_stock))) = flow_to_stocks.get(flow)
@@ -1871,9 +1872,8 @@ pub fn generate_layout_with_config(
     engine.generate_layout()
 }
 
-/// Generate multiple layouts with different seeds and pick the one with
-/// fewest crossings. On tie, the lowest seed wins.
-#[cfg(not(target_arch = "wasm32"))]
+/// Generate multiple layouts with different seeds in parallel and pick the
+/// one with fewest crossings. On tie, the lowest seed wins.
 pub fn generate_best_layout(model: &datamodel::Model) -> Result<datamodel::StockFlow, String> {
     use rayon::prelude::*;
 
@@ -1882,31 +1882,6 @@ pub fn generate_best_layout(model: &datamodel::Model) -> Result<datamodel::Stock
 
     let results: Vec<Result<LayoutResult, String>> = seeds
         .par_iter()
-        .map(|&seed| {
-            let mut cfg = config.clone();
-            cfg.annealing_random_seed = seed;
-            let metadata = compute_metadata(model);
-            let engine = LayoutEngine::new(cfg, model, metadata);
-            let view = engine.generate_layout()?;
-            let crossings = count_view_crossings(&view);
-            Ok(LayoutResult {
-                view,
-                crossings,
-                seed,
-            })
-        })
-        .collect();
-
-    select_best_layout(results)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn generate_best_layout(model: &datamodel::Model) -> Result<datamodel::StockFlow, String> {
-    let config = LayoutConfig::default();
-    let seeds = LAYOUT_SEEDS;
-
-    let results: Vec<Result<LayoutResult, String>> = seeds
-        .iter()
         .map(|&seed| {
             let mut cfg = config.clone();
             cfg.annealing_random_seed = seed;

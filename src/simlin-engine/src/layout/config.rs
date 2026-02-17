@@ -52,10 +52,6 @@ pub struct LayoutConfig {
     /// Temperature to reset to when reheating between rounds.
     /// Zero signals dynamic reheating using the initial temperature.
     pub annealing_reheat_temperature: f64,
-    /// Maximum auxiliary displacement from annealing baseline.
-    pub annealing_max_delta_aux: f64,
-    /// Maximum chain displacement from annealing baseline.
-    pub annealing_max_delta_chain: f64,
     /// Scales average edge length to compute initial temperature.
     pub annealing_temperature_scale: f64,
 
@@ -86,8 +82,6 @@ impl Default for LayoutConfig {
             annealing_interval: 200,
             annealing_max_rounds: 6,
             annealing_reheat_temperature: 0.0,
-            annealing_max_delta_aux: 200.0,
-            annealing_max_delta_chain: 25.0,
             annealing_temperature_scale: 0.4,
             debug: false,
         }
@@ -133,8 +127,6 @@ mod tests {
         assert_eq!(config.annealing_interval, 200);
         assert_eq!(config.annealing_max_rounds, 6);
         assert!((config.annealing_reheat_temperature - 0.0).abs() < f64::EPSILON);
-        assert!((config.annealing_max_delta_aux - 200.0).abs() < f64::EPSILON);
-        assert!((config.annealing_max_delta_chain - 25.0).abs() < f64::EPSILON);
         assert!((config.annealing_temperature_scale - 0.4).abs() < f64::EPSILON);
 
         // Debug
