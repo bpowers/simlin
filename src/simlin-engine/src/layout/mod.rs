@@ -5,8 +5,10 @@
 pub mod annealing;
 pub mod chain;
 pub mod config;
+pub mod connector;
 pub mod graph;
 pub mod metadata;
+pub mod placement;
 pub mod sfdp;
 pub mod text;
 pub mod uid;
