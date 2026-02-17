@@ -1799,6 +1799,10 @@ fn detect_chains(
 }
 
 /// Count edge crossings in a completed StockFlow view.
+///
+/// Arc and multi-point link shapes are approximated as straight segments
+/// from source to target position, so counts for diagrams with curved
+/// connectors are approximate.
 pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
     if view.elements.is_empty() {
         return 0;
@@ -1861,7 +1865,9 @@ pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
 /// layout; the one with fewest connector crossings is selected.
 const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
 
-/// Generate a complete stock-flow diagram layout for a model.
+/// Generate a complete stock-flow diagram layout for a model using a single
+/// seed. This is the fast path; for higher-quality results use
+/// [`generate_best_layout`] which tries multiple seeds in parallel.
 ///
 /// Computes metadata (dependency graph, chains) from the model variables,
 /// then runs the multi-phase layout pipeline: chain positioning via SFDP,
