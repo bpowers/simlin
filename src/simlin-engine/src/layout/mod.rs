@@ -1875,8 +1875,9 @@ pub fn generate_layout(model: &datamodel::Model) -> Result<datamodel::StockFlow,
 /// Generate layout with a specific configuration.
 pub fn generate_layout_with_config(
     model: &datamodel::Model,
-    config: LayoutConfig,
+    mut config: LayoutConfig,
 ) -> Result<datamodel::StockFlow, String> {
+    config.validate();
     let metadata = compute_metadata(model);
     let engine = LayoutEngine::new(config, model, metadata);
     engine.generate_layout()
@@ -2348,7 +2349,121 @@ mod tests {
         if let ViewElement::Aux(aux) = &best.elements[0] {
             assert_eq!(aux.name, "from_seed_42");
         } else {
-            panic!("expected Aux element");
+            unreachable!("expected Aux element");
         }
+    }
+
+    #[test]
+    fn test_generate_layout_aux_only() {
+        let model = datamodel::Model {
+            name: "aux_only".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "rate".to_string(),
+                    equation: datamodel::Equation::Scalar("0.5".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "factor".to_string(),
+                    equation: datamodel::Equation::Scalar("rate * 2".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let result = generate_layout(&model).unwrap();
+        assert_eq!(
+            result
+                .elements
+                .iter()
+                .filter(|e| matches!(e, ViewElement::Aux(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_generate_layout_single_aux() {
+        let model = datamodel::Model {
+            name: "single".to_string(),
+            sim_specs: None,
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "x".to_string(),
+                equation: datamodel::Equation::Scalar("42".to_string(), None),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Public,
+                ai_state: None,
+                uid: Some(1),
+            })],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let result = generate_layout(&model).unwrap();
+        assert_eq!(result.elements.len(), 1);
+    }
+
+    #[test]
+    fn test_generate_layout_disconnected_stocks() {
+        let model = datamodel::Model {
+            name: "disconnected".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "stock_a".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec![],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "stock_b".to_string(),
+                    equation: datamodel::Equation::Scalar("200".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec![],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let result = generate_layout(&model).unwrap();
+        let stocks: Vec<_> = result
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Stock(_)))
+            .collect();
+        assert_eq!(stocks.len(), 2);
     }
 }

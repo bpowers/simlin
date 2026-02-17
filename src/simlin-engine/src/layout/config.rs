@@ -55,6 +55,26 @@ pub struct LayoutConfig {
     pub annealing_temperature_scale: f64,
 }
 
+impl LayoutConfig {
+    /// Clamp fields to physically meaningful ranges so that nonsensical
+    /// caller-provided values (e.g. negative dimensions or cooling rate
+    /// above 1.0) don't produce undefined layout behavior.
+    pub fn validate(&mut self) {
+        self.horizontal_spacing = self.horizontal_spacing.max(1.0);
+        self.vertical_spacing = self.vertical_spacing.max(1.0);
+        self.stock_width = self.stock_width.max(1.0);
+        self.stock_height = self.stock_height.max(1.0);
+        self.flow_width = self.flow_width.max(1.0);
+        self.flow_height = self.flow_height.max(1.0);
+        self.aux_width = self.aux_width.max(1.0);
+        self.aux_height = self.aux_height.max(1.0);
+        self.cloud_width = self.cloud_width.max(1.0);
+        self.cloud_height = self.cloud_height.max(1.0);
+        self.annealing_cooling_rate = self.annealing_cooling_rate.clamp(0.0, 1.0);
+        self.loop_curvature_factor = self.loop_curvature_factor.clamp(0.0, 1.0);
+    }
+}
+
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
@@ -123,5 +143,46 @@ mod tests {
         assert_eq!(config.annealing_max_rounds, 6);
         assert!((config.annealing_reheat_temperature - 0.0).abs() < f64::EPSILON);
         assert!((config.annealing_temperature_scale - 0.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_validate_clamps_negative_dimensions() {
+        let mut config = LayoutConfig {
+            stock_width: -10.0,
+            stock_height: 0.0,
+            horizontal_spacing: -5.0,
+            vertical_spacing: 0.5,
+            ..LayoutConfig::default()
+        };
+        config.validate();
+        assert!((config.stock_width - 1.0).abs() < f64::EPSILON);
+        assert!((config.stock_height - 1.0).abs() < f64::EPSILON);
+        assert!((config.horizontal_spacing - 1.0).abs() < f64::EPSILON);
+        assert!((config.vertical_spacing - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_validate_clamps_cooling_rate() {
+        let mut config = LayoutConfig {
+            annealing_cooling_rate: 1.5,
+            ..LayoutConfig::default()
+        };
+        config.validate();
+        assert!((config.annealing_cooling_rate - 1.0).abs() < f64::EPSILON);
+
+        config.annealing_cooling_rate = -0.1;
+        config.validate();
+        assert!(config.annealing_cooling_rate.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_validate_preserves_valid_config() {
+        let mut config = LayoutConfig::default();
+        let before = config.clone();
+        config.validate();
+        assert!((config.stock_width - before.stock_width).abs() < f64::EPSILON);
+        assert!(
+            (config.annealing_cooling_rate - before.annealing_cooling_rate).abs() < f64::EPSILON
+        );
     }
 }

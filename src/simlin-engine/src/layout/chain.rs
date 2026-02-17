@@ -23,6 +23,7 @@ pub fn make_cloud_node_ident(uid: i32) -> String {
 
 /// Parse a cloud node identifier back to its integer ID.
 /// Returns `None` if the string does not have the expected prefix or suffix.
+#[cfg(test)]
 pub fn parse_cloud_node_ident(ident: &str) -> Option<i32> {
     ident.strip_prefix(CLOUD_NODE_PREFIX)?.parse().ok()
 }

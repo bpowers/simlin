@@ -112,4 +112,19 @@ mod tests {
             "verylongvariablenamewithoutbreaks"
         );
     }
+
+    #[test]
+    fn test_format_label_non_ascii() {
+        // Separators ('_' and ' ') are always ASCII, so byte-indexing at
+        // their positions is safe even when the label contains multi-byte
+        // UTF-8 characters.
+        assert_eq!(
+            format_label_with_line_breaks("Bevölkerungs_wachstum"),
+            "Bevölkerungs\nwachstum"
+        );
+        assert_eq!(
+            format_label_with_line_breaks("taux de_croissance"),
+            "taux de\ncroissance"
+        );
+    }
 }

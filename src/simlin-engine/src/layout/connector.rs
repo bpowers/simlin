@@ -88,7 +88,7 @@ pub fn calculate_loop_arc_angle(
     let mut takeoff = base_angle - (angle_diff * curvature_factor);
 
     // Apply a minimum curve when the loop center is nearly collinear
-    // with the connector direction.
+    // with the connector direction.  Threshold ported from Go Praxis.
     if angle_diff.abs() < 15.0 {
         takeoff = base_angle - 20.0;
     }

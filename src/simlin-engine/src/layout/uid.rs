@@ -36,7 +36,7 @@ impl UidManager {
         }
 
         let uid = self.next;
-        self.next += 1;
+        self.next = self.next.saturating_add(1);
 
         self.seen.insert(uid, ident.to_string());
         if !ident.is_empty() {

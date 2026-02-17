@@ -464,14 +464,14 @@ mod tests {
                 assert!((v.x - 50.0).abs() < 1e-10);
                 assert!((v.y - 50.0).abs() < 1e-10);
             }
-            _ => panic!("expected Aux"),
+            _ => unreachable!("expected Aux"),
         }
         match &elements[1] {
             ViewElement::Stock(v) => {
                 assert!((v.x - 70.0).abs() < 1e-10);
                 assert!((v.y - 70.0).abs() < 1e-10);
             }
-            _ => panic!("expected Stock"),
+            _ => unreachable!("expected Stock"),
         }
     }
 
@@ -509,7 +509,7 @@ mod tests {
                 assert!((v.points[1].x - 245.0).abs() < 1e-10);
                 assert!((v.points[1].y - 240.0).abs() < 1e-10);
             }
-            _ => panic!("expected Flow"),
+            _ => unreachable!("expected Flow"),
         }
     }
 

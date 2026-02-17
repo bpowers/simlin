@@ -90,6 +90,8 @@ fn sample_standard_normal(rng: &mut StdRng) -> f64 {
 
 /// Generate a perturbation step using the same hybrid strategy as the Go
 /// implementation: 65% Gaussian steps, 35% uniform-radius polar steps.
+/// Probability threshold (0.35) and radius range (0.4..1.2) are tuning
+/// constants ported from Go Praxis.
 fn generate_step(rng: &mut StdRng, temperature: f64) -> (f64, f64) {
     let gauss_x = sample_standard_normal(rng) * temperature;
     let gauss_y = sample_standard_normal(rng) * temperature;
@@ -319,9 +321,9 @@ fn apply_displacement<N: NodeId>(
         return;
     };
 
-    // Use a generous default limit; callers with more context (e.g.
-    // knowing whether a node is a stock vs auxiliary) can provide a
-    // filtered `build_segments` or wrap this function.
+    // Generous displacement limit ported from Go Praxis.  Callers with
+    // more context (e.g. knowing whether a node is a stock vs auxiliary)
+    // can provide a filtered `build_segments` or wrap this function.
     let limit = 200.0;
     let target_x = (pos.x + dx).clamp(base.x - limit, base.x + limit);
     let target_y = (pos.y + dy).clamp(base.y - limit, base.y + limit);
