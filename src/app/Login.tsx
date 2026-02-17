@@ -15,8 +15,6 @@ import {
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
 } from '@firebase/auth';
-import clsx from 'clsx';
-
 import {
   AppleIcon,
   EmailIcon,
@@ -225,7 +223,6 @@ export class Login extends React.Component<LoginProps, LoginState> {
           loginUI = (
             <Card
               variant="outlined"
-              style={{ minWidth: 275, maxWidth: 360, width: '100%' }}
               className={styles.emailForm}
             >
               <form onSubmit={this.onNullSubmit}>
@@ -260,7 +257,6 @@ export class Login extends React.Component<LoginProps, LoginState> {
           loginUI = (
             <Card
               variant="outlined"
-              style={{ minWidth: 275, maxWidth: 360, width: '100%' }}
               className={styles.emailForm}
             >
               <form onSubmit={this.onNullSubmit}>
@@ -309,7 +305,6 @@ export class Login extends React.Component<LoginProps, LoginState> {
           loginUI = (
             <Card
               variant="outlined"
-              style={{ minWidth: 275, maxWidth: 360, width: '100%' }}
               className={styles.emailForm}
             >
               <form onSubmit={this.onNullSubmit}>
@@ -367,7 +362,6 @@ export class Login extends React.Component<LoginProps, LoginState> {
           loginUI = (
             <Card
               variant="outlined"
-              style={{ minWidth: 275, maxWidth: 360, width: '100%' }}
               className={styles.emailForm}
             >
               <form onSubmit={this.onNullSubmit}>
@@ -396,7 +390,6 @@ export class Login extends React.Component<LoginProps, LoginState> {
           loginUI = (
             <Card
               variant="outlined"
-              style={{ minWidth: 275, maxWidth: 360, width: '100%' }}
               className={styles.emailForm}
             >
               <form onSubmit={this.onNullSubmit}>
@@ -435,37 +428,33 @@ export class Login extends React.Component<LoginProps, LoginState> {
             <div className={styles.optionsButtons}>
               <Button
                 variant="contained"
-                style={{ backgroundColor: 'black' }}
+                className={styles.appleButton}
                 startIcon={<AppleIcon />}
                 onClick={this.appleLoginClick}
               >
                 Sign in with Apple
               </Button>
-              <br />
               <Button variant="contained" color="primary" startIcon={<GoogleIcon />} onClick={this.googleLoginClick}>
                 Sign in with Google
               </Button>
-              <br />
               <Button
                 variant="contained"
-                style={{ backgroundColor: '#db4437' }}
+                className={styles.emailButton}
                 startIcon={<EmailIcon />}
                 onClick={this.emailLoginClick}
               >
                 Sign in with email
               </Button>
-              <br />
             </div>
           );
       }
     }
 
     return (
-      <div className={clsx(styles.outer)}>
+      <div className={styles.outer}>
         <div className={styles.middle}>
           <div className={styles.inner}>
             <ModelIcon className={styles.logo} />
-            <br />
             <div className={disabledClass}>{loginUI}</div>
           </div>
         </div>
