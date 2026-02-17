@@ -34,6 +34,7 @@ mod json_proptest;
 pub mod json_sdai;
 #[cfg(test)]
 mod json_sdai_proptest;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod layout;
 mod lexer;
 pub mod ltm;

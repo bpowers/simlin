@@ -3,3 +3,4 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 pub mod graph;
+pub mod sfdp;
