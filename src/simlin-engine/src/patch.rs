@@ -368,11 +368,23 @@ fn rename_model_equations(
                     old_ident,
                     new_ident,
                 );
+                rewrite_compat_active_initial(
+                    &mut flow.compat,
+                    compiled_var.init_ast(),
+                    old_ident,
+                    new_ident,
+                );
             }
             Variable::Aux(aux) => {
                 rewrite_equation(
                     &mut aux.equation,
                     compiled_var.ast(),
+                    compiled_var.init_ast(),
+                    old_ident,
+                    new_ident,
+                );
+                rewrite_compat_active_initial(
+                    &mut aux.compat,
                     compiled_var.init_ast(),
                     old_ident,
                     new_ident,
@@ -440,6 +452,25 @@ fn apply_ast_to_equation_initial(equation: &mut datamodel::Equation, ast: &Ast<E
             }
         }
         _ => {}
+    }
+}
+
+fn rewrite_compat_active_initial(
+    compat: &mut datamodel::Compat,
+    init_ast: Option<&Ast<Expr2>>,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) {
+    if compat.active_initial.is_some()
+        && let Some(init_ast) = init_ast
+    {
+        let renamed = rename_ast(init_ast, old_ident, new_ident);
+        match &renamed {
+            Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
+                compat.active_initial = Some(expr2_to_string(expr));
+            }
+            Ast::Arrayed(_, _) => {}
+        }
     }
 }
 
@@ -2372,5 +2403,189 @@ mod tests {
         apply_patch(&mut project, patch).unwrap();
         let model = project.get_model("Customer Growth").unwrap();
         assert!(model.get_variable("growth_rate").is_some());
+    }
+
+    #[test]
+    fn rename_updates_compat_active_initial_on_aux() {
+        let mut project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    Variable::Aux(datamodel::Aux {
+                        ident: "base_rate".to_string(),
+                        equation: Equation::Scalar("10".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    Variable::Aux(datamodel::Aux {
+                        ident: "adjusted".to_string(),
+                        equation: Equation::Scalar("base_rate * 2".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            active_initial: Some("base_rate * 3".to_string()),
+                        },
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::RenameVariable {
+                    from: "base_rate".to_string(),
+                    to: "initial_rate".to_string(),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        match model.get_variable("adjusted").unwrap() {
+            Variable::Aux(aux) => {
+                match &aux.equation {
+                    Equation::Scalar(eqn) => assert_eq!(eqn, "initial_rate * 2"),
+                    _ => panic!("expected scalar equation"),
+                }
+                assert_eq!(
+                    aux.compat.active_initial.as_deref(),
+                    Some("initial_rate * 3"),
+                );
+            }
+            _ => panic!("expected auxiliary variable"),
+        }
+    }
+
+    #[test]
+    fn rename_updates_compat_active_initial_on_flow() {
+        let mut project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    Variable::Aux(datamodel::Aux {
+                        ident: "capacity".to_string(),
+                        equation: Equation::Scalar("100".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    Variable::Flow(datamodel::Flow {
+                        ident: "production".to_string(),
+                        equation: Equation::Scalar("capacity / 10".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            active_initial: Some("capacity / 5".to_string()),
+                        },
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::RenameVariable {
+                    from: "capacity".to_string(),
+                    to: "max_capacity".to_string(),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        match model.get_variable("production").unwrap() {
+            Variable::Flow(flow) => {
+                match &flow.equation {
+                    Equation::Scalar(eqn) => assert_eq!(eqn, "max_capacity / 10"),
+                    _ => panic!("expected scalar equation"),
+                }
+                assert_eq!(
+                    flow.compat.active_initial.as_deref(),
+                    Some("max_capacity / 5"),
+                );
+            }
+            _ => panic!("expected flow variable"),
+        }
+    }
+
+    #[test]
+    fn rename_preserves_none_compat_active_initial() {
+        let mut project = TestProject::new("test")
+            .aux("old_name", "42", None)
+            .aux("consumer", "old_name + 1", None)
+            .build_datamodel();
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::RenameVariable {
+                    from: "old_name".to_string(),
+                    to: "new_name".to_string(),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        match model.get_variable("consumer").unwrap() {
+            Variable::Aux(aux) => {
+                match &aux.equation {
+                    Equation::Scalar(eqn) => assert_eq!(eqn, "new_name + 1"),
+                    _ => panic!("expected scalar equation"),
+                }
+                assert!(aux.compat.active_initial.is_none());
+            }
+            _ => panic!("expected auxiliary variable"),
+        }
     }
 }

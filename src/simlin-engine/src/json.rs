@@ -643,6 +643,8 @@ impl From<GraphicalFunction> for datamodel::GraphicalFunction {
 
 impl From<Stock> for datamodel::Stock {
     fn from(stock: Stock) -> Self {
+        // Stocks don't use active_initial (their equation IS the initial value),
+        // so no arrayed_equation.compat fallback is needed here unlike Flow/Aux.
         let compat = datamodel::Compat {
             active_initial: stock.compat.and_then(|c| c.active_initial),
         };
