@@ -42,10 +42,12 @@ pub const VDF_SENTINEL: u32 = 0xf6800000;
 
 /// Record field[1] value identifying system/control variables (INITIAL TIME,
 /// FINAL TIME, TIME STEP, SAVEPER).
+#[cfg_attr(not(feature = "file_io"), allow(dead_code))]
 const RECORD_F1_SYSTEM: u32 = 23;
 
 /// Record field[1] value identifying INITIAL TIME constant records. These
 /// pass the standard model-variable filter but aren't model variables.
+#[cfg_attr(not(feature = "file_io"), allow(dead_code))]
 const RECORD_F1_INITIAL_TIME_CONST: u32 = 15;
 
 /// Size of a VDF section header in bytes (magic + 5 u32 fields).

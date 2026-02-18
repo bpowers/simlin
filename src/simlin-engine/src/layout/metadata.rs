@@ -13,11 +13,18 @@ pub struct StockFlowChain {
     pub importance: f64,
 }
 
-/// A dominant period discovered via LTM analysis.
-#[derive(Clone)]
+/// A time interval during which a specific set of loops dominates behavior.
+/// Consecutive timesteps with the same dominant loop set are grouped together.
+#[derive(Clone, Debug, PartialEq)]
 pub struct DominantPeriod {
-    pub period: f64,
-    pub strength: f64,
+    /// Start time of this period.
+    pub start: f64,
+    /// End time of this period.
+    pub end: f64,
+    /// Names of the loops that dominate during this period, sorted by score.
+    pub dominant_loops: Vec<String>,
+    /// Combined relative score of the dominant loops.
+    pub combined_score: f64,
 }
 
 /// A feedback loop discovered via LTM analysis.
@@ -58,6 +65,7 @@ impl FeedbackLoop {
 pub struct ComputedMetadata {
     pub chains: Vec<StockFlowChain>,
     pub feedback_loops: Vec<FeedbackLoop>,
+    pub dominant_periods: Vec<DominantPeriod>,
     pub dep_graph: BTreeMap<String, BTreeSet<String>>,
     pub reverse_dep_graph: BTreeMap<String, BTreeSet<String>>,
     pub constants: BTreeSet<String>,
@@ -71,6 +79,7 @@ impl ComputedMetadata {
         Self {
             chains: Vec::new(),
             feedback_loops: Vec::new(),
+            dominant_periods: Vec::new(),
             dep_graph: BTreeMap::new(),
             reverse_dep_graph: BTreeMap::new(),
             constants: BTreeSet::new(),
@@ -92,6 +101,138 @@ impl ComputedMetadata {
             .map(|(from, to)| (from.as_deref(), to.as_deref()))
             .unwrap_or((None, None))
     }
+}
+
+/// Calculate dominant periods from feedback loop importance series.
+///
+/// At each timestep, loops are sorted by absolute score descending. Loops of
+/// the same polarity are accumulated until their combined score >= 0.5 (i.e.,
+/// they explain at least half the behavior). Consecutive timesteps with the
+/// same dominant loop set are grouped into a single `DominantPeriod`.
+///
+/// `dt` is the time between consecutive entries in each loop's importance_series.
+/// `start_time` is the simulation start time.
+pub fn calculate_dominant_periods(
+    loops: &[FeedbackLoop],
+    start_time: f64,
+    dt: f64,
+) -> Vec<DominantPeriod> {
+    if loops.is_empty() {
+        return Vec::new();
+    }
+
+    // Find the length of the shortest importance series
+    let n_steps = loops
+        .iter()
+        .filter(|l| !l.importance_series.is_empty())
+        .map(|l| l.importance_series.len())
+        .min()
+        .unwrap_or(0);
+
+    if n_steps == 0 {
+        return Vec::new();
+    }
+
+    let mut periods: Vec<DominantPeriod> = Vec::new();
+    // Track score accumulation for averaging combined_score over a period.
+    let mut score_sum: f64 = 0.0;
+    let mut score_count: usize = 0;
+
+    for step in 0..n_steps {
+        let time = start_time + (step as f64) * dt;
+
+        // Collect (loop_name, score, polarity) for this timestep
+        let mut scored: Vec<(&str, f64, LoopPolarity)> = loops
+            .iter()
+            .filter(|l| step < l.importance_series.len())
+            .map(|l| (l.name.as_str(), l.importance_series[step], l.polarity))
+            .collect();
+
+        // Sort by absolute score descending
+        scored.sort_by(|a, b| {
+            b.1.abs()
+                .partial_cmp(&a.1.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Greedily accumulate same-polarity loops until combined >= 0.5
+        let mut dominant_names: Vec<String> = Vec::new();
+        let mut combined = 0.0_f64;
+
+        if let Some((_, _, lead_polarity)) = scored.first() {
+            let lead_polarity = *lead_polarity;
+            for &(name, score, polarity) in &scored {
+                if polarity != lead_polarity {
+                    continue;
+                }
+                dominant_names.push(name.to_string());
+                combined += score.abs();
+                if combined >= 0.5 {
+                    break;
+                }
+            }
+        }
+
+        // Sorted copy for order-independent set comparison -- the greedy
+        // accumulation order can vary between timesteps when scores swap.
+        let mut sorted_names = dominant_names.clone();
+        sorted_names.sort();
+
+        // Skip timesteps with no meaningful dominance (e.g. initial step
+        // where all loop scores are zero or non-finite). Finalize the
+        // current period first so dominance can't bridge across a gap.
+        if combined == 0.0 {
+            if let Some(last) = periods.last_mut()
+                && score_count > 0
+            {
+                last.combined_score = score_sum / score_count as f64;
+            }
+            score_sum = 0.0;
+            score_count = 0;
+            continue;
+        }
+
+        // Try to extend the current period if the dominant set matches
+        // and there was no zero-score gap (score_count > 0).
+        // Compare sorted sets but store score-ordered names.
+        if score_count > 0
+            && let Some(last) = periods.last_mut()
+        {
+            let mut last_sorted = last.dominant_loops.clone();
+            last_sorted.sort();
+            if last_sorted == sorted_names {
+                last.end = time;
+                score_sum += combined;
+                score_count += 1;
+                continue;
+            }
+        }
+
+        // Finalize the average for the previous period
+        if let Some(last) = periods.last_mut()
+            && score_count > 0
+        {
+            last.combined_score = score_sum / score_count as f64;
+        }
+
+        score_sum = combined;
+        score_count = 1;
+        periods.push(DominantPeriod {
+            start: time,
+            end: time,
+            dominant_loops: dominant_names,
+            combined_score: combined,
+        });
+    }
+
+    // Finalize the last period's average
+    if let Some(last) = periods.last_mut()
+        && score_count > 0
+    {
+        last.combined_score = score_sum / score_count as f64;
+    }
+
+    periods
 }
 
 #[cfg(test)]
@@ -181,11 +322,252 @@ mod tests {
         let meta = ComputedMetadata::new_empty();
         assert!(meta.chains.is_empty());
         assert!(meta.feedback_loops.is_empty());
+        assert!(meta.dominant_periods.is_empty());
         assert!(meta.dep_graph.is_empty());
         assert!(meta.reverse_dep_graph.is_empty());
         assert!(meta.constants.is_empty());
         assert!(meta.stock_to_inflows.is_empty());
         assert!(meta.stock_to_outflows.is_empty());
         assert!(meta.flow_to_stocks.is_empty());
+    }
+
+    #[test]
+    fn test_dominant_periods_empty_loops() {
+        let periods = calculate_dominant_periods(&[], 0.0, 1.0);
+        assert!(periods.is_empty());
+    }
+
+    #[test]
+    fn test_dominant_periods_single_dominant_loop() {
+        // One loop always dominates (score > 0.5 at every step)
+        let loops = vec![FeedbackLoop {
+            name: "R1".to_string(),
+            polarity: LoopPolarity::Reinforcing,
+            variables: vec!["a".to_string(), "b".to_string()],
+            importance_series: vec![0.8, 0.7, 0.9],
+            dominant_period: None,
+        }];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(periods.len(), 1);
+        assert!((periods[0].start - 0.0).abs() < f64::EPSILON);
+        assert!((periods[0].end - 2.0).abs() < f64::EPSILON);
+        assert_eq!(periods[0].dominant_loops, vec!["R1"]);
+        // combined_score should be the average across all 3 timesteps
+        let expected_avg = (0.8 + 0.7 + 0.9) / 3.0;
+        assert!(
+            (periods[0].combined_score - expected_avg).abs() < 1e-10,
+            "combined_score should be average ({expected_avg}), got {}",
+            periods[0].combined_score,
+        );
+    }
+
+    #[test]
+    fn test_dominant_periods_switch() {
+        // R1 dominates first 2 steps, then B1 takes over
+        let loops = vec![
+            FeedbackLoop {
+                name: "R1".to_string(),
+                polarity: LoopPolarity::Reinforcing,
+                variables: vec!["a".to_string()],
+                importance_series: vec![0.7, 0.6, 0.1, 0.1],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "B1".to_string(),
+                polarity: LoopPolarity::Balancing,
+                variables: vec!["b".to_string()],
+                importance_series: vec![0.3, 0.4, 0.9, 0.9],
+                dominant_period: None,
+            },
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(periods.len(), 2);
+        assert_eq!(periods[0].dominant_loops, vec!["R1"]);
+        assert_eq!(periods[1].dominant_loops, vec!["B1"]);
+    }
+
+    #[test]
+    fn test_dominant_periods_combined_score_averaged_across_switch() {
+        // R1 dominates steps 0-1 (scores 0.6, 0.8), B1 dominates steps 2-3 (scores 0.7, 0.9)
+        let loops = vec![
+            FeedbackLoop {
+                name: "R1".to_string(),
+                polarity: LoopPolarity::Reinforcing,
+                variables: vec!["a".to_string()],
+                importance_series: vec![0.6, 0.8, 0.1, 0.1],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "B1".to_string(),
+                polarity: LoopPolarity::Balancing,
+                variables: vec!["b".to_string()],
+                importance_series: vec![0.2, 0.1, 0.7, 0.9],
+                dominant_period: None,
+            },
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(periods.len(), 2);
+
+        let r1_avg = (0.6 + 0.8) / 2.0;
+        assert!(
+            (periods[0].combined_score - r1_avg).abs() < 1e-10,
+            "R1 period combined_score should be average ({r1_avg}), got {}",
+            periods[0].combined_score,
+        );
+
+        let b1_avg = (0.7 + 0.9) / 2.0;
+        assert!(
+            (periods[1].combined_score - b1_avg).abs() < 1e-10,
+            "B1 period combined_score should be average ({b1_avg}), got {}",
+            periods[1].combined_score,
+        );
+    }
+
+    #[test]
+    fn test_dominant_periods_same_set_different_order() {
+        // Both R1 and R2 are needed to reach 0.5 at every timestep, but
+        // their relative scores swap between steps. The dominant *set*
+        // is the same so this should produce a single period, not two.
+        let loops = vec![
+            FeedbackLoop {
+                name: "R1".to_string(),
+                polarity: LoopPolarity::Reinforcing,
+                variables: vec!["a".to_string()],
+                importance_series: vec![0.35, 0.20, 0.35],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "R2".to_string(),
+                polarity: LoopPolarity::Reinforcing,
+                variables: vec!["b".to_string()],
+                importance_series: vec![0.20, 0.35, 0.20],
+                dominant_period: None,
+            },
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(
+            periods.len(),
+            1,
+            "same dominant set with swapped order should produce one period, got {:?}",
+            periods
+                .iter()
+                .map(|p| &p.dominant_loops)
+                .collect::<Vec<_>>(),
+        );
+        // Both loops should appear in the dominant set, ordered by score
+        // (R1 has the higher score at the first timestep)
+        let mut names = periods[0].dominant_loops.clone();
+        names.sort();
+        assert_eq!(names, vec!["R1", "R2"]);
+    }
+
+    #[test]
+    fn test_dominant_periods_split_across_zero_gap() {
+        // R1 dominates at steps 0, 1, then has zero score at step 2,
+        // then dominates again at steps 3, 4. This should produce two
+        // separate periods, not one continuous period bridging the gap.
+        let loops = vec![FeedbackLoop {
+            name: "R1".to_string(),
+            polarity: LoopPolarity::Reinforcing,
+            variables: vec!["a".to_string()],
+            importance_series: vec![0.8, 0.7, 0.0, 0.9, 0.6],
+            dominant_period: None,
+        }];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(
+            periods.len(),
+            2,
+            "zero-score gap should split into two periods, got {:?}",
+            periods.iter().map(|p| (p.start, p.end)).collect::<Vec<_>>(),
+        );
+        assert!((periods[0].start - 0.0).abs() < f64::EPSILON);
+        assert!((periods[0].end - 1.0).abs() < f64::EPSILON);
+        assert!((periods[1].start - 3.0).abs() < f64::EPSILON);
+        assert!((periods[1].end - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_dominant_periods_score_ordering_preserved() {
+        // Verify that dominant_loops preserves score-based ordering,
+        // not alphabetical.
+        let loops = vec![
+            FeedbackLoop {
+                name: "B1".to_string(),
+                polarity: LoopPolarity::Balancing,
+                variables: vec!["a".to_string()],
+                importance_series: vec![0.6],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "A1".to_string(),
+                polarity: LoopPolarity::Balancing,
+                variables: vec!["b".to_string()],
+                importance_series: vec![0.3],
+                dominant_period: None,
+            },
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(periods.len(), 1);
+        // B1 has the higher score so should come first despite being
+        // alphabetically after A1.
+        assert_eq!(periods[0].dominant_loops[0], "B1");
+    }
+
+    #[test]
+    fn test_dominant_periods_no_importance() {
+        let loops = vec![FeedbackLoop {
+            name: "R1".to_string(),
+            polarity: LoopPolarity::Reinforcing,
+            variables: vec!["a".to_string()],
+            importance_series: vec![],
+            dominant_period: None,
+        }];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert!(periods.is_empty());
+    }
+
+    #[test]
+    fn test_dominant_periods_undetermined_leader_no_polarity_mixing() {
+        // When the strongest loop at a timestep is Undetermined, only other
+        // Undetermined loops should be accumulated -- reinforcing/balancing
+        // loops must not be mixed into the same dominant set.
+        let loops = vec![
+            FeedbackLoop {
+                name: "U1".to_string(),
+                polarity: LoopPolarity::Undetermined,
+                variables: vec!["a".to_string()],
+                importance_series: vec![0.4, 0.4],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "R1".to_string(),
+                polarity: LoopPolarity::Reinforcing,
+                variables: vec!["b".to_string()],
+                importance_series: vec![0.3, 0.3],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "B1".to_string(),
+                polarity: LoopPolarity::Balancing,
+                variables: vec!["c".to_string()],
+                importance_series: vec![0.2, 0.2],
+                dominant_period: None,
+            },
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert!(!periods.is_empty());
+        for p in &periods {
+            // R1 and B1 should never appear together with U1
+            assert!(
+                !p.dominant_loops.contains(&"R1".to_string()),
+                "reinforcing loop should not be mixed with undetermined leader: {:?}",
+                p.dominant_loops,
+            );
+            assert!(
+                !p.dominant_loops.contains(&"B1".to_string()),
+                "balancing loop should not be mixed with undetermined leader: {:?}",
+                p.dominant_loops,
+            );
+        }
     }
 }

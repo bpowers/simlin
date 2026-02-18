@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::f64::consts::PI;
 
 use rand::rngs::StdRng;
@@ -10,6 +10,23 @@ use rand::{Rng, SeedableRng};
 
 use super::config::LayoutConfig;
 use super::graph::{Layout, NodeId, Position};
+
+/// Adjacency map: node -> [(neighbor, weight)]. Used for coupled motion.
+pub type AdjacencyMap<N> = HashMap<N, Vec<(N, f64)>>;
+
+/// Find the neighbor of `node` with the highest absolute edge weight.
+pub fn strongest_neighbor<N: NodeId>(node: &N, adjacency: &AdjacencyMap<N>) -> Option<N> {
+    adjacency.get(node).and_then(|neighbors| {
+        neighbors
+            .iter()
+            .max_by(|a, b| {
+                a.1.abs()
+                    .partial_cmp(&b.1.abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(n, _)| n.clone())
+    })
+}
 
 /// A line segment for crossing detection.
 #[derive(Clone, Debug)]
@@ -135,23 +152,42 @@ where
     N: NodeId,
     F: Fn(&Layout<N>) -> Vec<LineSegment>,
 {
-    run_annealing_with_filter(initial_layout, build_segments, config, seed, |_| true)
+    let default_limit = config.annealing_max_delta_aux;
+    run_annealing_with_filter(
+        initial_layout,
+        build_segments,
+        config,
+        seed,
+        |_| true,
+        |_| default_limit,
+        &HashMap::new(),
+    )
 }
 
 /// Run simulated annealing while only perturbing nodes that satisfy
-/// `can_perturb`.
-pub fn run_annealing_with_filter<N, F, P>(
+/// `can_perturb`. `displacement_limit` returns the max displacement for each node.
+/// `adjacency` enables coupled motion: after moving a node, its strongest neighbor
+/// is moved by 50% of the same displacement.
+pub fn run_annealing_with_filter<N, F, P, D>(
     initial_layout: &Layout<N>,
     build_segments: F,
     config: &LayoutConfig,
     seed: u64,
     can_perturb: P,
+    displacement_limit: D,
+    adjacency: &AdjacencyMap<N>,
 ) -> AnnealingResult<N>
 where
     N: NodeId,
     F: Fn(&Layout<N>) -> Vec<LineSegment>,
     P: Fn(&N) -> bool,
+    D: Fn(&N) -> f64,
 {
+    debug_assert!(
+        config.annealing_reheat_period > 0,
+        "reheat_period must be positive"
+    );
+
     let mut rng = StdRng::seed_from_u64(seed);
 
     let initial_crossings = count_crossings(&build_segments(initial_layout));
@@ -203,8 +239,15 @@ where
             break;
         }
 
-        let perturbed =
-            perturb_layout(&test_layout, &baseline, temperature, &mut rng, &can_perturb);
+        let perturbed = perturb_layout(
+            &test_layout,
+            &baseline,
+            temperature,
+            &mut rng,
+            &can_perturb,
+            &displacement_limit,
+            adjacency,
+        );
         let perturbed_crossings = count_crossings(&build_segments(&perturbed));
 
         let delta = perturbed_crossings as f64 - current_crossings as f64;
@@ -288,15 +331,19 @@ where
 }
 
 /// Perturb 1..4 random nodes, clamping each to a maximum displacement from
-/// its baseline position. Matches the Go `perturbLayout` method.
+/// its baseline position. After each primary perturbation, the strongest
+/// neighbor is moved by 50% of the same delta (coupled motion).
 fn perturb_layout<N: NodeId>(
     layout: &Layout<N>,
     baseline: &BTreeMap<N, Position>,
     temperature: f64,
     rng: &mut StdRng,
     can_perturb: &impl Fn(&N) -> bool,
+    displacement_limit: &impl Fn(&N) -> f64,
+    adjacency: &AdjacencyMap<N>,
 ) -> Layout<N> {
     let mut result = layout.clone();
+    let mut moved: HashSet<N> = HashSet::new();
 
     // Collect candidate nodes that are allowed to move.
     let mut candidates: Vec<N> = layout
@@ -318,11 +365,36 @@ fn perturb_layout<N: NodeId>(
         let idx = rng.random_range(0..candidates.len());
         let node_id = candidates[idx].clone();
 
+        let limit = displacement_limit(&node_id);
         let (dx, dy) = generate_step(rng, temperature);
-        apply_displacement(&node_id, baseline, &mut result, dx, dy);
+        apply_displacement(&node_id, baseline, &mut result, dx, dy, limit);
+        moved.insert(node_id.clone());
 
-        // Remove from candidates to avoid perturbing same node twice
-        candidates.swap_remove(idx);
+        // Coupled motion: move strongest neighbor by 50% displacement
+        if let Some(neighbor) = strongest_neighbor(&node_id, adjacency)
+            && !moved.contains(&neighbor)
+        {
+            let n_limit = displacement_limit(&neighbor);
+            apply_displacement(
+                &neighbor,
+                baseline,
+                &mut result,
+                dx * 0.5,
+                dy * 0.5,
+                n_limit,
+            );
+            moved.insert(neighbor.clone());
+            if let Some(ni) = candidates.iter().position(|c| *c == neighbor) {
+                candidates.swap_remove(ni);
+            }
+        }
+
+        // Remove from candidates to avoid perturbing same node twice.
+        // Re-locate idx since swap_remove of the neighbor may have
+        // moved the primary node.
+        if let Some(pi) = candidates.iter().position(|c| *c == node_id) {
+            candidates.swap_remove(pi);
+        }
     }
 
     result
@@ -336,6 +408,7 @@ fn apply_displacement<N: NodeId>(
     layout: &mut Layout<N>,
     dx: f64,
     dy: f64,
+    limit: f64,
 ) {
     let Some(pos) = layout.get(node_id).copied() else {
         return;
@@ -344,10 +417,6 @@ fn apply_displacement<N: NodeId>(
         return;
     };
 
-    // Generous displacement limit ported from Go Praxis.  Callers with
-    // more context (e.g. knowing whether a node is a stock vs auxiliary)
-    // can provide a filtered `build_segments` or wrap this function.
-    let limit = 200.0;
     let target_x = (pos.x + dx).clamp(base.x - limit, base.x + limit);
     let target_y = (pos.y + dy).clamp(base.y - limit, base.y + limit);
 
@@ -581,8 +650,159 @@ mod tests {
             ..LayoutConfig::default()
         };
 
-        let result = run_annealing_with_filter(&layout, build_segments, &config, 42, |_node| false);
+        let result = run_annealing_with_filter(
+            &layout,
+            build_segments,
+            &config,
+            42,
+            |_node| false,
+            |_| 200.0,
+            &HashMap::new(),
+        );
         assert_eq!(result.layout, layout);
         assert!(!result.improved);
+    }
+
+    #[test]
+    fn test_apply_displacement_respects_custom_limit() {
+        let mut layout: Layout<String> = BTreeMap::new();
+        layout.insert("a".to_string(), Position::new(100.0, 100.0));
+        let baseline = layout.clone();
+
+        apply_displacement(&"a".to_string(), &baseline, &mut layout, 500.0, 500.0, 25.0);
+        let pos = layout[&"a".to_string()];
+        assert!(
+            (pos.x - 125.0).abs() < f64::EPSILON,
+            "x should be clamped to base+limit: got {}",
+            pos.x
+        );
+        assert!(
+            (pos.y - 125.0).abs() < f64::EPSILON,
+            "y should be clamped to base+limit: got {}",
+            pos.y
+        );
+    }
+
+    #[test]
+    fn test_chain_nodes_use_smaller_limit() {
+        let mut layout: Layout<String> = BTreeMap::new();
+        layout.insert("chain".to_string(), Position::new(100.0, 100.0));
+        layout.insert("aux".to_string(), Position::new(200.0, 200.0));
+        let baseline = layout.clone();
+
+        apply_displacement(
+            &"chain".to_string(),
+            &baseline,
+            &mut layout,
+            100.0,
+            100.0,
+            25.0,
+        );
+        let chain_pos = layout[&"chain".to_string()];
+        assert!(
+            (chain_pos.x - 100.0).abs() <= 25.0 + f64::EPSILON,
+            "chain node should be within 25 of baseline"
+        );
+    }
+
+    #[test]
+    fn test_strongest_neighbor_selects_max_weight() {
+        let mut adj: AdjacencyMap<String> = HashMap::new();
+        adj.insert(
+            "a".to_string(),
+            vec![
+                ("b".to_string(), 1.0),
+                ("c".to_string(), 5.0),
+                ("d".to_string(), 3.0),
+            ],
+        );
+        let result = strongest_neighbor(&"a".to_string(), &adj);
+        assert_eq!(result, Some("c".to_string()));
+    }
+
+    #[test]
+    fn test_strongest_neighbor_none_for_isolated() {
+        let adj: AdjacencyMap<String> = HashMap::new();
+        let result = strongest_neighbor(&"a".to_string(), &adj);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_neighbor_coupling_applies_half_displacement() {
+        let mut layout: Layout<String> = BTreeMap::new();
+        layout.insert("a".to_string(), Position::new(100.0, 100.0));
+        layout.insert("b".to_string(), Position::new(200.0, 200.0));
+        let baseline = layout.clone();
+
+        let mut adj: AdjacencyMap<String> = HashMap::new();
+        adj.insert("a".to_string(), vec![("b".to_string(), 1.0)]);
+        adj.insert("b".to_string(), vec![("a".to_string(), 1.0)]);
+
+        // Manually apply displacement + coupled motion to verify 50% factor
+        let dx = 10.0;
+        let dy = 20.0;
+        apply_displacement(&"a".to_string(), &baseline, &mut layout, dx, dy, 200.0);
+        if let Some(neighbor) = strongest_neighbor(&"a".to_string(), &adj) {
+            apply_displacement(&neighbor, &baseline, &mut layout, dx * 0.5, dy * 0.5, 200.0);
+        }
+
+        let b_pos = layout[&"b".to_string()];
+        assert!(
+            (b_pos.x - 205.0).abs() < f64::EPSILON,
+            "neighbor x should move by half dx: got {}",
+            b_pos.x
+        );
+        assert!(
+            (b_pos.y - 210.0).abs() < f64::EPSILON,
+            "neighbor y should move by half dy: got {}",
+            b_pos.y
+        );
+    }
+
+    #[test]
+    fn test_neighbor_coupling_respects_displacement_limit() {
+        let mut layout: Layout<String> = BTreeMap::new();
+        layout.insert("a".to_string(), Position::new(100.0, 100.0));
+        layout.insert("b".to_string(), Position::new(200.0, 200.0));
+        let baseline = layout.clone();
+
+        // Large dx that would exceed limit of 10 for neighbor
+        let dx = 100.0;
+        apply_displacement(
+            &"b".to_string(),
+            &baseline,
+            &mut layout,
+            dx * 0.5,
+            0.0,
+            10.0,
+        );
+        let b_pos = layout[&"b".to_string()];
+        assert!(
+            (b_pos.x - 210.0).abs() < f64::EPSILON,
+            "neighbor should be clamped at limit: got {}",
+            b_pos.x
+        );
+    }
+
+    #[test]
+    fn test_aux_nodes_use_larger_limit() {
+        let mut layout: Layout<String> = BTreeMap::new();
+        layout.insert("aux".to_string(), Position::new(100.0, 100.0));
+        let baseline = layout.clone();
+
+        apply_displacement(
+            &"aux".to_string(),
+            &baseline,
+            &mut layout,
+            150.0,
+            150.0,
+            200.0,
+        );
+        let aux_pos = layout[&"aux".to_string()];
+        assert!(
+            (aux_pos.x - 250.0).abs() < f64::EPSILON,
+            "aux node should move freely within 200 limit: got {}",
+            aux_pos.x
+        );
     }
 }

@@ -2,13 +2,86 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use crate::datamodel::view_element::LabelSide;
+
+const CHAR_WIDTH: f64 = 7.0;
+const LINE_HEIGHT: f64 = 14.0;
+const LABEL_PADDING: f64 = 4.0;
+
 /// Estimate text width based on character count.
 ///
 /// Uses a simple heuristic: each character is approximately 7 pixels wide.
 /// This is a rough approximation suitable for layout planning, not precise
 /// text rendering.
 pub fn estimate_text_width(text: &str) -> f64 {
-    text.chars().count() as f64 * 7.0
+    text.chars().count() as f64 * CHAR_WIDTH
+}
+
+/// Estimate the bounding box of a label placed relative to an element.
+///
+/// Returns `(min_x, min_y, max_x, max_y)` in absolute coordinates.
+/// Uses `format_label_with_line_breaks` to determine line count and widths.
+pub fn estimate_label_bounds(
+    text: &str,
+    center_x: f64,
+    center_y: f64,
+    label_side: LabelSide,
+    elem_width: f64,
+    elem_height: f64,
+) -> (f64, f64, f64, f64) {
+    let formatted = format_label_with_line_breaks(text);
+    let lines: Vec<&str> = formatted.split('\n').collect();
+    let max_line_width = lines
+        .iter()
+        .map(|line| line.chars().count() as f64 * CHAR_WIDTH)
+        .fold(0.0_f64, f64::max);
+    let total_height = lines.len() as f64 * LINE_HEIGHT;
+    let half_label_w = max_line_width / 2.0;
+
+    match label_side {
+        LabelSide::Bottom => {
+            let top = center_y + elem_height / 2.0 + LABEL_PADDING;
+            (
+                center_x - half_label_w,
+                top,
+                center_x + half_label_w,
+                top + total_height,
+            )
+        }
+        LabelSide::Top => {
+            let bottom = center_y - elem_height / 2.0 - LABEL_PADDING;
+            (
+                center_x - half_label_w,
+                bottom - total_height,
+                center_x + half_label_w,
+                bottom,
+            )
+        }
+        LabelSide::Left => {
+            let right = center_x - elem_width / 2.0 - LABEL_PADDING;
+            (
+                right - max_line_width,
+                center_y - total_height / 2.0,
+                right,
+                center_y + total_height / 2.0,
+            )
+        }
+        LabelSide::Right => {
+            let left = center_x + elem_width / 2.0 + LABEL_PADDING;
+            (
+                left,
+                center_y - total_height / 2.0,
+                left + max_line_width,
+                center_y + total_height / 2.0,
+            )
+        }
+        LabelSide::Center => (
+            center_x - half_label_w,
+            center_y - total_height / 2.0,
+            center_x + half_label_w,
+            center_y + total_height / 2.0,
+        ),
+    }
 }
 
 /// Format a label with a single line break at the word boundary closest to the
@@ -111,6 +184,48 @@ mod tests {
             format_label_with_line_breaks("verylongvariablenamewithoutbreaks"),
             "verylongvariablenamewithoutbreaks"
         );
+    }
+
+    #[test]
+    fn test_estimate_label_bounds_bottom() {
+        let (min_x, min_y, max_x, max_y) =
+            estimate_label_bounds("rate", 100.0, 50.0, LabelSide::Bottom, 18.0, 18.0);
+        // Label below: min_y should be below element bottom edge
+        assert!(min_y > 50.0 + 18.0 / 2.0);
+        assert!(max_y > min_y);
+        assert!(min_x < 100.0);
+        assert!(max_x > 100.0);
+    }
+
+    #[test]
+    fn test_estimate_label_bounds_right() {
+        let (min_x, _min_y, max_x, _max_y) =
+            estimate_label_bounds("rate", 100.0, 50.0, LabelSide::Right, 18.0, 18.0);
+        // Label right: min_x should be to the right of element right edge
+        assert!(min_x > 100.0 + 18.0 / 2.0);
+        assert!(max_x > min_x);
+    }
+
+    #[test]
+    fn test_estimate_label_bounds_long_name() {
+        let long_name = "very_long_variable_name_for_testing";
+        let (min_x, _min_y, max_x, _max_y) =
+            estimate_label_bounds(long_name, 100.0, 50.0, LabelSide::Bottom, 18.0, 18.0);
+        let label_width = max_x - min_x;
+        assert!(
+            label_width > 18.0,
+            "label width {} should exceed element width 18",
+            label_width
+        );
+    }
+
+    #[test]
+    fn test_estimate_label_bounds_top() {
+        let (_min_x, min_y, _max_x, max_y) =
+            estimate_label_bounds("x", 100.0, 50.0, LabelSide::Top, 18.0, 18.0);
+        // Label above: max_y should be above element top edge
+        assert!(max_y < 50.0 - 18.0 / 2.0);
+        assert!(min_y < max_y);
     }
 
     #[test]

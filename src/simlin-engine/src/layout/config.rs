@@ -53,6 +53,10 @@ pub struct LayoutConfig {
     pub annealing_reheat_temperature: f64,
     /// Scales average edge length to compute initial temperature.
     pub annealing_temperature_scale: f64,
+    /// Maximum displacement for auxiliary nodes during annealing.
+    pub annealing_max_delta_aux: f64,
+    /// Maximum displacement for chain nodes (stocks/flows) during annealing.
+    pub annealing_max_delta_chain: f64,
 }
 
 impl LayoutConfig {
@@ -72,6 +76,13 @@ impl LayoutConfig {
         self.cloud_height = self.cloud_height.max(1.0);
         self.annealing_cooling_rate = self.annealing_cooling_rate.clamp(0.0, 1.0);
         self.loop_curvature_factor = self.loop_curvature_factor.clamp(0.0, 1.0);
+        self.annealing_reheat_period = self.annealing_reheat_period.max(1);
+        self.annealing_iterations = self.annealing_iterations.max(1);
+        self.annealing_interval = self.annealing_interval.max(1);
+        self.annealing_max_rounds = self.annealing_max_rounds.max(1);
+        self.annealing_temperature_scale = self.annealing_temperature_scale.max(0.0);
+        self.annealing_max_delta_aux = self.annealing_max_delta_aux.max(1.0);
+        self.annealing_max_delta_chain = self.annealing_max_delta_chain.max(1.0);
     }
 }
 
@@ -100,6 +111,8 @@ impl Default for LayoutConfig {
             annealing_max_rounds: 6,
             annealing_reheat_temperature: 0.0,
             annealing_temperature_scale: 0.4,
+            annealing_max_delta_aux: 200.0,
+            annealing_max_delta_chain: 25.0,
         }
     }
 }
@@ -173,6 +186,32 @@ mod tests {
         config.annealing_cooling_rate = -0.1;
         config.validate();
         assert!(config.annealing_cooling_rate.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_validate_clamps_reheat_period_zero() {
+        let mut config = LayoutConfig {
+            annealing_reheat_period: 0,
+            ..LayoutConfig::default()
+        };
+        config.validate();
+        assert_eq!(config.annealing_reheat_period, 1);
+    }
+
+    #[test]
+    fn test_validate_clamps_iterations_zero() {
+        let mut config = LayoutConfig {
+            annealing_iterations: 0,
+            annealing_interval: 0,
+            annealing_max_rounds: 0,
+            annealing_temperature_scale: -1.0,
+            ..LayoutConfig::default()
+        };
+        config.validate();
+        assert_eq!(config.annealing_iterations, 1);
+        assert_eq!(config.annealing_interval, 1);
+        assert_eq!(config.annealing_max_rounds, 1);
+        assert!(config.annealing_temperature_scale.abs() < f64::EPSILON);
     }
 
     #[test]

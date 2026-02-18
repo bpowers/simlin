@@ -16,10 +16,11 @@ pub mod uid;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::f64::consts::PI;
 
-use crate::common::canonicalize;
+use crate::common::{Canonical, Ident, canonicalize};
 use crate::datamodel;
 use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
 use crate::datamodel::{Rect, ViewElement};
+use crate::model::ModelStage1;
 
 use self::annealing::{FlowTemplate, LineSegment, run_annealing_with_filter};
 use self::chain::{DIAGRAM_ORIGIN_MARGIN, compute_chain_positions, make_cloud_node_ident};
@@ -32,8 +33,8 @@ use self::metadata::{ComputedMetadata, LoopPolarity, StockFlowChain};
 use self::placement::{
     calculate_optimal_label_side, calculate_restricted_label_side, normalize_coordinates,
 };
-use self::sfdp::{SfdpConfig, compute_layout_from_initial};
-use self::text::format_label_with_line_breaks;
+use self::sfdp::{SfdpConfig, compute_layout_from_initial_with_callback, should_trigger_annealing};
+use self::text::{estimate_label_bounds, format_label_with_line_breaks};
 use self::uid::UidManager;
 
 /// Tracks the bounding box of all layout elements.
@@ -693,7 +694,7 @@ impl<'a> LayoutEngine<'a> {
         self.apply_layout_positions(&layout, &var_to_node)?;
 
         // Create auxiliary view elements for any not yet created
-        self.create_missing_auxiliary_elements(&layout, &var_to_node);
+        self.create_missing_auxiliary_elements(&layout, &var_to_node)?;
 
         // Create connector (link) view elements
         self.create_connectors()?;
@@ -937,13 +938,6 @@ impl<'a> LayoutEngine<'a> {
             beautify_leaves: true,
         };
 
-        let final_layout = compute_layout_from_initial(
-            &constrained_graph,
-            &sfdp_config,
-            &initial_layout,
-            self.config.annealing_random_seed,
-        );
-
         let node_to_ident: HashMap<String, String> = var_to_node
             .iter()
             .map(|(ident, node_id)| (node_id.clone(), ident.clone()))
@@ -987,10 +981,12 @@ impl<'a> LayoutEngine<'a> {
 
                 if let (Some(from_ident), Some(to_ident)) =
                     (node_to_ident.get(&edge.from), node_to_ident.get(&edge.to))
-                    // In dep_graph orientation (var -> dependencies), structural
-                    // stock bookkeeping edges are stock -> flow and are not
-                    // rendered as connectors.
-                    && is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows)
+                    && is_structural_stock_flow(
+                        from_ident,
+                        to_ident,
+                        &stock_inflows,
+                        &stock_outflows,
+                    )
                 {
                     continue;
                 }
@@ -1033,15 +1029,85 @@ impl<'a> LayoutEngine<'a> {
             segments
         };
 
-        let annealed = run_annealing_with_filter(
-            &final_layout,
-            build_segments,
-            &self.config,
-            self.config.annealing_random_seed,
-            |node_id: &String| aux_node_ids.contains(node_id),
+        // Build adjacency map for coupled motion
+        let mut adjacency: annealing::AdjacencyMap<String> = HashMap::new();
+        for edge in constrained_graph.edges() {
+            adjacency
+                .entry(edge.from.clone())
+                .or_default()
+                .push((edge.to.clone(), edge.weight));
+            adjacency
+                .entry(edge.to.clone())
+                .or_default()
+                .push((edge.from.clone(), edge.weight));
+        }
+
+        let max_delta_aux = self.config.annealing_max_delta_aux;
+        let max_delta_chain = self.config.annealing_max_delta_chain;
+        let annealing_config = self.config.clone();
+        let annealing_seed = self.config.annealing_random_seed;
+
+        // Interleaved annealing state
+        let mut annealing_round: usize = 0;
+        let mut last_annealing_iter: usize = 0;
+        let mut best_crossings: usize = usize::MAX;
+        let mut best_layout: Option<Layout<String>> = None;
+
+        let final_layout = compute_layout_from_initial_with_callback(
+            &constrained_graph,
+            &sfdp_config,
+            &initial_layout,
+            annealing_seed,
+            &mut |iter, layout| {
+                if !should_trigger_annealing(
+                    iter,
+                    annealing_config.annealing_interval,
+                    last_annealing_iter,
+                    annealing_round,
+                    annealing_config.annealing_max_rounds,
+                ) {
+                    return None;
+                }
+
+                let result = run_annealing_with_filter(
+                    layout,
+                    build_segments,
+                    &annealing_config,
+                    annealing_seed.wrapping_add(annealing_round as u64),
+                    |node_id: &String| aux_node_ids.contains(node_id),
+                    |node_id: &String| {
+                        if aux_node_ids.contains(node_id) {
+                            max_delta_aux
+                        } else {
+                            max_delta_chain
+                        }
+                    },
+                    &adjacency,
+                );
+
+                last_annealing_iter = iter;
+                annealing_round += 1;
+
+                if result.crossings < best_crossings {
+                    best_crossings = result.crossings;
+                    best_layout = Some(result.layout.clone());
+                    Some(result.layout)
+                } else {
+                    None
+                }
+            },
         );
 
-        Ok(annealed.layout)
+        // If SFDP drifted after a good annealing round, the final layout
+        // may be worse than the best we found. Compare and keep the better one.
+        if let Some(saved) = best_layout {
+            let final_crossings = annealing::count_crossings(&build_segments(&final_layout));
+            if final_crossings > best_crossings {
+                return Ok(saved);
+            }
+        }
+
+        Ok(final_layout)
     }
 
     /// Update all element coordinates from SFDP results.
@@ -1133,7 +1199,7 @@ impl<'a> LayoutEngine<'a> {
         &mut self,
         layout: &Layout<String>,
         var_to_node: &HashMap<String, String>,
-    ) {
+    ) -> Result<(), String> {
         let existing_uids: HashSet<i32> = self.elements.iter().map(|e| e.get_uid()).collect();
 
         for var in &self.model.variables {
@@ -1144,12 +1210,16 @@ impl<'a> LayoutEngine<'a> {
                     continue;
                 }
 
-                // Find position from layout
                 let pos = var_to_node
                     .get(canonical.as_ref())
                     .and_then(|node_id| layout.get(node_id))
                     .copied()
-                    .unwrap_or(Position::new(self.config.start_x, self.config.start_y));
+                    .ok_or_else(|| {
+                        format!(
+                            "create_missing_auxiliary_elements: no layout position for aux '{}'",
+                            canonical.as_ref()
+                        )
+                    })?;
 
                 let name = self.display_name(&canonical);
                 let formatted = format_label_with_line_breaks(&name);
@@ -1164,11 +1234,20 @@ impl<'a> LayoutEngine<'a> {
                 self.positions.insert(uid, pos);
             }
         }
+        Ok(())
     }
 
     /// Create link view elements for all non-structural dependency edges.
     fn create_connectors(&mut self) -> Result<(), String> {
         let mut link_set: HashSet<String> = HashSet::new();
+
+        let model_var_idents: HashSet<String> = self
+            .model
+            .variables
+            .iter()
+            .filter(|v| !matches!(v, datamodel::Variable::Module(_)))
+            .map(|v| canonicalize(v.get_ident()).into_owned())
+            .collect();
 
         // Build lookup sets for structural connections
         let stock_inflows: HashMap<String, HashSet<String>> = self
@@ -1208,12 +1287,30 @@ impl<'a> LayoutEngine<'a> {
                     continue;
                 }
 
-                let from_uid = self.uid_manager.get_uid(from_ident).ok_or_else(|| {
-                    format!("create_connectors: missing UID for source '{}'", from_ident)
-                })?;
-                let to_uid = self.uid_manager.get_uid(to_ident).ok_or_else(|| {
-                    format!("create_connectors: missing UID for target '{}'", to_ident)
-                })?;
+                let from_uid = match self.uid_manager.get_uid(from_ident) {
+                    Some(uid) => uid,
+                    None => {
+                        if model_var_idents.contains(from_ident) {
+                            return Err(format!(
+                                "create_connectors: missing UID for model variable '{}'",
+                                from_ident
+                            ));
+                        }
+                        continue;
+                    }
+                };
+                let to_uid = match self.uid_manager.get_uid(to_ident) {
+                    Some(uid) => uid,
+                    None => {
+                        if model_var_idents.contains(to_ident) {
+                            return Err(format!(
+                                "create_connectors: missing UID for model variable '{}'",
+                                to_ident
+                            ));
+                        }
+                        continue;
+                    }
+                };
 
                 if from_uid == 0 || to_uid == 0 {
                     return Err(format!(
@@ -1515,7 +1612,7 @@ impl<'a> LayoutEngine<'a> {
         }
     }
 
-    /// Recalculate bounds from all current element positions.
+    /// Recalculate bounds from all current element positions, including label extents.
     fn recalculate_bounds(&mut self) {
         let mut bounds = Bounds::new();
 
@@ -1535,6 +1632,15 @@ impl<'a> LayoutEngine<'a> {
                         self.config.stock_width,
                         self.config.stock_height,
                     );
+                    let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
+                        &s.name,
+                        s.x,
+                        s.y,
+                        s.label_side,
+                        self.config.stock_width,
+                        self.config.stock_height,
+                    );
+                    bounds.update(lx0, ly0, lx1, ly1);
                 }
                 ViewElement::Flow(f) => {
                     update(
@@ -1547,6 +1653,15 @@ impl<'a> LayoutEngine<'a> {
                     for pt in &f.points {
                         bounds.update(pt.x, pt.y, pt.x, pt.y);
                     }
+                    let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
+                        &f.name,
+                        f.x,
+                        f.y,
+                        f.label_side,
+                        self.config.flow_width,
+                        self.config.flow_height,
+                    );
+                    bounds.update(lx0, ly0, lx1, ly1);
                 }
                 ViewElement::Aux(a) => {
                     update(
@@ -1556,6 +1671,15 @@ impl<'a> LayoutEngine<'a> {
                         self.config.aux_width,
                         self.config.aux_height,
                     );
+                    let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
+                        &a.name,
+                        a.x,
+                        a.y,
+                        a.label_side,
+                        self.config.aux_width,
+                        self.config.aux_height,
+                    );
+                    bounds.update(lx0, ly0, lx1, ly1);
                 }
                 ViewElement::Cloud(c) => {
                     update(
@@ -1698,8 +1822,177 @@ fn is_structural_stock_flow(
     false
 }
 
+/// Try to compile the project and return the compiled model for AST-based
+/// dependency extraction. Returns `None` if compilation fails or the model
+/// isn't found, in which case callers should fall back to string heuristics.
+/// Resolve the canonical model name, handling the "main" alias for
+/// unnamed models (empty name).
+fn resolve_model_name<'a>(project: &'a datamodel::Project, model_name: &'a str) -> &'a str {
+    project
+        .get_model(model_name)
+        .map(|m| m.name.as_str())
+        .unwrap_or(model_name)
+}
+
+fn try_compile_model(
+    project: &datamodel::Project,
+    model_name: &str,
+) -> Option<std::sync::Arc<ModelStage1>> {
+    let actual_name = resolve_model_name(project, model_name);
+    let project_clone = project.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::project::Project::from(project_clone)
+    }));
+    let compiled = result.ok()?;
+    let model_ident = Ident::new(actual_name);
+    compiled.models.get(&model_ident).cloned()
+}
+
+/// Extract dependencies for a single variable using the compiled AST.
+/// Returns the set of canonical ident strings this variable depends on.
+fn extract_ast_deps(
+    compiled_var: &crate::variable::Variable,
+    compiled_model: &ModelStage1,
+) -> Option<Vec<String>> {
+    let raw_deps = match compiled_var {
+        crate::variable::Variable::Stock {
+            init_ast: Some(ast),
+            ..
+        } => crate::variable::identifier_set(ast, &[], None),
+        crate::variable::Variable::Var { ast: Some(ast), .. } => {
+            crate::variable::identifier_set(ast, &[], None)
+        }
+        crate::variable::Variable::Module { inputs, .. } => {
+            inputs.iter().map(|i| i.src.clone()).collect()
+        }
+        // No AST available (e.g. per-variable compilation error) --
+        // signal caller to fall back to string heuristics.
+        _ => return None,
+    };
+    let resolved = crate::model::resolve_non_private_dependencies(compiled_model, raw_deps);
+    Some(resolved.into_iter().map(|id| id.to_string()).collect())
+}
+
+/// Build feedback loops from the persisted model loop_metadata (UIDs only,
+/// no LTM simulation). Used as a fallback when LTM detection fails.
+fn build_feedback_loops_from_metadata(
+    model: &datamodel::Model,
+    uid_to_ident: &HashMap<i32, String>,
+) -> Vec<metadata::FeedbackLoop> {
+    let mut feedback_loops = Vec::new();
+    for (idx, loop_md) in model.loop_metadata.iter().enumerate() {
+        if loop_md.deleted {
+            continue;
+        }
+        let mut variables: Vec<String> = loop_md
+            .uids
+            .iter()
+            .filter_map(|uid| uid_to_ident.get(uid).cloned())
+            .collect();
+        if variables.len() < 2 {
+            continue;
+        }
+        if variables.first() != variables.last()
+            && let Some(first) = variables.first().cloned()
+        {
+            variables.push(first);
+        }
+
+        feedback_loops.push(metadata::FeedbackLoop {
+            name: if loop_md.name.is_empty() {
+                format!("loop_{}", idx + 1)
+            } else {
+                loop_md.name.clone()
+            },
+            polarity: LoopPolarity::Undetermined,
+            variables,
+            importance_series: Vec::new(),
+            dominant_period: None,
+        });
+    }
+    feedback_loops
+}
+
+/// Try to detect feedback loops using LTM analysis: compile the project,
+/// detect loops, augment with synthetic LTM variables, simulate, and extract
+/// importance time series. Returns `None` if any step fails, signaling the
+/// caller to fall back to persisted loop_metadata.
+fn try_detect_ltm_loops(
+    project: &datamodel::Project,
+    model_name: &str,
+) -> Option<Vec<metadata::FeedbackLoop>> {
+    use std::rc::Rc;
+
+    let actual_name = resolve_model_name(project, model_name).to_string();
+    let project_clone = project.clone();
+
+    // Run the entire LTM pipeline inside catch_unwind since compilation
+    // can panic on malformed models (e.g., missing module references).
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let compiled = crate::project::Project::from(project_clone);
+        let model_ident = Ident::new(&actual_name);
+
+        let compiled_model = compiled.models.get(&model_ident)?;
+        let model_loops = crate::ltm::detect_loops(compiled_model, &compiled).ok()?;
+        if model_loops.is_empty() {
+            return Some(Vec::new());
+        }
+
+        // Augment with LTM synthetic variables and simulate
+        let ltm_project = compiled.with_ltm().ok()?;
+        let sim = crate::interpreter::Simulation::new(&Rc::new(ltm_project), &actual_name).ok()?;
+        let compiled_sim = sim.compile().ok()?;
+        let mut vm = crate::vm::Vm::new(compiled_sim).ok()?;
+        vm.run_to_end().ok()?;
+
+        let mut feedback_loops = Vec::new();
+        for loop_item in &model_loops {
+            let polarity = match loop_item.polarity {
+                crate::ltm::LoopPolarity::Reinforcing => LoopPolarity::Reinforcing,
+                crate::ltm::LoopPolarity::Balancing => LoopPolarity::Balancing,
+                crate::ltm::LoopPolarity::Undetermined => LoopPolarity::Undetermined,
+            };
+
+            let variables: Vec<String> = {
+                let mut vars: Vec<String> =
+                    loop_item.links.iter().map(|l| l.from.to_string()).collect();
+                if let Some(first) = vars.first().cloned() {
+                    vars.push(first);
+                }
+                vars
+            };
+
+            // Extract the relative loop score time series
+            let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_item.id);
+            let var_ident = Ident::new(&var_name);
+            let importance_series = vm
+                .get_series(&var_ident)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|v| if v.is_finite() { v } else { 0.0 })
+                .collect();
+
+            feedback_loops.push(metadata::FeedbackLoop {
+                name: loop_item.id.clone(),
+                polarity,
+                variables,
+                importance_series,
+                dominant_period: None,
+            });
+        }
+
+        Some(feedback_loops)
+    }))
+    .ok()
+    .flatten()
+}
+
 /// Compute metadata for a model from its variable definitions and dependency structure.
-pub fn compute_metadata(model: &datamodel::Model) -> ComputedMetadata {
+pub fn compute_metadata(
+    project: &datamodel::Project,
+    model_name: &str,
+) -> Option<ComputedMetadata> {
+    let model = project.get_model(model_name)?;
     let mut dep_graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut reverse_dep_graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut constants: BTreeSet<String> = BTreeSet::new();
@@ -1762,8 +2055,10 @@ pub fn compute_metadata(model: &datamodel::Model) -> ComputedMetadata {
         }
     }
 
-    // Build dependency graph from equation references
-    // For now, use a simple heuristic: parse equation text for variable references
+    // Try AST-based dependency extraction via a compiled model.
+    // Falls back to string heuristics if compilation fails.
+    let compiled_model = try_compile_model(project, model_name);
+
     let all_idents: HashSet<String> = model
         .variables
         .iter()
@@ -1778,14 +2073,29 @@ pub fn compute_metadata(model: &datamodel::Model) -> ComputedMetadata {
         let var_ident = canonicalize(var.get_ident()).into_owned();
         dep_graph.entry(var_ident.clone()).or_default();
 
-        // Extract dependencies from the equation
-        let deps = extract_equation_deps(var, &all_idents);
+        let deps = if let Some(ref cm) = compiled_model {
+            let ident_key = Ident::<Canonical>::new(&var_ident);
+            cm.variables
+                .get(&ident_key)
+                .and_then(|compiled_var| extract_ast_deps(compiled_var, cm))
+                .unwrap_or_else(|| extract_equation_deps(var, &all_idents))
+        } else {
+            extract_equation_deps(var, &all_idents)
+        };
 
-        if deps.is_empty() {
-            // Check if this is truly a constant (no stock inflows/outflows either)
-            if !matches!(var, datamodel::Variable::Stock(_)) {
-                constants.insert(var_ident.clone());
-            }
+        // Filter to only include deps that are actual rendered model
+        // variables. AST extraction can yield module-internal identifiers
+        // (e.g. "m·out") that don't correspond to any rendered element.
+        // Also exclude self-references: the string heuristic skips them,
+        // but AST extraction doesn't (stocks reference themselves through
+        // init expressions, SMOOTH/DELAY patterns, etc.).
+        let deps: Vec<String> = deps
+            .into_iter()
+            .filter(|d| d != &var_ident && all_idents.contains(d))
+            .collect();
+
+        if deps.is_empty() && !matches!(var, datamodel::Variable::Stock(_)) {
+            constants.insert(var_ident.clone());
         }
 
         for dep in &deps {
@@ -1836,48 +2146,42 @@ pub fn compute_metadata(model: &datamodel::Model) -> ComputedMetadata {
         &all_flows,
     );
 
-    let mut feedback_loops = Vec::new();
-    for (idx, loop_md) in model.loop_metadata.iter().enumerate() {
-        if loop_md.deleted {
-            continue;
-        }
-        let mut variables: Vec<String> = loop_md
-            .uids
-            .iter()
-            .filter_map(|uid| uid_to_ident.get(uid).cloned())
-            .collect();
-        if variables.len() < 2 {
-            continue;
-        }
-        if variables.first() != variables.last()
-            && let Some(first) = variables.first().cloned()
-        {
-            variables.push(first);
-        }
+    // Try LTM-based loop detection. Falls back to persisted loop_metadata
+    // if LTM detection or simulation fails.
+    let mut feedback_loops = try_detect_ltm_loops(project, model_name)
+        .unwrap_or_else(|| build_feedback_loops_from_metadata(model, &uid_to_ident));
+    feedback_loops.sort_by(|a, b| {
+        b.average_importance()
+            .partial_cmp(&a.average_importance())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
-        feedback_loops.push(metadata::FeedbackLoop {
-            name: if loop_md.name.is_empty() {
-                format!("loop_{}", idx + 1)
-            } else {
-                loop_md.name.clone()
-            },
-            polarity: LoopPolarity::Undetermined,
-            variables,
-            importance_series: Vec::new(),
-            dominant_period: None,
-        });
-    }
+    let dominant_periods = {
+        let specs = model.sim_specs.as_ref().unwrap_or(&project.sim_specs);
+        let dt_to_f64 = |dt: &datamodel::Dt| match dt {
+            datamodel::Dt::Dt(v) => *v,
+            datamodel::Dt::Reciprocal(v) => 1.0 / v,
+        };
+        let dt = dt_to_f64(&specs.dt);
+        let raw_save_step = specs.save_step.as_ref().map(dt_to_f64).unwrap_or(dt);
+        // The VM/interpreter saves at most once per dt step
+        // (save_every = max(1, round(save_step/dt))), so the effective
+        // cadence is never faster than dt.
+        let effective_save_step = raw_save_step.max(dt);
+        metadata::calculate_dominant_periods(&feedback_loops, specs.start, effective_save_step)
+    };
 
-    ComputedMetadata {
+    Some(ComputedMetadata {
         chains,
         feedback_loops,
+        dominant_periods,
         dep_graph,
         reverse_dep_graph,
         constants,
         stock_to_inflows,
         stock_to_outflows,
         flow_to_stocks,
-    }
+    })
 }
 
 /// Extract variable dependencies from an equation using word-boundary
@@ -1965,14 +2269,13 @@ fn detect_chains(
         .collect();
 
     if all_stocks.is_empty() {
-        // Create chains for all flows when there are no stocks.
         let mut chains = Vec::new();
         for flow_ident in all_flows {
             chains.push(StockFlowChain {
                 stocks: Vec::new(),
                 flows: vec![flow_ident.clone()],
                 all_vars: vec![flow_ident.clone()],
-                importance: 0.0,
+                importance: 5.0,
             });
         }
         return chains;
@@ -2037,10 +2340,10 @@ fn detect_chains(
         all_vars.sort();
 
         chains.push(StockFlowChain {
-            stocks: chain_stocks,
-            flows: chain_flows,
+            stocks: chain_stocks.clone(),
+            flows: chain_flows.clone(),
             all_vars,
-            importance: 0.0,
+            importance: (chain_stocks.len() * 10 + chain_flows.len() * 5) as f64,
         });
     }
 
@@ -2053,9 +2356,15 @@ fn detect_chains(
             stocks: Vec::new(),
             flows: vec![flow_ident.clone()],
             all_vars: vec![flow_ident.clone()],
-            importance: 0.0,
+            importance: 5.0,
         });
     }
+
+    chains.sort_by(|a, b| {
+        b.importance
+            .partial_cmp(&a.importance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     chains
 }
@@ -2135,32 +2444,45 @@ const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
 /// then runs the multi-phase layout pipeline: chain positioning via SFDP,
 /// auxiliary placement, connector routing, label optimization, and
 /// coordinate normalization.
-pub fn generate_layout(model: &datamodel::Model) -> Result<datamodel::StockFlow, String> {
+pub fn generate_layout(
+    project: &datamodel::Project,
+    model_name: &str,
+) -> Result<datamodel::StockFlow, String> {
     let config = LayoutConfig::default();
-    let metadata = compute_metadata(model);
+    let not_found = || format!("model '{}' not found in project", model_name);
+    let model = project.get_model(model_name).ok_or_else(not_found)?;
+    let metadata = compute_metadata(project, model_name).ok_or_else(not_found)?;
     let engine = LayoutEngine::new(config, model, metadata);
     engine.generate_layout()
 }
 
 /// Generate layout with a specific configuration.
 pub fn generate_layout_with_config(
-    model: &datamodel::Model,
+    project: &datamodel::Project,
+    model_name: &str,
     mut config: LayoutConfig,
 ) -> Result<datamodel::StockFlow, String> {
     config.validate();
-    let metadata = compute_metadata(model);
+    let not_found = || format!("model '{}' not found in project", model_name);
+    let model = project.get_model(model_name).ok_or_else(not_found)?;
+    let metadata = compute_metadata(project, model_name).ok_or_else(not_found)?;
     let engine = LayoutEngine::new(config, model, metadata);
     engine.generate_layout()
 }
 
 /// Generate multiple layouts with different seeds in parallel and pick the
 /// one with fewest crossings. On tie, the lowest seed wins.
-pub fn generate_best_layout(model: &datamodel::Model) -> Result<datamodel::StockFlow, String> {
+pub fn generate_best_layout(
+    project: &datamodel::Project,
+    model_name: &str,
+) -> Result<datamodel::StockFlow, String> {
     use rayon::prelude::*;
 
     let config = LayoutConfig::default();
     let seeds = LAYOUT_SEEDS;
-    let metadata = compute_metadata(model);
+    let not_found = || format!("model '{}' not found in project", model_name);
+    let model = project.get_model(model_name).ok_or_else(not_found)?;
+    let metadata = compute_metadata(project, model_name).ok_or_else(not_found)?;
 
     let results: Vec<Result<LayoutResult, String>> = seeds
         .par_iter()
@@ -2179,6 +2501,18 @@ pub fn generate_best_layout(model: &datamodel::Model) -> Result<datamodel::Stock
         .collect();
 
     select_best_layout(results)
+}
+
+/// Compute and return layout metadata (dependency graph, chains, feedback loops,
+/// dominant periods) for a model without generating a full diagram layout.
+///
+/// This is useful for analysis tools that want loop importance, dominant periods,
+/// or dependency information without paying the cost of SFDP + annealing.
+pub fn compute_layout_metadata(
+    project: &datamodel::Project,
+    model_name: &str,
+) -> Option<ComputedMetadata> {
+    compute_metadata(project, model_name)
 }
 
 /// Pick the layout with fewest crossings; on tie, the one from the lowest seed.
@@ -2211,6 +2545,23 @@ fn select_best_layout(
 mod tests {
     use super::*;
     use crate::datamodel;
+
+    fn test_project(model: datamodel::Model) -> datamodel::Project {
+        let name = model.name.clone();
+        datamodel::Project {
+            name: name.clone(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: Vec::new(),
+            units: Vec::new(),
+            models: vec![model],
+            source: None,
+            ai_information: None,
+        }
+    }
+
+    /// Name used for test models -- matches the name in `simple_model()` and
+    /// inline test models so that `project.get_model(TEST_MODEL)` finds them.
+    const TEST_MODEL: &str = "test";
 
     fn simple_model() -> datamodel::Model {
         datamodel::Model {
@@ -2290,23 +2641,23 @@ mod tests {
 
     #[test]
     fn test_generate_layout_empty() {
-        let model = datamodel::Model {
-            name: "empty".to_string(),
+        let project = test_project(datamodel::Model {
+            name: TEST_MODEL.to_string(),
             sim_specs: None,
             variables: Vec::new(),
             views: Vec::new(),
             loop_metadata: Vec::new(),
             groups: Vec::new(),
-        };
-        let result = generate_layout(&model).unwrap();
+        });
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
         assert!(result.elements.is_empty());
         assert_eq!(result.zoom, 1.0);
     }
 
     #[test]
     fn test_generate_layout_single_chain() {
-        let model = simple_model();
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(simple_model());
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
 
         assert!(!result.elements.is_empty());
         assert_eq!(result.zoom, 1.0);
@@ -2335,8 +2686,9 @@ mod tests {
 
     #[test]
     fn test_generate_layout_completeness() {
-        let model = simple_model();
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(simple_model());
+        let model = project.get_model(TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
 
         // Every model variable should have a view element
         let element_names: HashSet<String> = result
@@ -2357,8 +2709,8 @@ mod tests {
 
     #[test]
     fn test_coordinates_positive() {
-        let model = simple_model();
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(simple_model());
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
 
         for elem in &result.elements {
             match elem {
@@ -2385,8 +2737,8 @@ mod tests {
 
     #[test]
     fn test_no_duplicate_uids() {
-        let model = simple_model();
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(simple_model());
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
 
         let mut uids: HashSet<i32> = HashSet::new();
         for elem in &result.elements {
@@ -2397,8 +2749,8 @@ mod tests {
 
     #[test]
     fn test_viewbox_encompasses_elements() {
-        let model = simple_model();
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(simple_model());
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
 
         let vb = &result.view_box;
         assert!(vb.width > 0.0);
@@ -2435,15 +2787,15 @@ mod tests {
 
     #[test]
     fn test_zoom_default() {
-        let model = simple_model();
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(simple_model());
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
         assert_eq!(result.zoom, 1.0);
     }
 
     #[test]
     fn test_flow_points_attached() {
-        let model = simple_model();
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(simple_model());
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
 
         for elem in &result.elements {
             if let ViewElement::Flow(flow) = elem {
@@ -2465,8 +2817,8 @@ mod tests {
 
     #[test]
     fn test_compute_metadata_chains() {
-        let model = simple_model();
-        let metadata = compute_metadata(&model);
+        let project = test_project(simple_model());
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
 
         // Should detect one chain: population + births + deaths
         assert_eq!(metadata.chains.len(), 1);
@@ -2481,8 +2833,8 @@ mod tests {
 
     #[test]
     fn test_compute_metadata_dep_graph() {
-        let model = simple_model();
-        let metadata = compute_metadata(&model);
+        let project = test_project(simple_model());
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
 
         // births depends on population and birth_rate
         let births_deps = metadata.dep_graph.get("births").unwrap();
@@ -2492,8 +2844,8 @@ mod tests {
 
     #[test]
     fn test_compute_metadata_constants() {
-        let model = simple_model();
-        let metadata = compute_metadata(&model);
+        let project = test_project(simple_model());
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
 
         // birth_rate and death_rate are constants (scalar equations with no variable references)
         assert!(metadata.is_constant("birth_rate"));
@@ -2709,7 +3061,7 @@ mod tests {
     #[test]
     fn test_generate_layout_aux_only() {
         let model = datamodel::Model {
-            name: "aux_only".to_string(),
+            name: TEST_MODEL.to_string(),
             sim_specs: None,
             variables: vec![
                 datamodel::Variable::Aux(datamodel::Aux {
@@ -2741,7 +3093,8 @@ mod tests {
             loop_metadata: Vec::new(),
             groups: Vec::new(),
         };
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(model);
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
         assert_eq!(
             result
                 .elements
@@ -2755,7 +3108,7 @@ mod tests {
     #[test]
     fn test_generate_layout_single_aux() {
         let model = datamodel::Model {
-            name: "single".to_string(),
+            name: TEST_MODEL.to_string(),
             sim_specs: None,
             variables: vec![datamodel::Variable::Aux(datamodel::Aux {
                 ident: "x".to_string(),
@@ -2773,14 +3126,15 @@ mod tests {
             loop_metadata: Vec::new(),
             groups: Vec::new(),
         };
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(model);
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
         assert_eq!(result.elements.len(), 1);
     }
 
     #[test]
     fn test_generate_layout_disconnected_stocks() {
         let model = datamodel::Model {
-            name: "disconnected".to_string(),
+            name: TEST_MODEL.to_string(),
             sim_specs: None,
             variables: vec![
                 datamodel::Variable::Stock(datamodel::Stock {
@@ -2816,7 +3170,8 @@ mod tests {
             loop_metadata: Vec::new(),
             groups: Vec::new(),
         };
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(model);
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
         let stocks: Vec<_> = result
             .elements
             .iter()
@@ -2827,8 +3182,9 @@ mod tests {
 
     #[test]
     fn test_connector_direction_dependency_to_dependent() {
-        let model = simple_model();
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(simple_model());
+        let model = project.get_model(TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
 
         let uid_to_ident: HashMap<i32, String> = model
             .variables
@@ -2874,7 +3230,7 @@ mod tests {
     #[test]
     fn test_compute_metadata_includes_isolated_flows_when_stocks_exist() {
         let model = datamodel::Model {
-            name: "mixed".to_string(),
+            name: TEST_MODEL.to_string(),
             sim_specs: None,
             variables: vec![
                 datamodel::Variable::Stock(datamodel::Stock {
@@ -2923,7 +3279,8 @@ mod tests {
             groups: Vec::new(),
         };
 
-        let metadata = compute_metadata(&model);
+        let project = test_project(model);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
 
         assert!(
             metadata
@@ -2937,7 +3294,7 @@ mod tests {
     #[test]
     fn test_generate_layout_includes_isolated_flows_when_stocks_exist() {
         let model = datamodel::Model {
-            name: "mixed".to_string(),
+            name: TEST_MODEL.to_string(),
             sim_specs: None,
             variables: vec![
                 datamodel::Variable::Stock(datamodel::Stock {
@@ -2986,7 +3343,8 @@ mod tests {
             groups: Vec::new(),
         };
 
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(model);
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
         let flow_count = result
             .elements
             .iter()
@@ -2998,7 +3356,7 @@ mod tests {
     #[test]
     fn test_generate_layout_ignores_module_dependencies_for_connectors() {
         let model = datamodel::Model {
-            name: "module_dep".to_string(),
+            name: TEST_MODEL.to_string(),
             sim_specs: None,
             variables: vec![
                 datamodel::Variable::Aux(datamodel::Aux {
@@ -3042,7 +3400,8 @@ mod tests {
             groups: Vec::new(),
         };
 
-        let result = generate_layout(&model).unwrap();
+        let project = test_project(model);
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
         let element_uids: HashSet<i32> = result.elements.iter().map(|e| e.get_uid()).collect();
 
         for elem in &result.elements {
@@ -3154,7 +3513,7 @@ mod tests {
     #[test]
     fn test_compute_metadata_populates_feedback_loops_from_model_metadata() {
         let model = datamodel::Model {
-            name: "loops".to_string(),
+            name: TEST_MODEL.to_string(),
             sim_specs: None,
             variables: vec![
                 datamodel::Variable::Aux(datamodel::Aux {
@@ -3192,12 +3551,491 @@ mod tests {
             groups: Vec::new(),
         };
 
-        let metadata = compute_metadata(&model);
+        let project = test_project(model);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
         assert_eq!(metadata.feedback_loops.len(), 1);
         assert_eq!(metadata.feedback_loops[0].name, "R1");
         assert_eq!(
             metadata.feedback_loops[0].causal_chain(),
             &["x".to_string(), "y".to_string(), "x".to_string()]
         );
+    }
+
+    #[test]
+    fn test_chain_importance_formula() {
+        let mut stock_to_inflows: HashMap<String, Vec<String>> = HashMap::new();
+        let mut stock_to_outflows: HashMap<String, Vec<String>> = HashMap::new();
+        let mut flow_to_stocks: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        let mut all_flows: BTreeSet<String> = BTreeSet::new();
+
+        // Chain: s1 -> f1 -> s2 -> f2 -> (none), f3 -> s2
+        // 2 stocks + 3 flows = 2*10 + 3*5 = 35
+        stock_to_outflows.insert("s1".into(), vec!["f1".into()]);
+        stock_to_inflows.insert("s2".into(), vec!["f1".into(), "f3".into()]);
+        stock_to_outflows.insert("s2".into(), vec!["f2".into()]);
+        stock_to_inflows.insert("s1".into(), vec![]);
+        flow_to_stocks.insert("f1".into(), (Some("s1".into()), Some("s2".into())));
+        flow_to_stocks.insert("f2".into(), (Some("s2".into()), None));
+        flow_to_stocks.insert("f3".into(), (None, Some("s2".into())));
+        all_flows.extend(["f1".into(), "f2".into(), "f3".into()]);
+
+        let chains = detect_chains(
+            &stock_to_inflows,
+            &stock_to_outflows,
+            &flow_to_stocks,
+            &all_flows,
+        );
+        assert_eq!(chains.len(), 1);
+        assert!((chains[0].importance - 35.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_chains_sorted_descending() {
+        let mut stock_to_inflows: HashMap<String, Vec<String>> = HashMap::new();
+        let mut stock_to_outflows: HashMap<String, Vec<String>> = HashMap::new();
+        let mut flow_to_stocks: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        let mut all_flows: BTreeSet<String> = BTreeSet::new();
+
+        // Chain 1: 1 stock + 1 flow = 15
+        stock_to_outflows.insert("a".into(), vec!["fa".into()]);
+        stock_to_inflows.insert("a".into(), vec![]);
+        flow_to_stocks.insert("fa".into(), (Some("a".into()), None));
+        all_flows.insert("fa".into());
+
+        // Chain 2: 2 stocks + 1 flow = 25
+        stock_to_outflows.insert("b".into(), vec!["fb".into()]);
+        stock_to_inflows.insert("b".into(), vec![]);
+        stock_to_inflows.insert("c".into(), vec!["fb".into()]);
+        stock_to_outflows.insert("c".into(), vec![]);
+        flow_to_stocks.insert("fb".into(), (Some("b".into()), Some("c".into())));
+        all_flows.insert("fb".into());
+
+        let chains = detect_chains(
+            &stock_to_inflows,
+            &stock_to_outflows,
+            &flow_to_stocks,
+            &all_flows,
+        );
+        assert_eq!(chains.len(), 2);
+        assert!(
+            chains[0].importance >= chains[1].importance,
+            "chains should be sorted descending by importance: {} vs {}",
+            chains[0].importance,
+            chains[1].importance
+        );
+        assert!((chains[0].importance - 25.0).abs() < f64::EPSILON);
+        assert!((chains[1].importance - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_isolated_flow_importance_is_5() {
+        let stock_to_inflows: HashMap<String, Vec<String>> = HashMap::new();
+        let stock_to_outflows: HashMap<String, Vec<String>> = HashMap::new();
+        let flow_to_stocks: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        let mut all_flows: BTreeSet<String> = BTreeSet::new();
+        all_flows.insert("lonely_flow".into());
+
+        let chains = detect_chains(
+            &stock_to_inflows,
+            &stock_to_outflows,
+            &flow_to_stocks,
+            &all_flows,
+        );
+        assert_eq!(chains.len(), 1);
+        assert!((chains[0].importance - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_ast_deps_exclude_builtins() {
+        // A variable referencing TIME (a builtin) should not produce a connector
+        // to TIME since TIME is not a model variable.
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "rate".to_string(),
+                    equation: datamodel::Equation::Scalar("0.1".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "output".to_string(),
+                    equation: datamodel::Equation::Scalar("rate * TIME".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let project = test_project(model);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+
+        let output_deps = metadata.dep_graph.get("output").unwrap();
+        assert!(output_deps.contains("rate"), "output should depend on rate");
+        assert!(
+            !output_deps.contains("time"),
+            "output should NOT depend on builtin TIME"
+        );
+    }
+
+    #[test]
+    fn test_ast_deps_no_false_positives() {
+        // String heuristic would falsely match "birth" inside "birthday".
+        // AST-based extraction should not.
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "birth".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "birthday".to_string(),
+                    equation: datamodel::Equation::Scalar("365".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "output".to_string(),
+                    equation: datamodel::Equation::Scalar("birthday + 1".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(3),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let project = test_project(model);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+
+        let output_deps = metadata.dep_graph.get("output").unwrap();
+        assert!(
+            output_deps.contains("birthday"),
+            "output should depend on birthday"
+        );
+        assert!(
+            !output_deps.contains("birth"),
+            "output should NOT falsely depend on birth (substring match)"
+        );
+    }
+
+    #[test]
+    fn test_deps_fallback_on_compile_error() {
+        // A model with a module referencing a nonexistent submodel should
+        // gracefully fall back to string heuristic for dep extraction.
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "x".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Module(datamodel::Module {
+                    ident: "m".to_string(),
+                    model_name: "nonexistent_model".to_string(),
+                    documentation: String::new(),
+                    units: None,
+                    references: Vec::new(),
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "y".to_string(),
+                    equation: datamodel::Equation::Scalar("x + 1".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(3),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let project = test_project(model);
+        let result = generate_layout(&project, TEST_MODEL);
+        assert!(
+            result.is_ok(),
+            "layout should succeed despite compile error, via fallback"
+        );
+    }
+
+    #[test]
+    fn test_ltm_fallback_on_sim_error() {
+        // A model with loop_metadata but that can't be simulated should
+        // fall back to persisted loop_metadata UIDs for feedback loops.
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "x".to_string(),
+                    equation: datamodel::Equation::Scalar("y".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "y".to_string(),
+                    equation: datamodel::Equation::Scalar("x".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: vec![datamodel::LoopMetadata {
+                uids: vec![1, 2],
+                deleted: false,
+                name: "R1".to_string(),
+                description: String::new(),
+            }],
+            groups: Vec::new(),
+        };
+        let project = test_project(model);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+
+        // Should have fallen back to persisted metadata since this minimal
+        // model doesn't have sim_specs and can't simulate.
+        assert_eq!(metadata.feedback_loops.len(), 1);
+        assert_eq!(metadata.feedback_loops[0].name, "R1");
+    }
+
+    #[test]
+    fn test_compute_metadata_returns_none_for_unknown_model() {
+        let project = test_project(simple_model());
+        assert!(compute_metadata(&project, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_compute_metadata_falls_back_for_invalid_equation() {
+        // A variable with an unparseable equation should still get
+        // string-heuristic dependencies rather than being treated as a
+        // constant.
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "population".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["births".to_string()],
+                    outflows: vec![],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "births".to_string(),
+                    equation: datamodel::Equation::Scalar(
+                        "population *** totally_broken_syntax".to_string(),
+                        None,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let project = test_project(model);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+
+        let births_deps = metadata.dep_graph.get("births").unwrap();
+        assert!(
+            births_deps.contains("population"),
+            "births should depend on population via string-heuristic fallback, got: {:?}",
+            births_deps,
+        );
+        assert!(
+            !metadata.constants.contains("births"),
+            "births should not be classified as a constant",
+        );
+    }
+
+    #[test]
+    fn test_compute_metadata_excludes_non_model_deps() {
+        // Equation text that mentions an identifier not in the model
+        // (simulating a module output reference like "m·out" that
+        // resolve_non_private_dependencies might pass through).
+        // The dep graph should only contain identifiers for actual
+        // rendered model variables.
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "x".to_string(),
+                    equation: datamodel::Equation::Scalar("phantom + 1".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "y".to_string(),
+                    equation: datamodel::Equation::Scalar("x * 2".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let project = test_project(model);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+
+        // "phantom" is not a model variable so should not appear in the dep graph
+        let all_graph_nodes: BTreeSet<&String> = metadata
+            .dep_graph
+            .keys()
+            .chain(metadata.dep_graph.values().flat_map(|deps| deps.iter()))
+            .collect();
+        assert!(
+            !all_graph_nodes.contains(&"phantom".to_string()),
+            "dep graph should not contain non-model identifiers, got: {:?}",
+            all_graph_nodes,
+        );
+
+        // y should still depend on x (a real model variable)
+        let y_deps = metadata.dep_graph.get("y").unwrap();
+        assert!(
+            y_deps.contains("x"),
+            "y should depend on x, got: {:?}",
+            y_deps,
+        );
+
+        // x should be a constant since its only dep (phantom) was filtered
+        assert!(
+            metadata.constants.contains("x"),
+            "x should be a constant after filtering non-model deps",
+        );
+    }
+
+    #[test]
+    fn test_resolve_model_name_returns_actual_name_for_main_alias() {
+        let model = datamodel::Model {
+            name: String::new(),
+            sim_specs: None,
+            variables: Vec::new(),
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let project = test_project(model);
+        // "main" should resolve to the empty string (the actual model name)
+        assert_eq!(resolve_model_name(&project, "main"), "");
+    }
+
+    #[test]
+    fn test_resolve_model_name_passthrough_for_named_model() {
+        let project = test_project(simple_model());
+        assert_eq!(resolve_model_name(&project, TEST_MODEL), TEST_MODEL);
+    }
+
+    #[test]
+    fn test_resolve_model_name_passthrough_for_unknown_model() {
+        let project = test_project(simple_model());
+        assert_eq!(resolve_model_name(&project, "nonexistent"), "nonexistent");
+    }
+
+    #[test]
+    fn test_try_compile_model_with_main_alias() {
+        let mut model = simple_model();
+        model.name = String::new();
+        let project = test_project(model);
+        // Should find the model via "main" alias
+        let compiled = try_compile_model(&project, "main");
+        assert!(
+            compiled.is_some(),
+            "try_compile_model should resolve 'main' to the unnamed model"
+        );
+    }
+
+    #[test]
+    fn test_compute_metadata_with_main_alias() {
+        let mut model = simple_model();
+        model.name = String::new();
+        let project = test_project(model);
+        let metadata = compute_metadata(&project, "main");
+        assert!(
+            metadata.is_some(),
+            "compute_metadata should work with 'main' alias for unnamed models"
+        );
+        let metadata = metadata.unwrap();
+        assert!(!metadata.dep_graph.is_empty());
     }
 }

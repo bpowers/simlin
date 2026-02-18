@@ -229,12 +229,15 @@ pub fn compute_chain_positions(
 
     // During chain-level annealing only move chain nodes; synthetic chain cloud
     // nodes stay anchored to preserve endpoint semantics.
+    let max_delta = config.annealing_max_delta_chain;
     let layout = run_annealing_with_filter(
         &layout,
         build_segments,
         config,
         config.annealing_random_seed,
         |node_id: &String| node_id.starts_with("chain_"),
+        |_| max_delta,
+        &HashMap::new(),
     )
     .layout;
 
