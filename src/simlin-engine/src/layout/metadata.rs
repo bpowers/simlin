@@ -166,12 +166,11 @@ pub fn calculate_dominant_periods(
         let mut balancing_loops: Vec<&str> = Vec::new();
 
         for &(name, score) in &scored {
-            let abs_score = score.abs();
             if score > 0.0 {
-                reinforcing_sum += abs_score;
+                reinforcing_sum += score;
                 reinforcing_loops.push(name);
-            } else {
-                balancing_sum += abs_score;
+            } else if score < 0.0 {
+                balancing_sum += score.abs();
                 balancing_loops.push(name);
             }
         }
@@ -636,5 +635,36 @@ mod tests {
         let mut names = periods[0].dominant_loops.clone();
         names.sort();
         assert_eq!(names, vec!["R1", "R2"]);
+    }
+
+    #[test]
+    fn test_dominant_periods_zero_score_loops_excluded_from_dominant_set() {
+        // One loop has a small negative score, another has zero score.
+        // The zero-score loop contributes nothing and should not inflate
+        // the dominant set in the fallback path.
+        let loops = vec![
+            FeedbackLoop {
+                name: "B1".to_string(),
+                polarity: LoopPolarity::Balancing,
+                variables: vec!["a".to_string()],
+                importance_series: vec![-0.01],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "Z1".to_string(),
+                polarity: LoopPolarity::Undetermined,
+                variables: vec!["b".to_string()],
+                importance_series: vec![0.0],
+                dominant_period: None,
+            },
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(periods.len(), 1);
+        assert_eq!(
+            periods[0].dominant_loops,
+            vec!["B1"],
+            "zero-score loop Z1 should not appear in dominant set, got: {:?}",
+            periods[0].dominant_loops,
+        );
     }
 }
