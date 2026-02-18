@@ -549,6 +549,54 @@ fn test_compute_layout_metadata_dep_graph() {
     );
 }
 
+/// Regression test: when save_step < dt, dominant period timestamps must still
+/// use the effective save cadence (dt, not save_step). Without this fix, period
+/// timestamps would be compressed (e.g. 0..2.5 instead of 0..10) because the
+/// code used the raw save_step as the series spacing.
+#[test]
+fn test_dominant_period_timestamps_respect_effective_save_cadence() {
+    use simlin_engine::layout::compute_metadata;
+
+    // save_step (0.25) < dt (1), so effective cadence should be dt (1.0).
+    let xmile = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><vendor>test</vendor><product version="1.0">test</product></header>
+  <sim_specs>
+    <start>0</start><stop>10</stop><dt>1</dt>
+    <save_step>0.25</save_step>
+  </sim_specs>
+  <model>
+    <variables>
+      <stock name="population">
+        <eqn>100</eqn>
+        <inflow>births</inflow>
+      </stock>
+      <flow name="births">
+        <eqn>population * growth_rate</eqn>
+      </flow>
+      <aux name="growth_rate">
+        <eqn>0.1</eqn>
+      </aux>
+    </variables>
+  </model>
+</xmile>"#;
+
+    let mut reader = std::io::BufReader::new(xmile.as_bytes());
+    let project = simlin_engine::open_xmile(&mut reader).unwrap();
+    let metadata = compute_metadata(&project, MAIN_MODEL).unwrap();
+
+    let sim_stop = 10.0_f64;
+    for period in &metadata.dominant_periods {
+        assert!(
+            period.end <= sim_stop,
+            "dominant period end ({}) should not exceed simulation stop ({}); \
+             save_step < dt should use dt as effective cadence",
+            period.end,
+            sim_stop,
+        );
+    }
+}
+
 /// Regression test: AST dependency extraction must not produce self-edges.
 /// A stock whose init expression references itself (e.g. `population * 0.5`)
 /// would create a self-loop in the dep graph without the self-reference filter.

@@ -2163,12 +2163,13 @@ pub fn compute_metadata(
             datamodel::Dt::Dt(v) => *v,
             datamodel::Dt::Reciprocal(v) => 1.0 / v,
         };
-        let save_step = specs
-            .save_step
-            .as_ref()
-            .map(dt_to_f64)
-            .unwrap_or_else(|| dt_to_f64(&specs.dt));
-        metadata::calculate_dominant_periods(&feedback_loops, specs.start, save_step)
+        let dt = dt_to_f64(&specs.dt);
+        let raw_save_step = specs.save_step.as_ref().map(dt_to_f64).unwrap_or(dt);
+        // The VM/interpreter saves at most once per dt step
+        // (save_every = max(1, round(save_step/dt))), so the effective
+        // cadence is never faster than dt.
+        let effective_save_step = raw_save_step.max(dt);
+        metadata::calculate_dominant_periods(&feedback_loops, specs.start, effective_save_step)
     };
 
     Some(ComputedMetadata {

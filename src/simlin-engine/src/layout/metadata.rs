@@ -162,7 +162,7 @@ pub fn calculate_dominant_periods(
         if let Some((_, _, lead_polarity)) = scored.first() {
             let lead_polarity = *lead_polarity;
             for &(name, score, polarity) in &scored {
-                if polarity != lead_polarity && lead_polarity != LoopPolarity::Undetermined {
+                if polarity != lead_polarity {
                     continue;
                 }
                 dominant_names.push(name.to_string());
@@ -524,5 +524,50 @@ mod tests {
         }];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
         assert!(periods.is_empty());
+    }
+
+    #[test]
+    fn test_dominant_periods_undetermined_leader_no_polarity_mixing() {
+        // When the strongest loop at a timestep is Undetermined, only other
+        // Undetermined loops should be accumulated -- reinforcing/balancing
+        // loops must not be mixed into the same dominant set.
+        let loops = vec![
+            FeedbackLoop {
+                name: "U1".to_string(),
+                polarity: LoopPolarity::Undetermined,
+                variables: vec!["a".to_string()],
+                importance_series: vec![0.4, 0.4],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "R1".to_string(),
+                polarity: LoopPolarity::Reinforcing,
+                variables: vec!["b".to_string()],
+                importance_series: vec![0.3, 0.3],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "B1".to_string(),
+                polarity: LoopPolarity::Balancing,
+                variables: vec!["c".to_string()],
+                importance_series: vec![0.2, 0.2],
+                dominant_period: None,
+            },
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert!(!periods.is_empty());
+        for p in &periods {
+            // R1 and B1 should never appear together with U1
+            assert!(
+                !p.dominant_loops.contains(&"R1".to_string()),
+                "reinforcing loop should not be mixed with undetermined leader: {:?}",
+                p.dominant_loops,
+            );
+            assert!(
+                !p.dominant_loops.contains(&"B1".to_string()),
+                "balancing loop should not be mixed with undetermined leader: {:?}",
+                p.dominant_loops,
+            );
+        }
     }
 }
