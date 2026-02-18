@@ -336,6 +336,10 @@ impl<'a, N: NodeId> Sfdp<'a, N> {
 
         let nodes: Vec<N> = self.graph.nodes().cloned().collect();
 
+        // Computed once from the initial layout. These offsets become stale if
+        // the callback replaces the layout (line 415-416), but the constraints
+        // still converge because SFDP re-applies offsets every iteration --
+        // the worst case is slightly slower convergence, not incorrect results.
         let group_offsets = self.compute_rigid_group_offsets(layout);
 
         for iteration in 0..config.max_iterations {

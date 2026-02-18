@@ -1825,16 +1825,26 @@ fn is_structural_stock_flow(
 /// Try to compile the project and return the compiled model for AST-based
 /// dependency extraction. Returns `None` if compilation fails or the model
 /// isn't found, in which case callers should fall back to string heuristics.
+/// Resolve the canonical model name, handling the "main" alias for
+/// unnamed models (empty name).
+fn resolve_model_name<'a>(project: &'a datamodel::Project, model_name: &'a str) -> &'a str {
+    project
+        .get_model(model_name)
+        .map(|m| m.name.as_str())
+        .unwrap_or(model_name)
+}
+
 fn try_compile_model(
     project: &datamodel::Project,
     model_name: &str,
 ) -> Option<std::sync::Arc<ModelStage1>> {
+    let actual_name = resolve_model_name(project, model_name);
     let project_clone = project.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::project::Project::from(project_clone)
     }));
     let compiled = result.ok()?;
-    let model_ident = Ident::new(model_name);
+    let model_ident = Ident::new(actual_name);
     compiled.models.get(&model_ident).cloned()
 }
 
@@ -1913,14 +1923,14 @@ fn try_detect_ltm_loops(
 ) -> Option<Vec<metadata::FeedbackLoop>> {
     use std::rc::Rc;
 
+    let actual_name = resolve_model_name(project, model_name).to_string();
     let project_clone = project.clone();
-    let model_name_owned = model_name.to_string();
 
     // Run the entire LTM pipeline inside catch_unwind since compilation
     // can panic on malformed models (e.g., missing module references).
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let compiled = crate::project::Project::from(project_clone);
-        let model_ident = Ident::new(&model_name_owned);
+        let model_ident = Ident::new(&actual_name);
 
         let compiled_model = compiled.models.get(&model_ident)?;
         let model_loops = crate::ltm::detect_loops(compiled_model, &compiled).ok()?;
@@ -1930,8 +1940,7 @@ fn try_detect_ltm_loops(
 
         // Augment with LTM synthetic variables and simulate
         let ltm_project = compiled.with_ltm().ok()?;
-        let sim =
-            crate::interpreter::Simulation::new(&Rc::new(ltm_project), &model_name_owned).ok()?;
+        let sim = crate::interpreter::Simulation::new(&Rc::new(ltm_project), &actual_name).ok()?;
         let compiled_sim = sim.compile().ok()?;
         let mut vm = crate::vm::Vm::new(compiled_sim).ok()?;
         vm.run_to_end().ok()?;
@@ -3954,5 +3963,59 @@ mod tests {
             metadata.constants.contains("x"),
             "x should be a constant after filtering non-model deps",
         );
+    }
+
+    #[test]
+    fn test_resolve_model_name_returns_actual_name_for_main_alias() {
+        let model = datamodel::Model {
+            name: String::new(),
+            sim_specs: None,
+            variables: Vec::new(),
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let project = test_project(model);
+        // "main" should resolve to the empty string (the actual model name)
+        assert_eq!(resolve_model_name(&project, "main"), "");
+    }
+
+    #[test]
+    fn test_resolve_model_name_passthrough_for_named_model() {
+        let project = test_project(simple_model());
+        assert_eq!(resolve_model_name(&project, TEST_MODEL), TEST_MODEL);
+    }
+
+    #[test]
+    fn test_resolve_model_name_passthrough_for_unknown_model() {
+        let project = test_project(simple_model());
+        assert_eq!(resolve_model_name(&project, "nonexistent"), "nonexistent");
+    }
+
+    #[test]
+    fn test_try_compile_model_with_main_alias() {
+        let mut model = simple_model();
+        model.name = String::new();
+        let project = test_project(model);
+        // Should find the model via "main" alias
+        let compiled = try_compile_model(&project, "main");
+        assert!(
+            compiled.is_some(),
+            "try_compile_model should resolve 'main' to the unnamed model"
+        );
+    }
+
+    #[test]
+    fn test_compute_metadata_with_main_alias() {
+        let mut model = simple_model();
+        model.name = String::new();
+        let project = test_project(model);
+        let metadata = compute_metadata(&project, "main");
+        assert!(
+            metadata.is_some(),
+            "compute_metadata should work with 'main' alias for unnamed models"
+        );
+        let metadata = metadata.unwrap();
+        assert!(!metadata.dep_graph.is_empty());
     }
 }
