@@ -503,10 +503,14 @@ def _create_converter() -> cattrs.Converter:
         gf = None
         if d.get("graphicalFunction"):
             gf = conv.structure(d["graphicalFunction"], GraphicalFunction)
+        compat = None
+        compat_dict = d.get("compat")
+        if compat_dict:
+            compat = Compat(active_initial=compat_dict.get("activeInitial"))
         return ElementEquation(
             subscript=d["subscript"],
             equation=d.get("equation", ""),
-            active_initial=d.get("activeInitial", ""),
+            compat=compat,
             graphical_function=gf,
         )
 

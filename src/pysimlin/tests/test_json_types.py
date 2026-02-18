@@ -22,8 +22,11 @@ except ImportError:
 
 from simlin.json_converter import converter
 from simlin.json_types import (
+    ArrayedEquation,
     Auxiliary,
+    Compat,
     DeleteVariable,
+    ElementEquation,
     Flow,
     GraphicalFunction,
     GraphicalFunctionScale,
@@ -537,3 +540,60 @@ class TestNullValueHandling:
         assert gf.x_scale is None
         assert gf.y_scale is None
         assert gf.kind == "discrete"
+
+
+class TestElementEquationCompat:
+    """Tests for element-level compat roundtripping."""
+
+    def test_element_equation_compat_roundtrip(self) -> None:
+        """ElementEquation with compat.activeInitial roundtrips correctly."""
+        ee = ElementEquation(
+            subscript="north",
+            equation="50",
+            compat=Compat(active_initial="10"),
+        )
+        json_dict = converter.unstructure(ee)
+        assert "compat" in json_dict
+        assert json_dict["compat"]["activeInitial"] == "10"
+        assert "activeInitial" not in json_dict
+
+        reconstructed = converter.structure(json_dict, ElementEquation)
+        assert reconstructed == ee
+
+    def test_element_equation_no_compat_roundtrip(self) -> None:
+        """ElementEquation without compat omits the field."""
+        ee = ElementEquation(subscript="south", equation="75")
+        json_dict = converter.unstructure(ee)
+        assert "compat" not in json_dict
+
+        reconstructed = converter.structure(json_dict, ElementEquation)
+        assert reconstructed == ee
+
+    def test_arrayed_flow_with_element_compat_roundtrip(self) -> None:
+        """Flow with arrayed elements carrying compat roundtrips correctly."""
+        flow = Flow(
+            name="rate",
+            arrayed_equation=ArrayedEquation(
+                dimensions=["Region"],
+                elements=[
+                    ElementEquation(
+                        subscript="east",
+                        equation="supply_east",
+                        compat=Compat(active_initial="init_east"),
+                    ),
+                    ElementEquation(
+                        subscript="west",
+                        equation="supply_west",
+                    ),
+                ],
+            ),
+        )
+        json_dict = converter.unstructure(flow)
+        json_str = json.dumps(json_dict)
+        parsed = json.loads(json_str)
+        reconstructed = converter.structure(parsed, Flow)
+        assert reconstructed == flow
+
+        elems = json_dict["arrayedEquation"]["elements"]
+        assert elems[0]["compat"]["activeInitial"] == "init_east"
+        assert "compat" not in elems[1]

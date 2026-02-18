@@ -44,7 +44,7 @@ class ElementEquation:
 
     subscript: str
     equation: str
-    active_initial: str = ""
+    compat: Compat | None = None
     graphical_function: GraphicalFunction | None = None
 
 
