@@ -168,13 +168,11 @@ def auxiliary_strategy(draw: Any) -> Auxiliary:
     """Generate an auxiliary variable."""
     has_gf = draw(st.booleans())
     gf = draw(graphical_function_strategy()) if has_gf else None
-    has_initial = draw(st.booleans())
 
     return Auxiliary(
         name=draw(ident_strategy()),
         uid=draw(st.integers(min_value=0, max_value=10000)),
         equation=draw(equation_strategy()),
-        initial_equation=draw(equation_strategy()) if has_initial else "",
         units=draw(st.sampled_from(["", "dimensionless", "ratio"])),
         graphical_function=gf,
         documentation=draw(st.sampled_from(["", "An auxiliary variable"])),

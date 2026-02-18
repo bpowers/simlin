@@ -83,6 +83,14 @@ export interface GraphicalFunction {
 // ============================================================================
 
 /**
+ * Vensim compatibility options for a variable.
+ */
+export interface Compat {
+  /** Active initial equation (Vensim ACTIVE INITIAL) */
+  readonly activeInitial?: string;
+}
+
+/**
  * An element-specific equation for arrayed variables.
  */
 export interface ElementEquation {
@@ -90,8 +98,8 @@ export interface ElementEquation {
   readonly subscript: string;
   /** Equation for this specific element */
   readonly equation: string;
-  /** Initial equation for this element (for stocks or stateful variables) */
-  readonly initialEquation?: string;
+  /** Active initial equation for this element */
+  readonly activeInitial?: string;
   /** Graphical function for this element */
   readonly graphicalFunction?: GraphicalFunction;
 }
@@ -104,8 +112,8 @@ export interface ArrayedEquation {
   readonly dimensions: readonly string[];
   /** Default equation for all elements (if not overridden per element) */
   readonly equation?: string;
-  /** Default initial equation for all elements */
-  readonly initialEquation?: string;
+  /** Vensim compatibility options */
+  readonly compat?: Compat;
   /** Element-specific equations that override the default */
   readonly elements?: readonly ElementEquation[];
 }
@@ -148,6 +156,8 @@ export interface Stock {
   readonly isPublic?: boolean;
   /** Arrayed equation structure for subscripted variables */
   readonly arrayedEquation?: ArrayedEquation;
+  /** Vensim compatibility options */
+  readonly compat?: Compat;
 }
 
 /**
@@ -182,6 +192,8 @@ export interface Flow {
   readonly isPublic?: boolean;
   /** Arrayed equation structure for subscripted variables */
   readonly arrayedEquation?: ArrayedEquation;
+  /** Vensim compatibility options */
+  readonly compat?: Compat;
 }
 
 /**
@@ -205,8 +217,6 @@ export interface Aux {
   readonly name: string;
   /** Equation defining this variable */
   readonly equation?: string;
-  /** Initial value equation (for variables with memory like DELAY, SMOOTH) */
-  readonly initialEquation?: string;
   /** Units (if specified) */
   readonly units?: string;
   /** Graphical/table function if this uses WITH LOOKUP */
@@ -219,6 +229,8 @@ export interface Aux {
   readonly isPublic?: boolean;
   /** Arrayed equation structure for subscripted variables */
   readonly arrayedEquation?: ArrayedEquation;
+  /** Vensim compatibility options */
+  readonly compat?: Compat;
 }
 
 /**

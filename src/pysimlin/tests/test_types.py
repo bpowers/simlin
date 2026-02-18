@@ -263,25 +263,25 @@ class TestAux:
 
         assert aux.name == "birth_rate"
         assert aux.equation == "0.03"
-        assert aux.initial_equation is None
+        assert aux.active_initial is None
         assert aux.units is None
         assert aux.documentation is None
         assert aux.dimensions == ()
         assert aux.graphical_function is None
 
-    def test_aux_with_initial_equation(self) -> None:
-        """Test Aux with initial equation (for variables with memory)."""
+    def test_aux_with_active_initial(self) -> None:
+        """Test Aux with active initial (for variables with memory)."""
         aux = Aux(
             name="smoothed_value",
             equation="SMOOTH3(input, delay_time)",
-            initial_equation="10",
+            active_initial="10",
             units="widgets",
             documentation="3rd order exponential smooth",
         )
 
         assert aux.name == "smoothed_value"
         assert aux.equation == "SMOOTH3(input, delay_time)"
-        assert aux.initial_equation == "10"
+        assert aux.active_initial == "10"
         assert aux.units == "widgets"
         assert aux.documentation == "3rd order exponential smooth"
 

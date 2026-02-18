@@ -138,32 +138,17 @@ macro_rules! convert_equation(
             datamodel::Equation::Arrayed(dimensions, elements)
         } else if let Some(dimensions) = $var.dimensions {
             let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name).into_owned()).collect();
-            datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default(), $var.initial_eqn)
+            datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default())
         } else {
-            datamodel::Equation::Scalar($var.eqn.unwrap_or_default(), $var.initial_eqn)
+            datamodel::Equation::Scalar($var.eqn.unwrap_or_default())
         }
     }}
 );
 
-// TODO: forked the above function because stocks don't have `init_eqn` fields.  Probably a macro-ish way to fix this.
-macro_rules! convert_stock_equation(
+macro_rules! extract_compat(
     ($var:expr) => {{
-        if let Some(elements) = $var.elements {
-            let dimensions = match $var.dimensions {
-                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name).into_owned()).collect(),
-                None => vec![],
-            };
-            let elements = elements.into_iter().map(|e| {
-                let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).into_owned()).collect();
-                (canonical_subscripts.join(","), e.eqn, e.initial_eqn, e.gf.map(datamodel::GraphicalFunction::from))
-            }).collect();
-            datamodel::Equation::Arrayed(dimensions, elements)
-        } else if let Some(dimensions) = $var.dimensions {
-            let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name).into_owned()).collect();
-            datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default(), None)
-        } else {
-            datamodel::Equation::Scalar($var.eqn.unwrap_or_default(), None)
-        }
+        let active_initial = $var.initial_eqn.filter(|s| !s.is_empty());
+        datamodel::Compat { active_initial }
     }}
 );
 
@@ -200,7 +185,7 @@ impl From<Stock> for datamodel::Stock {
             .collect();
         datamodel::Stock {
             ident: stock.name.clone(),
-            equation: convert_stock_equation!(stock),
+            equation: convert_equation!(stock),
             documentation: stock.doc.unwrap_or_default(),
             units: stock.units,
             inflows,
@@ -208,6 +193,7 @@ impl From<Stock> for datamodel::Stock {
             non_negative: stock.non_negative.is_some(),
             can_be_module_input: can_be_module_input(&stock.access),
             visibility: visibility(&stock.access),
+            compat: datamodel::Compat::default(),
             ai_state: ai_state_from(stock.ai_state),
             uid: None,
         }
@@ -219,14 +205,14 @@ impl From<datamodel::Stock> for Stock {
         Stock {
             name: stock.ident,
             eqn: match &stock.equation {
-                Equation::Scalar(eqn, ..) => {
+                Equation::Scalar(eqn) => {
                     if eqn.is_empty() {
                         None
                     } else {
                         Some(eqn.clone())
                     }
                 }
-                Equation::ApplyToAll(_, eqn, ..) => {
+                Equation::ApplyToAll(_, eqn) => {
                     if eqn.is_empty() {
                         None
                     } else {
@@ -371,6 +357,7 @@ impl ToXml<XmlWriter> for Flow {
 
 impl From<Flow> for datamodel::Flow {
     fn from(flow: Flow) -> Self {
+        let compat = extract_compat!(flow);
         datamodel::Flow {
             ident: flow.name.clone(),
             equation: convert_equation!(flow),
@@ -380,6 +367,7 @@ impl From<Flow> for datamodel::Flow {
             non_negative: flow.non_negative.is_some(),
             can_be_module_input: can_be_module_input(&flow.access),
             visibility: visibility(&flow.access),
+            compat,
             ai_state: ai_state_from(flow.ai_state),
             uid: None,
         }
@@ -391,14 +379,14 @@ impl From<datamodel::Flow> for Flow {
         Flow {
             name: flow.ident,
             eqn: match &flow.equation {
-                Equation::Scalar(eqn, ..) => {
+                Equation::Scalar(eqn) => {
                     if eqn.is_empty() {
                         None
                     } else {
                         Some(eqn.clone())
                     }
                 }
-                Equation::ApplyToAll(_, eqn, ..) => {
+                Equation::ApplyToAll(_, eqn) => {
                     if eqn.is_empty() {
                         None
                     } else {
@@ -407,11 +395,7 @@ impl From<datamodel::Flow> for Flow {
                 }
                 Equation::Arrayed(_, _) => None,
             },
-            initial_eqn: match &flow.equation {
-                Equation::Scalar(.., initial_eqn) => initial_eqn.clone(),
-                Equation::ApplyToAll(.., initial_eqn) => initial_eqn.clone(),
-                Equation::Arrayed(..) => None,
-            },
+            initial_eqn: flow.compat.active_initial,
             doc: if flow.documentation.is_empty() {
                 None
             } else {
@@ -535,6 +519,7 @@ impl ToXml<XmlWriter> for Aux {
 
 impl From<Aux> for datamodel::Aux {
     fn from(aux: Aux) -> Self {
+        let compat = extract_compat!(aux);
         datamodel::Aux {
             ident: aux.name.clone(),
             equation: convert_equation!(aux),
@@ -543,6 +528,7 @@ impl From<Aux> for datamodel::Aux {
             gf: aux.gf.map(datamodel::GraphicalFunction::from),
             can_be_module_input: can_be_module_input(&aux.access),
             visibility: visibility(&aux.access),
+            compat,
             ai_state: ai_state_from(aux.ai_state),
             uid: None,
         }
@@ -554,14 +540,14 @@ impl From<datamodel::Aux> for Aux {
         Aux {
             name: aux.ident,
             eqn: match &aux.equation {
-                Equation::Scalar(eqn, ..) => {
+                Equation::Scalar(eqn) => {
                     if eqn.is_empty() {
                         None
                     } else {
                         Some(eqn.clone())
                     }
                 }
-                Equation::ApplyToAll(_, eqn, ..) => {
+                Equation::ApplyToAll(_, eqn) => {
                     if eqn.is_empty() {
                         None
                     } else {
@@ -570,11 +556,7 @@ impl From<datamodel::Aux> for Aux {
                 }
                 Equation::Arrayed(_, _) => None,
             },
-            initial_eqn: match &aux.equation {
-                Equation::Scalar(.., initial_eqn) => initial_eqn.clone(),
-                Equation::ApplyToAll(.., initial_eqn) => initial_eqn.clone(),
-                Equation::Arrayed(..) => None,
-            },
+            initial_eqn: aux.compat.active_initial,
             doc: if aux.documentation.is_empty() {
                 None
             } else {
@@ -701,7 +683,7 @@ fn test_canonicalize_stock_inflows() {
 
     let expected = datamodel::Variable::Stock(datamodel::Stock {
         ident: "Heat Loss To Room".to_string(),
-        equation: Equation::Scalar("total_population".to_string(), None),
+        equation: Equation::Scalar("total_population".to_string()),
         documentation: "People who can contract the disease.".to_string(),
         units: Some("people".to_string()),
         inflows: vec!["solar_radiation".to_string()],
@@ -709,6 +691,7 @@ fn test_canonicalize_stock_inflows() {
         non_negative: false,
         can_be_module_input: false,
         visibility: datamodel::Visibility::Private,
+        compat: datamodel::Compat::default(),
         ai_state: None,
         uid: None,
     });

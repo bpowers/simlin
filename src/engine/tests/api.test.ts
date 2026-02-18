@@ -12,7 +12,21 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project, Model, Sim, Run, LinkPolarity, ModelPatchBuilder, configureWasm, ready, resetWasm, SIMLIN_VARTYPE_STOCK, SIMLIN_VARTYPE_FLOW, SIMLIN_VARTYPE_AUX, SIMLIN_VARTYPE_MODULE } from '../src';
+import {
+  Project,
+  Model,
+  Sim,
+  Run,
+  LinkPolarity,
+  ModelPatchBuilder,
+  configureWasm,
+  ready,
+  resetWasm,
+  SIMLIN_VARTYPE_STOCK,
+  SIMLIN_VARTYPE_FLOW,
+  SIMLIN_VARTYPE_AUX,
+  SIMLIN_VARTYPE_MODULE,
+} from '../src';
 import { JsonStock, JsonFlow, JsonAuxiliary } from '../src/json-types';
 
 // Helper to load the WASM module
@@ -99,9 +113,7 @@ describe('High-Level API', () => {
     it('should throw for nonexistent model name', async () => {
       const project = await openTestProject();
 
-      await expect(project.getModel('nonexistent_model_xyz')).rejects.toThrow(
-        /not found/,
-      );
+      await expect(project.getModel('nonexistent_model_xyz')).rejects.toThrow(/not found/);
 
       await project.dispose();
     });
@@ -949,7 +961,7 @@ describe('High-Level API', () => {
       await project.dispose();
     });
 
-    // Test for: Stock initialEquation should read from arrayedEquation.initialEquation
+    // Test for: arrayed stock reads initial equation from arrayedEquation.equation
     it('should read arrayed stock initialEquation correctly', async () => {
       const projectJson = {
         name: 'test_project',
@@ -967,7 +979,7 @@ describe('High-Level API', () => {
                 name: 'population',
                 arrayedEquation: {
                   dimensions: ['Region'],
-                  initialEquation: '1000',
+                  equation: '1000',
                 },
                 inflows: [],
                 outflows: [],
@@ -1273,9 +1285,12 @@ describe('High-Level API', () => {
       // edit() must use the resolved display name in the patch, not the alias.
       // allowErrors because the engine may report compilation warnings for
       // non-standard model names.
-      await model.edit((_currentVars, patch) => {
-        patch.upsertAux({ name: 'new_var', equation: '42' });
-      }, { allowErrors: true });
+      await model.edit(
+        (_currentVars, patch) => {
+          patch.upsertAux({ name: 'new_var', equation: '42' });
+        },
+        { allowErrors: true },
+      );
 
       const newVar = await model.getVariable('new_var');
       expect(newVar).toBeDefined();

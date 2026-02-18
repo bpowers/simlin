@@ -174,9 +174,11 @@ def _aux_from_dict(d: dict[str, Any]) -> Aux:
     equation = d.get("equation", "")
     if not equation and arrayed:
         equation = arrayed.get("equation", "")
-    initial_eq = d.get("initialEquation", "")
-    if not initial_eq and arrayed:
-        initial_eq = arrayed.get("initialEquation", "")
+    compat = d.get("compat") or {}
+    active_initial = compat.get("activeInitial", "")
+    if not active_initial and arrayed:
+        arrayed_compat = arrayed.get("compat") or {}
+        active_initial = arrayed_compat.get("activeInitial", "")
     dimensions: tuple[str, ...] = ()
     if arrayed:
         dimensions = tuple(arrayed.get("dimensions", []))
@@ -187,7 +189,7 @@ def _aux_from_dict(d: dict[str, Any]) -> Aux:
     return Aux(
         name=d["name"],
         equation=equation,
-        initial_equation=initial_eq or None,
+        active_initial=active_initial or None,
         units=d.get("units") or None,
         documentation=d.get("documentation") or None,
         dimensions=dimensions,
@@ -790,10 +792,10 @@ class Model:
             return f"{var.name} is a flow computed as {var.equation}"
 
         if isinstance(var, Aux):
-            if var.initial_equation:
+            if var.active_initial:
                 return (
                     f"{var.name} is an auxiliary variable computed as {var.equation} "
-                    f"with initial value {var.initial_equation}"
+                    f"with initial value {var.active_initial}"
                 )
             return f"{var.name} is an auxiliary variable computed as {var.equation}"
 

@@ -31,12 +31,19 @@ export interface JsonGraphicalFunction {
 }
 
 /**
+ * Vensim compatibility options for a variable.
+ */
+export interface JsonCompat {
+  activeInitial?: string;
+}
+
+/**
  * An element-specific equation for arrayed variables.
  */
 export interface JsonElementEquation {
   subscript: string;
   equation: string;
-  initialEquation?: string;
+  activeInitial?: string;
   graphicalFunction?: JsonGraphicalFunction;
 }
 
@@ -46,7 +53,7 @@ export interface JsonElementEquation {
 export interface JsonArrayedEquation {
   dimensions: string[];
   equation?: string;
-  initialEquation?: string;
+  compat?: JsonCompat;
   elements?: JsonElementEquation[];
 }
 
@@ -75,6 +82,7 @@ export interface JsonStock {
   canBeModuleInput?: boolean;
   isPublic?: boolean;
   arrayedEquation?: JsonArrayedEquation;
+  compat?: JsonCompat;
 }
 
 /**
@@ -91,6 +99,7 @@ export interface JsonFlow {
   canBeModuleInput?: boolean;
   isPublic?: boolean;
   arrayedEquation?: JsonArrayedEquation;
+  compat?: JsonCompat;
 }
 
 /**
@@ -100,13 +109,13 @@ export interface JsonAuxiliary {
   name: string;
   uid?: number;
   equation?: string;
-  initialEquation?: string;
   units?: string;
   graphicalFunction?: JsonGraphicalFunction;
   documentation?: string;
   canBeModuleInput?: boolean;
   isPublic?: boolean;
   arrayedEquation?: JsonArrayedEquation;
+  compat?: JsonCompat;
 }
 
 /**

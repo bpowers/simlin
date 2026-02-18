@@ -319,8 +319,8 @@ fn format_unit_error(
 
 fn variable_equation_text(var: &Variable) -> Option<String> {
     match var.get_equation() {
-        Some(Equation::Scalar(eqn, _)) => Some(eqn.clone()),
-        Some(Equation::ApplyToAll(_, eqn, _)) => Some(eqn.clone()),
+        Some(Equation::Scalar(eqn)) => Some(eqn.clone()),
+        Some(Equation::ApplyToAll(_, eqn)) => Some(eqn.clone()),
         _ => None,
     }
 }

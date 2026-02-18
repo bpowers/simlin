@@ -152,11 +152,11 @@ impl<MI, E> Variable<MI, E> {
     pub fn scalar_equation(&self) -> Option<&String> {
         match self {
             Variable::Stock {
-                eqn: Some(datamodel::Equation::Scalar(s, ..)),
+                eqn: Some(datamodel::Equation::Scalar(s)),
                 ..
             }
             | Variable::Var {
-                eqn: Some(datamodel::Equation::Scalar(s, ..)),
+                eqn: Some(datamodel::Equation::Scalar(s)),
                 ..
             } => Some(s),
             _ => None,
@@ -350,6 +350,7 @@ fn parse_equation(
     eqn: &datamodel::Equation,
     dimensions: &[datamodel::Dimension],
     is_initial: bool,
+    active_initial: Option<&str>,
 ) -> (Option<Ast<Expr0>>, Vec<EquationError>) {
     fn parse_inner(eqn: &str) -> (Option<Expr0>, Vec<EquationError>) {
         match Expr0::new(eqn, LexerType::Equation) {
@@ -358,20 +359,20 @@ fn parse_equation(
         }
     }
     match eqn {
-        datamodel::Equation::Scalar(eqn, init_eqn) => {
+        datamodel::Equation::Scalar(eqn) => {
             let (ast, errors) = if !is_initial {
                 parse_inner(eqn)
-            } else if let Some(init_eqn) = init_eqn {
+            } else if let Some(init_eqn) = active_initial {
                 parse_inner(init_eqn)
             } else {
                 (None, vec![])
             };
             (ast.map(Ast::Scalar), errors)
         }
-        datamodel::Equation::ApplyToAll(dimension_names, eqn, init_eqn) => {
+        datamodel::Equation::ApplyToAll(dimension_names, eqn) => {
             let (ast, mut errors) = if !is_initial {
                 parse_inner(eqn)
-            } else if let Some(init_eqn) = init_eqn {
+            } else if let Some(init_eqn) = active_initial {
                 parse_inner(init_eqn)
             } else {
                 (None, vec![])
@@ -429,9 +430,10 @@ where
 
     let mut parse_and_lower_eqn = |ident: &str,
                                    eqn: &datamodel::Equation,
-                                   is_initial: bool|
+                                   is_initial: bool,
+                                   active_initial: Option<&str>|
      -> (Option<Ast<Expr0>>, Vec<EquationError>) {
-        let (ast, mut errors) = parse_equation(eqn, dimensions, is_initial);
+        let (ast, mut errors) = parse_equation(eqn, dimensions, is_initial, active_initial);
         let ast = match ast {
             Some(ast) => match instantiate_implicit_modules(ident, ast, Some(&dimensions_ctx)) {
                 Ok((ast, mut new_vars)) => {
@@ -462,7 +464,7 @@ where
             let ident = v.ident.clone();
 
             // TODO: should is_intial be true here?
-            let (ast, errors) = parse_and_lower_eqn(&ident, &v.equation, false);
+            let (ast, errors) = parse_and_lower_eqn(&ident, &v.equation, false, None);
 
             let mut unit_errors: Vec<UnitError> = vec![];
             let units = match parse_units(units_ctx, v.units.as_deref()) {
@@ -489,8 +491,13 @@ where
         datamodel::Variable::Flow(v) => {
             let ident = Ident::new(&v.ident);
 
-            let (ast, mut errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, false);
-            let (init_ast, init_errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, true);
+            let (ast, mut errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, false, None);
+            let (init_ast, init_errors) = parse_and_lower_eqn(
+                ident.as_str(),
+                &v.equation,
+                true,
+                v.compat.active_initial.as_deref(),
+            );
             errors.extend(init_errors);
 
             let mut unit_errors: Vec<UnitError> = vec![];
@@ -522,8 +529,13 @@ where
         datamodel::Variable::Aux(v) => {
             let ident = Ident::new(&v.ident);
 
-            let (ast, mut errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, false);
-            let (init_ast, init_errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, true);
+            let (ast, mut errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, false, None);
+            let (init_ast, init_errors) = parse_and_lower_eqn(
+                ident.as_str(),
+                &v.equation,
+                true,
+                v.compat.active_initial.as_deref(),
+            );
             errors.extend(init_errors);
 
             let mut unit_errors: Vec<UnitError> = vec![];
@@ -736,9 +748,10 @@ fn test_identifier_sets() {
 
     for (eqn, id_list) in cases.iter() {
         let (ast, err) = parse_equation(
-            &datamodel::Equation::Scalar((*eqn).to_owned(), None),
+            &datamodel::Equation::Scalar((*eqn).to_owned()),
             &[],
             false,
+            None,
         );
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
@@ -778,7 +791,7 @@ fn test_tables() {
     use crate::common::canonicalize;
     let input = datamodel::Variable::Aux(datamodel::Aux {
         ident: canonicalize("lookup function table").into_owned(),
-        equation: datamodel::Equation::Scalar("0".to_string(), None),
+        equation: datamodel::Equation::Scalar("0".to_string()),
         documentation: "".to_string(),
         units: None,
         gf: Some(datamodel::GraphicalFunction {
@@ -798,6 +811,7 @@ fn test_tables() {
         visibility: datamodel::Visibility::Private,
         ai_state: None,
         uid: None,
+        compat: datamodel::Compat::default(),
     });
 
     let expected = Variable::Var {
@@ -808,7 +822,7 @@ fn test_tables() {
             Loc::new(0, 1),
         ))),
         init_ast: None,
-        eqn: Some(datamodel::Equation::Scalar("0".to_string(), None)),
+        eqn: Some(datamodel::Equation::Scalar("0".to_string())),
         units: None,
         tables: vec![Table {
             x: vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0],

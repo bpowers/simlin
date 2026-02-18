@@ -137,7 +137,7 @@ class Aux:
     but are recalculated at each time step.
 
     Some auxiliaries have memory (like those using DELAY or SMOOTH), in which
-    case they have an initial_equation that sets their initial state.
+    case they have an active_initial that sets their initial state.
 
     Immutable - modifying attributes will not change the underlying model.
     """
@@ -148,8 +148,8 @@ class Aux:
     equation: str
     """Equation defining this variable"""
 
-    initial_equation: str | None = None
-    """Initial value equation (for variables with memory like DELAY, SMOOTH)"""
+    active_initial: str | None = None
+    """Active initial equation (Vensim ACTIVE INITIAL)"""
 
     units: str | None = None
     """Units (if specified)"""

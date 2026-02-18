@@ -284,24 +284,16 @@ fn normalize_expr(expr: &str) -> String {
 /// Also converts Arrayed equations where all elements have the same expression to ApplyToAll.
 fn normalize_equation(eq: &mut Equation) {
     match eq {
-        Equation::Scalar(expr, initial_comment) => {
+        Equation::Scalar(expr) => {
             *expr = normalize_expr(expr);
-            // The initial-value comment is an expression string (e.g. from ACTIVE INITIAL),
-            // not documentation, so normalize it as an expression.
-            if let Some(c) = initial_comment {
-                *c = normalize_expr(c);
-            }
         }
-        Equation::ApplyToAll(dims, expr, initial_comment) => {
+        Equation::ApplyToAll(dims, expr) => {
             // Lowercase and sort dimension names for consistent comparison
             for dim in dims.iter_mut() {
                 *dim = dim.to_lowercase();
             }
             dims.sort();
             *expr = normalize_expr(expr);
-            if let Some(c) = initial_comment {
-                *c = normalize_expr(c);
-            }
         }
         Equation::Arrayed(dims, elements) => {
             // Lowercase and sort dimension names for consistent comparison
@@ -335,11 +327,7 @@ fn normalize_equation(eq: &mut Equation) {
                     e == first_expr && init == first_initial && gf.is_none()
                 });
                 if all_same {
-                    *eq = Equation::ApplyToAll(
-                        dims.clone(),
-                        first_expr.clone(),
-                        first_initial.clone(),
-                    );
+                    *eq = Equation::ApplyToAll(dims.clone(), first_expr.clone());
                 }
             }
         }
@@ -366,15 +354,11 @@ fn test_normalize_arrayed_to_apply_to_all_preserves_initial() {
         ],
     );
     normalize_equation(&mut eq);
-    // After normalization, expressions (including initial-value comments) are lowercased
-    // and spaces around operators are removed.
+    // After normalization, expressions are lowercased and spaces around operators
+    // are removed. active_initial now lives in Compat, not in Equation.
     assert_eq!(
         eq,
-        Equation::ApplyToAll(
-            vec!["dim".to_string()],
-            "x+1".to_string(),
-            Some("init_val".to_string())
-        )
+        Equation::ApplyToAll(vec!["dim".to_string()], "x+1".to_string(),)
     );
 }
 
@@ -387,6 +371,10 @@ fn normalize_stock(stock: &mut Stock) {
     stock.units = normalize_units(stock.units.as_ref());
     // Normalize equation
     normalize_equation(&mut stock.equation);
+    // Normalize compat active_initial as an expression
+    if let Some(c) = stock.compat.active_initial.as_mut() {
+        *c = normalize_expr(c);
+    }
     // uid is view-related
     stock.uid = None;
     // AI state is not relevant to MDL parsing equivalence
@@ -401,6 +389,10 @@ fn normalize_flow(flow: &mut Flow) {
     flow.documentation = normalize_doc(&flow.documentation);
     flow.units = normalize_units(flow.units.as_ref());
     normalize_equation(&mut flow.equation);
+    // Normalize compat active_initial as an expression
+    if let Some(c) = flow.compat.active_initial.as_mut() {
+        *c = normalize_expr(c);
+    }
     // Graphical functions match without normalization
     flow.uid = None;
     flow.ai_state = None;
@@ -411,6 +403,10 @@ fn normalize_aux(aux: &mut Aux) {
     aux.documentation = normalize_doc(&aux.documentation);
     aux.units = normalize_units(aux.units.as_ref());
     normalize_equation(&mut aux.equation);
+    // Normalize compat active_initial as an expression
+    if let Some(c) = aux.compat.active_initial.as_mut() {
+        *c = normalize_expr(c);
+    }
     // Graphical functions match without normalization
     aux.uid = None;
     aux.ai_state = None;

@@ -1947,10 +1947,11 @@ fn test_arrays() {
                         visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
+                        compat: Compat::default(),
                     }),
                     Variable::Aux(Aux {
                         ident: "picked".to_owned(),
-                        equation: Equation::Scalar("aux[INT(TIME MOD 5) + 1]".to_owned(), None),
+                        equation: Equation::Scalar("aux[INT(TIME MOD 5) + 1]".to_owned()),
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,
@@ -1958,13 +1959,13 @@ fn test_arrays() {
                         visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
+                        compat: Compat::default(),
                     }),
                     Variable::Aux(Aux {
                         ident: "aux".to_owned(),
                         equation: Equation::ApplyToAll(
                             vec!["letters".to_owned()],
                             "constants".to_owned(),
-                            None,
                         ),
                         documentation: "".to_owned(),
                         units: None,
@@ -1973,10 +1974,11 @@ fn test_arrays() {
                         visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
+                        compat: Compat::default(),
                     }),
                     Variable::Aux(Aux {
                         ident: "picked2".to_owned(),
-                        equation: Equation::Scalar("aux[b]".to_owned(), None),
+                        equation: Equation::Scalar("aux[b]".to_owned()),
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,
@@ -1984,6 +1986,7 @@ fn test_arrays() {
                         visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
+                        compat: Compat::default(),
                     }),
                 ],
                 views: vec![],
@@ -2207,7 +2210,9 @@ fn nan_is_approx_eq() {
 
 #[test]
 fn simulation_uses_model_sim_specs_when_present() {
-    use crate::datamodel::{self, Aux, Equation, SimSpecs as DmSimSpecs, Variable, Visibility};
+    use crate::datamodel::{
+        self, Aux, Compat, Equation, SimSpecs as DmSimSpecs, Variable, Visibility,
+    };
 
     let project_specs = DmSimSpecs {
         start: 0.0,
@@ -2232,7 +2237,7 @@ fn simulation_uses_model_sim_specs_when_present() {
         sim_specs: Some(model_specs.clone()),
         variables: vec![Variable::Aux(Aux {
             ident: "const".to_string(),
-            equation: Equation::Scalar("1".to_string(), None),
+            equation: Equation::Scalar("1".to_string()),
             documentation: String::new(),
             units: None,
             gf: None,
@@ -2240,6 +2245,7 @@ fn simulation_uses_model_sim_specs_when_present() {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         })],
         views: vec![],
         loop_metadata: vec![],
@@ -2267,7 +2273,9 @@ fn simulation_uses_model_sim_specs_when_present() {
 
 #[test]
 fn simulation_defaults_to_project_sim_specs_without_model_override() {
-    use crate::datamodel::{self, Aux, Equation, SimSpecs as DmSimSpecs, Variable, Visibility};
+    use crate::datamodel::{
+        self, Aux, Compat, Equation, SimSpecs as DmSimSpecs, Variable, Visibility,
+    };
 
     let project_specs = DmSimSpecs {
         start: 1.0,
@@ -2283,7 +2291,7 @@ fn simulation_defaults_to_project_sim_specs_without_model_override() {
         sim_specs: None,
         variables: vec![Variable::Aux(Aux {
             ident: "const".to_string(),
-            equation: Equation::Scalar("1".to_string(), None),
+            equation: Equation::Scalar("1".to_string()),
             documentation: String::new(),
             units: None,
             gf: None,
@@ -2291,6 +2299,7 @@ fn simulation_defaults_to_project_sim_specs_without_model_override() {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         })],
         views: vec![],
         loop_metadata: vec![],

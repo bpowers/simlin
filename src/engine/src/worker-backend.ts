@@ -76,10 +76,7 @@ export class WorkerBackend implements EngineBackend {
    * Send a request and return a promise for the result.
    * The request is enqueued and executed in FIFO order.
    */
-  private sendRequest<T>(
-    buildMessage: (requestId: number) => WorkerRequest,
-    transfer?: Transferable[],
-  ): Promise<T> {
+  private sendRequest<T>(buildMessage: (requestId: number) => WorkerRequest, transfer?: Transferable[]): Promise<T> {
     if (this._terminated) {
       return Promise.reject(new Error('WorkerBackend terminated'));
     }
@@ -137,7 +134,11 @@ export class WorkerBackend implements EngineBackend {
       // avoids an extra multi-MB copy -- the buffer will be transferred
       // to the worker via postMessage transfer list instead of being
       // structured-cloned.
-      if (source.buffer instanceof ArrayBuffer && source.byteOffset === 0 && source.byteLength === source.buffer.byteLength) {
+      if (
+        source.buffer instanceof ArrayBuffer &&
+        source.byteOffset === 0 &&
+        source.byteLength === source.buffer.byteLength
+      ) {
         return { buffer: source.buffer };
       }
       return { buffer: source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength) as ArrayBuffer };

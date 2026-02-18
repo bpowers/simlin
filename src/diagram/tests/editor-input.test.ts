@@ -9,7 +9,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project as Project, configureWasm, ready, resetWasm, SIMLIN_VARTYPE_STOCK, SIMLIN_VARTYPE_FLOW } from '@simlin/engine';
+import {
+  Project as Project,
+  configureWasm,
+  ready,
+  resetWasm,
+  SIMLIN_VARTYPE_STOCK,
+  SIMLIN_VARTYPE_FLOW,
+} from '@simlin/engine';
 
 import type { EditorProps, ProtobufProjectData, JsonProjectData, ProjectData } from '../Editor';
 

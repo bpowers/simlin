@@ -186,6 +186,16 @@
               "type": "null"
             }
           ]
+        },
+        "compat": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Compat"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -209,10 +219,14 @@
             "null"
           ]
         },
-        "initialEquation": {
-          "type": [
-            "string",
-            "null"
+        "compat": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Compat"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "elements": {
@@ -229,6 +243,17 @@
         "dimensions"
       ]
     },
+    "Compat": {
+      "type": "object",
+      "properties": {
+        "activeInitial": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
     "ElementEquation": {
       "type": "object",
       "properties": {
@@ -238,8 +263,11 @@
         "equation": {
           "type": "string"
         },
-        "initialEquation": {
-          "type": "string"
+        "activeInitial": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "graphicalFunction": {
           "anyOf": [
@@ -368,6 +396,16 @@
               "type": "null"
             }
           ]
+        },
+        "compat": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Compat"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -385,9 +423,6 @@
           "type": "string"
         },
         "equation": {
-          "type": "string"
-        },
-        "initialEquation": {
           "type": "string"
         },
         "units": {
@@ -416,6 +451,16 @@
           "anyOf": [
             {
               "$ref": "#/$defs/ArrayedEquation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "compat": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Compat"
             },
             {
               "type": "null"

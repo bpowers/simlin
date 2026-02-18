@@ -12,7 +12,15 @@
 
 import { EngineBackend, ModelHandle } from './backend';
 import { Stock, Flow, Aux, Module, Variable, TimeSpec, Link, Loop, ModelIssue, GraphicalFunction } from './types';
-import { JsonStock, JsonFlow, JsonAuxiliary, JsonModule, JsonGraphicalFunction, JsonProjectPatch, JsonSimSpecs } from './json-types';
+import {
+  JsonStock,
+  JsonFlow,
+  JsonAuxiliary,
+  JsonModule,
+  JsonGraphicalFunction,
+  JsonProjectPatch,
+  JsonSimSpecs,
+} from './json-types';
 import { ErrorCode } from './errors';
 import { Project } from './project';
 import { Sim } from './sim';
@@ -52,7 +60,10 @@ function parseDt(dt: string): number {
  * while models store their display names. This lets check() match them correctly.
  */
 function canonicalizeModelName(name: string): string {
-  return name.trim().toLowerCase().replace(/[\s_]+/g, '_');
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, '_');
 }
 
 /** Type mask constants matching SIMLIN_VARTYPE_* from the C FFI. */
@@ -93,41 +104,31 @@ function parseJsonGraphicalFunction(gf: JsonGraphicalFunction): GraphicalFunctio
 
 function extractEquation(
   topLevel: string | undefined,
-  arrayed: { equation?: string; initialEquation?: string } | undefined,
-  field: 'equation' | 'initialEquation' = 'equation',
+  arrayed: { equation?: string } | undefined,
 ): string {
   if (topLevel) {
     return topLevel;
   }
-  if (arrayed) {
-    const value = arrayed[field];
-    if (value) {
-      return value;
-    }
+  if (arrayed?.equation) {
+    return arrayed.equation;
   }
   return '';
 }
 
 /**
  * Extract a stock's initial equation. For stocks, the initial value can appear
- * in two arrayed fields depending on the source format:
- * - `arrayedEquation.equation`: XMILE-sourced data (where `<eqn>` IS the initial value)
- * - `arrayedEquation.initialEquation`: JSON-sourced data with an explicit initial field
+ * in the top-level `initialEquation` or in the arrayed `equation` field
+ * (XMILE-sourced data where `<eqn>` IS the initial value).
  */
 function extractStockInitialEquation(
   topLevel: string | undefined,
-  arrayed: { equation?: string; initialEquation?: string } | undefined,
+  arrayed: { equation?: string } | undefined,
 ): string {
   if (topLevel) {
     return topLevel;
   }
-  if (arrayed) {
-    if (arrayed.initialEquation) {
-      return arrayed.initialEquation;
-    }
-    if (arrayed.equation) {
-      return arrayed.equation;
-    }
+  if (arrayed?.equation) {
+    return arrayed.equation;
   }
   return '';
 }
@@ -138,9 +139,6 @@ function jsonVarToVariable(v: JsonVarWithType): Variable {
       const s: Stock = {
         type: 'stock',
         name: v.name,
-        // For stocks, the initial value can come from two arrayed fields:
-        // - arrayedEquation.equation (XMILE-sourced: <eqn> IS the initial value)
-        // - arrayedEquation.initialEquation (JSON-sourced: explicit initial field)
         initialEquation: extractStockInitialEquation(v.initialEquation, v.arrayedEquation),
         inflows: v.inflows || [],
         outflows: v.outflows || [],
@@ -148,6 +146,7 @@ function jsonVarToVariable(v: JsonVarWithType): Variable {
         documentation: v.documentation || undefined,
         nonNegative: v.nonNegative || false,
         arrayedEquation: v.arrayedEquation,
+        compat: v.compat || undefined,
       };
       return s;
     }
@@ -165,6 +164,7 @@ function jsonVarToVariable(v: JsonVarWithType): Variable {
         nonNegative: v.nonNegative || false,
         graphicalFunction: gf,
         arrayedEquation: v.arrayedEquation,
+        compat: v.compat || undefined,
       };
       return f;
     }
@@ -173,17 +173,17 @@ function jsonVarToVariable(v: JsonVarWithType): Variable {
       if (v.graphicalFunction) {
         gf = parseJsonGraphicalFunction(v.graphicalFunction);
       }
-      const equation = extractEquation(v.equation, v.arrayedEquation);
-      const initialEquation = extractEquation(v.initialEquation, v.arrayedEquation, 'initialEquation');
+      const activeInitial = v.compat?.activeInitial || v.arrayedEquation?.compat?.activeInitial;
+      const compat = activeInitial ? { activeInitial } : undefined;
       const a: Aux = {
         type: 'aux',
         name: v.name,
-        equation,
-        initialEquation: initialEquation || undefined,
+        equation: extractEquation(v.equation, v.arrayedEquation),
         units: v.units || undefined,
         documentation: v.documentation || undefined,
         graphicalFunction: gf,
         arrayedEquation: v.arrayedEquation,
+        compat,
       };
       return a;
     }
@@ -360,8 +360,8 @@ export class Model {
       case 'flow':
         return `${v.name} is a flow computed as ${v.equation}`;
       case 'aux':
-        if (v.initialEquation) {
-          return `${v.name} is an auxiliary variable computed as ${v.equation} with initial value ${v.initialEquation}`;
+        if (v.compat?.activeInitial) {
+          return `${v.name} is an auxiliary variable computed as ${v.equation} with initial value ${v.compat.activeInitial}`;
         }
         return `${v.name} is an auxiliary variable computed as ${v.equation}`;
       case 'module':
@@ -480,9 +480,7 @@ export class Model {
     const { dryRun = false, allowErrors = false } = options;
 
     // Get current editable variable names (stocks + flows + auxs)
-    const varNames = await this.getVarNames(
-      SIMLIN_VARTYPE_STOCK | SIMLIN_VARTYPE_FLOW | SIMLIN_VARTYPE_AUX,
-    );
+    const varNames = await this.getVarNames(SIMLIN_VARTYPE_STOCK | SIMLIN_VARTYPE_FLOW | SIMLIN_VARTYPE_AUX);
 
     const currentVars: Record<string, JsonStock | JsonFlow | JsonAuxiliary> = {};
     for (const name of varNames) {

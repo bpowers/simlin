@@ -205,8 +205,8 @@ class Aux:
     equation: str
     """Equation defining this variable"""
 
-    initial_equation: Optional[str] = None
-    """Initial value equation (for variables with memory like DELAY, SMOOTH)"""
+    active_initial: Optional[str] = None
+    """Active initial equation (Vensim ACTIVE INITIAL)"""
 
     units: Optional[str] = None
     """Units (if specified)"""

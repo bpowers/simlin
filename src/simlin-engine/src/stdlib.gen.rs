@@ -12,9 +12,9 @@
 
 use crate::datamodel::view_element::{FlowPoint, LabelSide, LinkPolarity, LinkShape};
 use crate::datamodel::{
-    Aux, Dt, Equation, Flow, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
-    LoopMetadata, Model, ModelGroup, Module, ModuleReference, Rect, SimMethod, SimSpecs, Stock,
-    StockFlow, Variable, View, ViewElement, Visibility, view_element,
+    Aux, Compat, Dt, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
+    GraphicalFunctionScale, LoopMetadata, Model, ModelGroup, Module, ModuleReference, Rect,
+    SimMethod, SimSpecs, Stock, StockFlow, Variable, View, ViewElement, Visibility, view_element,
 };
 
 pub const MODEL_NAMES: [&str; 7] = [
@@ -41,7 +41,7 @@ fn delay1() -> Model {
         variables: vec![
             Variable::Aux(Aux {
                 ident: "delay_time".to_string(),
-                equation: Equation::Scalar("1".to_string(), None),
+                equation: Equation::Scalar("1".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -49,10 +49,11 @@ fn delay1() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Aux(Aux {
                 ident: "initial_value".to_string(),
-                equation: Equation::Scalar("NAN".to_string(), None),
+                equation: Equation::Scalar("NAN".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -60,10 +61,11 @@ fn delay1() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Flow(Flow {
                 ident: "input".to_string(),
-                equation: Equation::Scalar("0".to_string(), None),
+                equation: Equation::Scalar("0".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -72,10 +74,11 @@ fn delay1() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Flow(Flow {
                 ident: "output".to_string(),
-                equation: Equation::Scalar("Stock/delay_time".to_string(), None),
+                equation: Equation::Scalar("Stock/delay_time".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -84,13 +87,13 @@ fn delay1() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Stock(Stock {
                 ident: "stock".to_string(),
                 equation: Equation::Scalar(
                     "(if isModuleInput(initial_value) then initial_value else input) * delay_time"
                         .to_string(),
-                    None,
                 ),
                 documentation: "".to_string(),
                 units: None,
@@ -101,6 +104,7 @@ fn delay1() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
         ],
         views: vec![View::StockFlow(StockFlow {
@@ -212,7 +216,7 @@ fn delay3() -> Model {
         variables: vec![
             Variable::Aux(Aux {
             ident: "delay_time".to_string(),
-            equation: Equation::Scalar("1".to_string(), None),
+            equation: Equation::Scalar("1".to_string()),
             documentation: "".to_string(),
             units: None,
             gf: None,
@@ -220,10 +224,11 @@ fn delay3() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Flow(Flow {
             ident: "flow_1".to_string(),
-            equation: Equation::Scalar("Stock/(delay_time/3)".to_string(), None),
+            equation: Equation::Scalar("Stock/(delay_time/3)".to_string()),
             documentation: "".to_string(),
             units: None,
             gf: None,
@@ -232,10 +237,11 @@ fn delay3() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Flow(Flow {
             ident: "flow_2".to_string(),
-            equation: Equation::Scalar("Stock_2/(delay_time/3)".to_string(), None),
+            equation: Equation::Scalar("Stock_2/(delay_time/3)".to_string()),
             documentation: "".to_string(),
             units: None,
             gf: None,
@@ -244,10 +250,11 @@ fn delay3() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Aux(Aux {
             ident: "initial_value".to_string(),
-            equation: Equation::Scalar("NAN".to_string(), None),
+            equation: Equation::Scalar("NAN".to_string()),
             documentation: "".to_string(),
             units: None,
             gf: None,
@@ -255,10 +262,11 @@ fn delay3() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Flow(Flow {
             ident: "input".to_string(),
-            equation: Equation::Scalar("0".to_string(), None),
+            equation: Equation::Scalar("0".to_string()),
             documentation: "".to_string(),
             units: None,
             gf: None,
@@ -267,10 +275,11 @@ fn delay3() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Flow(Flow {
             ident: "output".to_string(),
-            equation: Equation::Scalar("Stock_3/(delay_time/3)".to_string(), None),
+            equation: Equation::Scalar("Stock_3/(delay_time/3)".to_string()),
             documentation: "".to_string(),
             units: None,
             gf: None,
@@ -279,10 +288,11 @@ fn delay3() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Stock(Stock {
             ident: "stock".to_string(),
-            equation: Equation::Scalar("(if isModuleInput(initial_value) then initial_value else input) * (delay_time/3)".to_string(), None),
+            equation: Equation::Scalar("(if isModuleInput(initial_value) then initial_value else input) * (delay_time/3)".to_string()),
             documentation: "".to_string(),
             units: None,
             inflows: vec!["input".to_string()],
@@ -292,10 +302,11 @@ fn delay3() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Stock(Stock {
             ident: "stock_2".to_string(),
-            equation: Equation::Scalar("(if isModuleInput(initial_value) then initial_value else input) * (delay_time/3)".to_string(), None),
+            equation: Equation::Scalar("(if isModuleInput(initial_value) then initial_value else input) * (delay_time/3)".to_string()),
             documentation: "".to_string(),
             units: None,
             inflows: vec!["flow_1".to_string()],
@@ -305,10 +316,11 @@ fn delay3() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Stock(Stock {
             ident: "stock_3".to_string(),
-            equation: Equation::Scalar("(if isModuleInput(initial_value) then initial_value else input) * (delay_time/3)".to_string(), None),
+            equation: Equation::Scalar("(if isModuleInput(initial_value) then initial_value else input) * (delay_time/3)".to_string()),
             documentation: "".to_string(),
             units: None,
             inflows: vec!["flow_2".to_string()],
@@ -318,6 +330,7 @@ fn delay3() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         })
         ],
         views: vec![View::StockFlow(StockFlow {
@@ -458,7 +471,7 @@ fn init() -> Model {
         variables: vec![
             Variable::Aux(Aux {
                 ident: "input".to_string(),
-                equation: Equation::Scalar("0".to_string(), None),
+                equation: Equation::Scalar("0".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -466,10 +479,11 @@ fn init() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Stock(Stock {
                 ident: "output".to_string(),
-                equation: Equation::Scalar("input".to_string(), None),
+                equation: Equation::Scalar("input".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 inflows: vec![],
@@ -479,6 +493,7 @@ fn init() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
         ],
         views: vec![View::StockFlow(StockFlow {
@@ -519,7 +534,7 @@ fn previous() -> Model {
         variables: vec![
             Variable::Flow(Flow {
                 ident: "draining".to_string(),
-                equation: Equation::Scalar("output / DT".to_string(), None),
+                equation: Equation::Scalar("output / DT".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -528,10 +543,11 @@ fn previous() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Aux(Aux {
                 ident: "initial_value".to_string(),
-                equation: Equation::Scalar("0".to_string(), None),
+                equation: Equation::Scalar("0".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -539,10 +555,11 @@ fn previous() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Aux(Aux {
                 ident: "input".to_string(),
-                equation: Equation::Scalar("0".to_string(), None),
+                equation: Equation::Scalar("0".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -550,10 +567,11 @@ fn previous() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Flow(Flow {
                 ident: "measuring".to_string(),
-                equation: Equation::Scalar("input / DT".to_string(), None),
+                equation: Equation::Scalar("input / DT".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -562,10 +580,11 @@ fn previous() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Stock(Stock {
                 ident: "output".to_string(),
-                equation: Equation::Scalar("initial_value".to_string(), None),
+                equation: Equation::Scalar("initial_value".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 inflows: vec!["measuring".to_string()],
@@ -575,6 +594,7 @@ fn previous() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
         ],
         views: vec![View::StockFlow(StockFlow {
@@ -686,7 +706,7 @@ fn smth1() -> Model {
         variables: vec![
             Variable::Aux(Aux {
                 ident: "delay_time".to_string(),
-                equation: Equation::Scalar("1".to_string(), None),
+                equation: Equation::Scalar("1".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -694,10 +714,11 @@ fn smth1() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Flow(Flow {
                 ident: "flow".to_string(),
-                equation: Equation::Scalar("(input - Output)/delay_time".to_string(), None),
+                equation: Equation::Scalar("(input - Output)/delay_time".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -706,10 +727,11 @@ fn smth1() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Aux(Aux {
                 ident: "initial_value".to_string(),
-                equation: Equation::Scalar("NAN".to_string(), None),
+                equation: Equation::Scalar("NAN".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -717,10 +739,11 @@ fn smth1() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Aux(Aux {
                 ident: "input".to_string(),
-                equation: Equation::Scalar("0".to_string(), None),
+                equation: Equation::Scalar("0".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -728,12 +751,12 @@ fn smth1() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Stock(Stock {
                 ident: "output".to_string(),
                 equation: Equation::Scalar(
                     "if isModuleInput(initial_value) then initial_value else input".to_string(),
-                    None,
                 ),
                 documentation: "".to_string(),
                 units: None,
@@ -744,6 +767,7 @@ fn smth1() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
         ],
         views: vec![View::StockFlow(StockFlow {
@@ -844,7 +868,7 @@ fn smth3() -> Model {
         variables: vec![
             Variable::Aux(Aux {
                 ident: "delay_time".to_string(),
-                equation: Equation::Scalar("1".to_string(), None),
+                equation: Equation::Scalar("1".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -852,10 +876,11 @@ fn smth3() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Flow(Flow {
                 ident: "flow_1".to_string(),
-                equation: Equation::Scalar("(input - Stock_1)/(delay_time/3)".to_string(), None),
+                equation: Equation::Scalar("(input - Stock_1)/(delay_time/3)".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -864,10 +889,11 @@ fn smth3() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Flow(Flow {
                 ident: "flow_2".to_string(),
-                equation: Equation::Scalar("(Stock_1 - Stock_2)/(delay_time/3)".to_string(), None),
+                equation: Equation::Scalar("(Stock_1 - Stock_2)/(delay_time/3)".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -876,10 +902,11 @@ fn smth3() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Flow(Flow {
                 ident: "flow_3".to_string(),
-                equation: Equation::Scalar("(Stock_2 - Output)/(delay_time/3)".to_string(), None),
+                equation: Equation::Scalar("(Stock_2 - Output)/(delay_time/3)".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -888,10 +915,11 @@ fn smth3() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Aux(Aux {
                 ident: "initial_value".to_string(),
-                equation: Equation::Scalar("NAN".to_string(), None),
+                equation: Equation::Scalar("NAN".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -899,10 +927,11 @@ fn smth3() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Aux(Aux {
                 ident: "input".to_string(),
-                equation: Equation::Scalar("0".to_string(), None),
+                equation: Equation::Scalar("0".to_string()),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -910,12 +939,12 @@ fn smth3() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Stock(Stock {
                 ident: "output".to_string(),
                 equation: Equation::Scalar(
                     "if isModuleInput(initial_value) then initial_value else input".to_string(),
-                    None,
                 ),
                 documentation: "".to_string(),
                 units: None,
@@ -926,12 +955,12 @@ fn smth3() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Stock(Stock {
                 ident: "stock_1".to_string(),
                 equation: Equation::Scalar(
                     "if isModuleInput(initial_value) then initial_value else input".to_string(),
-                    None,
                 ),
                 documentation: "".to_string(),
                 units: None,
@@ -942,12 +971,12 @@ fn smth3() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
             Variable::Stock(Stock {
                 ident: "stock_2".to_string(),
                 equation: Equation::Scalar(
                     "if isModuleInput(initial_value) then initial_value else input".to_string(),
-                    None,
                 ),
                 documentation: "".to_string(),
                 units: None,
@@ -958,6 +987,7 @@ fn smth3() -> Model {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: Compat::default(),
             }),
         ],
         views: vec![View::StockFlow(StockFlow {
@@ -1164,7 +1194,7 @@ fn trend() -> Model {
         variables: vec![
             Variable::Aux(Aux {
             ident: "delay_time".to_string(),
-            equation: Equation::Scalar("1".to_string(), None),
+            equation: Equation::Scalar("1".to_string()),
             documentation: "".to_string(),
             units: None,
             gf: None,
@@ -1172,10 +1202,11 @@ fn trend() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Flow(Flow {
             ident: "flow".to_string(),
-            equation: Equation::Scalar("(input-Stock)/delay_time".to_string(), None),
+            equation: Equation::Scalar("(input-Stock)/delay_time".to_string()),
             documentation: "".to_string(),
             units: None,
             gf: None,
@@ -1184,10 +1215,11 @@ fn trend() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Aux(Aux {
             ident: "initial_value".to_string(),
-            equation: Equation::Scalar("NAN".to_string(), None),
+            equation: Equation::Scalar("NAN".to_string()),
             documentation: "".to_string(),
             units: None,
             gf: None,
@@ -1195,10 +1227,11 @@ fn trend() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Aux(Aux {
             ident: "input".to_string(),
-            equation: Equation::Scalar("0".to_string(), None),
+            equation: Equation::Scalar("0".to_string()),
             documentation: "".to_string(),
             units: None,
             gf: None,
@@ -1206,10 +1239,11 @@ fn trend() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Aux(Aux {
             ident: "output".to_string(),
-            equation: Equation::Scalar("SAFEDIV(input-Stock, ABS(Stock)*delay_time)".to_string(), None),
+            equation: Equation::Scalar("SAFEDIV(input-Stock, ABS(Stock)*delay_time)".to_string()),
             documentation: "".to_string(),
             units: None,
             gf: None,
@@ -1217,10 +1251,11 @@ fn trend() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         }),
             Variable::Stock(Stock {
             ident: "stock".to_string(),
-            equation: Equation::Scalar("if isModuleInput(initial_value) then input / (1 + delay_time * initial_value) else input".to_string(), None),
+            equation: Equation::Scalar("if isModuleInput(initial_value) then input / (1 + delay_time * initial_value) else input".to_string()),
             documentation: "".to_string(),
             units: None,
             inflows: vec!["flow".to_string()],
@@ -1230,6 +1265,7 @@ fn trend() -> Model {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: Compat::default(),
         })
         ],
         views: vec![View::StockFlow(StockFlow {

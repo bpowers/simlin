@@ -127,11 +127,7 @@ export class DirectBackend implements EngineBackend {
   private _handles = new Map<number, HandleEntry>();
   private _projectChildren = new Map<number, Set<number>>();
 
-  private allocHandle(
-    kind: HandleKind,
-    ptr: number,
-    extra?: { projectHandle?: number },
-  ): number {
+  private allocHandle(kind: HandleKind, ptr: number, extra?: { projectHandle?: number }): number {
     const handle = this._nextHandle++;
     this._handles.set(handle, {
       kind,

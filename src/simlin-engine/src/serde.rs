@@ -5,7 +5,7 @@
 use float_cmp::approx_eq;
 
 use crate::datamodel::{
-    Aux, Dimension, DimensionElements, Dt, Equation, Extension, Flow, GraphicalFunction,
+    Aux, Compat, Dimension, DimensionElements, Dt, Equation, Extension, Flow, GraphicalFunction,
     GraphicalFunctionKind, GraphicalFunctionScale, LoopMetadata, Model, ModelGroup, Module,
     ModuleReference, Project, Rect, SimMethod, SimSpecs, Source, Stock, StockFlow, Unit, Variable,
     View, ViewElement, Visibility, view_element,
@@ -276,20 +276,18 @@ impl From<Equation> for project_io::variable::Equation {
     fn from(eqn: Equation) -> Self {
         project_io::variable::Equation {
             equation: Some(match eqn {
-                Equation::Scalar(equation, initial_equation) => {
-                    project_io::variable::equation::Equation::Scalar(
-                        project_io::variable::ScalarEquation {
-                            equation,
-                            initial_equation,
-                        },
-                    )
-                }
-                Equation::ApplyToAll(dimension_names, equation, initial_equation) => {
+                Equation::Scalar(equation) => project_io::variable::equation::Equation::Scalar(
+                    project_io::variable::ScalarEquation {
+                        equation,
+                        initial_equation: None,
+                    },
+                ),
+                Equation::ApplyToAll(dimension_names, equation) => {
                     project_io::variable::equation::Equation::ApplyToAll(
                         project_io::variable::ApplyToAllEquation {
                             dimension_names,
                             equation,
-                            initial_equation,
+                            initial_equation: None,
                         },
                     )
                 }
@@ -316,14 +314,24 @@ impl From<Equation> for project_io::variable::Equation {
     }
 }
 
+/// Extract the legacy `initial_equation` from a proto equation message.
+/// Used for backward-compatible deserialization of old protobuf data.
+fn extract_legacy_initial_equation(eqn: &project_io::variable::Equation) -> Option<String> {
+    match eqn.equation.as_ref()? {
+        project_io::variable::equation::Equation::Scalar(s) => s.initial_equation.clone(),
+        project_io::variable::equation::Equation::ApplyToAll(a) => a.initial_equation.clone(),
+        project_io::variable::equation::Equation::Arrayed(_) => None,
+    }
+}
+
 impl From<project_io::variable::Equation> for Equation {
     fn from(eqn: project_io::variable::Equation) -> Self {
         match eqn.equation.unwrap() {
             project_io::variable::equation::Equation::Scalar(scalar) => {
-                Equation::Scalar(scalar.equation, scalar.initial_equation)
+                Equation::Scalar(scalar.equation)
             }
             project_io::variable::equation::Equation::ApplyToAll(a2a) => {
-                Equation::ApplyToAll(a2a.dimension_names, a2a.equation, a2a.initial_equation)
+                Equation::ApplyToAll(a2a.dimension_names, a2a.equation)
             }
             project_io::variable::equation::Equation::Arrayed(arrayed) => Equation::Arrayed(
                 arrayed.dimension_names,
@@ -347,18 +355,8 @@ impl From<project_io::variable::Equation> for Equation {
 #[test]
 fn test_equation_roundtrip() {
     let cases: &[_] = &[
-        Equation::Scalar("a+1".to_string(), None),
-        Equation::Scalar("a+1".to_string(), Some("392".to_string())),
-        Equation::ApplyToAll(
-            vec!["a".to_string(), "b".to_string()],
-            "c+2".to_string(),
-            None,
-        ),
-        Equation::ApplyToAll(
-            vec!["a".to_string(), "b".to_string()],
-            "c+2".to_string(),
-            Some("33".to_string()),
-        ),
+        Equation::Scalar("a+1".to_string()),
+        Equation::ApplyToAll(vec!["a".to_string(), "b".to_string()], "c+2".to_string()),
         Equation::Arrayed(
             vec!["d".to_string()],
             vec![
@@ -377,6 +375,25 @@ fn test_equation_roundtrip() {
         let actual = Equation::from(project_io::variable::Equation::from(expected.clone()));
         assert_eq!(expected, actual);
     }
+}
+
+#[test]
+fn test_legacy_initial_equation_deserialization() {
+    // Old protos with initial_equation on ScalarEquation should be readable
+    let proto_eqn = project_io::variable::Equation {
+        equation: Some(project_io::variable::equation::Equation::Scalar(
+            project_io::variable::ScalarEquation {
+                equation: "a+1".to_string(),
+                initial_equation: Some("392".to_string()),
+            },
+        )),
+    };
+    let legacy = extract_legacy_initial_equation(&proto_eqn);
+    assert_eq!(legacy, Some("392".to_string()));
+
+    // Equation conversion ignores the legacy field
+    let eqn = Equation::from(proto_eqn);
+    assert_eq!(eqn, Equation::Scalar("a+1".to_string()));
 }
 
 impl From<Visibility> for project_io::variable::Visibility {
@@ -414,6 +431,13 @@ fn test_visibility_roundtrip() {
 
 impl From<Stock> for project_io::variable::Stock {
     fn from(stock: Stock) -> Self {
+        let compat = if stock.compat.is_empty() {
+            None
+        } else {
+            Some(project_io::variable::Compat {
+                active_initial: stock.compat.active_initial,
+            })
+        };
         project_io::variable::Stock {
             ident: stock.ident,
             equation: Some(stock.equation.into()),
@@ -425,12 +449,18 @@ impl From<Stock> for project_io::variable::Stock {
             can_be_module_input: stock.can_be_module_input,
             visibility: project_io::variable::Visibility::from(stock.visibility) as i32,
             uid: stock.uid.unwrap_or_default(),
+            compat,
         }
     }
 }
 
 impl From<project_io::variable::Stock> for Stock {
     fn from(stock: project_io::variable::Stock) -> Self {
+        let legacy_ai = stock
+            .equation
+            .as_ref()
+            .and_then(extract_legacy_initial_equation);
+        let compat_ai = stock.compat.and_then(|c| c.active_initial).or(legacy_ai);
         Stock {
             ident: stock.ident,
             equation: stock.equation.unwrap().into(),
@@ -447,6 +477,9 @@ impl From<project_io::variable::Stock> for Stock {
             visibility: Visibility::from(
                 project_io::variable::Visibility::try_from(stock.visibility).unwrap_or_default(),
             ),
+            compat: Compat {
+                active_initial: compat_ai,
+            },
             ai_state: None,
             uid: if stock.uid == 0 {
                 None
@@ -462,7 +495,7 @@ fn test_stock_roundtrip() {
     let cases: &[Stock] = &[
         Stock {
             ident: "blerg".to_string(),
-            equation: Equation::Scalar("1+3".to_string(), None),
+            equation: Equation::Scalar("1+3".to_string()),
             documentation: "this is deep stuff".to_string(),
             units: None,
             inflows: vec!["inflow".to_string()],
@@ -470,12 +503,13 @@ fn test_stock_roundtrip() {
             non_negative: false,
             can_be_module_input: true,
             visibility: Visibility::Public,
+            compat: Compat::default(),
             ai_state: None,
             uid: Some(42),
         },
         Stock {
             ident: "blerg2".to_string(),
-            equation: Equation::Scalar("1+3".to_string(), None),
+            equation: Equation::Scalar("1+3".to_string()),
             documentation: "this is deep stuff".to_string(),
             units: Some("flarbles".to_string()),
             inflows: vec!["inflow".to_string()],
@@ -483,6 +517,7 @@ fn test_stock_roundtrip() {
             non_negative: false,
             can_be_module_input: false,
             visibility: Visibility::Private,
+            compat: Compat::default(),
             ai_state: None,
             uid: None,
         },
@@ -496,6 +531,13 @@ fn test_stock_roundtrip() {
 
 impl From<Flow> for project_io::variable::Flow {
     fn from(flow: Flow) -> Self {
+        let compat = if flow.compat.is_empty() {
+            None
+        } else {
+            Some(project_io::variable::Compat {
+                active_initial: flow.compat.active_initial,
+            })
+        };
         project_io::variable::Flow {
             ident: flow.ident,
             equation: Some(flow.equation.into()),
@@ -506,12 +548,18 @@ impl From<Flow> for project_io::variable::Flow {
             can_be_module_input: flow.can_be_module_input,
             visibility: project_io::variable::Visibility::from(flow.visibility) as i32,
             uid: flow.uid.unwrap_or_default(),
+            compat,
         }
     }
 }
 
 impl From<project_io::variable::Flow> for Flow {
     fn from(flow: project_io::variable::Flow) -> Self {
+        let legacy_ai = flow
+            .equation
+            .as_ref()
+            .and_then(extract_legacy_initial_equation);
+        let compat_ai = flow.compat.and_then(|c| c.active_initial).or(legacy_ai);
         Flow {
             ident: flow.ident,
             equation: flow.equation.unwrap().into(),
@@ -527,6 +575,9 @@ impl From<project_io::variable::Flow> for Flow {
             visibility: Visibility::from(
                 project_io::variable::Visibility::try_from(flow.visibility).unwrap_or_default(),
             ),
+            compat: Compat {
+                active_initial: compat_ai,
+            },
             ai_state: None,
             uid: if flow.uid == 0 { None } else { Some(flow.uid) },
         }
@@ -538,19 +589,20 @@ fn test_flow_roundtrip() {
     let cases: &[Flow] = &[
         Flow {
             ident: "blerg".to_string(),
-            equation: Equation::Scalar("1+3".to_string(), None),
+            equation: Equation::Scalar("1+3".to_string()),
             documentation: "this is deep stuff".to_string(),
             units: None,
             gf: None,
             non_negative: false,
             can_be_module_input: true,
             visibility: Visibility::Private,
+            compat: Compat::default(),
             ai_state: None,
             uid: Some(100),
         },
         Flow {
             ident: "blerg2".to_string(),
-            equation: Equation::Scalar("1+3".to_string(), Some("66".to_string())),
+            equation: Equation::Scalar("1+3".to_string()),
             documentation: "this is deep stuff".to_string(),
             units: Some("flarbles".to_string()),
             gf: Some(GraphicalFunction {
@@ -569,6 +621,9 @@ fn test_flow_roundtrip() {
             non_negative: false,
             can_be_module_input: false,
             visibility: Visibility::Public,
+            compat: Compat {
+                active_initial: Some("66".to_string()),
+            },
             ai_state: None,
             uid: None,
         },
@@ -582,6 +637,13 @@ fn test_flow_roundtrip() {
 
 impl From<Aux> for project_io::variable::Aux {
     fn from(aux: Aux) -> Self {
+        let compat = if aux.compat.is_empty() {
+            None
+        } else {
+            Some(project_io::variable::Compat {
+                active_initial: aux.compat.active_initial,
+            })
+        };
         project_io::variable::Aux {
             ident: aux.ident,
             equation: Some(aux.equation.into()),
@@ -591,12 +653,18 @@ impl From<Aux> for project_io::variable::Aux {
             can_be_module_input: aux.can_be_module_input,
             visibility: project_io::variable::Visibility::from(aux.visibility).into(),
             uid: aux.uid.unwrap_or_default(),
+            compat,
         }
     }
 }
 
 impl From<project_io::variable::Aux> for Aux {
     fn from(aux: project_io::variable::Aux) -> Self {
+        let legacy_ai = aux
+            .equation
+            .as_ref()
+            .and_then(extract_legacy_initial_equation);
+        let compat_ai = aux.compat.and_then(|c| c.active_initial).or(legacy_ai);
         Aux {
             ident: aux.ident,
             equation: aux.equation.unwrap().into(),
@@ -611,6 +679,9 @@ impl From<project_io::variable::Aux> for Aux {
             visibility: Visibility::from(
                 project_io::variable::Visibility::try_from(aux.visibility).unwrap_or_default(),
             ),
+            compat: Compat {
+                active_initial: compat_ai,
+            },
             ai_state: None,
             uid: if aux.uid == 0 { None } else { Some(aux.uid) },
         }
@@ -622,18 +693,21 @@ fn test_aux_roundtrip() {
     let cases: &[Aux] = &[
         Aux {
             ident: "blerg".to_string(),
-            equation: Equation::Scalar("1+3".to_string(), Some("11".to_string())),
+            equation: Equation::Scalar("1+3".to_string()),
             documentation: "this is deep stuff".to_string(),
             units: None,
             gf: None,
             can_be_module_input: false,
             visibility: Visibility::Public,
+            compat: Compat {
+                active_initial: Some("11".to_string()),
+            },
             ai_state: None,
             uid: Some(200),
         },
         Aux {
             ident: "blerg2".to_string(),
-            equation: Equation::Scalar("1+3".to_string(), None),
+            equation: Equation::Scalar("1+3".to_string()),
             documentation: "this is deep stuff".to_string(),
             units: Some("flarbles".to_string()),
             gf: Some(GraphicalFunction {
@@ -651,6 +725,7 @@ fn test_aux_roundtrip() {
             }),
             can_be_module_input: true,
             visibility: Visibility::Private,
+            compat: Compat::default(),
             ai_state: None,
             uid: None,
         },
@@ -816,12 +891,13 @@ fn test_variable_roundtrip() {
     let cases: &[Variable] = &[
         Variable::Aux(Aux {
             ident: "blerg".to_string(),
-            equation: Equation::Scalar("1+3".to_string(), None),
+            equation: Equation::Scalar("1+3".to_string()),
             documentation: "this is deep stuff".to_string(),
             units: None,
             gf: None,
             can_be_module_input: false,
             visibility: Visibility::Public,
+            compat: Compat::default(),
             ai_state: None,
             uid: None,
         }),
@@ -1667,7 +1743,7 @@ fn test_model_with_loop_metadata_roundtrip() {
         sim_specs: None,
         variables: vec![Variable::Stock(Stock {
             ident: "stock1".to_string(),
-            equation: Equation::Scalar("1".to_string(), None),
+            equation: Equation::Scalar("1".to_string()),
             documentation: "".to_string(),
             units: None,
             inflows: vec![],
@@ -1675,6 +1751,7 @@ fn test_model_with_loop_metadata_roundtrip() {
             non_negative: false,
             can_be_module_input: false,
             visibility: Visibility::Private,
+            compat: Compat::default(),
             ai_state: None,
             uid: Some(1),
         })],
@@ -1709,7 +1786,7 @@ fn test_model_with_groups_roundtrip() {
         sim_specs: None,
         variables: vec![Variable::Stock(Stock {
             ident: "stock1".to_string(),
-            equation: Equation::Scalar("1".to_string(), None),
+            equation: Equation::Scalar("1".to_string()),
             documentation: "".to_string(),
             units: None,
             inflows: vec![],
@@ -1717,6 +1794,7 @@ fn test_model_with_groups_roundtrip() {
             non_negative: false,
             can_be_module_input: false,
             visibility: Visibility::Private,
+            compat: Compat::default(),
             ai_state: None,
             uid: Some(1),
         })],

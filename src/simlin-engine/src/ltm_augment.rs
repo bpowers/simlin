@@ -354,11 +354,11 @@ fn generate_auxiliary_to_auxiliary_equation(
     // Get the equation text of the 'to' variable
     let to_equation = match to_var {
         Variable::Stock {
-            eqn: Some(Equation::Scalar(eq, _)),
+            eqn: Some(Equation::Scalar(eq)),
             ..
         } => eq.clone(),
         Variable::Var {
-            eqn: Some(Equation::Scalar(eq, _)),
+            eqn: Some(Equation::Scalar(eq)),
             ..
         } => eq.clone(),
         _ => "0".to_string(), // Default if no equation
@@ -453,7 +453,7 @@ fn generate_stock_to_flow_equation(
     // Get the flow equation text
     let flow_equation = match flow_var {
         Variable::Var {
-            eqn: Some(Equation::Scalar(eq, _)),
+            eqn: Some(Equation::Scalar(eq)),
             ..
         } => eq.clone(),
         _ => "0".to_string(),
@@ -564,7 +564,7 @@ fn create_aux_variable(name: &str, equation: &str) -> crate::datamodel::Variable
 
     datamodel::Variable::Aux(datamodel::Aux {
         ident: canonicalize(name).into_owned(),
-        equation: datamodel::Equation::Scalar(equation.to_string(), None),
+        equation: datamodel::Equation::Scalar(equation.to_string()),
         documentation: "LTM".to_string(),
         units: None, // LTM scores are dimensionless by design, no need to declare
         gf: None,
@@ -572,6 +572,7 @@ fn create_aux_variable(name: &str, equation: &str) -> crate::datamodel::Variable
         visibility: datamodel::Visibility::Public,
         ai_state: None,
         uid: None,
+        compat: datamodel::Compat::default(),
     })
 }
 
@@ -893,7 +894,7 @@ mod tests {
             ident: Ident::new("raw_input"),
             ast: None,
             init_ast: None,
-            eqn: Some(Equation::Scalar("10 + SIN(TIME)".to_string(), None)),
+            eqn: Some(Equation::Scalar("10 + SIN(TIME)".to_string())),
             units: None,
             tables: vec![],
             non_negative: false,
@@ -950,7 +951,7 @@ mod tests {
             ident: Ident::new("processed"),
             ast: None,
             init_ast: None,
-            eqn: Some(Equation::Scalar("smoother * 2".to_string(), None)),
+            eqn: Some(Equation::Scalar("smoother * 2".to_string())),
             units: None,
             tables: vec![],
             non_negative: false,
@@ -1002,7 +1003,7 @@ mod tests {
             ident: Ident::new("raw_data"),
             ast: None,
             init_ast: None,
-            eqn: Some(Equation::Scalar("TIME * 2".to_string(), None)),
+            eqn: Some(Equation::Scalar("TIME * 2".to_string())),
             units: None,
             tables: vec![],
             non_negative: false,
@@ -1143,7 +1144,7 @@ mod tests {
             ident: Ident::new("input_value"),
             ast: None,
             init_ast: None,
-            eqn: Some(Equation::Scalar("10".to_string(), None)),
+            eqn: Some(Equation::Scalar("10".to_string())),
             units: None,
             tables: vec![],
             non_negative: false,
@@ -1157,7 +1158,7 @@ mod tests {
             ident: Ident::new("output_value"),
             ast: None,
             init_ast: None,
-            eqn: Some(Equation::Scalar("processor * 2".to_string(), None)),
+            eqn: Some(Equation::Scalar("processor * 2".to_string())),
             units: None,
             tables: vec![],
             non_negative: false,
@@ -1215,7 +1216,7 @@ mod tests {
         // Remove debug output
         for var in link_vars.values() {
             if let datamodel::Variable::Aux(aux) = var
-                && let datamodel::Equation::Scalar(eq, _) = &aux.equation
+                && let datamodel::Equation::Scalar(eq) = &aux.equation
             {
                 // Module link scores should use the black box formula
                 assert!(

@@ -777,7 +777,7 @@ y = SUM(x[COP Developed!])
 
         if let Variable::Aux(a) = y {
             let eq = match &a.equation {
-                Equation::Scalar(expr, _) => expr.clone(),
+                Equation::Scalar(expr) => expr.clone(),
                 other => panic!("Expected Scalar equation, got {:?}", other),
             };
             assert!(

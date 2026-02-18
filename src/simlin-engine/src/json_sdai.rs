@@ -237,7 +237,7 @@ impl From<GraphicalFunction> for datamodel::GraphicalFunction {
 
 impl From<StockFields> for datamodel::Stock {
     fn from(stock: StockFields) -> Self {
-        let equation = datamodel::Equation::Scalar(stock.equation.unwrap_or_default(), None);
+        let equation = datamodel::Equation::Scalar(stock.equation.unwrap_or_default());
 
         datamodel::Stock {
             ident: stock.name,
@@ -251,13 +251,14 @@ impl From<StockFields> for datamodel::Stock {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         }
     }
 }
 
 impl From<FlowFields> for datamodel::Flow {
     fn from(flow: FlowFields) -> Self {
-        let equation = datamodel::Equation::Scalar(flow.equation.unwrap_or_default(), None);
+        let equation = datamodel::Equation::Scalar(flow.equation.unwrap_or_default());
 
         datamodel::Flow {
             ident: flow.name,
@@ -270,13 +271,14 @@ impl From<FlowFields> for datamodel::Flow {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         }
     }
 }
 
 impl From<AuxiliaryFields> for datamodel::Aux {
     fn from(aux: AuxiliaryFields) -> Self {
-        let equation = datamodel::Equation::Scalar(aux.equation.unwrap_or_default(), None);
+        let equation = datamodel::Equation::Scalar(aux.equation.unwrap_or_default());
 
         datamodel::Aux {
             ident: aux.name,
@@ -288,6 +290,7 @@ impl From<AuxiliaryFields> for datamodel::Aux {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         }
     }
 }
@@ -423,8 +426,8 @@ impl From<datamodel::GraphicalFunction> for GraphicalFunction {
 
 fn extract_equation_string(eq: &datamodel::Equation) -> String {
     match eq {
-        datamodel::Equation::Scalar(s, _) => s.clone(),
-        datamodel::Equation::ApplyToAll(_, s, _) => s.clone(),
+        datamodel::Equation::Scalar(s) => s.clone(),
+        datamodel::Equation::ApplyToAll(_, s) => s.clone(),
         datamodel::Equation::Arrayed(_, elems) => {
             if let Some((_, s, _, _)) = elems.first() {
                 s.clone()

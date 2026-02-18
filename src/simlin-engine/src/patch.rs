@@ -403,10 +403,10 @@ fn rewrite_equation(
 
 fn apply_ast_to_equation_main(equation: &mut datamodel::Equation, ast: &Ast<Expr2>) {
     match (equation, ast) {
-        (datamodel::Equation::Scalar(main, _), Ast::Scalar(expr)) => {
+        (datamodel::Equation::Scalar(main), Ast::Scalar(expr)) => {
             *main = expr2_to_string(expr);
         }
-        (datamodel::Equation::ApplyToAll(_, main, _), Ast::ApplyToAll(_, expr)) => {
+        (datamodel::Equation::ApplyToAll(_, main), Ast::ApplyToAll(_, expr)) => {
             *main = expr2_to_string(expr);
         }
         (datamodel::Equation::Arrayed(_, elements), Ast::Arrayed(_, exprs)) => {
@@ -423,11 +423,11 @@ fn apply_ast_to_equation_main(equation: &mut datamodel::Equation, ast: &Ast<Expr
 
 fn apply_ast_to_equation_initial(equation: &mut datamodel::Equation, ast: &Ast<Expr2>) {
     match (equation, ast) {
-        (datamodel::Equation::Scalar(_, initial @ Some(_)), Ast::Scalar(expr)) => {
-            *initial = Some(expr2_to_string(expr));
+        (datamodel::Equation::Scalar(_), Ast::Scalar(_)) => {
+            // active_initial now lives in Compat, not in Equation
         }
-        (datamodel::Equation::ApplyToAll(_, _, initial @ Some(_)), Ast::ApplyToAll(_, expr)) => {
-            *initial = Some(expr2_to_string(expr));
+        (datamodel::Equation::ApplyToAll(_, _), Ast::ApplyToAll(_, _)) => {
+            // active_initial now lives in Compat, not in Equation
         }
         (datamodel::Equation::Arrayed(_, elements), Ast::Arrayed(_, exprs)) => {
             for (element_name, _, initial, _) in elements.iter_mut() {
@@ -932,7 +932,7 @@ mod tests {
         let mut project = TestProject::new("test").build_datamodel();
         let aux = datamodel::Aux {
             ident: "new_aux".to_string(),
-            equation: Equation::Scalar("1".to_string(), None),
+            equation: Equation::Scalar("1".to_string()),
             documentation: String::new(),
             units: None,
             gf: None,
@@ -940,6 +940,7 @@ mod tests {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         };
         let patch = ProjectPatch {
             project_ops: vec![],
@@ -965,7 +966,7 @@ mod tests {
             .build_datamodel();
         let stock = datamodel::Stock {
             ident: "stock".to_string(),
-            equation: Equation::Scalar("5".to_string(), None),
+            equation: Equation::Scalar("5".to_string()),
             documentation: "docs".to_string(),
             units: Some("people".to_string()),
             inflows: vec!["flow".to_string()],
@@ -975,6 +976,7 @@ mod tests {
             visibility: Visibility::Public,
             ai_state: None,
             uid: Some(10),
+            compat: datamodel::Compat::default(),
         };
         let patch = ProjectPatch {
             project_ops: vec![],
@@ -1184,7 +1186,7 @@ mod tests {
 
         match model.get_variable("foo").unwrap() {
             Variable::Aux(aux) => match &aux.equation {
-                datamodel::Equation::Scalar(eqn, _) => assert_eq!(eqn, "baz + 1"),
+                datamodel::Equation::Scalar(eqn) => assert_eq!(eqn, "baz + 1"),
                 _ => panic!("expected scalar equation"),
             },
             _ => panic!("expected auxiliary variable"),
@@ -1192,7 +1194,7 @@ mod tests {
 
         match model.get_variable("baz").unwrap() {
             Variable::Aux(aux) => match &aux.equation {
-                datamodel::Equation::Scalar(eqn, _) => assert_eq!(eqn, "foo + 2"),
+                datamodel::Equation::Scalar(eqn) => assert_eq!(eqn, "foo + 2"),
                 _ => panic!("expected scalar equation"),
             },
             _ => panic!("expected renamed auxiliary"),
@@ -1236,7 +1238,7 @@ mod tests {
             sim_specs: None,
             variables: vec![datamodel::Variable::Aux(datamodel::Aux {
                 ident: "target".to_string(),
-                equation: datamodel::Equation::Scalar("0".to_string(), None),
+                equation: datamodel::Equation::Scalar("0".to_string()),
                 documentation: String::new(),
                 units: None,
                 gf: None,
@@ -1244,6 +1246,7 @@ mod tests {
                 visibility: datamodel::Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: datamodel::Compat::default(),
             })],
             views: vec![],
             loop_metadata: vec![],
@@ -1266,7 +1269,7 @@ mod tests {
 
         match model.get_variable("consumer").unwrap() {
             Variable::Aux(aux) => match &aux.equation {
-                datamodel::Equation::Scalar(eqn, _) => assert_eq!(eqn, "new_input * 2"),
+                datamodel::Equation::Scalar(eqn) => assert_eq!(eqn, "new_input * 2"),
                 _ => panic!("expected scalar equation"),
             },
             _ => panic!("expected auxiliary variable"),
@@ -1322,7 +1325,7 @@ mod tests {
             sim_specs: None,
             variables: vec![datamodel::Variable::Aux(datamodel::Aux {
                 ident: "foo".to_string(),
-                equation: datamodel::Equation::Scalar("0".to_string(), None),
+                equation: datamodel::Equation::Scalar("0".to_string()),
                 documentation: String::new(),
                 units: None,
                 gf: None,
@@ -1330,6 +1333,7 @@ mod tests {
                 visibility: datamodel::Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: datamodel::Compat::default(),
             })],
             views: vec![],
             loop_metadata: vec![],
@@ -1352,7 +1356,7 @@ mod tests {
 
         match model.get_variable("consumer").unwrap() {
             Variable::Aux(aux) => match &aux.equation {
-                datamodel::Equation::Scalar(eqn, _) => {
+                datamodel::Equation::Scalar(eqn) => {
                     assert_eq!(eqn, "renamed_foo + child·foo + bar");
                 }
                 _ => panic!("expected scalar equation"),
@@ -1362,7 +1366,7 @@ mod tests {
 
         match model.get_variable("renamed_foo").unwrap() {
             Variable::Aux(aux) => match &aux.equation {
-                datamodel::Equation::Scalar(eqn, _) => assert_eq!(eqn, "1"),
+                datamodel::Equation::Scalar(eqn) => assert_eq!(eqn, "1"),
                 _ => panic!("expected scalar equation"),
             },
             _ => panic!("expected renamed auxiliary"),
@@ -1394,7 +1398,7 @@ mod tests {
 
         match model.get_variable("consumer").unwrap() {
             Variable::Aux(aux) => match &aux.equation {
-                datamodel::Equation::Scalar(eqn, _) => {
+                datamodel::Equation::Scalar(eqn) => {
                     assert_eq!(eqn, "bar + self·bar");
                 }
                 _ => panic!("expected scalar equation"),
@@ -1419,7 +1423,7 @@ mod tests {
                 variables: vec![
                     datamodel::Variable::Aux(datamodel::Aux {
                         ident: "base_value".to_string(),
-                        equation: datamodel::Equation::Scalar("10".to_string(), None),
+                        equation: datamodel::Equation::Scalar("10".to_string()),
                         documentation: String::new(),
                         units: None,
                         gf: None,
@@ -1427,6 +1431,7 @@ mod tests {
                         visibility: datamodel::Visibility::Private,
                         ai_state: None,
                         uid: None,
+                        compat: datamodel::Compat::default(),
                     }),
                     datamodel::Variable::Aux(datamodel::Aux {
                         ident: "regional_growth".to_string(),
@@ -1454,6 +1459,7 @@ mod tests {
                         visibility: datamodel::Visibility::Private,
                         ai_state: None,
                         uid: None,
+                        compat: datamodel::Compat::default(),
                     }),
                 ],
                 views: vec![],
@@ -1509,7 +1515,7 @@ mod tests {
                 variables: vec![
                     datamodel::Variable::Aux(datamodel::Aux {
                         ident: "price".to_string(),
-                        equation: datamodel::Equation::Scalar("100".to_string(), None),
+                        equation: datamodel::Equation::Scalar("100".to_string()),
                         documentation: String::new(),
                         units: None,
                         gf: None,
@@ -1517,13 +1523,13 @@ mod tests {
                         visibility: datamodel::Visibility::Private,
                         ai_state: None,
                         uid: None,
+                        compat: datamodel::Compat::default(),
                     }),
                     datamodel::Variable::Aux(datamodel::Aux {
                         ident: "revenue".to_string(),
                         equation: datamodel::Equation::ApplyToAll(
                             vec!["Product".to_string()],
                             "price * quantity".to_string(),
-                            None,
                         ),
                         documentation: String::new(),
                         units: None,
@@ -1532,10 +1538,11 @@ mod tests {
                         visibility: datamodel::Visibility::Private,
                         ai_state: None,
                         uid: None,
+                        compat: datamodel::Compat::default(),
                     }),
                     datamodel::Variable::Aux(datamodel::Aux {
                         ident: "quantity".to_string(),
-                        equation: datamodel::Equation::Scalar("5".to_string(), None),
+                        equation: datamodel::Equation::Scalar("5".to_string()),
                         documentation: String::new(),
                         units: None,
                         gf: None,
@@ -1543,6 +1550,7 @@ mod tests {
                         visibility: datamodel::Visibility::Private,
                         ai_state: None,
                         uid: None,
+                        compat: datamodel::Compat::default(),
                     }),
                 ],
                 views: vec![],
@@ -1569,7 +1577,7 @@ mod tests {
 
         match model.get_variable("revenue").unwrap() {
             Variable::Aux(aux) => match &aux.equation {
-                datamodel::Equation::ApplyToAll(dims, eqn, _) => {
+                datamodel::Equation::ApplyToAll(dims, eqn) => {
                     assert_eq!(dims, &vec!["Product".to_string()]);
                     assert_eq!(eqn, "unit_price * quantity");
                 }
@@ -1602,9 +1610,8 @@ mod tests {
 
         match model.get_variable("inventory").unwrap() {
             Variable::Stock(stock) => match &stock.equation {
-                datamodel::Equation::Scalar(main, initial) => {
+                datamodel::Equation::Scalar(main) => {
                     assert_eq!(main, "starting_inventory * 2");
-                    assert_eq!(initial, &None);
                 }
                 _ => panic!("expected scalar equation"),
             },
@@ -1633,7 +1640,7 @@ mod tests {
 
         let stock = datamodel::Stock {
             ident: "inventory".to_string(),
-            equation: Equation::Scalar("100".to_string(), None),
+            equation: Equation::Scalar("100".to_string()),
             documentation: String::new(),
             units: None,
             inflows: vec![],
@@ -1643,6 +1650,7 @@ mod tests {
             visibility: Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         };
 
         let patch = ProjectPatch {
@@ -1675,7 +1683,7 @@ mod tests {
         match model.get_variable("inventory").unwrap() {
             Variable::Stock(stock) => {
                 assert_eq!(stock.inflows, vec!["inflow".to_string()]);
-                assert_eq!(stock.equation, Equation::Scalar("100".to_string(), None));
+                assert_eq!(stock.equation, Equation::Scalar("100".to_string()));
             }
             _ => panic!("expected stock"),
         }
@@ -1699,7 +1707,7 @@ mod tests {
             Variable::Stock(stock) => {
                 assert!(stock.inflows.is_empty());
                 assert!(stock.outflows.is_empty());
-                assert_eq!(stock.equation, Equation::Scalar("100".to_string(), None));
+                assert_eq!(stock.equation, Equation::Scalar("100".to_string()));
             }
             _ => panic!("expected stock"),
         }
@@ -1742,7 +1750,7 @@ mod tests {
             Variable::Stock(stock) => {
                 assert!(stock.inflows.is_empty());
                 assert!(stock.outflows.is_empty());
-                assert_eq!(stock.equation, Equation::Scalar("1000".to_string(), None));
+                assert_eq!(stock.equation, Equation::Scalar("1000".to_string()));
                 assert_eq!(stock.documentation, "Total population");
                 assert_eq!(stock.units, Some("people".to_string()));
                 assert!(stock.non_negative);
@@ -1897,7 +1905,7 @@ mod tests {
             sim_specs: None,
             variables: vec![datamodel::Variable::Aux(datamodel::Aux {
                 ident: "output".to_string(),
-                equation: Equation::Scalar("42".to_string(), None),
+                equation: Equation::Scalar("42".to_string()),
                 documentation: String::new(),
                 units: None,
                 gf: None,
@@ -1905,6 +1913,7 @@ mod tests {
                 visibility: Visibility::Public,
                 ai_state: None,
                 uid: None,
+                compat: datamodel::Compat::default(),
             })],
             views: vec![],
             loop_metadata: vec![],
@@ -1954,7 +1963,7 @@ mod tests {
             sim_specs: None,
             variables: vec![datamodel::Variable::Aux(datamodel::Aux {
                 ident: "input_var".to_string(),
-                equation: Equation::Scalar("0".to_string(), None),
+                equation: Equation::Scalar("0".to_string()),
                 documentation: String::new(),
                 units: None,
                 gf: None,
@@ -1962,6 +1971,7 @@ mod tests {
                 visibility: Visibility::Public,
                 ai_state: None,
                 uid: None,
+                compat: datamodel::Compat::default(),
             })],
             views: vec![],
             loop_metadata: vec![],
@@ -2158,7 +2168,7 @@ mod tests {
                     name: "new_submodel".to_string(),
                     ops: vec![ModelOperation::UpsertAux(datamodel::Aux {
                         ident: "input".to_string(),
-                        equation: Equation::Scalar("0".to_string(), None),
+                        equation: Equation::Scalar("0".to_string()),
                         documentation: String::new(),
                         units: None,
                         gf: None,
@@ -2166,6 +2176,7 @@ mod tests {
                         visibility: Visibility::Public,
                         ai_state: None,
                         uid: None,
+                        compat: datamodel::Compat::default(),
                     })],
                 },
                 // Add the module reference to main
@@ -2204,7 +2215,7 @@ mod tests {
             sim_specs: None,
             variables: vec![datamodel::Variable::Aux(datamodel::Aux {
                 ident: "sub_input".to_string(),
-                equation: Equation::Scalar("0".to_string(), None),
+                equation: Equation::Scalar("0".to_string()),
                 documentation: String::new(),
                 units: None,
                 gf: None,
@@ -2212,6 +2223,7 @@ mod tests {
                 visibility: Visibility::Public,
                 ai_state: None,
                 uid: None,
+                compat: datamodel::Compat::default(),
             })],
             views: vec![],
             loop_metadata: vec![],
@@ -2281,7 +2293,7 @@ mod tests {
                     name: "main".to_string(),
                     ops: vec![ModelOperation::UpsertAux(datamodel::Aux {
                         ident: "y".to_string(),
-                        equation: Equation::Scalar("2".to_string(), None),
+                        equation: Equation::Scalar("2".to_string()),
                         documentation: String::new(),
                         units: None,
                         gf: None,
@@ -2289,6 +2301,7 @@ mod tests {
                         visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
+                        compat: datamodel::Compat::default(),
                     })],
                 },
                 ModelPatch {
@@ -2343,7 +2356,7 @@ mod tests {
                 name: "Customer Growth".to_string(),
                 ops: vec![ModelOperation::UpsertAux(datamodel::Aux {
                     ident: "growth_rate".to_string(),
-                    equation: Equation::Scalar("0.05".to_string(), None),
+                    equation: Equation::Scalar("0.05".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -2351,6 +2364,7 @@ mod tests {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: datamodel::Compat::default(),
                 })],
             }],
         };
