@@ -3655,7 +3655,7 @@ mod tests {
             variables: vec![
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "rate".to_string(),
-                    equation: datamodel::Equation::Scalar("0.1".to_string(), None),
+                    equation: datamodel::Equation::Scalar("0.1".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -3663,10 +3663,11 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(1),
+                    compat: Default::default(),
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "output".to_string(),
-                    equation: datamodel::Equation::Scalar("rate * TIME".to_string(), None),
+                    equation: datamodel::Equation::Scalar("rate * TIME".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -3674,6 +3675,7 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(2),
+                    compat: Default::default(),
                 }),
             ],
             views: Vec::new(),
@@ -3701,7 +3703,7 @@ mod tests {
             variables: vec![
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "birth".to_string(),
-                    equation: datamodel::Equation::Scalar("10".to_string(), None),
+                    equation: datamodel::Equation::Scalar("10".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -3709,10 +3711,11 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(1),
+                    compat: Default::default(),
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "birthday".to_string(),
-                    equation: datamodel::Equation::Scalar("365".to_string(), None),
+                    equation: datamodel::Equation::Scalar("365".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -3720,10 +3723,11 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(2),
+                    compat: Default::default(),
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "output".to_string(),
-                    equation: datamodel::Equation::Scalar("birthday + 1".to_string(), None),
+                    equation: datamodel::Equation::Scalar("birthday + 1".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -3731,6 +3735,7 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(3),
+                    compat: Default::default(),
                 }),
             ],
             views: Vec::new(),
@@ -3761,7 +3766,7 @@ mod tests {
             variables: vec![
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "x".to_string(),
-                    equation: datamodel::Equation::Scalar("1".to_string(), None),
+                    equation: datamodel::Equation::Scalar("1".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -3769,6 +3774,7 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(1),
+                    compat: Default::default(),
                 }),
                 datamodel::Variable::Module(datamodel::Module {
                     ident: "m".to_string(),
@@ -3783,7 +3789,7 @@ mod tests {
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "y".to_string(),
-                    equation: datamodel::Equation::Scalar("x + 1".to_string(), None),
+                    equation: datamodel::Equation::Scalar("x + 1".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -3791,6 +3797,7 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(3),
+                    compat: Default::default(),
                 }),
             ],
             views: Vec::new(),
@@ -3815,7 +3822,7 @@ mod tests {
             variables: vec![
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "x".to_string(),
-                    equation: datamodel::Equation::Scalar("y".to_string(), None),
+                    equation: datamodel::Equation::Scalar("y".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -3823,10 +3830,11 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(1),
+                    compat: Default::default(),
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "y".to_string(),
-                    equation: datamodel::Equation::Scalar("x".to_string(), None),
+                    equation: datamodel::Equation::Scalar("x".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -3834,6 +3842,7 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(2),
+                    compat: Default::default(),
                 }),
             ],
             views: Vec::new(),
@@ -3871,7 +3880,7 @@ mod tests {
             variables: vec![
                 datamodel::Variable::Stock(datamodel::Stock {
                     ident: "population".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string(), None),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
                     documentation: String::new(),
                     units: None,
                     inflows: vec!["births".to_string()],
@@ -3881,12 +3890,12 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(1),
+                    compat: Default::default(),
                 }),
                 datamodel::Variable::Flow(datamodel::Flow {
                     ident: "births".to_string(),
                     equation: datamodel::Equation::Scalar(
                         "population *** totally_broken_syntax".to_string(),
-                        None,
                     ),
                     documentation: String::new(),
                     units: None,
@@ -3896,6 +3905,7 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(2),
+                    compat: Default::default(),
                 }),
             ],
             views: Vec::new(),
@@ -3930,7 +3940,7 @@ mod tests {
             variables: vec![
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "x".to_string(),
-                    equation: datamodel::Equation::Scalar("phantom + 1".to_string(), None),
+                    equation: datamodel::Equation::Scalar("phantom + 1".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -3938,10 +3948,11 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(1),
+                    compat: Default::default(),
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "y".to_string(),
-                    equation: datamodel::Equation::Scalar("x * 2".to_string(), None),
+                    equation: datamodel::Equation::Scalar("x * 2".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -3949,6 +3960,7 @@ mod tests {
                     visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(2),
+                    compat: Default::default(),
                 }),
             ],
             views: Vec::new(),

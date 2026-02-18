@@ -190,17 +190,35 @@ pub fn calculate_restricted_label_side(
 
     let band = PI / 8.0;
 
-    let mut best_side = allowed[0];
-    let mut best_clearance = f64::NEG_INFINITY;
-    let mut best_density = usize::MAX;
-    let mut best_preference = usize::MAX;
-
     let preference_order = [
         LabelSide::Bottom,
         LabelSide::Right,
         LabelSide::Left,
         LabelSide::Top,
     ];
+
+    // Matching Praxis layout.go:324 -- near-best clearances within this
+    // epsilon are treated as ties, reducing jitter from float noise.
+    const CLEARANCE_EPS: f64 = PI / 24.0;
+
+    // First pass: find the best clearance across all allowed sides
+    let mut best_clearance = f64::NEG_INFINITY;
+    for &side in allowed {
+        let side_angle = label_side_angle(side);
+        let min_clearance = angles
+            .iter()
+            .map(|&a| angular_distance(side_angle, a))
+            .fold(f64::INFINITY, f64::min);
+        if min_clearance > best_clearance {
+            best_clearance = min_clearance;
+        }
+    }
+
+    // Second pass: among sides within the epsilon band of best_clearance,
+    // pick the one with lowest density, breaking further ties by preference.
+    let mut best_side = allowed[0];
+    let mut best_density = usize::MAX;
+    let mut best_preference = usize::MAX;
 
     for &side in allowed {
         let side_angle = label_side_angle(side);
@@ -209,6 +227,10 @@ pub fn calculate_restricted_label_side(
             .iter()
             .map(|&a| angular_distance(side_angle, a))
             .fold(f64::INFINITY, f64::min);
+
+        if best_clearance - min_clearance > CLEARANCE_EPS {
+            continue;
+        }
 
         let density = angles
             .iter()
@@ -220,15 +242,8 @@ pub fn calculate_restricted_label_side(
             .position(|&s| s == side)
             .unwrap_or(usize::MAX);
 
-        let is_better = min_clearance > best_clearance
-            || (min_clearance == best_clearance && density < best_density)
-            || (min_clearance == best_clearance
-                && density == best_density
-                && pref_idx < best_preference);
-
-        if is_better {
+        if density < best_density || (density == best_density && pref_idx < best_preference) {
             best_side = side;
-            best_clearance = min_clearance;
             best_density = density;
             best_preference = pref_idx;
         }
@@ -435,6 +450,39 @@ mod tests {
         let side = calculate_restricted_label_side("x", &positions, &uses, &used_by, &allowed);
         // Bottom angle (pi/2) is occupied, so it should pick something else
         assert_ne!(side, LabelSide::Bottom);
+    }
+
+    #[test]
+    fn test_calculate_restricted_label_side_epsilon_tiebreak() {
+        // Two connections positioned so that Right and Bottom have nearly-equal
+        // clearance (within PI/24), but Bottom has higher density. The epsilon
+        // band should treat them as tied, and lower density should win.
+
+        // Place connections so that Bottom has slightly better clearance but
+        // higher density than Right.
+        //
+        // Connection at angle ~PI/2 + 0.05 (just past Bottom center, making
+        // Bottom's clearance slightly worse than Right's, but within epsilon).
+        // A second connection also near Bottom increases its density.
+        let positions = HashMap::from([
+            ("x".to_string(), Position::new(100.0, 100.0)),
+            // slightly right of straight-down, giving Bottom a small clearance
+            ("c1".to_string(), Position::new(101.0, 200.0)),
+            // another connection near Bottom, increasing density there
+            ("c2".to_string(), Position::new(99.0, 200.0)),
+        ]);
+        let uses = BTreeMap::new();
+        let used_by = BTreeMap::from([(
+            "x".to_string(),
+            BTreeSet::from(["c1".to_string(), "c2".to_string()]),
+        )]);
+        let allowed = [LabelSide::Right, LabelSide::Bottom];
+
+        let side = calculate_restricted_label_side("x", &positions, &uses, &used_by, &allowed);
+        // Both connections are near PI/2 (Bottom), so Bottom has poor clearance
+        // and high density. Right has much better clearance and zero density.
+        // With epsilon or without, Right should win here.
+        assert_eq!(side, LabelSide::Right);
     }
 
     #[test]
