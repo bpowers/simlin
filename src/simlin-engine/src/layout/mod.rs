@@ -1875,6 +1875,90 @@ fn try_compile_model(
     compiled.models.get(&model_ident).cloned()
 }
 
+/// Returns true if the compiled model has reliable AST-based dependency
+/// information for the given variable. When false (variable not found or
+/// has no AST due to a parse error), callers should fall back to
+/// string-heuristic extraction.
+fn has_compiled_ast(cm: &ModelStage1, ident: &Ident<Canonical>) -> bool {
+    matches!(
+        cm.variables.get(ident),
+        Some(crate::variable::Variable::Stock {
+            init_ast: Some(_),
+            ..
+        }) | Some(crate::variable::Variable::Var { ast: Some(_), .. })
+            | Some(crate::variable::Variable::Module { .. })
+    )
+}
+
+/// Extract variable dependencies from an equation using word-boundary
+/// matching on the equation text. This is a heuristic that avoids requiring
+/// full model compilation; it can produce false positives for identifiers
+/// that collide with builtin function names and doesn't handle subscripted
+/// references. Used as a fallback when compilation fails or a variable has
+/// a parse error and no AST is available.
+fn extract_equation_deps(var: &datamodel::Variable, all_idents: &HashSet<String>) -> Vec<String> {
+    let equation = match var.get_equation() {
+        Some(eq) => eq,
+        None => return Vec::new(),
+    };
+
+    let equation_texts: Vec<&str> = match equation {
+        datamodel::Equation::Scalar(text) => vec![text.as_str()],
+        datamodel::Equation::ApplyToAll(_, text) => vec![text.as_str()],
+        datamodel::Equation::Arrayed(_, entries) => entries
+            .iter()
+            .map(|(_, text, _, _)| text.as_str())
+            .collect(),
+    };
+    if equation_texts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut deps = Vec::new();
+    let lowered_texts: Vec<String> = equation_texts
+        .iter()
+        .map(|text| text.to_lowercase())
+        .collect();
+    let var_ident = canonicalize(var.get_ident());
+
+    for ident in all_idents {
+        if ident == var_ident.as_ref() {
+            continue;
+        }
+        if lowered_texts
+            .iter()
+            .any(|equation_lower| contains_ident(equation_lower, ident))
+        {
+            deps.push(ident.clone());
+        }
+    }
+
+    deps
+}
+
+/// Check if an identifier appears as a word boundary match in equation text.
+fn contains_ident(equation_lower: &str, ident: &str) -> bool {
+    let ident_lower = ident.to_lowercase();
+    let mut search_from = 0;
+    while let Some(pos) = equation_lower[search_from..].find(&ident_lower) {
+        let abs_pos = search_from + pos;
+        let end_pos = abs_pos + ident_lower.len();
+
+        let before_ok = abs_pos == 0
+            || !equation_lower.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
+                && equation_lower.as_bytes()[abs_pos - 1] != b'_';
+        let after_ok = end_pos >= equation_lower.len()
+            || !equation_lower.as_bytes()[end_pos].is_ascii_alphanumeric()
+                && equation_lower.as_bytes()[end_pos] != b'_';
+
+        if before_ok && after_ok {
+            return true;
+        }
+        search_from = abs_pos + 1;
+    }
+    false
+}
+
 /// Build feedback loops from the persisted model loop_metadata (UIDs only,
 /// no LTM simulation). Used as a fallback when LTM detection fails.
 fn build_feedback_loops_from_metadata(
@@ -2075,11 +2159,15 @@ pub fn compute_metadata(
 
         let deps: Vec<String> = if let Some(ref cm) = compiled_model {
             let ident_key = Ident::<Canonical>::new(&var_ident);
-            crate::model::get_incoming_links(cm, &ident_key)
-                .map(|deps| deps.into_iter().map(|id| id.to_string()).collect())
-                .unwrap_or_default()
+            if has_compiled_ast(cm, &ident_key) {
+                crate::model::get_incoming_links(cm, &ident_key)
+                    .map(|deps| deps.into_iter().map(|id| id.to_string()).collect())
+                    .unwrap_or_default()
+            } else {
+                extract_equation_deps(var, &all_idents)
+            }
         } else {
-            Vec::new()
+            extract_equation_deps(var, &all_idents)
         };
 
         // Filter to only include deps that are actual rendered model
@@ -2805,6 +2893,121 @@ mod tests {
             &all_flows,
         );
         assert_eq!(chains.len(), 2);
+    }
+
+    #[test]
+    fn test_contains_ident_word_boundary() {
+        assert!(contains_ident("a + b * c", "b"));
+        assert!(!contains_ident("abc", "b"));
+        assert!(contains_ident("birth_rate * population", "birth_rate"));
+        assert!(!contains_ident("high_birth_rate * x", "birth_rate"));
+    }
+
+    fn make_aux(ident: &str, equation: &str) -> datamodel::Variable {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::Scalar(equation.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Public,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        })
+    }
+
+    #[test]
+    fn test_extract_equation_deps_simple() {
+        let var = make_aux("births", "population * birth_rate");
+        let idents: HashSet<String> = ["population", "birth_rate", "births", "death_rate"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut deps = extract_equation_deps(&var, &idents);
+        deps.sort();
+        assert_eq!(deps, vec!["birth_rate", "population"]);
+    }
+
+    #[test]
+    fn test_extract_equation_deps_excludes_self() {
+        let var = make_aux("x", "x + y");
+        let idents: HashSet<String> = ["x", "y"].iter().map(|s| s.to_string()).collect();
+        let deps = extract_equation_deps(&var, &idents);
+        assert_eq!(deps, vec!["y"]);
+    }
+
+    #[test]
+    fn test_extract_equation_deps_builtin_function() {
+        let var = make_aux("result", "MAX(a, b)");
+        let idents: HashSet<String> = ["a", "b", "result"].iter().map(|s| s.to_string()).collect();
+        let mut deps = extract_equation_deps(&var, &idents);
+        deps.sort();
+        assert_eq!(deps, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_extract_equation_deps_if_then_else() {
+        let var = make_aux("output", "IF THEN ELSE(flag > 0, alpha, beta)");
+        let idents: HashSet<String> = ["flag", "alpha", "beta", "output"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut deps = extract_equation_deps(&var, &idents);
+        deps.sort();
+        assert_eq!(deps, vec!["alpha", "beta", "flag"]);
+    }
+
+    #[test]
+    fn test_extract_equation_deps_no_equation() {
+        let var = datamodel::Variable::Stock(datamodel::Stock {
+            ident: "stock".to_string(),
+            equation: datamodel::Equation::Scalar(String::new()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            non_negative: false,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Public,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        });
+        let idents: HashSet<String> = ["stock", "x"].iter().map(|s| s.to_string()).collect();
+        let deps = extract_equation_deps(&var, &idents);
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_extract_equation_deps_arrayed_uses_all_entries() {
+        let var = datamodel::Variable::Aux(datamodel::Aux {
+            ident: "arr".to_string(),
+            equation: datamodel::Equation::Arrayed(
+                vec!["dim".to_string()],
+                vec![
+                    ("a".to_string(), "foo".to_string(), None, None),
+                    ("b".to_string(), "bar".to_string(), None, None),
+                ],
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Public,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        });
+        let idents: HashSet<String> = ["arr", "foo", "bar"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let mut deps = extract_equation_deps(&var, &idents);
+        deps.sort();
+        assert_eq!(deps, vec!["bar", "foo"]);
     }
 
     #[test]
@@ -3684,10 +3887,10 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_metadata_invalid_equation_still_has_structural_deps() {
-        // A flow with an unparseable equation has no AST-level deps, but
-        // should still be connected to its stock via structural dependencies
-        // (the stock's inflows list).
+    fn test_compute_metadata_falls_back_for_invalid_equation() {
+        // A variable with an unparseable equation should still get
+        // string-heuristic dependencies rather than being treated as a
+        // constant.
         let model = datamodel::Model {
             name: TEST_MODEL.to_string(),
             sim_specs: None,
@@ -3729,7 +3932,18 @@ mod tests {
         let project = test_project(model);
         let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
 
-        // population should depend on births via structural inflows
+        let births_deps = metadata.dep_graph.get("births").unwrap();
+        assert!(
+            births_deps.contains("population"),
+            "births should depend on population via string-heuristic fallback, got: {:?}",
+            births_deps,
+        );
+        assert!(
+            !metadata.constants.contains("births"),
+            "births should not be classified as a constant",
+        );
+
+        // population should also depend on births via structural inflows
         let pop_deps = metadata.dep_graph.get("population").unwrap();
         assert!(
             pop_deps.contains("births"),
