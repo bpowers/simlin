@@ -8,7 +8,9 @@ use super::annealing::{LineSegment, run_annealing_with_filter};
 use super::config::LayoutConfig;
 use super::graph::{ConstrainedGraphBuilder, GraphBuilder, Position};
 use super::metadata::{ComputedMetadata, StockFlowChain};
-use super::sfdp::{SfdpConfig, compute_layout_from_initial};
+use super::sfdp::{
+    SfdpConfig, compute_layout_from_initial_with_callback, should_trigger_annealing,
+};
 
 /// Prefix for synthetic cloud nodes representing missing flow endpoints.
 pub const CLOUD_NODE_PREFIX: &str = "__cloud__";
@@ -143,7 +145,14 @@ pub fn build_chain_dependency_graph(
     for (i, chain) in chains.iter().enumerate() {
         for flow in &chain.flows {
             let (from_stock, to_stock) = metadata.connected_stocks(flow);
-            if from_stock.is_none() || to_stock.is_none() {
+            if from_stock.is_none() {
+                let seq = cloud_seq.entry(i).or_insert(0);
+                let cloud_id = make_chain_cloud_ident(i, *seq);
+                *seq += 1;
+                builder.add_node(cloud_id.clone());
+                builder.add_edge(format!("chain_{i}"), cloud_id, 1.0);
+            }
+            if to_stock.is_none() {
                 let seq = cloud_seq.entry(i).or_insert(0);
                 let cloud_id = make_chain_cloud_ident(i, *seq);
                 *seq += 1;
@@ -207,8 +216,6 @@ pub fn compute_chain_positions(
         ..SfdpConfig::default()
     };
 
-    let layout = compute_layout_from_initial(&graph, &sfdp_config, &initial, 42);
-
     let build_segments = |candidate_layout: &BTreeMap<String, Position>| -> Vec<LineSegment> {
         let mut segments = Vec::new();
         for edge in graph.edges() {
@@ -227,19 +234,84 @@ pub fn compute_chain_positions(
         segments
     };
 
-    // During chain-level annealing only move chain nodes; synthetic chain cloud
-    // nodes stay anchored to preserve endpoint semantics.
+    // Interleave annealing rounds within SFDP iterations via the callback.
+    // Tracks state across invocations of the closure.
     let max_delta = config.annealing_max_delta_chain;
-    let layout = run_annealing_with_filter(
-        &layout,
-        build_segments,
-        config,
-        config.annealing_random_seed,
-        |node_id: &String| node_id.starts_with("chain_"),
-        |_| max_delta,
-        &HashMap::new(),
-    )
-    .layout;
+    let mut annealing_round: usize = 0;
+    let mut last_annealing_iter: usize = 0;
+    let mut last_best_crossings: usize = usize::MAX;
+    let mut best_annealed_layout: Option<BTreeMap<String, Position>> = None;
+    const BETWEEN_ROUND_COOLING: f64 = 0.99;
+
+    let layout = compute_layout_from_initial_with_callback(
+        &graph,
+        &sfdp_config,
+        &initial,
+        42,
+        &mut |iteration, current_layout| {
+            if !should_trigger_annealing(
+                iteration,
+                config.annealing_interval,
+                last_annealing_iter,
+                annealing_round,
+                config.annealing_max_rounds,
+            ) {
+                return None;
+            }
+
+            last_annealing_iter = iteration;
+
+            let crossings = super::annealing::count_crossings(&build_segments(current_layout));
+
+            // Decide temperature: reheat if no improvement, cool between rounds
+            let mut round_config = config.clone();
+            if crossings >= last_best_crossings && last_best_crossings < usize::MAX {
+                // No improvement -- reheat
+                if config.annealing_reheat_temperature > 0.0 {
+                    round_config.annealing_temperature = config.annealing_reheat_temperature;
+                }
+                // else keep default temperature (dynamic reheating)
+            } else if annealing_round > 0 {
+                round_config.annealing_temperature *=
+                    BETWEEN_ROUND_COOLING.powi(annealing_round as i32);
+            }
+
+            let result = run_annealing_with_filter(
+                current_layout,
+                build_segments,
+                &round_config,
+                config
+                    .annealing_random_seed
+                    .wrapping_add(annealing_round as u64),
+                |node_id: &String| node_id.starts_with("chain_"),
+                |_| max_delta,
+                &HashMap::new(),
+            );
+
+            if result.crossings < last_best_crossings {
+                last_best_crossings = result.crossings;
+                best_annealed_layout = Some(result.layout.clone());
+            }
+
+            annealing_round += 1;
+
+            Some(result.layout)
+        },
+    );
+
+    // Subsequent SFDP iterations after the last annealing round may have
+    // degraded the layout.  Use the best annealed layout if it has fewer
+    // crossings than the final SFDP output.
+    let layout = if let Some(ref best) = best_annealed_layout {
+        let final_crossings = super::annealing::count_crossings(&build_segments(&layout));
+        if last_best_crossings < final_crossings {
+            best.clone()
+        } else {
+            layout
+        }
+    } else {
+        layout
+    };
 
     // Extract only the chain node positions
     let chain_positions: BTreeMap<usize, Position> = (0..n)
@@ -439,6 +511,70 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_chain_positions_uses_interleaved_annealing() {
+        // Multi-chain layout with crossing edges; verifies the interleaved
+        // annealing path runs without errors and produces valid output.
+        let chains = vec![
+            StockFlowChain {
+                stocks: vec!["s0".to_string()],
+                flows: vec!["f0".to_string()],
+                all_vars: vec!["s0".to_string(), "f0".to_string()],
+                importance: 1.0,
+            },
+            StockFlowChain {
+                stocks: vec!["s1".to_string()],
+                flows: vec!["f1".to_string()],
+                all_vars: vec!["s1".to_string(), "f1".to_string()],
+                importance: 0.8,
+            },
+            StockFlowChain {
+                stocks: vec!["s2".to_string()],
+                flows: vec!["f2".to_string()],
+                all_vars: vec!["s2".to_string(), "f2".to_string()],
+                importance: 0.5,
+            },
+            StockFlowChain {
+                stocks: vec!["s3".to_string()],
+                flows: vec!["f3".to_string()],
+                all_vars: vec!["s3".to_string(), "f3".to_string()],
+                importance: 0.3,
+            },
+        ];
+        let mut metadata = ComputedMetadata::new_empty();
+        for i in 0..4 {
+            metadata.flow_to_stocks.insert(
+                format!("f{i}"),
+                (Some(format!("s{i}")), Some(format!("s{i}"))),
+            );
+        }
+        // Cross-chain dependencies to create edges
+        metadata.dep_graph.insert(
+            "f1".to_string(),
+            std::collections::BTreeSet::from(["s0".to_string()]),
+        );
+        metadata.dep_graph.insert(
+            "f3".to_string(),
+            std::collections::BTreeSet::from(["s2".to_string()]),
+        );
+
+        let config = LayoutConfig::default();
+        let result = compute_chain_positions(&chains, &metadata, &config);
+
+        assert_eq!(result.len(), 4);
+        for pos in result.values() {
+            assert!(pos.x.is_finite(), "x should be finite");
+            assert!(pos.y.is_finite(), "y should be finite");
+        }
+
+        // Positions should not all be identical
+        let positions: Vec<&Position> = result.values().collect();
+        let all_same = positions
+            .windows(2)
+            .all(|w| (w[0].x - w[1].x).abs() < 1e-6 && (w[0].y - w[1].y).abs() < 1e-6);
+        assert!(!all_same, "chains should have distinct positions");
+    }
+
+    #[test]
     fn test_build_chain_dependency_graph_no_cross_deps() {
         let chains = vec![
             StockFlowChain {
@@ -537,6 +673,51 @@ mod tests {
         let (graph, _var_to_node) = build_chain_dependency_graph(&chains, &metadata);
 
         // chain_0 + one cloud node
+        assert_eq!(graph.node_count(), 2);
+        assert!(graph.has_node(&"chain_0".to_string()));
+        assert!(graph.has_node(&make_chain_cloud_ident(0, 0)));
+    }
+
+    #[test]
+    fn test_build_chain_dependency_graph_cloud_to_cloud_flow() {
+        // A flow with BOTH endpoints missing should generate 2 cloud nodes
+        let chains = vec![StockFlowChain {
+            stocks: vec![],
+            flows: vec!["decay".to_string()],
+            all_vars: vec!["decay".to_string()],
+            importance: 1.0,
+        }];
+        let mut metadata = ComputedMetadata::new_empty();
+        metadata
+            .flow_to_stocks
+            .insert("decay".to_string(), (None, None));
+
+        let (graph, _var_to_node) = build_chain_dependency_graph(&chains, &metadata);
+
+        // chain_0 + two cloud nodes (one per missing endpoint)
+        assert_eq!(graph.node_count(), 3);
+        assert!(graph.has_node(&"chain_0".to_string()));
+        assert!(graph.has_node(&make_chain_cloud_ident(0, 0)));
+        assert!(graph.has_node(&make_chain_cloud_ident(0, 1)));
+    }
+
+    #[test]
+    fn test_build_chain_dependency_graph_single_missing_endpoint() {
+        // A flow with only one missing endpoint should generate exactly 1 cloud
+        let chains = vec![StockFlowChain {
+            stocks: vec!["population".to_string()],
+            flows: vec!["births".to_string()],
+            all_vars: vec!["population".to_string(), "births".to_string()],
+            importance: 1.0,
+        }];
+        let mut metadata = ComputedMetadata::new_empty();
+        metadata
+            .flow_to_stocks
+            .insert("births".to_string(), (None, Some("population".to_string())));
+
+        let (graph, _var_to_node) = build_chain_dependency_graph(&chains, &metadata);
+
+        // chain_0 + exactly one cloud node
         assert_eq!(graph.node_count(), 2);
         assert!(graph.has_node(&"chain_0".to_string()));
         assert!(graph.has_node(&make_chain_cloud_ident(0, 0)));

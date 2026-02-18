@@ -58,7 +58,7 @@ pub fn calc_stock_flow_arc_angle(stock_pos: Position, flow_pos: Position) -> f64
         if dx >= 0.0 { -45.0 } else { -135.0 }
     } else {
         let base_angle = dy.atan2(dx).to_degrees();
-        let adjustment = if dx >= 0.0 { -45.0 } else { 45.0 };
+        let adjustment = if dx >= 0.0 { 45.0 } else { -45.0 };
         normalize_angle(base_angle + adjustment)
     }
 }
@@ -90,7 +90,8 @@ pub fn calculate_loop_arc_angle(
     // Apply a minimum curve when the loop center is nearly collinear
     // with the connector direction.  Threshold ported from Go Praxis.
     if angle_diff.abs() < 15.0 {
-        takeoff = base_angle - 20.0;
+        let min_curve = if angle_diff < 0.0 { -20.0 } else { 20.0 };
+        takeoff = base_angle - min_curve;
     }
 
     normalize_angle(takeoff)
@@ -200,11 +201,42 @@ mod tests {
 
     #[test]
     fn test_calc_stock_flow_arc_angle_vertical() {
-        // Flow directly below stock: dy > dx, dx = 0 (>= 0), so adjustment = -45
-        // base_angle = atan2(100, 0) = 90 degrees, result = 90 - 45 = 45
+        // Flow directly below stock: dy > dx, dx = 0 (>= 0), so adjustment = +45
+        // base_angle = atan2(100, 0) = 90 degrees, result = 90 + 45 = 135
         let stock = Position::new(0.0, 0.0);
         let flow = Position::new(0.0, 100.0);
-        assert!((calc_stock_flow_arc_angle(stock, flow) - 45.0).abs() < 1e-10);
+        assert!((calc_stock_flow_arc_angle(stock, flow) - 135.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_calc_stock_flow_arc_angle_flow_below_stock() {
+        // Matches Praxis layout_test.go:2181
+        let stock = Position::new(0.0, 0.0);
+        let flow = Position::new(0.0, 120.0);
+        assert!((calc_stock_flow_arc_angle(stock, flow) - 135.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_calc_stock_flow_arc_angle_flow_above_stock() {
+        // dy=-120, dx=0: vertical branch, base_angle=-90, adjustment=+45, result=-45
+        let stock = Position::new(0.0, 0.0);
+        let flow = Position::new(0.0, -120.0);
+        let angle = calc_stock_flow_arc_angle(stock, flow);
+        assert!((angle - (-45.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_calc_stock_flow_arc_angle_flow_below_right() {
+        // stock=(0,0), flow=(10,120): dy > dx, vertical branch
+        // base_angle = atan2(120, 10) ≈ 85.24 degrees
+        // dx=10 >= 0, adjustment = +45
+        // result = normalize(85.24 + 45) = 130.24
+        let stock = Position::new(0.0, 0.0);
+        let flow = Position::new(10.0, 120.0);
+        let angle = calc_stock_flow_arc_angle(stock, flow);
+        let base = (120.0_f64).atan2(10.0).to_degrees();
+        let expected = normalize_angle(base + 45.0);
+        assert!((angle - expected).abs() < 1e-10);
     }
 
     #[test]
@@ -230,6 +262,32 @@ mod tests {
         let angle = calculate_loop_arc_angle(from, to, center, 0.5);
         // angle_to_center ~= 0.28 degrees, angle_diff ~= 0.28, |0.28| < 15
         // so takeoff = base_angle - 20 = 0 - 20 = -20
+        assert!((angle - (-20.0)).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_calculate_loop_arc_angle_collinear_negative_diff() {
+        // Loop center nearly along the connector direction but slightly below
+        // the line, giving a small negative angle_diff.
+        let from = Position::new(0.0, 0.0);
+        let to = Position::new(100.0, 0.0);
+        let center = Position::new(200.0, -1.0);
+
+        let angle = calculate_loop_arc_angle(from, to, center, 0.5);
+        // angle_to_center ~= -0.28 degrees, angle_diff ~= -0.28, |angle_diff| < 15
+        // min_curve = -20 (angle_diff < 0), takeoff = 0 - (-20) = 20
+        assert!((angle - 20.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_calculate_loop_arc_angle_collinear_positive_diff() {
+        // Positive angle_diff case: center slightly above the line
+        let from = Position::new(0.0, 0.0);
+        let to = Position::new(100.0, 0.0);
+        let center = Position::new(200.0, 1.0);
+
+        let angle = calculate_loop_arc_angle(from, to, center, 0.5);
+        // angle_diff ~= +0.28, min_curve = +20, takeoff = 0 - 20 = -20
         assert!((angle - (-20.0)).abs() < 1.0);
     }
 
