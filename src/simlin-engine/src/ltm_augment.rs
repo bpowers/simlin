@@ -124,37 +124,37 @@ fn generate_ltm_variables_inner(
             }
         }
     } else {
-        // Existing behavior: detect loops, generate for loop links only
-        let loops = detect_loops(project)?;
+        for (model_name, model) in &project.models {
+            if model.implicit {
+                continue;
+            }
 
-        for (model_name, model_loops) in &loops {
-            if let Some(model) = project.models.get(model_name) {
-                if model.implicit {
-                    continue;
+            let model_loops = detect_loops(model, project)?;
+            if model_loops.is_empty() {
+                continue;
+            }
+
+            let mut synthetic_vars = Vec::new();
+
+            let mut loop_links = HashSet::new();
+            for loop_item in &model_loops {
+                for link in &loop_item.links {
+                    loop_links.insert(link.clone());
                 }
+            }
 
-                let mut synthetic_vars = Vec::new();
+            let link_score_vars = generate_link_score_variables(&loop_links, &model.variables);
+            let loop_score_vars = generate_loop_score_variables(&model_loops);
 
-                let mut loop_links = HashSet::new();
-                for loop_item in model_loops {
-                    for link in &loop_item.links {
-                        loop_links.insert(link.clone());
-                    }
-                }
+            for (var_name, var) in link_score_vars {
+                synthetic_vars.push((var_name, var));
+            }
+            for (var_name, var) in loop_score_vars {
+                synthetic_vars.push((var_name, var));
+            }
 
-                let link_score_vars = generate_link_score_variables(&loop_links, &model.variables);
-                let loop_score_vars = generate_loop_score_variables(model_loops);
-
-                for (var_name, var) in link_score_vars {
-                    synthetic_vars.push((var_name, var));
-                }
-                for (var_name, var) in loop_score_vars {
-                    synthetic_vars.push((var_name, var));
-                }
-
-                if !synthetic_vars.is_empty() {
-                    result.insert(model_name.clone(), synthetic_vars);
-                }
+            if !synthetic_vars.is_empty() {
+                result.insert(model_name.clone(), synthetic_vars);
             }
         }
     }

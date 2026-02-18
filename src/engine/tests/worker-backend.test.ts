@@ -276,7 +276,8 @@ describe('WorkerBackend', () => {
     test('getLoops returns array', async () => {
       const data = loadTestXmile();
       const handle = await backend.projectOpenXmile(data);
-      const loops = await backend.projectGetLoops(handle);
+      const modelHandle = await backend.projectGetModel(handle, null);
+      const loops = await backend.modelGetLoops(modelHandle);
       expect(loops).toBeInstanceOf(Array);
     });
 

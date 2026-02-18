@@ -26,7 +26,7 @@ from ._ffi import (
     model_get_var_names,
     string_to_c,
 )
-from .analysis import Link, LinkPolarity, Loop
+from .analysis import Link, LinkPolarity, Loop, LoopPolarity
 from .errors import ErrorCode, SimlinRuntimeError
 
 # Variable type bitmask constants, matching SIMLIN_VARTYPE_* from the C FFI.
@@ -551,6 +551,47 @@ class Model:
             units=sim_specs.get("timeUnits") or None,
         )
 
+    def get_loops(self) -> list[Loop]:
+        """Get all feedback loops in the model.
+
+        Returns:
+            List of Loop objects
+        """
+        with self._lock:
+            self._check_alive()
+            err_ptr = ffi.new("SimlinError **")
+            loops_ptr = lib.simlin_analyze_get_loops(self._ptr, err_ptr)
+            check_out_error(err_ptr, "Get loops")
+
+        if loops_ptr == ffi.NULL:
+            return []
+
+        try:
+            if loops_ptr.count == 0:
+                return []
+
+            loops = []
+            for i in range(loops_ptr.count):
+                c_loop = loops_ptr.loops[i]
+
+                variables = []
+                for j in range(c_loop.var_count):
+                    var_name = c_to_string(c_loop.variables[j])
+                    if var_name:
+                        variables.append(var_name)
+
+                loop = Loop(
+                    id=c_to_string(c_loop.id) or f"loop_{i}",
+                    variables=tuple(variables),
+                    polarity=LoopPolarity(c_loop.polarity),
+                )
+                loops.append(loop)
+
+            return loops
+
+        finally:
+            lib.simlin_free_loops(loops_ptr)
+
     @property
     def loops(self) -> tuple[Loop, ...]:
         """Structural feedback loops (no behavior data).
@@ -562,9 +603,7 @@ class Model:
         Returns:
             Tuple of Loop objects (structural only, no behavior data)
         """
-        if self._project is None:
-            return ()
-        return tuple(self._project.get_loops())
+        return tuple(self.get_loops())
 
     def simulate(
         self,

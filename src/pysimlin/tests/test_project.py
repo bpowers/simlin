@@ -71,10 +71,9 @@ class TestProjectAnalysis:
     """Test project analysis functions."""
 
     def test_get_loops(self, xmile_model_path) -> None:
-        """Test getting feedback loops."""
+        """Test getting feedback loops from a model."""
         model = simlin.load(xmile_model_path)
-        project = model.project
-        loops = project.get_loops()
+        loops = model.get_loops()
         assert isinstance(loops, list)
         # Not all models have loops
         for loop in loops:

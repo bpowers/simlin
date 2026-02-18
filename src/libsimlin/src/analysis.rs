@@ -20,32 +20,46 @@ use crate::ffi_error::SimlinError;
 use crate::ffi_try;
 use crate::{
     clear_out_error, drop_c_string, drop_link, drop_links_vec, drop_loop, drop_loops_vec,
-    require_project, require_sim, store_anyhow_error, store_error, SimlinErrorCode, SimlinProject,
+    require_model, require_sim, store_anyhow_error, store_error, SimlinErrorCode, SimlinModel,
     SimlinSim,
 };
 
-/// Get the feedback loops detected in the project
+/// Get the feedback loops detected in a model
 ///
 /// # Safety
-/// - `project` must be a valid pointer to a SimlinProject
+/// - `model` must be a valid pointer to a SimlinModel
 /// - The returned SimlinLoops must be freed with simlin_free_loops
 #[no_mangle]
 pub unsafe extern "C" fn simlin_analyze_get_loops(
-    project: *mut SimlinProject,
+    model: *mut SimlinModel,
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinLoops {
     clear_out_error(out_error);
-    let project_ref = match require_project(project) {
-        Ok(p) => p,
+    let model_ref = match require_model(model) {
+        Ok(m) => m,
         Err(err) => {
             store_anyhow_error(out_error, err);
             return ptr::null_mut();
         }
     };
-    let project = &project_ref.project;
+    let project_locked = (*model_ref.project).project.lock().unwrap();
 
-    let project_locked = project.lock().unwrap();
-    let loops_by_model = match detect_loops(&project_locked) {
+    let engine_model = match project_locked
+        .models
+        .get(&*canonicalize(&model_ref.model_name))
+    {
+        Some(m) => m,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName)
+                    .with_message(format!("model '{}' not found", model_ref.model_name)),
+            );
+            return ptr::null_mut();
+        }
+    };
+
+    let all_loops = match detect_loops(engine_model, &project_locked) {
         Ok(loops) => loops,
         Err(err) => {
             store_error(
@@ -56,11 +70,6 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
             return ptr::null_mut();
         }
     };
-    // Collect all loops from all models
-    let mut all_loops = Vec::new();
-    for (_model_name, model_loops) in loops_by_model {
-        all_loops.extend(model_loops);
-    }
     if all_loops.is_empty() {
         // Return empty result
         let result = Box::new(SimlinLoops {

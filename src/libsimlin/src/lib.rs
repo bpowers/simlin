@@ -1908,7 +1908,7 @@ mod tests {
             assert!(err.is_null());
             // Get loops to find loop ID
             err = ptr::null_mut();
-            let loops = simlin_analyze_get_loops(proj, &mut err as *mut *mut SimlinError);
+            let loops = simlin_analyze_get_loops(model, &mut err as *mut *mut SimlinError);
             assert!(err.is_null());
             assert!(!loops.is_null());
             assert!((*loops).count > 0);

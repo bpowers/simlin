@@ -168,12 +168,12 @@ typedef struct {
 extern "C" {
 #endif // __cplusplus
 
-// Get the feedback loops detected in the project
+// Get the feedback loops detected in a model
 //
 // # Safety
-// - `project` must be a valid pointer to a SimlinProject
+// - `model` must be a valid pointer to a SimlinModel
 // - The returned SimlinLoops must be freed with simlin_free_loops
-SimlinLoops *simlin_analyze_get_loops(SimlinProject *project, SimlinError **out_error);
+SimlinLoops *simlin_analyze_get_loops(SimlinModel *model, SimlinError **out_error);
 
 // Frees a SimlinLoops structure
 //

@@ -61,6 +61,7 @@ describe('race conditions', () => {
   test('concurrent project operations all complete', async () => {
     const data = loadTestXmile();
     const handle = await backend.projectOpenXmile(data);
+    const modelHandle = await backend.projectGetModel(handle, null);
 
     // Fire many operations concurrently
     const results = await Promise.all([
@@ -68,7 +69,7 @@ describe('race conditions', () => {
       backend.projectGetModelNames(handle),
       backend.projectIsSimulatable(handle, null),
       backend.projectGetErrors(handle),
-      backend.projectGetLoops(handle),
+      backend.modelGetLoops(modelHandle),
       backend.projectSerializeProtobuf(handle),
     ]);
 

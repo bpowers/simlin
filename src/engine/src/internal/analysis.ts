@@ -17,7 +17,7 @@ import {
   malloc,
 } from './memory';
 import {
-  SimlinProjectPtr,
+  SimlinModelPtr,
   SimlinSimPtr,
   SimlinLoopsPtr,
   SimlinLinksPtr,
@@ -35,18 +35,18 @@ import {
 } from './error';
 
 /**
- * Analyze a project and get feedback loops.
- * @param project Project pointer
+ * Analyze a model and get feedback loops.
+ * @param model Model pointer
  * @returns Loops pointer
  */
-export function simlin_analyze_get_loops(project: SimlinProjectPtr): SimlinLoopsPtr {
+export function simlin_analyze_get_loops(model: SimlinModelPtr): SimlinLoopsPtr {
   const exports = getExports();
-  const fn = exports.simlin_analyze_get_loops as (proj: number, outErr: number) => number;
+  const fn = exports.simlin_analyze_get_loops as (model: number, outErr: number) => number;
 
   const outErrPtr = allocOutPtr();
 
   try {
-    const result = fn(project, outErrPtr);
+    const result = fn(model, outErrPtr);
     const errPtr = readOutPtr(outErrPtr);
 
     if (errPtr !== 0) {
