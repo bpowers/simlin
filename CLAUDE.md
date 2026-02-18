@@ -54,7 +54,6 @@ The pre-commit hook (`scripts/pre-commit`) runs automatically and performs:
 6. WASM build
 7. TypeScript tests
 8. Python bindings tests
-9. AI test quality verification
 
 **Important**: Never use `--no-verify` to skip hooks.
 
