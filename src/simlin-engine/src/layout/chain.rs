@@ -240,6 +240,7 @@ pub fn compute_chain_positions(
     let mut annealing_round: usize = 0;
     let mut last_annealing_iter: usize = 0;
     let mut last_best_crossings: usize = usize::MAX;
+    let mut best_annealed_layout: Option<BTreeMap<String, Position>> = None;
     const BETWEEN_ROUND_COOLING: f64 = 0.99;
 
     let layout = compute_layout_from_initial_with_callback(
@@ -289,6 +290,7 @@ pub fn compute_chain_positions(
 
             if result.crossings < last_best_crossings {
                 last_best_crossings = result.crossings;
+                best_annealed_layout = Some(result.layout.clone());
             }
 
             annealing_round += 1;
@@ -296,6 +298,20 @@ pub fn compute_chain_positions(
             Some(result.layout)
         },
     );
+
+    // Subsequent SFDP iterations after the last annealing round may have
+    // degraded the layout.  Use the best annealed layout if it has fewer
+    // crossings than the final SFDP output.
+    let layout = if let Some(ref best) = best_annealed_layout {
+        let final_crossings = super::annealing::count_crossings(&build_segments(&layout));
+        if last_best_crossings < final_crossings {
+            best.clone()
+        } else {
+            layout
+        }
+    } else {
+        layout
+    };
 
     // Extract only the chain node positions
     let chain_positions: BTreeMap<usize, Position> = (0..n)
