@@ -66,7 +66,7 @@ pub struct ElementEquation {
     pub subscript: String,
     pub equation: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub active_initial: Option<String>,
+    pub compat: Option<Compat>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub graphical_function: Option<GraphicalFunction>,
 }
@@ -646,7 +646,10 @@ impl From<Stock> for datamodel::Stock {
         // Stocks don't use active_initial (their equation IS the initial value),
         // so no arrayed_equation.compat fallback is needed here unlike Flow/Aux.
         let compat = datamodel::Compat {
-            active_initial: stock.compat.and_then(|c| c.active_initial),
+            active_initial: stock
+                .compat
+                .and_then(|c| c.active_initial)
+                .filter(|s| !s.is_empty()),
         };
         let equation = match stock.arrayed_equation {
             Some(arrayed) => {
@@ -659,7 +662,9 @@ impl From<Stock> for datamodel::Stock {
                                 (
                                     ee.subscript,
                                     ee.equation,
-                                    ee.active_initial,
+                                    ee.compat
+                                        .and_then(|c| c.active_initial)
+                                        .filter(|s| !s.is_empty()),
                                     ee.graphical_function.map(|gf| gf.into()),
                                 )
                             })
@@ -707,12 +712,16 @@ impl From<Stock> for datamodel::Stock {
 impl From<Flow> for datamodel::Flow {
     fn from(flow: Flow) -> Self {
         let compat = datamodel::Compat {
-            active_initial: flow.compat.and_then(|c| c.active_initial).or_else(|| {
-                flow.arrayed_equation
-                    .as_ref()
-                    .and_then(|a| a.compat.as_ref())
-                    .and_then(|c| c.active_initial.clone())
-            }),
+            active_initial: flow
+                .compat
+                .and_then(|c| c.active_initial)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    flow.arrayed_equation
+                        .as_ref()
+                        .and_then(|a| a.compat.as_ref())
+                        .and_then(|c| c.active_initial.clone())
+                }),
         };
         let equation = match flow.arrayed_equation {
             Some(arrayed) => {
@@ -725,7 +734,9 @@ impl From<Flow> for datamodel::Flow {
                                 (
                                     ee.subscript,
                                     ee.equation,
-                                    ee.active_initial,
+                                    ee.compat
+                                        .and_then(|c| c.active_initial)
+                                        .filter(|s| !s.is_empty()),
                                     ee.graphical_function.map(|gf| gf.into()),
                                 )
                             })
@@ -768,12 +779,16 @@ impl From<Flow> for datamodel::Flow {
 impl From<Auxiliary> for datamodel::Aux {
     fn from(aux: Auxiliary) -> Self {
         let compat = datamodel::Compat {
-            active_initial: aux.compat.and_then(|c| c.active_initial).or_else(|| {
-                aux.arrayed_equation
-                    .as_ref()
-                    .and_then(|a| a.compat.as_ref())
-                    .and_then(|c| c.active_initial.clone())
-            }),
+            active_initial: aux
+                .compat
+                .and_then(|c| c.active_initial)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    aux.arrayed_equation
+                        .as_ref()
+                        .and_then(|a| a.compat.as_ref())
+                        .and_then(|c| c.active_initial.clone())
+                }),
         };
         let equation = match aux.arrayed_equation {
             Some(arrayed) => {
@@ -786,7 +801,9 @@ impl From<Auxiliary> for datamodel::Aux {
                                 (
                                     ee.subscript,
                                     ee.equation,
-                                    ee.active_initial,
+                                    ee.compat
+                                        .and_then(|c| c.active_initial)
+                                        .filter(|s| !s.is_empty()),
                                     ee.graphical_function.map(|gf| gf.into()),
                                 )
                             })
@@ -1246,7 +1263,9 @@ impl From<datamodel::Stock> for Stock {
                         |(subscript, equation, active_initial, gf)| ElementEquation {
                             subscript,
                             equation,
-                            active_initial,
+                            compat: active_initial.map(|ai| Compat {
+                                active_initial: Some(ai),
+                            }),
                             graphical_function: gf.map(|g| g.into()),
                         },
                     )
@@ -1307,7 +1326,9 @@ impl From<datamodel::Flow> for Flow {
                         |(subscript, equation, active_initial, gf)| ElementEquation {
                             subscript,
                             equation,
-                            active_initial,
+                            compat: active_initial.map(|ai| Compat {
+                                active_initial: Some(ai),
+                            }),
                             graphical_function: gf.map(|g| g.into()),
                         },
                     )
@@ -1367,7 +1388,9 @@ impl From<datamodel::Aux> for Auxiliary {
                         |(subscript, equation, active_initial, gf)| ElementEquation {
                             subscript,
                             equation,
-                            active_initial,
+                            compat: active_initial.map(|ai| Compat {
+                                active_initial: Some(ai),
+                            }),
                             graphical_function: gf.map(|g| g.into()),
                         },
                     )
@@ -1887,13 +1910,15 @@ mod tests {
                             ElementEquation {
                                 subscript: "Boston".to_string(),
                                 equation: "50".to_string(),
-                                active_initial: Some("10".to_string()),
+                                compat: Some(Compat {
+                                    active_initial: Some("10".to_string()),
+                                }),
                                 graphical_function: None,
                             },
                             ElementEquation {
                                 subscript: "NYC".to_string(),
                                 equation: "100".to_string(),
-                                active_initial: None,
+                                compat: None,
                                 graphical_function: None,
                             },
                         ]),
@@ -2018,13 +2043,15 @@ mod tests {
                             ElementEquation {
                                 subscript: "east".to_string(),
                                 equation: "supply_east".to_string(),
-                                active_initial: Some("init_supply_east".to_string()),
+                                compat: Some(Compat {
+                                    active_initial: Some("init_supply_east".to_string()),
+                                }),
                                 graphical_function: None,
                             },
                             ElementEquation {
                                 subscript: "west".to_string(),
                                 equation: "supply_west".to_string(),
-                                active_initial: None,
+                                compat: None,
                                 graphical_function: None,
                             },
                         ]),
@@ -2136,13 +2163,15 @@ mod tests {
                             ElementEquation {
                                 subscript: "north".to_string(),
                                 equation: "north_demand".to_string(),
-                                active_initial: Some("north_demand_init".to_string()),
+                                compat: Some(Compat {
+                                    active_initial: Some("north_demand_init".to_string()),
+                                }),
                                 graphical_function: None,
                             },
                             ElementEquation {
                                 subscript: "south".to_string(),
                                 equation: "south_demand".to_string(),
-                                active_initial: None,
+                                compat: None,
                                 graphical_function: None,
                             },
                         ]),
@@ -3185,5 +3214,62 @@ mod tests {
 
         let dm: datamodel::Flow = flow.into();
         assert_eq!(dm.compat.active_initial.as_deref(), Some("correct"));
+    }
+
+    #[test]
+    fn empty_active_initial_normalized_to_none() {
+        // Top-level compat with empty activeInitial should become None
+        let stock = Stock {
+            uid: 0,
+            name: "pop".to_string(),
+            initial_equation: "100".to_string(),
+            units: String::new(),
+            inflows: vec![],
+            outflows: vec![],
+            non_negative: false,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: None,
+            compat: Some(Compat {
+                active_initial: Some(String::new()),
+            }),
+        };
+        let dm_stock: datamodel::Stock = stock.into();
+        assert_eq!(dm_stock.compat.active_initial, None);
+
+        // Element-level compat with empty activeInitial should become None
+        let flow = Flow {
+            uid: 0,
+            name: "rate".to_string(),
+            equation: String::new(),
+            units: String::new(),
+            non_negative: false,
+            graphical_function: None,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: None,
+                compat: None,
+                elements: Some(vec![ElementEquation {
+                    subscript: "north".to_string(),
+                    equation: "10".to_string(),
+                    compat: Some(Compat {
+                        active_initial: Some(String::new()),
+                    }),
+                    graphical_function: None,
+                }]),
+            }),
+            compat: None,
+        };
+        let dm_flow: datamodel::Flow = flow.into();
+        match &dm_flow.equation {
+            datamodel::Equation::Arrayed(_, elems) => {
+                assert_eq!(elems[0].2, None);
+            }
+            _ => panic!("expected Arrayed equation"),
+        }
     }
 }

@@ -43,7 +43,7 @@ export interface JsonCompat {
 export interface JsonElementEquation {
   subscript: string;
   equation: string;
-  activeInitial?: string;
+  compat?: JsonCompat;
   graphicalFunction?: JsonGraphicalFunction;
 }
 

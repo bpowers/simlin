@@ -263,10 +263,14 @@
         "equation": {
           "type": "string"
         },
-        "activeInitial": {
-          "type": [
-            "string",
-            "null"
+        "compat": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Compat"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "graphicalFunction": {

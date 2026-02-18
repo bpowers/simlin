@@ -139,7 +139,9 @@ fn element_equation_strategy() -> impl Strategy<Value = ElementEquation> {
             |(subscript, equation, active_initial, gf)| ElementEquation {
                 subscript,
                 equation,
-                active_initial,
+                compat: active_initial.map(|ai| Compat {
+                    active_initial: Some(ai),
+                }),
                 graphical_function: gf,
             },
         )
@@ -1277,13 +1279,15 @@ mod protobuf_roundtrip_tests {
                             ElementEquation {
                                 subscript: "north".to_string(),
                                 equation: "50".to_string(),
-                                active_initial: Some("10".to_string()),
+                                compat: Some(Compat {
+                                    active_initial: Some("10".to_string()),
+                                }),
                                 graphical_function: None,
                             },
                             ElementEquation {
                                 subscript: "south".to_string(),
                                 equation: "75".to_string(),
-                                active_initial: None,
+                                compat: None,
                                 graphical_function: None,
                             },
                         ]),

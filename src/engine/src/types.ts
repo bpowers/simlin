@@ -98,8 +98,8 @@ export interface ElementEquation {
   readonly subscript: string;
   /** Equation for this specific element */
   readonly equation: string;
-  /** Active initial equation for this element */
-  readonly activeInitial?: string;
+  /** Vensim compatibility options for this element */
+  readonly compat?: Compat;
   /** Graphical function for this element */
   readonly graphicalFunction?: GraphicalFunction;
 }
