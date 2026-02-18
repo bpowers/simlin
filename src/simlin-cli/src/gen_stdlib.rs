@@ -101,19 +101,14 @@ fn gen_option_graphical_function(opt: &Option<GraphicalFunction>) -> String {
 
 fn gen_equation(eq: &Equation) -> String {
     match eq {
-        Equation::Scalar(s, units) => {
-            format!(
-                "Equation::Scalar(\"{}\".to_string(), {})",
-                escape_string(s),
-                gen_option_string(units)
-            )
+        Equation::Scalar(s) => {
+            format!("Equation::Scalar(\"{}\".to_string())", escape_string(s),)
         }
-        Equation::ApplyToAll(dims, s, units) => {
+        Equation::ApplyToAll(dims, s) => {
             format!(
-                "Equation::ApplyToAll({}, \"{}\".to_string(), {})",
+                "Equation::ApplyToAll({}, \"{}\".to_string())",
                 gen_vec_string(dims),
                 escape_string(s),
-                gen_option_string(units)
             )
         }
         Equation::Arrayed(dims, elements) => {
@@ -152,6 +147,7 @@ fn gen_stock(stock: &datamodel::Stock) -> String {
             visibility: {},
             ai_state: None,
             uid: {:?},
+            compat: Compat::default(),
         }})",
         escape_string(&stock.ident),
         gen_equation(&stock.equation),
@@ -179,6 +175,7 @@ fn gen_flow(flow: &datamodel::Flow) -> String {
             visibility: {},
             ai_state: None,
             uid: {:?},
+            compat: Compat::default(),
         }})",
         escape_string(&flow.ident),
         gen_equation(&flow.equation),
@@ -204,6 +201,7 @@ fn gen_aux(aux: &datamodel::Aux) -> String {
             visibility: {},
             ai_state: None,
             uid: {:?},
+            compat: Compat::default(),
         }})",
         escape_string(&aux.ident),
         gen_equation(&aux.equation),
@@ -635,7 +633,7 @@ pub fn generate(stdlib_dir: &str, output_path: &str) -> Result<(), Box<dyn std::
     writeln!(
         output,
         "use crate::datamodel::{{
-    Aux, Dt, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
+    Aux, Compat, Dt, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
     GraphicalFunctionScale, LoopMetadata, Model, ModelGroup, Module, ModuleReference,
     Rect, SimMethod, SimSpecs, Stock, StockFlow, Variable, View, ViewElement, Visibility,
     view_element,

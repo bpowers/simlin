@@ -126,7 +126,7 @@ impl TestProject {
     pub fn aux(mut self, name: &str, equation: &str, units: Option<&str>) -> Self {
         self.variables.push(Variable::Aux(datamodel::Aux {
             ident: name.to_string(),
-            equation: Equation::Scalar(equation.to_string(), None),
+            equation: Equation::Scalar(equation.to_string()),
             documentation: String::new(),
             units: units.map(|s| s.to_string()),
             gf: None,
@@ -134,6 +134,7 @@ impl TestProject {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         }));
         self
     }
@@ -142,7 +143,7 @@ impl TestProject {
     pub fn flow(mut self, name: &str, equation: &str, units: Option<&str>) -> Self {
         self.variables.push(Variable::Flow(datamodel::Flow {
             ident: name.to_string(),
-            equation: Equation::Scalar(equation.to_string(), None),
+            equation: Equation::Scalar(equation.to_string()),
             documentation: String::new(),
             units: units.map(|s| s.to_string()),
             gf: None,
@@ -151,6 +152,7 @@ impl TestProject {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         }));
         self
     }
@@ -166,7 +168,7 @@ impl TestProject {
     ) -> Self {
         self.variables.push(Variable::Stock(datamodel::Stock {
             ident: name.to_string(),
-            equation: Equation::Scalar(initial.to_string(), None),
+            equation: Equation::Scalar(initial.to_string()),
             documentation: String::new(),
             units: units.map(|s| s.to_string()),
             inflows: inflows.iter().map(|s| s.to_string()).collect(),
@@ -176,6 +178,7 @@ impl TestProject {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         }));
         self
     }
@@ -197,7 +200,7 @@ impl TestProject {
     ) -> Self {
         self.variables.push(Variable::Stock(datamodel::Stock {
             ident: name.to_string(),
-            equation: Equation::Scalar(initial.to_string(), None),
+            equation: Equation::Scalar(initial.to_string()),
             documentation: documentation.to_string(),
             units: units.map(|s| s.to_string()),
             inflows: inflows.iter().map(|s| s.to_string()).collect(),
@@ -207,6 +210,7 @@ impl TestProject {
             visibility,
             ai_state: None,
             uid,
+            compat: datamodel::Compat::default(),
         }));
         self
     }
@@ -285,7 +289,7 @@ impl TestProject {
     ) -> Self {
         self.variables.push(Variable::Aux(datamodel::Aux {
             ident: name.to_string(),
-            equation: Equation::ApplyToAll(dims, equation.to_string(), None),
+            equation: Equation::ApplyToAll(dims, equation.to_string()),
             documentation: String::new(),
             units: units.map(|s| s.to_string()),
             gf: None,
@@ -293,6 +297,7 @@ impl TestProject {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         }));
         self
     }
@@ -320,6 +325,7 @@ impl TestProject {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         }));
         self
     }

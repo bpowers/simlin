@@ -32,12 +32,19 @@ class GraphicalFunction:
 
 
 @dataclass
+class Compat:
+    """Vensim compatibility options for a variable."""
+
+    active_initial: str | None = None
+
+
+@dataclass
 class ElementEquation:
     """An element-specific equation for arrayed variables."""
 
     subscript: str
     equation: str
-    initial_equation: str = ""
+    compat: Compat | None = None
     graphical_function: GraphicalFunction | None = None
 
 
@@ -47,7 +54,7 @@ class ArrayedEquation:
 
     dimensions: list[str] = field(default_factory=list)
     equation: str | None = None
-    initial_equation: str | None = None
+    compat: Compat | None = None
     elements: list[ElementEquation] | None = None
 
 
@@ -77,6 +84,7 @@ class Stock:
     can_be_module_input: bool = False
     is_public: bool = False
     arrayed_equation: ArrayedEquation | None = None
+    compat: Compat | None = None
 
 
 @dataclass
@@ -93,6 +101,7 @@ class Flow:
     can_be_module_input: bool = False
     is_public: bool = False
     arrayed_equation: ArrayedEquation | None = None
+    compat: Compat | None = None
 
 
 @dataclass
@@ -102,13 +111,13 @@ class Auxiliary:
     name: str
     uid: int = 0
     equation: str = ""
-    initial_equation: str = ""
     units: str = ""
     graphical_function: GraphicalFunction | None = None
     documentation: str = ""
     can_be_module_input: bool = False
     is_public: bool = False
     arrayed_equation: ArrayedEquation | None = None
+    compat: Compat | None = None
 
 
 @dataclass

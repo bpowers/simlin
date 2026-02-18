@@ -3714,7 +3714,7 @@ fn test_model_get_latex_equation_invalid_utf8() {
 fn test_model_get_latex_equation_module_var_no_ast() {
     // Module variables exist in the model but have no AST (they reference other models)
     // This tests the path where var.ast() returns None
-    use engine::datamodel::{self, Dt, Equation, Project, SimMethod, SimSpecs, Visibility};
+    use engine::datamodel::{self, Compat, Dt, Equation, Project, SimMethod, SimSpecs, Visibility};
 
     // Create a project with two models: a child model and main model with a module
     let project = Project {
@@ -3736,7 +3736,7 @@ fn test_model_get_latex_equation_module_var_no_ast() {
                 sim_specs: None,
                 variables: vec![datamodel::Variable::Aux(datamodel::Aux {
                     ident: "child_var".to_string(),
-                    equation: Equation::Scalar("42".to_string(), None),
+                    equation: Equation::Scalar("42".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -3744,6 +3744,7 @@ fn test_model_get_latex_equation_module_var_no_ast() {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: Compat::default(),
                 })],
                 views: vec![],
                 loop_metadata: vec![],

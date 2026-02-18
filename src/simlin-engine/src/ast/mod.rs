@@ -680,7 +680,6 @@ mod ast_tests {
             equation: datamodel::Equation::ApplyToAll(
                 vec!["region".to_string()],
                 "100".to_string(),
-                None,
             ),
             documentation: "".to_string(),
             units: None,
@@ -689,6 +688,7 @@ mod ast_tests {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         });
 
         let model_datamodel = datamodel::Model {
@@ -758,7 +758,6 @@ mod ast_tests {
             equation: datamodel::Equation::ApplyToAll(
                 vec!["region".to_string()],
                 "100".to_string(),
-                None,
             ),
             documentation: "".to_string(),
             units: None,
@@ -767,13 +766,13 @@ mod ast_tests {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         });
         let array_var2 = datamodel::Variable::Aux(datamodel::Aux {
             ident: canonicalize("product_data").into_owned(),
             equation: datamodel::Equation::ApplyToAll(
                 vec!["product".to_string()],
                 "50".to_string(),
-                None,
             ),
             documentation: "".to_string(),
             units: None,
@@ -782,6 +781,7 @@ mod ast_tests {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         });
 
         let model_datamodel = datamodel::Model {

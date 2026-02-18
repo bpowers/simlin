@@ -20,6 +20,7 @@ from .json_types import (
     Auxiliary,
     AuxiliaryViewElement,
     CloudViewElement,
+    Compat,
     DeleteVariable,
     DeleteView,
     Dimension,
@@ -455,6 +456,12 @@ def _create_converter() -> cattrs.Converter:
     conv.register_structure_hook(AliasViewElement, structure_alias_view_element)
     conv.register_structure_hook(FlowPoint, structure_flow_point)
 
+    # Compat: structure from camelCase JSON
+    def structure_compat(d: dict[str, Any], _: type) -> Compat:
+        return Compat(active_initial=d.get("activeInitial"))
+
+    conv.register_structure_hook(Compat, structure_compat)
+
     # Register omit-default hooks for variable types
     # These skip fields that match their defaults (matching Rust's skip_serializing_if)
     # Required fields are always included (based on the JSON schema)
@@ -464,6 +471,7 @@ def _create_converter() -> cattrs.Converter:
         Auxiliary: {"name"},
         Module: {"name", "model_name"},
         SimSpecs: {"start_time", "end_time", "dt", "method"},
+        Compat: set(),
         ArrayedEquation: {"dimensions"},
         ElementEquation: {"subscript", "equation"},
         ModuleReference: {"src", "dst"},
@@ -495,10 +503,14 @@ def _create_converter() -> cattrs.Converter:
         gf = None
         if d.get("graphicalFunction"):
             gf = conv.structure(d["graphicalFunction"], GraphicalFunction)
+        compat = None
+        compat_dict = d.get("compat")
+        if compat_dict:
+            compat = Compat(active_initial=compat_dict.get("activeInitial"))
         return ElementEquation(
             subscript=d["subscript"],
             equation=d.get("equation", ""),
-            initial_equation=d.get("initialEquation", ""),
+            compat=compat,
             graphical_function=gf,
         )
 
@@ -509,10 +521,14 @@ def _create_converter() -> cattrs.Converter:
         elements = None
         if d.get("elements"):
             elements = [conv.structure(e, ElementEquation) for e in d["elements"]]
+        compat = None
+        compat_dict = d.get("compat")
+        if compat_dict:
+            compat = Compat(active_initial=compat_dict.get("activeInitial"))
         return ArrayedEquation(
             dimensions=d.get("dimensions", []),
             equation=d.get("equation"),
-            initial_equation=d.get("initialEquation"),
+            compat=compat,
             elements=elements,
         )
 
@@ -529,6 +545,10 @@ def _create_converter() -> cattrs.Converter:
         arrayed_equation = None
         if d.get("arrayedEquation"):
             arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
+        compat = None
+        compat_dict = d.get("compat")
+        if compat_dict:
+            compat = Compat(active_initial=compat_dict.get("activeInitial"))
         return Stock(
             name=d["name"],
             inflows=d.get("inflows", []),
@@ -541,6 +561,7 @@ def _create_converter() -> cattrs.Converter:
             can_be_module_input=d.get("canBeModuleInput", False),
             is_public=d.get("isPublic", False),
             arrayed_equation=arrayed_equation,
+            compat=compat,
         )
 
     conv.register_structure_hook(Stock, structure_stock)
@@ -553,6 +574,10 @@ def _create_converter() -> cattrs.Converter:
         arrayed_equation = None
         if d.get("arrayedEquation"):
             arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
+        compat = None
+        compat_dict = d.get("compat")
+        if compat_dict:
+            compat = Compat(active_initial=compat_dict.get("activeInitial"))
         return Flow(
             name=d["name"],
             uid=d.get("uid", 0),
@@ -564,6 +589,7 @@ def _create_converter() -> cattrs.Converter:
             can_be_module_input=d.get("canBeModuleInput", False),
             is_public=d.get("isPublic", False),
             arrayed_equation=arrayed_equation,
+            compat=compat,
         )
 
     conv.register_structure_hook(Flow, structure_flow)
@@ -576,17 +602,21 @@ def _create_converter() -> cattrs.Converter:
         arrayed_equation = None
         if d.get("arrayedEquation"):
             arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
+        compat = None
+        compat_dict = d.get("compat")
+        if compat_dict:
+            compat = Compat(active_initial=compat_dict.get("activeInitial"))
         return Auxiliary(
             name=d["name"],
             uid=d.get("uid", 0),
             equation=d.get("equation", ""),
-            initial_equation=d.get("initialEquation", ""),
             units=d.get("units", ""),
             graphical_function=gf,
             documentation=d.get("documentation", ""),
             can_be_module_input=d.get("canBeModuleInput", False),
             is_public=d.get("isPublic", False),
             arrayed_equation=arrayed_equation,
+            compat=compat,
         )
 
     conv.register_structure_hook(Auxiliary, structure_auxiliary)

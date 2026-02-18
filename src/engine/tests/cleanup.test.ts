@@ -99,10 +99,7 @@ describe('dispose warns on async backend errors', () => {
     // Wait for the promise rejection to be handled
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Project'),
-      expect.any(Error),
-    );
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Project'), expect.any(Error));
   });
 
   it('Model Symbol.dispose warns when backend rejects', async () => {
@@ -114,10 +111,7 @@ describe('dispose warns on async backend errors', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Model'),
-      expect.any(Error),
-    );
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Model'), expect.any(Error));
   });
 
   it('Sim Symbol.dispose warns when backend rejects', async () => {
@@ -130,10 +124,7 @@ describe('dispose warns on async backend errors', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Sim'),
-      expect.any(Error),
-    );
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Sim'), expect.any(Error));
   });
 });
 

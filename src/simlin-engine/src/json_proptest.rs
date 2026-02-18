@@ -132,14 +132,16 @@ fn element_equation_strategy() -> impl Strategy<Value = ElementEquation> {
     (
         ident_strategy(),
         equation_strategy(),
-        prop_oneof![Just(String::new()), equation_strategy()],
+        prop::option::of(equation_strategy()),
         prop::option::of(graphical_function_strategy()),
     )
         .prop_map(
-            |(subscript, equation, initial_equation, gf)| ElementEquation {
+            |(subscript, equation, active_initial, gf)| ElementEquation {
                 subscript,
                 equation,
-                initial_equation,
+                compat: active_initial.map(|ai| Compat {
+                    active_initial: Some(ai),
+                }),
                 graphical_function: gf,
             },
         )
@@ -156,7 +158,9 @@ fn arrayed_equation_strategy() -> impl Strategy<Value = ArrayedEquation> {
             .prop_map(|(dims, eq, init_eq)| ArrayedEquation {
                 dimensions: dims,
                 equation: Some(eq),
-                initial_equation: init_eq,
+                compat: init_eq.map(|ai| Compat {
+                    active_initial: Some(ai)
+                }),
                 elements: None,
             }),
         // Elements variant: has elements, no equation
@@ -167,7 +171,7 @@ fn arrayed_equation_strategy() -> impl Strategy<Value = ArrayedEquation> {
             .prop_map(|(dims, elems)| ArrayedEquation {
                 dimensions: dims,
                 equation: None,
-                initial_equation: None,
+                compat: None,
                 elements: Some(elems),
             }),
     ]
@@ -204,6 +208,7 @@ fn stock_strategy() -> BoxedStrategy<Stock> {
                         can_be_module_input: can_input,
                         is_public: is_pub,
                         arrayed_equation: None,
+                        compat: None,
                     }
                 }
             ),
@@ -234,6 +239,7 @@ fn stock_strategy() -> BoxedStrategy<Stock> {
                         can_be_module_input: can_input,
                         is_public: is_pub,
                         arrayed_equation: Some(arr_eq),
+                        compat: None,
                     }
                 }
             ),
@@ -268,6 +274,7 @@ fn flow_strategy() -> BoxedStrategy<Flow> {
                         can_be_module_input: can_input,
                         is_public: is_pub,
                         arrayed_equation: None,
+                        compat: None,
                     }
                 }
             ),
@@ -296,6 +303,7 @@ fn flow_strategy() -> BoxedStrategy<Flow> {
                         can_be_module_input: can_input,
                         is_public: is_pub,
                         arrayed_equation: Some(arr_eq),
+                        compat: None,
                     }
                 }
             ),
@@ -305,12 +313,12 @@ fn flow_strategy() -> BoxedStrategy<Flow> {
 
 fn auxiliary_strategy() -> BoxedStrategy<Auxiliary> {
     prop_oneof![
-        // Scalar aux: has equation/initial_equation, no arrayed_equation
+        // Scalar aux: has equation, no arrayed_equation
         (
             any::<i32>(),
             ident_strategy(),
             equation_strategy(),
-            prop_oneof![Just(String::new()), equation_strategy()],
+            prop::option::of(equation_strategy()),
             units_strategy(),
             prop::option::of(graphical_function_strategy()),
             documentation_strategy(),
@@ -323,17 +331,19 @@ fn auxiliary_strategy() -> BoxedStrategy<Auxiliary> {
                         uid,
                         name,
                         equation: eq,
-                        initial_equation: init_eq,
                         units,
                         graphical_function: gf,
                         documentation: doc,
                         can_be_module_input: can_input,
                         is_public: is_pub,
                         arrayed_equation: None,
+                        compat: init_eq.map(|ai| Compat {
+                            active_initial: Some(ai),
+                        }),
                     }
                 }
             ),
-        // Arrayed aux: has arrayed_equation, empty equation/initial_equation
+        // Arrayed aux: has arrayed_equation, empty equation
         (
             any::<i32>(),
             ident_strategy(),
@@ -349,13 +359,13 @@ fn auxiliary_strategy() -> BoxedStrategy<Auxiliary> {
                     uid,
                     name,
                     equation: String::new(),
-                    initial_equation: String::new(),
                     units,
                     graphical_function: gf,
                     documentation: doc,
                     can_be_module_input: can_input,
                     is_public: is_pub,
                     arrayed_equation: Some(arr_eq),
+                    compat: None,
                 }
             }),
     ]
@@ -1085,6 +1095,7 @@ mod protobuf_roundtrip_tests {
                     can_be_module_input: false,
                     is_public: true,
                     arrayed_equation: None,
+                    compat: None,
                 }],
                 flows: vec![
                     Flow {
@@ -1098,6 +1109,7 @@ mod protobuf_roundtrip_tests {
                         can_be_module_input: false,
                         is_public: false,
                         arrayed_equation: None,
+                        compat: None,
                     },
                     Flow {
                         uid: 3,
@@ -1110,6 +1122,7 @@ mod protobuf_roundtrip_tests {
                         can_be_module_input: false,
                         is_public: false,
                         arrayed_equation: None,
+                        compat: None,
                     },
                 ],
                 auxiliaries: vec![
@@ -1117,25 +1130,25 @@ mod protobuf_roundtrip_tests {
                         uid: 4,
                         name: "birth_rate".to_string(),
                         equation: "0.03".to_string(),
-                        initial_equation: String::new(),
                         units: "1/year".to_string(),
                         graphical_function: None,
                         documentation: String::new(),
                         can_be_module_input: true,
                         is_public: false,
                         arrayed_equation: None,
+                        compat: None,
                     },
                     Auxiliary {
                         uid: 5,
                         name: "death_rate".to_string(),
                         equation: "0.01".to_string(),
-                        initial_equation: String::new(),
                         units: "1/year".to_string(),
                         graphical_function: None,
                         documentation: String::new(),
                         can_be_module_input: true,
                         is_public: false,
                         arrayed_equation: None,
+                        compat: None,
                     },
                 ],
                 modules: vec![],
@@ -1243,16 +1256,16 @@ mod protobuf_roundtrip_tests {
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["warehouses".to_string()],
                         equation: Some("100".to_string()),
-                        initial_equation: None,
+                        compat: None,
                         elements: None,
                     }),
+                    compat: None,
                 }],
                 flows: vec![],
                 auxiliaries: vec![Auxiliary {
                     uid: 2,
                     name: "demand".to_string(),
                     equation: String::new(),
-                    initial_equation: String::new(),
                     units: String::new(),
                     graphical_function: None,
                     documentation: String::new(),
@@ -1261,22 +1274,25 @@ mod protobuf_roundtrip_tests {
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["regions".to_string()],
                         equation: None,
-                        initial_equation: None,
+                        compat: None,
                         elements: Some(vec![
                             ElementEquation {
                                 subscript: "north".to_string(),
                                 equation: "50".to_string(),
-                                initial_equation: "10".to_string(),
+                                compat: Some(Compat {
+                                    active_initial: Some("10".to_string()),
+                                }),
                                 graphical_function: None,
                             },
                             ElementEquation {
                                 subscript: "south".to_string(),
                                 equation: "75".to_string(),
-                                initial_equation: String::new(),
+                                compat: None,
                                 graphical_function: None,
                             },
                         ]),
                     }),
+                    compat: None,
                 }],
                 modules: vec![],
                 sim_specs: None,
@@ -1347,7 +1363,6 @@ mod protobuf_roundtrip_tests {
                     uid: 1,
                     name: "lookup".to_string(),
                     equation: "lookup(input)".to_string(),
-                    initial_equation: String::new(),
                     units: String::new(),
                     graphical_function: Some(GraphicalFunction {
                         points: vec![[0.0, 0.0], [0.5, 0.25], [1.0, 1.0]],
@@ -1360,6 +1375,7 @@ mod protobuf_roundtrip_tests {
                     can_be_module_input: false,
                     is_public: false,
                     arrayed_equation: None,
+                    compat: None,
                 }],
                 modules: vec![],
                 sim_specs: None,

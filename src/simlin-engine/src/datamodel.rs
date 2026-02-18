@@ -190,8 +190,8 @@ pub struct GraphicalFunction {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub enum Equation {
-    Scalar(String, Option<String>),
-    ApplyToAll(Vec<DimensionName>, String, Option<String>),
+    Scalar(String),
+    ApplyToAll(Vec<DimensionName>, String),
     Arrayed(
         Vec<DimensionName>,
         Vec<(
@@ -201,6 +201,18 @@ pub enum Equation {
             Option<GraphicalFunction>,
         )>,
     ),
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Default)]
+pub struct Compat {
+    pub active_initial: Option<String>,
+}
+
+impl Compat {
+    pub fn is_empty(&self) -> bool {
+        self.active_initial.is_none()
+    }
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -237,6 +249,7 @@ pub struct Stock {
     pub visibility: Visibility,
     pub ai_state: Option<AiState>,
     pub uid: Option<i32>,
+    pub compat: Compat,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -252,6 +265,7 @@ pub struct Flow {
     pub visibility: Visibility,
     pub ai_state: Option<AiState>,
     pub uid: Option<i32>,
+    pub compat: Compat,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -266,6 +280,7 @@ pub struct Aux {
     pub visibility: Visibility,
     pub ai_state: Option<AiState>,
     pub uid: Option<i32>,
+    pub compat: Compat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,9 +360,9 @@ impl Variable {
 
     pub fn set_scalar_equation(&mut self, equation: &str) {
         match self {
-            Variable::Stock(stock) => stock.equation = Equation::Scalar(equation.to_string(), None),
-            Variable::Flow(flow) => flow.equation = Equation::Scalar(equation.to_string(), None),
-            Variable::Aux(aux) => aux.equation = Equation::Scalar(equation.to_string(), None),
+            Variable::Stock(stock) => stock.equation = Equation::Scalar(equation.to_string()),
+            Variable::Flow(flow) => flow.equation = Equation::Scalar(equation.to_string()),
+            Variable::Aux(aux) => aux.equation = Equation::Scalar(equation.to_string()),
             Variable::Module(_module) => {}
         }
     }

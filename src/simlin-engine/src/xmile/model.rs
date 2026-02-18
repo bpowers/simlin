@@ -463,7 +463,7 @@ fn test_semantic_group_roundtrip() {
         sim_specs: None,
         variables: vec![datamodel::Variable::Aux(datamodel::Aux {
             ident: "test_var".to_string(),
-            equation: datamodel::Equation::Scalar("1".to_string(), None),
+            equation: datamodel::Equation::Scalar("1".to_string()),
             documentation: String::new(),
             units: None,
             gf: None,
@@ -471,6 +471,7 @@ fn test_semantic_group_roundtrip() {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         })],
         views: vec![],
         loop_metadata: vec![],

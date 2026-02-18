@@ -21,7 +21,9 @@ function loadDefaultProject(name: string): string {
 
 // Simulate the server's preview generation pipeline:
 // XMILE -> engine -> protobuf -> engine -> JSON -> DataModel -> SVG -> PNG
-async function generatePreview(modelName: string): Promise<{ svg: string; png: Uint8Array; viewbox: { width: number; height: number } }> {
+async function generatePreview(
+  modelName: string,
+): Promise<{ svg: string; png: Uint8Array; viewbox: { width: number; height: number } }> {
   const xmile = loadDefaultProject(modelName);
 
   // Step 1: Import from XMILE and serialize to protobuf (same as new-user.ts)

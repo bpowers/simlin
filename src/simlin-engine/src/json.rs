@@ -65,10 +65,19 @@ pub type Ident = String;
 pub struct ElementEquation {
     pub subscript: String,
     pub equation: String,
-    #[serde(skip_serializing_if = "is_empty_string", default)]
-    pub initial_equation: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compat: Option<Compat>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub graphical_function: Option<GraphicalFunction>,
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Compat {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub active_initial: Option<String>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -80,7 +89,7 @@ pub struct ArrayedEquation {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub equation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub initial_equation: Option<String>,
+    pub compat: Option<Compat>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub elements: Option<Vec<ElementEquation>>,
 }
@@ -135,6 +144,8 @@ pub struct Stock {
     pub is_public: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub arrayed_equation: Option<ArrayedEquation>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compat: Option<Compat>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -161,6 +172,8 @@ pub struct Flow {
     pub is_public: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub arrayed_equation: Option<ArrayedEquation>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compat: Option<Compat>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -174,8 +187,6 @@ pub struct Auxiliary {
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub equation: String,
     #[serde(skip_serializing_if = "is_empty_string", default)]
-    pub initial_equation: String,
-    #[serde(skip_serializing_if = "is_empty_string", default)]
     pub units: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub graphical_function: Option<GraphicalFunction>,
@@ -187,6 +198,8 @@ pub struct Auxiliary {
     pub is_public: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub arrayed_equation: Option<ArrayedEquation>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compat: Option<Compat>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -630,6 +643,14 @@ impl From<GraphicalFunction> for datamodel::GraphicalFunction {
 
 impl From<Stock> for datamodel::Stock {
     fn from(stock: Stock) -> Self {
+        // Stocks don't use active_initial (their equation IS the initial value),
+        // so no arrayed_equation.compat fallback is needed here unlike Flow/Aux.
+        let compat = datamodel::Compat {
+            active_initial: stock
+                .compat
+                .and_then(|c| c.active_initial)
+                .filter(|s| !s.is_empty()),
+        };
         let equation = match stock.arrayed_equation {
             Some(arrayed) => {
                 if let Some(elements) = arrayed.elements {
@@ -641,11 +662,9 @@ impl From<Stock> for datamodel::Stock {
                                 (
                                     ee.subscript,
                                     ee.equation,
-                                    if ee.initial_equation.is_empty() {
-                                        None
-                                    } else {
-                                        Some(ee.initial_equation)
-                                    },
+                                    ee.compat
+                                        .and_then(|c| c.active_initial)
+                                        .filter(|s| !s.is_empty()),
                                     ee.graphical_function.map(|gf| gf.into()),
                                 )
                             })
@@ -655,11 +674,10 @@ impl From<Stock> for datamodel::Stock {
                     datamodel::Equation::ApplyToAll(
                         arrayed.dimensions,
                         arrayed.equation.unwrap_or_default(),
-                        arrayed.initial_equation,
                     )
                 }
             }
-            None => datamodel::Equation::Scalar(stock.initial_equation, None),
+            None => datamodel::Equation::Scalar(stock.initial_equation),
         };
 
         datamodel::Stock {
@@ -686,12 +704,25 @@ impl From<Stock> for datamodel::Stock {
             } else {
                 Some(stock.uid)
             },
+            compat,
         }
     }
 }
 
 impl From<Flow> for datamodel::Flow {
     fn from(flow: Flow) -> Self {
+        let compat = datamodel::Compat {
+            active_initial: flow
+                .compat
+                .and_then(|c| c.active_initial)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    flow.arrayed_equation
+                        .as_ref()
+                        .and_then(|a| a.compat.as_ref())
+                        .and_then(|c| c.active_initial.clone())
+                }),
+        };
         let equation = match flow.arrayed_equation {
             Some(arrayed) => {
                 if let Some(elements) = arrayed.elements {
@@ -703,11 +734,9 @@ impl From<Flow> for datamodel::Flow {
                                 (
                                     ee.subscript,
                                     ee.equation,
-                                    if ee.initial_equation.is_empty() {
-                                        None
-                                    } else {
-                                        Some(ee.initial_equation)
-                                    },
+                                    ee.compat
+                                        .and_then(|c| c.active_initial)
+                                        .filter(|s| !s.is_empty()),
                                     ee.graphical_function.map(|gf| gf.into()),
                                 )
                             })
@@ -717,11 +746,10 @@ impl From<Flow> for datamodel::Flow {
                     datamodel::Equation::ApplyToAll(
                         arrayed.dimensions,
                         arrayed.equation.unwrap_or_default(),
-                        arrayed.initial_equation,
                     )
                 }
             }
-            None => datamodel::Equation::Scalar(flow.equation, None),
+            None => datamodel::Equation::Scalar(flow.equation),
         };
 
         datamodel::Flow {
@@ -743,12 +771,25 @@ impl From<Flow> for datamodel::Flow {
             },
             ai_state: None,
             uid: if flow.uid == 0 { None } else { Some(flow.uid) },
+            compat,
         }
     }
 }
 
 impl From<Auxiliary> for datamodel::Aux {
     fn from(aux: Auxiliary) -> Self {
+        let compat = datamodel::Compat {
+            active_initial: aux
+                .compat
+                .and_then(|c| c.active_initial)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    aux.arrayed_equation
+                        .as_ref()
+                        .and_then(|a| a.compat.as_ref())
+                        .and_then(|c| c.active_initial.clone())
+                }),
+        };
         let equation = match aux.arrayed_equation {
             Some(arrayed) => {
                 if let Some(elements) = arrayed.elements {
@@ -760,11 +801,9 @@ impl From<Auxiliary> for datamodel::Aux {
                                 (
                                     ee.subscript,
                                     ee.equation,
-                                    if ee.initial_equation.is_empty() {
-                                        None
-                                    } else {
-                                        Some(ee.initial_equation)
-                                    },
+                                    ee.compat
+                                        .and_then(|c| c.active_initial)
+                                        .filter(|s| !s.is_empty()),
                                     ee.graphical_function.map(|gf| gf.into()),
                                 )
                             })
@@ -774,18 +813,10 @@ impl From<Auxiliary> for datamodel::Aux {
                     datamodel::Equation::ApplyToAll(
                         arrayed.dimensions,
                         arrayed.equation.unwrap_or_default(),
-                        arrayed.initial_equation,
                     )
                 }
             }
-            None => datamodel::Equation::Scalar(
-                aux.equation,
-                if aux.initial_equation.is_empty() {
-                    None
-                } else {
-                    Some(aux.initial_equation)
-                },
-            ),
+            None => datamodel::Equation::Scalar(aux.equation),
         };
 
         datamodel::Aux {
@@ -806,6 +837,7 @@ impl From<Auxiliary> for datamodel::Aux {
             },
             ai_state: None,
             uid: if aux.uid == 0 { None } else { Some(aux.uid) },
+            compat,
         }
     }
 }
@@ -1206,14 +1238,21 @@ impl From<datamodel::GraphicalFunction> for GraphicalFunction {
 
 impl From<datamodel::Stock> for Stock {
     fn from(stock: datamodel::Stock) -> Self {
+        let compat_json = if stock.compat.is_empty() {
+            None
+        } else {
+            Some(Compat {
+                active_initial: stock.compat.active_initial,
+            })
+        };
         let (initial_equation, arrayed_equation) = match stock.equation {
-            datamodel::Equation::Scalar(eq, init_eq) => (init_eq.unwrap_or(eq), None),
-            datamodel::Equation::ApplyToAll(dims, eq, init_eq) => (
+            datamodel::Equation::Scalar(eq) => (eq, None),
+            datamodel::Equation::ApplyToAll(dims, eq) => (
                 String::new(),
                 Some(ArrayedEquation {
                     dimensions: dims,
                     equation: Some(eq),
-                    initial_equation: init_eq,
+                    compat: None,
                     elements: None,
                 }),
             ),
@@ -1221,10 +1260,12 @@ impl From<datamodel::Stock> for Stock {
                 let ees = elems
                     .into_iter()
                     .map(
-                        |(subscript, equation, initial_equation, gf)| ElementEquation {
+                        |(subscript, equation, active_initial, gf)| ElementEquation {
                             subscript,
                             equation,
-                            initial_equation: initial_equation.unwrap_or_default(),
+                            compat: active_initial.map(|ai| Compat {
+                                active_initial: Some(ai),
+                            }),
                             graphical_function: gf.map(|g| g.into()),
                         },
                     )
@@ -1234,7 +1275,7 @@ impl From<datamodel::Stock> for Stock {
                     Some(ArrayedEquation {
                         dimensions: dims,
                         equation: None,
-                        initial_equation: None,
+                        compat: None,
                         elements: Some(ees),
                     }),
                 )
@@ -1253,20 +1294,28 @@ impl From<datamodel::Stock> for Stock {
             can_be_module_input: stock.can_be_module_input,
             is_public: matches!(stock.visibility, datamodel::Visibility::Public),
             arrayed_equation,
+            compat: compat_json,
         }
     }
 }
 
 impl From<datamodel::Flow> for Flow {
     fn from(flow: datamodel::Flow) -> Self {
+        let compat_json = if flow.compat.is_empty() {
+            None
+        } else {
+            Some(Compat {
+                active_initial: flow.compat.active_initial,
+            })
+        };
         let (equation, arrayed_equation) = match flow.equation {
-            datamodel::Equation::Scalar(eq, _) => (eq, None),
-            datamodel::Equation::ApplyToAll(dims, eq, init_eq) => (
+            datamodel::Equation::Scalar(eq) => (eq, None),
+            datamodel::Equation::ApplyToAll(dims, eq) => (
                 String::new(),
                 Some(ArrayedEquation {
                     dimensions: dims,
                     equation: Some(eq),
-                    initial_equation: init_eq,
+                    compat: None,
                     elements: None,
                 }),
             ),
@@ -1274,10 +1323,12 @@ impl From<datamodel::Flow> for Flow {
                 let ees = elems
                     .into_iter()
                     .map(
-                        |(subscript, equation, initial_equation, gf)| ElementEquation {
+                        |(subscript, equation, active_initial, gf)| ElementEquation {
                             subscript,
                             equation,
-                            initial_equation: initial_equation.unwrap_or_default(),
+                            compat: active_initial.map(|ai| Compat {
+                                active_initial: Some(ai),
+                            }),
                             graphical_function: gf.map(|g| g.into()),
                         },
                     )
@@ -1287,7 +1338,7 @@ impl From<datamodel::Flow> for Flow {
                     Some(ArrayedEquation {
                         dimensions: dims,
                         equation: None,
-                        initial_equation: None,
+                        compat: None,
                         elements: Some(ees),
                     }),
                 )
@@ -1305,21 +1356,28 @@ impl From<datamodel::Flow> for Flow {
             can_be_module_input: flow.can_be_module_input,
             is_public: matches!(flow.visibility, datamodel::Visibility::Public),
             arrayed_equation,
+            compat: compat_json,
         }
     }
 }
 
 impl From<datamodel::Aux> for Auxiliary {
     fn from(aux: datamodel::Aux) -> Self {
-        let (equation, initial_equation, arrayed_equation) = match aux.equation {
-            datamodel::Equation::Scalar(eq, init_eq) => (eq, init_eq.unwrap_or_default(), None),
-            datamodel::Equation::ApplyToAll(dims, eq, init_eq) => (
-                String::new(),
+        let compat_json = if aux.compat.is_empty() {
+            None
+        } else {
+            Some(Compat {
+                active_initial: aux.compat.active_initial,
+            })
+        };
+        let (equation, arrayed_equation) = match aux.equation {
+            datamodel::Equation::Scalar(eq) => (eq, None),
+            datamodel::Equation::ApplyToAll(dims, eq) => (
                 String::new(),
                 Some(ArrayedEquation {
                     dimensions: dims,
                     equation: Some(eq),
-                    initial_equation: init_eq,
+                    compat: None,
                     elements: None,
                 }),
             ),
@@ -1327,21 +1385,22 @@ impl From<datamodel::Aux> for Auxiliary {
                 let ees = elems
                     .into_iter()
                     .map(
-                        |(subscript, equation, initial_equation, gf)| ElementEquation {
+                        |(subscript, equation, active_initial, gf)| ElementEquation {
                             subscript,
                             equation,
-                            initial_equation: initial_equation.unwrap_or_default(),
+                            compat: active_initial.map(|ai| Compat {
+                                active_initial: Some(ai),
+                            }),
                             graphical_function: gf.map(|g| g.into()),
                         },
                     )
                     .collect();
                 (
                     String::new(),
-                    String::new(),
                     Some(ArrayedEquation {
                         dimensions: dims,
                         equation: None,
-                        initial_equation: None,
+                        compat: None,
                         elements: Some(ees),
                     }),
                 )
@@ -1352,13 +1411,13 @@ impl From<datamodel::Aux> for Auxiliary {
             uid: aux.uid.unwrap_or(0),
             name: aux.ident,
             equation,
-            initial_equation,
             units: aux.units.unwrap_or_default(),
             graphical_function: aux.gf.map(|gf| gf.into()),
             documentation: aux.documentation,
             can_be_module_input: aux.can_be_module_input,
             is_public: matches!(aux.visibility, datamodel::Visibility::Public),
             arrayed_equation,
+            compat: compat_json,
         }
     }
 }
@@ -1805,6 +1864,7 @@ mod tests {
                     can_be_module_input: false,
                     is_public: true,
                     arrayed_equation: None,
+                    compat: None,
                 },
             ),
             (
@@ -1823,9 +1883,10 @@ mod tests {
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["warehouses".to_string()],
                         equation: Some("50".to_string()),
-                        initial_equation: None,
+                        compat: None,
                         elements: None,
                     }),
+                    compat: None,
                 },
             ),
             (
@@ -1844,22 +1905,25 @@ mod tests {
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["cities".to_string()],
                         equation: None,
-                        initial_equation: None,
+                        compat: None,
                         elements: Some(vec![
                             ElementEquation {
                                 subscript: "Boston".to_string(),
                                 equation: "50".to_string(),
-                                initial_equation: "10".to_string(),
+                                compat: Some(Compat {
+                                    active_initial: Some("10".to_string()),
+                                }),
                                 graphical_function: None,
                             },
                             ElementEquation {
                                 subscript: "NYC".to_string(),
                                 equation: "100".to_string(),
-                                initial_equation: String::new(),
+                                compat: None,
                                 graphical_function: None,
                             },
                         ]),
                     }),
+                    compat: None,
                 },
             ),
         ];
@@ -1889,7 +1953,7 @@ mod tests {
             );
             assert_eq!(json_stock.units, json_stock3.units, "Failed for: {}", name);
             assert_eq!(
-                json_stock.initial_equation, json_stock3.initial_equation,
+                json_stock.compat, json_stock3.compat,
                 "Failed for: {}",
                 name
             );
@@ -1933,6 +1997,7 @@ mod tests {
                     can_be_module_input: false,
                     is_public: true,
                     arrayed_equation: None,
+                    compat: None,
                 },
             ),
             (
@@ -1950,8 +2015,11 @@ mod tests {
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["factories".to_string()],
                         equation: Some("orders / lead_time".to_string()),
-                        initial_equation: Some("initial_orders".to_string()),
+                        compat: None,
                         elements: None,
+                    }),
+                    compat: Some(Compat {
+                        active_initial: Some("initial_orders".to_string()),
                     }),
                 },
             ),
@@ -1970,22 +2038,25 @@ mod tests {
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["routes".to_string()],
                         equation: None,
-                        initial_equation: None,
+                        compat: None,
                         elements: Some(vec![
                             ElementEquation {
                                 subscript: "east".to_string(),
                                 equation: "supply_east".to_string(),
-                                initial_equation: "init_supply_east".to_string(),
+                                compat: Some(Compat {
+                                    active_initial: Some("init_supply_east".to_string()),
+                                }),
                                 graphical_function: None,
                             },
                             ElementEquation {
                                 subscript: "west".to_string(),
                                 equation: "supply_west".to_string(),
-                                initial_equation: String::new(),
+                                compat: None,
                                 graphical_function: None,
                             },
                         ]),
                     }),
+                    compat: None,
                 },
             ),
         ];
@@ -2040,7 +2111,9 @@ mod tests {
                     uid: 200,
                     name: "birth_rate".to_string(),
                     equation: "0.02".to_string(),
-                    initial_equation: "0.015".to_string(),
+                    compat: Some(Compat {
+                        active_initial: Some("0.015".to_string()),
+                    }),
                     units: "1/year".to_string(),
                     graphical_function: None,
                     documentation: "Annual birth rate".to_string(),
@@ -2055,7 +2128,6 @@ mod tests {
                     uid: 0,
                     name: "capacity".to_string(),
                     equation: String::new(),
-                    initial_equation: String::new(),
                     units: String::new(),
                     graphical_function: None,
                     documentation: String::new(),
@@ -2064,8 +2136,11 @@ mod tests {
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["plants".to_string()],
                         equation: Some("base_capacity".to_string()),
-                        initial_equation: Some("initial_capacity".to_string()),
+                        compat: None,
                         elements: None,
+                    }),
+                    compat: Some(Compat {
+                        active_initial: Some("initial_capacity".to_string()),
                     }),
                 },
             ),
@@ -2075,7 +2150,6 @@ mod tests {
                     uid: 0,
                     name: "demand".to_string(),
                     equation: String::new(),
-                    initial_equation: String::new(),
                     units: String::new(),
                     graphical_function: None,
                     documentation: String::new(),
@@ -2084,22 +2158,25 @@ mod tests {
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["regions".to_string()],
                         equation: None,
-                        initial_equation: None,
+                        compat: None,
                         elements: Some(vec![
                             ElementEquation {
                                 subscript: "north".to_string(),
                                 equation: "north_demand".to_string(),
-                                initial_equation: "north_demand_init".to_string(),
+                                compat: Some(Compat {
+                                    active_initial: Some("north_demand_init".to_string()),
+                                }),
                                 graphical_function: None,
                             },
                             ElementEquation {
                                 subscript: "south".to_string(),
                                 equation: "south_demand".to_string(),
-                                initial_equation: String::new(),
+                                compat: None,
                                 graphical_function: None,
                             },
                         ]),
                     }),
+                    compat: None,
                 },
             ),
         ];
@@ -2116,11 +2193,7 @@ mod tests {
                 "Failed for: {}",
                 name
             );
-            assert_eq!(
-                json_aux.initial_equation, json_aux3.initial_equation,
-                "Failed for: {}",
-                name
-            );
+            assert_eq!(json_aux.compat, json_aux3.compat, "Failed for: {}", name);
             assert_eq!(json_aux.units, json_aux3.units, "Failed for: {}", name);
             assert_eq!(
                 json_aux.graphical_function, json_aux3.graphical_function,
@@ -2360,6 +2433,7 @@ mod tests {
                 can_be_module_input: false,
                 is_public: false,
                 arrayed_equation: None,
+                compat: None,
             }],
             flows: vec![Flow {
                 uid: 2,
@@ -2372,18 +2446,19 @@ mod tests {
                 can_be_module_input: false,
                 is_public: false,
                 arrayed_equation: None,
+                compat: None,
             }],
             auxiliaries: vec![Auxiliary {
                 uid: 3,
                 name: "aux1".to_string(),
                 equation: "5".to_string(),
-                initial_equation: String::new(),
                 units: String::new(),
                 graphical_function: None,
                 documentation: String::new(),
                 can_be_module_input: false,
                 is_public: false,
                 arrayed_equation: None,
+                compat: None,
             }],
             modules: vec![],
             sim_specs: Some(SimSpecs {
@@ -2861,6 +2936,7 @@ mod tests {
             can_be_module_input: false,
             is_public: false,
             arrayed_equation: None,
+            compat: None,
         };
 
         let tagged = TaggedVariable::Stock(stock.clone());
@@ -2895,6 +2971,7 @@ mod tests {
             can_be_module_input: false,
             is_public: false,
             arrayed_equation: None,
+            compat: None,
         };
 
         let tagged = TaggedVariable::Flow(flow);
@@ -2917,7 +2994,7 @@ mod tests {
             uid: 3,
             name: "birth_rate".to_string(),
             equation: "0.02".to_string(),
-            initial_equation: String::new(),
+            compat: None,
             units: "1/year".to_string(),
             graphical_function: None,
             documentation: String::new(),
@@ -2972,7 +3049,7 @@ mod tests {
     fn test_tagged_variable_from_datamodel() {
         let dm_stock = datamodel::Variable::Stock(datamodel::Stock {
             ident: "inventory".to_string(),
-            equation: datamodel::Equation::Scalar("50".to_string(), None),
+            equation: datamodel::Equation::Scalar("50".to_string()),
             documentation: String::new(),
             units: None,
             inflows: vec!["production".to_string()],
@@ -2982,6 +3059,7 @@ mod tests {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: Some(10),
+            compat: datamodel::Compat::default(),
         });
 
         let tagged: TaggedVariable = dm_stock.into();
@@ -3014,6 +3092,7 @@ mod tests {
                 can_be_module_input: false,
                 is_public: false,
                 arrayed_equation: None,
+                compat: None,
             }),
             TaggedVariable::Flow(Flow {
                 uid: 2,
@@ -3026,12 +3105,13 @@ mod tests {
                 can_be_module_input: false,
                 is_public: false,
                 arrayed_equation: None,
+                compat: None,
             }),
             TaggedVariable::Auxiliary(Auxiliary {
                 uid: 3,
                 name: "constant".to_string(),
                 equation: "5".to_string(),
-                initial_equation: String::new(),
+                compat: None,
                 units: String::new(),
                 graphical_function: None,
                 documentation: String::new(),
@@ -3047,6 +3127,149 @@ mod tests {
         assert_eq!(vars.len(), roundtrip.len());
         for (orig, rt) in vars.iter().zip(roundtrip.iter()) {
             assert_eq!(orig, rt);
+        }
+    }
+
+    #[test]
+    fn flow_empty_compat_falls_back_to_arrayed_equation_compat() {
+        let flow = Flow {
+            uid: 0,
+            name: "rate".to_string(),
+            equation: String::new(),
+            units: String::new(),
+            non_negative: false,
+            graphical_function: None,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: Some("base * 2".to_string()),
+                compat: Some(Compat {
+                    active_initial: Some("base * 3".to_string()),
+                }),
+                elements: None,
+            }),
+            compat: Some(Compat {
+                active_initial: None,
+            }),
+        };
+
+        let dm: datamodel::Flow = flow.into();
+        assert_eq!(dm.compat.active_initial.as_deref(), Some("base * 3"));
+    }
+
+    #[test]
+    fn aux_empty_compat_falls_back_to_arrayed_equation_compat() {
+        let aux = Auxiliary {
+            uid: 0,
+            name: "val".to_string(),
+            equation: String::new(),
+            units: String::new(),
+            graphical_function: None,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: Some("x + 1".to_string()),
+                compat: Some(Compat {
+                    active_initial: Some("x + 2".to_string()),
+                }),
+                elements: None,
+            }),
+            compat: Some(Compat {
+                active_initial: None,
+            }),
+        };
+
+        let dm: datamodel::Aux = aux.into();
+        assert_eq!(dm.compat.active_initial.as_deref(), Some("x + 2"));
+    }
+
+    #[test]
+    fn flow_top_level_compat_takes_precedence() {
+        let flow = Flow {
+            uid: 0,
+            name: "rate".to_string(),
+            equation: String::new(),
+            units: String::new(),
+            non_negative: false,
+            graphical_function: None,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: Some("base * 2".to_string()),
+                compat: Some(Compat {
+                    active_initial: Some("stale".to_string()),
+                }),
+                elements: None,
+            }),
+            compat: Some(Compat {
+                active_initial: Some("correct".to_string()),
+            }),
+        };
+
+        let dm: datamodel::Flow = flow.into();
+        assert_eq!(dm.compat.active_initial.as_deref(), Some("correct"));
+    }
+
+    #[test]
+    fn empty_active_initial_normalized_to_none() {
+        // Top-level compat with empty activeInitial should become None
+        let stock = Stock {
+            uid: 0,
+            name: "pop".to_string(),
+            initial_equation: "100".to_string(),
+            units: String::new(),
+            inflows: vec![],
+            outflows: vec![],
+            non_negative: false,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: None,
+            compat: Some(Compat {
+                active_initial: Some(String::new()),
+            }),
+        };
+        let dm_stock: datamodel::Stock = stock.into();
+        assert_eq!(dm_stock.compat.active_initial, None);
+
+        // Element-level compat with empty activeInitial should become None
+        let flow = Flow {
+            uid: 0,
+            name: "rate".to_string(),
+            equation: String::new(),
+            units: String::new(),
+            non_negative: false,
+            graphical_function: None,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: None,
+                compat: None,
+                elements: Some(vec![ElementEquation {
+                    subscript: "north".to_string(),
+                    equation: "10".to_string(),
+                    compat: Some(Compat {
+                        active_initial: Some(String::new()),
+                    }),
+                    graphical_function: None,
+                }]),
+            }),
+            compat: None,
+        };
+        let dm_flow: datamodel::Flow = flow.into();
+        match &dm_flow.equation {
+            datamodel::Equation::Arrayed(_, elems) => {
+                assert_eq!(elems[0].2, None);
+            }
+            _ => panic!("expected Arrayed equation"),
         }
     }
 }

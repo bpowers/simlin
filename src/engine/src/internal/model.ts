@@ -85,9 +85,19 @@ export function simlin_model_get_name(model: SimlinModelPtr): string {
  * @param filter Substring filter (null = no filter)
  * @returns Number of variables
  */
-export function simlin_model_get_var_count(model: SimlinModelPtr, typeMask: number = 0, filter: string | null = null): number {
+export function simlin_model_get_var_count(
+  model: SimlinModelPtr,
+  typeMask: number = 0,
+  filter: string | null = null,
+): number {
   const exports = getExports();
-  const fn = exports.simlin_model_get_var_count as (model: number, typeMask: number, filter: number, outCount: number, outErr: number) => void;
+  const fn = exports.simlin_model_get_var_count as (
+    model: number,
+    typeMask: number,
+    filter: number,
+    outCount: number,
+    outErr: number,
+  ) => void;
 
   const outCountPtr = allocOutUsize();
   const outErrPtr = allocOutPtr();
@@ -185,7 +195,11 @@ export function simlin_model_get_links(model: SimlinModelPtr): SimlinLinksPtr {
  * @param filter Substring filter (null = no filter)
  * @returns Array of variable names
  */
-export function simlin_model_get_var_names(model: SimlinModelPtr, typeMask: number = 0, filter: string | null = null): string[] {
+export function simlin_model_get_var_names(
+  model: SimlinModelPtr,
+  typeMask: number = 0,
+  filter: string | null = null,
+): string[] {
   const exports = getExports();
   const fn = exports.simlin_model_get_var_names as (
     model: number,
@@ -332,9 +346,7 @@ export function simlin_model_get_incoming_links(model: SimlinModelPtr, varName: 
  * Call a WASM FFI function that writes its result to an out_buffer/out_len pair.
  * Handles error checking, buffer copying, and memory cleanup.
  */
-function callBufferReturningFn(
-  invoke: (outBuf: number, outLen: number, outErr: number) => void,
-): Uint8Array {
+function callBufferReturningFn(invoke: (outBuf: number, outLen: number, outErr: number) => void): Uint8Array {
   const outBufPtr = allocOutPtr();
   const outLenPtr = allocOutUsize();
   const outErrPtr = allocOutPtr();

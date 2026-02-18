@@ -61,6 +61,10 @@ message Variable {
     }
   };
 
+  message Compat {
+    optional string active_initial = 1;
+  };
+
   message Stock {
     string ident = 1;
     Equation equation = 8;
@@ -72,6 +76,7 @@ message Variable {
     bool can_be_module_input = 9;
     Visibility visibility = 10;
     int32 uid = 11;
+    optional Compat compat = 12;
   };
 
   message Flow {
@@ -84,6 +89,7 @@ message Variable {
     bool can_be_module_input = 9;
     Visibility visibility = 10;
     int32 uid = 11;
+    optional Compat compat = 12;
   };
 
   message Aux {
@@ -95,6 +101,7 @@ message Variable {
     bool can_be_module_input = 7;
     Visibility visibility = 8;
     int32 uid = 9;
+    optional Compat compat = 10;
   };
 
   message Module {

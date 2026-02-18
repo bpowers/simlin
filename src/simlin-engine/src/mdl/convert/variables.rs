@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crate::datamodel::{
-    self, DimensionElements, Equation, GraphicalFunction, GraphicalFunctionKind,
+    self, Compat, DimensionElements, Equation, GraphicalFunction, GraphicalFunctionKind,
     GraphicalFunctionScale, Model, ModelGroup, Project, Variable, View, Visibility,
 };
 
@@ -73,6 +73,7 @@ impl<'input> ConversionContext<'input> {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: datamodel::Compat::default(),
             });
             variables.push(flow);
         }
@@ -448,6 +449,7 @@ impl<'input> ConversionContext<'input> {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: datamodel::Compat::default(),
             })),
             VariableType::Flow => Some(Variable::Flow(datamodel::Flow {
                 ident,
@@ -460,6 +462,7 @@ impl<'input> ConversionContext<'input> {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: datamodel::Compat::default(),
             })),
             VariableType::Aux => Some(Variable::Aux(datamodel::Aux {
                 ident,
@@ -471,6 +474,7 @@ impl<'input> ConversionContext<'input> {
                 visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
+                compat: datamodel::Compat::default(),
             })),
         }
     }
@@ -642,7 +646,7 @@ impl<'input> ConversionContext<'input> {
 
         match info.var_type {
             VariableType::Stock => {
-                let (equation, _gf) = self.build_equation(&eq.equation, true);
+                let (equation, compat, _gf) = self.build_equation(&eq.equation, true);
                 Some(Variable::Stock(datamodel::Stock {
                     ident,
                     equation,
@@ -655,10 +659,11 @@ impl<'input> ConversionContext<'input> {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat,
                 }))
             }
             VariableType::Flow => {
-                let (equation, gf) = self.build_equation(&eq.equation, false);
+                let (equation, compat, gf) = self.build_equation(&eq.equation, false);
                 Some(Variable::Flow(datamodel::Flow {
                     ident,
                     equation,
@@ -670,10 +675,11 @@ impl<'input> ConversionContext<'input> {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat,
                 }))
             }
             VariableType::Aux => {
-                let (equation, gf) = self.build_equation(&eq.equation, false);
+                let (equation, compat, gf) = self.build_equation(&eq.equation, false);
                 Some(Variable::Aux(datamodel::Aux {
                     ident,
                     equation,
@@ -684,6 +690,7 @@ impl<'input> ConversionContext<'input> {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat,
                 }))
             }
         }
@@ -696,14 +703,15 @@ impl<'input> ConversionContext<'input> {
         &self,
         eq: &MdlEquation<'_>,
         is_stock: bool,
-    ) -> (Equation, Option<GraphicalFunction>) {
+    ) -> (Equation, Compat, Option<GraphicalFunction>) {
         match eq {
             MdlEquation::Regular(lhs, expr) => {
                 if is_stock {
                     // For stocks, extract initial value from INTEG
                     if let Some(initial) = self.extract_integ_initial(expr) {
                         let initial_str = self.formatter.format_expr(initial);
-                        return (self.make_equation(lhs, &initial_str), None);
+                        let (equation, compat) = self.make_equation(lhs, &initial_str);
+                        return (equation, compat, None);
                     }
                 }
 
@@ -711,43 +719,51 @@ impl<'input> ConversionContext<'input> {
                 if let Some((equation_expr, initial_expr)) = self.extract_active_initial(expr) {
                     let eq_str = self.formatter.format_expr(equation_expr);
                     let initial_str = self.formatter.format_expr(initial_expr);
-                    return (
-                        self.make_equation_with_initial(lhs, &eq_str, Some(initial_str)),
-                        None,
-                    );
+                    let (equation, compat) =
+                        self.make_equation_with_initial(lhs, &eq_str, Some(initial_str));
+                    return (equation, compat, None);
                 }
 
                 let eq_str = self.formatter.format_expr(expr);
-                (self.make_equation(lhs, &eq_str), None)
+                let (equation, compat) = self.make_equation(lhs, &eq_str);
+                (equation, compat, None)
             }
             MdlEquation::Lookup(lhs, table) => {
                 let gf = self.build_graphical_function(&lhs.name, table);
-                (self.make_equation(lhs, "0+0"), Some(gf))
+                let (equation, compat) = self.make_equation(lhs, "0+0");
+                (equation, compat, Some(gf))
             }
             MdlEquation::WithLookup(lhs, input, table) => {
                 let gf = self.build_graphical_function(&lhs.name, table);
                 let input_str = self.formatter.format_expr(input);
-                (self.make_equation(lhs, &input_str), Some(gf))
+                let (equation, compat) = self.make_equation(lhs, &input_str);
+                (equation, compat, Some(gf))
             }
-            MdlEquation::EmptyRhs(lhs, _) => (self.make_equation(lhs, "0+0"), None),
+            MdlEquation::EmptyRhs(lhs, _) => {
+                let (equation, compat) = self.make_equation(lhs, "0+0");
+                (equation, compat, None)
+            }
             MdlEquation::Implicit(lhs) => {
                 // Implicit equations become lookups on TIME with a default table
                 let gf = self.make_default_lookup();
-                (self.make_equation(lhs, "TIME"), Some(gf))
+                let (equation, compat) = self.make_equation(lhs, "TIME");
+                (equation, compat, Some(gf))
             }
             MdlEquation::Data(lhs, expr) => {
                 let eq_str = expr
                     .as_ref()
                     .map(|e| self.formatter.format_expr(e))
                     .unwrap_or_default();
-                (self.make_equation(lhs, &eq_str), None)
+                let (equation, compat) = self.make_equation(lhs, &eq_str);
+                (equation, compat, None)
             }
             MdlEquation::TabbedArray(lhs, values) | MdlEquation::NumberList(lhs, values) => {
                 // Create an arrayed equation from the number list
-                self.make_array_equation(lhs, values)
+                let (equation, gf) = self.make_array_equation(lhs, values);
+                (equation, Compat::default(), gf)
             }
             MdlEquation::SubscriptDef(_, _) | MdlEquation::Equivalence(_, _, _) => {
-                (Equation::Scalar(String::new(), None), None)
+                (Equation::Scalar(String::new()), Compat::default(), None)
             }
         }
     }
@@ -765,7 +781,7 @@ impl<'input> ConversionContext<'input> {
     }
 
     /// Create an Equation from LHS and equation string, handling subscripts.
-    fn make_equation(&self, lhs: &Lhs<'_>, eq_str: &str) -> Equation {
+    fn make_equation(&self, lhs: &Lhs<'_>, eq_str: &str) -> (Equation, Compat) {
         self.make_equation_with_initial(lhs, eq_str, None)
     }
 
@@ -775,9 +791,12 @@ impl<'input> ConversionContext<'input> {
         lhs: &Lhs<'_>,
         eq_str: &str,
         initial_str: Option<String>,
-    ) -> Equation {
+    ) -> (Equation, Compat) {
+        let compat = Compat {
+            active_initial: initial_str,
+        };
         if lhs.subscripts.is_empty() {
-            Equation::Scalar(eq_str.to_string(), initial_str)
+            (Equation::Scalar(eq_str.to_string()), compat)
         } else {
             // Subscripted equation becomes ApplyToAll
             let dims: Vec<String> = lhs
@@ -789,7 +808,7 @@ impl<'input> ConversionContext<'input> {
                     }
                 })
                 .collect();
-            Equation::ApplyToAll(dims, eq_str.to_string(), initial_str)
+            (Equation::ApplyToAll(dims, eq_str.to_string()), compat)
         }
     }
 
@@ -809,7 +828,7 @@ impl<'input> ConversionContext<'input> {
             } else {
                 String::new()
             };
-            return (Equation::Scalar(eq_str, None), None);
+            return (Equation::Scalar(eq_str), None);
         }
 
         // Get dimension names from subscripts
@@ -833,7 +852,7 @@ impl<'input> ConversionContext<'input> {
                 } else {
                     String::new()
                 };
-                return (Equation::ApplyToAll(dims, eq_str, None), None);
+                return (Equation::ApplyToAll(dims, eq_str), None);
             }
         };
 
@@ -844,7 +863,7 @@ impl<'input> ConversionContext<'input> {
             } else {
                 String::new()
             };
-            return (Equation::ApplyToAll(dims, eq_str, None), None);
+            return (Equation::ApplyToAll(dims, eq_str), None);
         }
 
         // Create element-specific equations
@@ -1177,7 +1196,7 @@ x = y * 2
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Scalar(eq, _) => {
+                Equation::Scalar(eq) => {
                     assert_eq!(eq, "y * 2");
                 }
                 other => panic!("Expected Scalar equation, got {:?}", other),
@@ -1212,7 +1231,7 @@ x = 42
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Scalar(eq, _) => {
+                Equation::Scalar(eq) => {
                     assert_eq!(eq, "42", "Should use the real equation, not empty");
                 }
                 other => panic!("Expected Scalar equation, got {:?}", other),
@@ -1246,7 +1265,7 @@ x = 42
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Scalar(eq, _) => {
+                Equation::Scalar(eq) => {
                     assert_eq!(eq, "42", "Should use the real equation");
                 }
                 other => panic!("Expected Scalar equation, got {:?}", other),
@@ -1279,7 +1298,7 @@ x = 2
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Scalar(eq, _) => {
+                Equation::Scalar(eq) => {
                     assert_eq!(eq, "1", "First regular equation should win");
                 }
                 other => panic!("Expected Scalar equation, got {:?}", other),
@@ -1522,12 +1541,12 @@ x[a1, DimB] = 5
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Scalar(eq, initial_eq) => {
+                Equation::Scalar(eq) => {
                     assert_eq!(eq, "y * 2", "Equation should be the first argument");
                     assert_eq!(
-                        initial_eq.as_deref(),
+                        a.compat.active_initial.as_deref(),
                         Some("100"),
-                        "Initial equation should be the second argument"
+                        "Initial equation should be in compat.active_initial"
                     );
                 }
                 other => panic!("Expected Scalar equation, got {:?}", other),
@@ -1715,7 +1734,7 @@ x = y * 2
             // Units should come from the real equation, not the AFO placeholder
             assert_eq!(a.units.as_deref(), Some("Widgets"));
             // Verify we also got the correct equation
-            assert!(matches!(&a.equation, Equation::Scalar(eq, _) if eq == "y * 2"));
+            assert!(matches!(&a.equation, Equation::Scalar(eq) if eq == "y * 2"));
         } else {
             panic!("Expected Aux");
         }
@@ -1741,7 +1760,7 @@ x = y * 2
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Scalar(eq, _) => {
+                Equation::Scalar(eq) => {
                     assert_eq!(eq, "0+0", "Empty RHS should produce '0+0'");
                 }
                 other => panic!("Expected Scalar equation, got {:?}", other),
@@ -1773,7 +1792,7 @@ x[DimA] =
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::ApplyToAll(dims, eq, _) => {
+                Equation::ApplyToAll(dims, eq) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(eq, "0+0", "Empty subscripted RHS should produce '0+0'");
                 }
@@ -1829,7 +1848,7 @@ x = y * 2
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Scalar(eq, _) => {
+                Equation::Scalar(eq) => {
                     assert_eq!(eq, "0+0", "Lookup-only variable should have 0+0 equation");
                 }
                 other => panic!("Expected Scalar equation, got {:?}", other),

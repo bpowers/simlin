@@ -471,7 +471,7 @@ mod tests {
         // Add an array variable manually
         model.variables.push(DatamodelVariable::Aux(Aux {
             ident: "array_var".to_string(),
-            equation: Equation::ApplyToAll(vec!["dimension1".to_string()], "10".to_string(), None),
+            equation: Equation::ApplyToAll(vec!["dimension1".to_string()], "10".to_string()),
             documentation: String::new(),
             units: None,
             gf: None,
@@ -479,6 +479,7 @@ mod tests {
             visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         }));
 
         let sim_specs = sim_specs_with_units("years");

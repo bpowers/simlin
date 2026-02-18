@@ -398,7 +398,7 @@ impl<'input> ConversionContext<'input> {
             let rate_str = self
                 .extract_integ_rate(&first_eq.equation)
                 .map(|e| self.formatter.format_expr(e))?;
-            return Some(Equation::Scalar(rate_str, None));
+            return Some(Equation::Scalar(rate_str));
         }
 
         // Arrayed stock - need to build arrayed equation
@@ -1146,14 +1146,14 @@ Stock[DimA] = INTEG(10, 0)
 
         if let Variable::Flow(f) = net_flow {
             match &f.equation {
-                Equation::ApplyToAll(dims, _eq_str, _) => {
+                Equation::ApplyToAll(dims, _eq_str) => {
                     assert_eq!(dims, &["DimA"], "Should have stock's dimensions");
                 }
                 Equation::Arrayed(dims, elements) => {
                     assert_eq!(dims, &["DimA"], "Should have stock's dimensions");
                     assert_eq!(elements.len(), 2, "Should have 2 elements");
                 }
-                Equation::Scalar(_, _) => {
+                Equation::Scalar(_) => {
                     panic!("Should NOT be scalar for arrayed stock")
                 }
             }
@@ -1219,7 +1219,7 @@ rate = 5
 
         if let Variable::Flow(f) = net_flow {
             assert!(
-                matches!(f.equation, Equation::Scalar(_, _)),
+                matches!(f.equation, Equation::Scalar(_)),
                 "Scalar stock should have scalar synthetic flow, got {:?}",
                 f.equation
             );

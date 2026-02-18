@@ -13,7 +13,7 @@ use simlin_engine::Simulation;
 use simlin_engine::Vm;
 use simlin_engine::datamodel::Project;
 use simlin_engine::datamodel::{
-    Aux, Dimension, Dt, Equation, SimMethod, SimSpecs, Variable, Visibility,
+    Aux, Compat, Dimension, Dt, Equation, SimMethod, SimSpecs, Variable, Visibility,
 };
 use std::sync::Arc;
 
@@ -38,11 +38,7 @@ fn create_sum_project(array_size: u32) -> Project {
             variables: vec![
                 Variable::Aux(Aux {
                     ident: "arr".to_string(),
-                    equation: Equation::ApplyToAll(
-                        vec![dim_name.to_string()],
-                        "1.0".to_string(),
-                        None,
-                    ),
+                    equation: Equation::ApplyToAll(vec![dim_name.to_string()], "1.0".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -50,10 +46,11 @@ fn create_sum_project(array_size: u32) -> Project {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: Compat::default(),
                 }),
                 Variable::Aux(Aux {
                     ident: "total".to_string(),
-                    equation: Equation::Scalar("SUM(arr[*])".to_string(), None),
+                    equation: Equation::Scalar("SUM(arr[*])".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -61,6 +58,7 @@ fn create_sum_project(array_size: u32) -> Project {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: Compat::default(),
                 }),
             ],
             views: vec![],
@@ -93,11 +91,7 @@ fn create_elementwise_add_project(array_size: u32) -> Project {
             variables: vec![
                 Variable::Aux(Aux {
                     ident: "a".to_string(),
-                    equation: Equation::ApplyToAll(
-                        vec![dim_name.to_string()],
-                        "1.0".to_string(),
-                        None,
-                    ),
+                    equation: Equation::ApplyToAll(vec![dim_name.to_string()], "1.0".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -105,14 +99,11 @@ fn create_elementwise_add_project(array_size: u32) -> Project {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: Compat::default(),
                 }),
                 Variable::Aux(Aux {
                     ident: "b".to_string(),
-                    equation: Equation::ApplyToAll(
-                        vec![dim_name.to_string()],
-                        "2.0".to_string(),
-                        None,
-                    ),
+                    equation: Equation::ApplyToAll(vec![dim_name.to_string()], "2.0".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -120,13 +111,13 @@ fn create_elementwise_add_project(array_size: u32) -> Project {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: Compat::default(),
                 }),
                 Variable::Aux(Aux {
                     ident: "result".to_string(),
                     equation: Equation::ApplyToAll(
                         vec![dim_name.to_string()],
                         "a[*] + b[*]".to_string(),
-                        None,
                     ),
                     documentation: String::new(),
                     units: None,
@@ -135,6 +126,7 @@ fn create_elementwise_add_project(array_size: u32) -> Project {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: Compat::default(),
                 }),
             ],
             views: vec![],
@@ -174,11 +166,7 @@ fn create_same_array_multi_ref_project(array_size: u32, num_refs: usize) -> Proj
             variables: vec![
                 Variable::Aux(Aux {
                     ident: "a".to_string(),
-                    equation: Equation::ApplyToAll(
-                        vec![dim_name.to_string()],
-                        "1.0".to_string(),
-                        None,
-                    ),
+                    equation: Equation::ApplyToAll(vec![dim_name.to_string()], "1.0".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -186,10 +174,11 @@ fn create_same_array_multi_ref_project(array_size: u32, num_refs: usize) -> Proj
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: Compat::default(),
                 }),
                 Variable::Aux(Aux {
                     ident: "result".to_string(),
-                    equation: Equation::ApplyToAll(vec![dim_name.to_string()], equation, None),
+                    equation: Equation::ApplyToAll(vec![dim_name.to_string()], equation),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -197,6 +186,7 @@ fn create_same_array_multi_ref_project(array_size: u32, num_refs: usize) -> Proj
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: Compat::default(),
                 }),
             ],
             views: vec![],
@@ -232,11 +222,7 @@ fn create_broadcast_project(dim1_size: u32, dim2_size: u32) -> Project {
                 // 1D array on DimA
                 Variable::Aux(Aux {
                     ident: "vec_a".to_string(),
-                    equation: Equation::ApplyToAll(
-                        vec!["DimA".to_string()],
-                        "1.0".to_string(),
-                        None,
-                    ),
+                    equation: Equation::ApplyToAll(vec!["DimA".to_string()], "1.0".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -244,15 +230,12 @@ fn create_broadcast_project(dim1_size: u32, dim2_size: u32) -> Project {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: Compat::default(),
                 }),
                 // 1D array on DimB
                 Variable::Aux(Aux {
                     ident: "vec_b".to_string(),
-                    equation: Equation::ApplyToAll(
-                        vec!["DimB".to_string()],
-                        "2.0".to_string(),
-                        None,
-                    ),
+                    equation: Equation::ApplyToAll(vec!["DimB".to_string()], "2.0".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -260,6 +243,7 @@ fn create_broadcast_project(dim1_size: u32, dim2_size: u32) -> Project {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: Compat::default(),
                 }),
                 // 2D result from broadcasting
                 Variable::Aux(Aux {
@@ -267,7 +251,6 @@ fn create_broadcast_project(dim1_size: u32, dim2_size: u32) -> Project {
                     equation: Equation::ApplyToAll(
                         vec!["DimA".to_string(), "DimB".to_string()],
                         "vec_a[*] + vec_b[*]".to_string(),
-                        None,
                     ),
                     documentation: String::new(),
                     units: None,
@@ -276,6 +259,7 @@ fn create_broadcast_project(dim1_size: u32, dim2_size: u32) -> Project {
                     visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: Compat::default(),
                 }),
             ],
             views: vec![],

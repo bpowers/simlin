@@ -470,7 +470,7 @@ mod tests {
     fn make_scalar_aux_var(name: &str) -> Variable {
         Variable::Aux(AuxVar {
             ident: name.to_string(),
-            equation: Equation::Scalar("0".to_string(), None),
+            equation: Equation::Scalar("0".to_string()),
             documentation: String::new(),
             units: None,
             gf: None,
@@ -478,13 +478,14 @@ mod tests {
             visibility: datamodel::Visibility::Public,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         })
     }
 
     fn make_scalar_stock_var(name: &str) -> Variable {
         Variable::Stock(StockVar {
             ident: name.to_string(),
-            equation: Equation::Scalar("0".to_string(), None),
+            equation: Equation::Scalar("0".to_string()),
             documentation: String::new(),
             units: None,
             inflows: vec![],
@@ -494,13 +495,14 @@ mod tests {
             visibility: datamodel::Visibility::Public,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         })
     }
 
     fn make_scalar_flow_var(name: &str) -> Variable {
         Variable::Flow(FlowVar {
             ident: name.to_string(),
-            equation: Equation::Scalar("0".to_string(), None),
+            equation: Equation::Scalar("0".to_string()),
             documentation: String::new(),
             units: None,
             gf: None,
@@ -509,6 +511,7 @@ mod tests {
             visibility: datamodel::Visibility::Public,
             ai_state: None,
             uid: None,
+            compat: datamodel::Compat::default(),
         })
     }
 

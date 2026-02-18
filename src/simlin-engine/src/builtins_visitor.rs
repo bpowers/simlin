@@ -305,7 +305,7 @@ impl<'a> BuiltinVisitor<'a> {
                         let eqn = print_eqn(&transformed_arg);
                         let x_var = datamodel::Variable::Aux(datamodel::Aux {
                             ident: id.clone(),
-                            equation: datamodel::Equation::Scalar(eqn, None),
+                            equation: datamodel::Equation::Scalar(eqn),
                             documentation: "".to_string(),
                             units: None,
                             gf: None,
@@ -313,6 +313,7 @@ impl<'a> BuiltinVisitor<'a> {
                             visibility: datamodel::Visibility::Private,
                             ai_state: None,
                             uid: None,
+                            compat: datamodel::Compat::default(),
                         });
                         self.vars.insert(Ident::new(&id), x_var);
                         id

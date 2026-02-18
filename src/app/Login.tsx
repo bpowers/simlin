@@ -221,10 +221,7 @@ export class Login extends React.Component<LoginProps, LoginState> {
       switch (this.state.emailLoginFlow) {
         case 'showEmail':
           loginUI = (
-            <Card
-              variant="outlined"
-              className={styles.emailForm}
-            >
+            <Card variant="outlined" className={styles.emailForm}>
               <form onSubmit={this.onNullSubmit}>
                 <CardContent>
                   <h6 className={typography.heading6}>Sign in with email</h6>
@@ -255,10 +252,7 @@ export class Login extends React.Component<LoginProps, LoginState> {
           break;
         case 'showPassword':
           loginUI = (
-            <Card
-              variant="outlined"
-              className={styles.emailForm}
-            >
+            <Card variant="outlined" className={styles.emailForm}>
               <form onSubmit={this.onNullSubmit}>
                 <CardContent>
                   <h6 className={typography.heading6}>Sign in</h6>
@@ -303,10 +297,7 @@ export class Login extends React.Component<LoginProps, LoginState> {
           break;
         case 'showSignup':
           loginUI = (
-            <Card
-              variant="outlined"
-              className={styles.emailForm}
-            >
+            <Card variant="outlined" className={styles.emailForm}>
               <form onSubmit={this.onNullSubmit}>
                 <CardContent>
                   <h6 className={typography.heading6}>Create account</h6>
@@ -360,10 +351,7 @@ export class Login extends React.Component<LoginProps, LoginState> {
         case 'showProviderRedirect':
           const provider = this.state.provider === 'google.com' ? 'Google' : 'Apple';
           loginUI = (
-            <Card
-              variant="outlined"
-              className={styles.emailForm}
-            >
+            <Card variant="outlined" className={styles.emailForm}>
               <form onSubmit={this.onNullSubmit}>
                 <CardContent>
                   <h6 className={typography.heading6}>Sign in - you already have an account</h6>
@@ -388,10 +376,7 @@ export class Login extends React.Component<LoginProps, LoginState> {
           break;
         case 'showRecover':
           loginUI = (
-            <Card
-              variant="outlined"
-              className={styles.emailForm}
-            >
+            <Card variant="outlined" className={styles.emailForm}>
               <form onSubmit={this.onNullSubmit}>
                 <CardContent>
                   <h6 className={typography.heading6}>Recover password</h6>

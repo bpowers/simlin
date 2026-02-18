@@ -106,7 +106,7 @@ fn append_model(s: &mut String, prefix: &str, mut i: i32, sample: i32, model: &M
             s.push_str(prefix);
             s.push_str(&name);
             match var.get_equation() {
-                Some(Equation::Scalar(eqn, ..)) | Some(Equation::ApplyToAll(_, eqn, _)) => {
+                Some(Equation::Scalar(eqn)) | Some(Equation::ApplyToAll(_, eqn)) => {
                     s.push('=');
                     let eqn = escape(eqn);
                     s.push_str(&eqn);
