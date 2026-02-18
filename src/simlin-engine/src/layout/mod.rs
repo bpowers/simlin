@@ -1006,9 +1006,12 @@ impl<'a> LayoutEngine<'a> {
                     continue;
                 };
 
+                // Graph edges follow dep_graph direction (stock → flow for
+                // structural deps). Skip these since they're rendered as
+                // pipes, not connectors.
                 if let (Some(from_ident), Some(to_ident)) =
                     (node_to_ident.get(&edge.from), node_to_ident.get(&edge.to))
-                    && is_structural_flow_stock(
+                    && is_structural_stock_flow(
                         from_ident,
                         to_ident,
                         &stock_inflows,
@@ -2893,6 +2896,74 @@ mod tests {
             &all_flows,
         );
         assert_eq!(chains.len(), 2);
+    }
+
+    #[test]
+    fn test_is_structural_stock_flow_matches_dep_graph_direction() {
+        // dep_graph stores stock -> flow (stock depends on its inflows/outflows).
+        // is_structural_stock_flow(from=stock, to=flow) should return true.
+        let stock_inflows: HashMap<String, HashSet<String>> =
+            HashMap::from([("population".into(), HashSet::from(["births".into()]))]);
+        let stock_outflows: HashMap<String, HashSet<String>> =
+            HashMap::from([("population".into(), HashSet::from(["deaths".into()]))]);
+
+        assert!(is_structural_stock_flow(
+            "population",
+            "births",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+        assert!(is_structural_stock_flow(
+            "population",
+            "deaths",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+        // Reversed direction should NOT match
+        assert!(!is_structural_stock_flow(
+            "births",
+            "population",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+        // Unrelated pair should not match
+        assert!(!is_structural_stock_flow(
+            "birth_rate",
+            "births",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+    }
+
+    #[test]
+    fn test_is_structural_flow_stock_matches_connector_direction() {
+        // Connectors render as dependency -> dependent. For structural
+        // stock-flow deps, the connector goes from flow -> stock.
+        // is_structural_flow_stock(from=flow, to=stock) should return true.
+        let stock_inflows: HashMap<String, HashSet<String>> =
+            HashMap::from([("population".into(), HashSet::from(["births".into()]))]);
+        let stock_outflows: HashMap<String, HashSet<String>> =
+            HashMap::from([("population".into(), HashSet::from(["deaths".into()]))]);
+
+        assert!(is_structural_flow_stock(
+            "births",
+            "population",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+        assert!(is_structural_flow_stock(
+            "deaths",
+            "population",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+        // Reversed direction should NOT match
+        assert!(!is_structural_flow_stock(
+            "population",
+            "births",
+            &stock_inflows,
+            &stock_outflows,
+        ));
     }
 
     #[test]
