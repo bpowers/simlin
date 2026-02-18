@@ -1050,7 +1050,8 @@ impl<'a> LayoutEngine<'a> {
         // Interleaved annealing state
         let mut annealing_round: usize = 0;
         let mut last_annealing_iter: usize = 0;
-        let mut prev_crossings: usize = usize::MAX;
+        let mut best_crossings: usize = usize::MAX;
+        let mut best_layout: Option<Layout<String>> = None;
 
         let final_layout = compute_layout_from_initial_with_callback(
             &constrained_graph,
@@ -1087,14 +1088,24 @@ impl<'a> LayoutEngine<'a> {
                 last_annealing_iter = iter;
                 annealing_round += 1;
 
-                if result.crossings >= prev_crossings {
-                    None
-                } else {
-                    prev_crossings = result.crossings;
+                if result.crossings < best_crossings {
+                    best_crossings = result.crossings;
+                    best_layout = Some(result.layout.clone());
                     Some(result.layout)
+                } else {
+                    None
                 }
             },
         );
+
+        // If SFDP drifted after a good annealing round, the final layout
+        // may be worse than the best we found. Compare and keep the better one.
+        if let Some(saved) = best_layout {
+            let final_crossings = annealing::count_crossings(&build_segments(&final_layout));
+            if final_crossings > best_crossings {
+                return Ok(saved);
+            }
+        }
 
         Ok(final_layout)
     }
@@ -2063,6 +2074,14 @@ pub fn compute_metadata(
         } else {
             extract_equation_deps(var, &all_idents)
         };
+
+        // Filter to only include deps that are actual rendered model
+        // variables. AST extraction can yield module-internal identifiers
+        // (e.g. "m·out") that don't correspond to any rendered element.
+        let deps: Vec<String> = deps
+            .into_iter()
+            .filter(|d| all_idents.contains(d))
+            .collect();
 
         if deps.is_empty() && !matches!(var, datamodel::Variable::Stock(_)) {
             constants.insert(var_ident.clone());
@@ -3866,6 +3885,74 @@ mod tests {
         assert!(
             !metadata.constants.contains("births"),
             "births should not be classified as a constant",
+        );
+    }
+
+    #[test]
+    fn test_compute_metadata_excludes_non_model_deps() {
+        // Equation text that mentions an identifier not in the model
+        // (simulating a module output reference like "m·out" that
+        // resolve_non_private_dependencies might pass through).
+        // The dep graph should only contain identifiers for actual
+        // rendered model variables.
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "x".to_string(),
+                    equation: datamodel::Equation::Scalar("phantom + 1".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "y".to_string(),
+                    equation: datamodel::Equation::Scalar("x * 2".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let project = test_project(model);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+
+        // "phantom" is not a model variable so should not appear in the dep graph
+        let all_graph_nodes: BTreeSet<&String> = metadata
+            .dep_graph
+            .keys()
+            .chain(metadata.dep_graph.values().flat_map(|deps| deps.iter()))
+            .collect();
+        assert!(
+            !all_graph_nodes.contains(&"phantom".to_string()),
+            "dep graph should not contain non-model identifiers, got: {:?}",
+            all_graph_nodes,
+        );
+
+        // y should still depend on x (a real model variable)
+        let y_deps = metadata.dep_graph.get("y").unwrap();
+        assert!(
+            y_deps.contains("x"),
+            "y should depend on x, got: {:?}",
+            y_deps,
+        );
+
+        // x should be a constant since its only dep (phantom) was filtered
+        assert!(
+            metadata.constants.contains("x"),
+            "x should be a constant after filtering non-model deps",
         );
     }
 }
