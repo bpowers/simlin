@@ -3,7 +3,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 
 import { Project as EngineProject } from '@simlin/engine';
-import { Project } from '@simlin/core/datamodel';
+import { projectFromJson } from '@simlin/core/datamodel';
 import { renderSvgToString } from '@simlin/diagram/render-common';
 
 // Compute the WASM path relative to the engine package
@@ -18,8 +18,8 @@ let contents = readFileSync(args[0], 'utf-8');
 const engineProject = inputFile.endsWith('.mdl')
   ? await EngineProject.openVensim(contents, { wasm: wasmPath })
   : await EngineProject.open(contents, { wasm: wasmPath });
-const pb = engineProject.serializeProtobuf();
-const project = Project.deserializeBinary(pb);
+const json = await engineProject.serializeJson();
+const project = projectFromJson(JSON.parse(json));
 
 
 const [ svgString ] = renderSvgToString(project, 'main');

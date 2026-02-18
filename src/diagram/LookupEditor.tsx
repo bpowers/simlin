@@ -4,13 +4,12 @@
 
 import * as React from 'react';
 
-import { List } from 'immutable';
 import Button from './components/Button';
 import TextField from './components/TextField';
 
 import { defined } from '@simlin/core/common';
 import { at } from '@simlin/core/collections';
-import { Variable, GraphicalFunction, GraphicalFunctionScale, GraphicalFunctionKind } from '@simlin/core/datamodel';
+import { Variable, GraphicalFunction, GraphicalFunctionKind, variableGf } from '@simlin/core/datamodel';
 
 import { LineChart } from './LineChart';
 
@@ -34,13 +33,13 @@ function tableFrom(gf: GraphicalFunction): GFTable | undefined {
   if (!gf.yPoints) {
     return undefined;
   }
-  const ypts: List<number> = gf.yPoints;
+  const ypts: readonly number[] = gf.yPoints;
 
-  const size = gf.yPoints.size;
+  const size = gf.yPoints.length;
   const xList = new Float64Array(size);
   const yList = new Float64Array(size);
 
-  for (let i = 0; i < ypts.size; i++) {
+  for (let i = 0; i < ypts.length; i++) {
     // either the x points have been explicitly specified, or
     // it is a linear mapping of points between xmin and xmax,
     // inclusive
@@ -133,13 +132,13 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
 
   getVariableGF(): GraphicalFunction {
     const { variable } = this.props;
-    let gf = defined(variable.gf);
+    let gf = defined(variableGf(variable));
 
     // ensure yScale always exists
     if (!gf.yScale) {
       let min = 0;
       let max = 0;
-      for (let i = 0; i < gf.yPoints.size; i++) {
+      for (let i = 0; i < gf.yPoints.length; i++) {
         const y = at(gf.yPoints, i);
         if (y < min) {
           min = y;
@@ -151,7 +150,7 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
       min = Math.floor(min);
       max = Math.ceil(max);
 
-      gf = gf.set('yScale', new GraphicalFunctionScale({ min, max }));
+      gf = { ...gf, yScale: { min, max } };
     }
 
     return gf;
@@ -186,13 +185,7 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
     const { yMax } = this.state;
     if (value < yMax) {
       this.setState({
-        gf: this.state.gf.set(
-          'yScale',
-          new GraphicalFunctionScale({
-            min: value,
-            max: yMax,
-          }),
-        ),
+        gf: { ...this.state.gf, yScale: { min: value, max: yMax } },
       });
     }
   };
@@ -207,13 +200,7 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
     const { yMin } = this.state;
     if (yMin < value) {
       this.setState({
-        gf: this.state.gf.set(
-          'yScale',
-          new GraphicalFunctionScale({
-            min: yMin,
-            max: value,
-          }),
-        ),
+        gf: { ...this.state.gf, yScale: { min: yMin, max: value } },
       });
     }
   };
@@ -244,7 +231,7 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
     const value = Number(event.target.value);
     const { table } = this.state;
     const xScale = defined(this.state.gf.xScale);
-    const gf = this.state.gf.set('xScale', xScale.set('min', value));
+    const gf: GraphicalFunction = { ...this.state.gf, xScale: { ...xScale, min: value } };
 
     const newTable = LookupEditor.rescaleX(gf, table);
 
@@ -259,7 +246,7 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
     const value = Number(event.target.value);
     const { table } = this.state;
     const xScale = defined(this.state.gf.xScale);
-    const gf = this.state.gf.set('xScale', xScale.set('max', value));
+    const gf: GraphicalFunction = { ...this.state.gf, xScale: { ...xScale, max: value } };
 
     const newTable = LookupEditor.rescaleX(gf, table);
 
@@ -327,8 +314,8 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
 
   handleLookupSave = (): void => {
     const { gf, table } = this.state;
-    const yPoints = table.y.reduce((pts: List<number>, curr: number) => pts.push(curr), List());
-    this.props.onLookupChange(defined(this.props.variable.ident), gf.set('yPoints', yPoints));
+    const yPoints = Array.from(table.y);
+    this.props.onLookupChange(defined(this.props.variable.ident), { ...gf, yPoints });
     this.setState({ hasChange: false });
   };
 

@@ -7,7 +7,7 @@ import * as path from 'path';
 
 import { Project as EngineProject } from '@simlin/engine';
 import { JsonProject } from '@simlin/engine';
-import { Project as DmProject } from '@simlin/core/datamodel';
+import { projectFromJson } from '@simlin/core/datamodel';
 import { renderSvgToString } from '@simlin/diagram/render-common';
 import { renderToPNG } from '../render-inner';
 
@@ -34,7 +34,7 @@ async function generatePreview(
   // Step 2: Load from protobuf and serialize to JSON (same as render.ts)
   const engineProject = await EngineProject.openProtobuf(protobuf);
   const json = JSON.parse(await engineProject.serializeJson()) as JsonProject;
-  const project = DmProject.fromJson(json);
+  const project = projectFromJson(json);
   await engineProject.dispose();
 
   // Step 3: Render to SVG

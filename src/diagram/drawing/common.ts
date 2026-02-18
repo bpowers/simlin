@@ -2,7 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { List } from 'immutable';
 import { Node, Descendant } from 'slate';
 
 import { CustomText, CustomElement } from './SlateEditor';
@@ -51,8 +50,8 @@ export function mergeBounds(a: Rect, b: Rect): Rect {
   };
 }
 
-export function calcViewBox(elements: List<Rect | undefined>): Rect | undefined {
-  if (elements.size === 0) {
+export function calcViewBox(elements: readonly (Rect | undefined)[]): Rect | undefined {
+  if (elements.length === 0) {
     return undefined;
   }
 
@@ -63,7 +62,7 @@ export function calcViewBox(elements: List<Rect | undefined>): Rect | undefined 
     bottom: -Infinity,
   };
 
-  const bounds: Rect = elements.reduce((view, box) => {
+  const bounds: Rect = elements.reduce<Rect>((view, box) => {
     if (box === undefined) {
       return view;
     }

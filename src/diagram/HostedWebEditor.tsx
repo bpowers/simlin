@@ -4,7 +4,6 @@
 
 import * as React from 'react';
 
-import { List } from 'immutable';
 import { fromUint8Array, toUint8Array } from 'js-base64';
 
 import { baseURL, defined } from '@simlin/core/common';
@@ -31,7 +30,7 @@ interface HostedWebEditorProps {
 }
 
 interface HostedWebEditorState {
-  serviceErrors: List<Error>;
+  serviceErrors: readonly Error[];
   projectBinary: Readonly<Uint8Array> | undefined;
   projectVersion: number;
 }
@@ -41,7 +40,7 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
     super(props);
 
     this.state = {
-      serviceErrors: List<Error>(),
+      serviceErrors: [],
       projectBinary: undefined,
       projectVersion: -1,
     };
@@ -53,7 +52,7 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
 
   appendModelError(msg: string) {
     this.setState({
-      serviceErrors: this.state.serviceErrors.push(new HostedWebEditorError(msg)),
+      serviceErrors: [...this.state.serviceErrors, new HostedWebEditorError(msg)],
     });
   }
 
@@ -121,7 +120,7 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
     const { embedded } = this.props;
 
     if (!this.state.projectBinary || !this.state.projectVersion) {
-      if (!this.state.serviceErrors.isEmpty()) {
+      if (this.state.serviceErrors.length > 0) {
         return <div>{first(this.state.serviceErrors).message}</div>;
       } else {
         return <div />;

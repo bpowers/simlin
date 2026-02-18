@@ -4,7 +4,6 @@
 
 import * as React from 'react';
 
-import { List } from 'immutable';
 import { LineChart, ChartSeries } from './LineChart';
 import { createEditor, Descendant, Text, Transforms } from 'slate';
 import { withHistory } from 'slate-history';
@@ -15,15 +14,12 @@ import katex from 'katex';
 import { Dark2 } from './colors';
 
 import {
-  StockViewElement,
   ViewElement,
   Variable,
   GraphicalFunction,
-  GraphicalFunctionScale,
-  ApplyToAllEquation,
-  ScalarEquation,
   EquationError,
   UnitError,
+  variableGf,
 } from '@simlin/core/datamodel';
 
 import { defined, Series } from '@simlin/core/common';
@@ -72,9 +68,10 @@ function descendantsFromString(equation: string): CustomElement[] {
 }
 
 function scalarEquationFor(variable: Variable): string {
-  if (variable.equation instanceof ScalarEquation) {
+  if (variable.type === 'module') return '';
+  if (variable.equation.type === 'scalar') {
     return variable.equation.equation;
-  } else if (variable.equation instanceof ApplyToAllEquation) {
+  } else if (variable.equation.type === 'applyToAll') {
     return '{apply-to-all:}\n' + variable.equation.equation;
   } else {
     return "{ TODO: arrayed variable editing isn't supported yet}";
@@ -83,12 +80,12 @@ function scalarEquationFor(variable: Variable): string {
 
 function highlightErrors(
   s: string,
-  errors: List<EquationError> | undefined,
-  unitErrors: List<UnitError> | undefined,
+  errors: readonly EquationError[] | undefined,
+  unitErrors: readonly UnitError[] | undefined,
   isUnits: boolean,
 ): CustomElement[] {
   const result = descendantsFromString(s);
-  if (!isUnits && errors && errors.size > 0) {
+  if (!isUnits && errors && errors.length > 0) {
     const err = at(errors, 0);
     console.log(err);
     if (err.end > 0) {
@@ -101,7 +98,7 @@ function highlightErrors(
 
       defined(result[0]).children = [{ text: beforeText }, { text: errText, error: true }, { text: afterText }];
     }
-  } else if (unitErrors && unitErrors.size > 0) {
+  } else if (unitErrors && unitErrors.length > 0) {
     for (const err of unitErrors) {
       if (isUnits === err.isConsistencyError) {
         continue;
@@ -151,7 +148,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
       unitsContents: units,
       notesEditor: withHistory(withReact(createEditor())) as unknown as CustomEditor,
       notesContents: descendantsFromString(props.variable.documentation),
-      editingEquation: !!(props.variable.errors && props.variable.errors.size > 0),
+      editingEquation: !!(props.variable.errors && props.variable.errors.length > 0),
       latexEquation: undefined,
       latexLoading: false,
     };
@@ -243,13 +240,13 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
 
   handleAddLookupTable = (): void => {
     const ident = defined(this.props.viewElement.ident);
-    const gf = new GraphicalFunction({
+    const gf: GraphicalFunction = {
       kind: 'continuous',
-      xScale: new GraphicalFunctionScale({ min: 0, max: 1 }),
-      yScale: new GraphicalFunctionScale({ min: 0, max: 1 }),
+      xScale: { min: 0, max: 1 },
+      yScale: { min: 0, max: 1 },
       xPoints: undefined,
-      yPoints: List([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
-    });
+      yPoints: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+    };
     this.props.onTableChange(ident, gf);
   };
 
@@ -819,7 +816,7 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     const { variable } = this.props;
 
     let table;
-    if (variable.gf) {
+    if (variableGf(variable)) {
       table = <LookupEditor variable={variable} onLookupChange={this.handleLookupChange} />;
     } else {
       table = (
@@ -847,9 +844,9 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
   render() {
     const { activeTab, viewElement } = this.props;
 
-    const equationType = viewElement instanceof StockViewElement ? 'Initial Value' : 'Equation';
+    const equationType = viewElement.type === 'stock' ? 'Initial Value' : 'Equation';
     const content = activeTab === 0 ? this.renderEquation() : this.renderLookup();
-    const lookupTab = viewElement instanceof StockViewElement ? undefined : <Tab label="Lookup Function" />;
+    const lookupTab = viewElement.type === 'stock' ? undefined : <Tab label="Lookup Function" />;
 
     return (
       <div className={styles.card}>

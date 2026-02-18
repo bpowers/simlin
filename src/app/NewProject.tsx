@@ -20,7 +20,7 @@ import {
 
 import { Project } from './Project';
 import { User } from './User';
-import { Project as ProjectDM } from '@simlin/core/datamodel';
+import { projectFromJson } from '@simlin/core/datamodel';
 import { Project as EngineProject } from '@simlin/engine';
 import type { JsonProject } from '@simlin/engine';
 
@@ -156,9 +156,9 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
 
       const projectPB = await engineProject.serializeProtobuf();
       const json = JSON.parse(await engineProject.serializeJson()) as JsonProject;
-      const activeProject = ProjectDM.fromJson(json);
+      const activeProject = projectFromJson(json);
       const views = activeProject.models.get('main')?.views;
-      if (!views || views.isEmpty()) {
+      if (!views || views.length === 0) {
         this.setState({
           errorMsg: `can't import model with no view at this time.`,
         });

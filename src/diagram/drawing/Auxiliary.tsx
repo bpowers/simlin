@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import clsx from 'clsx';
 
-import { AuxViewElement, ViewElement } from '@simlin/core/datamodel';
+import { AuxViewElement, ViewElement, variableIsArrayed } from '@simlin/core/datamodel';
 import { defined, Series } from '@simlin/core/common';
 
 import { displayName, mergeBounds, Point, Rect, square } from './common';
@@ -28,15 +28,15 @@ export interface AuxProps {
 }
 
 export function auxContains(element: ViewElement, point: Point): boolean {
-  const cx = element.cx;
-  const cy = element.cy;
+  const cx = element.x;
+  const cy = element.y;
 
   const distance = Math.sqrt(square(point.x - cx) + square(point.y - cy));
   return distance <= AuxRadius;
 }
 
 export function auxBounds(element: AuxViewElement): Rect {
-  const { cx, cy } = element;
+  const { x: cx, y: cy } = element;
   const r = AuxRadius;
 
   const bounds = {
@@ -83,8 +83,8 @@ export class Aux extends React.PureComponent<AuxProps> {
     const r = this.radius();
     const θ = -Math.PI / 4; // 45 degrees
 
-    const cx = element.cx + r * Math.cos(θ);
-    const cy = element.cy + r * Math.sin(θ);
+    const cx = element.x + r * Math.cos(θ);
+    const cy = element.y + r * Math.sin(θ);
 
     return <circle className={styles.errorIndicator} cx={cx} cy={cy} r={3} />;
   }
@@ -94,10 +94,10 @@ export class Aux extends React.PureComponent<AuxProps> {
       return undefined;
     }
     const { element } = this.props;
-    const isArrayed = element.var?.isArrayed || false;
+    const isArrayed = (element.var && variableIsArrayed(element.var)) || false;
     const arrayedOffset = isArrayed ? 3 : 0;
-    const cx = element.cx - arrayedOffset;
-    const cy = element.cy - arrayedOffset;
+    const cx = element.x - arrayedOffset;
+    const cy = element.y - arrayedOffset;
     const r = this.radius();
 
     return (
@@ -109,11 +109,11 @@ export class Aux extends React.PureComponent<AuxProps> {
 
   render() {
     const { element, isEditingName, isSelected, isValidTarget, series } = this.props;
-    const cx = element.cx;
-    const cy = element.cy;
+    const cx = element.x;
+    const cy = element.y;
     const r = this.radius();
 
-    const isArrayed = element.var?.isArrayed || false;
+    const isArrayed = (element.var && variableIsArrayed(element.var)) || false;
     const arrayedOffset = isArrayed ? 3 : 0;
 
     const side = element.labelSide;

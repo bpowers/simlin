@@ -2,10 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { List, Set, Map } from 'immutable';
-
 import {
-  Point,
   FlowViewElement,
   StockViewElement,
   CloudViewElement,
@@ -16,8 +13,6 @@ import {
   GroupViewElement,
   ViewElement,
   UID,
-  Aux,
-  ApplyToAllEquation,
 } from '@simlin/core/datamodel';
 
 import { StockWidth } from '../drawing/Stock';
@@ -31,7 +26,8 @@ function makeStock(
   inflows: number[] = [],
   outflows: number[] = [],
 ): StockViewElement {
-  return new StockViewElement({
+  return {
+    type: 'stock',
     uid,
     name: `Stock${uid}`,
     ident: `stock_${uid}`,
@@ -40,9 +36,9 @@ function makeStock(
     y,
     labelSide: 'center',
     isZeroRadius: false,
-    inflows: List(inflows),
-    outflows: List(outflows),
-  });
+    inflows,
+    outflows,
+  };
 }
 
 function makeFlow(
@@ -51,7 +47,8 @@ function makeFlow(
   y: number,
   points: Array<{ x: number; y: number; attachedToUid?: number }>,
 ): FlowViewElement {
-  return new FlowViewElement({
+  return {
+    type: 'flow',
     uid,
     name: `Flow${uid}`,
     ident: `flow_${uid}`,
@@ -59,29 +56,33 @@ function makeFlow(
     x,
     y,
     labelSide: 'center',
-    points: List(points.map((p) => new Point({ x: p.x, y: p.y, attachedToUid: p.attachedToUid }))),
+    points: points.map((p) => ({ x: p.x, y: p.y, attachedToUid: p.attachedToUid })),
     isZeroRadius: false,
-  });
+  };
 }
 
 function makeCloud(uid: number, flowUid: number, x: number, y: number): CloudViewElement {
-  return new CloudViewElement({
+  return {
+    type: 'cloud',
     uid,
     flowUid,
     x,
     y,
     isZeroRadius: false,
-  });
+    ident: undefined,
+  };
 }
 
 function makeAux(uid: number, x: number, y: number, isArrayed = false): AuxViewElement {
   const auxVar = isArrayed
-    ? new Aux({
+    ? {
+        type: 'aux' as const,
         ident: `aux_${uid}`,
-        equation: new ApplyToAllEquation({
-          dimensionNames: List(['dim1']),
+        equation: {
+          type: 'applyToAll' as const,
+          dimensionNames: ['dim1'],
           equation: '1',
-        }),
+        },
         documentation: '',
         units: '',
         gf: undefined,
@@ -89,9 +90,10 @@ function makeAux(uid: number, x: number, y: number, isArrayed = false): AuxViewE
         errors: undefined,
         unitErrors: undefined,
         uid: undefined,
-      })
+      }
     : undefined;
-  return new AuxViewElement({
+  return {
+    type: 'aux',
     uid,
     name: `Aux${uid}`,
     ident: `aux_${uid}`,
@@ -100,21 +102,29 @@ function makeAux(uid: number, x: number, y: number, isArrayed = false): AuxViewE
     y,
     labelSide: 'center',
     isZeroRadius: false,
-  });
+  };
 }
 
 function makeLink(uid: number, fromUid: number, toUid: number, arc: number = 0): LinkViewElement {
-  return new LinkViewElement({
+  return {
+    type: 'link',
     uid,
     fromUid,
     toUid,
     arc,
+    isStraight: false,
     multiPoint: undefined,
-  });
+    polarity: undefined,
+    x: 0,
+    y: 0,
+    isZeroRadius: false,
+    ident: undefined,
+  };
 }
 
 function makeModule(uid: number, x: number, y: number): ModuleViewElement {
-  return new ModuleViewElement({
+  return {
+    type: 'module',
     uid,
     name: `Module${uid}`,
     ident: `module_${uid}`,
@@ -123,22 +133,25 @@ function makeModule(uid: number, x: number, y: number): ModuleViewElement {
     y,
     labelSide: 'center',
     isZeroRadius: false,
-  });
+  };
 }
 
 function makeAlias(uid: number, aliasOfUid: number, x: number, y: number): AliasViewElement {
-  return new AliasViewElement({
+  return {
+    type: 'alias',
     uid,
     aliasOfUid,
     x,
     y,
     labelSide: 'center',
     isZeroRadius: false,
-  });
+    ident: undefined,
+  };
 }
 
 function makeGroup(uid: number, x: number, y: number, width: number = 100, height: number = 80): GroupViewElement {
-  return new GroupViewElement({
+  return {
+    type: 'group',
     uid,
     name: `Group${uid}`,
     x,
@@ -146,7 +159,8 @@ function makeGroup(uid: number, x: number, y: number, width: number = 100, heigh
     width,
     height,
     isZeroRadius: false,
-  });
+    ident: undefined,
+  };
 }
 
 interface Point2D {
@@ -173,7 +187,11 @@ function testApplyGroupMovement(
   });
 
   // Merge updates back into the original elements map
-  return elements.merge(updatedElements);
+  const result = new Map(elements);
+  for (const [uid, el] of updatedElements) {
+    result.set(uid, el);
+  }
+  return result;
 }
 
 describe('Group Movement', () => {
@@ -187,34 +205,34 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, stockB);
+      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, stockB]]);
 
-      const selection = Set<UID>([1, 2, 3]);
+      const selection = new Set<UID>([1, 2, 3]);
       const delta = { x: -50, y: -30 }; // Move right 50, down 30
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Stock A should move
       const newStockA = result.get(1) as StockViewElement;
-      expect(newStockA.cx).toBe(150); // 100 + 50
-      expect(newStockA.cy).toBe(130); // 100 + 30
+      expect(newStockA.x).toBe(150); // 100 + 50
+      expect(newStockA.y).toBe(130); // 100 + 30
 
       // Stock B should move
       const newStockB = result.get(3) as StockViewElement;
-      expect(newStockB.cx).toBe(250); // 200 + 50
-      expect(newStockB.cy).toBe(130); // 100 + 30
+      expect(newStockB.x).toBe(250); // 200 + 50
+      expect(newStockB.y).toBe(130); // 100 + 30
 
       // Flow valve should move
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.cx).toBe(200); // 150 + 50
-      expect(newFlow.cy).toBe(130); // 100 + 30
+      expect(newFlow.x).toBe(200); // 150 + 50
+      expect(newFlow.y).toBe(130); // 100 + 30
 
       // Flow endpoints should move too
       const newPoints = newFlow.points;
-      expect(newPoints.first()!.x).toBe(100 + StockWidth / 2 + 50);
-      expect(newPoints.first()!.y).toBe(130);
-      expect(newPoints.last()!.x).toBe(200 - StockWidth / 2 + 50);
-      expect(newPoints.last()!.y).toBe(130);
+      expect(newPoints[0].x).toBe(100 + StockWidth / 2 + 50);
+      expect(newPoints[0].y).toBe(130);
+      expect(newPoints[newPoints.length - 1].x).toBe(200 - StockWidth / 2 + 50);
+      expect(newPoints[newPoints.length - 1].y).toBe(130);
     });
 
     it('should preserve relative positions in a longer chain', () => {
@@ -231,21 +249,21 @@ describe('Group Movement', () => {
         { x: 300 - StockWidth / 2, y: 100, attachedToUid: 5 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow1).set(3, stockB).set(4, flow2).set(5, stockC);
+      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow1], [3, stockB], [4, flow2], [5, stockC]]);
 
-      const selection = Set<UID>([1, 2, 3, 4, 5]);
+      const selection = new Set<UID>([1, 2, 3, 4, 5]);
       const delta = { x: -100, y: 0 }; // Move right 100
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // All stocks should move by same amount
-      expect((result.get(1) as StockViewElement).cx).toBe(200);
-      expect((result.get(3) as StockViewElement).cx).toBe(300);
-      expect((result.get(5) as StockViewElement).cx).toBe(400);
+      expect((result.get(1) as StockViewElement).x).toBe(200);
+      expect((result.get(3) as StockViewElement).x).toBe(300);
+      expect((result.get(5) as StockViewElement).x).toBe(400);
 
       // All flows should move by same amount
-      expect((result.get(2) as FlowViewElement).cx).toBe(250);
-      expect((result.get(4) as FlowViewElement).cx).toBe(350);
+      expect((result.get(2) as FlowViewElement).x).toBe(250);
+      expect((result.get(4) as FlowViewElement).x).toBe(350);
     });
   });
 
@@ -259,29 +277,29 @@ describe('Group Movement', () => {
         { x: 200, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, cloud);
+      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, cloud]]);
 
       // Only select the stock, not the flow
-      const selection = Set<UID>([1]);
+      const selection = new Set<UID>([1]);
       const delta = { x: -50, y: 0 }; // Move stock right 50
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Stock should move
       const newStock = result.get(1) as StockViewElement;
-      expect(newStock.cx).toBe(150);
+      expect(newStock.x).toBe(150);
 
       // Flow should be adjusted (routed from new stock position to fixed cloud)
       const newFlow = result.get(2) as FlowViewElement;
       // The source point should be updated to connect to new stock position
-      expect(newFlow.points.first()!.attachedToUid).toBe(1);
+      expect(newFlow.points[0].attachedToUid).toBe(1);
       // IMPORTANT: Verify the source point x-coordinate is at the NEW stock edge
       // (not double-moved). Stock moved from 100 to 150, so source point should
       // be at 150 + StockWidth/2.
-      expect(newFlow.points.first()!.x).toBe(150 + StockWidth / 2);
+      expect(newFlow.points[0].x).toBe(150 + StockWidth / 2);
       // The sink point should still be at cloud
-      expect(newFlow.points.last()!.attachedToUid).toBe(3);
-      expect(newFlow.points.last()!.x).toBe(200);
+      expect(newFlow.points[newFlow.points.length - 1].attachedToUid).toBe(3);
+      expect(newFlow.points[newFlow.points.length - 1].x).toBe(200);
     });
   });
 
@@ -327,27 +345,28 @@ describe('Group Movement', () => {
         { x: 400, y: 120, attachedToUid: 41 },
       ]);
 
-      let elements = Map<UID, ViewElement>()
-        .set(1, stockA)
-        .set(2, stockB)
-        .set(10, flowA1)
-        .set(11, flowA2)
-        .set(20, flowB1)
-        .set(21, flowB2)
-        .set(30, cloudA1)
-        .set(31, cloudA2)
-        .set(40, cloudB1)
-        .set(41, cloudB2);
+      const elements = new Map<UID, ViewElement>([
+        [1, stockA],
+        [2, stockB],
+        [10, flowA1],
+        [11, flowA2],
+        [20, flowB1],
+        [21, flowB2],
+        [30, cloudA1],
+        [31, cloudA2],
+        [40, cloudB1],
+        [41, cloudB2],
+      ]);
 
       // Select both stocks (not the flows or clouds)
-      const selection = Set<UID>([1, 2]);
+      const selection = new Set<UID>([1, 2]);
       const delta = { x: -50, y: 0 }; // Move stocks right by 50
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Both stocks should move
-      expect((result.get(1) as StockViewElement).cx).toBe(150);
-      expect((result.get(2) as StockViewElement).cx).toBe(350);
+      expect((result.get(1) as StockViewElement).x).toBe(150);
+      expect((result.get(2) as StockViewElement).x).toBe(350);
 
       // All four flows should be routed and have DIFFERENT y-coordinates on their stock edges.
       // This verifies that offsets were computed correctly for both stocks.
@@ -355,15 +374,15 @@ describe('Group Movement', () => {
       // Stock A's flows should have different y-coordinates at the stock edge
       const newFlowA1 = result.get(10) as FlowViewElement;
       const newFlowA2 = result.get(11) as FlowViewElement;
-      const flowA1SourceY = newFlowA1.points.first()!.y;
-      const flowA2SourceY = newFlowA2.points.first()!.y;
+      const flowA1SourceY = newFlowA1.points[0].y;
+      const flowA2SourceY = newFlowA2.points[0].y;
       expect(flowA1SourceY).not.toBe(flowA2SourceY);
 
       // Stock B's flows should have different y-coordinates at the stock edge
       const newFlowB1 = result.get(20) as FlowViewElement;
       const newFlowB2 = result.get(21) as FlowViewElement;
-      const flowB1SourceY = newFlowB1.points.first()!.y;
-      const flowB2SourceY = newFlowB2.points.first()!.y;
+      const flowB1SourceY = newFlowB1.points[0].y;
+      const flowB2SourceY = newFlowB2.points[0].y;
       // This assertion will FAIL if the iterator bug exists, because Stock B's
       // flows won't have proper offsets computed (inner loop consumed iterator)
       expect(flowB1SourceY).not.toBe(flowB2SourceY);
@@ -395,11 +414,11 @@ describe('Group Movement', () => {
         { x: 200, y: 150, attachedToUid: 5 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow1).set(3, flow2).set(4, stockB).set(5, cloud);
+      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow1], [3, flow2], [4, stockB], [5, cloud]]);
 
       // Select Stock A and Stock B (so Flow 1 has both endpoints selected)
       // Don't select the cloud (so Flow 2 has only one endpoint selected)
-      const selection = Set<UID>([1, 4]);
+      const selection = new Set<UID>([1, 4]);
       const delta = { x: -50, y: 0 }; // Move stocks right 50
 
       const result = testApplyGroupMovement(elements, selection, delta);
@@ -407,23 +426,23 @@ describe('Group Movement', () => {
       // Both stocks should move
       const newStockA = result.get(1) as StockViewElement;
       const newStockB = result.get(4) as StockViewElement;
-      expect(newStockA.cx).toBe(150);
-      expect(newStockB.cx).toBe(250);
+      expect(newStockA.x).toBe(150);
+      expect(newStockB.x).toBe(250);
 
       // Flow 1 should translate uniformly (both endpoints moved)
       const newFlow1 = result.get(2) as FlowViewElement;
-      expect(newFlow1.points.first()!.x).toBe(150 + StockWidth / 2);
-      expect(newFlow1.points.last()!.x).toBe(250 - StockWidth / 2);
+      expect(newFlow1.points[0].x).toBe(150 + StockWidth / 2);
+      expect(newFlow1.points[newFlow1.points.length - 1].x).toBe(250 - StockWidth / 2);
 
       // Flow 2 should be routed (one endpoint moved, one fixed)
       const newFlow2 = result.get(3) as FlowViewElement;
-      expect(newFlow2.points.first()!.x).toBe(150 + StockWidth / 2); // at new stock position
-      expect(newFlow2.points.last()!.x).toBe(200); // cloud unchanged
+      expect(newFlow2.points[0].x).toBe(150 + StockWidth / 2); // at new stock position
+      expect(newFlow2.points[newFlow2.points.length - 1].x).toBe(200); // cloud unchanged
 
       // Both flows should have different y-coordinates on Stock A's edge
       // (i.e., they should not overlap)
-      const flow1SourceY = newFlow1.points.first()!.y;
-      const flow2SourceY = newFlow2.points.first()!.y;
+      const flow1SourceY = newFlow1.points[0].y;
+      const flow2SourceY = newFlow2.points[0].y;
       expect(flow1SourceY).not.toBe(flow2SourceY);
     });
   });
@@ -440,33 +459,33 @@ describe('Group Movement', () => {
         { x: 200, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, cloudA).set(2, flow).set(3, cloudB);
+      const elements = new Map<UID, ViewElement>([[1, cloudA], [2, flow], [3, cloudB]]);
 
       // Only select the flow (not the clouds)
-      const selection = Set<UID>([2]);
+      const selection = new Set<UID>([2]);
       const delta = { x: -50, y: -30 }; // Move right 50, down 30
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Both clouds should move along with the flow
       const newCloudA = result.get(1) as CloudViewElement;
-      expect(newCloudA.cx).toBe(150); // 100 + 50
-      expect(newCloudA.cy).toBe(130); // 100 + 30
+      expect(newCloudA.x).toBe(150); // 100 + 50
+      expect(newCloudA.y).toBe(130); // 100 + 30
 
       const newCloudB = result.get(3) as CloudViewElement;
-      expect(newCloudB.cx).toBe(250); // 200 + 50
-      expect(newCloudB.cy).toBe(130); // 100 + 30
+      expect(newCloudB.x).toBe(250); // 200 + 50
+      expect(newCloudB.y).toBe(130); // 100 + 30
 
       // Flow valve should move
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.cx).toBe(200); // 150 + 50
-      expect(newFlow.cy).toBe(130); // 100 + 30
+      expect(newFlow.x).toBe(200); // 150 + 50
+      expect(newFlow.y).toBe(130); // 100 + 30
 
       // Flow endpoints should move too
-      expect(newFlow.points.first()!.x).toBe(150);
-      expect(newFlow.points.first()!.y).toBe(130);
-      expect(newFlow.points.last()!.x).toBe(250);
-      expect(newFlow.points.last()!.y).toBe(130);
+      expect(newFlow.points[0].x).toBe(150);
+      expect(newFlow.points[0].y).toBe(130);
+      expect(newFlow.points[newFlow.points.length - 1].x).toBe(250);
+      expect(newFlow.points[newFlow.points.length - 1].y).toBe(130);
     });
 
     it('should move L-shaped cloud-cloud flow uniformly', () => {
@@ -480,30 +499,30 @@ describe('Group Movement', () => {
         { x: 200, y: 200, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, cloudA).set(2, flow).set(3, cloudB);
+      const elements = new Map<UID, ViewElement>([[1, cloudA], [2, flow], [3, cloudB]]);
 
       // Only select the flow
-      const selection = Set<UID>([2]);
+      const selection = new Set<UID>([2]);
       const delta = { x: -25, y: -25 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Both clouds should move
-      expect((result.get(1) as CloudViewElement).cx).toBe(125);
-      expect((result.get(1) as CloudViewElement).cy).toBe(125);
-      expect((result.get(3) as CloudViewElement).cx).toBe(225);
-      expect((result.get(3) as CloudViewElement).cy).toBe(225);
+      expect((result.get(1) as CloudViewElement).x).toBe(125);
+      expect((result.get(1) as CloudViewElement).y).toBe(125);
+      expect((result.get(3) as CloudViewElement).x).toBe(225);
+      expect((result.get(3) as CloudViewElement).y).toBe(225);
 
       // Flow valve and all points should move
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.cx).toBe(125);
-      expect(newFlow.cy).toBe(175);
-      expect(newFlow.points.get(0)!.x).toBe(125);
-      expect(newFlow.points.get(0)!.y).toBe(125);
-      expect(newFlow.points.get(1)!.x).toBe(125);
-      expect(newFlow.points.get(1)!.y).toBe(225);
-      expect(newFlow.points.get(2)!.x).toBe(225);
-      expect(newFlow.points.get(2)!.y).toBe(225);
+      expect(newFlow.x).toBe(125);
+      expect(newFlow.y).toBe(175);
+      expect(newFlow.points[0].x).toBe(125);
+      expect(newFlow.points[0].y).toBe(125);
+      expect(newFlow.points[1].x).toBe(125);
+      expect(newFlow.points[1].y).toBe(225);
+      expect(newFlow.points[2].x).toBe(225);
+      expect(newFlow.points[2].y).toBe(225);
     });
   });
 
@@ -522,10 +541,10 @@ describe('Group Movement', () => {
       // Add an aux that's also selected (making this a group selection)
       const aux = makeAux(4, 300, 200);
 
-      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock).set(4, aux);
+      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock], [4, aux]]);
 
       // Select the flow AND the aux (group selection, but neither flow endpoint is selected)
-      const selection = Set<UID>([2, 4]);
+      const selection = new Set<UID>([2, 4]);
       // Drag DOWN 30 (perpendicular to horizontal flow, > 5px threshold)
       // delta is subtracted, so y: -30 moves down
       const delta = { x: 0, y: -30 };
@@ -533,33 +552,33 @@ describe('Group Movement', () => {
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Stock should NOT move (not selected)
-      expect((result.get(3) as StockViewElement).cx).toBe(200);
-      expect((result.get(3) as StockViewElement).cy).toBe(100);
+      expect((result.get(3) as StockViewElement).x).toBe(200);
+      expect((result.get(3) as StockViewElement).y).toBe(100);
 
       // Aux should move with the group
-      expect((result.get(4) as AuxViewElement).cx).toBe(300);
-      expect((result.get(4) as AuxViewElement).cy).toBe(230);
+      expect((result.get(4) as AuxViewElement).x).toBe(300);
+      expect((result.get(4) as AuxViewElement).y).toBe(230);
 
       // Cloud should move down (perpendicular to flow direction)
       const newCloud = result.get(1) as CloudViewElement;
-      expect(newCloud.cx).toBe(100); // x unchanged
-      expect(newCloud.cy).toBe(130); // moved down 30
+      expect(newCloud.x).toBe(100); // x unchanged
+      expect(newCloud.y).toBe(130); // moved down 30
 
       // Flow should become L-shaped (3 points)
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.points.size).toBe(3);
+      expect(newFlow.points.length).toBe(3);
 
       // First point: at cloud's new position
-      expect(newFlow.points.first()!.x).toBe(100);
-      expect(newFlow.points.first()!.y).toBe(130);
+      expect(newFlow.points[0].x).toBe(100);
+      expect(newFlow.points[0].y).toBe(130);
 
       // Middle point: corner (at stock's x, cloud's new y)
-      expect(newFlow.points.get(1)!.x).toBe(200 - StockWidth / 2);
-      expect(newFlow.points.get(1)!.y).toBe(130);
+      expect(newFlow.points[1].x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points[1].y).toBe(130);
 
       // Last point: at stock (unchanged)
-      expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
-      expect(newFlow.points.last()!.y).toBe(100);
+      expect(newFlow.points[newFlow.points.length - 1].x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points[newFlow.points.length - 1].y).toBe(100);
     });
 
     it('should create L-shape when single cloud-stock flow dragged perpendicular', () => {
@@ -573,10 +592,10 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock);
+      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock]]);
 
       // Only select the flow (single-flow selection, not group movement)
-      const selection = Set<UID>([2]);
+      const selection = new Set<UID>([2]);
       // Drag DOWN 30 (perpendicular to horizontal flow, > 5px threshold)
       // delta is subtracted, so y: -30 moves down
       const delta = { x: 0, y: -30 };
@@ -584,29 +603,29 @@ describe('Group Movement', () => {
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Stock should NOT move
-      expect((result.get(3) as StockViewElement).cx).toBe(200);
-      expect((result.get(3) as StockViewElement).cy).toBe(100);
+      expect((result.get(3) as StockViewElement).x).toBe(200);
+      expect((result.get(3) as StockViewElement).y).toBe(100);
 
       // Cloud should move down (perpendicular to flow direction)
       const newCloud = result.get(1) as CloudViewElement;
-      expect(newCloud.cx).toBe(100); // x unchanged
-      expect(newCloud.cy).toBe(130); // moved down 30
+      expect(newCloud.x).toBe(100); // x unchanged
+      expect(newCloud.y).toBe(130); // moved down 30
 
       // Flow should become L-shaped (3 points)
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.points.size).toBe(3);
+      expect(newFlow.points.length).toBe(3);
 
       // First point: at cloud's new position
-      expect(newFlow.points.first()!.x).toBe(100);
-      expect(newFlow.points.first()!.y).toBe(130);
+      expect(newFlow.points[0].x).toBe(100);
+      expect(newFlow.points[0].y).toBe(130);
 
       // Middle point: corner (at stock's x, cloud's new y)
-      expect(newFlow.points.get(1)!.x).toBe(200 - StockWidth / 2);
-      expect(newFlow.points.get(1)!.y).toBe(130);
+      expect(newFlow.points[1].x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points[1].y).toBe(130);
 
       // Last point: at stock (unchanged)
-      expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
-      expect(newFlow.points.last()!.y).toBe(100);
+      expect(newFlow.points[newFlow.points.length - 1].x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points[newFlow.points.length - 1].y).toBe(100);
     });
 
     it('should not create L-shape when perpendicular drag is too small', () => {
@@ -619,20 +638,20 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock);
+      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock]]);
 
       // Small perpendicular drag (< 5px threshold)
-      const selection = Set<UID>([2]);
+      const selection = new Set<UID>([2]);
       const delta = { x: 0, y: -3 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Flow should remain 2-point (no L-shape)
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.points.size).toBe(2);
+      expect(newFlow.points.length).toBe(2);
 
       // Cloud should NOT move
-      expect((result.get(1) as CloudViewElement).cy).toBe(100);
+      expect((result.get(1) as CloudViewElement).y).toBe(100);
     });
 
     it('should slide valve along path when single cloud-stock flow dragged parallel', () => {
@@ -645,26 +664,26 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock);
+      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock]]);
 
       // Parallel drag (along the flow)
-      const selection = Set<UID>([2]);
+      const selection = new Set<UID>([2]);
       const delta = { x: -20, y: 0 }; // Move right 20
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Flow should remain 2-point
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.points.size).toBe(2);
+      expect(newFlow.points.length).toBe(2);
 
       // Valve should move right (clamped to flow path)
       // Original: 140, proposed: 160
       // Flow spans from 100 to 177.5 (stock edge minus 10px margin = 167.5)
-      expect(newFlow.cx).toBe(160);
-      expect(newFlow.cy).toBe(100);
+      expect(newFlow.x).toBe(160);
+      expect(newFlow.y).toBe(100);
 
       // Cloud should NOT move (parallel drag)
-      expect((result.get(1) as CloudViewElement).cx).toBe(100);
+      expect((result.get(1) as CloudViewElement).x).toBe(100);
     });
   });
 
@@ -678,27 +697,27 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, stockB);
+      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, stockB]]);
 
       // Only select the flow
-      const selection = Set<UID>([2]);
+      const selection = new Set<UID>([2]);
       const delta = { x: -20, y: 0 }; // Move right 20
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Stocks should NOT move
-      expect((result.get(1) as StockViewElement).cx).toBe(100);
-      expect((result.get(3) as StockViewElement).cx).toBe(200);
+      expect((result.get(1) as StockViewElement).x).toBe(100);
+      expect((result.get(3) as StockViewElement).x).toBe(200);
 
       // Flow valve should move but be clamped to stay on the flow path
       // Flow goes from x=122.5 to x=177.5 (with 10px margin, max is 167.5)
       // Proposed position is 170, so it gets clamped to 167.5
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.cx).toBe(167.5); // Clamped to stay within flow bounds
+      expect(newFlow.x).toBe(167.5); // Clamped to stay within flow bounds
 
       // Flow endpoints should stay fixed (attached to stocks)
-      expect(newFlow.points.first()!.x).toBe(100 + StockWidth / 2);
-      expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points[0].x).toBe(100 + StockWidth / 2);
+      expect(newFlow.points[newFlow.points.length - 1].x).toBe(200 - StockWidth / 2);
     });
 
     it('should clamp valve to flow path when moving perpendicular to flow direction', () => {
@@ -712,25 +731,25 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, stockB);
+      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, stockB]]);
 
       // Only select the flow, move UP (perpendicular to the horizontal flow)
-      const selection = Set<UID>([2]);
+      const selection = new Set<UID>([2]);
       const delta = { x: 0, y: 50 }; // Move up 50
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Stocks should NOT move
-      expect((result.get(1) as StockViewElement).cy).toBe(100);
-      expect((result.get(3) as StockViewElement).cy).toBe(100);
+      expect((result.get(1) as StockViewElement).y).toBe(100);
+      expect((result.get(3) as StockViewElement).y).toBe(100);
 
       // Flow valve should be clamped to stay on the horizontal flow path (y=100)
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.cy).toBe(100); // Should stay on the flow path
+      expect(newFlow.y).toBe(100); // Should stay on the flow path
 
       // Flow endpoints should stay fixed
-      expect(newFlow.points.first()!.y).toBe(100);
-      expect(newFlow.points.last()!.y).toBe(100);
+      expect(newFlow.points[0].y).toBe(100);
+      expect(newFlow.points[newFlow.points.length - 1].y).toBe(100);
     });
   });
 
@@ -744,26 +763,26 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, stockB);
+      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, stockB]]);
 
       // Select Stock A and Flow 1, but NOT Stock B
-      const selection = Set<UID>([1, 2]);
+      const selection = new Set<UID>([1, 2]);
       const delta = { x: -50, y: 0 }; // Move right 50
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Stock A should move
-      expect((result.get(1) as StockViewElement).cx).toBe(150);
+      expect((result.get(1) as StockViewElement).x).toBe(150);
 
       // Stock B should NOT move
-      expect((result.get(3) as StockViewElement).cx).toBe(200);
+      expect((result.get(3) as StockViewElement).x).toBe(200);
 
       // Flow source should move with Stock A
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.points.first()!.x).toBe(100 + StockWidth / 2 + 50);
+      expect(newFlow.points[0].x).toBe(100 + StockWidth / 2 + 50);
 
       // Flow sink should stay at Stock B's position
-      expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points[newFlow.points.length - 1].x).toBe(200 - StockWidth / 2);
     });
 
     it('should move flow valve with the group when flow and one endpoint are selected', () => {
@@ -782,30 +801,30 @@ describe('Group Movement', () => {
         { x: 300 - StockWidth / 2, y: 100, attachedToUid: 3 }, // x = 277.5
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, stockB);
+      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, stockB]]);
 
       // Select Stock A and Flow (not Stock B)
-      const selection = Set<UID>([1, 2]);
+      const selection = new Set<UID>([1, 2]);
       const delta = { x: -50, y: 0 }; // Move right 50
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Stock A should move from 100 to 150
-      expect((result.get(1) as StockViewElement).cx).toBe(150);
+      expect((result.get(1) as StockViewElement).x).toBe(150);
 
       // Flow should be re-routed:
       // - Source moves from 122.5 to 172.5 (at new Stock A edge)
       // - Sink stays at 277.5 (at Stock B edge)
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.points.first()!.x).toBe(150 + StockWidth / 2); // 172.5
-      expect(newFlow.points.last()!.x).toBe(300 - StockWidth / 2); // 277.5
+      expect(newFlow.points[0].x).toBe(150 + StockWidth / 2); // 172.5
+      expect(newFlow.points[newFlow.points.length - 1].x).toBe(300 - StockWidth / 2); // 277.5
 
       // The valve should have moved with the drag:
       // Original valve at 140, drag delta of 50 right -> proposed position 190
       // Flow now spans 172.5 to 277.5, so 190 is within bounds
       // Valve should be at or near 190 (clamped to flow path)
-      expect(newFlow.cx).toBeCloseTo(190, 0);
-      expect(newFlow.cy).toBe(100);
+      expect(newFlow.x).toBeCloseTo(190, 0);
+      expect(newFlow.y).toBe(100);
     });
 
     it('should preserve orthogonal flow geometry when moving perpendicular to flow direction', () => {
@@ -819,28 +838,28 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, stockA).set(2, flow).set(3, stockB);
+      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, stockB]]);
 
       // Select Stock A and Flow, but NOT Stock B
       // Move UP by 50 (perpendicular to original horizontal flow)
-      const selection = Set<UID>([1, 2]);
+      const selection = new Set<UID>([1, 2]);
       const delta = { x: 0, y: 50 }; // Move up 50
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Stock A should move up
-      expect((result.get(1) as StockViewElement).cy).toBe(50);
+      expect((result.get(1) as StockViewElement).y).toBe(50);
 
       // Stock B should stay in place
-      expect((result.get(3) as StockViewElement).cy).toBe(100);
+      expect((result.get(3) as StockViewElement).y).toBe(100);
 
       // Flow should be re-routed properly (L-shaped or straight to fixed stock)
       // The key assertion: the flow should NOT have a diagonal segment
       // The sink point should still connect to Stock B at its edge
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.points.last()!.attachedToUid).toBe(3);
-      expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
-      expect(newFlow.points.last()!.y).toBe(100);
+      expect(newFlow.points[newFlow.points.length - 1].attachedToUid).toBe(3);
+      expect(newFlow.points[newFlow.points.length - 1].x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points[newFlow.points.length - 1].y).toBe(100);
     });
   });
 
@@ -850,19 +869,19 @@ describe('Group Movement', () => {
       const aux2 = makeAux(2, 150, 150);
       const stock = makeStock(3, 200, 100);
 
-      let elements = Map<UID, ViewElement>().set(1, aux1).set(2, aux2).set(3, stock);
+      const elements = new Map<UID, ViewElement>([[1, aux1], [2, aux2], [3, stock]]);
 
-      const selection = Set<UID>([1, 2, 3]);
+      const selection = new Set<UID>([1, 2, 3]);
       const delta = { x: -30, y: -20 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
-      expect((result.get(1) as AuxViewElement).cx).toBe(130);
-      expect((result.get(1) as AuxViewElement).cy).toBe(120);
-      expect((result.get(2) as AuxViewElement).cx).toBe(180);
-      expect((result.get(2) as AuxViewElement).cy).toBe(170);
-      expect((result.get(3) as StockViewElement).cx).toBe(230);
-      expect((result.get(3) as StockViewElement).cy).toBe(120);
+      expect((result.get(1) as AuxViewElement).x).toBe(130);
+      expect((result.get(1) as AuxViewElement).y).toBe(120);
+      expect((result.get(2) as AuxViewElement).x).toBe(180);
+      expect((result.get(2) as AuxViewElement).y).toBe(170);
+      expect((result.get(3) as StockViewElement).x).toBe(230);
+      expect((result.get(3) as StockViewElement).y).toBe(120);
     });
   });
 
@@ -871,32 +890,32 @@ describe('Group Movement', () => {
       const module1 = makeModule(1, 100, 100);
       const stock = makeStock(2, 200, 100);
 
-      let elements = Map<UID, ViewElement>().set(1, module1).set(2, stock);
+      const elements = new Map<UID, ViewElement>([[1, module1], [2, stock]]);
 
-      const selection = Set<UID>([1, 2]);
+      const selection = new Set<UID>([1, 2]);
       const delta = { x: -50, y: -25 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       const newModule = result.get(1) as ModuleViewElement;
-      expect(newModule.cx).toBe(150);
-      expect(newModule.cy).toBe(125);
-      expect((result.get(2) as StockViewElement).cx).toBe(250);
+      expect(newModule.x).toBe(150);
+      expect(newModule.y).toBe(125);
+      expect((result.get(2) as StockViewElement).x).toBe(250);
     });
 
     it('should move a single selected module', () => {
       const module1 = makeModule(1, 100, 100);
 
-      let elements = Map<UID, ViewElement>().set(1, module1);
+      const elements = new Map<UID, ViewElement>([[1, module1]]);
 
-      const selection = Set<UID>([1]);
+      const selection = new Set<UID>([1]);
       const delta = { x: -30, y: -20 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       const newModule = result.get(1) as ModuleViewElement;
-      expect(newModule.cx).toBe(130);
-      expect(newModule.cy).toBe(120);
+      expect(newModule.x).toBe(130);
+      expect(newModule.y).toBe(120);
     });
   });
 
@@ -905,38 +924,38 @@ describe('Group Movement', () => {
       const aux = makeAux(1, 100, 100);
       const alias = makeAlias(2, 1, 200, 150);
 
-      let elements = Map<UID, ViewElement>().set(1, aux).set(2, alias);
+      const elements = new Map<UID, ViewElement>([[1, aux], [2, alias]]);
 
-      const selection = Set<UID>([1, 2]);
+      const selection = new Set<UID>([1, 2]);
       const delta = { x: -40, y: -30 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
-      expect((result.get(1) as AuxViewElement).cx).toBe(140);
-      expect((result.get(1) as AuxViewElement).cy).toBe(130);
+      expect((result.get(1) as AuxViewElement).x).toBe(140);
+      expect((result.get(1) as AuxViewElement).y).toBe(130);
       const newAlias = result.get(2) as AliasViewElement;
-      expect(newAlias.cx).toBe(240);
-      expect(newAlias.cy).toBe(180);
+      expect(newAlias.x).toBe(240);
+      expect(newAlias.y).toBe(180);
     });
 
     it('should move a single selected alias', () => {
       const aux = makeAux(1, 100, 100);
       const alias = makeAlias(2, 1, 200, 150);
 
-      let elements = Map<UID, ViewElement>().set(1, aux).set(2, alias);
+      const elements = new Map<UID, ViewElement>([[1, aux], [2, alias]]);
 
       // Only select the alias
-      const selection = Set<UID>([2]);
+      const selection = new Set<UID>([2]);
       const delta = { x: -25, y: -15 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Aux should NOT move
-      expect((result.get(1) as AuxViewElement).cx).toBe(100);
+      expect((result.get(1) as AuxViewElement).x).toBe(100);
       // Alias should move
       const newAlias = result.get(2) as AliasViewElement;
-      expect(newAlias.cx).toBe(225);
-      expect(newAlias.cy).toBe(165);
+      expect(newAlias.x).toBe(225);
+      expect(newAlias.y).toBe(165);
     });
   });
 
@@ -945,16 +964,16 @@ describe('Group Movement', () => {
       const group = makeGroup(1, 150, 140, 100, 80);
       const stock = makeStock(2, 150, 140);
 
-      let elements = Map<UID, ViewElement>().set(1, group).set(2, stock);
+      const elements = new Map<UID, ViewElement>([[1, group], [2, stock]]);
 
-      const selection = Set<UID>([1, 2]);
+      const selection = new Set<UID>([1, 2]);
       const delta = { x: -50, y: -30 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       const newGroup = result.get(1) as GroupViewElement;
-      expect(newGroup.cx).toBe(200);
-      expect(newGroup.cy).toBe(170);
+      expect(newGroup.x).toBe(200);
+      expect(newGroup.y).toBe(170);
       // Width and height should be preserved
       expect(newGroup.width).toBe(100);
       expect(newGroup.height).toBe(80);
@@ -963,16 +982,16 @@ describe('Group Movement', () => {
     it('should move a single selected group element', () => {
       const group = makeGroup(1, 150, 140, 120, 90);
 
-      let elements = Map<UID, ViewElement>().set(1, group);
+      const elements = new Map<UID, ViewElement>([[1, group]]);
 
-      const selection = Set<UID>([1]);
+      const selection = new Set<UID>([1]);
       const delta = { x: -20, y: -10 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       const newGroup = result.get(1) as GroupViewElement;
-      expect(newGroup.cx).toBe(170);
-      expect(newGroup.cy).toBe(150);
+      expect(newGroup.x).toBe(170);
+      expect(newGroup.y).toBe(150);
       expect(newGroup.width).toBe(120);
       expect(newGroup.height).toBe(90);
     });
@@ -988,28 +1007,28 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock);
+      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock]]);
 
       // Select cloud, flow, and stock
-      const selection = Set<UID>([1, 2, 3]);
+      const selection = new Set<UID>([1, 2, 3]);
       const delta = { x: -50, y: -30 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Cloud should move
-      expect((result.get(1) as CloudViewElement).cx).toBe(150);
-      expect((result.get(1) as CloudViewElement).cy).toBe(130);
+      expect((result.get(1) as CloudViewElement).x).toBe(150);
+      expect((result.get(1) as CloudViewElement).y).toBe(130);
 
       // Stock should move
-      expect((result.get(3) as StockViewElement).cx).toBe(250);
-      expect((result.get(3) as StockViewElement).cy).toBe(130);
+      expect((result.get(3) as StockViewElement).x).toBe(250);
+      expect((result.get(3) as StockViewElement).y).toBe(130);
 
       // Flow should translate uniformly
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.cx).toBe(200);
-      expect(newFlow.cy).toBe(130);
-      expect(newFlow.points.first()!.x).toBe(150);
-      expect(newFlow.points.first()!.y).toBe(130);
+      expect(newFlow.x).toBe(200);
+      expect(newFlow.y).toBe(130);
+      expect(newFlow.points[0].x).toBe(150);
+      expect(newFlow.points[0].y).toBe(130);
     });
   });
 
@@ -1027,44 +1046,45 @@ describe('Group Movement', () => {
         { x: 250, y: 100, attachedToUid: 11 },
       ]);
 
-      const elements = Map<UID, ViewElement>()
-        .set(10, cloudA)
-        .set(20, flowIn)
-        .set(1, stock)
-        .set(21, flowOut)
-        .set(11, cloudB);
+      const elements = new Map<UID, ViewElement>([
+        [10, cloudA],
+        [20, flowIn],
+        [1, stock],
+        [21, flowOut],
+        [11, cloudB],
+      ]);
 
-      const selection = Set<UID>([10, 20, 1, 21, 11]);
+      const selection = new Set<UID>([10, 20, 1, 21, 11]);
       // delta is subtracted from viewBox coords, so negative = elements move in positive direction
       const delta = { x: -60, y: -40 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // All elements should shift by (60, 40)
-      expect((result.get(10) as CloudViewElement).cx).toBe(110);
-      expect((result.get(10) as CloudViewElement).cy).toBe(140);
-      expect((result.get(11) as CloudViewElement).cx).toBe(310);
-      expect((result.get(11) as CloudViewElement).cy).toBe(140);
-      expect((result.get(1) as StockViewElement).cx).toBe(210);
-      expect((result.get(1) as StockViewElement).cy).toBe(140);
+      expect((result.get(10) as CloudViewElement).x).toBe(110);
+      expect((result.get(10) as CloudViewElement).y).toBe(140);
+      expect((result.get(11) as CloudViewElement).x).toBe(310);
+      expect((result.get(11) as CloudViewElement).y).toBe(140);
+      expect((result.get(1) as StockViewElement).x).toBe(210);
+      expect((result.get(1) as StockViewElement).y).toBe(140);
 
       const newFlowIn = result.get(20) as FlowViewElement;
-      expect(newFlowIn.cx).toBe(160);
-      expect(newFlowIn.cy).toBe(140);
-      expect(newFlowIn.points.first()!.x).toBe(110);
-      expect(newFlowIn.points.first()!.y).toBe(140);
-      expect(newFlowIn.points.last()!.x).toBe(150 - StockWidth / 2 + 60);
-      expect(newFlowIn.points.last()!.y).toBe(140);
-      expect(newFlowIn.points.size).toBe(2);
+      expect(newFlowIn.x).toBe(160);
+      expect(newFlowIn.y).toBe(140);
+      expect(newFlowIn.points[0].x).toBe(110);
+      expect(newFlowIn.points[0].y).toBe(140);
+      expect(newFlowIn.points[newFlowIn.points.length - 1].x).toBe(150 - StockWidth / 2 + 60);
+      expect(newFlowIn.points[newFlowIn.points.length - 1].y).toBe(140);
+      expect(newFlowIn.points.length).toBe(2);
 
       const newFlowOut = result.get(21) as FlowViewElement;
-      expect(newFlowOut.cx).toBe(260);
-      expect(newFlowOut.cy).toBe(140);
-      expect(newFlowOut.points.first()!.x).toBe(150 + StockWidth / 2 + 60);
-      expect(newFlowOut.points.first()!.y).toBe(140);
-      expect(newFlowOut.points.last()!.x).toBe(310);
-      expect(newFlowOut.points.last()!.y).toBe(140);
-      expect(newFlowOut.points.size).toBe(2);
+      expect(newFlowOut.x).toBe(260);
+      expect(newFlowOut.y).toBe(140);
+      expect(newFlowOut.points[0].x).toBe(150 + StockWidth / 2 + 60);
+      expect(newFlowOut.points[0].y).toBe(140);
+      expect(newFlowOut.points[newFlowOut.points.length - 1].x).toBe(310);
+      expect(newFlowOut.points[newFlowOut.points.length - 1].y).toBe(140);
+      expect(newFlowOut.points.length).toBe(2);
     });
 
     it('should re-route flows when only clouds and stock are selected', () => {
@@ -1080,32 +1100,33 @@ describe('Group Movement', () => {
         { x: 250, y: 100, attachedToUid: 11 },
       ]);
 
-      const elements = Map<UID, ViewElement>()
-        .set(10, cloudA)
-        .set(20, flowIn)
-        .set(1, stock)
-        .set(21, flowOut)
-        .set(11, cloudB);
+      const elements = new Map<UID, ViewElement>([
+        [10, cloudA],
+        [20, flowIn],
+        [1, stock],
+        [21, flowOut],
+        [11, cloudB],
+      ]);
 
       // Select only clouds + stock, not flows
-      const selection = Set<UID>([10, 1, 11]);
+      const selection = new Set<UID>([10, 1, 11]);
       const delta = { x: -60, y: 0 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Clouds and stock move
-      expect((result.get(10) as CloudViewElement).cx).toBe(110);
-      expect((result.get(1) as StockViewElement).cx).toBe(210);
-      expect((result.get(11) as CloudViewElement).cx).toBe(310);
+      expect((result.get(10) as CloudViewElement).x).toBe(110);
+      expect((result.get(1) as StockViewElement).x).toBe(210);
+      expect((result.get(11) as CloudViewElement).x).toBe(310);
 
       // Flows are re-routed between new positions
       const newFlowIn = result.get(20) as FlowViewElement;
-      expect(newFlowIn.points.first()!.x).toBe(110);
-      expect(newFlowIn.points.last()!.x).toBe(210 - StockWidth / 2);
+      expect(newFlowIn.points[0].x).toBe(110);
+      expect(newFlowIn.points[newFlowIn.points.length - 1].x).toBe(210 - StockWidth / 2);
 
       const newFlowOut = result.get(21) as FlowViewElement;
-      expect(newFlowOut.points.first()!.x).toBe(210 + StockWidth / 2);
-      expect(newFlowOut.points.last()!.x).toBe(310);
+      expect(newFlowOut.points[0].x).toBe(210 + StockWidth / 2);
+      expect(newFlowOut.points[newFlowOut.points.length - 1].x).toBe(310);
     });
   });
 
@@ -1119,29 +1140,29 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock);
+      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock]]);
 
       // Only select the cloud, not the flow
-      const selection = Set<UID>([1]);
+      const selection = new Set<UID>([1]);
       const delta = { x: -50, y: 0 }; // Move cloud right 50 (parallel to flow)
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Cloud should move
       const newCloud = result.get(1) as CloudViewElement;
-      expect(newCloud.cx).toBe(150);
+      expect(newCloud.x).toBe(150);
 
       // Flow should be adjusted (routed from new cloud position to fixed stock)
       const newFlow = result.get(2) as FlowViewElement;
       // Flow remains 2 points (straight horizontal line)
-      expect(newFlow.points.size).toBe(2);
+      expect(newFlow.points.length).toBe(2);
       // The source point should be updated to connect to new cloud position
-      expect(newFlow.points.first()!.attachedToUid).toBe(1);
-      expect(newFlow.points.first()!.x).toBe(150);
-      expect(newFlow.points.first()!.y).toBe(100);
+      expect(newFlow.points[0].attachedToUid).toBe(1);
+      expect(newFlow.points[0].x).toBe(150);
+      expect(newFlow.points[0].y).toBe(100);
       // The sink point should still be at stock
-      expect(newFlow.points.last()!.attachedToUid).toBe(3);
-      expect(newFlow.points.last()!.x).toBe(200 - StockWidth / 2);
+      expect(newFlow.points[newFlow.points.length - 1].attachedToUid).toBe(3);
+      expect(newFlow.points[newFlow.points.length - 1].x).toBe(200 - StockWidth / 2);
     });
 
     it('should create L-shaped flow when cloud moves perpendicular to flow direction', () => {
@@ -1153,10 +1174,10 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      let elements = Map<UID, ViewElement>().set(1, cloud).set(2, flow).set(3, stock);
+      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock]]);
 
       // Only select the cloud, not the flow
-      const selection = Set<UID>([1]);
+      const selection = new Set<UID>([1]);
       // Move cloud DOWN 30 (perpendicular to horizontal flow)
       // delta is subtracted, so y: -30 moves from y=100 to y=130
       const delta = { x: 0, y: -30 };
@@ -1165,27 +1186,27 @@ describe('Group Movement', () => {
 
       // Cloud should move down
       const newCloud = result.get(1) as CloudViewElement;
-      expect(newCloud.cx).toBe(100); // x unchanged
-      expect(newCloud.cy).toBe(130); // moved down 30
+      expect(newCloud.x).toBe(100); // x unchanged
+      expect(newCloud.y).toBe(130); // moved down 30
 
       // Flow should be re-routed as L-shaped (3 points)
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.points.size).toBe(3);
+      expect(newFlow.points.length).toBe(3);
 
       // First point: at cloud's new position
-      const firstPt = newFlow.points.first()!;
+      const firstPt = newFlow.points[0];
       expect(firstPt.attachedToUid).toBe(1);
       expect(firstPt.x).toBe(100);
       expect(firstPt.y).toBe(130);
 
       // Middle point: corner creating the L-shape (at stock's x, cloud's new y)
-      const middlePt = newFlow.points.get(1)!;
+      const middlePt = newFlow.points[1];
       expect(middlePt.attachedToUid).toBeUndefined(); // corner point, not attached
       expect(middlePt.x).toBe(200 - StockWidth / 2); // at stock's x
       expect(middlePt.y).toBe(130); // at cloud's new y
 
       // Last point: at stock (unchanged)
-      const lastPt = newFlow.points.last()!;
+      const lastPt = newFlow.points[newFlow.points.length - 1];
       expect(lastPt.attachedToUid).toBe(3);
       expect(lastPt.x).toBe(200 - StockWidth / 2);
       expect(lastPt.y).toBe(100);
@@ -1206,19 +1227,19 @@ describe('Link arc adjustment during group movement', () => {
     const auxB = makeAux(2, 200, 100);
     const link = makeLink(3, 1, 2, 30); // Arc of 30 degrees
 
-    let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+    const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
 
     // Select both auxes and the link
-    const selection = Set<UID>([1, 2, 3]);
+    const selection = new Set<UID>([1, 2, 3]);
     const delta = { x: -50, y: -25 }; // Move everything right 50, down 25
 
     const result = testApplyGroupMovement(elements, selection, delta);
 
     // Auxes should move
-    expect((result.get(1) as AuxViewElement).cx).toBe(150);
-    expect((result.get(1) as AuxViewElement).cy).toBe(125);
-    expect((result.get(2) as AuxViewElement).cx).toBe(250);
-    expect((result.get(2) as AuxViewElement).cy).toBe(125);
+    expect((result.get(1) as AuxViewElement).x).toBe(150);
+    expect((result.get(1) as AuxViewElement).y).toBe(125);
+    expect((result.get(2) as AuxViewElement).x).toBe(250);
+    expect((result.get(2) as AuxViewElement).y).toBe(125);
 
     // Link arc should be preserved since both endpoints moved together
     const newLink = result.get(3) as LinkViewElement;
@@ -1233,20 +1254,20 @@ describe('Link arc adjustment during group movement', () => {
     const auxB = makeAux(2, 200, 100);
     const link = makeLink(3, 1, 2, 30);
 
-    let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+    const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
 
     // Select only Aux A and the link (not Aux B)
-    const selection = Set<UID>([1, 3]);
+    const selection = new Set<UID>([1, 3]);
     const delta = { x: -50, y: 0 }; // Move Aux A right 50, keeping horizontal
 
     const result = testApplyGroupMovement(elements, selection, delta);
 
     // Aux A should move
-    expect((result.get(1) as AuxViewElement).cx).toBe(150);
-    expect((result.get(1) as AuxViewElement).cy).toBe(100);
+    expect((result.get(1) as AuxViewElement).x).toBe(150);
+    expect((result.get(1) as AuxViewElement).y).toBe(100);
 
     // Aux B should stay
-    expect((result.get(2) as AuxViewElement).cx).toBe(200);
+    expect((result.get(2) as AuxViewElement).x).toBe(200);
 
     // Link arc should be adjusted to preserve curve shape.
     // Original line: (100, 100) -> (200, 100), angle = 0
@@ -1263,18 +1284,18 @@ describe('Link arc adjustment during group movement', () => {
     const auxB = makeAux(2, 200, 100);
     const link = makeLink(3, 1, 2, 0); // No initial arc
 
-    let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+    const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
 
     // Select only Aux A and the link
-    const selection = Set<UID>([1, 3]);
+    const selection = new Set<UID>([1, 3]);
     // Move Aux A down, causing rotation
     const delta = { x: 0, y: -100 };
 
     const result = testApplyGroupMovement(elements, selection, delta);
 
     // Aux A should move down
-    expect((result.get(1) as AuxViewElement).cx).toBe(100);
-    expect((result.get(1) as AuxViewElement).cy).toBe(200);
+    expect((result.get(1) as AuxViewElement).x).toBe(100);
+    expect((result.get(1) as AuxViewElement).y).toBe(200);
 
     // Link arc should be adjusted for the rotation
     // Original line: (100, 100) -> (200, 100), angle = 0
@@ -1294,10 +1315,10 @@ describe('Link arc adjustment during group movement', () => {
     const auxB = makeAux(2, 200, 100);
     const link = makeLink(3, 1, 2, 0);
 
-    let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+    const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
 
     // Select Aux A and the link (but not Aux B)
-    const selection = Set<UID>([1, 3]);
+    const selection = new Set<UID>([1, 3]);
     const delta = { x: 0, y: -100 }; // Move down
 
     const result = testApplyGroupMovement(elements, selection, delta);
@@ -1316,10 +1337,10 @@ describe('Link arc adjustment during group movement', () => {
     const auxB = makeAux(2, 200, 100);
     const link = makeLink(3, 1, 2, 0); // Initially straight (arc = 0)
 
-    let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+    const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
 
     // Select only the link (no endpoints)
-    const selection = Set<UID>([3]);
+    const selection = new Set<UID>([3]);
     const delta = { x: 0, y: 0 }; // No actual movement
     // Drag to a point above the link line to create an arc
     const arcPoint = { x: 150, y: 50 };
@@ -1346,17 +1367,17 @@ describe('Link arc adjustment during group movement', () => {
       const auxB = makeAux(2, 200, 100, false); // Not arrayed
       const link = makeLink(3, 1, 2, 0); // Initially straight
 
-      let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+      const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
 
       // Select Aux A and link (not Aux B)
-      const selection = Set<UID>([1, 3]);
+      const selection = new Set<UID>([1, 3]);
       // Move Aux A down by 100 - this causes a 45-degree rotation
       const delta = { x: 0, y: -100 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Aux A should move down
-      expect((result.get(1) as AuxViewElement).cy).toBe(200);
+      expect((result.get(1) as AuxViewElement).y).toBe(200);
 
       // Link arc should be adjusted by -45 degrees (same as non-arrayed case)
       // This verifies the bug is fixed: without the fix, the arc would drift
@@ -1373,17 +1394,17 @@ describe('Link arc adjustment during group movement', () => {
       const auxB = makeAux(2, 200, 100, true); // Arrayed (visual center at 197, 97 due to ArrayedOffset)
       const link = makeLink(3, 1, 2, 0); // Initially straight
 
-      let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+      const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
 
       // Select Aux B and link (not Aux A)
-      const selection = Set<UID>([2, 3]);
+      const selection = new Set<UID>([2, 3]);
       // Move Aux B down by 100 (causes rotation)
       const delta = { x: 0, y: -100 };
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
       // Aux B should move down (y increases by 100)
-      expect((result.get(2) as AuxViewElement).cy).toBe(200);
+      expect((result.get(2) as AuxViewElement).y).toBe(200);
 
       // Calculate expected arc adjustment based on visual centers:
       // Old visual line: (100, 100) -> (197, 97), old angle ≈ atan2(-3, 97)
@@ -1404,10 +1425,10 @@ describe('Link arc adjustment during group movement', () => {
       const auxB = makeAux(2, 200, 100, true); // Arrayed
       const link = makeLink(3, 1, 2, 0); // Initially straight
 
-      let elements = Map<UID, ViewElement>().set(1, auxA).set(2, auxB).set(3, link);
+      const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
 
       // Select Aux A and link (not Aux B)
-      const selection = Set<UID>([1, 3]);
+      const selection = new Set<UID>([1, 3]);
       // Move Aux A down by 100 (causes 45-degree rotation)
       const delta = { x: 0, y: -100 };
 
@@ -1416,6 +1437,106 @@ describe('Link arc adjustment during group movement', () => {
       // Link arc should be adjusted by -45 degrees (same as non-arrayed case)
       const newLink = result.get(3) as LinkViewElement;
       expect(Math.abs(newLink.arc - -45)).toBeLessThan(1);
+    });
+  });
+
+  describe('multiple flow accumulation', () => {
+    it('should return all routed flows when multiple flows attach to a moved stock', () => {
+      // Stock with 3 outflows to 3 separate clouds: moving the stock should
+      // re-route all flows and return all of them (regression: quadratic spread
+      // in routeUnselectedFlows could silently lose elements).
+      const stock = makeStock(1, 200, 200, [], [10, 20, 30]);
+      const cloud1 = makeCloud(2, 10, 400, 200);
+      const cloud2 = makeCloud(3, 20, 200, 400);
+      const cloud3 = makeCloud(4, 30, 200, 50);
+      const flow1 = makeFlow(10, 300, 200, [
+        { x: 200, y: 200, attachedToUid: 1 },
+        { x: 400, y: 200, attachedToUid: 2 },
+      ]);
+      const flow2 = makeFlow(20, 200, 300, [
+        { x: 200, y: 200, attachedToUid: 1 },
+        { x: 200, y: 400, attachedToUid: 3 },
+      ]);
+      const flow3 = makeFlow(30, 200, 125, [
+        { x: 200, y: 200, attachedToUid: 1 },
+        { x: 200, y: 50, attachedToUid: 4 },
+      ]);
+
+      const elements = new Map<UID, ViewElement>([
+        [1, stock],
+        [2, cloud1],
+        [3, cloud2],
+        [4, cloud3],
+        [10, flow1],
+        [20, flow2],
+        [30, flow3],
+      ]);
+
+      // Select only the stock
+      const selection = new Set<UID>([1]);
+      const delta = { x: -50, y: -30 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // All 3 flows should be present in the result with updated routing
+      expect(result.has(10)).toBe(true);
+      expect(result.has(20)).toBe(true);
+      expect(result.has(30)).toBe(true);
+
+      // Verify stock moved
+      const movedStock = result.get(1) as StockViewElement;
+      expect(movedStock.x).toBe(250);
+      expect(movedStock.y).toBe(230);
+
+      // Each flow's source point should be attached to the stock
+      for (const flowUid of [10, 20, 30]) {
+        const flow = result.get(flowUid) as FlowViewElement;
+        expect(flow).toBeDefined();
+        expect(flow.points.length).toBeGreaterThanOrEqual(2);
+        const sourcePoint = flow.points[0];
+        expect(sourcePoint.attachedToUid).toBe(1);
+      }
+    });
+
+    it('should return all routed flows when both-ends-selected flows are accumulated', () => {
+      // Multiple flows where both source and sink are in the selection
+      const stock1 = makeStock(1, 100, 100, [], [10, 20]);
+      const stock2 = makeStock(2, 300, 100, [10], []);
+      const stock3 = makeStock(3, 100, 300, [20], []);
+      const flow1 = makeFlow(10, 200, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 300, y: 100, attachedToUid: 2 },
+      ]);
+      const flow2 = makeFlow(20, 100, 200, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 100, y: 300, attachedToUid: 3 },
+      ]);
+
+      const elements = new Map<UID, ViewElement>([
+        [1, stock1],
+        [2, stock2],
+        [3, stock3],
+        [10, flow1],
+        [20, flow2],
+      ]);
+
+      // Select all stocks and flows
+      const selection = new Set<UID>([1, 2, 3, 10, 20]);
+      const delta = { x: -10, y: -10 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Both flows should be in the result
+      expect(result.has(10)).toBe(true);
+      expect(result.has(20)).toBe(true);
+
+      // Verify uniform translation for both-ends-selected flows
+      const movedFlow1 = result.get(10) as FlowViewElement;
+      const movedFlow2 = result.get(20) as FlowViewElement;
+      expect(movedFlow1.x).toBe(210);
+      expect(movedFlow1.y).toBe(110);
+      expect(movedFlow2.x).toBe(110);
+      expect(movedFlow2.y).toBe(210);
     });
   });
 });

@@ -27,15 +27,15 @@ export interface AliasProps {
 }
 
 export function aliasContains(element: ViewElement, point: Point): boolean {
-  const cx = element.cx;
-  const cy = element.cy;
+  const cx = element.x;
+  const cy = element.y;
 
   const distance = Math.sqrt(square(point.x - cx) + square(point.y - cy));
   return distance <= AuxRadius;
 }
 
 export function aliasBounds(element: AliasViewElement, aliasOf: NamedViewElement | undefined): Rect {
-  const { cx, cy } = element;
+  const { x: cx, y: cy } = element;
   const r = AuxRadius;
 
   const bounds = {
@@ -80,8 +80,8 @@ export class Alias extends React.PureComponent<AliasProps> {
     const { element } = this.props;
     const isArrayed = false; // element.var?.isArrayed || false;
     const arrayedOffset = isArrayed ? 3 : 0;
-    const cx = element.cx - arrayedOffset;
-    const cy = element.cy - arrayedOffset;
+    const cx = element.x - arrayedOffset;
+    const cy = element.y - arrayedOffset;
     const r = this.radius();
 
     return (
@@ -93,8 +93,8 @@ export class Alias extends React.PureComponent<AliasProps> {
 
   render() {
     const { element, isSelected, isValidTarget, series, aliasOf } = this.props;
-    const cx = element.cx;
-    const cy = element.cy;
+    const cx = element.x;
+    const cy = element.y;
     const r = this.radius();
 
     const isArrayed = false; // element.var?.isArrayed || false;

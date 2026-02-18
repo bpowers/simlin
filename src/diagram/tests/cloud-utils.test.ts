@@ -2,9 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { List } from 'immutable';
-
-import { Point, FlowViewElement, CloudViewElement } from '@simlin/core/datamodel';
+import { FlowViewElement, CloudViewElement } from '@simlin/core/datamodel';
 
 import { isCloudOnSourceSide, isCloudOnSinkSide } from '../drawing/cloud-utils';
 
@@ -14,7 +12,8 @@ function makeFlow(
   y: number,
   points: Array<{ x: number; y: number; attachedToUid?: number }>,
 ): FlowViewElement {
-  return new FlowViewElement({
+  return {
+    type: 'flow',
     uid,
     name: 'TestFlow',
     ident: 'test_flow',
@@ -22,19 +21,21 @@ function makeFlow(
     x,
     y,
     labelSide: 'center',
-    points: List(points.map((p) => new Point({ x: p.x, y: p.y, attachedToUid: p.attachedToUid }))),
+    points: points.map((p) => ({ x: p.x, y: p.y, attachedToUid: p.attachedToUid })),
     isZeroRadius: false,
-  });
+  };
 }
 
 function makeCloud(uid: number, flowUid: number, x: number, y: number): CloudViewElement {
-  return new CloudViewElement({
+  return {
+    type: 'cloud',
     uid,
     flowUid,
     x,
     y,
     isZeroRadius: false,
-  });
+    ident: undefined,
+  };
 }
 
 describe('Cloud to stock attachment', () => {

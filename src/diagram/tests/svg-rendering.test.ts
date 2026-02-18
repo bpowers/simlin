@@ -13,7 +13,7 @@ import { init, reset } from '@simlin/engine/internal/wasm';
 import { simlin_project_open_xmile, simlin_project_render_svg } from '../../engine/src/internal/import-export';
 import { simlin_project_serialize_json, simlin_project_unref } from '../../engine/src/internal/project';
 import { SimlinJsonFormat } from '../../engine/src/internal/types';
-import { Project } from '@simlin/core/datamodel';
+import { projectFromJson } from '@simlin/core/datamodel';
 import { renderSvgToString } from '../render-common';
 
 function loadXmile(relativePath: string): Uint8Array {
@@ -65,7 +65,7 @@ describe('SVG rendering cross-language comparison', () => {
         const jsonBytes = simlin_project_serialize_json(projectPtr2, SimlinJsonFormat.Native);
         const jsonStr = new TextDecoder().decode(jsonBytes);
         const jsonProject = JSON.parse(jsonStr);
-        const tsProject = Project.fromJson(jsonProject);
+        const tsProject = projectFromJson(jsonProject);
         const [svg] = renderSvgToString(tsProject, 'main');
         tsSvg = svg;
       } finally {

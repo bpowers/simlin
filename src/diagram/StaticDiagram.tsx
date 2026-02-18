@@ -5,13 +5,12 @@
 import React from 'react';
 import { renderToString } from 'react-dom/server';
 import { toUint8Array } from 'js-base64';
-import { Map, Set } from 'immutable';
 
 import './theme.css';
 
 import { Series } from '@simlin/core/common';
 import { at, getOrThrow } from '@simlin/core/collections';
-import { UID, ViewElement, Project } from '@simlin/core/datamodel';
+import { UID, ViewElement, Project, projectFromJson, projectAttachData } from '@simlin/core/datamodel';
 import { Project as EngineProject } from '@simlin/engine';
 import type { JsonProject } from '@simlin/engine';
 import { Point } from './drawing/common';
@@ -21,7 +20,7 @@ interface DiagramProps {
   isDarkTheme?: boolean;
   projectPbBase64: string;
   project?: Project; // Pre-loaded project for SSR
-  data?: Map<string, Series>;
+  data?: ReadonlyMap<string, Series>;
 }
 
 interface DiagramState {
@@ -35,7 +34,7 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
     // Use pre-loaded project if provided (for SSR), otherwise undefined
     let project = props.project;
     if (project && props.data !== undefined) {
-      project = project.attachData(props.data, 'main');
+      project = projectAttachData(project, props.data, 'main');
     }
 
     this.state = {
@@ -54,11 +53,11 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
     const serializedProject = toUint8Array(this.props.projectPbBase64);
     const engineProject = await EngineProject.openProtobuf(serializedProject);
     const json = JSON.parse(await engineProject.serializeJson()) as JsonProject;
-    let project = Project.fromJson(json);
+    let project = projectFromJson(json);
     await engineProject.dispose();
 
     if (this.props.data !== undefined) {
-      project = project.attachData(this.props.data, 'main');
+      project = projectAttachData(project, this.props.data, 'main');
     }
 
     this.setState({
@@ -78,7 +77,7 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
     const model = getOrThrow(project.models, 'main');
 
     const renameVariable = (_oldName: string, _newName: string): void => {};
-    const onSelection = (_selected: Set<UID>): void => {};
+    const onSelection = (_selected: ReadonlySet<UID>): void => {};
     const moveSelection = (_position: Point): void => {};
     const moveFlow = (_element: ViewElement, _target: number, _position: Point): void => {};
     const moveLabel = (_uid: UID, _side: 'top' | 'left' | 'bottom' | 'right'): void => {};
@@ -94,7 +93,7 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
         view={at(model.views, 0)}
         version={1}
         selectedTool={undefined}
-        selection={Set()}
+        selection={new Set()}
         onRenameVariable={renameVariable}
         onSetSelection={onSelection}
         onMoveSelection={moveSelection}

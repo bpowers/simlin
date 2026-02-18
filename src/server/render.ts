@@ -4,7 +4,7 @@
 
 import { Worker } from 'worker_threads';
 
-import { Project as DmProject } from '@simlin/core/datamodel';
+import { projectFromJson } from '@simlin/core/datamodel';
 import { Project as EngineProject } from '@simlin/engine';
 import type { JsonProject } from '@simlin/engine';
 import { renderSvgToString } from '@simlin/diagram/render-common';
@@ -13,7 +13,7 @@ import { File } from './schemas/file_pb';
 export async function renderToPNG(fileDoc: File): Promise<Uint8Array> {
   const engineProject = await EngineProject.openProtobuf(fileDoc.getProjectContents_asU8());
   const json = JSON.parse(await engineProject.serializeJson()) as JsonProject;
-  const project = DmProject.fromJson(json);
+  const project = projectFromJson(json);
   await engineProject.dispose();
 
   const [svgString, viewbox] = renderSvgToString(project, 'main');

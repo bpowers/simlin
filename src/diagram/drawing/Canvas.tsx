@@ -8,9 +8,7 @@ import * as React from 'react';
 
 import clsx from 'clsx';
 import { Descendant } from 'slate';
-import { List, Map, Set } from 'immutable';
-
-import { defined, exists } from '@simlin/core/common';
+import { defined, exists, mapValues, setsEqual } from '@simlin/core/common';
 import { at, first, getOrThrow, last, only } from '@simlin/core/collections';
 import {
   ViewElement,
@@ -30,6 +28,9 @@ import {
   Project,
   Model,
   Rect as ViewRect,
+  rectDefault as viewRectDefault,
+  isNamedViewElement,
+  variableHasError,
 } from '@simlin/core/datamodel';
 import { canonicalize } from '@simlin/core/canonicalize';
 
@@ -63,7 +64,8 @@ export const fauxTargetUid = -3;
 export const inCreationCloudUid = -4;
 export const fauxCloudTargetUid = -5;
 
-const fauxTarget = new AuxViewElement({
+const fauxTarget: AuxViewElement = {
+  type: 'aux',
   name: '$⁚model-internal-faux-target',
   ident: '$⁚model-internal-faux-target',
   uid: fauxTargetUid,
@@ -72,15 +74,17 @@ const fauxTarget = new AuxViewElement({
   y: 0,
   labelSide: 'right' as LabelSide,
   isZeroRadius: true,
-});
+};
 
-const fauxCloudTarget = new CloudViewElement({
+const fauxCloudTarget: CloudViewElement = {
+  type: 'cloud',
   uid: fauxCloudTargetUid,
   flowUid: -1,
   x: 0,
   y: 0,
   isZeroRadius: true,
-});
+  ident: undefined,
+};
 
 function radToDeg(r: number): number {
   return (r * 180) / Math.PI;
@@ -159,9 +163,9 @@ export interface CanvasProps {
   view: StockFlowView;
   version: number;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
-  selection: Set<UID>;
+  selection: ReadonlySet<UID>;
   onRenameVariable: (oldName: string, newName: string) => void;
-  onSetSelection: (selected: Set<UID>) => void;
+  onSetSelection: (selected: ReadonlySet<UID>) => void;
   onMoveSelection: (position: Point, arcPoint?: Point, segmentIndex?: number) => void;
   onMoveFlow: (
     flow: FlowViewElement,
@@ -190,19 +194,18 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   mouseDownPoint: Point | undefined;
   selectionCenterOffset: Point | undefined;
   pointerId: number | undefined;
-  elementBounds = List<Rect | undefined>();
+  elementBounds: Array<Rect | undefined> = [];
   prevSelectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
   // we have to regenerate selectionUpdates when selection !== props.selection
-  selection = Set<UID>();
+  selection: ReadonlySet<UID> = new Set<UID>();
   cachedVersion = -Infinity;
-  cachedElements = List<ViewElement>();
-  elements = Map<UID, ViewElement>();
-  selectionUpdates = Map<UID, ViewElement>();
+  cachedElements: readonly ViewElement[] = [];
+  elements = new Map<UID, ViewElement>();
+  selectionUpdates = new Map<UID, ViewElement>();
   computeBounds = false;
 
   // Multi-touch tracking for pinch gestures
-  // Note: use globalThis.Map to get native Map (not Immutable.Map from imports)
-  activePointers = new globalThis.Map<number, TrackedPointer>();
+  activePointers = new Map<number, TrackedPointer>();
 
   // Momentum/inertia animation
   velocityTracker: VelocityTracker = { positions: [] };
@@ -236,7 +239,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       dragSelectionPoint: undefined,
       moveDelta: undefined,
       movingCanvasOffset: undefined,
-      initialBounds: ViewRect.default(),
+      initialBounds: viewRectDefault(),
       svgSize: undefined,
       inCreation: undefined,
       inCreationCloud: undefined,
@@ -268,16 +271,16 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   // for resolving connector ends
   static buildSelectionMap(
     props: CanvasProps,
-    elements: Map<UID, ViewElement>,
+    elements: ReadonlyMap<UID, ViewElement>,
     inCreation?: ViewElement,
   ): Map<UID, ViewElement> {
-    let selection = Map<UID, ViewElement>();
+    const selection = new Map<UID, ViewElement>();
     for (const uid of props.selection) {
       if (uid === inCreationUid && inCreation) {
-        selection = selection.set(uid, inCreation);
+        selection.set(uid, inCreation);
       } else {
         const e = getOrThrow(elements, uid);
-        selection = selection.set(e.uid, e);
+        selection.set(e.uid, e);
       }
     }
     return selection;
@@ -342,7 +345,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     };
 
     if (this.computeBounds) {
-      this.elementBounds = this.elementBounds.push(cloudBounds(element));
+      this.elementBounds.push(cloudBounds(element));
     }
 
     return <Cloud key={element.uid} {...props} />;
@@ -367,13 +370,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     };
 
     let isTarget = false;
-    if (element instanceof CloudViewElement) {
+    if (element.type === 'cloud') {
       isTarget = cloudContains(element, pointer);
-    } else if (element instanceof StockViewElement) {
+    } else if (element.type === 'stock') {
       isTarget = stockContains(element, pointer);
-    } else if (element instanceof AuxViewElement) {
+    } else if (element.type === 'aux') {
       isTarget = auxContains(element, pointer);
-    } else if (element instanceof FlowViewElement) {
+    } else if (element.type === 'flow') {
       isTarget = auxContains(element, pointer);
     }
     if (!isTarget) {
@@ -381,16 +384,16 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     }
 
     // don't allow connectors from and to the same element
-    if (arrow instanceof LinkViewElement && arrow.fromUid === element.uid) {
+    if (arrow.type === 'link' && arrow.fromUid === element.uid) {
       return undefined;
     }
 
     // dont allow duplicate links between the same two elements
-    if (arrow instanceof LinkViewElement) {
+    if (arrow.type === 'link') {
       const { view } = this.props;
       for (const e of view.elements) {
         // skip if its not a connector, or if it is the currently selected connector
-        if (!(e instanceof LinkViewElement) || e.uid === arrow.uid) {
+        if (e.type !== 'link' || e.uid === arrow.uid) {
           continue;
         }
 
@@ -400,8 +403,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       }
     }
 
-    if (arrow instanceof FlowViewElement) {
-      if (!(element instanceof StockViewElement)) {
+    if (arrow.type === 'flow') {
+      if (element.type !== 'stock') {
         return false;
       }
 
@@ -414,11 +417,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         }
         // For multi-segment flows (3+ points), the source needs to align with
         // the adjacent point (second), not the sink point. For 2-point flows,
-        // points.get(1) gives us the last point, which is correct.
+        // points[1] gives us the last point, which is correct.
         const adjacentToSource = at(arrow.points, 1);
         return (
-          Math.abs(adjacentToSource.x - element.cx) < StockWidth / 2 ||
-          Math.abs(adjacentToSource.y - element.cy) < StockHeight / 2
+          Math.abs(adjacentToSource.x - element.x) < StockWidth / 2 ||
+          Math.abs(adjacentToSource.y - element.y) < StockHeight / 2
         );
       } else {
         // For arrowhead movement: check if target stock is valid sink
@@ -429,21 +432,21 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         }
         // For multi-segment flows (3+ points), the arrowhead needs to align with
         // the adjacent point (second-to-last), not the source point. For 2-point
-        // flows, points.size - 2 = 0 gives us the first point, which is correct.
-        const adjacentToArrowhead = at(arrow.points, arrow.points.size - 2);
+        // flows, points.length - 2 = 0 gives us the first point, which is correct.
+        const adjacentToArrowhead = at(arrow.points, arrow.points.length - 2);
         return (
-          Math.abs(adjacentToArrowhead.x - element.cx) < StockWidth / 2 ||
-          Math.abs(adjacentToArrowhead.y - element.cy) < StockHeight / 2
+          Math.abs(adjacentToArrowhead.x - element.x) < StockWidth / 2 ||
+          Math.abs(adjacentToArrowhead.y - element.y) < StockHeight / 2
         );
       }
     }
 
-    return element instanceof FlowViewElement || element instanceof AuxViewElement;
+    return element.type === 'flow' || element.type === 'aux';
   }
 
   aux(element: AuxViewElement): React.ReactElement {
     const variable = this.props.model.variables.get(element.ident);
-    const hasWarning = variable?.hasError || false;
+    const hasWarning = variable ? variableHasError(variable) : false;
     const isSelected = this.isSelected(element);
     const series = variable?.data;
     const props: AuxProps = {
@@ -458,7 +461,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     };
 
     if (this.computeBounds) {
-      this.elementBounds = this.elementBounds.push(auxBounds(element));
+      this.elementBounds.push(auxBounds(element));
     }
 
     return <Aux key={element.uid} {...props} />;
@@ -466,7 +469,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
   stock(element: StockViewElement): React.ReactElement {
     const variable = this.props.model.variables.get(element.ident);
-    const hasWarning = variable?.hasError || false;
+    const hasWarning = variable ? variableHasError(variable) : false;
     const isSelected = this.isSelected(element);
     const series = variable?.data;
     const props: StockProps = {
@@ -481,7 +484,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     };
 
     if (this.computeBounds) {
-      this.elementBounds = this.elementBounds.push(stockBounds(element));
+      this.elementBounds.push(stockBounds(element));
     }
     return <Stock key={element.uid} {...props} />;
   }
@@ -494,7 +497,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     };
 
     if (this.computeBounds) {
-      this.elementBounds = this.elementBounds.push(moduleBounds(props));
+      this.elementBounds.push(moduleBounds(props));
     }
     return <Module key={element.uid} {...props} />;
   }
@@ -507,7 +510,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     };
 
     if (this.computeBounds) {
-      this.elementBounds = this.elementBounds.push(groupBounds(element));
+      this.elementBounds.push(groupBounds(element));
     }
     return <Group key={element.uid} {...props} />;
   }
@@ -519,7 +522,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // Get the updated element from selectionUpdates if available (arc was already adjusted
     // by applyGroupMovement for group selection cases)
     const updatedElement = this.selectionUpdates.get(element.uid);
-    if (updatedElement instanceof LinkViewElement) {
+    if (updatedElement !== undefined && updatedElement.type === 'link') {
       element = updatedElement;
     }
 
@@ -529,7 +532,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     let isSticky = false;
     if (isMovingArrow && isSelected && this.selectionCenterOffset) {
       const validTarget = this.cachedElements.find((e: ViewElement) => {
-        if (!(e instanceof AuxViewElement || e instanceof FlowViewElement)) {
+        if (e.type !== 'aux' && e.type !== 'flow') {
           return false;
         }
         return this.isValidTarget(e) || false;
@@ -542,11 +545,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         const delta = this.state.moveDelta ?? { x: 0, y: 0 };
         const canvasOffset = this.getCanvasOffset();
         // if to isn't a valid target, that means it is the fauxTarget
-        to = (to as AuxViewElement).merge({
+        to = {
+          ...(to as AuxViewElement),
           x: off.x - delta.x - canvasOffset.x,
           y: off.y - delta.y - canvasOffset.y,
           isZeroRadius: true,
-        }) as ViewElement;
+        };
       }
     }
     // When dragging a link arrow (isMovingArrow), adjust arc based on the dynamic to position.
@@ -563,14 +567,14 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
       const newθ = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
       const diffθ = oldθ - newθ;
-      element = element.set('arc', updateArcAngle(element.arc, radToDeg(diffθ)));
+      element = { ...element, arc: updateArcAngle(element.arc, radToDeg(diffθ)) };
     }
     const props: ConnectorProps = {
       element,
       from,
       to,
       isSelected,
-      isDashed: to instanceof StockViewElement,
+      isDashed: to.type === 'stock',
       onSelection: this.handleEditConnector,
     };
     if (isSelected && !isSticky) {
@@ -587,21 +591,21 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     const off = defined(this.selectionCenterOffset);
     const delta = this.state.moveDelta ?? { x: 0, y: 0 };
     const canvasOffset = this.getCanvasOffset();
-    return new FlowPoint({
+    return {
       x: off.x - delta.x - canvasOffset.x,
       y: off.y - delta.y - canvasOffset.y,
       attachedToUid: undefined,
-    });
+    };
   }
 
   flow(element: FlowViewElement) {
     const variable = this.props.model.variables.get(element.ident);
-    const hasWarning = variable?.hasError || false;
+    const hasWarning = variable ? variableHasError(variable) : false;
     const { isMovingArrow } = this.state;
     const isSelected = this.isSelected(element);
     const series = variable?.data;
 
-    if (element.points.size < 2) {
+    if (element.points.length < 2) {
       return;
     }
 
@@ -610,7 +614,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       return;
     }
     const source = this.getElementByUid(sourceId);
-    if (!(source instanceof StockViewElement || source instanceof CloudViewElement)) {
+    if (source.type !== 'stock' && source.type !== 'cloud') {
       throw new Error('invariant broken');
     }
 
@@ -619,12 +623,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       return;
     }
     const sink = this.getElementByUid(sinkId);
-    if (!(sink instanceof StockViewElement || sink instanceof CloudViewElement)) {
+    if (sink.type !== 'stock' && sink.type !== 'cloud') {
       throw new Error('invariant broken');
     }
 
     if (this.computeBounds) {
-      this.elementBounds = this.elementBounds.push(flowBounds(element));
+      this.elementBounds.push(flowBounds(element));
     }
 
     return (
@@ -650,16 +654,16 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   constrainFlowMovement(
     flow: FlowViewElement,
     moveDelta: Point,
-  ): [FlowViewElement, List<StockViewElement | CloudViewElement>] {
+  ): [FlowViewElement, readonly (StockViewElement | CloudViewElement)[]] {
     const sourceId = defined(first(flow.points).attachedToUid);
     let source = this.getElementByUid(sourceId) as StockViewElement | CloudViewElement;
-    if (!(source instanceof StockViewElement || source instanceof CloudViewElement)) {
+    if (source.type !== 'stock' && source.type !== 'cloud') {
       throw new Error('invariant broken');
     }
 
     const sinkId = defined(last(flow.points).attachedToUid);
     let sink = this.getElementByUid(sinkId) as StockViewElement | CloudViewElement;
-    if (!(sink instanceof StockViewElement || sink instanceof CloudViewElement)) {
+    if (sink.type !== 'stock' && sink.type !== 'cloud') {
       throw new Error('invariant broken');
     }
 
@@ -669,7 +673,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       // Source movement: find valid target for source end
       const validTarget = this.cachedElements.find((e: ViewElement) => {
         // Don't connect to the sink stock
-        if (!(e instanceof StockViewElement) || e.uid === sinkId) {
+        if (e.type !== 'stock' || e.uid === sinkId) {
           return false;
         }
         return this.isValidTarget(e) || false;
@@ -677,63 +681,67 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
       if (validTarget) {
         moveDelta = {
-          x: source.cx - validTarget.cx,
-          y: source.cy - validTarget.cy,
+          x: source.x - validTarget.x,
+          y: source.y - validTarget.y,
         };
-        source = validTarget.merge({
+        source = {
+          ...validTarget,
           uid: sourceId,
-          x: source.cx,
-          y: source.cy,
-        });
+          x: source.x,
+          y: source.y,
+        };
       } else {
         const off = this.selectionCenterOffset;
         const canvasOffset = this.getCanvasOffset();
 
-        source = (source as unknown as any).merge({
+        source = {
+          ...source,
           x: off.x - canvasOffset.x,
           y: off.y - canvasOffset.y,
           isZeroRadius: true,
-        });
+        };
       }
 
       [source, flow] = UpdateCloudAndFlow(source, flow, moveDelta);
-      return [flow, List([])];
+      return [flow, []];
     }
 
     if (isMovingArrow && this.selectionCenterOffset) {
       const validTarget = this.cachedElements.find((e: ViewElement) => {
         // connecting both the inflow + outflow of a stock to itself wouldn't make sense.
-        if (!(e instanceof StockViewElement) || e.uid === sourceId) {
+        if (e.type !== 'stock' || e.uid === sourceId) {
           return false;
         }
         return this.isValidTarget(e) || false;
       }) as StockViewElement;
       if (validTarget) {
         moveDelta = {
-          x: sink.cx - validTarget.cx,
-          y: sink.cy - validTarget.cy,
+          x: sink.x - validTarget.x,
+          y: sink.y - validTarget.y,
         };
-        sink = validTarget.merge({
+        sink = {
+          ...validTarget,
           uid: sinkId,
-          x: sink.cx,
-          y: sink.cy,
-        });
+          x: sink.x,
+          y: sink.y,
+        };
       } else {
         const off = this.selectionCenterOffset;
         const canvasOffset = this.getCanvasOffset();
 
-        sink = (sink as unknown as any).merge({
+        sink = {
+          ...sink,
           x: off.x - canvasOffset.x,
           y: off.y - canvasOffset.y,
           isZeroRadius: true,
-        });
+        };
       }
 
       [sink, flow] = UpdateCloudAndFlow(sink, flow, moveDelta);
-      return [flow, List([])];
+      return [flow, []];
     }
 
-    const ends = List<StockViewElement | CloudViewElement>([source, sink]);
+    const ends: readonly (StockViewElement | CloudViewElement)[] = [source, sink];
     return UpdateFlow(flow, ends, moveDelta, this.state.draggingSegmentIndex);
   }
 
@@ -745,44 +753,44 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     return UpdateCloudAndFlow(cloudEl, flow, moveDelta);
   }
 
-  constrainStockMovement(stockEl: StockViewElement, moveDelta: Point): [StockViewElement, List<FlowViewElement>] {
-    const flows = List<FlowViewElement>(
-      stockEl.inflows
-        .concat(stockEl.outflows)
-        .map((uid) => (this.selectionUpdates.get(uid) || this.getElementByUid(uid)) as FlowViewElement | undefined)
-        .filter((element) => element !== undefined)
-        .map((element) => defined(element)),
-    );
+  constrainStockMovement(
+    stockEl: StockViewElement,
+    moveDelta: Point,
+  ): [StockViewElement, readonly FlowViewElement[]] {
+    const flows = [...stockEl.inflows, ...stockEl.outflows]
+      .map((uid) => (this.selectionUpdates.get(uid) || this.getElementByUid(uid)) as FlowViewElement | undefined)
+      .filter((element) => element !== undefined)
+      .map((element) => defined(element));
 
     return UpdateStockAndFlows(stockEl, flows, moveDelta);
   }
 
-  renderInitAndCache(): List<ViewElement> {
-    if (!this.props.selection.equals(this.selection)) {
+  renderInitAndCache(): readonly ViewElement[] {
+    if (!setsEqual(this.props.selection, this.selection)) {
       this.selection = this.props.selection;
     }
 
-    let displayElements = this.props.view.elements;
+    let displayElements: readonly ViewElement[] = this.props.view.elements;
     if (this.state.inCreation) {
-      displayElements = displayElements.push(this.state.inCreation);
+      displayElements = [...displayElements, this.state.inCreation];
     }
     if (this.state.inCreationCloud) {
-      displayElements = displayElements.push(this.state.inCreationCloud);
+      displayElements = [...displayElements, this.state.inCreationCloud];
     }
 
     if (this.props.version !== this.cachedVersion) {
-      this.elements = Map(displayElements.map((el) => [el.uid, el]))
-        .set(fauxTarget.uid, fauxTarget)
-        .set(fauxCloudTarget.uid, fauxCloudTarget);
+      this.elements = new Map(displayElements.map((el) => [el.uid, el]));
+      this.elements.set(fauxTarget.uid, fauxTarget);
+      this.elements.set(fauxCloudTarget.uid, fauxCloudTarget);
       this.cachedElements = displayElements;
       this.cachedVersion = this.props.version;
     }
 
     this.selectionUpdates = Canvas.buildSelectionMap(this.props, this.elements, this.state.inCreation);
     if (this.state.labelSide) {
-      this.selectionUpdates = this.selectionUpdates.map((el) => {
-        return (el as AuxViewElement).set('labelSide', defined(this.state.labelSide));
-      });
+      this.selectionUpdates = mapValues(this.selectionUpdates, (el) => {
+        return { ...el, labelSide: defined(this.state.labelSide) } as ViewElement;
+      }) as Map<UID, ViewElement>;
     }
     if (this.state.moveDelta) {
       const moveDelta = defined(this.state.moveDelta);
@@ -795,7 +803,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         segmentIndex: this.state.draggingSegmentIndex,
       });
 
-      this.selectionUpdates = this.selectionUpdates.merge(updatedElements);
+      this.selectionUpdates = new Map([...this.selectionUpdates, ...updatedElements]);
     }
 
     return displayElements;
@@ -811,7 +819,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     this.setState(pointerStateReset());
 
     if (clearSelection) {
-      this.props.onSetSelection(Set());
+      this.props.onSetSelection(new Set());
     }
 
     this.focusCanvas();
@@ -873,7 +881,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         if (wasDeferredText && newSel.size === 1) {
           const uid = only(newSel);
           const el = this.getElementByUid(uid);
-          if (!el.isNamed()) {
+          if (!isNamedViewElement(el)) {
             // Clouds and other non-named elements can't enter text editing
             this.selectionCenterOffset = undefined;
             this.setState(pointerStateReset());
@@ -907,11 +915,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
         if (this.state.editNameOnPointerUp) {
           let inCreation = this.state.inCreation;
-          if (inCreation instanceof StockViewElement || inCreation instanceof AuxViewElement) {
-            inCreation = inCreation.merge({
+          if (inCreation !== undefined && (inCreation.type === 'stock' || inCreation.type === 'aux')) {
+            inCreation = {
+              ...inCreation,
               x: inCreation.x - delta.x,
               y: inCreation.y - delta.y,
-            });
+            };
           } else {
             throw new Error('invariant broken');
           }
@@ -937,9 +946,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             foundInvalidTarget = foundInvalidTarget || isValid === false;
             return isValid || false;
           });
-          if (element instanceof LinkViewElement && validTarget) {
+          if (element.type === 'link' && validTarget) {
             this.props.onAttachLink(element, defined(validTarget.ident));
-          } else if (element instanceof FlowViewElement) {
+          } else if (element.type === 'flow') {
             // don't create a flow stacked on top of 2 clouds due to a misclick
             if (this.state.moveDelta.x === 0 && this.state.moveDelta.y === 0 && this.state.inCreation) {
               this.clearPointerState();
@@ -948,7 +957,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             const inCreation = !!this.state.inCreation;
             const isSourceAttach = this.state.isMovingSource;
             let fauxTargetCenter: Point | undefined;
-            if (element.points.get(1)?.attachedToUid === fauxCloudTargetUid) {
+            if (element.points[1]?.attachedToUid === fauxCloudTargetUid) {
               const canvasOffset = this.getCanvasOffset();
               fauxTargetCenter = {
                 x: this.selectionCenterOffset.x - canvasOffset.x,
@@ -1007,10 +1016,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     }
 
     if (this.state.isMovingCanvas && this.state.movingCanvasOffset) {
-      const newViewBox = this.props.view.viewBox.merge({
+      const newViewBox = {
+        ...this.props.view.viewBox,
         x: this.state.movingCanvasOffset.x,
         y: this.state.movingCanvasOffset.y,
-      });
+      };
 
       this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
       this.setState({ movingCanvasOffset: undefined });
@@ -1036,37 +1046,37 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       const bottom = Math.max(pointA.y, pointB.y) - canvasOffset.y;
 
       // Find all elements within the selection rectangle
-      let selectedElements = Set<UID>();
+      const selectedElements = new Set<UID>();
       for (const element of this.cachedElements) {
         // Clouds use center-point containment (no visible bounds to intersect with rect corners)
-        if (element instanceof CloudViewElement) {
-          if (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom) {
-            selectedElements = selectedElements.add(element.uid);
+        if (element.type === 'cloud') {
+          if (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom) {
+            selectedElements.add(element.uid);
           }
-        } else if (element instanceof AuxViewElement) {
+        } else if (element.type === 'aux') {
           if (
             auxContains(element, { x: left, y: top }) ||
             auxContains(element, { x: right, y: top }) ||
             auxContains(element, { x: left, y: bottom }) ||
             auxContains(element, { x: right, y: bottom }) ||
-            (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom)
+            (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom)
           ) {
-            selectedElements = selectedElements.add(element.uid);
+            selectedElements.add(element.uid);
           }
-        } else if (element instanceof StockViewElement) {
+        } else if (element.type === 'stock') {
           // For stocks, check if center is within rectangle
-          if (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom) {
-            selectedElements = selectedElements.add(element.uid);
+          if (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom) {
+            selectedElements.add(element.uid);
           }
-        } else if (element instanceof FlowViewElement) {
-          // For flows, check if valve center (cx, cy) is within rectangle
-          if (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom) {
-            selectedElements = selectedElements.add(element.uid);
+        } else if (element.type === 'flow') {
+          // For flows, check if valve center (x, y) is within rectangle
+          if (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom) {
+            selectedElements.add(element.uid);
           }
-        } else if (element instanceof AliasViewElement || element instanceof ModuleViewElement) {
+        } else if (element.type === 'alias' || element.type === 'module') {
           // For other named elements, check if center is within rectangle
-          if (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom) {
-            selectedElements = selectedElements.add(element.uid);
+          if (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom) {
+            selectedElements.add(element.uid);
           }
         }
       }
@@ -1094,12 +1104,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       const dHeight = contentRect.height - oldSize.height;
       const canvasOffset = this.getCanvasOffset();
 
-      const newViewBox = new ViewRect({
+      const newViewBox: ViewRect = {
         x: canvasOffset.x + dWidth / 4,
         y: canvasOffset.y + dHeight / 4,
         width: contentRect.width,
         height: contentRect.height,
-      });
+      };
 
       this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
     }
@@ -1247,10 +1257,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     };
 
     // Update viewBox with new offset
-    const newViewBox = this.props.view.viewBox.merge({
+    const newViewBox = {
+      ...this.props.view.viewBox,
       x: newOffset.x,
       y: newOffset.y,
-    });
+    };
     this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
 
     // Continue animation
@@ -1307,10 +1318,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     deltaX /= zoom;
     deltaY /= zoom;
 
-    const newViewBox = viewBox.merge({
+    const newViewBox = {
+      ...viewBox,
       x: viewBox.x - deltaX,
       y: viewBox.y - deltaY,
-    });
+    };
 
     this.props.onViewBoxChange(newViewBox, zoom);
   };
@@ -1369,10 +1381,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       y: newCursorCanvas.y - modelY,
     };
 
-    const newViewBox = viewBox.merge({
+    const newViewBox = {
+      ...viewBox,
       x: newOffset.x,
       y: newOffset.y,
-    });
+    };
 
     this.props.onViewBoxChange(newViewBox, newZoom);
   };
@@ -1436,8 +1449,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   handleLabelDrag = (uid: number, e: React.PointerEvent<SVGElement>) => {
     this.pointerId = e.pointerId;
 
-    const selectionSet = Set([uid]);
-    if (!this.props.selection.equals(selectionSet)) {
+    const selectionSet = new Set([uid]);
+    if (!setsEqual(this.props.selection, selectionSet)) {
       this.props.onSetSelection(selectionSet);
     }
 
@@ -1449,8 +1462,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       y: client.y - delta.y,
     };
 
-    const cx = element.cx;
-    const cy = element.cy;
+    const cx = element.x;
+    const cy = element.y;
 
     const angle = radToDeg(Math.atan2(cy - pointer.y, cx - pointer.x));
 
@@ -1593,10 +1606,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       y: currentCenterCanvas.y - modelPoint.y,
     };
 
-    const newViewBox = this.props.view.viewBox.merge({
+    const newViewBox = {
+      ...this.props.view.viewBox,
       x: newOffset.x,
       y: newOffset.y,
-    });
+    };
 
     this.props.onViewBoxChange(newViewBox, newZoom);
   };
@@ -1698,7 +1712,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       let inCreation: AuxViewElement | StockViewElement;
       if (selectedTool === 'aux') {
         const name = this.getNewVariableName('New Variable');
-        inCreation = new AuxViewElement({
+        inCreation = {
+          type: 'aux',
           uid: inCreationUid,
           var: undefined,
           x: client.x - canvasOffset.x,
@@ -1707,10 +1722,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           ident: canonicalize(name),
           labelSide: 'right',
           isZeroRadius: false,
-        });
+        };
       } else {
         const name = this.getNewVariableName('New Stock');
-        inCreation = new StockViewElement({
+        inCreation = {
+          type: 'stock',
           uid: inCreationUid,
           var: undefined,
           x: client.x - canvasOffset.x,
@@ -1719,9 +1735,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           ident: canonicalize(name),
           labelSide: 'bottom',
           isZeroRadius: false,
-          inflows: List<UID>(),
-          outflows: List<UID>(),
-        });
+          inflows: [],
+          outflows: [],
+        };
       }
 
       this.pointerId = e.pointerId;
@@ -1738,7 +1754,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           y: 0,
         },
       });
-      this.props.onSetSelection(Set([inCreation.uid]));
+      this.props.onSetSelection(new Set([inCreation.uid]));
       return;
     }
     this.pointerId = e.pointerId;
@@ -1748,16 +1764,19 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       const x = client.x - canvasOffset.x;
       const y = client.y - canvasOffset.y;
 
-      const inCreationCloud = new CloudViewElement({
+      const inCreationCloud: CloudViewElement = {
+        type: 'cloud',
         uid: inCreationCloudUid,
         flowUid: inCreationUid,
         x,
         y,
         isZeroRadius: false,
-      });
+        ident: undefined,
+      };
 
       const name = this.getNewVariableName('New Flow');
-      const inCreation = new FlowViewElement({
+      const inCreation: FlowViewElement = {
+        type: 'flow',
         uid: inCreationUid,
         var: undefined,
         name,
@@ -1765,12 +1784,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         x,
         y,
         labelSide: 'bottom',
-        points: List([
-          new FlowPoint({ x, y, attachedToUid: inCreationCloud.uid }),
-          new FlowPoint({ x, y, attachedToUid: fauxCloudTarget.uid }),
-        ]),
+        points: [
+          { x, y, attachedToUid: inCreationCloud.uid },
+          { x, y, attachedToUid: fauxCloudTarget.uid },
+        ],
         isZeroRadius: false,
-      });
+      };
 
       this.selectionCenterOffset = client;
 
@@ -1784,7 +1803,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           y: 0,
         },
       });
-      this.props.onSetSelection(Set([inCreation.uid]));
+      this.props.onSetSelection(new Set([inCreation.uid]));
       return;
     }
 
@@ -1859,43 +1878,50 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     const { selectedTool } = this.props;
     let inCreation: ViewElement | undefined;
 
-    if (selectedTool === 'link' && element.isNamed()) {
+    if (selectedTool === 'link' && isNamedViewElement(element)) {
       isEditingName = false;
       isMovingArrow = true;
-      inCreation = new LinkViewElement({
+      inCreation = {
+        type: 'link',
         uid: inCreationUid,
         fromUid: element.uid,
         toUid: fauxTarget.uid,
         arc: 0.0,
         multiPoint: undefined,
         isStraight: false,
-      });
+        polarity: undefined,
+        x: 0,
+        y: 0,
+        isZeroRadius: false,
+        ident: undefined,
+      };
       element = inCreation;
-    } else if (selectedTool === 'flow' && element instanceof StockViewElement) {
+    } else if (selectedTool === 'flow' && element.type === 'stock') {
       isEditingName = false;
       isMovingArrow = true;
-      const startPoint = new FlowPoint({
-        x: element.cx,
-        y: element.cy,
+      const startPoint: FlowPoint = {
+        x: element.x,
+        y: element.y,
         attachedToUid: element.uid,
-      });
-      const endPoint = new FlowPoint({
-        x: element.cx,
-        y: element.cy,
+      };
+      const endPoint: FlowPoint = {
+        x: element.x,
+        y: element.y,
         attachedToUid: fauxCloudTarget.uid,
-      });
+      };
       const name = this.getNewVariableName('New Flow');
-      inCreation = new FlowViewElement({
+      inCreation = {
+        type: 'flow',
         uid: inCreationUid,
         var: undefined,
         name: name,
         ident: canonicalize(name),
-        x: element.cx,
-        y: element.cy,
+        x: element.x,
+        y: element.y,
         labelSide: 'bottom',
-        points: List([startPoint, endPoint]),
+        points: [startPoint, endPoint],
         isZeroRadius: false,
-      });
+      };
       element = inCreation;
     } else {
       // Not a link/flow tool action -- compute selection and handle clouds
@@ -1929,11 +1955,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
       // Cloud re-attachment only when the cloud will be the sole selection
       const willBeSoleSelection = newSelection !== undefined && newSelection.size === 1;
-      if (element instanceof CloudViewElement && element.flowUid !== undefined && willBeSoleSelection) {
+      if (element.type === 'cloud' && element.flowUid !== undefined && willBeSoleSelection) {
         let flow: FlowViewElement | undefined;
         try {
           const flowElement = this.getElementByUid(element.flowUid);
-          if (flowElement instanceof FlowViewElement) {
+          if (flowElement.type === 'flow') {
             flow = flowElement;
           }
         } catch (e) {
@@ -1976,7 +2002,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     });
 
     if (selectedTool === 'link' || selectedTool === 'flow') {
-      this.props.onSetSelection(Set([element.uid]));
+      this.props.onSetSelection(new Set([element.uid]));
     }
   };
 
@@ -2006,7 +2032,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     const newName = plainSerialize(defined(this.state.editingName));
 
     if (uid === inCreationUid) {
-      this.props.onCreateVariable((element as unknown as any).set('name', newName));
+      this.props.onCreateVariable({ ...element, name: newName } as ViewElement);
     } else {
       this.props.onRenameVariable(oldName, newName);
     }
@@ -2025,7 +2051,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     }
   }
 
-  buildLayers(displayElements: List<ViewElement>): React.ReactElement[][] {
+  buildLayers(displayElements: readonly ViewElement[]): React.ReactElement[][] {
     // create different layers for each of the display types so that views compose together nicely
     const zLayers = new Array(ZMax) as React.ReactElement[][];
     for (let i = 0; i < ZMax; i++) {
@@ -2051,28 +2077,28 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
       let zOrder = 0;
       let component: React.ReactElement | undefined;
-      if (element instanceof AuxViewElement) {
+      if (element.type === 'aux') {
         component = this.aux(element);
         zOrder = 5;
-      } else if (element instanceof LinkViewElement) {
+      } else if (element.type === 'link') {
         component = this.connector(element);
         zOrder = 2;
-      } else if (element instanceof StockViewElement) {
+      } else if (element.type === 'stock') {
         component = this.stock(element);
         zOrder = 4;
-      } else if (element instanceof FlowViewElement) {
+      } else if (element.type === 'flow') {
         component = this.flow(element);
         zOrder = 3;
-      } else if (element instanceof CloudViewElement) {
+      } else if (element.type === 'cloud') {
         component = this.cloud(element);
         zOrder = 4;
-      } else if (element instanceof AliasViewElement) {
+      } else if (element.type === 'alias') {
         component = this.alias(element);
         zOrder = 5;
-      } else if (element instanceof ModuleViewElement) {
+      } else if (element.type === 'module') {
         component = this.module(element);
         zOrder = 4;
-      } else if (element instanceof GroupViewElement) {
+      } else if (element.type === 'group') {
         component = this.group(element);
         zOrder = 0; // Groups render behind everything else
       }
@@ -2092,7 +2118,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
     this.computeBounds = true;
     if (this.computeBounds) {
-      this.elementBounds = List<Rect | undefined>();
+      this.elementBounds = [];
     }
 
     // we are ignoring the result here, because we're calling it for
@@ -2106,12 +2132,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       const top = Math.floor(bounds.top) - 10;
       const width = Math.ceil(bounds.right - left) + 10;
       const height = Math.ceil(bounds.bottom - top) + 10;
-      initialBounds = new ViewRect({
-        x: left,
-        y: top,
-        width,
-        height,
-      });
+      initialBounds = { x: left, y: top, width, height };
       this.setState({ initialBounds });
     }
 
@@ -2204,12 +2225,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         }
       }
 
-      const newViewBox = new ViewRect({
-        x,
-        y,
-        width: svgWidth,
-        height: svgHeight,
-      });
+      const newViewBox: ViewRect = { x, y, width: svgWidth, height: svgHeight };
 
       this.props.onViewBoxChange(newViewBox, zoom);
 
@@ -2222,7 +2238,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     }
 
     this.computeBounds = false;
-    this.elementBounds = List<Rect | undefined>();
+    this.elementBounds = [];
   }
 
   render() {
@@ -2265,21 +2281,21 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       dragRect = <rect className={styles.dragRectOverlay} x={x} y={y} width={w} height={h} />;
     }
 
-    if (!isEditingName || this.props.selection.isEmpty()) {
+    if (!isEditingName || this.props.selection.size === 0) {
       overlayClass += ' ' + styles.noPointerEvents;
     } else {
       const zoom = this.props.view.zoom;
       const editingUid = only(this.props.selection);
       const editingElement = this.getElementByUid(editingUid) as NamedViewElement;
-      const rw = editingElement instanceof StockViewElement ? StockWidth / 2 : AuxRadius;
-      const rh = editingElement instanceof StockViewElement ? StockHeight / 2 : AuxRadius;
+      const rw = editingElement.type === 'stock' ? StockWidth / 2 : AuxRadius;
+      const rh = editingElement.type === 'stock' ? StockHeight / 2 : AuxRadius;
       const side = editingElement.labelSide;
       const offset = this.getCanvasOffset();
       nameEditor = (
         <EditableLabel
           uid={editingUid}
-          cx={(editingElement.cx + offset.x) * zoom}
-          cy={(editingElement.cy + offset.y) * zoom}
+          cx={(editingElement.x + offset.x) * zoom}
+          cy={(editingElement.y + offset.y) * zoom}
           side={side}
           rw={rw * zoom}
           rh={rh * zoom}
@@ -2320,9 +2336,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // we don't need these things anymore
 
     if (this.elementBounds) {
-      this.elementBounds = List<Rect | undefined>();
+      this.elementBounds = [];
     }
-    this.selectionUpdates = Map<UID, ViewElement>();
+    this.selectionUpdates = new Map<UID, ViewElement>();
     // n.b. we don't want to clear this.elements as thats used when handling callbacks
 
     return (

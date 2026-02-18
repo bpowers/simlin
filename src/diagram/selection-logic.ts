@@ -2,12 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { Set } from 'immutable';
+import { setAdd, setDelete } from '@simlin/core/common';
 
 import { UID } from '@simlin/core/datamodel';
 
 export interface MouseDownSelectionResult {
-  newSelection: Set<UID> | undefined;
+  newSelection: ReadonlySet<UID> | undefined;
   deferSingleSelect: UID | undefined;
 }
 
@@ -21,15 +21,15 @@ export interface MouseDownSelectionResult {
  * - No modifier, element NOT in selection: replace selection
  */
 export function computeMouseDownSelection(
-  currentSelection: Set<UID>,
+  currentSelection: ReadonlySet<UID>,
   clickedUid: UID,
   isMultiSelect: boolean,
 ): MouseDownSelectionResult {
   if (isMultiSelect) {
     if (currentSelection.has(clickedUid)) {
-      return { newSelection: currentSelection.delete(clickedUid), deferSingleSelect: undefined };
+      return { newSelection: setDelete(currentSelection, clickedUid), deferSingleSelect: undefined };
     } else {
-      return { newSelection: currentSelection.add(clickedUid), deferSingleSelect: undefined };
+      return { newSelection: setAdd(currentSelection, clickedUid), deferSingleSelect: undefined };
     }
   }
 
@@ -40,7 +40,7 @@ export function computeMouseDownSelection(
   }
 
   // Element not in current selection -- select it immediately
-  return { newSelection: Set([clickedUid]), deferSingleSelect: undefined };
+  return { newSelection: new Set([clickedUid]), deferSingleSelect: undefined };
 }
 
 /**
@@ -50,12 +50,12 @@ export function computeMouseDownSelection(
  * expect a FlowViewElement for attachment handling.
  */
 export function resolveSelectionForReattachment(
-  newSelection: Set<UID>,
+  newSelection: ReadonlySet<UID>,
   enteredReattachmentMode: boolean,
   reattachFlowUid: UID,
-): Set<UID> {
+): ReadonlySet<UID> {
   if (enteredReattachmentMode) {
-    return Set([reattachFlowUid]);
+    return new Set([reattachFlowUid]);
   }
   return newSelection;
 }
@@ -104,12 +104,12 @@ export function pointerStateReset(): PointerStateReset {
  * If a deferred UID was set on mouseDown and no drag occurred,
  * collapse the selection to just that element.
  */
-export function computeMouseUpSelection(deferredUid: UID | undefined, didDrag: boolean): Set<UID> | undefined {
+export function computeMouseUpSelection(deferredUid: UID | undefined, didDrag: boolean): ReadonlySet<UID> | undefined {
   if (deferredUid === undefined) {
     return undefined;
   }
   if (didDrag) {
     return undefined;
   }
-  return Set([deferredUid]);
+  return new Set([deferredUid]);
 }

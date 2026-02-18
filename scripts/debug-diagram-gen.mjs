@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 import { Project as EngineProject } from '@simlin/engine';
-import { Project as ProjectDM } from '@simlin/core/datamodel';
+import { projectFromJson } from '@simlin/core/datamodel';
 import { renderSvgToString } from '@simlin/diagram/render-common';
 
 // Compute the WASM path relative to the engine package
@@ -34,7 +34,7 @@ function generateAndSaveSvg(project, outputPath, label) {
   }
 
   const views = mainModel.views;
-  if (!views || views.isEmpty()) {
+  if (!views || views.length === 0) {
     throw new Error(`Cannot generate ${label} diagram: model has no views`);
   }
 
@@ -88,8 +88,8 @@ async function main() {
     const engineProject = inputFile.endsWith('.mdl')
       ? await EngineProject.openVensim(contents, { wasm: wasmPath })
       : await EngineProject.open(contents, { wasm: wasmPath });
-    const projectPB = engineProject.serializeProtobuf();
-    const project = ProjectDM.deserializeBinary(projectPB);
+    const projectJson = await engineProject.serializeJson();
+    const project = projectFromJson(JSON.parse(projectJson));
 
     // Generate and open the original SVG
     const originalTempPath = mkdtempSync(join(tempDir, 'simlin-diagram-'));
@@ -129,8 +129,8 @@ async function main() {
     // Note: generateViews is not yet implemented in the engine
     console.log('Note: View generation is not yet implemented');
 
-    // Serialize back to protobuf and then to XMILE
-    const regeneratedPB = noViewsEngineProject.serializeProtobuf();
+    // Serialize to JSON and XMILE
+    const regeneratedJson = await noViewsEngineProject.serializeJson();
     const regeneratedXmile = noViewsEngineProject.toXmileString();
 
     if (!regeneratedXmile) {
@@ -145,11 +145,11 @@ async function main() {
 
     // Parse the regenerated XMILE back into a project to generate SVG
     console.log('\nGenerating SVG from regenerated model...');
-    const regeneratedProject = ProjectDM.deserializeBinary(regeneratedPB);
+    const regeneratedProject = projectFromJson(JSON.parse(regeneratedJson));
 
     // Check if the regenerated model has views before trying to render
     const regeneratedMainModel = regeneratedProject.models.get('main');
-    if (regeneratedMainModel && regeneratedMainModel.views && !regeneratedMainModel.views.isEmpty()) {
+    if (regeneratedMainModel && regeneratedMainModel.views && regeneratedMainModel.views.length > 0) {
       // Generate and open the regenerated SVG
       const regeneratedSvgPath = mkdtempSync(join(tempDir, `${inputFilename}-regenerated-svg-`));
       const regeneratedSvgFile = join(regeneratedSvgPath, 'regenerated-diagram.svg');
