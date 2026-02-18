@@ -6,8 +6,6 @@ import * as React from 'react';
 
 import { Link } from 'wouter';
 import clsx from 'clsx';
-import { List } from 'immutable';
-
 import {
   AppBar,
   Button,
@@ -32,7 +30,7 @@ import typography from './typography.module.css';
 
 interface HomeState {
   anchorEl?: HTMLElement;
-  projects: List<Project>;
+  projects: readonly Project[];
 }
 
 interface HomeProps {
@@ -54,7 +52,7 @@ class Home extends React.Component<HomeProps, HomeState> {
 
     this.state = {
       anchorEl: undefined,
-      projects: List<Project>(),
+      projects: [],
     };
 
     setTimeout(this.getProjects);
@@ -69,7 +67,7 @@ class Home extends React.Component<HomeProps, HomeState> {
     }
     const projects = (await response.json()) as Project[];
     this.setState({
-      projects: List(projects),
+      projects,
     });
   };
 

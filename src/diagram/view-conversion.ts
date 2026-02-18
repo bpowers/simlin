@@ -6,14 +6,6 @@ import type { JsonView, JsonViewElement, JsonRect, JsonFlowPoint, JsonLinkPoint 
 
 import {
   ViewElement,
-  StockViewElement,
-  FlowViewElement,
-  AuxViewElement,
-  CloudViewElement,
-  LinkViewElement,
-  ModuleViewElement,
-  AliasViewElement,
-  GroupViewElement,
   StockFlowView,
   Rect,
   Point,
@@ -43,106 +35,99 @@ function pointToLinkPoint(point: Point): JsonLinkPoint {
   };
 }
 
-function elementToJson(element: ViewElement): JsonViewElement | null {
-  if (element instanceof StockViewElement) {
-    return {
-      type: 'stock',
-      uid: element.uid,
-      name: element.name,
-      x: element.x,
-      y: element.y,
-      labelSide: element.labelSide,
-    };
-  }
+function elementToJson(element: ViewElement): JsonViewElement {
+  switch (element.type) {
+    case 'stock':
+      return {
+        type: 'stock',
+        uid: element.uid,
+        name: element.name,
+        x: element.x,
+        y: element.y,
+        labelSide: element.labelSide,
+      };
 
-  if (element instanceof FlowViewElement) {
-    return {
-      type: 'flow',
-      uid: element.uid,
-      name: element.name,
-      x: element.x,
-      y: element.y,
-      points: element.points.map(pointToFlowPoint).toArray(),
-      labelSide: element.labelSide,
-    };
-  }
+    case 'flow':
+      return {
+        type: 'flow',
+        uid: element.uid,
+        name: element.name,
+        x: element.x,
+        y: element.y,
+        points: element.points.map(pointToFlowPoint),
+        labelSide: element.labelSide,
+      };
 
-  if (element instanceof AuxViewElement) {
-    return {
-      type: 'aux',
-      uid: element.uid,
-      name: element.name,
-      x: element.x,
-      y: element.y,
-      labelSide: element.labelSide,
-    };
-  }
+    case 'aux':
+      return {
+        type: 'aux',
+        uid: element.uid,
+        name: element.name,
+        x: element.x,
+        y: element.y,
+        labelSide: element.labelSide,
+      };
 
-  if (element instanceof CloudViewElement) {
-    return {
-      type: 'cloud',
-      uid: element.uid,
-      flowUid: element.flowUid,
-      x: element.x,
-      y: element.y,
-    };
-  }
+    case 'cloud':
+      return {
+        type: 'cloud',
+        uid: element.uid,
+        flowUid: element.flowUid,
+        x: element.x,
+        y: element.y,
+      };
 
-  if (element instanceof LinkViewElement) {
-    const result: JsonViewElement = {
-      type: 'link',
-      uid: element.uid,
-      fromUid: element.fromUid,
-      toUid: element.toUid,
-    };
+    case 'link': {
+      const result: JsonViewElement = {
+        type: 'link',
+        uid: element.uid,
+        fromUid: element.fromUid,
+        toUid: element.toUid,
+      };
 
-    if (element.arc !== undefined) {
-      (result as any).arc = element.arc;
+      if (element.arc !== undefined) {
+        (result as any).arc = element.arc;
+      }
+
+      if (element.multiPoint) {
+        (result as any).multiPoints = element.multiPoint.map(pointToLinkPoint);
+      }
+
+      return result;
     }
 
-    if (element.multiPoint) {
-      (result as any).multiPoints = element.multiPoint.map(pointToLinkPoint).toArray();
-    }
+    case 'module':
+      return {
+        type: 'module',
+        uid: element.uid,
+        name: element.name,
+        x: element.x,
+        y: element.y,
+        labelSide: element.labelSide,
+      };
 
-    return result;
+    case 'alias':
+      return {
+        type: 'alias',
+        uid: element.uid,
+        aliasOfUid: element.aliasOfUid,
+        x: element.x,
+        y: element.y,
+        labelSide: element.labelSide,
+      };
+
+    case 'group':
+      // GroupViewElement stores center-based x/y internally, convert to top-left for JSON
+      return {
+        type: 'group',
+        uid: element.uid,
+        name: element.name,
+        x: element.x - element.width / 2,
+        y: element.y - element.height / 2,
+        width: element.width,
+        height: element.height,
+      };
   }
-
-  if (element instanceof ModuleViewElement) {
-    return {
-      type: 'module',
-      uid: element.uid,
-      name: element.name,
-      x: element.x,
-      y: element.y,
-      labelSide: element.labelSide,
-    };
-  }
-
-  if (element instanceof AliasViewElement) {
-    return {
-      type: 'alias',
-      uid: element.uid,
-      aliasOfUid: element.aliasOfUid,
-      x: element.x,
-      y: element.y,
-      labelSide: element.labelSide,
-    };
-  }
-
-  if (element instanceof GroupViewElement) {
-    // GroupViewElement stores center-based x/y internally, convert to top-left for JSON
-    return {
-      type: 'group',
-      uid: element.uid,
-      name: element.name,
-      x: element.x - element.width / 2,
-      y: element.y - element.height / 2,
-      width: element.width,
-      height: element.height,
-    };
-  }
-
-  return null;
 }
 
 /**
@@ -152,10 +137,7 @@ export function stockFlowViewToJson(view: StockFlowView): JsonView {
   const elements: JsonViewElement[] = [];
 
   for (const element of view.elements) {
-    const jsonElement = elementToJson(element);
-    if (jsonElement) {
-      elements.push(jsonElement);
-    }
+    elements.push(elementToJson(element));
   }
 
   const result: JsonView = {

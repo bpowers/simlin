@@ -11,7 +11,7 @@ import { first, last } from '@simlin/core/collections';
  * Throws if the flow has fewer than 2 points (which would be invalid).
  */
 export function isCloudOnSourceSide(cloud: CloudViewElement, flow: FlowViewElement): boolean {
-  if (flow.points.size < 2) {
+  if (flow.points.length < 2) {
     throw new Error(`Flow ${flow.uid} has fewer than 2 points`);
   }
   const firstPoint = first(flow.points);
@@ -24,7 +24,7 @@ export function isCloudOnSourceSide(cloud: CloudViewElement, flow: FlowViewEleme
  * Throws if the flow has fewer than 2 points (which would be invalid).
  */
 export function isCloudOnSinkSide(cloud: CloudViewElement, flow: FlowViewElement): boolean {
-  if (flow.points.size < 2) {
+  if (flow.points.length < 2) {
     throw new Error(`Flow ${flow.uid} has fewer than 2 points`);
   }
   const lastPoint = last(flow.points);

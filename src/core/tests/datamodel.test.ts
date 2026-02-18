@@ -2,41 +2,69 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { List, Map } from 'immutable';
-
 import {
+  graphicalFunctionScaleFromJson,
+  graphicalFunctionScaleToJson,
+  graphicalFunctionFromJson,
+  graphicalFunctionToJson,
+  stockFromJson,
+  stockToJson,
+  flowFromJson,
+  flowToJson,
+  auxFromJson,
+  auxToJson,
+  moduleFromJson,
+  moduleToJson,
+  stockViewElementFromJson,
+  flowViewElementFromJson,
+  linkViewElementFromJson,
+  cloudViewElementFromJson,
+  stockFlowViewFromJson,
+  stockFlowViewToJson,
+  simSpecsFromJson,
+  simSpecsToJson,
+  dimensionFromJson,
+  dimensionToJson,
+  sourceFromJson,
+  sourceToJson,
+  loopMetadataFromJson,
+  loopMetadataToJson,
+  modelFromJson,
+  modelToJson,
+  projectFromJson,
+  projectToJson,
+} from '../datamodel';
+
+import type {
   GraphicalFunctionScale,
   GraphicalFunction,
   Stock,
   Flow,
   Aux,
   Module,
-  ModuleReference,
-  AuxViewElement,
+  ScalarEquation,
+  ApplyToAllEquation,
+  ArrayedEquation,
+  SimSpecs,
+  Dimension,
+  Source,
+  StockFlowView,
   StockViewElement,
   FlowViewElement,
   LinkViewElement,
   CloudViewElement,
-  Point,
-  Rect,
-  StockFlowView,
-  Model,
-  SimSpecs,
-  Dt,
-  Dimension,
-  Source,
-  Project,
-  ScalarEquation,
-  ApplyToAllEquation,
-  ArrayedEquation,
+  AuxViewElement,
   LoopMetadata,
+  Model,
+  Project,
+  Variable,
 } from '../datamodel';
 
 describe('GraphicalFunctionScale', () => {
   it('should roundtrip correctly', () => {
-    const scale = new GraphicalFunctionScale({ min: -10, max: 100 });
-    const json = scale.toJson();
-    const restored = GraphicalFunctionScale.fromJson(json);
+    const scale: GraphicalFunctionScale = { min: -10, max: 100 };
+    const json = graphicalFunctionScaleToJson(scale);
+    const restored = graphicalFunctionScaleFromJson(json);
     expect(restored.min).toBe(scale.min);
     expect(restored.max).toBe(scale.max);
   });
@@ -44,60 +72,61 @@ describe('GraphicalFunctionScale', () => {
 
 describe('GraphicalFunction', () => {
   it('should roundtrip with points', () => {
-    const gf = new GraphicalFunction({
+    const gf: GraphicalFunction = {
       kind: 'continuous',
-      xPoints: List([0, 1, 2]),
-      yPoints: List([10, 20, 30]),
-      xScale: new GraphicalFunctionScale({ min: 0, max: 2 }),
-      yScale: new GraphicalFunctionScale({ min: 0, max: 50 }),
-    });
-    const json = gf.toJson();
+      xPoints: [0, 1, 2],
+      yPoints: [10, 20, 30],
+      xScale: { min: 0, max: 2 },
+      yScale: { min: 0, max: 50 },
+    };
+    const json = graphicalFunctionToJson(gf);
     expect(json.points).toHaveLength(3);
     expect(json.points![0]).toEqual([0, 10]);
     expect(json.points![1]).toEqual([1, 20]);
     expect(json.points![2]).toEqual([2, 30]);
 
-    const restored = GraphicalFunction.fromJson(json);
+    const restored = graphicalFunctionFromJson(json);
     expect(restored.kind).toBe('continuous');
-    expect(restored.xPoints?.toArray()).toEqual([0, 1, 2]);
-    expect(restored.yPoints.toArray()).toEqual([10, 20, 30]);
+    expect(restored.xPoints).toEqual([0, 1, 2]);
+    expect(restored.yPoints).toEqual([10, 20, 30]);
   });
 
   it('should roundtrip with yPoints only', () => {
-    const gf = new GraphicalFunction({
+    const gf: GraphicalFunction = {
       kind: 'extrapolate',
       xPoints: undefined,
-      yPoints: List([5, 10, 15, 20]),
-      xScale: new GraphicalFunctionScale({ min: 0, max: 3 }),
-      yScale: new GraphicalFunctionScale({ min: 0, max: 25 }),
-    });
-    const json = gf.toJson();
+      yPoints: [5, 10, 15, 20],
+      xScale: { min: 0, max: 3 },
+      yScale: { min: 0, max: 25 },
+    };
+    const json = graphicalFunctionToJson(gf);
     expect(json.yPoints).toEqual([5, 10, 15, 20]);
     expect(json.points).toBeUndefined();
 
-    const restored = GraphicalFunction.fromJson(json);
-    expect(restored.yPoints.toArray()).toEqual([5, 10, 15, 20]);
+    const restored = graphicalFunctionFromJson(json);
+    expect(restored.yPoints).toEqual([5, 10, 15, 20]);
     expect(restored.xPoints).toBeUndefined();
   });
 });
 
 describe('Stock', () => {
   it('should roundtrip correctly', () => {
-    const stock = new Stock({
+    const stock: Stock = {
+      type: 'stock',
       ident: 'population',
-      equation: new ScalarEquation({ equation: '100' }),
+      equation: { type: 'scalar', equation: '100' },
       documentation: 'Population of the system',
       units: 'people',
-      inflows: List(['births']),
-      outflows: List(['deaths']),
+      inflows: ['births'],
+      outflows: ['deaths'],
       nonNegative: true,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
       uid: 1,
-    });
+    };
 
-    const json = stock.toJson();
+    const json = stockToJson(stock);
     expect(json.name).toBe('population');
     expect(json.initialEquation).toBe('100');
     expect(json.inflows).toEqual(['births']);
@@ -105,11 +134,12 @@ describe('Stock', () => {
     expect(json.nonNegative).toBe(true);
     expect(json.uid).toBe(1);
 
-    const restored = Stock.fromJson(json);
+    const restored = stockFromJson(json);
     expect(restored.ident).toBe('population');
+    expect(restored.equation.type).toBe('scalar');
     expect((restored.equation as ScalarEquation).equation).toBe('100');
-    expect(restored.inflows.toArray()).toEqual(['births']);
-    expect(restored.outflows.toArray()).toEqual(['deaths']);
+    expect(restored.inflows).toEqual(['births']);
+    expect(restored.outflows).toEqual(['deaths']);
     expect(restored.nonNegative).toBe(true);
     expect(restored.uid).toBe(1);
   });
@@ -117,9 +147,10 @@ describe('Stock', () => {
 
 describe('Flow', () => {
   it('should roundtrip correctly', () => {
-    const flow = new Flow({
+    const flow: Flow = {
+      type: 'flow',
       ident: 'births',
-      equation: new ScalarEquation({ equation: 'population * birth_rate' }),
+      equation: { type: 'scalar', equation: 'population * birth_rate' },
       documentation: 'Birth rate',
       units: 'people/year',
       gf: undefined,
@@ -128,13 +159,13 @@ describe('Flow', () => {
       errors: undefined,
       unitErrors: undefined,
       uid: 2,
-    });
+    };
 
-    const json = flow.toJson();
+    const json = flowToJson(flow);
     expect(json.name).toBe('births');
     expect(json.equation).toBe('population * birth_rate');
 
-    const restored = Flow.fromJson(json);
+    const restored = flowFromJson(json);
     expect(restored.ident).toBe('births');
     expect((restored.equation as ScalarEquation).equation).toBe('population * birth_rate');
   });
@@ -142,9 +173,10 @@ describe('Flow', () => {
 
 describe('Aux', () => {
   it('should roundtrip correctly', () => {
-    const aux = new Aux({
+    const aux: Aux = {
+      type: 'aux',
       ident: 'birth_rate',
-      equation: new ScalarEquation({ equation: '0.03' }),
+      equation: { type: 'scalar', equation: '0.03' },
       documentation: 'Annual birth rate',
       units: '1/year',
       gf: undefined,
@@ -152,28 +184,29 @@ describe('Aux', () => {
       errors: undefined,
       unitErrors: undefined,
       uid: 3,
-    });
+    };
 
-    const json = aux.toJson();
+    const json = auxToJson(aux);
     expect(json.name).toBe('birth_rate');
     expect(json.equation).toBe('0.03');
 
-    const restored = Aux.fromJson(json);
+    const restored = auxFromJson(json);
     expect(restored.ident).toBe('birth_rate');
   });
 
   it('should roundtrip with graphical function', () => {
-    const gf = new GraphicalFunction({
+    const gf: GraphicalFunction = {
       kind: 'continuous',
-      xPoints: List([0, 50, 100]),
-      yPoints: List([0, 0.5, 1]),
-      xScale: new GraphicalFunctionScale({ min: 0, max: 100 }),
-      yScale: new GraphicalFunctionScale({ min: 0, max: 1 }),
-    });
+      xPoints: [0, 50, 100],
+      yPoints: [0, 0.5, 1],
+      xScale: { min: 0, max: 100 },
+      yScale: { min: 0, max: 1 },
+    };
 
-    const aux = new Aux({
+    const aux: Aux = {
+      type: 'aux',
       ident: 'effect',
-      equation: new ScalarEquation({ equation: 'input' }),
+      equation: { type: 'scalar', equation: 'input' },
       documentation: '',
       units: '',
       gf,
@@ -181,50 +214,50 @@ describe('Aux', () => {
       errors: undefined,
       unitErrors: undefined,
       uid: 4,
-    });
+    };
 
-    const json = aux.toJson();
+    const json = auxToJson(aux);
     expect(json.graphicalFunction).toBeDefined();
     expect(json.graphicalFunction!.points).toHaveLength(3);
 
-    const restored = Aux.fromJson(json);
+    const restored = auxFromJson(json);
     expect(restored.gf).toBeDefined();
-    expect(restored.gf!.yPoints.toArray()).toEqual([0, 0.5, 1]);
+    expect(restored.gf!.yPoints).toEqual([0, 0.5, 1]);
   });
 });
 
 describe('Module', () => {
   it('should roundtrip correctly', () => {
-    const mod = new Module({
+    const mod: Module = {
+      type: 'module',
       ident: 'sector',
       modelName: 'SectorModel',
       documentation: 'A sector submodel',
       units: '',
-      references: List([
-        new ModuleReference({ src: 'input_var', dst: 'sector_input' }),
-      ]),
+      references: [{ src: 'input_var', dst: 'sector_input' }],
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
       uid: 5,
-    });
+    };
 
-    const json = mod.toJson();
+    const json = moduleToJson(mod);
     expect(json.name).toBe('sector');
     expect(json.modelName).toBe('SectorModel');
     expect(json.references).toHaveLength(1);
     expect(json.references![0].src).toBe('input_var');
 
-    const restored = Module.fromJson(json);
+    const restored = moduleFromJson(json);
     expect(restored.ident).toBe('sector');
     expect(restored.modelName).toBe('SectorModel');
-    expect(restored.references.size).toBe(1);
+    expect(restored.references.length).toBe(1);
   });
 });
 
 describe('View Elements', () => {
   it('should roundtrip StockViewElement', () => {
-    const elem = new StockViewElement({
+    const elem: StockViewElement = {
+      type: 'stock',
       uid: 1,
       name: 'Population',
       ident: 'population',
@@ -233,18 +266,25 @@ describe('View Elements', () => {
       y: 200,
       labelSide: 'top',
       isZeroRadius: false,
-      inflows: List(),
-      outflows: List(),
+      inflows: [],
+      outflows: [],
+    };
+
+    const json = stockFlowViewToJson({
+      nextUid: 2,
+      elements: [elem],
+      viewBox: { x: 0, y: 0, width: 0, height: 0 },
+      zoom: -1,
+      useLetteredPolarity: false,
     });
+    const stockJson = json.elements[0];
+    expect(stockJson.type).toBe('stock');
+    expect((stockJson as any).name).toBe('Population');
+    expect((stockJson as any).x).toBe(100);
+    expect((stockJson as any).y).toBe(200);
+    expect((stockJson as any).labelSide).toBe('top');
 
-    const json = elem.toJson();
-    expect(json.type).toBe('stock');
-    expect(json.name).toBe('Population');
-    expect(json.x).toBe(100);
-    expect(json.y).toBe(200);
-    expect(json.labelSide).toBe('top');
-
-    const restored = StockViewElement.fromJson(json);
+    const restored = stockViewElementFromJson(stockJson as any);
     expect(restored.uid).toBe(1);
     expect(restored.name).toBe('Population');
     expect(restored.x).toBe(100);
@@ -252,7 +292,8 @@ describe('View Elements', () => {
   });
 
   it('should roundtrip FlowViewElement', () => {
-    const elem = new FlowViewElement({
+    const elem: FlowViewElement = {
+      type: 'flow',
       uid: 2,
       name: 'Births',
       ident: 'births',
@@ -260,118 +301,160 @@ describe('View Elements', () => {
       x: 50,
       y: 200,
       labelSide: 'bottom',
-      points: List([
-        new Point({ x: 0, y: 200, attachedToUid: undefined }),
-        new Point({ x: 100, y: 200, attachedToUid: 1 }),
-      ]),
+      points: [
+        { x: 0, y: 200, attachedToUid: undefined },
+        { x: 100, y: 200, attachedToUid: 1 },
+      ],
       isZeroRadius: false,
+    };
+
+    const json = stockFlowViewToJson({
+      nextUid: 3,
+      elements: [elem],
+      viewBox: { x: 0, y: 0, width: 0, height: 0 },
+      zoom: -1,
+      useLetteredPolarity: false,
     });
+    const flowJson = json.elements[0] as any;
+    expect(flowJson.type).toBe('flow');
+    expect(flowJson.points).toHaveLength(2);
+    expect(flowJson.points[1].attachedToUid).toBe(1);
 
-    const json = elem.toJson();
-    expect(json.type).toBe('flow');
-    expect(json.points).toHaveLength(2);
-    expect(json.points[1].attachedToUid).toBe(1);
-
-    const restored = FlowViewElement.fromJson(json);
-    expect(restored.points.size).toBe(2);
-    expect(restored.points.get(1)?.attachedToUid).toBe(1);
+    const restored = flowViewElementFromJson(flowJson);
+    expect(restored.points.length).toBe(2);
+    expect(restored.points[1]?.attachedToUid).toBe(1);
   });
 
   it('should roundtrip LinkViewElement with arc', () => {
-    const elem = new LinkViewElement({
+    const elem: LinkViewElement = {
+      type: 'link',
       uid: 3,
       fromUid: 1,
       toUid: 2,
       arc: 30,
       isStraight: false,
       multiPoint: undefined,
+      polarity: undefined,
+      x: NaN,
+      y: NaN,
+      isZeroRadius: false,
+      ident: undefined,
+    };
+
+    const json = stockFlowViewToJson({
+      nextUid: 4,
+      elements: [elem],
+      viewBox: { x: 0, y: 0, width: 0, height: 0 },
+      zoom: -1,
+      useLetteredPolarity: false,
     });
+    const linkJson = json.elements[0] as any;
+    expect(linkJson.type).toBe('link');
+    expect(linkJson.arc).toBe(30);
+    expect(linkJson.multiPoints).toBeUndefined();
 
-    const json = elem.toJson();
-    expect(json.type).toBe('link');
-    expect(json.arc).toBe(30);
-    expect((json as any).multiPoints).toBeUndefined();
-
-    const restored = LinkViewElement.fromJson(json);
+    const restored = linkViewElementFromJson(linkJson);
     expect(restored.arc).toBe(30);
     expect(restored.isStraight).toBe(false);
   });
 
   it('should roundtrip LinkViewElement straight line', () => {
-    const elem = new LinkViewElement({
+    const elem: LinkViewElement = {
+      type: 'link',
       uid: 4,
       fromUid: 1,
       toUid: 3,
       arc: undefined,
       isStraight: true,
       multiPoint: undefined,
+      polarity: undefined,
+      x: NaN,
+      y: NaN,
+      isZeroRadius: false,
+      ident: undefined,
+    };
+
+    const json = stockFlowViewToJson({
+      nextUid: 5,
+      elements: [elem],
+      viewBox: { x: 0, y: 0, width: 0, height: 0 },
+      zoom: -1,
+      useLetteredPolarity: false,
     });
+    const linkJson = json.elements[0] as any;
+    expect(linkJson.type).toBe('link');
+    expect(linkJson.arc).toBeUndefined();
 
-    const json = elem.toJson();
-    expect(json.type).toBe('link');
-    expect(json.arc).toBeUndefined();
-
-    const restored = LinkViewElement.fromJson(json);
+    const restored = linkViewElementFromJson(linkJson);
     expect(restored.isStraight).toBe(true);
     expect(restored.arc).toBeUndefined();
   });
 
   it('should roundtrip CloudViewElement', () => {
-    const elem = new CloudViewElement({
+    const elem: CloudViewElement = {
+      type: 'cloud',
       uid: 5,
       flowUid: 2,
       x: 0,
       y: 200,
       isZeroRadius: false,
+      ident: undefined,
+    };
+
+    const json = stockFlowViewToJson({
+      nextUid: 6,
+      elements: [elem],
+      viewBox: { x: 0, y: 0, width: 0, height: 0 },
+      zoom: -1,
+      useLetteredPolarity: false,
     });
+    const cloudJson = json.elements[0] as any;
+    expect(cloudJson.type).toBe('cloud');
+    expect(cloudJson.flowUid).toBe(2);
 
-    const json = elem.toJson();
-    expect(json.type).toBe('cloud');
-    expect(json.flowUid).toBe(2);
-
-    const restored = CloudViewElement.fromJson(json);
+    const restored = cloudViewElementFromJson(cloudJson);
     expect(restored.flowUid).toBe(2);
   });
 });
 
 describe('SimSpecs', () => {
   it('should roundtrip correctly', () => {
-    const specs = new SimSpecs({
+    const specs: SimSpecs = {
       start: 0,
       stop: 100,
-      dt: new Dt({ value: 0.25, isReciprocal: false }),
-      saveStep: new Dt({ value: 1, isReciprocal: false }),
+      dt: { value: 0.25, isReciprocal: false },
+      saveStep: { value: 1, isReciprocal: false },
       simMethod: 'rk4',
       timeUnits: 'years',
-    });
+    };
 
-    const json = specs.toJson();
+    const json = simSpecsToJson(specs);
     expect(json.startTime).toBe(0);
     expect(json.endTime).toBe(100);
     expect(json.dt).toBe('0.25');
     expect(json.saveStep).toBe(1);
     expect(json.method).toBe('rk4');
 
-    const restored = SimSpecs.fromJson(json);
+    const restored = simSpecsFromJson(json);
     expect(restored.start).toBe(0);
     expect(restored.stop).toBe(100);
     expect(restored.dt.value).toBe(0.25);
   });
 
   it('should handle reciprocal dt', () => {
-    const specs = new SimSpecs({
+    const specs: SimSpecs = {
       start: 0,
       stop: 10,
-      dt: new Dt({ value: 4, isReciprocal: true }),
+      dt: { value: 4, isReciprocal: true },
       saveStep: undefined,
       simMethod: 'euler',
       timeUnits: 'days',
-    });
+    };
 
-    const json = specs.toJson();
+    const json = simSpecsToJson(specs);
     expect(json.dt).toBe('1/4');
 
-    const restored = SimSpecs.fromJson(json);
+    const restored = simSpecsFromJson(json);
     expect(restored.dt.isReciprocal).toBe(true);
     expect(restored.dt.value).toBe(4);
   });
@@ -379,45 +462,45 @@ describe('SimSpecs', () => {
 
 describe('Dimension', () => {
   it('should roundtrip with elements', () => {
-    const dim = new Dimension({
+    const dim: Dimension = {
       name: 'regions',
-      subscripts: List(['north', 'south', 'east', 'west']),
-    });
+      subscripts: ['north', 'south', 'east', 'west'],
+    };
 
-    const json = dim.toJson();
+    const json = dimensionToJson(dim);
     expect(json.name).toBe('regions');
     expect(json.elements).toEqual(['north', 'south', 'east', 'west']);
 
-    const restored = Dimension.fromJson(json);
+    const restored = dimensionFromJson(json);
     expect(restored.name).toBe('regions');
-    expect(restored.subscripts.toArray()).toEqual(['north', 'south', 'east', 'west']);
+    expect(restored.subscripts).toEqual(['north', 'south', 'east', 'west']);
   });
 });
 
 describe('Source', () => {
   it('should roundtrip correctly', () => {
-    const source = new Source({
+    const source: Source = {
       extension: 'xmile',
       content: '<xmile>...</xmile>',
-    });
+    };
 
-    const json = source.toJson();
+    const json = sourceToJson(source);
     expect(json.extension).toBe('xmile');
     expect(json.content).toBe('<xmile>...</xmile>');
 
-    const restored = Source.fromJson(json);
+    const restored = sourceFromJson(json);
     expect(restored.extension).toBe('xmile');
     expect(restored.content).toBe('<xmile>...</xmile>');
   });
 
   it('should handle empty source', () => {
-    const source = new Source({
+    const source: Source = {
       extension: undefined,
       content: '',
-    });
+    };
 
-    const json = source.toJson();
-    const restored = Source.fromJson(json);
+    const json = sourceToJson(source);
+    const restored = sourceFromJson(json);
     expect(restored.extension).toBeUndefined();
     expect(restored.content).toBe('');
   });
@@ -425,44 +508,45 @@ describe('Source', () => {
 
 describe('LoopMetadata', () => {
   it('should roundtrip correctly', () => {
-    const loop = new LoopMetadata({
-      uids: List([1, 2, 3, 4, 1]),
+    const loop: LoopMetadata = {
+      uids: [1, 2, 3, 4, 1],
       deleted: false,
       name: 'Growth Loop',
       description: 'Main reinforcing loop',
-    });
+    };
 
-    const json = loop.toJson();
+    const json = loopMetadataToJson(loop);
     expect(json.uids).toEqual([1, 2, 3, 4, 1]);
     expect(json.name).toBe('Growth Loop');
     expect(json.description).toBe('Main reinforcing loop');
     expect(json.deleted).toBeUndefined();
 
-    const restored = LoopMetadata.fromJson(json);
-    expect(restored.uids.toArray()).toEqual([1, 2, 3, 4, 1]);
+    const restored = loopMetadataFromJson(json);
+    expect(restored.uids).toEqual([1, 2, 3, 4, 1]);
     expect(restored.name).toBe('Growth Loop');
     expect(restored.deleted).toBe(false);
   });
 
   it('should handle deleted loop', () => {
-    const loop = new LoopMetadata({
-      uids: List([1, 2]),
+    const loop: LoopMetadata = {
+      uids: [1, 2],
       deleted: true,
       name: 'Deleted Loop',
       description: '',
-    });
+    };
 
-    const json = loop.toJson();
+    const json = loopMetadataToJson(loop);
     expect(json.deleted).toBe(true);
 
-    const restored = LoopMetadata.fromJson(json);
+    const restored = loopMetadataFromJson(json);
     expect(restored.deleted).toBe(true);
   });
 });
 
 describe('StockFlowView', () => {
   it('should roundtrip with various element types', () => {
-    const stockElem = new StockViewElement({
+    const stockElem: StockViewElement = {
+      type: 'stock',
       uid: 1,
       name: 'Population',
       ident: 'population',
@@ -471,11 +555,12 @@ describe('StockFlowView', () => {
       y: 200,
       labelSide: 'top',
       isZeroRadius: false,
-      inflows: List([2]),
-      outflows: List([]),
-    });
+      inflows: [2],
+      outflows: [],
+    };
 
-    const flowElem = new FlowViewElement({
+    const flowElem: FlowViewElement = {
+      type: 'flow',
       uid: 2,
       name: 'Births',
       ident: 'births',
@@ -483,14 +568,15 @@ describe('StockFlowView', () => {
       x: 100,
       y: 200,
       labelSide: 'bottom',
-      points: List([
-        new Point({ x: 50, y: 200, attachedToUid: undefined }),
-        new Point({ x: 150, y: 200, attachedToUid: 1 }),
-      ]),
+      points: [
+        { x: 50, y: 200, attachedToUid: undefined },
+        { x: 150, y: 200, attachedToUid: 1 },
+      ],
       isZeroRadius: false,
-    });
+    };
 
-    const auxElem = new AuxViewElement({
+    const auxElem: AuxViewElement = {
+      type: 'aux',
       uid: 3,
       name: 'BirthRate',
       ident: 'birth_rate',
@@ -499,39 +585,48 @@ describe('StockFlowView', () => {
       y: 100,
       labelSide: 'right',
       isZeroRadius: false,
-    });
+    };
 
-    const linkElem = new LinkViewElement({
+    const linkElem: LinkViewElement = {
+      type: 'link',
       uid: 4,
       fromUid: 3,
       toUid: 2,
       arc: 45,
       isStraight: false,
       multiPoint: undefined,
-    });
+      polarity: undefined,
+      x: NaN,
+      y: NaN,
+      isZeroRadius: false,
+      ident: undefined,
+    };
 
-    const cloudElem = new CloudViewElement({
+    const cloudElem: CloudViewElement = {
+      type: 'cloud',
       uid: 5,
       flowUid: 2,
       x: 50,
       y: 200,
       isZeroRadius: false,
-    });
+      ident: undefined,
+    };
 
-    const view = new StockFlowView({
-      elements: List([stockElem, flowElem, auxElem, linkElem, cloudElem]),
+    const view: StockFlowView = {
+      elements: [stockElem, flowElem, auxElem, linkElem, cloudElem],
       nextUid: 6,
-      viewBox: new Rect({ x: 0, y: 0, width: 800, height: 600 }),
+      viewBox: { x: 0, y: 0, width: 800, height: 600 },
       zoom: 1.5,
-    });
+      useLetteredPolarity: false,
+    };
 
-    const json = view.toJson();
+    const json = stockFlowViewToJson(view);
     expect(json.elements).toHaveLength(5);
     expect(json.viewBox).toEqual({ x: 0, y: 0, width: 800, height: 600 });
     expect(json.zoom).toBe(1.5);
 
-    const restored = StockFlowView.fromJson(json, Map());
-    expect(restored.elements.size).toBe(5);
+    const restored = stockFlowViewFromJson(json, new Map());
+    expect(restored.elements.length).toBe(5);
     expect(restored.viewBox.width).toBe(800);
     expect(restored.zoom).toBe(1.5);
   });
@@ -539,46 +634,50 @@ describe('StockFlowView', () => {
 
 describe('Arrayed Equations', () => {
   it('should roundtrip Stock with ApplyToAllEquation', () => {
-    const stock = new Stock({
+    const stock: Stock = {
+      type: 'stock',
       ident: 'inventory',
-      equation: new ApplyToAllEquation({
-        dimensionNames: List(['warehouses']),
+      equation: {
+        type: 'applyToAll',
+        dimensionNames: ['warehouses'],
         equation: '100',
-      }),
+      },
       documentation: 'Inventory by warehouse',
       units: 'items',
-      inflows: List([]),
-      outflows: List([]),
+      inflows: [],
+      outflows: [],
       nonNegative: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
       uid: 1,
-    });
+    };
 
-    const json = stock.toJson();
+    const json = stockToJson(stock);
     expect(json.arrayedEquation).toBeDefined();
     expect(json.arrayedEquation!.dimensions).toEqual(['warehouses']);
     expect(json.arrayedEquation!.equation).toBe('100');
     expect(json.initialEquation).toBeUndefined();
 
-    const restored = Stock.fromJson(json);
-    expect(restored.equation).toBeInstanceOf(ApplyToAllEquation);
+    const restored = stockFromJson(json);
+    expect(restored.equation.type).toBe('applyToAll');
     const eq = restored.equation as ApplyToAllEquation;
-    expect(eq.dimensionNames.toArray()).toEqual(['warehouses']);
+    expect(eq.dimensionNames).toEqual(['warehouses']);
     expect(eq.equation).toBe('100');
   });
 
   it('should roundtrip Aux with ArrayedEquation', () => {
-    const aux = new Aux({
+    const aux: Aux = {
+      type: 'aux',
       ident: 'demand',
-      equation: new ArrayedEquation({
-        dimensionNames: List(['regions']),
-        elements: Map<string, string>([
+      equation: {
+        type: 'arrayed',
+        dimensionNames: ['regions'],
+        elements: new Map<string, string>([
           ['north', '50'],
           ['south', '75'],
         ]),
-      }),
+      },
       documentation: 'Demand by region',
       units: '',
       gf: undefined,
@@ -586,17 +685,17 @@ describe('Arrayed Equations', () => {
       errors: undefined,
       unitErrors: undefined,
       uid: 2,
-    });
+    };
 
-    const json = aux.toJson();
+    const json = auxToJson(aux);
     expect(json.arrayedEquation).toBeDefined();
     expect(json.arrayedEquation!.dimensions).toEqual(['regions']);
     expect(json.arrayedEquation!.elements).toHaveLength(2);
 
-    const restored = Aux.fromJson(json);
-    expect(restored.equation).toBeInstanceOf(ArrayedEquation);
+    const restored = auxFromJson(json);
+    expect(restored.equation.type).toBe('arrayed');
     const eq = restored.equation as ArrayedEquation;
-    expect(eq.dimensionNames.toArray()).toEqual(['regions']);
+    expect(eq.dimensionNames).toEqual(['regions']);
     expect(eq.elements.size).toBe(2);
     expect(eq.elements.get('north')).toBe('50');
     expect(eq.elements.get('south')).toBe('75');
@@ -605,54 +704,69 @@ describe('Arrayed Equations', () => {
 
 describe('LinkViewElement multiPoint', () => {
   it('should roundtrip with multiPoint path', () => {
-    const elem = new LinkViewElement({
+    const elem: LinkViewElement = {
+      type: 'link',
       uid: 10,
       fromUid: 1,
       toUid: 2,
       arc: undefined,
       isStraight: false,
-      multiPoint: List([
-        new Point({ x: 100, y: 100, attachedToUid: undefined }),
-        new Point({ x: 150, y: 75, attachedToUid: undefined }),
-        new Point({ x: 200, y: 100, attachedToUid: undefined }),
-      ]),
+      multiPoint: [
+        { x: 100, y: 100, attachedToUid: undefined },
+        { x: 150, y: 75, attachedToUid: undefined },
+        { x: 200, y: 100, attachedToUid: undefined },
+      ],
+      polarity: undefined,
+      x: NaN,
+      y: NaN,
+      isZeroRadius: false,
+      ident: undefined,
+    };
+
+    const json = stockFlowViewToJson({
+      nextUid: 11,
+      elements: [elem],
+      viewBox: { x: 0, y: 0, width: 0, height: 0 },
+      zoom: -1,
+      useLetteredPolarity: false,
     });
+    const linkJson = json.elements[0] as any;
+    expect(linkJson.type).toBe('link');
+    expect(linkJson.arc).toBeUndefined();
+    expect(linkJson.multiPoints).toHaveLength(3);
+    expect(linkJson.multiPoints[1]).toEqual({ x: 150, y: 75 });
 
-    const json = elem.toJson();
-    expect(json.type).toBe('link');
-    expect(json.arc).toBeUndefined();
-    expect((json as any).multiPoints).toHaveLength(3);
-    expect((json as any).multiPoints[1]).toEqual({ x: 150, y: 75 });
-
-    const restored = LinkViewElement.fromJson(json);
+    const restored = linkViewElementFromJson(linkJson);
     expect(restored.arc).toBeUndefined();
     expect(restored.isStraight).toBe(false);
     expect(restored.multiPoint).toBeDefined();
-    expect(restored.multiPoint!.size).toBe(3);
-    expect(restored.multiPoint!.get(1)?.x).toBe(150);
-    expect(restored.multiPoint!.get(1)?.y).toBe(75);
+    expect(restored.multiPoint!.length).toBe(3);
+    expect(restored.multiPoint![1]?.x).toBe(150);
+    expect(restored.multiPoint![1]?.y).toBe(75);
   });
 });
 
 describe('Model', () => {
   it('should roundtrip correctly', () => {
-    const stock = new Stock({
+    const stock: Stock = {
+      type: 'stock',
       ident: 'population',
-      equation: new ScalarEquation({ equation: '100' }),
+      equation: { type: 'scalar', equation: '100' },
       documentation: '',
       units: 'people',
-      inflows: List(['births']),
-      outflows: List(['deaths']),
+      inflows: ['births'],
+      outflows: ['deaths'],
       nonNegative: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
       uid: 1,
-    });
+    };
 
-    const flow = new Flow({
+    const flow: Flow = {
+      type: 'flow',
       ident: 'births',
-      equation: new ScalarEquation({ equation: 'population * 0.03' }),
+      equation: { type: 'scalar', equation: 'population * 0.03' },
       documentation: '',
       units: 'people/year',
       gf: undefined,
@@ -661,51 +775,53 @@ describe('Model', () => {
       errors: undefined,
       unitErrors: undefined,
       uid: 2,
-    });
+    };
 
-    const model = new Model({
+    const model: Model = {
       name: 'main',
-      variables: Map<string, any>([
+      variables: new Map<string, Variable>([
         ['population', stock],
         ['births', flow],
       ]),
-      views: List(),
-      loopMetadata: List(),
-      groups: List(),
-    });
+      views: [],
+      loopMetadata: [],
+      groups: [],
+    };
 
-    const json = model.toJson();
+    const json = modelToJson(model);
     expect(json.name).toBe('main');
     expect(json.stocks).toHaveLength(1);
     expect(json.flows).toHaveLength(1);
 
-    const restored = Model.fromJson(json);
+    const restored = modelFromJson(json);
     expect(restored.name).toBe('main');
     expect(restored.variables.size).toBe(2);
-    expect(restored.variables.get('population')).toBeInstanceOf(Stock);
-    expect(restored.variables.get('births')).toBeInstanceOf(Flow);
+    expect(restored.variables.get('population')?.type).toBe('stock');
+    expect(restored.variables.get('births')?.type).toBe('flow');
   });
 });
 
 describe('Project', () => {
   it('should roundtrip a complete project', () => {
-    const stock = new Stock({
+    const stock: Stock = {
+      type: 'stock',
       ident: 'population',
-      equation: new ScalarEquation({ equation: '100' }),
+      equation: { type: 'scalar', equation: '100' },
       documentation: 'Population level',
       units: 'people',
-      inflows: List(['births']),
-      outflows: List([]),
+      inflows: ['births'],
+      outflows: [],
       nonNegative: true,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
       uid: 1,
-    });
+    };
 
-    const flow = new Flow({
+    const flow: Flow = {
+      type: 'flow',
       ident: 'births',
-      equation: new ScalarEquation({ equation: 'population * birth_rate' }),
+      equation: { type: 'scalar', equation: 'population * birth_rate' },
       documentation: '',
       units: 'people/year',
       gf: undefined,
@@ -714,11 +830,12 @@ describe('Project', () => {
       errors: undefined,
       unitErrors: undefined,
       uid: 2,
-    });
+    };
 
-    const aux = new Aux({
+    const aux: Aux = {
+      type: 'aux',
       ident: 'birth_rate',
-      equation: new ScalarEquation({ equation: '0.03' }),
+      equation: { type: 'scalar', equation: '0.03' },
       documentation: '',
       units: '1/year',
       gf: undefined,
@@ -726,39 +843,39 @@ describe('Project', () => {
       errors: undefined,
       unitErrors: undefined,
       uid: 3,
-    });
+    };
 
-    const model = new Model({
+    const model: Model = {
       name: 'main',
-      variables: Map<string, any>([
+      variables: new Map<string, Variable>([
         ['population', stock],
         ['births', flow],
         ['birth_rate', aux],
       ]),
-      views: List(),
-      loopMetadata: List(),
-      groups: List(),
-    });
+      views: [],
+      loopMetadata: [],
+      groups: [],
+    };
 
-    const simSpecs = new SimSpecs({
+    const simSpecs: SimSpecs = {
       start: 0,
       stop: 100,
-      dt: new Dt({ value: 0.25, isReciprocal: false }),
-      saveStep: new Dt({ value: 1, isReciprocal: false }),
+      dt: { value: 0.25, isReciprocal: false },
+      saveStep: { value: 1, isReciprocal: false },
       simMethod: 'rk4',
       timeUnits: 'years',
-    });
+    };
 
-    const project = new Project({
+    const project: Project = {
       name: 'growth_model',
       simSpecs,
-      models: Map([['main', model]]),
-      dimensions: Map(),
+      models: new Map([['main', model]]),
+      dimensions: new Map(),
       hasNoEquations: false,
-      source: new Source({ extension: 'xmile', content: '<xmile/>' }),
-    });
+      source: { extension: 'xmile', content: '<xmile/>' },
+    };
 
-    const json = project.toJson();
+    const json = projectToJson(project);
     expect(json.name).toBe('growth_model');
     expect(json.simSpecs.startTime).toBe(0);
     expect(json.simSpecs.endTime).toBe(100);
@@ -768,7 +885,7 @@ describe('Project', () => {
     expect(json.models[0].auxiliaries).toHaveLength(1);
     expect(json.source?.extension).toBe('xmile');
 
-    const restored = Project.fromJson(json);
+    const restored = projectFromJson(json);
     expect(restored.name).toBe('growth_model');
     expect(restored.simSpecs.start).toBe(0);
     expect(restored.simSpecs.stop).toBe(100);
@@ -781,32 +898,32 @@ describe('Project', () => {
   });
 
   it('should handle empty project', () => {
-    const model = new Model({
+    const model: Model = {
       name: 'main',
-      variables: Map(),
-      views: List(),
-      loopMetadata: List(),
-      groups: List(),
-    });
+      variables: new Map(),
+      views: [],
+      loopMetadata: [],
+      groups: [],
+    };
 
-    const project = new Project({
+    const project: Project = {
       name: 'empty',
-      simSpecs: new SimSpecs({
+      simSpecs: {
         start: 0,
         stop: 10,
-        dt: new Dt({ value: 1, isReciprocal: false }),
+        dt: { value: 1, isReciprocal: false },
         saveStep: undefined,
         simMethod: 'euler',
         timeUnits: '',
-      }),
-      models: Map([['main', model]]),
-      dimensions: Map(),
+      },
+      models: new Map([['main', model]]),
+      dimensions: new Map(),
       hasNoEquations: true,
       source: undefined,
-    });
+    };
 
-    const json = project.toJson();
-    const restored = Project.fromJson(json);
+    const json = projectToJson(project);
+    const restored = projectFromJson(json);
 
     expect(restored.models.get('main')?.variables.size).toBe(0);
     expect(restored.source).toBeUndefined();

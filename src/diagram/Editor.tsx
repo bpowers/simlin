@@ -4,8 +4,6 @@
 
 import * as React from 'react';
 
-import { List, Map, Set, Stack } from 'immutable';
-
 import clsx from 'clsx';
 import IconButton from './components/IconButton';
 import TextField from './components/TextField';
@@ -32,18 +30,12 @@ import {
   Model,
   Variable,
   UID,
-  Stock as StockVar,
-  Flow,
   Aux,
-  ScalarEquation,
-  ApplyToAllEquation,
-  ArrayedEquation,
   ViewElement,
   NamedViewElement,
   StockFlowView,
   GraphicalFunction,
   LinkViewElement,
-  AuxViewElement,
   FlowViewElement,
   StockViewElement,
   CloudViewElement,
@@ -54,8 +46,11 @@ import {
   ErrorCode,
   Rect,
   UnitError,
+  projectFromJson,
+  projectAttachData,
+  isNamedViewElement,
 } from '@simlin/core/datamodel';
-import { defined, exists, Series, toInt, uint8ArraysEqual } from '@simlin/core/common';
+import { defined, exists, mapSet, Series, setsEqual, toInt, uint8ArraysEqual } from '@simlin/core/common';
 import { first, getOrThrow, last, only } from '@simlin/core/collections';
 
 import { AuxIcon } from './AuxIcon';
@@ -88,11 +83,11 @@ function convertErrorDetails(
   errors: ErrorDetail[],
   modelName: string,
 ): {
-  varErrors: Map<string, List<EquationError>>;
-  unitErrors: Map<string, List<UnitError>>;
+  varErrors: ReadonlyMap<string, readonly EquationError[]>;
+  unitErrors: ReadonlyMap<string, readonly UnitError[]>;
 } {
-  let varErrors = Map<string, List<EquationError>>();
-  let unitErrors = Map<string, List<UnitError>>();
+  let varErrors = new Map<string, readonly EquationError[]>();
+  let unitErrors = new Map<string, readonly UnitError[]>();
 
   for (const err of errors) {
     if (err.modelName !== modelName) {
@@ -107,23 +102,25 @@ function convertErrorDetails(
     const isUnitError = err.kind === SimlinErrorKind.Units;
 
     if (isUnitError) {
-      const unitError = new UnitError({
+      const unitError: UnitError = {
         start: err.startOffset ?? 0,
         end: err.endOffset ?? 0,
         code: err.code as unknown as ErrorCode,
         isConsistencyError: err.unitErrorKind === SimlinUnitErrorKind.Consistency,
         details: err.message ?? undefined,
-      });
-      const existing = unitErrors.get(ident) ?? List<UnitError>();
-      unitErrors = unitErrors.set(ident, existing.push(unitError));
+      };
+      const existing = unitErrors.get(ident) ?? [];
+      unitErrors = new Map(unitErrors);
+      unitErrors.set(ident, [...existing, unitError]);
     } else {
-      const eqError = new EquationError({
+      const eqError: EquationError = {
         start: err.startOffset ?? 0,
         end: err.endOffset ?? 0,
         code: err.code as unknown as ErrorCode,
-      });
-      const existing = varErrors.get(ident) ?? List<EquationError>();
-      varErrors = varErrors.set(ident, existing.push(eqError));
+      };
+      const existing = varErrors.get(ident) ?? [];
+      varErrors = new Map(varErrors);
+      varErrors.set(ident, [...existing, eqError]);
     }
   }
 
@@ -139,23 +136,23 @@ class EditorError implements Error {
 }
 
 interface CachedErrorDetails {
-  varErrors: Map<string, List<EquationError>>;
-  unitErrors: Map<string, List<UnitError>>;
+  varErrors: ReadonlyMap<string, readonly EquationError[]>;
+  unitErrors: ReadonlyMap<string, readonly UnitError[]>;
   simError: SimError | undefined;
-  modelErrors: List<ModelError>;
+  modelErrors: readonly ModelError[];
 }
 
 interface EditorState {
-  modelErrors: List<Error>;
+  modelErrors: readonly Error[];
   activeProject: Project | undefined;
-  projectHistory: Stack<Readonly<Uint8Array>>;
+  projectHistory: readonly Readonly<Uint8Array>[];
   projectOffset: number;
   modelName: string;
   dialOpen: boolean;
   dialVisible: boolean;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
-  data: Map<string, Series>;
-  selection: Set<UID>;
+  data: ReadonlyMap<string, Series>;
+  selection: ReadonlySet<UID>;
   status: 'ok' | 'error' | 'disabled';
   showDetails: 'variable' | 'errors' | undefined;
   flowStillBeingCreated: boolean;
@@ -217,16 +214,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       activeProject: undefined,
       projectHistory:
         props.inputFormat === 'protobuf'
-          ? Stack<Readonly<Uint8Array>>([props.initialProjectBinary])
-          : Stack<Readonly<Uint8Array>>(),
+          ? [props.initialProjectBinary]
+          : [],
       projectOffset: 0,
-      modelErrors: List<Error>(),
+      modelErrors: [],
       modelName: 'main',
       dialOpen: false,
       dialVisible: true,
       selectedTool: undefined,
-      data: Map<string, Series>(),
-      selection: Set<number>(),
+      data: new Map<string, Series>(),
+      selection: new Set<number>(),
       status: 'disabled',
       showDetails: undefined,
       flowStillBeingCreated: false,
@@ -235,10 +232,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       snapshotBlob: undefined,
       variableDetailsActiveTab: 0,
       cachedErrors: {
-        varErrors: Map<string, List<EquationError>>(),
-        unitErrors: Map<string, List<UnitError>>(),
+        varErrors: new Map<string, readonly EquationError[]>(),
+        unitErrors: new Map<string, readonly UnitError[]>(),
         simError: undefined,
-        modelErrors: List<ModelError>(),
+        modelErrors: [],
       },
     };
 
@@ -251,9 +248,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   componentDidMount() {
     if (this.props.readOnlyMode)
       this.setState({
-        modelErrors: this.state.modelErrors.push(
+        modelErrors: [
+          ...this.state.modelErrors,
           new Error("This is a read-only version. Any changes you make won't be saved."),
-        ),
+        ],
       });
 
     document.addEventListener('keydown', this.handleKeyDown);
@@ -282,7 +280,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   };
 
   private isUndoEnabled(): boolean {
-    return this.state.projectHistory.size > 1 && this.state.projectOffset < this.state.projectHistory.size - 1;
+    return this.state.projectHistory.length > 1 && this.state.projectOffset < this.state.projectHistory.length - 1;
   }
 
   private isRedoEnabled(): boolean {
@@ -318,7 +316,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const run = await model.run();
       const idents = run.varNames;
       const time = run.getSeries('time') ?? new Float64Array(0);
-      const data = Map<string, Series>(
+      const data = new Map<string, Series>(
         idents.map((ident) => {
           const values = run.getSeries(ident) ?? new Float64Array(0);
           return [ident, { name: ident, time, values }];
@@ -326,12 +324,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       );
       const project = defined(this.project());
       this.setState({
-        activeProject: project.attachData(data, this.state.modelName),
+        activeProject: projectAttachData(project, data, this.state.modelName),
         data,
       });
     } catch (e) {
       this.setState({
-        modelErrors: this.state.modelErrors.push(e as Error),
+        modelErrors: [...this.state.modelErrors, e as Error],
       });
     }
     // Refresh cached errors after simulation so the error panel reflects
@@ -340,8 +338,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   }
 
   async updateProject(serializedProject: Readonly<Uint8Array>, scheduleSave = true) {
-    if (this.state.projectHistory.size > 0) {
-      const current = this.state.projectHistory.get(this.state.projectOffset);
+    if (this.state.projectHistory.length > 0) {
+      const current = this.state.projectHistory[this.state.projectOffset];
       if (uint8ArraysEqual(serializedProject, current)) {
         return;
       }
@@ -352,9 +350,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return;
     }
     const json = JSON.parse(await engine.serializeJson()) as JsonProject;
-    let activeProject = await this.updateVariableErrors(Project.fromJson(json));
+    let activeProject = await this.updateVariableErrors(projectFromJson(json));
     if (this.state.data) {
-      activeProject = activeProject.attachData(this.state.data, this.state.modelName);
+      activeProject = projectAttachData(activeProject, this.state.data, this.state.modelName);
     }
 
     const priorHistory = this.state.projectHistory.slice();
@@ -364,7 +362,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const projectVersion = this.state.projectVersion + 0.01;
 
     this.setState({
-      projectHistory: priorHistory.unshift(serializedProject).slice(0, MaxUndoSize),
+      projectHistory: [serializedProject, ...priorHistory].slice(0, MaxUndoSize),
       activeProject,
       projectVersion,
       projectOffset: 0,
@@ -403,7 +401,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       }
     } catch (err) {
       this.setState({
-        modelErrors: this.state.modelErrors.push(err as Error),
+        modelErrors: [...this.state.modelErrors, err as Error],
       });
       return;
     }
@@ -416,7 +414,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         await this.save(version);
       } else {
         this.setState({
-          modelErrors: this.state.modelErrors.push(new Error('last save failed, please reload')),
+          modelErrors: [...this.state.modelErrors, new Error('last save failed, please reload')],
         });
       }
     }
@@ -424,7 +422,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   appendModelError(msg: string) {
     this.setState((prevState: EditorState) => ({
-      modelErrors: prevState.modelErrors.push(new EditorError(msg)),
+      modelErrors: [...prevState.modelErrors, new EditorError(msg)],
     }));
   }
 
@@ -460,18 +458,17 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     newName = newName.replace('\n', '\\n');
 
     const elements = view.elements.map((element: ViewElement) => {
-      if (!element.isNamed()) {
+      if (!isNamedViewElement(element)) {
         return element;
       }
-      const namedElement = element as AuxViewElement;
-      if (namedElement.ident !== oldIdent) {
+      if (element.ident !== oldIdent) {
         return element;
       }
 
-      return namedElement.set('name', newName);
+      return { ...element, name: newName };
     });
 
-    const updatedView = view.set('elements', elements);
+    const updatedView: StockFlowView = { ...view, elements };
 
     const ops: JsonModelOperation[] = [
       {
@@ -504,13 +501,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     this.scheduleSimRun();
   };
 
-  handleSelection = (selection: Set<UID>) => {
+  handleSelection = (selection: ReadonlySet<UID>) => {
     this.setState({
       selection,
       flowStillBeingCreated: false,
       variableDetailsActiveTab: 0,
     });
-    if (selection.isEmpty()) {
+    if (selection.size === 0) {
       this.setState({ showDetails: undefined });
     }
   };
@@ -538,10 +535,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // this will remove the selected elements, clouds, and connectors
     let elements = view.elements.filter((element: ViewElement) => {
       const remove =
-        selection.contains(element.uid) ||
-        (element instanceof CloudViewElement && selection.contains(element.flowUid)) ||
-        (element instanceof LinkViewElement &&
-          (selection.contains(element.toUid) || selection.contains(element.fromUid)));
+        selection.has(element.uid) ||
+        (element.type === 'cloud' && selection.has(element.flowUid)) ||
+        (element.type === 'link' &&
+          (selection.has(element.toUid) || selection.has(element.fromUid)));
       return !remove;
     });
 
@@ -549,30 +546,31 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     let { nextUid } = view;
     const clouds: CloudViewElement[] = [];
     elements = elements.map((element: ViewElement) => {
-      if (!(element instanceof FlowViewElement)) {
+      if (element.type !== 'flow') {
         return element;
       }
       const points = element.points.map((pt) => {
-        if (!pt.attachedToUid || !selection.contains(pt.attachedToUid)) {
+        if (!pt.attachedToUid || !selection.has(pt.attachedToUid)) {
           return pt;
         }
 
-        const cloud = new CloudViewElement({
+        const cloud: CloudViewElement = {
+          type: 'cloud',
           uid: nextUid++,
           x: pt.x,
           y: pt.y,
           flowUid: element.uid,
           isZeroRadius: false,
-        });
+          ident: undefined,
+        };
 
         clouds.push(cloud);
 
-        return pt.set('attachedToUid', cloud.uid);
+        return { ...pt, attachedToUid: cloud.uid };
       });
-      element = element.set('points', points);
-      return element;
+      return { ...element, points };
     });
-    elements = elements.concat(clouds);
+    elements = [...elements, ...clouds];
 
     const engine = this.engine();
     if (!engine) {
@@ -596,9 +594,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       }
     }
 
-    await this.updateView(view.merge({ elements, nextUid }));
+    await this.updateView({ ...view, elements, nextUid });
     this.setState({
-      selection: Set<number>(),
+      selection: new Set<number>(),
     });
     this.scheduleSimRun();
   };
@@ -607,13 +605,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const view = defined(this.getView());
 
     const elements = view.elements.map((element: ViewElement) => {
-      if (element.uid !== uid || !element.isNamed()) {
+      if (element.uid !== uid || !isNamedViewElement(element)) {
         return element;
       }
-      return (element as AuxViewElement).set('labelSide', side);
+      return { ...element, labelSide: side };
     });
 
-    await this.updateView(view.set('elements', elements));
+    await this.updateView({ ...view, elements });
   };
 
   handleFlowAttach = async (
@@ -635,7 +633,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     let sourceStockAttachingIdent: string | undefined;
     let uidToDelete: number | undefined;
     let updatedCloud: ViewElement | undefined;
-    let newClouds = List<ViewElement>();
+    let newClouds: ViewElement[] = [];
 
     let nextUid = view.nextUid;
     const getUid = (uid: number) => {
@@ -651,7 +649,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       if (element.uid !== flow.uid) {
         return element;
       }
-      if (!(element instanceof FlowViewElement)) {
+      if (element.type !== 'flow') {
         return element;
       }
 
@@ -663,62 +661,66 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         let from: StockViewElement | CloudViewElement;
 
         if (targetUid) {
-          if (oldFrom instanceof CloudViewElement) {
+          if (oldFrom.type === 'cloud') {
             uidToDelete = oldFrom.uid;
           }
           const newTarget = getUid(targetUid);
-          if (!(newTarget instanceof StockViewElement || newTarget instanceof CloudViewElement)) {
+          if (newTarget.type !== 'stock' && newTarget.type !== 'cloud') {
             throw new Error(`new target isn't a stock or cloud (uid ${newTarget.uid})`);
           }
           from = newTarget;
-        } else if (oldFrom instanceof CloudViewElement) {
+        } else if (oldFrom.type === 'cloud') {
           updateCloud = true;
-          from = oldFrom.merge({
-            x: oldFrom.cx - cursorMoveDelta.x,
-            y: oldFrom.cy - cursorMoveDelta.y,
-          });
+          from = {
+            ...oldFrom,
+            x: oldFrom.x - cursorMoveDelta.x,
+            y: oldFrom.y - cursorMoveDelta.y,
+          };
         } else {
           // Detaching from a stock - create a new cloud at the release position.
-          // Use the same approach as the sink path: oldFrom.cx - cursorMoveDelta.x/y
+          // Use the same approach as the sink path: oldFrom.x - cursorMoveDelta.x/y
           // This ensures the cloud appears where the user released, not where they started.
           newCloud = true;
-          from = new CloudViewElement({
+          from = {
+            type: 'cloud' as const,
             uid: nextUid++,
-            x: oldFrom.cx - cursorMoveDelta.x,
-            y: oldFrom.cy - cursorMoveDelta.y,
+            x: oldFrom.x - cursorMoveDelta.x,
+            y: oldFrom.y - cursorMoveDelta.y,
             flowUid: flow.uid,
             isZeroRadius: false,
-          });
+            ident: undefined,
+          };
         }
 
         if (oldFrom.uid !== from.uid) {
-          if (oldFrom instanceof StockViewElement) {
+          if (oldFrom.type === 'stock') {
             sourceStockDetachingIdent = oldFrom.ident;
           }
-          if (from instanceof StockViewElement) {
+          if (from.type === 'stock') {
             sourceStockAttachingIdent = from.ident;
           }
         }
 
         const moveDelta = {
-          x: oldFrom.cx - from.cx,
-          y: oldFrom.cy - from.cy,
+          x: oldFrom.x - from.x,
+          y: oldFrom.y - from.y,
         };
         const points = element.points.map((point) => {
           if (point.attachedToUid !== oldFrom.uid) {
             return point;
           }
-          return point.set('attachedToUid', from.uid);
+          return { ...point, attachedToUid: from.uid };
         });
-        from = (from as StockViewElement).merge({
-          x: oldFrom.cx,
-          y: oldFrom.cy,
-        });
-        element = element.set('points', points);
+        from = {
+          ...from,
+          x: oldFrom.x,
+          y: oldFrom.y,
+        } as StockViewElement | CloudViewElement;
+        element = { ...element, points };
 
         [from, element] = UpdateCloudAndFlow(from, element as FlowViewElement, moveDelta);
         if (newCloud) {
-          newClouds = newClouds.push(from);
+          newClouds = [...newClouds, from];
         } else if (updateCloud) {
           updatedCloud = from;
         }
@@ -732,59 +734,63 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       let updateCloud = false;
       let to: StockViewElement | CloudViewElement;
       if (targetUid) {
-        if (oldTo instanceof CloudViewElement) {
+        if (oldTo.type === 'cloud') {
           uidToDelete = oldTo.uid;
         }
         const newTarget = getUid(targetUid);
-        if (!(newTarget instanceof StockViewElement || newTarget instanceof CloudViewElement)) {
+        if (newTarget.type !== 'stock' && newTarget.type !== 'cloud') {
           throw new Error(`new target isn't a stock or cloud (uid ${newTarget.uid})`);
         }
         to = newTarget;
-      } else if (oldTo instanceof CloudViewElement) {
+      } else if (oldTo.type === 'cloud') {
         updateCloud = true;
-        to = oldTo.merge({
-          x: oldTo.cx - cursorMoveDelta.x,
-          y: oldTo.cy - cursorMoveDelta.y,
-        });
+        to = {
+          ...oldTo,
+          x: oldTo.x - cursorMoveDelta.x,
+          y: oldTo.y - cursorMoveDelta.y,
+        };
       } else {
         newCloud = true;
-        to = new CloudViewElement({
+        to = {
+          type: 'cloud' as const,
           uid: nextUid++,
-          x: oldTo.cx - cursorMoveDelta.x,
-          y: oldTo.cy - cursorMoveDelta.y,
+          x: oldTo.x - cursorMoveDelta.x,
+          y: oldTo.y - cursorMoveDelta.y,
           flowUid: flow.uid,
           isZeroRadius: false,
-        });
+          ident: undefined,
+        };
       }
 
       if (oldTo.uid !== to.uid) {
-        if (oldTo instanceof StockViewElement) {
+        if (oldTo.type === 'stock') {
           stockDetachingIdent = oldTo.ident;
         }
-        if (to instanceof StockViewElement) {
+        if (to.type === 'stock') {
           stockAttachingIdent = to.ident;
         }
       }
 
       const moveDelta = {
-        x: oldTo.cx - to.cx,
-        y: oldTo.cy - to.cy,
+        x: oldTo.x - to.x,
+        y: oldTo.y - to.y,
       };
       const points = element.points.map((point) => {
         if (point.attachedToUid !== oldTo.uid) {
           return point;
         }
-        return point.set('attachedToUid', to.uid);
+        return { ...point, attachedToUid: to.uid };
       });
-      to = (to as StockViewElement).merge({
-        x: oldTo.cx,
-        y: oldTo.cy,
-      });
-      element = element.set('points', points);
+      to = {
+        ...to,
+        x: oldTo.x,
+        y: oldTo.y,
+      } as StockViewElement | CloudViewElement;
+      element = { ...element, points };
 
       [to, element] = UpdateCloudAndFlow(to, element as FlowViewElement, moveDelta);
       if (newCloud) {
-        newClouds = newClouds.push(to);
+        newClouds = [...newClouds, to];
       } else if (updateCloud) {
         updatedCloud = to;
       }
@@ -801,29 +807,32 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // if we have something to delete, do it here
     elements = elements.filter((e) => e.uid !== uidToDelete);
     if (flow.uid === inCreationUid) {
-      flow = flow.merge({
+      flow = {
+        ...flow,
         uid: nextUid++,
-      });
+      };
       const firstPt = first(flow.points);
       const sourceUid = firstPt.attachedToUid;
       if (sourceUid === inCreationCloudUid) {
-        const newCloud = new CloudViewElement({
+        const newCloud: CloudViewElement = {
+          type: 'cloud',
           uid: nextUid++,
           x: firstPt.x,
           y: firstPt.y,
           flowUid: flow.uid,
           isZeroRadius: false,
-        });
-        elements = elements.push(newCloud);
-        flow = flow.set(
-          'points',
-          flow.points.map((pt) => {
+          ident: undefined,
+        };
+        elements = [...elements, newCloud];
+        flow = {
+          ...flow,
+          points: flow.points.map((pt) => {
             if (pt.attachedToUid === inCreationCloudUid) {
-              return pt.set('attachedToUid', newCloud.uid);
+              return { ...pt, attachedToUid: newCloud.uid };
             }
             return pt;
           }),
-        );
+        };
       } else if (sourceUid) {
         const sourceStock = getUid(sourceUid) as StockViewElement;
         sourceStockIdent = defined(sourceStock.ident);
@@ -840,34 +849,36 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
             y: 0,
           };
         } else {
-          to = new CloudViewElement({
+          to = {
+            type: 'cloud' as const,
             uid: nextUid++,
             x: defined(fauxTargetCenter).x,
             y: defined(fauxTargetCenter).y,
             flowUid: flow.uid,
             isZeroRadius: false,
-          });
+            ident: undefined,
+          };
           newCloud = true;
         }
-        flow = flow.set(
-          'points',
-          flow.points.map((pt) => {
+        flow = {
+          ...flow,
+          points: flow.points.map((pt) => {
             if (pt.attachedToUid === fauxCloudTargetUid) {
-              return pt.set('attachedToUid', to.uid);
+              return { ...pt, attachedToUid: to.uid };
             }
             return pt;
           }),
-        );
+        };
         [to, flow] = UpdateCloudAndFlow(to, flow, cursorMoveDelta);
         if (newCloud) {
-          elements = elements.push(to);
+          elements = [...elements, to];
         }
       }
-      elements = elements.push(flow);
-      selection = Set([flow.uid]);
+      elements = [...elements, flow];
+      selection = new Set([flow.uid]);
       isCreatingNew = true;
     }
-    elements = elements.concat(newClouds);
+    elements = [...elements, ...newClouds];
 
     const engine = this.engine();
     if (!engine) {
@@ -891,13 +902,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (sourceStockIdent) {
       const model = defined(this.getModel());
       const stockVar = model.variables.get(sourceStockIdent);
-      if (stockVar instanceof StockVar) {
+      if (stockVar?.type === 'stock') {
         ops.push({
           type: 'updateStockFlows',
           payload: {
             ident: stockVar.ident,
-            inflows: stockVar.inflows.toArray(),
-            outflows: stockVar.outflows.push(flow.ident).toArray(),
+            inflows: [...stockVar.inflows],
+            outflows: [...stockVar.outflows, flow.ident],
           },
         });
       }
@@ -907,13 +918,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (sourceStockAttachingIdent) {
       const model = defined(this.getModel());
       const stockVar = model.variables.get(sourceStockAttachingIdent);
-      if (stockVar instanceof StockVar) {
+      if (stockVar?.type === 'stock') {
         ops.push({
           type: 'updateStockFlows',
           payload: {
             ident: stockVar.ident,
-            inflows: stockVar.inflows.toArray(),
-            outflows: stockVar.outflows.push(flow.ident).toArray(),
+            inflows: [...stockVar.inflows],
+            outflows: [...stockVar.outflows, flow.ident],
           },
         });
       }
@@ -923,13 +934,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (sourceStockDetachingIdent) {
       const model = defined(this.getModel());
       const stockVar = model.variables.get(sourceStockDetachingIdent);
-      if (stockVar instanceof StockVar) {
+      if (stockVar?.type === 'stock') {
         ops.push({
           type: 'updateStockFlows',
           payload: {
             ident: stockVar.ident,
-            inflows: stockVar.inflows.toArray(),
-            outflows: stockVar.outflows.filter((f) => f !== flow.ident).toArray(),
+            inflows: [...stockVar.inflows],
+            outflows: stockVar.outflows.filter((f) => f !== flow.ident),
           },
         });
       }
@@ -939,13 +950,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (stockAttachingIdent) {
       const model = defined(this.getModel());
       const stockVar = model.variables.get(stockAttachingIdent);
-      if (stockVar instanceof StockVar) {
+      if (stockVar?.type === 'stock') {
         ops.push({
           type: 'updateStockFlows',
           payload: {
             ident: stockVar.ident,
-            inflows: stockVar.inflows.push(flow.ident).toArray(),
-            outflows: stockVar.outflows.toArray(),
+            inflows: [...stockVar.inflows, flow.ident],
+            outflows: [...stockVar.outflows],
           },
         });
       }
@@ -955,13 +966,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (stockDetachingIdent) {
       const model = defined(this.getModel());
       const stockVar = model.variables.get(stockDetachingIdent);
-      if (stockVar instanceof StockVar) {
+      if (stockVar?.type === 'stock') {
         ops.push({
           type: 'updateStockFlows',
           payload: {
             ident: stockVar.ident,
-            inflows: stockVar.inflows.filter((f) => f !== flow.ident).toArray(),
-            outflows: stockVar.outflows.toArray(),
+            inflows: stockVar.inflows.filter((f) => f !== flow.ident),
+            outflows: [...stockVar.outflows],
           },
         });
       }
@@ -981,7 +992,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       }
     }
 
-    await this.updateView(view.merge({ nextUid, elements }));
+    await this.updateView({ ...view, nextUid, elements });
     this.setState({
       selection,
       flowStillBeingCreated: inCreation,
@@ -1004,7 +1015,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     const getName = (ident: string) => {
       for (const e of view.elements) {
-        if (e.isNamed() && e.ident === ident) {
+        if (isNamedViewElement(e) && e.ident === ident) {
           return e;
         }
       }
@@ -1016,7 +1027,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         return element;
       }
 
-      if (!(element instanceof LinkViewElement)) {
+      if (element.type !== 'link') {
         return element;
       }
 
@@ -1027,15 +1038,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const fromVisual = getVisualCenter(from);
       const oldToVisual = getVisualCenter(oldTo);
       const toVisual = getVisualCenter(to);
-      const oldθ = Math.atan2(oldToVisual.cy - fromVisual.cy, oldToVisual.cx - fromVisual.cx);
-      const newθ = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
-      const diffθ = oldθ - newθ;
-      const angle = updateArcAngle(element.arc, radToDeg(diffθ));
+      const oldTheta = Math.atan2(oldToVisual.cy - fromVisual.cy, oldToVisual.cx - fromVisual.cx);
+      const newTheta = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
+      const diffTheta = oldTheta - newTheta;
+      const angle = updateArcAngle(element.arc, radToDeg(diffTheta));
 
-      return element.merge({
+      return {
+        ...element,
         arc: angle,
         toUid: to.uid,
-      });
+      };
     });
     let nextUid = view.nextUid;
     if (link.uid === inCreationUid) {
@@ -1044,20 +1056,21 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
       const fromVisual = getVisualCenter(from);
       const toVisual = getVisualCenter(to);
-      const oldθ = Math.atan2(0 - fromVisual.cy, 0 - fromVisual.cx);
-      const newθ = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
-      const diffθ = oldθ - newθ;
-      const angle = updateArcAngle(link.arc, radToDeg(diffθ));
+      const oldTheta = Math.atan2(0 - fromVisual.cy, 0 - fromVisual.cx);
+      const newTheta = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
+      const diffTheta = oldTheta - newTheta;
+      const angle = updateArcAngle(link.arc, radToDeg(diffTheta));
 
-      const newLink = link.merge({
+      const newLink: LinkViewElement = {
+        ...link,
         uid: nextUid++,
         toUid: to.uid,
         arc: angle,
-      });
-      elements = elements.push(newLink);
-      selection = Set([newLink.uid]);
+      };
+      elements = [...elements, newLink];
+      selection = new Set([newLink.uid]);
     }
-    view = view.merge({ nextUid, elements });
+    view = { ...view, nextUid, elements };
 
     await this.updateView(view);
     this.setState({ selection });
@@ -1095,7 +1108,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
 
     let nextUid = view.nextUid;
-    const elements = view.elements.push(element.set('uid', nextUid++));
+    const elements = [...view.elements, { ...element, uid: nextUid++ }];
     const elementType = viewElementType(element);
     const name = (element as NamedViewElement).name;
 
@@ -1145,9 +1158,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       this.appendModelError(e?.message ?? 'Unknown error during variable creation');
     }
 
-    await this.updateView(view.merge({ nextUid, elements }));
+    await this.updateView({ ...view, nextUid, elements });
     this.setState({
-      selection: Set<number>(),
+      selection: new Set<number>(),
     });
   };
 
@@ -1164,7 +1177,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
 
     const elements = view.elements.map((el) => updatedElements.get(el.uid) ?? el);
-    await this.updateView(view.merge({ elements }));
+    await this.updateView({ ...view, elements });
   };
 
   handleDrawerToggle = (isOpen: boolean) => {
@@ -1326,12 +1339,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return;
     }
 
-    return model.views.first();
+    return model.views[0];
   }
 
   setView(view: StockFlowView): void {
     const project = defined(this.project());
-    const activeProject = project.setIn(['models', this.state.modelName, 'views', 0], view);
+    const model = defined(project.models.get(this.state.modelName));
+    const views = [...model.views];
+    views[0] = view;
+    const updatedModel = { ...model, views };
+    const activeProject = { ...project, models: mapSet(project.models, this.state.modelName, updatedModel) };
     this.setState({ activeProject });
   }
 
@@ -1371,25 +1388,26 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   handleViewBoxChange = async (viewBox: Rect, zoom: number) => {
     const view = defined(this.getView());
-    await this.queueViewUpdate(view.merge({ viewBox, zoom }));
+    await this.queueViewUpdate({ ...view, viewBox, zoom });
   };
 
   async centerVariable(element: ViewElement): Promise<void> {
     const view = defined(this.getView());
     const zoom = view.zoom;
 
-    const cx = element.cx;
-    const cy = element.cy;
+    const cx = element.x;
+    const cy = element.y;
 
     const viewCy = view.viewBox.height / 2 / zoom;
     const viewCx = (view.viewBox.width - SearchbarWidthSm) / 2 / zoom;
 
-    const viewBox = view.viewBox.merge({
+    const viewBox: Rect = {
+      ...view.viewBox,
       x: viewCx - cx,
       y: viewCy - cy,
-    });
+    };
 
-    await this.queueViewUpdate(view.merge({ viewBox }));
+    await this.queueViewUpdate({ ...view, viewBox });
   }
 
   getCanvas() {
@@ -1411,7 +1429,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
 
     const onRenameVariable = !embedded ? this.handleRename : (_oldName: string, _newName: string): void => {};
-    const onSetSelection = !embedded ? this.handleSelection : (_selected: Set<UID>): void => {};
+    const onSetSelection = !embedded ? this.handleSelection : (_selected: ReadonlySet<UID>): void => {};
     const onMoveSelection = !embedded ? this.handleSelectionMove : (_position: Point): void => {};
     const onMoveFlow = !embedded ? this.handleFlowAttach : (_e: ViewElement, _t: number, _p: Point): void => {};
     const onMoveLabel = !embedded
@@ -1467,7 +1485,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           vertical: 'bottom',
           horizontal: 'center',
         }}
-        open={this.state.modelErrors.size > 0}
+        open={this.state.modelErrors.length > 0}
         autoHideDuration={6000}
       >
         <div>
@@ -1493,7 +1511,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
 
     for (const e of view.elements) {
-      if (selection.contains(e.uid) && e.isNamed()) {
+      if (selection.has(e.uid) && isNamedViewElement(e)) {
         names.push(defined(e.ident));
       }
     }
@@ -1515,7 +1533,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
 
     for (const e of view.elements) {
-      if (e.uid === uid && e.isNamed()) {
+      if (e.uid === uid && isNamedViewElement(e)) {
         return e;
       }
     }
@@ -1530,7 +1548,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
 
     for (const e of view.elements) {
-      if (e.isNamed() && e.ident === ident) {
+      if (isNamedViewElement(e) && e.ident === ident) {
         return e;
       }
     }
@@ -1546,11 +1564,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   handleSearchChange = async (_event: any, newValue: string | null) => {
     if (!newValue) {
-      this.handleSelection(Set());
+      this.handleSelection(new Set());
       return;
     }
     const element = this.getNamedElement(canonicalize(newValue));
-    this.handleSelection(element ? Set([element.uid]) : Set());
+    this.handleSelection(element ? new Set([element.uid]) : new Set());
     this.setState({
       showDetails: 'variable',
     });
@@ -1576,9 +1594,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const elements = this.getView()?.elements;
     if (elements) {
       autocompleteOptions = elements
-        .filter((e) => e.isNamed())
-        .map((e) => searchableName((e as NamedViewElement).name))
-        .toArray();
+        .filter((e) => isNamedViewElement(e))
+        .map((e) => searchableName((e as NamedViewElement).name));
     }
 
     const namedElement = this.getNamedSelectedElement();
@@ -1620,34 +1637,31 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   handleClearSelected = (e: React.MouseEvent<SVGSVGElement>) => {
     e.preventDefault();
-    this.handleSelection(Set());
+    this.handleSelection(new Set());
   };
 
   // Returns the equation fields for a JSON patch operation.
   // For scalar equations, returns { equation: string }.
   // For arrayed equations, returns { arrayedEquation: JsonArrayedEquation }.
   getEquationFields(variable: Variable): { equation?: string; arrayedEquation?: JsonArrayedEquation } {
-    const eq = variable.equation;
-    if (eq instanceof ScalarEquation) {
-      return { equation: eq.equation };
-    } else if (eq instanceof ApplyToAllEquation) {
+    const eq = variable.type === 'module' ? undefined : variable.equation;
+    if (!eq || eq.type === 'scalar') {
+      return { equation: eq?.equation ?? '' };
+    } else if (eq.type === 'applyToAll') {
       return {
         arrayedEquation: {
-          dimensions: eq.dimensionNames.toArray(),
+          dimensions: [...eq.dimensionNames],
           equation: eq.equation,
         },
       };
-    } else if (eq instanceof ArrayedEquation) {
+    } else if (eq.type === 'arrayed') {
       return {
         arrayedEquation: {
-          dimensions: eq.dimensionNames.toArray(),
-          elements: eq.elements
-            .entrySeq()
-            .map(([subscript, eqStr]) => ({
-              subscript,
-              equation: eqStr,
-            }))
-            .toArray(),
+          dimensions: [...eq.dimensionNames],
+          elements: [...eq.elements.entries()].map(([subscript, eqStr]) => ({
+            subscript,
+            equation: eqStr,
+          })),
         },
       };
     }
@@ -1680,14 +1694,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const existingEqFields = this.getEquationFields(variable);
 
     let op: JsonModelOperation;
-    if (variable instanceof StockVar) {
+    if (variable.type === 'stock') {
       op = {
         type: 'upsertStock',
         payload: {
           stock: {
             name: variable.ident,
-            inflows: variable.inflows.toArray(),
-            outflows: variable.outflows.toArray(),
+            inflows: [...variable.inflows],
+            outflows: [...variable.outflows],
             initialEquation: newEquation ?? existingEqFields.equation,
             arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
             units: newUnits ?? variable.units ?? undefined,
@@ -1695,10 +1709,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           },
         },
       };
-    } else if (variable instanceof Flow) {
+    } else if (variable.type === 'flow') {
       const gf = variable.gf
         ? {
-            yPoints: variable.gf.yPoints?.toArray(),
+            yPoints: [...variable.gf.yPoints],
             kind: variable.gf.kind,
             xScale: variable.gf.xScale ? { min: variable.gf.xScale.min, max: variable.gf.xScale.max } : undefined,
             yScale: variable.gf.yScale ? { min: variable.gf.yScale.min, max: variable.gf.yScale.max } : undefined,
@@ -1721,7 +1735,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const auxVar = variable as Aux;
       const gf = auxVar.gf
         ? {
-            yPoints: auxVar.gf.yPoints?.toArray(),
+            yPoints: [...auxVar.gf.yPoints],
             kind: auxVar.gf.kind,
             xScale: auxVar.gf.xScale ? { min: auxVar.gf.xScale.min, max: auxVar.gf.xScale.max } : undefined,
             yScale: auxVar.gf.yScale ? { min: auxVar.gf.yScale.min, max: auxVar.gf.yScale.max } : undefined,
@@ -1776,7 +1790,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     const gf = newTable
       ? {
-          yPoints: newTable.yPoints?.toArray(),
+          yPoints: [...newTable.yPoints],
           kind: newTable.kind,
           xScale: newTable.xScale ? { min: newTable.xScale.min, max: newTable.xScale.max } : undefined,
           yScale: newTable.yScale ? { min: newTable.yScale.min, max: newTable.yScale.max } : undefined,
@@ -1787,7 +1801,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const existingEqFields = this.getEquationFields(variable);
 
     let op: JsonModelOperation;
-    if (variable instanceof Flow) {
+    if (variable.type === 'flow') {
       op = {
         type: 'upsertFlow',
         payload: {
@@ -1958,23 +1972,24 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const { varErrors, unitErrors } = convertErrorDetails(errors, modelName);
 
     let simError: SimError | undefined;
-    let modelErrors = List<ModelError>();
+    let modelErrors: readonly ModelError[] = [];
     for (const err of errors) {
       if (err.modelName && err.modelName !== modelName) {
         continue;
       }
       if (err.kind === SimlinErrorKind.Simulation) {
-        simError = new SimError({
+        simError = {
           code: err.code as unknown as ErrorCode,
           details: err.message ?? undefined,
-        });
+        };
       } else if (!err.variableName) {
-        modelErrors = modelErrors.push(
-          new ModelError({
+        modelErrors = [
+          ...modelErrors,
+          {
             code: err.code as unknown as ErrorCode,
             details: err.message ?? undefined,
-          }),
-        );
+          },
+        ];
       }
     }
     const cachedErrors: CachedErrorDetails = { varErrors, unitErrors, simError, modelErrors };
@@ -1997,34 +2012,42 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       // if all the errors are 'just' that we have no equations,
       // don't scream "error" at the user -- they are starting from
       // scratch on a new model and don't expect it to be running yet.
-      if (varErrors.size === model.variables.size && Set(varErrors.keys()).equals(Set(model.variables.keys()))) {
+      if (varErrors.size === model.variables.size && setsEqual(new Set(varErrors.keys()), new Set(model.variables.keys()))) {
         let foundOtherError = false;
 
         for (const [, errs] of varErrors) {
-          if (errs.size !== 1 || first(errs).code !== ErrorCode.EmptyEquation) {
+          if (errs.length !== 1 || first(errs).code !== ErrorCode.EmptyEquation) {
             foundOtherError = true;
             break;
           }
         }
         if (!foundOtherError) {
-          return project.set('hasNoEquations', true);
+          return { ...project, hasNoEquations: true };
         }
       }
 
       for (const [ident, errs] of varErrors) {
-        project = project.updateIn(
-          ['models', modelName, 'variables', ident],
-          ((v: Variable): Variable => v.set('errors', errs)) as (value: unknown) => unknown,
-        );
+        const model = getOrThrow(project.models, modelName);
+        const variable = model.variables.get(ident);
+        if (variable) {
+          const updatedVar = { ...variable, errors: errs };
+          const updatedVars = mapSet(model.variables, ident, updatedVar);
+          const updatedModel = { ...model, variables: updatedVars };
+          project = { ...project, models: mapSet(project.models, modelName, updatedModel) };
+        }
       }
     }
 
     if (unitErrors.size > 0) {
       for (const [ident, errs] of unitErrors) {
-        project = project.updateIn(
-          ['models', modelName, 'variables', ident],
-          ((v: Variable): Variable => v.set('unitErrors', errs)) as (value: unknown) => unknown,
-        );
+        const model = getOrThrow(project.models, modelName);
+        const variable = model.variables.get(ident);
+        if (variable) {
+          const updatedVar = { ...variable, unitErrors: errs };
+          const updatedVars = mapSet(model.variables, ident, updatedVar);
+          const updatedModel = { ...model, variables: updatedVars };
+          project = { ...project, models: mapSet(project.models, modelName, updatedModel) };
+        }
       }
     }
 
@@ -2049,10 +2072,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const serializedProject = await engine.serializeProtobuf();
 
     const json = JSON.parse(await engine.serializeJson()) as JsonProject;
-    const project = await this.updateVariableErrors(Project.fromJson(json));
+    const project = await this.updateVariableErrors(projectFromJson(json));
 
     this.setState({
-      projectHistory: Stack<Readonly<Uint8Array>>([serializedProject]),
+      projectHistory: [serializedProject],
       activeProject: project,
     });
   }
@@ -2071,13 +2094,17 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     this.engineProject = engine;
 
     const json = JSON.parse(await engine.serializeJson()) as JsonProject;
-    let project = Project.fromJson(json);
+    let project = projectFromJson(json);
 
     if (this.newEngineShouldPullView) {
       const queuedView = defined(this.newEngineQueuedView);
       this.newEngineShouldPullView = false;
       this.newEngineQueuedView = undefined;
-      project = project.setIn(['models', this.state.modelName, 'views', 0], queuedView);
+      const model = defined(project.models.get(this.state.modelName));
+      const views = [...model.views];
+      views[0] = queuedView;
+      const updatedModel = { ...model, views };
+      project = { ...project, models: mapSet(project.models, this.state.modelName, updatedModel) };
       this.queueViewUpdate(queuedView);
     }
 
@@ -2110,9 +2137,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const delta = kind === 'undo' ? 1 : -1;
     let projectOffset = this.state.projectOffset + delta;
     // ensure our offset is always valid
-    projectOffset = Math.min(projectOffset, this.state.projectHistory.size - 1);
+    projectOffset = Math.min(projectOffset, this.state.projectHistory.length - 1);
     projectOffset = Math.max(projectOffset, 0);
-    const serializedProject = defined(this.state.projectHistory.get(projectOffset));
+    const serializedProject = defined(this.state.projectHistory[projectOffset]);
     const projectVersion = this.state.projectVersion + 0.01;
     this.setState({ projectOffset, projectVersion });
 
@@ -2138,10 +2165,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const diffX = (newViewWidth - oldViewWidth) / 2;
     const diffY = (newViewHeight - oldViewHeight) / 2;
 
-    const newViewBox = oldViewBox.merge({
+    const newViewBox: Rect = {
+      ...oldViewBox,
       x: oldViewBox.x + diffX,
       y: oldViewBox.y + diffY,
-    });
+    };
     await this.handleViewBoxChange(newViewBox, newZoom);
   };
 
@@ -2169,14 +2197,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           this.setState({ snapshotBlob });
         } else {
           this.setState({
-            modelErrors: this.state.modelErrors.push(new Error('snapshot creation failed (1).')),
+            modelErrors: [...this.state.modelErrors, new Error('snapshot creation failed (1).')],
           });
         }
       });
     };
     image.onerror = () => {
       this.setState({
-        modelErrors: this.state.modelErrors.push(new Error('snapshot creation failed (2).')),
+        modelErrors: [...this.state.modelErrors, new Error('snapshot creation failed (2).')],
       });
     };
 

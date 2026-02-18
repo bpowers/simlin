@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { Set } from 'immutable';
-
 import {
   computeMouseDownSelection,
   computeMouseUpSelection,
@@ -13,44 +11,44 @@ import {
 
 describe('computeMouseDownSelection', () => {
   it('click unselected element without modifier replaces selection', () => {
-    const result = computeMouseDownSelection(Set([1, 2, 3]), 5, false);
-    expect(result.newSelection).toEqual(Set([5]));
+    const result = computeMouseDownSelection(new Set([1, 2, 3]), 5, false);
+    expect(result.newSelection).toEqual(new Set([5]));
     expect(result.deferSingleSelect).toBeUndefined();
   });
 
   it('click unselected element with modifier adds to selection', () => {
-    const result = computeMouseDownSelection(Set([1, 2]), 3, true);
-    expect(result.newSelection).toEqual(Set([1, 2, 3]));
+    const result = computeMouseDownSelection(new Set([1, 2]), 3, true);
+    expect(result.newSelection).toEqual(new Set([1, 2, 3]));
     expect(result.deferSingleSelect).toBeUndefined();
   });
 
   it('click selected element with modifier removes from selection', () => {
-    const result = computeMouseDownSelection(Set([1, 2, 3]), 2, true);
-    expect(result.newSelection).toEqual(Set([1, 3]));
+    const result = computeMouseDownSelection(new Set([1, 2, 3]), 2, true);
+    expect(result.newSelection).toEqual(new Set([1, 3]));
     expect(result.deferSingleSelect).toBeUndefined();
   });
 
   it('click element already in multi-selection without modifier defers', () => {
-    const result = computeMouseDownSelection(Set([1, 2, 3]), 2, false);
+    const result = computeMouseDownSelection(new Set([1, 2, 3]), 2, false);
     expect(result.newSelection).toBeUndefined();
     expect(result.deferSingleSelect).toBe(2);
   });
 
   it('click sole selected element without modifier defers', () => {
-    const result = computeMouseDownSelection(Set([5]), 5, false);
+    const result = computeMouseDownSelection(new Set([5]), 5, false);
     expect(result.newSelection).toBeUndefined();
     expect(result.deferSingleSelect).toBe(5);
   });
 
   it('click with empty selection without modifier selects it', () => {
-    const result = computeMouseDownSelection(Set(), 1, false);
-    expect(result.newSelection).toEqual(Set([1]));
+    const result = computeMouseDownSelection(new Set(), 1, false);
+    expect(result.newSelection).toEqual(new Set([1]));
     expect(result.deferSingleSelect).toBeUndefined();
   });
 
   it('modifier click on only element in selection removes it', () => {
-    const result = computeMouseDownSelection(Set([1]), 1, true);
-    expect(result.newSelection).toEqual(Set());
+    const result = computeMouseDownSelection(new Set([1]), 1, true);
+    expect(result.newSelection).toEqual(new Set());
     expect(result.deferSingleSelect).toBeUndefined();
   });
 });
@@ -62,25 +60,25 @@ describe('resolveSelectionForReattachment', () => {
     // FlowViewElement for attachment handling.
     const cloudUid = 10;
     const flowUid = 20;
-    const result = resolveSelectionForReattachment(Set([cloudUid]), true, flowUid);
-    expect(result).toEqual(Set([flowUid]));
+    const result = resolveSelectionForReattachment(new Set([cloudUid]), true, flowUid);
+    expect(result).toEqual(new Set([flowUid]));
   });
 
   it('preserves original selection when re-attachment is not activated', () => {
-    const result = resolveSelectionForReattachment(Set([10]), false, 20);
-    expect(result).toEqual(Set([10]));
+    const result = resolveSelectionForReattachment(new Set([10]), false, 20);
+    expect(result).toEqual(new Set([10]));
   });
 
   it('preserves multi-element selection when re-attachment is not activated', () => {
-    const result = resolveSelectionForReattachment(Set([1, 2, 3]), false, 20);
-    expect(result).toEqual(Set([1, 2, 3]));
+    const result = resolveSelectionForReattachment(new Set([1, 2, 3]), false, 20);
+    expect(result).toEqual(new Set([1, 2, 3]));
   });
 });
 
 describe('computeMouseUpSelection', () => {
   it('deferred + no drag collapses to single element', () => {
     const result = computeMouseUpSelection(2, false);
-    expect(result).toEqual(Set([2]));
+    expect(result).toEqual(new Set([2]));
   });
 
   it('deferred + drag occurred returns undefined', () => {

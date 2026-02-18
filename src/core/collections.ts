@@ -2,49 +2,44 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { List, Map, Set } from 'immutable';
-
 /**
- * Get the first element of a non-empty list.
- * Throws if the list is empty.
+ * Get the first element of a non-empty array.
+ * Throws if the array is empty.
  */
-export function first<T>(list: List<T>): T {
-  const value = list.first();
-  if (value === undefined) {
-    throw new Error(`Expected non-empty list, got size=${list.size}`);
+export function first<T>(arr: readonly T[]): T {
+  if (arr.length === 0) {
+    throw new Error(`Expected non-empty array, got length=0`);
   }
-  return value;
+  return arr[0];
 }
 
 /**
- * Get the last element of a non-empty list.
- * Throws if the list is empty.
+ * Get the last element of a non-empty array.
+ * Throws if the array is empty.
  */
-export function last<T>(list: List<T>): T {
-  const value = list.last();
-  if (value === undefined) {
-    throw new Error(`Expected non-empty list, got size=${list.size}`);
+export function last<T>(arr: readonly T[]): T {
+  if (arr.length === 0) {
+    throw new Error(`Expected non-empty array, got length=0`);
   }
-  return value;
+  return arr[arr.length - 1];
 }
 
 /**
- * Get element at index from a list.
+ * Get element at index from an array.
  * Throws if the index is out of bounds.
  */
-export function at<T>(list: List<T>, index: number): T {
-  const value = list.get(index);
-  if (value === undefined) {
-    throw new Error(`Index ${index} out of bounds for list of size ${list.size}`);
+export function at<T>(arr: readonly T[], index: number): T {
+  if (index < 0 || index >= arr.length) {
+    throw new Error(`Index ${index} out of bounds for array of length ${arr.length}`);
   }
-  return value;
+  return arr[index];
 }
 
 /**
  * Get value from a map by key.
  * Throws if the key does not exist.
  */
-export function getOrThrow<K, V>(map: Map<K, V>, key: K): V {
+export function getOrThrow<K, V>(map: ReadonlyMap<K, V>, key: K): V {
   const value = map.get(key);
   if (value === undefined) {
     throw new Error(`Missing key: ${key}`);
@@ -56,9 +51,9 @@ export function getOrThrow<K, V>(map: Map<K, V>, key: K): V {
  * Get the single element from a singleton set.
  * Throws if the set does not have exactly one element.
  */
-export function only<T>(set: Set<T>): T {
+export function only<T>(set: ReadonlySet<T>): T {
   if (set.size !== 1) {
     throw new Error(`Expected singleton set, got size=${set.size}`);
   }
-  return set.first() as T;
+  return set.values().next().value!;
 }

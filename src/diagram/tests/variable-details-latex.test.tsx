@@ -14,25 +14,26 @@ Object.assign(globalThis, { TextEncoder, TextDecoder });
 import * as React from 'react';
 import { render, act } from '@testing-library/react';
 import { VariableDetails } from '../VariableDetails';
-import { Aux, AuxViewElement, ScalarEquation } from '@simlin/core/datamodel';
+import { Aux, AuxViewElement } from '@simlin/core/datamodel';
 
 function makeAux(ident: string): Aux {
-  return new Aux({
+  return {
+    type: 'aux',
     ident,
-    equation: new ScalarEquation({ equation: '1' }),
+    equation: { type: 'scalar', equation: '1' },
     documentation: '',
     units: '',
     gf: undefined,
-    isArrayed: false,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
     uid: undefined,
-  });
+  };
 }
 
 function makeViewElement(ident: string): AuxViewElement {
-  return new AuxViewElement({
+  return {
+    type: 'aux',
     uid: 1,
     name: ident,
     ident,
@@ -41,7 +42,7 @@ function makeViewElement(ident: string): AuxViewElement {
     y: 0,
     labelSide: 'right',
     isZeroRadius: false,
-  });
+  };
 }
 
 interface Deferred<T> {

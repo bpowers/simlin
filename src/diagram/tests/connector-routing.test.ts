@@ -7,26 +7,24 @@ import {
   StockViewElement,
   FlowViewElement,
   LinkViewElement,
-  Point,
   Aux,
   Stock,
   Flow,
-  ApplyToAllEquation,
-  ScalarEquation,
 } from '@simlin/core/datamodel';
-import { List } from 'immutable';
 
 import { Connector, circleFromPoints, getVisualCenter, ArrayedOffset } from '../drawing/Connector';
 import { AuxRadius } from '../drawing/default';
 
 function makeAux(uid: number, x: number, y: number, isArrayed: boolean = false): AuxViewElement {
-  const auxVar = isArrayed
-    ? new Aux({
+  const auxVar: Aux = isArrayed
+    ? {
+        type: 'aux',
         ident: 'test_aux',
-        equation: new ApplyToAllEquation({
-          dimensionNames: List(['dim1']),
+        equation: {
+          type: 'applyToAll',
+          dimensionNames: ['dim1'],
           equation: '1',
-        }),
+        },
         documentation: '',
         units: '',
         gf: undefined,
@@ -34,10 +32,11 @@ function makeAux(uid: number, x: number, y: number, isArrayed: boolean = false):
         errors: undefined,
         unitErrors: undefined,
         uid: undefined,
-      })
-    : new Aux({
+      }
+    : {
+        type: 'aux',
         ident: 'test_aux',
-        equation: new ScalarEquation({ equation: '1' }),
+        equation: { type: 'scalar', equation: '1' },
         documentation: '',
         units: '',
         gf: undefined,
@@ -45,9 +44,10 @@ function makeAux(uid: number, x: number, y: number, isArrayed: boolean = false):
         errors: undefined,
         unitErrors: undefined,
         uid: undefined,
-      });
+      };
 
-  return new AuxViewElement({
+  return {
+    type: 'aux',
     uid,
     name: 'TestAux',
     ident: 'test_aux',
@@ -56,42 +56,46 @@ function makeAux(uid: number, x: number, y: number, isArrayed: boolean = false):
     y,
     labelSide: 'right',
     isZeroRadius: false,
-  });
+  };
 }
 
 function makeStock(uid: number, x: number, y: number, isArrayed: boolean = false): StockViewElement {
-  const stockVar = isArrayed
-    ? new Stock({
+  const stockVar: Stock = isArrayed
+    ? {
+        type: 'stock',
         ident: 'test_stock',
-        equation: new ApplyToAllEquation({
-          dimensionNames: List(['dim1']),
+        equation: {
+          type: 'applyToAll',
+          dimensionNames: ['dim1'],
           equation: '10',
-        }),
+        },
         documentation: '',
         units: '',
-        inflows: List(),
-        outflows: List(),
+        inflows: [],
+        outflows: [],
         nonNegative: false,
         data: undefined,
         errors: undefined,
         unitErrors: undefined,
         uid: undefined,
-      })
-    : new Stock({
+      }
+    : {
+        type: 'stock',
         ident: 'test_stock',
-        equation: new ScalarEquation({ equation: '10' }),
+        equation: { type: 'scalar', equation: '10' },
         documentation: '',
         units: '',
-        inflows: List(),
-        outflows: List(),
+        inflows: [],
+        outflows: [],
         nonNegative: false,
         data: undefined,
         errors: undefined,
         unitErrors: undefined,
         uid: undefined,
-      });
+      };
 
-  return new StockViewElement({
+  return {
+    type: 'stock',
     uid,
     name: 'TestStock',
     ident: 'test_stock',
@@ -100,30 +104,38 @@ function makeStock(uid: number, x: number, y: number, isArrayed: boolean = false
     y,
     labelSide: 'center',
     isZeroRadius: false,
-    inflows: List(),
-    outflows: List(),
-  });
+    inflows: [],
+    outflows: [],
+  };
 }
 
 function makeLink(uid: number, fromUid: number, toUid: number): LinkViewElement {
-  return new LinkViewElement({
+  return {
+    type: 'link',
     uid,
     fromUid,
     toUid,
     arc: undefined,
     isStraight: true,
     multiPoint: undefined,
-  });
+    polarity: undefined,
+    x: NaN,
+    y: NaN,
+    isZeroRadius: false,
+    ident: undefined,
+  };
 }
 
 function makeFlowElement(uid: number, x: number, y: number, isArrayed: boolean = false): FlowViewElement {
-  const flowVar = isArrayed
-    ? new Flow({
+  const flowVar: Flow = isArrayed
+    ? {
+        type: 'flow',
         ident: 'test_flow',
-        equation: new ApplyToAllEquation({
-          dimensionNames: List(['dim1']),
+        equation: {
+          type: 'applyToAll',
+          dimensionNames: ['dim1'],
           equation: '1',
-        }),
+        },
         documentation: '',
         units: '',
         gf: undefined,
@@ -132,10 +144,11 @@ function makeFlowElement(uid: number, x: number, y: number, isArrayed: boolean =
         errors: undefined,
         unitErrors: undefined,
         uid: undefined,
-      })
-    : new Flow({
+      }
+    : {
+        type: 'flow',
         ident: 'test_flow',
-        equation: new ScalarEquation({ equation: '1' }),
+        equation: { type: 'scalar', equation: '1' },
         documentation: '',
         units: '',
         gf: undefined,
@@ -144,9 +157,10 @@ function makeFlowElement(uid: number, x: number, y: number, isArrayed: boolean =
         errors: undefined,
         unitErrors: undefined,
         uid: undefined,
-      });
+      };
 
-  return new FlowViewElement({
+  return {
+    type: 'flow',
     uid,
     name: 'TestFlow',
     ident: 'test_flow',
@@ -154,12 +168,12 @@ function makeFlowElement(uid: number, x: number, y: number, isArrayed: boolean =
     x,
     y,
     labelSide: 'center',
-    points: List([
-      new Point({ x: x - 50, y, attachedToUid: undefined }),
-      new Point({ x: x + 50, y, attachedToUid: undefined }),
-    ]),
+    points: [
+      { x: x - 50, y, attachedToUid: undefined },
+      { x: x + 50, y, attachedToUid: undefined },
+    ],
     isZeroRadius: false,
-  });
+  };
 }
 
 describe('Connector routing', () => {
@@ -171,7 +185,7 @@ describe('Connector routing', () => {
         const link = makeLink(3, 1, 2);
 
         // The angle from aux to target is 0 radians (pointing right)
-        const theta = Math.atan2(target.cy - aux.cy, target.cx - aux.cx);
+        const theta = Math.atan2(target.y - aux.y, target.x - aux.x);
 
         // Use the Connector class's static method via reflection or test through render
         // Since intersectElementStraight is private, we test through the isStraightLine method
@@ -189,8 +203,8 @@ describe('Connector routing', () => {
 
         // The intersection point for aux should be at (100 + AuxRadius, 100)
         // since we're going right (theta = 0)
-        const expectedX = aux.cx + AuxRadius * Math.cos(theta);
-        const expectedY = aux.cy + AuxRadius * Math.sin(theta);
+        const expectedX = aux.x + AuxRadius * Math.cos(theta);
+        const expectedY = aux.y + AuxRadius * Math.sin(theta);
         expect(expectedX).toBeCloseTo(100 + AuxRadius);
         expect(expectedY).toBeCloseTo(100);
       });
@@ -200,15 +214,15 @@ describe('Connector routing', () => {
         const target = makeAux(2, 200, 200, false);
 
         // The angle should be 45 degrees (PI/4)
-        const theta = Math.atan2(target.cy - aux.cy, target.cx - aux.cx);
+        const theta = Math.atan2(target.y - aux.y, target.x - aux.x);
         expect(theta).toBeCloseTo(Math.PI / 4);
 
         // Expected intersection at the boundary
-        const expectedX = aux.cx + AuxRadius * Math.cos(theta);
-        const expectedY = aux.cy + AuxRadius * Math.sin(theta);
+        const expectedX = aux.x + AuxRadius * Math.cos(theta);
+        const expectedY = aux.y + AuxRadius * Math.sin(theta);
 
         // Verify it's on a 45-degree line
-        expect(expectedX - aux.cx).toBeCloseTo(expectedY - aux.cy);
+        expect(expectedX - aux.x).toBeCloseTo(expectedY - aux.y);
       });
     });
 
@@ -218,15 +232,15 @@ describe('Connector routing', () => {
         const target = makeAux(2, 200, 100, false);
         const link = makeLink(3, 1, 2);
 
-        // For arrayed elements, the visual front is at (cx - 3, cy - 3)
+        // For arrayed elements, the visual front is at (x - 3, y - 3)
         // The connector should attach to this visual center
-        const visualCx = arrayedAux.cx - ArrayedOffset;
-        const visualCy = arrayedAux.cy - ArrayedOffset;
+        const visualCx = arrayedAux.x - ArrayedOffset;
+        const visualCy = arrayedAux.y - ArrayedOffset;
 
         // The expected intersection should be calculated from the visual center
         // Since target is at (200, 100) and visual center is at (97, 97),
         // the angle is slightly upward
-        const theta = Math.atan2(target.cy - visualCy, target.cx - visualCx);
+        const theta = Math.atan2(target.y - visualCy, target.x - visualCx);
         const expectedX = visualCx + AuxRadius * Math.cos(theta);
         const expectedY = visualCy + AuxRadius * Math.sin(theta);
 
@@ -253,7 +267,7 @@ describe('Connector routing', () => {
 
         const visual = getVisualCenter(arrayedStock);
 
-        // For arrayed stocks, same principle: visual front at (cx - 3, cy - 3)
+        // For arrayed stocks, same principle: visual front at (x - 3, y - 3)
         expect(visual.cx).toBe(97);
         expect(visual.cy).toBe(97);
       });
@@ -297,14 +311,14 @@ describe('Connector routing', () => {
 
         // The intersection should be calculated from the visual center (97, 97)
         // not the logical center (100, 100)
-        const visualCx = arrayedAux.cx - ArrayedOffset;
-        const visualCy = arrayedAux.cy - ArrayedOffset;
+        const visualCx = arrayedAux.x - ArrayedOffset;
+        const visualCy = arrayedAux.y - ArrayedOffset;
 
         // The element's angle from the circle center should be based on visual center
         const expectedAngle = Math.atan2(visualCy - circ.y, visualCx - circ.x);
 
         // Verify the angle is different from what it would be with logical center
-        const logicalAngle = Math.atan2(arrayedAux.cy - circ.y, arrayedAux.cx - circ.x);
+        const logicalAngle = Math.atan2(arrayedAux.y - circ.y, arrayedAux.x - circ.x);
         expect(expectedAngle).not.toBeCloseTo(logicalAngle, 3);
       });
     });
@@ -403,7 +417,7 @@ describe('Connector routing', () => {
     it('should return logical center for zero-radius placeholder (even if arrayed)', () => {
       // Create an arrayed aux but with isZeroRadius = true (used during drag operations)
       const arrayedAux = makeAux(1, 100, 100, true);
-      const zeroRadiusPlaceholder = arrayedAux.set('isZeroRadius', true);
+      const zeroRadiusPlaceholder: AuxViewElement = { ...arrayedAux, isZeroRadius: true };
 
       const visual = getVisualCenter(zeroRadiusPlaceholder);
 

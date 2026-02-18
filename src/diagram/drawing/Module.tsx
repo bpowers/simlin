@@ -23,7 +23,7 @@ export interface ModuleProps {
 
 export function moduleBounds(props: ModuleProps): Rect {
   const { element } = props;
-  const { cx, cy } = element;
+  const { x: cx, y: cy } = element;
   const width = ModuleWidth;
   const height = ModuleHeight;
   return {
@@ -39,8 +39,8 @@ export class Module extends React.PureComponent<ModuleProps> {
     const { element } = this.props;
     const w = ModuleWidth;
     const h = ModuleHeight;
-    const cx = element.cx;
-    const cy = element.cy;
+    const cx = element.x;
+    const cy = element.y;
     const side = element.labelSide;
 
     return (

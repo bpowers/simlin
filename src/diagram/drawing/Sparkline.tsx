@@ -4,8 +4,6 @@
 
 import * as React from 'react';
 
-import { List } from 'immutable';
-
 import { defined, Series } from '@simlin/core/common';
 import { Dark2 } from '../colors';
 
@@ -55,7 +53,7 @@ export class Sparkline extends React.PureComponent<SparklineProps> {
   // these should all be 'private', but Typescript can't enforce that with the `styled` above
   pAxis = '';
   sparklines: Array<React.ReactNode> = [];
-  cachedSeries: List<Series> | unknown;
+  cachedSeries: Readonly<Array<Series>> | unknown;
 
   recache() {
     const time = defined(this.props.series[0]).time;

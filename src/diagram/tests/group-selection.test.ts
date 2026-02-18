@@ -2,9 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { List } from 'immutable';
-
-import { Point, FlowViewElement, StockViewElement, AuxViewElement, CloudViewElement } from '@simlin/core/datamodel';
+import { FlowViewElement, StockViewElement, AuxViewElement, CloudViewElement } from '@simlin/core/datamodel';
 
 import { StockWidth } from '../drawing/Stock';
 
@@ -16,7 +14,8 @@ function makeStock(
   inflows: number[] = [],
   outflows: number[] = [],
 ): StockViewElement {
-  return new StockViewElement({
+  return {
+    type: 'stock',
     uid,
     name: `Stock${uid}`,
     ident: `stock_${uid}`,
@@ -25,9 +24,9 @@ function makeStock(
     y,
     labelSide: 'center',
     isZeroRadius: false,
-    inflows: List(inflows),
-    outflows: List(outflows),
-  });
+    inflows,
+    outflows,
+  };
 }
 
 function makeFlow(
@@ -36,7 +35,8 @@ function makeFlow(
   y: number,
   points: Array<{ x: number; y: number; attachedToUid?: number }>,
 ): FlowViewElement {
-  return new FlowViewElement({
+  return {
+    type: 'flow',
     uid,
     name: `Flow${uid}`,
     ident: `flow_${uid}`,
@@ -44,13 +44,14 @@ function makeFlow(
     x,
     y,
     labelSide: 'center',
-    points: List(points.map((p) => new Point({ x: p.x, y: p.y, attachedToUid: p.attachedToUid }))),
+    points: points.map((p) => ({ x: p.x, y: p.y, attachedToUid: p.attachedToUid })),
     isZeroRadius: false,
-  });
+  };
 }
 
 function makeAux(uid: number, x: number, y: number): AuxViewElement {
-  return new AuxViewElement({
+  return {
+    type: 'aux',
     uid,
     name: `Aux${uid}`,
     ident: `aux_${uid}`,
@@ -59,28 +60,30 @@ function makeAux(uid: number, x: number, y: number): AuxViewElement {
     y,
     labelSide: 'center',
     isZeroRadius: false,
-  });
+  };
 }
 
 function makeCloud(uid: number, flowUid: number, x: number, y: number): CloudViewElement {
-  return new CloudViewElement({
+  return {
+    type: 'cloud',
     uid,
     flowUid,
     x,
     y,
     isZeroRadius: false,
-  });
+    ident: undefined,
+  };
 }
 
 // Helper to check if element center is within selection rectangle
 function isInSelectionRect(
-  element: { cx: number; cy: number },
+  element: { x: number; y: number },
   left: number,
   right: number,
   top: number,
   bottom: number,
 ): boolean {
-  return element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom;
+  return element.x >= left && element.x <= right && element.y >= top && element.y <= bottom;
 }
 
 describe('Group Selection', () => {

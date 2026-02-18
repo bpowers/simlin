@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import clsx from 'clsx';
 
-import { StockViewElement, ViewElement } from '@simlin/core/datamodel';
+import { StockViewElement, ViewElement, variableIsArrayed } from '@simlin/core/datamodel';
 import { defined, Series } from '@simlin/core/common';
 
 import { displayName, mergeBounds, Point, Rect } from './common';
@@ -30,8 +30,8 @@ export interface StockProps {
 }
 
 export function stockContains(element: ViewElement, point: Point): boolean {
-  const cx = element.cx;
-  const cy = element.cy;
+  const cx = element.x;
+  const cy = element.y;
   const width = StockWidth;
   const height = StockHeight;
 
@@ -42,7 +42,7 @@ export function stockContains(element: ViewElement, point: Point): boolean {
 }
 
 export function stockBounds(element: StockViewElement): Rect {
-  const { cx, cy } = element;
+  const { x: cx, y: cy } = element;
   const width = StockWidth;
   const height = StockHeight;
   const bounds = {
@@ -92,8 +92,8 @@ export class Stock extends React.PureComponent<StockProps> {
     const w = StockWidth;
     const h = StockHeight;
 
-    const cx = element.cx + w / 2 - 1;
-    const cy = element.cy - h / 2 + 1;
+    const cx = element.x + w / 2 - 1;
+    const cy = element.y - h / 2 + 1;
 
     return <circle className={styles.errorIndicator} cx={cx} cy={cy} r={3} />;
   }
@@ -103,10 +103,10 @@ export class Stock extends React.PureComponent<StockProps> {
       return undefined;
     }
     const { element } = this.props;
-    const isArrayed = element.var?.isArrayed || false;
+    const isArrayed = (element.var && variableIsArrayed(element.var)) || false;
     const arrayedOffset = isArrayed ? 3 : 0;
-    const cx = element.cx - arrayedOffset;
-    const cy = element.cy - arrayedOffset;
+    const cx = element.x - arrayedOffset;
+    const cy = element.y - arrayedOffset;
     const w = StockWidth;
     const h = StockHeight;
 
@@ -121,12 +121,12 @@ export class Stock extends React.PureComponent<StockProps> {
     const { element, isEditingName, isSelected, isValidTarget } = this.props;
     const w = StockWidth;
     const h = StockHeight;
-    const cx = element.cx;
-    const cy = element.cy;
+    const cx = element.x;
+    const cy = element.y;
 
     const series = this.props.series;
 
-    const isArrayed = element.var?.isArrayed || false;
+    const isArrayed = (element.var && variableIsArrayed(element.var)) || false;
     const arrayedOffset = isArrayed ? 3 : 0;
 
     const side = element.labelSide;

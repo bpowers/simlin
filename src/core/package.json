@@ -34,8 +34,7 @@
   },
   "sideEffects": false,
   "dependencies": {
-    "@simlin/engine": "workspace:*",
-    "immutable": "^5.1.4"
+    "@simlin/engine": "workspace:*"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",

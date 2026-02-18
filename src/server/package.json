@@ -21,7 +21,6 @@
     "firebase-admin": "^13.6.1",
     "google-protobuf": "^4.0.1",
     "helmet": "^8.1.0",
-    "immutable": "^5.1.4",
     "node-fetch": "^3.3.2",
     "passport": "^0.7.0",
     "passport-strategy": "^1.0.0",

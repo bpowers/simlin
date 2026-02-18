@@ -4,8 +4,6 @@
 
 import * as React from 'react';
 
-import { List, Map } from 'immutable';
-
 import { SimError, ModelError, EquationError, ErrorCode, UnitError } from '@simlin/core/datamodel';
 import { errorCodeDescription } from '@simlin/engine';
 
@@ -13,9 +11,9 @@ import styles from './ErrorDetails.module.css';
 
 interface ErrorDetailsProps {
   simError: SimError | undefined;
-  modelErrors: List<ModelError>;
-  varErrors: Map<string, List<EquationError>>;
-  varUnitErrors: Map<string, List<UnitError>>;
+  modelErrors: readonly ModelError[];
+  varErrors: ReadonlyMap<string, readonly EquationError[]>;
+  varUnitErrors: ReadonlyMap<string, readonly UnitError[]>;
   status: 'ok' | 'error' | 'disabled';
 }
 
@@ -27,14 +25,14 @@ export class ErrorDetails extends React.PureComponent<ErrorDetailsProps> {
       simError &&
       !(
         (simError.code === ErrorCode.NotSimulatable || simError.code === ErrorCode.EmptyEquation) &&
-        !modelErrors.isEmpty()
+        modelErrors.length > 0
       )
     ) {
       errors.push(<div className={styles.list}>simulation error: {errorCodeDescription(simError.code)}</div>);
     }
-    if (!modelErrors.isEmpty()) {
+    if (modelErrors.length > 0) {
       for (const err of modelErrors) {
-        if (err.code === ErrorCode.VariablesHaveErrors && !varErrors.isEmpty()) {
+        if (err.code === ErrorCode.VariablesHaveErrors && varErrors.size > 0) {
           continue;
         }
         const details = err.details;

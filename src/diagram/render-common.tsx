@@ -6,7 +6,6 @@
 
 import * as React from 'react';
 
-import { Set } from 'immutable';
 import { renderToString } from 'react-dom/server';
 
 import { UID, ViewElement, Project } from '@simlin/core/datamodel';
@@ -20,7 +19,7 @@ export function renderSvgToString(project: Project, modelName: string): [string,
   const model = getOrThrow(project.models, modelName);
 
   const renameVariable = (_oldName: string, _newName: string): void => {};
-  const onSelection = (_selected: Set<UID>): void => {};
+  const onSelection = (_selected: ReadonlySet<UID>): void => {};
   const moveSelection = (_position: Point): void => {};
   const moveFlow = (_element: ViewElement, _target: number, _position: Point): void => {};
   const moveLabel = (_uid: UID, _side: 'top' | 'left' | 'bottom' | 'right'): void => {};
@@ -36,7 +35,7 @@ export function renderSvgToString(project: Project, modelName: string): [string,
       view={at(model.views, 0)}
       version={1}
       selectedTool={undefined}
-      selection={Set()}
+      selection={new Set()}
       onRenameVariable={renameVariable}
       onSetSelection={onSelection}
       onMoveSelection={moveSelection}

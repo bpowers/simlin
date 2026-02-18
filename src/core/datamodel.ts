@@ -2,9 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { defined, Series } from './common';
-
-import { List, Map, Record } from 'immutable';
+import { defined, mapSet, mapValues, Series } from './common';
 
 import { canonicalize } from './canonicalize';
 
@@ -46,212 +44,151 @@ export { ErrorCode };
 
 export type UID = number;
 
-const equationErrorDefaults = {
-  code: ErrorCode.NoError,
-  start: 0.0,
-  end: 0.0,
-};
-export class EquationError extends Record(equationErrorDefaults) {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof equationErrorDefaults) {
-    super(props);
-  }
+export interface EquationError {
+  readonly code: ErrorCode;
+  readonly start: number;
+  readonly end: number;
 }
 
-const unitErrorDefaults = {
-  code: ErrorCode.NoError,
-  start: 0.0,
-  end: 0.0,
-  isConsistencyError: false,
-  details: undefined as string | undefined,
-};
-export class UnitError extends Record(unitErrorDefaults) {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof unitErrorDefaults) {
-    super(props);
-  }
+export interface UnitError {
+  readonly code: ErrorCode;
+  readonly start: number;
+  readonly end: number;
+  readonly isConsistencyError: boolean;
+  readonly details: string | undefined;
 }
 
-const simErrorDefaults = {
-  code: ErrorCode.NoError,
-  details: undefined as string | undefined,
-};
-export class SimError extends Record(simErrorDefaults) {}
+export interface SimError {
+  readonly code: ErrorCode;
+  readonly details: string | undefined;
+}
 
-const modelErrorDefaults = {
-  code: ErrorCode.NoError,
-  details: undefined as string | undefined,
-};
-export class ModelError extends Record(modelErrorDefaults) {}
+export interface ModelError {
+  readonly code: ErrorCode;
+  readonly details: string | undefined;
+}
 
 export type GraphicalFunctionKind = 'continuous' | 'extrapolate' | 'discrete';
 
-const graphicalFunctionScaleDefaults = {
-  min: 0.0,
-  max: 0.0,
-};
-export class GraphicalFunctionScale extends Record(graphicalFunctionScaleDefaults) {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof graphicalFunctionScaleDefaults) {
-    super(props);
-  }
-  static default(): GraphicalFunctionScale {
-    return new GraphicalFunctionScale(graphicalFunctionScaleDefaults);
-  }
-  static fromJson(json: JsonGraphicalFunctionScale): GraphicalFunctionScale {
-    return new GraphicalFunctionScale({
-      min: json.min,
-      max: json.max,
-    });
-  }
-  toJson(): JsonGraphicalFunctionScale {
-    return {
-      min: this.min,
-      max: this.max,
-    };
-  }
+export interface GraphicalFunctionScale {
+  readonly min: number;
+  readonly max: number;
 }
 
-const graphicalFunctionDefaults = {
-  kind: 'continuous' as GraphicalFunctionKind,
-  xPoints: undefined as List<number> | undefined,
-  yPoints: List<number>(),
-  xScale: GraphicalFunctionScale.default(),
-  yScale: GraphicalFunctionScale.default(),
-};
+export function graphicalFunctionScaleDefault(): GraphicalFunctionScale {
+  return { min: 0, max: 0 };
+}
 
-export class GraphicalFunction extends Record(graphicalFunctionDefaults) {
-  // this isn't useless, as it ensures we specify the full object
+export function graphicalFunctionScaleFromJson(json: JsonGraphicalFunctionScale): GraphicalFunctionScale {
+  return { min: json.min, max: json.max };
+}
 
-  constructor(props: typeof graphicalFunctionDefaults) {
-    super(props);
+export function graphicalFunctionScaleToJson(scale: GraphicalFunctionScale): JsonGraphicalFunctionScale {
+  return { min: scale.min, max: scale.max };
+}
+
+export interface GraphicalFunction {
+  readonly kind: GraphicalFunctionKind;
+  readonly xPoints: readonly number[] | undefined;
+  readonly yPoints: readonly number[];
+  readonly xScale: GraphicalFunctionScale;
+  readonly yScale: GraphicalFunctionScale;
+}
+
+export function graphicalFunctionFromJson(json: JsonGraphicalFunction): GraphicalFunction {
+  let xPoints: readonly number[] | undefined;
+  let yPoints: readonly number[];
+
+  if (json.points && json.points.length > 0) {
+    xPoints = json.points.map((p: [number, number]) => p[0]);
+    yPoints = json.points.map((p: [number, number]) => p[1]);
+  } else {
+    xPoints = undefined;
+    yPoints = json.yPoints ?? [];
   }
 
-  static fromJson(json: JsonGraphicalFunction): GraphicalFunction {
-    let xPoints: List<number> | undefined;
-    let yPoints: List<number>;
+  const xScale = json.xScale
+    ? graphicalFunctionScaleFromJson(json.xScale)
+    : { min: 0, max: Math.max(0, yPoints.length - 1) };
+  const yScale = json.yScale ? graphicalFunctionScaleFromJson(json.yScale) : graphicalFunctionScaleDefault();
 
-    if (json.points && json.points.length > 0) {
-      xPoints = List(json.points.map((p: [number, number]) => p[0]));
-      yPoints = List(json.points.map((p: [number, number]) => p[1]));
-    } else {
-      xPoints = undefined;
-      yPoints = List(json.yPoints ?? []);
-    }
-
-    const xScale = json.xScale
-      ? GraphicalFunctionScale.fromJson(json.xScale)
-      : new GraphicalFunctionScale({ min: 0, max: Math.max(0, yPoints.size - 1) });
-    const yScale = json.yScale
-      ? GraphicalFunctionScale.fromJson(json.yScale)
-      : GraphicalFunctionScale.default();
-
-    let kind: GraphicalFunctionKind = 'continuous';
-    if (json.kind === 'discrete') {
-      kind = 'discrete';
-    } else if (json.kind === 'extrapolate') {
-      kind = 'extrapolate';
-    }
-
-    return new GraphicalFunction({
-      kind,
-      xPoints,
-      yPoints,
-      xScale,
-      yScale,
-    });
+  let kind: GraphicalFunctionKind = 'continuous';
+  if (json.kind === 'discrete') {
+    kind = 'discrete';
+  } else if (json.kind === 'extrapolate') {
+    kind = 'extrapolate';
   }
-  toJson(): JsonGraphicalFunction {
-    const result: JsonGraphicalFunction = {};
 
-    if (this.xPoints && this.xPoints.size > 0) {
-      result.points = this.xPoints
-        .zip(this.yPoints)
-        .map(([x, y]) => [x, y] as [number, number])
-        .toArray();
-    } else {
-      result.yPoints = this.yPoints.toArray();
-    }
+  return { kind, xPoints, yPoints, xScale, yScale };
+}
 
-    if (this.kind && this.kind !== 'continuous') {
-      result.kind = this.kind;
-    }
+export function graphicalFunctionToJson(gf: GraphicalFunction): JsonGraphicalFunction {
+  const result: JsonGraphicalFunction = {};
 
-    if (this.xScale) {
-      result.xScale = this.xScale.toJson();
-    }
-    if (this.yScale) {
-      result.yScale = this.yScale.toJson();
-    }
-
-    return result;
+  if (gf.xPoints && gf.xPoints.length > 0) {
+    result.points = gf.xPoints.map((x, i) => [x, gf.yPoints[i]] as [number, number]);
+  } else {
+    result.yPoints = [...gf.yPoints];
   }
+
+  if (gf.kind && gf.kind !== 'continuous') {
+    result.kind = gf.kind;
+  }
+
+  if (gf.xScale) {
+    result.xScale = graphicalFunctionScaleToJson(gf.xScale);
+  }
+  if (gf.yScale) {
+    result.yScale = graphicalFunctionScaleToJson(gf.yScale);
+  }
+
+  return result;
+}
+
+// Equation types
+
+export interface ScalarEquation {
+  readonly type: 'scalar';
+  readonly equation: string;
+}
+
+export interface ApplyToAllEquation {
+  readonly type: 'applyToAll';
+  readonly dimensionNames: readonly string[];
+  readonly equation: string;
+}
+
+export interface ArrayedEquation {
+  readonly type: 'arrayed';
+  readonly dimensionNames: readonly string[];
+  readonly elements: ReadonlyMap<string, string>;
 }
 
 export type Equation = ScalarEquation | ApplyToAllEquation | ArrayedEquation;
-
-const scalarEquationDefaults = {
-  equation: '',
-};
-export class ScalarEquation extends Record(scalarEquationDefaults) {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof scalarEquationDefaults) {
-    super(props);
-  }
-  static default(): ScalarEquation {
-    return new ScalarEquation({
-      equation: '',
-    });
-  }
-}
-
-const applyToAllEquationDefaults = {
-  dimensionNames: List<string>(),
-  equation: '',
-};
-export class ApplyToAllEquation extends Record(applyToAllEquationDefaults) {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof applyToAllEquationDefaults) {
-    super(props);
-  }
-}
-
-const arrayedEquationDefaults = {
-  dimensionNames: List<string>(),
-  elements: Map<string, string>(),
-};
-export class ArrayedEquation extends Record(arrayedEquationDefaults) {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof arrayedEquationDefaults) {
-    super(props);
-  }
-}
 
 function stockEquationFromJson(
   initialEquation: string | undefined,
   arrayedEquation: JsonArrayedEquation | undefined,
 ): Equation {
   if (arrayedEquation) {
-    const dimensionNames = List<string>(arrayedEquation.dimensions ?? []);
+    const dimensionNames: readonly string[] = arrayedEquation.dimensions ?? [];
     if (arrayedEquation.elements && arrayedEquation.elements.length > 0) {
-      return new ArrayedEquation({
+      return {
+        type: 'arrayed',
         dimensionNames,
-        elements: Map<string, string>(arrayedEquation.elements.map((el: JsonElementEquation) => [el.subscript, el.equation] as [string, string])),
-      });
+        elements: new Map<string, string>(
+          arrayedEquation.elements.map((el: JsonElementEquation) => [el.subscript, el.equation] as [string, string]),
+        ),
+      };
     } else {
-      return new ApplyToAllEquation({
+      return {
+        type: 'applyToAll',
         dimensionNames,
         equation: arrayedEquation.equation ?? '',
-      });
+      };
     }
   }
-  return new ScalarEquation({ equation: initialEquation ?? '' });
+  return { type: 'scalar', equation: initialEquation ?? '' };
 }
 
 function auxEquationFromJson(
@@ -261,53 +198,54 @@ function auxEquationFromJson(
 ): { equation: Equation; graphicalFunction: GraphicalFunction | undefined } {
   let graphicalFunction: GraphicalFunction | undefined;
   if (gf) {
-    graphicalFunction = GraphicalFunction.fromJson(gf);
+    graphicalFunction = graphicalFunctionFromJson(gf);
   }
 
   if (arrayedEquation) {
-    const dimensionNames = List<string>(arrayedEquation.dimensions ?? []);
+    const dimensionNames: readonly string[] = arrayedEquation.dimensions ?? [];
     if (arrayedEquation.elements && arrayedEquation.elements.length > 0) {
       return {
-        equation: new ArrayedEquation({
+        equation: {
+          type: 'arrayed',
           dimensionNames,
-          elements: Map<string, string>(arrayedEquation.elements.map((el: JsonElementEquation) => [el.subscript, el.equation] as [string, string])),
-        }),
+          elements: new Map<string, string>(
+            arrayedEquation.elements.map((el: JsonElementEquation) => [el.subscript, el.equation] as [string, string]),
+          ),
+        },
         graphicalFunction,
       };
     } else {
       return {
-        equation: new ApplyToAllEquation({
+        equation: {
+          type: 'applyToAll',
           dimensionNames,
           equation: arrayedEquation.equation ?? '',
-        }),
+        },
         graphicalFunction,
       };
     }
   }
   return {
-    equation: new ScalarEquation({ equation: equation ?? '' }),
+    equation: { type: 'scalar', equation: equation ?? '' },
     graphicalFunction,
   };
 }
 
 function stockEquationToJson(equation: Equation): { initialEquation?: string; arrayedEquation?: JsonArrayedEquation } {
-  if (equation instanceof ScalarEquation) {
+  if (equation.type === 'scalar') {
     return { initialEquation: equation.equation || undefined };
-  } else if (equation instanceof ApplyToAllEquation) {
+  } else if (equation.type === 'applyToAll') {
     return {
       arrayedEquation: {
-        dimensions: equation.dimensionNames.toArray(),
+        dimensions: [...equation.dimensionNames],
         equation: equation.equation || undefined,
       },
     };
-  } else if (equation instanceof ArrayedEquation) {
+  } else if (equation.type === 'arrayed') {
     return {
       arrayedEquation: {
-        dimensions: equation.dimensionNames.toArray(),
-        elements: equation.elements
-          .map((eqn, subscript) => ({ subscript, equation: eqn }))
-          .valueSeq()
-          .toArray(),
+        dimensions: [...equation.dimensionNames],
+        elements: [...equation.elements].map(([subscript, eqn]) => ({ subscript, equation: eqn })),
       },
     };
   }
@@ -315,1366 +253,1150 @@ function stockEquationToJson(equation: Equation): { initialEquation?: string; ar
 }
 
 function auxEquationToJson(equation: Equation): { equation?: string; arrayedEquation?: JsonArrayedEquation } {
-  if (equation instanceof ScalarEquation) {
+  if (equation.type === 'scalar') {
     return { equation: equation.equation || undefined };
-  } else if (equation instanceof ApplyToAllEquation) {
+  } else if (equation.type === 'applyToAll') {
     return {
       arrayedEquation: {
-        dimensions: equation.dimensionNames.toArray(),
+        dimensions: [...equation.dimensionNames],
         equation: equation.equation || undefined,
       },
     };
-  } else if (equation instanceof ArrayedEquation) {
+  } else if (equation.type === 'arrayed') {
     return {
       arrayedEquation: {
-        dimensions: equation.dimensionNames.toArray(),
-        elements: equation.elements
-          .map((eqn, subscript) => ({ subscript, equation: eqn }))
-          .valueSeq()
-          .toArray(),
+        dimensions: [...equation.dimensionNames],
+        elements: [...equation.elements].map(([subscript, eqn]) => ({ subscript, equation: eqn })),
       },
     };
   }
   return {};
 }
 
-export interface Variable {
+// Variable types
+
+export interface Stock {
+  readonly type: 'stock';
   readonly ident: string;
-  readonly equation: Equation | undefined;
-  readonly gf: GraphicalFunction | undefined;
-  readonly units: string;
+  readonly equation: Equation;
   readonly documentation: string;
-  readonly isArrayed: boolean;
-  readonly hasError: boolean;
-  readonly errors: List<EquationError> | undefined;
-  readonly unitErrors: List<UnitError> | undefined;
+  readonly units: string;
+  readonly inflows: readonly string[];
+  readonly outflows: readonly string[];
+  readonly nonNegative: boolean;
   readonly data: Readonly<Array<Series>> | undefined;
-  set(prop: 'errors', errors: List<EquationError> | undefined): Variable;
-  set(prop: 'unitErrors', errors: List<UnitError> | undefined): Variable;
-  set(prop: 'data', data: Readonly<Array<Series>> | undefined): Variable;
+  readonly errors: readonly EquationError[] | undefined;
+  readonly unitErrors: readonly UnitError[] | undefined;
+  readonly uid: number | undefined;
 }
 
-const stockDefaults = {
-  ident: '',
-  equation: ScalarEquation.default() as Equation,
-  documentation: '',
-  units: '',
-  inflows: List<string>(),
-  outflows: List<string>(),
-  nonNegative: false,
-  data: undefined as Readonly<Array<Series>> | undefined,
-  errors: undefined as List<EquationError> | undefined,
-  unitErrors: undefined as List<UnitError> | undefined,
-  uid: undefined as number | undefined,
-};
-export class Stock extends Record(stockDefaults) implements Variable {
-  // this isn't useless, as it ensures we specify the full object
+export interface Flow {
+  readonly type: 'flow';
+  readonly ident: string;
+  readonly equation: Equation;
+  readonly documentation: string;
+  readonly units: string;
+  readonly gf: GraphicalFunction | undefined;
+  readonly nonNegative: boolean;
+  readonly data: Readonly<Array<Series>> | undefined;
+  readonly errors: readonly EquationError[] | undefined;
+  readonly unitErrors: readonly UnitError[] | undefined;
+  readonly uid: number | undefined;
+}
 
-  constructor(props: typeof stockDefaults) {
-    super(props);
+export interface Aux {
+  readonly type: 'aux';
+  readonly ident: string;
+  readonly equation: Equation;
+  readonly documentation: string;
+  readonly units: string;
+  readonly gf: GraphicalFunction | undefined;
+  readonly data: Readonly<Array<Series>> | undefined;
+  readonly errors: readonly EquationError[] | undefined;
+  readonly unitErrors: readonly UnitError[] | undefined;
+  readonly uid: number | undefined;
+}
+
+export interface ModuleReference {
+  readonly src: string;
+  readonly dst: string;
+}
+
+export function moduleReferenceFromJson(json: JsonModuleReference): ModuleReference {
+  return { src: json.src, dst: json.dst };
+}
+
+export function moduleReferenceToJson(ref: ModuleReference): JsonModuleReference {
+  return { src: ref.src, dst: ref.dst };
+}
+
+export interface Module {
+  readonly type: 'module';
+  readonly ident: string;
+  readonly modelName: string;
+  readonly documentation: string;
+  readonly units: string;
+  readonly references: readonly ModuleReference[];
+  readonly data: Readonly<Array<Series>> | undefined;
+  readonly errors: readonly EquationError[] | undefined;
+  readonly unitErrors: readonly UnitError[] | undefined;
+  readonly uid: number | undefined;
+}
+
+export type Variable = Stock | Flow | Aux | Module;
+
+export function variableIsArrayed(v: Variable): boolean {
+  if (v.type === 'module') return false;
+  return v.equation.type === 'applyToAll' || v.equation.type === 'arrayed';
+}
+
+export function variableHasError(v: Variable): boolean {
+  return v.errors !== undefined || v.unitErrors !== undefined;
+}
+
+export function variableGf(v: Variable): GraphicalFunction | undefined {
+  if (v.type === 'flow' || v.type === 'aux') return v.gf;
+  return undefined;
+}
+
+export function variableEquation(v: Variable): Equation | undefined {
+  if (v.type === 'module') return undefined;
+  return v.equation;
+}
+
+export function stockFromJson(json: JsonStock): Stock {
+  return {
+    type: 'stock',
+    ident: canonicalize(json.name),
+    equation: stockEquationFromJson(json.initialEquation, json.arrayedEquation),
+    documentation: json.documentation ?? '',
+    units: json.units ?? '',
+    inflows: json.inflows ?? [],
+    outflows: json.outflows ?? [],
+    nonNegative: json.nonNegative ?? false,
+    data: undefined,
+    errors: undefined,
+    unitErrors: undefined,
+    uid: json.uid,
+  };
+}
+
+export function stockToJson(stock: Stock): JsonStock {
+  const eqJson = stockEquationToJson(stock.equation);
+  const result: JsonStock = {
+    name: stock.ident,
+    inflows: [...stock.inflows],
+    outflows: [...stock.outflows],
+  };
+  if (stock.uid !== undefined) {
+    result.uid = stock.uid;
   }
-  static fromJson(json: JsonStock): Stock {
-    return new Stock({
-      ident: canonicalize(json.name),
-      equation: stockEquationFromJson(json.initialEquation, json.arrayedEquation),
-      documentation: json.documentation ?? '',
-      units: json.units ?? '',
-      inflows: List(json.inflows ?? []),
-      outflows: List(json.outflows ?? []),
-      nonNegative: json.nonNegative ?? false,
-      data: undefined,
-      errors: undefined,
-      unitErrors: undefined,
-      uid: json.uid,
-    });
+  if (eqJson.initialEquation) {
+    result.initialEquation = eqJson.initialEquation;
   }
-  toJson(): JsonStock {
-    const eqJson = stockEquationToJson(this.equation);
-    const result: JsonStock = {
-      name: this.ident,
-      inflows: this.inflows.toArray(),
-      outflows: this.outflows.toArray(),
-    };
-    if (this.uid !== undefined) {
-      result.uid = this.uid;
-    }
-    if (eqJson.initialEquation) {
-      result.initialEquation = eqJson.initialEquation;
-    }
-    if (eqJson.arrayedEquation) {
-      result.arrayedEquation = eqJson.arrayedEquation;
-    }
-    if (this.units) {
-      result.units = this.units;
-    }
-    if (this.nonNegative) {
-      result.nonNegative = this.nonNegative;
-    }
-    if (this.documentation) {
-      result.documentation = this.documentation;
-    }
-    return result;
+  if (eqJson.arrayedEquation) {
+    result.arrayedEquation = eqJson.arrayedEquation;
   }
-  get gf(): undefined {
-    return undefined;
+  if (stock.units) {
+    result.units = stock.units;
   }
-  get isArrayed(): boolean {
-    return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
+  if (stock.nonNegative) {
+    result.nonNegative = stock.nonNegative;
   }
-  get hasError(): boolean {
-    return this.errors !== undefined || this.unitErrors !== undefined;
+  if (stock.documentation) {
+    result.documentation = stock.documentation;
+  }
+  return result;
+}
+
+export function flowFromJson(json: JsonFlow): Flow {
+  const { equation, graphicalFunction } = auxEquationFromJson(json.equation, json.arrayedEquation, json.graphicalFunction);
+  return {
+    type: 'flow',
+    ident: canonicalize(json.name),
+    equation,
+    documentation: json.documentation ?? '',
+    units: json.units ?? '',
+    gf: graphicalFunction,
+    nonNegative: json.nonNegative ?? false,
+    data: undefined,
+    errors: undefined,
+    unitErrors: undefined,
+    uid: json.uid,
+  };
+}
+
+export function flowToJson(flow: Flow): JsonFlow {
+  const eqJson = auxEquationToJson(flow.equation);
+  const result: JsonFlow = {
+    name: flow.ident,
+  };
+  if (flow.uid !== undefined) {
+    result.uid = flow.uid;
+  }
+  if (eqJson.equation) {
+    result.equation = eqJson.equation;
+  }
+  if (eqJson.arrayedEquation) {
+    result.arrayedEquation = eqJson.arrayedEquation;
+  }
+  if (flow.gf) {
+    result.graphicalFunction = graphicalFunctionToJson(flow.gf);
+  }
+  if (flow.units) {
+    result.units = flow.units;
+  }
+  if (flow.nonNegative) {
+    result.nonNegative = flow.nonNegative;
+  }
+  if (flow.documentation) {
+    result.documentation = flow.documentation;
+  }
+  return result;
+}
+
+export function auxFromJson(json: JsonAuxiliary): Aux {
+  const { equation, graphicalFunction } = auxEquationFromJson(json.equation, json.arrayedEquation, json.graphicalFunction);
+  return {
+    type: 'aux',
+    ident: canonicalize(json.name),
+    equation,
+    documentation: json.documentation ?? '',
+    units: json.units ?? '',
+    gf: graphicalFunction,
+    data: undefined,
+    errors: undefined,
+    unitErrors: undefined,
+    uid: json.uid,
+  };
+}
+
+export function auxToJson(aux: Aux): JsonAuxiliary {
+  const eqJson = auxEquationToJson(aux.equation);
+  const result: JsonAuxiliary = {
+    name: aux.ident,
+  };
+  if (aux.uid !== undefined) {
+    result.uid = aux.uid;
+  }
+  if (eqJson.equation) {
+    result.equation = eqJson.equation;
+  }
+  if (eqJson.arrayedEquation) {
+    result.arrayedEquation = eqJson.arrayedEquation;
+  }
+  if (aux.gf) {
+    result.graphicalFunction = graphicalFunctionToJson(aux.gf);
+  }
+  if (aux.units) {
+    result.units = aux.units;
+  }
+  if (aux.documentation) {
+    result.documentation = aux.documentation;
+  }
+  return result;
+}
+
+export function moduleFromJson(json: JsonModule): Module {
+  return {
+    type: 'module',
+    ident: canonicalize(json.name),
+    modelName: json.modelName,
+    documentation: json.documentation ?? '',
+    units: json.units ?? '',
+    references: (json.references ?? []).map((ref: JsonModuleReference) => moduleReferenceFromJson(ref)),
+    data: undefined,
+    errors: undefined,
+    unitErrors: undefined,
+    uid: json.uid,
+  };
+}
+
+export function moduleToJson(mod: Module): JsonModule {
+  const result: JsonModule = {
+    name: mod.ident,
+    modelName: mod.modelName,
+  };
+  if (mod.uid !== undefined) {
+    result.uid = mod.uid;
+  }
+  if (mod.references.length > 0) {
+    result.references = mod.references.map((ref) => moduleReferenceToJson(ref));
+  }
+  if (mod.units) {
+    result.units = mod.units;
+  }
+  if (mod.documentation) {
+    result.documentation = mod.documentation;
+  }
+  return result;
+}
+
+function variableToJson(v: Variable): JsonStock | JsonFlow | JsonAuxiliary | JsonModule {
+  switch (v.type) {
+    case 'stock':
+      return stockToJson(v);
+    case 'flow':
+      return flowToJson(v);
+    case 'aux':
+      return auxToJson(v);
+    case 'module':
+      return moduleToJson(v);
   }
 }
 
-const flowDefaults = {
-  ident: '',
-  equation: ScalarEquation.default() as Equation,
-  documentation: '',
-  units: '',
-  gf: undefined as GraphicalFunction | undefined,
-  nonNegative: false,
-  data: undefined as Readonly<Array<Series>> | undefined,
-  errors: undefined as List<EquationError> | undefined,
-  unitErrors: undefined as List<UnitError> | undefined,
-  uid: undefined as number | undefined,
-};
-export class Flow extends Record(flowDefaults) implements Variable {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof flowDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonFlow): Flow {
-    const { equation, graphicalFunction } = auxEquationFromJson(
-      json.equation,
-      json.arrayedEquation,
-      json.graphicalFunction,
-    );
-    return new Flow({
-      ident: canonicalize(json.name),
-      equation,
-      documentation: json.documentation ?? '',
-      units: json.units ?? '',
-      gf: graphicalFunction,
-      nonNegative: json.nonNegative ?? false,
-      data: undefined,
-      errors: undefined,
-      unitErrors: undefined,
-      uid: json.uid,
-    });
-  }
-  toJson(): JsonFlow {
-    const eqJson = auxEquationToJson(this.equation);
-    const result: JsonFlow = {
-      name: this.ident,
-    };
-    if (this.uid !== undefined) {
-      result.uid = this.uid;
-    }
-    if (eqJson.equation) {
-      result.equation = eqJson.equation;
-    }
-    if (eqJson.arrayedEquation) {
-      result.arrayedEquation = eqJson.arrayedEquation;
-    }
-    if (this.gf) {
-      result.graphicalFunction = this.gf.toJson();
-    }
-    if (this.units) {
-      result.units = this.units;
-    }
-    if (this.nonNegative) {
-      result.nonNegative = this.nonNegative;
-    }
-    if (this.documentation) {
-      result.documentation = this.documentation;
-    }
-    return result;
-  }
-  get isArrayed(): boolean {
-    return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
-  }
-  get hasError(): boolean {
-    return this.errors !== undefined || this.unitErrors !== undefined;
-  }
-}
-
-const auxDefaults = {
-  ident: '',
-  equation: ScalarEquation.default() as Equation,
-  documentation: '',
-  units: '',
-  gf: undefined as GraphicalFunction | undefined,
-  data: undefined as Readonly<Array<Series>> | undefined,
-  errors: undefined as List<EquationError> | undefined,
-  unitErrors: undefined as List<UnitError> | undefined,
-  uid: undefined as number | undefined,
-};
-export class Aux extends Record(auxDefaults) implements Variable {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof auxDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonAuxiliary): Aux {
-    const { equation, graphicalFunction } = auxEquationFromJson(
-      json.equation,
-      json.arrayedEquation,
-      json.graphicalFunction,
-    );
-    return new Aux({
-      ident: canonicalize(json.name),
-      equation,
-      documentation: json.documentation ?? '',
-      units: json.units ?? '',
-      gf: graphicalFunction,
-      data: undefined,
-      errors: undefined,
-      unitErrors: undefined,
-      uid: json.uid,
-    });
-  }
-  toJson(): JsonAuxiliary {
-    const eqJson = auxEquationToJson(this.equation);
-    const result: JsonAuxiliary = {
-      name: this.ident,
-    };
-    if (this.uid !== undefined) {
-      result.uid = this.uid;
-    }
-    if (eqJson.equation) {
-      result.equation = eqJson.equation;
-    }
-    if (eqJson.arrayedEquation) {
-      result.arrayedEquation = eqJson.arrayedEquation;
-    }
-    if (this.gf) {
-      result.graphicalFunction = this.gf.toJson();
-    }
-    if (this.units) {
-      result.units = this.units;
-    }
-    if (this.documentation) {
-      result.documentation = this.documentation;
-    }
-    return result;
-  }
-  get isArrayed(): boolean {
-    return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
-  }
-  get hasError(): boolean {
-    return this.errors !== undefined || this.unitErrors !== undefined;
-  }
-}
-
-const moduleReferenceDefaults = {
-  src: '',
-  dst: '',
-};
-export class ModuleReference extends Record(moduleReferenceDefaults) {
-  constructor(props: typeof moduleReferenceDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonModuleReference): ModuleReference {
-    return new ModuleReference({
-      src: json.src,
-      dst: json.dst,
-    });
-  }
-  toJson(): JsonModuleReference {
-    return {
-      src: this.src,
-      dst: this.dst,
-    };
-  }
-}
-
-const moduleDefaults = {
-  ident: '',
-  modelName: '',
-  documentation: '',
-  units: '',
-  references: List<ModuleReference>(),
-  data: undefined as Readonly<Array<Series>> | undefined,
-  errors: undefined as List<EquationError> | undefined,
-  unitErrors: undefined as List<UnitError> | undefined,
-  uid: undefined as number | undefined,
-};
-export class Module extends Record(moduleDefaults) implements Variable {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof moduleDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonModule): Module {
-    return new Module({
-      ident: canonicalize(json.name),
-      modelName: json.modelName,
-      documentation: json.documentation ?? '',
-      units: json.units ?? '',
-      references: List((json.references ?? []).map((ref: JsonModuleReference) => ModuleReference.fromJson(ref))),
-      data: undefined,
-      errors: undefined,
-      unitErrors: undefined,
-      uid: json.uid,
-    });
-  }
-  toJson(): JsonModule {
-    const result: JsonModule = {
-      name: this.ident,
-      modelName: this.modelName,
-    };
-    if (this.uid !== undefined) {
-      result.uid = this.uid;
-    }
-    if (this.references.size > 0) {
-      result.references = this.references.map((ref) => ref.toJson()).toArray();
-    }
-    if (this.units) {
-      result.units = this.units;
-    }
-    if (this.documentation) {
-      result.documentation = this.documentation;
-    }
-    return result;
-  }
-  get equation(): undefined {
-    return undefined;
-  }
-  get gf(): undefined {
-    return undefined;
-  }
-  get isArrayed(): boolean {
-    return false;
-  }
-  get hasError(): boolean {
-    return this.errors !== undefined;
-  }
-}
+// View types
 
 export type LabelSide = 'top' | 'left' | 'center' | 'bottom' | 'right';
 
-export interface ViewElement {
-  readonly isZeroRadius: boolean;
+export interface AuxViewElement {
+  readonly type: 'aux';
   readonly uid: number;
-  readonly cx: number;
-  readonly cy: number;
-  readonly ident: string | undefined;
-  isNamed(): boolean;
-  set(prop: 'uid', uid: number): ViewElement;
-  set(prop: 'x', x: number): ViewElement;
-  set(prop: 'y', x: number): ViewElement;
+  readonly name: string;
+  readonly ident: string;
+  readonly var: Aux | undefined;
+  readonly x: number;
+  readonly y: number;
+  readonly labelSide: LabelSide;
+  readonly isZeroRadius: boolean;
 }
 
-const auxViewElementDefaults = {
-  uid: -1,
-  name: '',
-  ident: '',
-  var: undefined as Aux | undefined,
-  x: -1,
-  y: -1,
-  labelSide: 'right' as LabelSide,
-  isZeroRadius: false,
-};
-export class AuxViewElement extends Record(auxViewElementDefaults) implements ViewElement {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof auxViewElementDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonAuxiliaryViewElement, auxVar?: Variable | undefined): AuxViewElement {
-    const ident = canonicalize(json.name);
-    return new AuxViewElement({
-      uid: json.uid,
-      name: json.name,
-      ident,
-      var: auxVar instanceof Aux ? auxVar : undefined,
-      x: json.x,
-      y: json.y,
-      labelSide: (json.labelSide ?? 'right') as LabelSide,
-      isZeroRadius: false,
-    });
-  }
-  toJson(): JsonAuxiliaryViewElement {
-    return {
-      type: 'aux',
-      uid: this.uid,
-      name: this.name,
-      x: this.x,
-      y: this.y,
-      labelSide: this.labelSide,
-    };
-  }
-  get cx(): number {
-    return this.x;
-  }
-  get cy(): number {
-    return this.y;
-  }
-  isNamed(): boolean {
-    return true;
-  }
+export interface StockViewElement {
+  readonly type: 'stock';
+  readonly uid: number;
+  readonly name: string;
+  readonly ident: string;
+  readonly var: Stock | undefined;
+  readonly x: number;
+  readonly y: number;
+  readonly labelSide: LabelSide;
+  readonly isZeroRadius: boolean;
+  readonly inflows: readonly UID[];
+  readonly outflows: readonly UID[];
 }
 
-const stockViewElementDefaults = {
-  uid: -1,
-  name: '',
-  ident: '',
-  var: undefined as Stock | undefined,
-  x: -1,
-  y: -1,
-  labelSide: 'center' as LabelSide,
-  isZeroRadius: false,
-  inflows: List<UID>(),
-  outflows: List<UID>(),
-};
-export class StockViewElement extends Record(stockViewElementDefaults) implements ViewElement {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof stockViewElementDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonStockViewElement, stockVar?: Variable | undefined): StockViewElement {
-    const ident = canonicalize(json.name);
-    return new StockViewElement({
-      uid: json.uid,
-      name: json.name,
-      ident,
-      var: stockVar instanceof Stock ? stockVar : undefined,
-      x: json.x,
-      y: json.y,
-      labelSide: (json.labelSide ?? 'center') as LabelSide,
-      isZeroRadius: false,
-      inflows: List<UID>(),
-      outflows: List<UID>(),
-    });
-  }
-  toJson(): JsonStockViewElement {
-    return {
-      type: 'stock',
-      uid: this.uid,
-      name: this.name,
-      x: this.x,
-      y: this.y,
-      labelSide: this.labelSide,
-    };
-  }
-  get cx(): number {
-    return this.x;
-  }
-  get cy(): number {
-    return this.y;
-  }
-  isNamed(): boolean {
-    return true;
-  }
+export interface Point {
+  readonly x: number;
+  readonly y: number;
+  readonly attachedToUid: number | undefined;
 }
 
-const pointDefaults = {
-  x: -1,
-  y: -1,
-  attachedToUid: undefined as number | undefined,
-};
-export class Point extends Record(pointDefaults) {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof pointDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonFlowPoint): Point {
-    return new Point({
-      x: json.x,
-      y: json.y,
-      attachedToUid: json.attachedToUid,
-    });
-  }
-  toJson(): JsonFlowPoint {
-    const result: JsonFlowPoint = {
-      x: this.x,
-      y: this.y,
-    };
-    if (this.attachedToUid !== undefined) {
-      result.attachedToUid = this.attachedToUid;
-    }
-    return result;
-  }
+export function pointFromJson(json: JsonFlowPoint): Point {
+  return { x: json.x, y: json.y, attachedToUid: json.attachedToUid };
 }
 
-const flowViewElementDefaults = {
-  uid: -1,
-  name: '',
-  ident: '',
-  var: undefined as Flow | undefined,
-  x: -1,
-  y: -1,
-  labelSide: 'center' as LabelSide,
-  points: List<Point>(),
-  isZeroRadius: false,
-};
-export class FlowViewElement extends Record(flowViewElementDefaults) implements ViewElement {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof flowViewElementDefaults) {
-    super(props);
+export function pointToJson(point: Point): JsonFlowPoint {
+  const result: JsonFlowPoint = { x: point.x, y: point.y };
+  if (point.attachedToUid !== undefined) {
+    result.attachedToUid = point.attachedToUid;
   }
-  static fromJson(json: JsonFlowViewElement, flowVar?: Variable | undefined): FlowViewElement {
-    const ident = canonicalize(json.name);
-    return new FlowViewElement({
-      uid: json.uid,
-      name: json.name,
-      ident,
-      var: flowVar instanceof Flow ? flowVar : undefined,
-      x: json.x,
-      y: json.y,
-      labelSide: (json.labelSide ?? 'center') as LabelSide,
-      points: List((json.points ?? []).map((p: JsonFlowPoint) => Point.fromJson(p))),
-      isZeroRadius: false,
-    });
-  }
-  toJson(): JsonFlowViewElement {
-    return {
-      type: 'flow',
-      uid: this.uid,
-      name: this.name,
-      x: this.x,
-      y: this.y,
-      points: this.points.map((p) => p.toJson()).toArray(),
-      labelSide: this.labelSide,
-    };
-  }
-  get cx(): number {
-    return this.x;
-  }
-  get cy(): number {
-    return this.y;
-  }
-  isNamed(): boolean {
-    return true;
-  }
+  return result;
 }
 
-const linkViewElementDefaults = {
-  uid: -1,
-  fromUid: -1,
-  toUid: -1,
-  arc: undefined as number | undefined,
-  isStraight: false,
-  multiPoint: undefined as List<Point> | undefined,
-  polarity: undefined as string | undefined,
-};
-export class LinkViewElement extends Record(linkViewElementDefaults) implements ViewElement {
-  static fromJson(json: JsonLinkViewElement): LinkViewElement {
-    let arc: number | undefined = undefined;
-    let isStraight = false;
-    let multiPoint: List<Point> | undefined = undefined;
-
-    if (json.arc !== undefined) {
-      arc = json.arc;
-    } else if (json.multiPoints && json.multiPoints.length > 0) {
-      multiPoint = List(json.multiPoints.map((p: JsonLinkPoint) => new Point({ x: p.x, y: p.y, attachedToUid: undefined })));
-    } else {
-      isStraight = true;
-    }
-
-    return new LinkViewElement({
-      uid: json.uid,
-      fromUid: json.fromUid,
-      toUid: json.toUid,
-      arc,
-      isStraight,
-      multiPoint,
-      polarity: json.polarity,
-    });
-  }
-  toJson(): JsonLinkViewElement {
-    const result: JsonLinkViewElement = {
-      type: 'link',
-      uid: this.uid,
-      fromUid: this.fromUid,
-      toUid: this.toUid,
-    };
-    if (this.arc !== undefined) {
-      result.arc = this.arc;
-    } else if (this.multiPoint) {
-      result.multiPoints = this.multiPoint.map((p) => ({ x: p.x, y: p.y })).toArray();
-    }
-    if (this.polarity !== undefined) {
-      result.polarity = this.polarity;
-    }
-    return result;
-  }
-  get cx(): number {
-    return NaN;
-  }
-  get cy(): number {
-    return NaN;
-  }
-  isNamed(): boolean {
-    return false;
-  }
-  get ident(): undefined {
-    return undefined;
-  }
-  get isZeroRadius(): boolean {
-    return false;
-  }
+export interface FlowViewElement {
+  readonly type: 'flow';
+  readonly uid: number;
+  readonly name: string;
+  readonly ident: string;
+  readonly var: Flow | undefined;
+  readonly x: number;
+  readonly y: number;
+  readonly labelSide: LabelSide;
+  readonly points: readonly Point[];
+  readonly isZeroRadius: boolean;
 }
 
-const moduleViewElementDefaults = {
-  uid: -1,
-  name: '',
-  ident: '',
-  var: undefined as Module | undefined,
-  x: -1,
-  y: -1,
-  labelSide: 'center' as LabelSide,
-  isZeroRadius: false,
-};
-export class ModuleViewElement extends Record(moduleViewElementDefaults) implements ViewElement {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof moduleViewElementDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonModuleViewElement, moduleVar?: Variable | undefined): ModuleViewElement {
-    const ident = canonicalize(json.name);
-    return new ModuleViewElement({
-      uid: json.uid,
-      name: json.name,
-      ident,
-      var: moduleVar instanceof Module ? moduleVar : undefined,
-      x: json.x,
-      y: json.y,
-      labelSide: (json.labelSide ?? 'center') as LabelSide,
-      isZeroRadius: false,
-    });
-  }
-  toJson(): JsonModuleViewElement {
-    return {
-      type: 'module',
-      uid: this.uid,
-      name: this.name,
-      x: this.x,
-      y: this.y,
-      labelSide: this.labelSide,
-    };
-  }
-  get cx(): number {
-    return this.x;
-  }
-  get cy(): number {
-    return this.y;
-  }
-  isNamed(): boolean {
-    return true;
-  }
+export interface LinkViewElement {
+  readonly type: 'link';
+  readonly uid: number;
+  readonly fromUid: number;
+  readonly toUid: number;
+  readonly arc: number | undefined;
+  readonly isStraight: boolean;
+  readonly multiPoint: readonly Point[] | undefined;
+  readonly polarity: string | undefined;
+  readonly x: number;
+  readonly y: number;
+  readonly isZeroRadius: boolean;
+  readonly ident: undefined;
 }
 
-const aliasViewElementDefaults = {
-  uid: -1,
-  aliasOfUid: -1,
-  x: -1,
-  y: -1,
-  labelSide: 'center' as LabelSide,
-  isZeroRadius: false,
-};
-export class AliasViewElement extends Record(aliasViewElementDefaults) implements ViewElement {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof aliasViewElementDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonAliasViewElement): AliasViewElement {
-    return new AliasViewElement({
-      uid: json.uid,
-      aliasOfUid: json.aliasOfUid,
-      x: json.x,
-      y: json.y,
-      labelSide: (json.labelSide ?? 'center') as LabelSide,
-      isZeroRadius: false,
-    });
-  }
-  toJson(): JsonAliasViewElement {
-    return {
-      type: 'alias',
-      uid: this.uid,
-      aliasOfUid: this.aliasOfUid,
-      x: this.x,
-      y: this.y,
-      labelSide: this.labelSide,
-    };
-  }
-  get cx(): number {
-    return this.x;
-  }
-  get cy(): number {
-    return this.y;
-  }
-  isNamed(): boolean {
-    return false;
-  }
-  get ident(): undefined {
-    return undefined;
-  }
+export interface ModuleViewElement {
+  readonly type: 'module';
+  readonly uid: number;
+  readonly name: string;
+  readonly ident: string;
+  readonly var: Module | undefined;
+  readonly x: number;
+  readonly y: number;
+  readonly labelSide: LabelSide;
+  readonly isZeroRadius: boolean;
 }
 
-const cloudViewElementDefaults = {
-  uid: -1,
-  flowUid: -1,
-  x: -1,
-  y: -1,
-  isZeroRadius: false,
-};
-export class CloudViewElement extends Record(cloudViewElementDefaults) implements ViewElement {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof cloudViewElementDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonCloudViewElement): CloudViewElement {
-    return new CloudViewElement({
-      uid: json.uid,
-      flowUid: json.flowUid,
-      x: json.x,
-      y: json.y,
-      isZeroRadius: false,
-    });
-  }
-  toJson(): JsonCloudViewElement {
-    return {
-      type: 'cloud',
-      uid: this.uid,
-      flowUid: this.flowUid,
-      x: this.x,
-      y: this.y,
-    };
-  }
-  get cx(): number {
-    return this.x;
-  }
-  get cy(): number {
-    return this.y;
-  }
-  isNamed(): boolean {
-    return false;
-  }
-  get ident(): undefined {
-    return undefined;
-  }
+export interface AliasViewElement {
+  readonly type: 'alias';
+  readonly uid: number;
+  readonly aliasOfUid: number;
+  readonly x: number;
+  readonly y: number;
+  readonly labelSide: LabelSide;
+  readonly isZeroRadius: boolean;
+  readonly ident: undefined;
 }
 
-const groupViewElementDefaults = {
-  uid: -1,
-  name: '',
-  x: -1,
-  y: -1,
-  width: 100,
-  height: 80,
-  isZeroRadius: false,
-};
-export class GroupViewElement extends Record(groupViewElementDefaults) implements ViewElement {
-  constructor(props: typeof groupViewElementDefaults) {
-    super(props);
-  }
-  // XMILE stores groups with top-left x/y, but we normalize to center-based
-  // coordinates internally to match all other ViewElements.
-  static fromJson(json: JsonGroupViewElement): GroupViewElement {
-    return new GroupViewElement({
-      uid: json.uid,
-      name: json.name,
-      x: json.x + json.width / 2,
-      y: json.y + json.height / 2,
-      width: json.width,
-      height: json.height,
-      isZeroRadius: false,
-    });
-  }
-  // Convert back to XMILE's top-left convention for serialization
-  toJson(): JsonGroupViewElement {
-    return {
-      type: 'group',
-      uid: this.uid,
-      name: this.name,
-      x: this.x - this.width / 2,
-      y: this.y - this.height / 2,
-      width: this.width,
-      height: this.height,
-    };
-  }
-  get cx(): number {
-    return this.x;
-  }
-  get cy(): number {
-    return this.y;
-  }
-  // Groups are organizational containers, not model variables.
-  // They shouldn't participate in variable-oriented lookups or autocomplete.
-  isNamed(): boolean {
-    return false;
-  }
-  get ident(): undefined {
-    return undefined;
-  }
+export interface CloudViewElement {
+  readonly type: 'cloud';
+  readonly uid: number;
+  readonly flowUid: number;
+  readonly x: number;
+  readonly y: number;
+  readonly isZeroRadius: boolean;
+  readonly ident: undefined;
 }
 
-export type NamedViewElement = StockViewElement | AuxViewElement | ModuleViewElement | FlowViewElement;
-
-const rectDefaults = {
-  x: -1,
-  y: -1,
-  width: -1,
-  height: -1,
-};
-export class Rect extends Record(rectDefaults) {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof rectDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonRect): Rect {
-    return new Rect({
-      x: json.x,
-      y: json.y,
-      width: json.width,
-      height: json.height,
-    });
-  }
-  toJson(): JsonRect {
-    return {
-      x: this.x,
-      y: this.y,
-      width: this.width,
-      height: this.height,
-    };
-  }
-
-  static default(): Rect {
-    return new Rect({
-      x: 0,
-      y: 0,
-      width: 0,
-      height: 0,
-    });
-  }
+export interface GroupViewElement {
+  readonly type: 'group';
+  readonly uid: number;
+  readonly name: string;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly isZeroRadius: boolean;
+  readonly ident: undefined;
 }
 
-const stockFlowViewDefaults = {
-  nextUid: -1,
-  elements: List<ViewElement>(),
-  viewBox: Rect.default(),
-  zoom: -1,
-  useLetteredPolarity: false,
-};
-export class StockFlowView extends Record(stockFlowViewDefaults) {
-  static fromJson(json: JsonView, variables: Map<string, Variable>): StockFlowView {
-    let maxUid = -1;
-    let namedElements = Map<string, UID>();
+export type ViewElement =
+  | AuxViewElement
+  | StockViewElement
+  | FlowViewElement
+  | LinkViewElement
+  | ModuleViewElement
+  | AliasViewElement
+  | CloudViewElement
+  | GroupViewElement;
 
-    const elements = List<ViewElement>(
-      (json.elements ?? []).map((element: JsonViewElement) => {
-        let e: ViewElement;
-        const ident = 'name' in element ? canonicalize(element.name) : undefined;
-        const variable = ident ? variables.get(ident) : undefined;
+export type NamedViewElement = AuxViewElement | StockViewElement | ModuleViewElement | FlowViewElement;
 
-        switch (element.type) {
-          case 'aux':
-            e = AuxViewElement.fromJson(element as JsonAuxiliaryViewElement, variable);
-            if (ident) namedElements = namedElements.set(ident, e.uid);
-            break;
-          case 'stock':
-            e = StockViewElement.fromJson(element as JsonStockViewElement, variable);
-            if (ident) namedElements = namedElements.set(ident, e.uid);
-            break;
-          case 'flow':
-            e = FlowViewElement.fromJson(element as JsonFlowViewElement, variable);
-            if (ident) namedElements = namedElements.set(ident, e.uid);
-            break;
-          case 'link':
-            e = LinkViewElement.fromJson(element as JsonLinkViewElement);
-            break;
-          case 'module':
-            e = ModuleViewElement.fromJson(element as JsonModuleViewElement, variable);
-            if (ident) namedElements = namedElements.set(ident, e.uid);
-            break;
-          case 'alias':
-            e = AliasViewElement.fromJson(element as JsonAliasViewElement);
-            break;
-          case 'cloud':
-            e = CloudViewElement.fromJson(element as JsonCloudViewElement);
-            break;
-          case 'group':
-            e = GroupViewElement.fromJson(element as JsonGroupViewElement);
-            break;
-          default:
-            throw new Error(`unknown view element type: ${(element as JsonViewElement).type}`);
-        }
-        maxUid = Math.max(e.uid, maxUid);
-        return e;
-      }),
-    ).map((element) => {
-      if (element instanceof StockViewElement && element.var) {
-        const stock = element.var;
-        const inflows = List<UID>(
-          stock.inflows.filter((ident: string) => namedElements.has(ident)).map((ident: string) => defined(namedElements.get(ident))),
-        );
-        const outflows = List<UID>(
-          stock.outflows.filter((ident: string) => namedElements.has(ident)).map((ident: string) => defined(namedElements.get(ident))),
-        );
-        return element.merge({
-          inflows,
-          outflows,
-        });
-      }
-      return element;
-    });
-
-    let nextUid = maxUid + 1;
-    if (nextUid === 0) {
-      nextUid = 1;
-    }
-
-    const viewBox = json.viewBox ? Rect.fromJson(json.viewBox) : Rect.default();
-
-    return new StockFlowView({
-      elements,
-      nextUid,
-      viewBox,
-      zoom: json.zoom ?? 1,
-      useLetteredPolarity: json.useLetteredPolarity ?? false,
-    });
-  }
-  toJson(): JsonView {
-    const elements: JsonViewElement[] = this.elements
-      .map((element) => {
-        if (element instanceof AuxViewElement) {
-          return element.toJson();
-        } else if (element instanceof StockViewElement) {
-          return element.toJson();
-        } else if (element instanceof FlowViewElement) {
-          return element.toJson();
-        } else if (element instanceof LinkViewElement) {
-          return element.toJson();
-        } else if (element instanceof ModuleViewElement) {
-          return element.toJson();
-        } else if (element instanceof AliasViewElement) {
-          return element.toJson();
-        } else if (element instanceof CloudViewElement) {
-          return element.toJson();
-        } else if (element instanceof GroupViewElement) {
-          return element.toJson();
-        } else {
-          throw new Error('unknown view element variant');
-        }
-      })
-      .toArray();
-
-    const result: JsonView = {
-      elements,
-    };
-
-    if (this.viewBox && (this.viewBox.width > 0 || this.viewBox.height > 0)) {
-      result.viewBox = this.viewBox.toJson();
-    }
-
-    if (this.zoom > 0) {
-      result.zoom = this.zoom;
-    }
-
-    if (this.useLetteredPolarity) {
-      result.useLetteredPolarity = true;
-    }
-
-    return result;
-  }
+export function isNamedViewElement(el: ViewElement): el is NamedViewElement {
+  return el.type === 'stock' || el.type === 'aux' || el.type === 'module' || el.type === 'flow';
 }
 
 export function viewElementType(
   element: ViewElement,
 ): 'aux' | 'stock' | 'flow' | 'link' | 'module' | 'alias' | 'cloud' | 'group' {
-  if (element instanceof AuxViewElement) {
-    return 'aux';
-  } else if (element instanceof StockViewElement) {
-    return 'stock';
-  } else if (element instanceof FlowViewElement) {
-    return 'flow';
-  } else if (element instanceof LinkViewElement) {
-    return 'link';
-  } else if (element instanceof ModuleViewElement) {
-    return 'module';
-  } else if (element instanceof AliasViewElement) {
-    return 'alias';
-  } else if (element instanceof CloudViewElement) {
-    return 'cloud';
-  } else if (element instanceof GroupViewElement) {
-    return 'group';
+  return element.type;
+}
+
+// View element fromJson functions
+
+export function auxViewElementFromJson(json: JsonAuxiliaryViewElement, auxVar?: Variable | undefined): AuxViewElement {
+  const ident = canonicalize(json.name);
+  return {
+    type: 'aux',
+    uid: json.uid,
+    name: json.name,
+    ident,
+    var: auxVar?.type === 'aux' ? auxVar : undefined,
+    x: json.x,
+    y: json.y,
+    labelSide: (json.labelSide ?? 'right') as LabelSide,
+    isZeroRadius: false,
+  };
+}
+
+export function stockViewElementFromJson(
+  json: JsonStockViewElement,
+  stockVar?: Variable | undefined,
+): StockViewElement {
+  const ident = canonicalize(json.name);
+  return {
+    type: 'stock',
+    uid: json.uid,
+    name: json.name,
+    ident,
+    var: stockVar?.type === 'stock' ? stockVar : undefined,
+    x: json.x,
+    y: json.y,
+    labelSide: (json.labelSide ?? 'center') as LabelSide,
+    isZeroRadius: false,
+    inflows: [],
+    outflows: [],
+  };
+}
+
+export function flowViewElementFromJson(
+  json: JsonFlowViewElement,
+  flowVar?: Variable | undefined,
+): FlowViewElement {
+  const ident = canonicalize(json.name);
+  return {
+    type: 'flow',
+    uid: json.uid,
+    name: json.name,
+    ident,
+    var: flowVar?.type === 'flow' ? flowVar : undefined,
+    x: json.x,
+    y: json.y,
+    labelSide: (json.labelSide ?? 'center') as LabelSide,
+    points: (json.points ?? []).map((p: JsonFlowPoint) => pointFromJson(p)),
+    isZeroRadius: false,
+  };
+}
+
+export function linkViewElementFromJson(json: JsonLinkViewElement): LinkViewElement {
+  let arc: number | undefined = undefined;
+  let isStraight = false;
+  let multiPoint: readonly Point[] | undefined = undefined;
+
+  if (json.arc !== undefined) {
+    arc = json.arc;
+  } else if (json.multiPoints && json.multiPoints.length > 0) {
+    multiPoint = json.multiPoints.map((p: JsonLinkPoint) => ({ x: p.x, y: p.y, attachedToUid: undefined }));
   } else {
-    throw new Error('unknown view element variant');
+    isStraight = true;
   }
+
+  return {
+    type: 'link',
+    uid: json.uid,
+    fromUid: json.fromUid,
+    toUid: json.toUid,
+    arc,
+    isStraight,
+    multiPoint,
+    polarity: json.polarity,
+    x: NaN,
+    y: NaN,
+    isZeroRadius: false,
+    ident: undefined,
+  };
 }
 
-const loopMetadataDefaults = {
-  uids: List<number>(),
-  deleted: false,
-  name: '',
-  description: '',
-};
-export class LoopMetadata extends Record(loopMetadataDefaults) {
-  constructor(props: typeof loopMetadataDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonLoopMetadata): LoopMetadata {
-    return new LoopMetadata({
-      uids: List(json.uids),
-      deleted: json.deleted ?? false,
-      name: json.name,
-      description: json.description ?? '',
-    });
-  }
-  toJson(): JsonLoopMetadata {
-    const result: JsonLoopMetadata = {
-      uids: this.uids.toArray(),
-      name: this.name,
-    };
-    if (this.deleted) {
-      result.deleted = this.deleted;
-    }
-    if (this.description) {
-      result.description = this.description;
-    }
-    return result;
-  }
+export function moduleViewElementFromJson(
+  json: JsonModuleViewElement,
+  moduleVar?: Variable | undefined,
+): ModuleViewElement {
+  const ident = canonicalize(json.name);
+  return {
+    type: 'module',
+    uid: json.uid,
+    name: json.name,
+    ident,
+    var: moduleVar?.type === 'module' ? moduleVar : undefined,
+    x: json.x,
+    y: json.y,
+    labelSide: (json.labelSide ?? 'center') as LabelSide,
+    isZeroRadius: false,
+  };
 }
 
-const modelGroupDefaults = {
-  name: '',
-  doc: undefined as string | undefined,
-  parent: undefined as string | undefined,
-  members: List<string>(),
-  runEnabled: false,
-};
-
-/**
- * Semantic/organizational group for categorizing model variables.
- * This is distinct from visual diagram groups (GroupViewElement).
- */
-export class ModelGroup extends Record(modelGroupDefaults) {
-  constructor(props: typeof modelGroupDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonModelGroup): ModelGroup {
-    return new ModelGroup({
-      name: json.name,
-      doc: json.doc,
-      parent: json.parent,
-      members: List(json.members ?? []),
-      runEnabled: json.runEnabled ?? false,
-    });
-  }
-  toJson(): JsonModelGroup {
-    const result: JsonModelGroup = {
-      name: this.name,
-      members: this.members.toArray(),
-    };
-    if (this.doc) {
-      result.doc = this.doc;
-    }
-    if (this.parent) {
-      result.parent = this.parent;
-    }
-    if (this.runEnabled) {
-      result.runEnabled = this.runEnabled;
-    }
-    return result;
-  }
+export function aliasViewElementFromJson(json: JsonAliasViewElement): AliasViewElement {
+  return {
+    type: 'alias',
+    uid: json.uid,
+    aliasOfUid: json.aliasOfUid,
+    x: json.x,
+    y: json.y,
+    labelSide: (json.labelSide ?? 'center') as LabelSide,
+    isZeroRadius: false,
+    ident: undefined,
+  };
 }
 
-const modelDefaults = {
-  name: '',
-  variables: Map<string, Variable>(),
-  views: List<StockFlowView>(),
-  loopMetadata: List<LoopMetadata>(),
-  groups: List<ModelGroup>(),
-};
-export class Model extends Record(modelDefaults) {
-  // this isn't useless, as it ensures we specify the full object
+export function cloudViewElementFromJson(json: JsonCloudViewElement): CloudViewElement {
+  return {
+    type: 'cloud',
+    uid: json.uid,
+    flowUid: json.flowUid,
+    x: json.x,
+    y: json.y,
+    isZeroRadius: false,
+    ident: undefined,
+  };
+}
 
-  constructor(props: typeof modelDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonModel): Model {
-    const variables = Map<string, Variable>(
-      [
-        ...(json.stocks ?? []).map((s: JsonStock) => Stock.fromJson(s) as Variable),
-        ...(json.flows ?? []).map((f: JsonFlow) => Flow.fromJson(f) as Variable),
-        ...(json.auxiliaries ?? []).map((a: JsonAuxiliary) => Aux.fromJson(a) as Variable),
-        ...(json.modules ?? []).map((m: JsonModule) => Module.fromJson(m) as Variable),
-      ].map((v: Variable) => [v.ident, v] as [string, Variable]),
-    );
+// XMILE stores groups with top-left x/y, but we normalize to center-based
+// coordinates internally to match all other ViewElements.
+export function groupViewElementFromJson(json: JsonGroupViewElement): GroupViewElement {
+  return {
+    type: 'group',
+    uid: json.uid,
+    name: json.name,
+    x: json.x + json.width / 2,
+    y: json.y + json.height / 2,
+    width: json.width,
+    height: json.height,
+    isZeroRadius: false,
+    ident: undefined,
+  };
+}
 
-    return new Model({
-      name: json.name,
-      variables,
-      views: List((json.views ?? []).map((view: JsonView) => StockFlowView.fromJson(view, variables))),
-      loopMetadata: List((json.loopMetadata ?? []).map((lm: JsonLoopMetadata) => LoopMetadata.fromJson(lm))),
-      groups: List((json.groups ?? []).map((g: JsonModelGroup) => ModelGroup.fromJson(g))),
-    });
-  }
-  toJson(): JsonModel {
-    const stocks: JsonStock[] = [];
-    const flows: JsonFlow[] = [];
-    const auxiliaries: JsonAuxiliary[] = [];
-    const modules: JsonModule[] = [];
+// View element toJson functions
 
-    for (const variable of this.variables.values()) {
-      if (variable instanceof Stock) {
-        stocks.push(variable.toJson());
-      } else if (variable instanceof Flow) {
-        flows.push(variable.toJson());
-      } else if (variable instanceof Aux) {
-        auxiliaries.push(variable.toJson());
-      } else if (variable instanceof Module) {
-        modules.push(variable.toJson());
+function viewElementToJson(element: ViewElement): JsonViewElement {
+  switch (element.type) {
+    case 'aux':
+      return {
+        type: 'aux',
+        uid: element.uid,
+        name: element.name,
+        x: element.x,
+        y: element.y,
+        labelSide: element.labelSide,
+      };
+    case 'stock':
+      return {
+        type: 'stock',
+        uid: element.uid,
+        name: element.name,
+        x: element.x,
+        y: element.y,
+        labelSide: element.labelSide,
+      };
+    case 'flow':
+      return {
+        type: 'flow',
+        uid: element.uid,
+        name: element.name,
+        x: element.x,
+        y: element.y,
+        points: element.points.map((p) => pointToJson(p)),
+        labelSide: element.labelSide,
+      };
+    case 'link': {
+      const result: JsonLinkViewElement = {
+        type: 'link',
+        uid: element.uid,
+        fromUid: element.fromUid,
+        toUid: element.toUid,
+      };
+      if (element.arc !== undefined) {
+        result.arc = element.arc;
+      } else if (element.multiPoint) {
+        result.multiPoints = element.multiPoint.map((p) => ({ x: p.x, y: p.y }));
       }
+      if (element.polarity !== undefined) {
+        result.polarity = element.polarity;
+      }
+      return result;
     }
-
-    const result: JsonModel = {
-      name: this.name,
-      stocks,
-      flows,
-      auxiliaries,
-    };
-
-    if (modules.length > 0) {
-      result.modules = modules;
-    }
-    if (this.views.size > 0) {
-      result.views = this.views.map((v: StockFlowView) => v.toJson()).toArray();
-    }
-    if (this.loopMetadata.size > 0) {
-      result.loopMetadata = this.loopMetadata.map((lm: LoopMetadata) => lm.toJson()).toArray();
-    }
-    if (this.groups.size > 0) {
-      result.groups = this.groups.map((g: ModelGroup) => g.toJson()).toArray();
-    }
-
-    return result;
+    case 'module':
+      return {
+        type: 'module',
+        uid: element.uid,
+        name: element.name,
+        x: element.x,
+        y: element.y,
+        labelSide: element.labelSide,
+      };
+    case 'alias':
+      return {
+        type: 'alias',
+        uid: element.uid,
+        aliasOfUid: element.aliasOfUid,
+        x: element.x,
+        y: element.y,
+        labelSide: element.labelSide,
+      };
+    case 'cloud':
+      return {
+        type: 'cloud',
+        uid: element.uid,
+        flowUid: element.flowUid,
+        x: element.x,
+        y: element.y,
+      };
+    case 'group':
+      // Convert back to XMILE's top-left convention for serialization
+      return {
+        type: 'group',
+        uid: element.uid,
+        name: element.name,
+        x: element.x - element.width / 2,
+        y: element.y - element.height / 2,
+        width: element.width,
+        height: element.height,
+      };
   }
 }
 
-const dtDefaults = {
-  value: 1,
-  isReciprocal: false,
-};
-export class Dt extends Record(dtDefaults) {
-  // this isn't useless, as it ensures we specify the full object
+// Rect
 
-  constructor(props: typeof dtDefaults) {
-    super(props);
-  }
-  static fromJson(dt: string): Dt {
-    if (dt.startsWith('1/')) {
-      const value = parseFloat(dt.substring(2));
-      return new Dt({ value, isReciprocal: true });
-    }
-    return new Dt({ value: parseFloat(dt), isReciprocal: false });
-  }
-  toJson(): string {
-    if (this.isReciprocal) {
-      return `1/${this.value}`;
-    }
-    return String(this.value);
-  }
-  static default(): Dt {
-    return new Dt(dtDefaults);
-  }
+export interface Rect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
 }
+
+export function rectFromJson(json: JsonRect): Rect {
+  return { x: json.x, y: json.y, width: json.width, height: json.height };
+}
+
+export function rectToJson(rect: Rect): JsonRect {
+  return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+}
+
+export function rectDefault(): Rect {
+  return { x: 0, y: 0, width: 0, height: 0 };
+}
+
+// StockFlowView
+
+export interface StockFlowView {
+  readonly nextUid: number;
+  readonly elements: readonly ViewElement[];
+  readonly viewBox: Rect;
+  readonly zoom: number;
+  readonly useLetteredPolarity: boolean;
+}
+
+export function stockFlowViewFromJson(json: JsonView, variables: ReadonlyMap<string, Variable>): StockFlowView {
+  let maxUid = -1;
+  const namedElements = new Map<string, UID>();
+
+  const rawElements: ViewElement[] = (json.elements ?? []).map((element: JsonViewElement) => {
+    let e: ViewElement;
+    const ident = 'name' in element ? canonicalize(element.name) : undefined;
+    const variable = ident ? variables.get(ident) : undefined;
+
+    switch (element.type) {
+      case 'aux':
+        e = auxViewElementFromJson(element as JsonAuxiliaryViewElement, variable);
+        if (ident) namedElements.set(ident, e.uid);
+        break;
+      case 'stock':
+        e = stockViewElementFromJson(element as JsonStockViewElement, variable);
+        if (ident) namedElements.set(ident, e.uid);
+        break;
+      case 'flow':
+        e = flowViewElementFromJson(element as JsonFlowViewElement, variable);
+        if (ident) namedElements.set(ident, e.uid);
+        break;
+      case 'link':
+        e = linkViewElementFromJson(element as JsonLinkViewElement);
+        break;
+      case 'module':
+        e = moduleViewElementFromJson(element as JsonModuleViewElement, variable);
+        if (ident) namedElements.set(ident, e.uid);
+        break;
+      case 'alias':
+        e = aliasViewElementFromJson(element as JsonAliasViewElement);
+        break;
+      case 'cloud':
+        e = cloudViewElementFromJson(element as JsonCloudViewElement);
+        break;
+      case 'group':
+        e = groupViewElementFromJson(element as JsonGroupViewElement);
+        break;
+      default:
+        throw new Error(`unknown view element type: ${(element as JsonViewElement).type}`);
+    }
+    maxUid = Math.max(e.uid, maxUid);
+    return e;
+  });
+
+  const elements: readonly ViewElement[] = rawElements.map((element) => {
+    if (element.type === 'stock' && element.var) {
+      const stock = element.var;
+      const inflows: readonly UID[] = stock.inflows
+        .filter((ident: string) => namedElements.has(ident))
+        .map((ident: string) => defined(namedElements.get(ident)));
+      const outflows: readonly UID[] = stock.outflows
+        .filter((ident: string) => namedElements.has(ident))
+        .map((ident: string) => defined(namedElements.get(ident)));
+      return { ...element, inflows, outflows };
+    }
+    return element;
+  });
+
+  let nextUid = maxUid + 1;
+  if (nextUid === 0) {
+    nextUid = 1;
+  }
+
+  const viewBox = json.viewBox ? rectFromJson(json.viewBox) : rectDefault();
+
+  return {
+    nextUid,
+    elements,
+    viewBox,
+    zoom: json.zoom ?? 1,
+    useLetteredPolarity: json.useLetteredPolarity ?? false,
+  };
+}
+
+export function stockFlowViewToJson(view: StockFlowView): JsonView {
+  const elements: JsonViewElement[] = view.elements.map((element) => viewElementToJson(element));
+
+  const result: JsonView = {
+    elements,
+  };
+
+  if (view.viewBox && (view.viewBox.width > 0 || view.viewBox.height > 0)) {
+    result.viewBox = rectToJson(view.viewBox);
+  }
+
+  if (view.zoom > 0) {
+    result.zoom = view.zoom;
+  }
+
+  if (view.useLetteredPolarity) {
+    result.useLetteredPolarity = true;
+  }
+
+  return result;
+}
+
+// LoopMetadata
+
+export interface LoopMetadata {
+  readonly uids: readonly number[];
+  readonly deleted: boolean;
+  readonly name: string;
+  readonly description: string;
+}
+
+export function loopMetadataFromJson(json: JsonLoopMetadata): LoopMetadata {
+  return {
+    uids: json.uids,
+    deleted: json.deleted ?? false,
+    name: json.name,
+    description: json.description ?? '',
+  };
+}
+
+export function loopMetadataToJson(lm: LoopMetadata): JsonLoopMetadata {
+  const result: JsonLoopMetadata = {
+    uids: [...lm.uids],
+    name: lm.name,
+  };
+  if (lm.deleted) {
+    result.deleted = lm.deleted;
+  }
+  if (lm.description) {
+    result.description = lm.description;
+  }
+  return result;
+}
+
+// ModelGroup
+
+export interface ModelGroup {
+  readonly name: string;
+  readonly doc: string | undefined;
+  readonly parent: string | undefined;
+  readonly members: readonly string[];
+  readonly runEnabled: boolean;
+}
+
+export function modelGroupFromJson(json: JsonModelGroup): ModelGroup {
+  return {
+    name: json.name,
+    doc: json.doc,
+    parent: json.parent,
+    members: json.members ?? [],
+    runEnabled: json.runEnabled ?? false,
+  };
+}
+
+export function modelGroupToJson(group: ModelGroup): JsonModelGroup {
+  const result: JsonModelGroup = {
+    name: group.name,
+    members: [...group.members],
+  };
+  if (group.doc) {
+    result.doc = group.doc;
+  }
+  if (group.parent) {
+    result.parent = group.parent;
+  }
+  if (group.runEnabled) {
+    result.runEnabled = group.runEnabled;
+  }
+  return result;
+}
+
+// Model
+
+export interface Model {
+  readonly name: string;
+  readonly variables: ReadonlyMap<string, Variable>;
+  readonly views: readonly StockFlowView[];
+  readonly loopMetadata: readonly LoopMetadata[];
+  readonly groups: readonly ModelGroup[];
+}
+
+export function modelFromJson(json: JsonModel): Model {
+  const variables = new Map<string, Variable>(
+    [
+      ...(json.stocks ?? []).map((s: JsonStock) => stockFromJson(s) as Variable),
+      ...(json.flows ?? []).map((f: JsonFlow) => flowFromJson(f) as Variable),
+      ...(json.auxiliaries ?? []).map((a: JsonAuxiliary) => auxFromJson(a) as Variable),
+      ...(json.modules ?? []).map((m: JsonModule) => moduleFromJson(m) as Variable),
+    ].map((v: Variable) => [v.ident, v] as [string, Variable]),
+  );
+
+  return {
+    name: json.name,
+    variables,
+    views: (json.views ?? []).map((view: JsonView) => stockFlowViewFromJson(view, variables)),
+    loopMetadata: (json.loopMetadata ?? []).map((lm: JsonLoopMetadata) => loopMetadataFromJson(lm)),
+    groups: (json.groups ?? []).map((g: JsonModelGroup) => modelGroupFromJson(g)),
+  };
+}
+
+export function modelToJson(model: Model): JsonModel {
+  const stocks: JsonStock[] = [];
+  const flows: JsonFlow[] = [];
+  const auxiliaries: JsonAuxiliary[] = [];
+  const modules: JsonModule[] = [];
+
+  for (const variable of model.variables.values()) {
+    const json = variableToJson(variable);
+    switch (variable.type) {
+      case 'stock':
+        stocks.push(json as JsonStock);
+        break;
+      case 'flow':
+        flows.push(json as JsonFlow);
+        break;
+      case 'aux':
+        auxiliaries.push(json as JsonAuxiliary);
+        break;
+      case 'module':
+        modules.push(json as JsonModule);
+        break;
+    }
+  }
+
+  const result: JsonModel = {
+    name: model.name,
+    stocks,
+    flows,
+    auxiliaries,
+  };
+
+  if (modules.length > 0) {
+    result.modules = modules;
+  }
+  if (model.views.length > 0) {
+    result.views = model.views.map((v: StockFlowView) => stockFlowViewToJson(v));
+  }
+  if (model.loopMetadata.length > 0) {
+    result.loopMetadata = model.loopMetadata.map((lm: LoopMetadata) => loopMetadataToJson(lm));
+  }
+  if (model.groups.length > 0) {
+    result.groups = model.groups.map((g: ModelGroup) => modelGroupToJson(g));
+  }
+
+  return result;
+}
+
+// Dt
+
+export interface Dt {
+  readonly value: number;
+  readonly isReciprocal: boolean;
+}
+
+export function dtFromJson(dt: string): Dt {
+  if (dt.startsWith('1/')) {
+    const value = parseFloat(dt.substring(2));
+    return { value, isReciprocal: true };
+  }
+  return { value: parseFloat(dt), isReciprocal: false };
+}
+
+export function dtToJson(dt: Dt): string {
+  if (dt.isReciprocal) {
+    return `1/${dt.value}`;
+  }
+  return String(dt.value);
+}
+
+export function dtDefault(): Dt {
+  return { value: 1, isReciprocal: false };
+}
+
+// SimSpecs
 
 export type SimMethod = 'euler' | 'rk2' | 'rk4';
 
-const simSpecsDefaults = {
-  start: 0,
-  stop: 10,
-  dt: Dt.default(),
-  saveStep: undefined as Dt | undefined,
-  simMethod: 'euler' as SimMethod,
-  timeUnits: undefined as string | undefined,
-};
-export class SimSpecs extends Record(simSpecsDefaults) {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof simSpecsDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonSimSpecs): SimSpecs {
-    return new SimSpecs({
-      start: json.startTime,
-      stop: json.endTime,
-      dt: Dt.fromJson(json.dt ?? '1'),
-      saveStep: json.saveStep ? new Dt({ value: json.saveStep, isReciprocal: false }) : undefined,
-      simMethod: (json.method ?? 'euler') as SimMethod,
-      timeUnits: json.timeUnits,
-    });
-  }
-  toJson(): JsonSimSpecs {
-    const result: JsonSimSpecs = {
-      startTime: this.start,
-      endTime: this.stop,
-      dt: this.dt.toJson(),
-    };
-    if (this.saveStep) {
-      result.saveStep = this.saveStep.isReciprocal ? 1 / this.saveStep.value : this.saveStep.value;
-    }
-    if (this.simMethod && this.simMethod !== 'euler') {
-      result.method = this.simMethod;
-    }
-    if (this.timeUnits) {
-      result.timeUnits = this.timeUnits;
-    }
-    return result;
-  }
-  static default(): SimSpecs {
-    return new SimSpecs(simSpecsDefaults);
-  }
+export interface SimSpecs {
+  readonly start: number;
+  readonly stop: number;
+  readonly dt: Dt;
+  readonly saveStep: Dt | undefined;
+  readonly simMethod: SimMethod;
+  readonly timeUnits: string | undefined;
 }
 
-const dimensionDefaults = {
-  name: '',
-  subscripts: List<string>(),
-};
-export class Dimension extends Record(dimensionDefaults) {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof dimensionDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonDimension): Dimension {
-    return new Dimension({
-      name: json.name,
-      subscripts: List(json.elements ?? []),
-    });
-  }
-  toJson(): JsonDimension {
-    const result: JsonDimension = {
-      name: this.name,
-    };
-    if (this.subscripts.size > 0) {
-      result.elements = this.subscripts.toArray();
-    }
-    return result;
-  }
+export function simSpecsFromJson(json: JsonSimSpecs): SimSpecs {
+  return {
+    start: json.startTime,
+    stop: json.endTime,
+    dt: dtFromJson(json.dt ?? '1'),
+    saveStep: json.saveStep ? { value: json.saveStep, isReciprocal: false } : undefined,
+    simMethod: (json.method ?? 'euler') as SimMethod,
+    timeUnits: json.timeUnits,
+  };
 }
+
+export function simSpecsToJson(specs: SimSpecs): JsonSimSpecs {
+  const result: JsonSimSpecs = {
+    startTime: specs.start,
+    endTime: specs.stop,
+    dt: dtToJson(specs.dt),
+  };
+  if (specs.saveStep) {
+    result.saveStep = specs.saveStep.isReciprocal ? 1 / specs.saveStep.value : specs.saveStep.value;
+  }
+  if (specs.simMethod && specs.simMethod !== 'euler') {
+    result.method = specs.simMethod;
+  }
+  if (specs.timeUnits) {
+    result.timeUnits = specs.timeUnits;
+  }
+  return result;
+}
+
+export function simSpecsDefault(): SimSpecs {
+  return {
+    start: 0,
+    stop: 10,
+    dt: dtDefault(),
+    saveStep: undefined,
+    simMethod: 'euler',
+    timeUnits: undefined,
+  };
+}
+
+// Dimension
+
+export interface Dimension {
+  readonly name: string;
+  readonly subscripts: readonly string[];
+}
+
+export function dimensionFromJson(json: JsonDimension): Dimension {
+  return {
+    name: json.name,
+    subscripts: json.elements ?? [],
+  };
+}
+
+export function dimensionToJson(dim: Dimension): JsonDimension {
+  const result: JsonDimension = {
+    name: dim.name,
+  };
+  if (dim.subscripts.length > 0) {
+    result.elements = [...dim.subscripts];
+  }
+  return result;
+}
+
+// Source
 
 export type Extension = 'xmile' | 'vensim' | undefined;
 
-const sourceDefaults = {
-  extension: undefined as Extension,
-  content: '',
-};
-export class Source extends Record(sourceDefaults) {
-  // this isn't useless, as it ensures we specify the full object
-
-  constructor(props: typeof sourceDefaults) {
-    super(props);
-  }
-  static fromJson(json: JsonSource): Source {
-    let extension: Extension;
-    if (json.extension === 'xmile') {
-      extension = 'xmile';
-    } else if (json.extension === 'vensim') {
-      extension = 'vensim';
-    } else {
-      extension = undefined;
-    }
-    return new Source({
-      extension,
-      content: json.content ?? '',
-    });
-  }
-  toJson(): JsonSource {
-    const result: JsonSource = {};
-    if (this.extension) {
-      result.extension = this.extension;
-    }
-    if (this.content) {
-      result.content = this.content;
-    }
-    return result;
-  }
+export interface Source {
+  readonly extension: Extension;
+  readonly content: string;
 }
 
-const projectDefaults = {
-  name: '',
-  simSpecs: SimSpecs.default(),
-  models: Map<string, Model>(),
-  dimensions: Map<string, Dimension>(),
-  hasNoEquations: false,
-  source: undefined as Source | undefined,
-};
-export class Project extends Record(projectDefaults) {
-  // this isn't useless, as it ensures we specify the full object
+export function sourceFromJson(json: JsonSource): Source {
+  let extension: Extension;
+  if (json.extension === 'xmile') {
+    extension = 'xmile';
+  } else if (json.extension === 'vensim') {
+    extension = 'vensim';
+  } else {
+    extension = undefined;
+  }
+  return {
+    extension,
+    content: json.content ?? '',
+  };
+}
 
-  constructor(props: typeof projectDefaults) {
-    super(props);
+export function sourceToJson(source: Source): JsonSource {
+  const result: JsonSource = {};
+  if (source.extension) {
+    result.extension = source.extension;
   }
-  static fromJson(json: JsonProject): Project {
-    return new Project({
-      name: json.name,
-      simSpecs: SimSpecs.fromJson(json.simSpecs),
-      models: Map<string, Model>(json.models.map((model: JsonModel) => [model.name, Model.fromJson(model)] as [string, Model])),
-      dimensions: Map<string, Dimension>((json.dimensions ?? []).map((dim: JsonDimension) => [dim.name, Dimension.fromJson(dim)] as [string, Dimension])),
-      hasNoEquations: false,
-      source: json.source ? Source.fromJson(json.source) : undefined,
-    });
+  if (source.content) {
+    result.content = source.content;
   }
-  toJson(): JsonProject {
-    const result: JsonProject = {
-      name: this.name,
-      simSpecs: this.simSpecs.toJson(),
-      models: this.models
-        .valueSeq()
-        .map((m: Model) => m.toJson())
-        .toArray(),
-    };
-    if (this.dimensions.size > 0) {
-      result.dimensions = this.dimensions
-        .valueSeq()
-        .map((d: Dimension) => d.toJson())
-        .toArray();
+  return result;
+}
+
+// Project
+
+export interface Project {
+  readonly name: string;
+  readonly simSpecs: SimSpecs;
+  readonly models: ReadonlyMap<string, Model>;
+  readonly dimensions: ReadonlyMap<string, Dimension>;
+  readonly hasNoEquations: boolean;
+  readonly source: Source | undefined;
+}
+
+export function projectFromJson(json: JsonProject): Project {
+  return {
+    name: json.name,
+    simSpecs: simSpecsFromJson(json.simSpecs),
+    models: new Map<string, Model>(json.models.map((model: JsonModel) => [model.name, modelFromJson(model)] as [string, Model])),
+    dimensions: new Map<string, Dimension>(
+      (json.dimensions ?? []).map((dim: JsonDimension) => [dim.name, dimensionFromJson(dim)] as [string, Dimension]),
+    ),
+    hasNoEquations: false,
+    source: json.source ? sourceFromJson(json.source) : undefined,
+  };
+}
+
+export function projectToJson(project: Project): JsonProject {
+  const result: JsonProject = {
+    name: project.name,
+    simSpecs: simSpecsToJson(project.simSpecs),
+    models: [...project.models.values()].map((m: Model) => modelToJson(m)),
+  };
+  if (project.dimensions.size > 0) {
+    result.dimensions = [...project.dimensions.values()].map((d: Dimension) => dimensionToJson(d));
+  }
+  if (project.source) {
+    result.source = sourceToJson(project.source);
+  }
+  return result;
+}
+
+export function projectAttachData(project: Project, data: ReadonlyMap<string, Series>, modelName: string): Project {
+  const model = defined(project.models.get(modelName));
+  const variables = mapValues(model.variables, (v: Variable) => {
+    if (data.has(v.ident)) {
+      return { ...v, data: [defined(data.get(v.ident))] };
     }
-    if (this.source) {
-      result.source = this.source.toJson();
+    if (!variableIsArrayed(v)) {
+      return v;
     }
-    return result;
-  }
-  attachData(data: Map<string, Series>, modelName: string): Project {
-    let model = defined(this.models.get(modelName));
-    const variables = model.variables.map((v: Variable) => {
-      if (data.has(v.ident)) {
-        return v.set('data', [defined(data.get(v.ident))]);
-      }
-      if (!v.isArrayed) {
-        return v;
-      }
-      const eqn = defined(v.equation);
-      if (!(eqn instanceof ApplyToAllEquation || eqn instanceof ArrayedEquation)) {
-        return v;
-      }
-      const dimNames = eqn.dimensionNames;
-      if (dimNames.size !== 1) {
-        return v;
-      }
-      const ident = v.ident;
-      const dim = defined(this.dimensions.get(defined(dimNames.get(0))));
-      const series = dim.subscripts
-        .map((element) => data.get(`${ident}[${element}]`))
-        .filter((data) => data !== undefined)
-        .map((data) => defined(data))
-        .toArray();
+    const eqn = variableEquation(v);
+    if (!eqn || (eqn.type !== 'applyToAll' && eqn.type !== 'arrayed')) {
+      return v;
+    }
+    const dimNames = eqn.dimensionNames;
+    if (dimNames.length !== 1) {
+      return v;
+    }
+    const ident = v.ident;
+    const dim = defined(project.dimensions.get(dimNames[0]));
+    const series = dim.subscripts
+      .map((element) => data.get(`${ident}[${element}]`))
+      .filter((d) => d !== undefined)
+      .map((d) => defined(d));
 
-      return v.set('data', series);
-    });
-    model = model.set('variables', variables);
-
-    return this.set('models', this.models.set(modelName, model));
-  }
+    return { ...v, data: series };
+  });
+  const updatedModel: Model = { ...model, variables };
+  return { ...project, models: mapSet(project.models, modelName, updatedModel) };
 }

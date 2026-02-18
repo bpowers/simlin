@@ -5,11 +5,9 @@
 import * as React from 'react';
 
 import {
-  AuxViewElement,
-  FlowViewElement,
+  isNamedViewElement,
   LinkViewElement,
-  ModuleViewElement,
-  StockViewElement,
+  variableIsArrayed,
   ViewElement,
 } from '@simlin/core/datamodel';
 
@@ -21,8 +19,8 @@ import styles from './Connector.module.css';
 export const ArrayedOffset = 3;
 
 function isElementArrayed(element: ViewElement): boolean {
-  if (element instanceof AuxViewElement || element instanceof StockViewElement || element instanceof FlowViewElement) {
-    return element.var?.isArrayed ?? false;
+  if (isNamedViewElement(element) && element.var) {
+    return variableIsArrayed(element.var);
   }
   return false;
 }
@@ -31,12 +29,12 @@ export function getVisualCenter(element: ViewElement): { cx: number; cy: number 
   // Zero-radius elements are temporary placeholders (used during drag operations)
   // that should stay anchored to the cursor position
   if (element.isZeroRadius) {
-    return { cx: element.cx, cy: element.cy };
+    return { cx: element.x, cy: element.y };
   }
   const offset = isElementArrayed(element) ? ArrayedOffset : 0;
   return {
-    cx: element.cx - offset,
-    cy: element.cy - offset,
+    cx: element.x - offset,
+    cy: element.y - offset,
   };
 }
 
@@ -110,9 +108,9 @@ export function takeoffθ(props: Pick<ConnectorProps, 'element' | 'from' | 'to' 
 export function intersectElementArc(element: ViewElement, circ: Circle, inv: boolean): Point {
   let r: number = AuxRadius;
   // FIXME: actually calculate intersections
-  if (element instanceof ModuleViewElement) {
+  if (element.type === 'module') {
     r = 25;
-  } else if (element instanceof StockViewElement) {
+  } else if (element.type === 'stock') {
     r = 15;
   } else if (element.isZeroRadius) {
     r = 0;
@@ -188,9 +186,9 @@ export class Connector extends React.PureComponent<ConnectorProps> {
   private static intersectElementStraight(element: ViewElement, θ: number): Point {
     let r: number = AuxRadius;
     // FIXME: actually calculate intersections
-    if (element instanceof ModuleViewElement) {
+    if (element.type === 'module') {
       r = 25;
-    } else if (element instanceof StockViewElement) {
+    } else if (element.type === 'stock') {
       r = 15;
     } else if (element.isZeroRadius) {
       r = 0;
