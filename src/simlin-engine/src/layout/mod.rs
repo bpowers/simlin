@@ -1964,8 +1964,7 @@ fn try_detect_ltm_loops(
 
             // Extract the relative loop score time series
             let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_item.id);
-            let var_ident =
-                Ident::<Canonical>::from_str_unchecked(&Ident::new(&var_name).to_source_repr());
+            let var_ident = Ident::new(&var_name);
             let importance_series = vm
                 .get_series(&var_ident)
                 .unwrap_or_default()
