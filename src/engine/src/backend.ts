@@ -61,7 +61,6 @@ export interface EngineBackend {
   projectSerializeJson(handle: ProjectHandle, format: SimlinJsonFormat): MaybePromise<Uint8Array>;
   projectSerializeXmile(handle: ProjectHandle): MaybePromise<Uint8Array>;
   projectRenderSvg(handle: ProjectHandle, modelName: string): MaybePromise<Uint8Array>;
-  projectGetLoops(handle: ProjectHandle): MaybePromise<Loop[]>;
   projectGetErrors(handle: ProjectHandle): MaybePromise<ErrorDetail[]>;
   projectApplyPatch(
     handle: ProjectHandle,
@@ -75,6 +74,7 @@ export interface EngineBackend {
   modelDispose(handle: ModelHandle): MaybePromise<void>;
   modelGetIncomingLinks(handle: ModelHandle, varName: string): MaybePromise<string[]>;
   modelGetLinks(handle: ModelHandle): MaybePromise<Link[]>;
+  modelGetLoops(handle: ModelHandle): MaybePromise<Loop[]>;
   modelGetLatexEquation(handle: ModelHandle, ident: string): MaybePromise<string | null>;
   modelGetVarJson(handle: ModelHandle, varName: string): MaybePromise<Uint8Array>;
   modelGetVarNames(handle: ModelHandle, typeMask?: number, filter?: string | null): MaybePromise<string[]>;

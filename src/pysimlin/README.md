@@ -520,7 +520,7 @@ for link in links:
         print(f"  Max score: {link.max_score():.4f}")
 
 # Get relative loop scores
-loops = project.get_loops()
+loops = model.get_loops()
 if loops:
     loop_scores = sim.get_relative_loop_score(loops[0].id)
 ```

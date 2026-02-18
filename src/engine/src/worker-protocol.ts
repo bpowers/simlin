@@ -52,7 +52,6 @@ export type WorkerRequest =
   | { type: 'projectSerializeJson'; requestId: number; handle: WorkerProjectHandle; format: number }
   | { type: 'projectSerializeXmile'; requestId: number; handle: WorkerProjectHandle }
   | { type: 'projectRenderSvg'; requestId: number; handle: WorkerProjectHandle; modelName: string }
-  | { type: 'projectGetLoops'; requestId: number; handle: WorkerProjectHandle }
   | { type: 'projectGetErrors'; requestId: number; handle: WorkerProjectHandle }
   | {
       type: 'projectApplyPatch';
@@ -67,6 +66,7 @@ export type WorkerRequest =
   | { type: 'modelDispose'; requestId: number; handle: WorkerModelHandle }
   | { type: 'modelGetIncomingLinks'; requestId: number; handle: WorkerModelHandle; varName: string }
   | { type: 'modelGetLinks'; requestId: number; handle: WorkerModelHandle }
+  | { type: 'modelGetLoops'; requestId: number; handle: WorkerModelHandle }
   | { type: 'modelGetLatexEquation'; requestId: number; handle: WorkerModelHandle; ident: string }
   | { type: 'modelGetVarJson'; requestId: number; handle: WorkerModelHandle; varName: string }
   | { type: 'modelGetVarNames'; requestId: number; handle: WorkerModelHandle; typeMask: number; filter: string | null }
@@ -166,12 +166,12 @@ export const VALID_REQUEST_TYPES: ReadonlySet<string> = new Set([
   'projectSerializeJson',
   'projectSerializeXmile',
   'projectRenderSvg',
-  'projectGetLoops',
   'projectGetErrors',
   'projectApplyPatch',
   'modelDispose',
   'modelGetIncomingLinks',
   'modelGetLinks',
+  'modelGetLoops',
   'modelGetLatexEquation',
   'modelGetVarJson',
   'modelGetVarNames',

@@ -230,16 +230,17 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
     if enable_ltm {
         let engine_project = Project::from(project.clone());
 
-        // First detect and output loops
         use simlin_engine::ltm;
-        if let Ok(loops_by_model) = ltm::detect_loops(&engine_project) {
-            // Output loop information to stderr
-            for (model_name, loops) in &loops_by_model {
-                if !loops.is_empty() {
-                    eprintln!("# Loops in model '{}':", model_name);
-                    for loop_item in loops {
-                        eprintln!("{} := {}", loop_item.id, loop_item.format_path());
-                    }
+        for (model_name, model) in &engine_project.models {
+            if model.implicit {
+                continue;
+            }
+            if let Ok(loops) = ltm::detect_loops(model, &engine_project)
+                && !loops.is_empty()
+            {
+                eprintln!("# Loops in model '{}':", model_name);
+                for loop_item in &loops {
+                    eprintln!("{} := {}", loop_item.id, loop_item.format_path());
                 }
             }
         }

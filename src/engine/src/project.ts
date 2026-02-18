@@ -13,7 +13,6 @@ import { EngineBackend, ProjectHandle } from './backend';
 import { getBackend } from '@simlin/engine/internal/backend-factory';
 import { SimlinJsonFormat, ErrorDetail } from './internal/types';
 import { WasmSourceProvider } from '@simlin/engine/internal/wasm';
-import { Loop } from './types';
 import { Model } from './model';
 import { JsonProjectPatch } from './json-types';
 
@@ -267,15 +266,6 @@ export class Project {
    */
   async renderSvgString(modelName: string): Promise<string> {
     return new TextDecoder().decode(await this.renderSvg(modelName));
-  }
-
-  /**
-   * Get all feedback loops in this project.
-   * @returns Array of Loop objects
-   */
-  async getLoops(): Promise<Loop[]> {
-    this.checkDisposed();
-    return await this._backend.projectGetLoops(this._handle);
   }
 
   /**

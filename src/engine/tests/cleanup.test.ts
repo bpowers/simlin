@@ -53,7 +53,7 @@ function createRejectingBackend(): EngineBackend {
     projectSerializeJson: () => Promise.reject(new Error('not implemented')),
     projectSerializeXmile: () => Promise.reject(new Error('not implemented')),
     projectRenderSvg: () => Promise.reject(new Error('not implemented')),
-    projectGetLoops: () => Promise.reject(new Error('not implemented')),
+    modelGetLoops: () => Promise.reject(new Error('not implemented')),
     projectGetErrors: () => Promise.reject(new Error('not implemented')),
     projectApplyPatch: () => Promise.reject(new Error('not implemented')),
     modelDispose: () => Promise.reject(new Error('model dispose failed')),

@@ -354,14 +354,6 @@ export class WorkerBackend implements EngineBackend {
     }));
   }
 
-  projectGetLoops(handle: ProjectHandle): Promise<Loop[]> {
-    return this.sendRequest<Loop[]>((requestId) => ({
-      type: 'projectGetLoops',
-      requestId,
-      handle,
-    }));
-  }
-
   projectGetErrors(handle: ProjectHandle): Promise<ErrorDetail[]> {
     return this.sendRequest<ErrorDetail[]>((requestId) => ({
       type: 'projectGetErrors',
@@ -416,6 +408,14 @@ export class WorkerBackend implements EngineBackend {
   modelGetLinks(handle: ModelHandle): Promise<Link[]> {
     return this.sendRequest<Link[]>((requestId) => ({
       type: 'modelGetLinks',
+      requestId,
+      handle,
+    }));
+  }
+
+  modelGetLoops(handle: ModelHandle): Promise<Loop[]> {
+    return this.sendRequest<Loop[]>((requestId) => ({
+      type: 'modelGetLoops',
       requestId,
       handle,
     }));

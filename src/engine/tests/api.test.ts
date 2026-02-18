@@ -142,12 +142,12 @@ describe('High-Level API', () => {
       await project.dispose();
     });
 
-    it('should get loops', async () => {
+    it('should get loops via model', async () => {
       const project = await openTestProject();
 
-      const loops = await project.getLoops();
+      const model = await project.mainModel();
+      const loops = await model.loops();
       expect(Array.isArray(loops)).toBe(true);
-      // The teacup model may or may not have feedback loops
 
       await project.dispose();
     });

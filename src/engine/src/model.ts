@@ -316,10 +316,7 @@ export class Model {
    */
   async loops(): Promise<readonly Loop[]> {
     this.checkDisposed();
-    if (this._project === null) {
-      return [];
-    }
-    return this._project.getLoops();
+    return await this.backend.modelGetLoops(this._handle);
   }
 
   /**

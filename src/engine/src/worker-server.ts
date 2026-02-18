@@ -295,11 +295,6 @@ export class WorkerServer {
         this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
         return;
       }
-      case 'projectGetLoops': {
-        const handle = this.getProjectHandle(request.handle);
-        this.sendSuccess(requestId, this.backend.projectGetLoops(handle));
-        return;
-      }
       case 'projectGetErrors': {
         const handle = this.getProjectHandle(request.handle);
         this.sendSuccess(requestId, this.backend.projectGetErrors(handle));
@@ -332,6 +327,11 @@ export class WorkerServer {
       case 'modelGetLinks': {
         const handle = this.getModelHandle(request.handle);
         this.sendSuccess(requestId, this.backend.modelGetLinks(handle));
+        return;
+      }
+      case 'modelGetLoops': {
+        const handle = this.getModelHandle(request.handle);
+        this.sendSuccess(requestId, this.backend.modelGetLoops(handle));
         return;
       }
       case 'modelGetLatexEquation': {

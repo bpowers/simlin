@@ -115,7 +115,7 @@ def advanced_analysis_with_context_managers():
     with model.project as project:
         # Analyze project-level information
         print("Project Analysis:")
-        loops = project.get_loops()
+        loops = model.get_loops()
         print(f"Found {len(loops)} feedback loops")
 
         errors = project.get_errors()

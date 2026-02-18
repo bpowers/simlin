@@ -177,9 +177,9 @@ class SimulationExperiment:
 class LoopDominanceAnalyzer:
     """Analyze loop dominance patterns over time."""
     
-    def __init__(self, project: simlin.Project):
-        self.project = project
-        self.loops = project.get_loops()
+    def __init__(self, model: simlin.Model):
+        self.model = model
+        self.loops = model.get_loops()
     
     def analyze_dominance(self, model: simlin.Model) -> pd.DataFrame:
         """Analyze which loops dominate at different times."""

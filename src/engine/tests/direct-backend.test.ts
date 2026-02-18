@@ -106,8 +106,10 @@ describe('DirectBackend', () => {
     });
 
     it('should get loops', () => {
-      const loops = backend.projectGetLoops(projectHandle);
+      const modelHandle = backend.projectGetModel(projectHandle, null);
+      const loops = backend.modelGetLoops(modelHandle);
       expect(Array.isArray(loops)).toBe(true);
+      backend.modelDispose(modelHandle);
     });
 
     it('should get errors (none for valid model)', () => {

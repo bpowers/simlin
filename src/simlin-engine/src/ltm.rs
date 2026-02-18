@@ -724,21 +724,10 @@ impl CausalGraph {
     }
 }
 
-/// Detect all loops in a project
-pub fn detect_loops(project: &Project) -> Result<HashMap<Ident<Canonical>, Vec<Loop>>> {
-    let mut all_loops = HashMap::new();
-
-    for (model_name, model) in &project.models {
-        // Skip implicit models (from stdlib)
-        if model.implicit {
-            continue;
-        }
-        let graph = CausalGraph::from_model(model, project)?;
-        let loops = graph.find_loops();
-        all_loops.insert(model_name.clone(), loops);
-    }
-
-    Ok(all_loops)
+/// Detect all feedback loops in a single model
+pub fn detect_loops(model: &ModelStage1, project: &Project) -> Result<Vec<Loop>> {
+    let graph = CausalGraph::from_model(model, project)?;
+    Ok(graph.find_loops())
 }
 
 /// Analyze the polarity of how a variable appears in an equation
@@ -1083,12 +1072,9 @@ mod tests {
         let sim_specs = sim_specs_with_units("years");
         let project = x_project(sim_specs, &[model]);
         let project = Project::from(project);
-        let loops = detect_loops(&project).unwrap();
-
-        // The model name should match what we provided to x_model
         let main_ident: Ident<Canonical> = Ident::new("main");
-        assert!(loops.contains_key(&main_ident), "Should have main model");
-        let model_loops = &loops[&main_ident];
+        let model = &project.models[&main_ident];
+        let model_loops = detect_loops(model, &project).unwrap();
         assert_eq!(model_loops.len(), 1);
 
         let loop_item = &model_loops[0];
@@ -1127,13 +1113,9 @@ mod tests {
         let project = x_project(sim_specs, &[model]);
         let project2 = Project::from(project);
 
-        // Detect loops in both projects
-        let loops1 = detect_loops(&project1).unwrap();
-        let loops2 = detect_loops(&project2).unwrap();
-
-        let main_ident = Ident::new("main");
-        let main_loops1 = loops1.get(&main_ident).unwrap();
-        let main_loops2 = loops2.get(&main_ident).unwrap();
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let main_loops1 = detect_loops(&project1.models[&main_ident], &project1).unwrap();
+        let main_loops2 = detect_loops(&project2.models[&main_ident], &project2).unwrap();
 
         // Should have the same number of loops
         assert_eq!(main_loops1.len(), main_loops2.len());
@@ -1163,11 +1145,8 @@ mod tests {
         let sim_specs = sim_specs_with_units("years");
         let project = x_project(sim_specs, &[model]);
         let project = Project::from(project);
-        let loops = detect_loops(&project).unwrap();
-
         let main_ident: Ident<Canonical> = Ident::new("main");
-        assert!(loops.contains_key(&main_ident), "Should have main model");
-        let model_loops = &loops[&main_ident];
+        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
         assert_eq!(model_loops.len(), 0);
     }
 
@@ -1189,11 +1168,8 @@ mod tests {
         let sim_specs = sim_specs_with_units("years");
         let project = x_project(sim_specs, &[model]);
         let project = Project::from(project);
-        let loops = detect_loops(&project).unwrap();
-
         let main_ident: Ident<Canonical> = Ident::new("main");
-        assert!(loops.contains_key(&main_ident), "Should have main model");
-        let model_loops = &loops[&main_ident];
+        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
 
         // Should find the balancing loop
         assert!(!model_loops.is_empty());
@@ -1245,12 +1221,8 @@ mod tests {
         let sim_specs = sim_specs_with_units("years");
         let project = x_project(sim_specs, &[main_model, smooth_model]);
         let project = Project::from(project);
-        let loops = detect_loops(&project).unwrap();
-
-        // Check that loops were detected in the main model
         let main_ident: Ident<Canonical> = Ident::new("main");
-        assert!(loops.contains_key(&main_ident), "Should have main model");
-        let _model_loops = &loops[&main_ident];
+        let _model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
 
         // We expect to be able to handle models with modules without crashing
         // The presence of modules shouldn't break loop detection
@@ -1300,10 +1272,8 @@ mod tests {
         let project = Project::from(project);
 
         // Test should complete without crashing
-        let loops = detect_loops(&project).unwrap();
-
         let main_ident: Ident<Canonical> = Ident::new("main");
-        assert!(loops.contains_key(&main_ident), "Should have main model");
+        let _model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
 
         // The enhanced detection might find cross-module loops
         // The exact count isn't critical; what matters is proper handling

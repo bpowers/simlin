@@ -73,11 +73,7 @@ fn load_ltm_results(file_path: &str) -> StdResult<LtmResults, Box<dyn Error>> {
     Ok(LtmResults { loop_scores })
 }
 
-fn ensure_ltm_results(
-    expected: &LtmResults,
-    actual_results: &Results,
-    loops: &HashMap<Ident<Canonical>, Vec<ltm::Loop>>,
-) {
+fn ensure_ltm_results(expected: &LtmResults, actual_results: &Results, loops: &[ltm::Loop]) {
     let mut errors = Vec::new();
 
     for (loop_id, expected_scores) in &expected.loop_scores {
@@ -151,10 +147,7 @@ fn ensure_ltm_results(
         eprintln!("========================================\n");
 
         for (loop_id, expected_series, actual_series, point_errors) in &errors {
-            let loop_info = loops
-                .values()
-                .flat_map(|v| v.iter())
-                .find(|l| l.id == *loop_id);
+            let loop_info = loops.iter().find(|l| l.id == *loop_id);
 
             eprintln!("Loop: {}", loop_id);
             if let Some(loop_obj) = loop_info {
@@ -209,7 +202,8 @@ fn simulate_ltm_path(model_path: &str) {
     let project = Project::from(datamodel_project);
     let ltm_project = project.with_ltm().unwrap();
 
-    let loops = ltm::detect_loops(&ltm_project).unwrap();
+    let main_ident: Ident<Canonical> = Ident::new("main");
+    let loops = ltm::detect_loops(&ltm_project.models[&main_ident], &ltm_project).unwrap();
     let ltm_project = Rc::new(ltm_project);
 
     let sim = Simulation::new(&ltm_project, "main").unwrap();
@@ -296,14 +290,10 @@ fn discovery_cross_validates_with_exhaustive() {
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
     let project = Project::from(datamodel_project);
-    let exhaustive_loops = ltm::detect_loops(&project).unwrap();
+    let main_ident: Ident<Canonical> = Ident::new("main");
+    let exhaustive_loops = ltm::detect_loops(&project.models[&main_ident], &project).unwrap();
 
-    // Count total loops across all models
-    let exhaustive_loop_count: usize = exhaustive_loops
-        .values()
-        .filter(|loops| !loops.is_empty())
-        .map(|loops| loops.len())
-        .sum();
+    let exhaustive_loop_count = exhaustive_loops.len();
 
     // Discovery mode
     let found = discover_loops_from_path(model_path);
@@ -319,32 +309,30 @@ fn discovery_cross_validates_with_exhaustive() {
 
     // Verify that the discovered loops match the exhaustive loops by checking
     // that every exhaustive loop's node set appears in the discovery results
-    for model_loops in exhaustive_loops.values() {
-        for exhaustive_loop in model_loops {
-            let mut exhaustive_nodes: Vec<String> = exhaustive_loop
+    for exhaustive_loop in &exhaustive_loops {
+        let mut exhaustive_nodes: Vec<String> = exhaustive_loop
+            .links
+            .iter()
+            .map(|l| l.from.as_str().to_string())
+            .collect();
+        exhaustive_nodes.sort();
+
+        let found_match = found.iter().any(|f| {
+            let mut found_nodes: Vec<String> = f
+                .loop_info
                 .links
                 .iter()
                 .map(|l| l.from.as_str().to_string())
                 .collect();
-            exhaustive_nodes.sort();
+            found_nodes.sort();
+            found_nodes == exhaustive_nodes
+        });
 
-            let found_match = found.iter().any(|f| {
-                let mut found_nodes: Vec<String> = f
-                    .loop_info
-                    .links
-                    .iter()
-                    .map(|l| l.from.as_str().to_string())
-                    .collect();
-                found_nodes.sort();
-                found_nodes == exhaustive_nodes
-            });
-
-            assert!(
-                found_match,
-                "Exhaustive loop {} not found in discovery results",
-                exhaustive_loop.format_path()
-            );
-        }
+        assert!(
+            found_match,
+            "Exhaustive loop {} not found in discovery results",
+            exhaustive_loop.format_path()
+        );
     }
 }
 
@@ -357,8 +345,9 @@ fn discovery_arms_race_3party() {
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
     let project = Project::from(datamodel_project);
-    let exhaustive_loops = ltm::detect_loops(&project).unwrap();
-    let exhaustive_count: usize = exhaustive_loops.values().map(|v| v.len()).sum();
+    let main_ident: Ident<Canonical> = Ident::new("main");
+    let exhaustive_loops = ltm::detect_loops(&project.models[&main_ident], &project).unwrap();
+    let exhaustive_count = exhaustive_loops.len();
 
     // The three-party arms race has 7 unique feedback loops: 3 self-adjustment
     // (balancing), 3 pairwise (reinforcing), and 1 three-way (reinforcing).
@@ -395,16 +384,14 @@ fn discovery_arms_race_3party() {
             .collect();
         found_nodes.sort();
 
-        let in_exhaustive = exhaustive_loops.values().any(|loops| {
-            loops.iter().any(|exh| {
-                let mut exh_nodes: Vec<String> = exh
-                    .links
-                    .iter()
-                    .map(|l| l.from.as_str().to_string())
-                    .collect();
-                exh_nodes.sort();
-                exh_nodes == found_nodes
-            })
+        let in_exhaustive = exhaustive_loops.iter().any(|exh| {
+            let mut exh_nodes: Vec<String> = exh
+                .links
+                .iter()
+                .map(|l| l.from.as_str().to_string())
+                .collect();
+            exh_nodes.sort();
+            exh_nodes == found_nodes
         });
         assert!(
             in_exhaustive,
@@ -423,7 +410,8 @@ fn discovery_decoupled_stocks() {
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
     let project = Project::from(datamodel_project);
-    let exhaustive_loops = ltm::detect_loops(&project).unwrap();
+    let main_ident: Ident<Canonical> = Ident::new("main");
+    let exhaustive_loops = ltm::detect_loops(&project.models[&main_ident], &project).unwrap();
     // Discovery mode -- the decoupled stocks model has time-varying loop
     // activity where different loops activate at different timesteps,
     // demonstrating why per-timestep discovery is necessary.
@@ -449,16 +437,14 @@ fn discovery_decoupled_stocks() {
             .collect();
         found_nodes.sort();
 
-        let in_exhaustive = exhaustive_loops.values().any(|loops| {
-            loops.iter().any(|exh| {
-                let mut exh_nodes: Vec<String> = exh
-                    .links
-                    .iter()
-                    .map(|l| l.from.as_str().to_string())
-                    .collect();
-                exh_nodes.sort();
-                exh_nodes == found_nodes
-            })
+        let in_exhaustive = exhaustive_loops.iter().any(|exh| {
+            let mut exh_nodes: Vec<String> = exh
+                .links
+                .iter()
+                .map(|l| l.from.as_str().to_string())
+                .collect();
+            exh_nodes.sort();
+            exh_nodes == found_nodes
         });
         assert!(
             in_exhaustive,

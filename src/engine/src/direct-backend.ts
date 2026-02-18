@@ -280,25 +280,6 @@ export class DirectBackend implements EngineBackend {
     return simlin_project_render_svg(this.getProjectPtr(handle), modelName);
   }
 
-  projectGetLoops(handle: ProjectHandle): Loop[] {
-    const loopsPtr = simlin_analyze_get_loops(this.getProjectPtr(handle));
-    if (loopsPtr === 0) {
-      return [];
-    }
-    let loops: Loop[] = [];
-    try {
-      const rawLoops = readLoops(loopsPtr);
-      loops = rawLoops.map((loop) => ({
-        id: loop.id,
-        variables: loop.variables,
-        polarity: loop.polarity as unknown as LoopPolarity,
-      }));
-    } finally {
-      simlin_free_loops(loopsPtr);
-    }
-    return loops;
-  }
-
   projectGetErrors(handle: ProjectHandle): ErrorDetail[] {
     const errPtr = simlin_project_get_errors(this.getProjectPtr(handle));
     if (errPtr === 0) {
@@ -354,6 +335,25 @@ export class DirectBackend implements EngineBackend {
   modelGetLinks(handle: ModelHandle): Link[] {
     const linksPtr = simlin_model_get_links_fn(this.getModelPtr(handle));
     return convertLinks(linksPtr);
+  }
+
+  modelGetLoops(handle: ModelHandle): Loop[] {
+    const loopsPtr = simlin_analyze_get_loops(this.getModelPtr(handle));
+    if (loopsPtr === 0) {
+      return [];
+    }
+    let loops: Loop[] = [];
+    try {
+      const rawLoops = readLoops(loopsPtr);
+      loops = rawLoops.map((loop) => ({
+        id: loop.id,
+        variables: loop.variables,
+        polarity: loop.polarity as unknown as LoopPolarity,
+      }));
+    } finally {
+      simlin_free_loops(loopsPtr);
+    }
+    return loops;
   }
 
   modelGetLatexEquation(handle: ModelHandle, ident: string): string | null {
