@@ -62,6 +62,7 @@ Equation text flows through these stages in order:
 - **`src/ltm.rs`** - Loops That Matter: feedback loop detection and dominance analysis
 - **`src/ltm_augment.rs`** - Synthetic variable generation for loop instrumentation
 - **`src/diagram/`** - Diagram/sketch rendering: `elements.rs`, `connector.rs`, `flow.rs`, `render.rs`, `common.rs`, `constants.rs`, `label.rs`, `arrowhead.rs`
+- **`src/layout/`** - Automatic diagram layout generation: `mod.rs` (pipeline orchestration, public API), `sfdp.rs` (force-directed placement), `annealing.rs` (crossing reduction), `chain.rs` (stock-flow chain positioning), `config.rs` (layout parameters), `connector.rs` (link routing), `graph.rs` (graph data structures), `metadata.rs` (feedback loops, dominant periods), `placement.rs` (label optimization, normalization), `text.rs` (label sizing), `uid.rs` (UID management)
 
 ## Generated files (do not edit by hand)
 
@@ -78,6 +79,7 @@ Equation text flows through these stages in order:
 - **`src/test_open_vensim.rs`** - Vensim compatibility tests (requires `xmutil` feature)
 - **`tests/simulate.rs`** - End-to-end simulation integration tests
 - **`tests/simulate_ltm.rs`** - LTM feature tests
+- **`tests/layout.rs`** - Layout generation integration tests (chains, connectors, LTM metadata, dominant periods)
 - **`tests/json_roundtrip.rs`** - JSON serialization roundtrip
 - **`tests/roundtrip.rs`** - XMILE/MDL roundtrip tests
 - **`tests/vm_alloc.rs`** - VM memory allocation tests

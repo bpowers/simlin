@@ -10,6 +10,10 @@ use rand::rngs::StdRng;
 
 use super::graph::{ConstrainedGraph, Layout, NodeId, Position};
 
+/// Callback invoked after each SFDP iteration. Returns `Some(layout)` to
+/// replace the current layout (e.g. after annealing), or `None` to continue.
+type IterationCallback<'a, N> = &'a mut dyn FnMut(usize, &Layout<N>) -> Option<Layout<N>>;
+
 /// Configuration for the SFDP (Scalable Force-Directed Placement) algorithm.
 #[derive(Clone, Debug)]
 pub struct SfdpConfig {
@@ -316,6 +320,108 @@ impl<'a, N: NodeId> Sfdp<'a, N> {
         norm
     }
 
+    /// Force-directed loop with iteration callback for interleaved annealing.
+    fn force_directed_with_rigid_cb(
+        &self,
+        layout: &mut Layout<N>,
+        k: f64,
+        callback: IterationCallback<'_, N>,
+    ) {
+        let config = self.config;
+        let kp = k.powf(1.0 - config.p);
+        let crk = config.c.powf((2.0 - config.p) / 3.0) / k;
+
+        let mut step = config.initial_step_size;
+        let mut prev_norm = f64::MAX;
+
+        let nodes: Vec<N> = self.graph.nodes().cloned().collect();
+
+        let group_offsets = self.compute_rigid_group_offsets(layout);
+
+        for iteration in 0..config.max_iterations {
+            let mut forces: BTreeMap<N, Position> = BTreeMap::new();
+
+            for i in 0..nodes.len() {
+                let n1 = &nodes[i];
+                let pos1 = match layout.get(n1) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                for n2 in &nodes[(i + 1)..] {
+                    let pos2 = match layout.get(n2) {
+                        Some(p) => *p,
+                        None => continue,
+                    };
+
+                    let dx = pos1.x - pos2.x;
+                    let dy = pos1.y - pos2.y;
+                    let dist = (dx * dx + dy * dy).sqrt().max(1e-9);
+
+                    let f = kp / dist.powf(1.0 - config.p);
+                    let fx = f * dx / dist;
+                    let fy = f * dy / dist;
+
+                    let f1 = forces.entry(n1.clone()).or_default();
+                    f1.x += fx;
+                    f1.y += fy;
+
+                    let f2 = forces.entry(n2.clone()).or_default();
+                    f2.x -= fx;
+                    f2.y -= fy;
+                }
+            }
+
+            for edge in self.graph.edges() {
+                let pos1 = match layout.get(&edge.from) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let pos2 = match layout.get(&edge.to) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+
+                let dx = pos1.x - pos2.x;
+                let dy = pos1.y - pos2.y;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist < 1e-9 {
+                    continue;
+                }
+
+                let f = crk * dist * edge.weight;
+                let fx = f * dx / dist;
+                let fy = f * dy / dist;
+
+                let f1 = forces.entry(edge.from.clone()).or_default();
+                f1.x -= fx;
+                f1.y -= fy;
+
+                let f2 = forces.entry(edge.to.clone()).or_default();
+                f2.x += fx;
+                f2.y += fy;
+            }
+
+            let norm =
+                self.apply_forces_with_rigid_constraints(layout, &forces, step, &group_offsets);
+
+            if norm >= prev_norm {
+                step *= config.cooling_factor;
+            } else if norm <= 0.95 * prev_norm {
+                step *= 0.99 / config.cooling_factor;
+            }
+            prev_norm = norm;
+
+            // Invoke callback; if it returns an updated layout, use it
+            if let Some(new_layout) = callback(iteration, layout) {
+                *layout = new_layout;
+            }
+
+            if step < config.convergence_threshold / k {
+                break;
+            }
+        }
+    }
+
     /// Post-processing pass that rearranges degree-1 (leaf) nodes evenly
     /// around their single neighbor at distance `k`.
     fn beautify_leaves(&self, layout: &mut Layout<N>, k: f64) {
@@ -401,6 +507,19 @@ pub fn compute_layout_from_initial<N: NodeId>(
     initial: &Layout<N>,
     seed: u64,
 ) -> Layout<N> {
+    compute_layout_from_initial_with_callback(graph, config, initial, seed, &mut |_, _| None)
+}
+
+/// Like `compute_layout_from_initial` but calls `callback` after each SFDP
+/// iteration. If the callback returns `Some(layout)`, SFDP continues from
+/// that (e.g. annealed) layout. This enables interleaved annealing.
+pub fn compute_layout_from_initial_with_callback<N: NodeId>(
+    graph: &ConstrainedGraph<N>,
+    config: &SfdpConfig,
+    initial: &Layout<N>,
+    seed: u64,
+    callback: IterationCallback<'_, N>,
+) -> Layout<N> {
     if graph.node_count() == 0 {
         return BTreeMap::new();
     }
@@ -420,13 +539,24 @@ pub fn compute_layout_from_initial<N: NodeId>(
         config.k
     };
 
-    sfdp.force_directed_with_rigid(&mut layout, k);
+    sfdp.force_directed_with_rigid_cb(&mut layout, k, callback);
 
     if config.beautify_leaves {
         sfdp.beautify_leaves(&mut layout, k);
     }
 
     layout
+}
+
+/// Check if annealing should trigger at the current SFDP iteration.
+pub fn should_trigger_annealing(
+    iter: usize,
+    interval: usize,
+    last_annealing_iter: usize,
+    round: usize,
+    max_rounds: usize,
+) -> bool {
+    round < max_rounds && iter > 0 && (iter - last_annealing_iter) >= interval
 }
 
 #[cfg(test)]
@@ -599,6 +729,53 @@ mod tests {
             "pinned leaf y should not change: expected {}, got {}",
             pinned_pos.y,
             pos.y
+        );
+    }
+
+    #[test]
+    fn test_should_trigger_annealing_logic() {
+        // Not enough iterations elapsed
+        assert!(!should_trigger_annealing(50, 100, 0, 0, 3));
+        // Enough iterations elapsed
+        assert!(should_trigger_annealing(100, 100, 0, 0, 3));
+        // Already at max rounds
+        assert!(!should_trigger_annealing(200, 100, 0, 3, 3));
+        // Iteration 0 never triggers
+        assert!(!should_trigger_annealing(0, 1, 0, 0, 3));
+        // Gap from last is less than interval
+        assert!(!should_trigger_annealing(150, 100, 100, 1, 3));
+        // Gap from last is exactly interval
+        assert!(should_trigger_annealing(200, 100, 100, 1, 3));
+    }
+
+    #[test]
+    fn test_sfdp_calls_callback() {
+        let cg = triangle_graph();
+        let config = SfdpConfig {
+            max_iterations: 10,
+            ..SfdpConfig::default()
+        };
+        let initial = BTreeMap::new();
+        let mut call_count = 0usize;
+
+        compute_layout_from_initial_with_callback(
+            &cg,
+            &config,
+            &initial,
+            42,
+            &mut |_iter, _layout| {
+                call_count += 1;
+                None
+            },
+        );
+
+        assert!(
+            call_count > 0,
+            "callback should have been invoked at least once"
+        );
+        assert!(
+            call_count <= 10,
+            "callback should not exceed max_iterations"
         );
     }
 }
