@@ -2087,9 +2087,12 @@ pub fn compute_metadata(
         // Filter to only include deps that are actual rendered model
         // variables. AST extraction can yield module-internal identifiers
         // (e.g. "m·out") that don't correspond to any rendered element.
+        // Also exclude self-references: the string heuristic skips them,
+        // but AST extraction doesn't (stocks reference themselves through
+        // init expressions, SMOOTH/DELAY patterns, etc.).
         let deps: Vec<String> = deps
             .into_iter()
-            .filter(|d| all_idents.contains(d))
+            .filter(|d| d != &var_ident && all_idents.contains(d))
             .collect();
 
         if deps.is_empty() && !matches!(var, datamodel::Variable::Stock(_)) {

@@ -548,3 +548,57 @@ fn test_compute_layout_metadata_dep_graph() {
         "SIR should have a non-empty reverse dependency graph"
     );
 }
+
+/// Regression test: AST dependency extraction must not produce self-edges.
+/// A stock whose init expression references itself (e.g. `population * 0.5`)
+/// would create a self-loop in the dep graph without the self-reference filter.
+#[test]
+fn test_dep_graph_excludes_self_references() {
+    use simlin_engine::layout::compute_layout_metadata;
+    use std::io::BufReader;
+
+    let xmile = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><vendor>test</vendor><product version="1.0">test</product></header>
+  <sim_specs><start>0</start><stop>10</stop><dt>1</dt></sim_specs>
+  <model>
+    <variables>
+      <stock name="population">
+        <eqn>population * 0.5</eqn>
+        <inflow>births</inflow>
+      </stock>
+      <flow name="births">
+        <eqn>population * growth_rate</eqn>
+      </flow>
+      <aux name="growth_rate">
+        <eqn>0.1</eqn>
+      </aux>
+    </variables>
+  </model>
+</xmile>"#;
+
+    let mut reader = BufReader::new(xmile.as_bytes());
+    let project = simlin_engine::open_xmile(&mut reader).unwrap();
+    let metadata = compute_layout_metadata(&project, MAIN_MODEL).unwrap();
+
+    for (var, deps) in &metadata.dep_graph {
+        assert!(
+            !deps.contains(var),
+            "dep_graph has self-edge: '{}' -> '{}'",
+            var,
+            var,
+        );
+    }
+
+    // The stock's init references itself, but the dep graph should still
+    // contain the stock with its flow dependencies (from structural edges).
+    assert!(
+        metadata.dep_graph.contains_key("population"),
+        "population should be in dep_graph"
+    );
+    let pop_deps = &metadata.dep_graph["population"];
+    assert!(
+        pop_deps.contains("births"),
+        "population should depend on its inflow 'births'"
+    );
+}
