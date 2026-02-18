@@ -135,6 +135,23 @@ where
     N: NodeId,
     F: Fn(&Layout<N>) -> Vec<LineSegment>,
 {
+    run_annealing_with_filter(initial_layout, build_segments, config, seed, |_| true)
+}
+
+/// Run simulated annealing while only perturbing nodes that satisfy
+/// `can_perturb`.
+pub fn run_annealing_with_filter<N, F, P>(
+    initial_layout: &Layout<N>,
+    build_segments: F,
+    config: &LayoutConfig,
+    seed: u64,
+    can_perturb: P,
+) -> AnnealingResult<N>
+where
+    N: NodeId,
+    F: Fn(&Layout<N>) -> Vec<LineSegment>,
+    P: Fn(&N) -> bool,
+{
     let mut rng = StdRng::seed_from_u64(seed);
 
     let initial_crossings = count_crossings(&build_segments(initial_layout));
@@ -186,7 +203,8 @@ where
             break;
         }
 
-        let perturbed = perturb_layout(&test_layout, &baseline, temperature, &mut rng);
+        let perturbed =
+            perturb_layout(&test_layout, &baseline, temperature, &mut rng, &can_perturb);
         let perturbed_crossings = count_crossings(&build_segments(&perturbed));
 
         let delta = perturbed_crossings as f64 - current_crossings as f64;
@@ -276,11 +294,16 @@ fn perturb_layout<N: NodeId>(
     baseline: &BTreeMap<N, Position>,
     temperature: f64,
     rng: &mut StdRng,
+    can_perturb: &impl Fn(&N) -> bool,
 ) -> Layout<N> {
     let mut result = layout.clone();
 
-    // Collect candidate nodes (all nodes present in the layout)
-    let mut candidates: Vec<N> = layout.keys().cloned().collect();
+    // Collect candidate nodes that are allowed to move.
+    let mut candidates: Vec<N> = layout
+        .keys()
+        .filter(|node| can_perturb(node))
+        .cloned()
+        .collect();
     if candidates.is_empty() {
         return result;
     }
@@ -533,5 +556,33 @@ mod tests {
         let (dx2, dy2) = generate_step(&mut rng2, 10.0);
         assert!((dx1 - dx2).abs() < f64::EPSILON);
         assert!((dy1 - dy2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_annealing_filter_prevents_motion() {
+        let mut layout: Layout<String> = BTreeMap::new();
+        layout.insert("a".to_string(), Position::new(0.0, 0.0));
+        layout.insert("b".to_string(), Position::new(100.0, 100.0));
+
+        let build_segments = |lay: &Layout<String>| -> Vec<LineSegment> {
+            vec![LineSegment {
+                start: lay["a"],
+                end: lay["b"],
+                from_node: "a".to_string(),
+                to_node: "b".to_string(),
+            }]
+        };
+
+        let config = LayoutConfig {
+            annealing_iterations: 25,
+            annealing_temperature: 10.0,
+            annealing_cooling_rate: 0.99,
+            annealing_reheat_period: 5,
+            ..LayoutConfig::default()
+        };
+
+        let result = run_annealing_with_filter(&layout, build_segments, &config, 42, |_node| false);
+        assert_eq!(result.layout, layout);
+        assert!(!result.improved);
     }
 }
