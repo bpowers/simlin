@@ -2026,29 +2026,28 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         }
       }
 
+      const mutableVars = new Map(model.variables);
       for (const [ident, errs] of varErrors) {
-        const model = getOrThrow(project.models, modelName);
-        const variable = model.variables.get(ident);
+        const variable = mutableVars.get(ident);
         if (variable) {
-          const updatedVar = { ...variable, errors: errs };
-          const updatedVars = mapSet(model.variables, ident, updatedVar);
-          const updatedModel = { ...model, variables: updatedVars };
-          project = { ...project, models: mapSet(project.models, modelName, updatedModel) };
+          mutableVars.set(ident, { ...variable, errors: errs });
         }
       }
+      const updatedModel = { ...model, variables: mutableVars as ReadonlyMap<string, Variable> };
+      project = { ...project, models: mapSet(project.models, modelName, updatedModel) };
     }
 
     if (unitErrors.size > 0) {
+      const model = getOrThrow(project.models, modelName);
+      const mutableVars = new Map(model.variables);
       for (const [ident, errs] of unitErrors) {
-        const model = getOrThrow(project.models, modelName);
-        const variable = model.variables.get(ident);
+        const variable = mutableVars.get(ident);
         if (variable) {
-          const updatedVar = { ...variable, unitErrors: errs };
-          const updatedVars = mapSet(model.variables, ident, updatedVar);
-          const updatedModel = { ...model, variables: updatedVars };
-          project = { ...project, models: mapSet(project.models, modelName, updatedModel) };
+          mutableVars.set(ident, { ...variable, unitErrors: errs });
         }
       }
+      const updatedModel = { ...model, variables: mutableVars as ReadonlyMap<string, Variable> };
+      project = { ...project, models: mapSet(project.models, modelName, updatedModel) };
     }
 
     return project;

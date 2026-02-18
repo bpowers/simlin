@@ -499,7 +499,7 @@ export function routeUnselectedFlows(
   preComputedOffsets: Map<UID, number>,
   delta: Point2D,
 ): ViewElement[] {
-  let updatedFlows: ViewElement[] = [];
+  const updatedFlows: ViewElement[] = [];
 
   // Build maps FIRST so we can reuse them (iterators can only be consumed once)
   const elementsMap = new Map<UID, ViewElement>();
@@ -550,15 +550,12 @@ export function routeUnselectedFlows(
       x: p.x - delta.x,
       y: p.y - delta.y,
     }));
-    updatedFlows = [
-      ...updatedFlows,
-      {
-        ...element,
-        x: element.x - delta.x,
-        y: element.y - delta.y,
-        points: newPoints,
-      },
-    ];
+    updatedFlows.push({
+      ...element,
+      x: element.x - delta.x,
+      y: element.y - delta.y,
+      points: newPoints,
+    });
   }
 
   // Update flows grouped by source endpoint using pre-computed offsets
@@ -572,7 +569,7 @@ export function routeUnselectedFlows(
       for (const flow of flows) {
         const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
         const updatedFlow = computeFlowRoute(flow, originalStock, newStockCx, newStockCy, offset);
-        updatedFlows = [...updatedFlows, updatedFlow];
+        updatedFlows.push(updatedFlow);
       }
     } else if (movedEndpoint && movedEndpoint.type === 'cloud') {
       // For clouds, use UpdateCloudAndFlow for routing but honor full delta if cloud is selected
@@ -626,7 +623,7 @@ export function routeUnselectedFlows(
               }
             }
           }
-          updatedFlows = [...updatedFlows, updatedFlow];
+          updatedFlows.push(updatedFlow);
         }
       }
     }
@@ -643,7 +640,7 @@ export function routeUnselectedFlows(
       for (const flow of flows) {
         const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
         const updatedFlow = computeFlowRoute(flow, originalStock, newStockCx, newStockCy, offset);
-        updatedFlows = [...updatedFlows, updatedFlow];
+        updatedFlows.push(updatedFlow);
       }
     } else if (movedEndpoint && movedEndpoint.type === 'cloud') {
       // For clouds, use UpdateCloudAndFlow for routing but honor full delta if cloud is selected
@@ -697,7 +694,7 @@ export function routeUnselectedFlows(
               }
             }
           }
-          updatedFlows = [...updatedFlows, updatedFlow];
+          updatedFlows.push(updatedFlow);
         }
       }
     }

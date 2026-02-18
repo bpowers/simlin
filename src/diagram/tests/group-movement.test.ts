@@ -1439,4 +1439,104 @@ describe('Link arc adjustment during group movement', () => {
       expect(Math.abs(newLink.arc - -45)).toBeLessThan(1);
     });
   });
+
+  describe('multiple flow accumulation', () => {
+    it('should return all routed flows when multiple flows attach to a moved stock', () => {
+      // Stock with 3 outflows to 3 separate clouds: moving the stock should
+      // re-route all flows and return all of them (regression: quadratic spread
+      // in routeUnselectedFlows could silently lose elements).
+      const stock = makeStock(1, 200, 200, [], [10, 20, 30]);
+      const cloud1 = makeCloud(2, 10, 400, 200);
+      const cloud2 = makeCloud(3, 20, 200, 400);
+      const cloud3 = makeCloud(4, 30, 200, 50);
+      const flow1 = makeFlow(10, 300, 200, [
+        { x: 200, y: 200, attachedToUid: 1 },
+        { x: 400, y: 200, attachedToUid: 2 },
+      ]);
+      const flow2 = makeFlow(20, 200, 300, [
+        { x: 200, y: 200, attachedToUid: 1 },
+        { x: 200, y: 400, attachedToUid: 3 },
+      ]);
+      const flow3 = makeFlow(30, 200, 125, [
+        { x: 200, y: 200, attachedToUid: 1 },
+        { x: 200, y: 50, attachedToUid: 4 },
+      ]);
+
+      const elements = new Map<UID, ViewElement>([
+        [1, stock],
+        [2, cloud1],
+        [3, cloud2],
+        [4, cloud3],
+        [10, flow1],
+        [20, flow2],
+        [30, flow3],
+      ]);
+
+      // Select only the stock
+      const selection = new Set<UID>([1]);
+      const delta = { x: -50, y: -30 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // All 3 flows should be present in the result with updated routing
+      expect(result.has(10)).toBe(true);
+      expect(result.has(20)).toBe(true);
+      expect(result.has(30)).toBe(true);
+
+      // Verify stock moved
+      const movedStock = result.get(1) as StockViewElement;
+      expect(movedStock.x).toBe(250);
+      expect(movedStock.y).toBe(230);
+
+      // Each flow's source point should be attached to the stock
+      for (const flowUid of [10, 20, 30]) {
+        const flow = result.get(flowUid) as FlowViewElement;
+        expect(flow).toBeDefined();
+        expect(flow.points.length).toBeGreaterThanOrEqual(2);
+        const sourcePoint = flow.points[0];
+        expect(sourcePoint.attachedToUid).toBe(1);
+      }
+    });
+
+    it('should return all routed flows when both-ends-selected flows are accumulated', () => {
+      // Multiple flows where both source and sink are in the selection
+      const stock1 = makeStock(1, 100, 100, [], [10, 20]);
+      const stock2 = makeStock(2, 300, 100, [10], []);
+      const stock3 = makeStock(3, 100, 300, [20], []);
+      const flow1 = makeFlow(10, 200, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 300, y: 100, attachedToUid: 2 },
+      ]);
+      const flow2 = makeFlow(20, 100, 200, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 100, y: 300, attachedToUid: 3 },
+      ]);
+
+      const elements = new Map<UID, ViewElement>([
+        [1, stock1],
+        [2, stock2],
+        [3, stock3],
+        [10, flow1],
+        [20, flow2],
+      ]);
+
+      // Select all stocks and flows
+      const selection = new Set<UID>([1, 2, 3, 10, 20]);
+      const delta = { x: -10, y: -10 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Both flows should be in the result
+      expect(result.has(10)).toBe(true);
+      expect(result.has(20)).toBe(true);
+
+      // Verify uniform translation for both-ends-selected flows
+      const movedFlow1 = result.get(10) as FlowViewElement;
+      const movedFlow2 = result.get(20) as FlowViewElement;
+      expect(movedFlow1.x).toBe(210);
+      expect(movedFlow1.y).toBe(110);
+      expect(movedFlow2.x).toBe(110);
+      expect(movedFlow2.y).toBe(210);
+    });
+  });
 });
