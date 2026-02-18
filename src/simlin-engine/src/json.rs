@@ -707,14 +707,12 @@ impl From<Stock> for datamodel::Stock {
 impl From<Flow> for datamodel::Flow {
     fn from(flow: Flow) -> Self {
         let compat = datamodel::Compat {
-            active_initial: flow
-                .compat
-                .or_else(|| {
-                    flow.arrayed_equation
-                        .as_ref()
-                        .and_then(|a| a.compat.clone())
-                })
-                .and_then(|c| c.active_initial),
+            active_initial: flow.compat.and_then(|c| c.active_initial).or_else(|| {
+                flow.arrayed_equation
+                    .as_ref()
+                    .and_then(|a| a.compat.as_ref())
+                    .and_then(|c| c.active_initial.clone())
+            }),
         };
         let equation = match flow.arrayed_equation {
             Some(arrayed) => {
@@ -770,10 +768,12 @@ impl From<Flow> for datamodel::Flow {
 impl From<Auxiliary> for datamodel::Aux {
     fn from(aux: Auxiliary) -> Self {
         let compat = datamodel::Compat {
-            active_initial: aux
-                .compat
-                .or_else(|| aux.arrayed_equation.as_ref().and_then(|a| a.compat.clone()))
-                .and_then(|c| c.active_initial),
+            active_initial: aux.compat.and_then(|c| c.active_initial).or_else(|| {
+                aux.arrayed_equation
+                    .as_ref()
+                    .and_then(|a| a.compat.as_ref())
+                    .and_then(|c| c.active_initial.clone())
+            }),
         };
         let equation = match aux.arrayed_equation {
             Some(arrayed) => {
@@ -3099,5 +3099,91 @@ mod tests {
         for (orig, rt) in vars.iter().zip(roundtrip.iter()) {
             assert_eq!(orig, rt);
         }
+    }
+
+    #[test]
+    fn flow_empty_compat_falls_back_to_arrayed_equation_compat() {
+        let flow = Flow {
+            uid: 0,
+            name: "rate".to_string(),
+            equation: String::new(),
+            units: String::new(),
+            non_negative: false,
+            graphical_function: None,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: Some("base * 2".to_string()),
+                compat: Some(Compat {
+                    active_initial: Some("base * 3".to_string()),
+                }),
+                elements: None,
+            }),
+            compat: Some(Compat {
+                active_initial: None,
+            }),
+        };
+
+        let dm: datamodel::Flow = flow.into();
+        assert_eq!(dm.compat.active_initial.as_deref(), Some("base * 3"));
+    }
+
+    #[test]
+    fn aux_empty_compat_falls_back_to_arrayed_equation_compat() {
+        let aux = Auxiliary {
+            uid: 0,
+            name: "val".to_string(),
+            equation: String::new(),
+            units: String::new(),
+            graphical_function: None,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: Some("x + 1".to_string()),
+                compat: Some(Compat {
+                    active_initial: Some("x + 2".to_string()),
+                }),
+                elements: None,
+            }),
+            compat: Some(Compat {
+                active_initial: None,
+            }),
+        };
+
+        let dm: datamodel::Aux = aux.into();
+        assert_eq!(dm.compat.active_initial.as_deref(), Some("x + 2"));
+    }
+
+    #[test]
+    fn flow_top_level_compat_takes_precedence() {
+        let flow = Flow {
+            uid: 0,
+            name: "rate".to_string(),
+            equation: String::new(),
+            units: String::new(),
+            non_negative: false,
+            graphical_function: None,
+            documentation: String::new(),
+            can_be_module_input: false,
+            is_public: false,
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: Some("base * 2".to_string()),
+                compat: Some(Compat {
+                    active_initial: Some("stale".to_string()),
+                }),
+                elements: None,
+            }),
+            compat: Some(Compat {
+                active_initial: Some("correct".to_string()),
+            }),
+        };
+
+        let dm: datamodel::Flow = flow.into();
+        assert_eq!(dm.compat.active_initial.as_deref(), Some("correct"));
     }
 }
