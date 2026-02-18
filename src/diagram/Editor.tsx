@@ -86,8 +86,8 @@ function convertErrorDetails(
   varErrors: ReadonlyMap<string, readonly EquationError[]>;
   unitErrors: ReadonlyMap<string, readonly UnitError[]>;
 } {
-  let varErrors = new Map<string, readonly EquationError[]>();
-  let unitErrors = new Map<string, readonly UnitError[]>();
+  const varErrors = new Map<string, EquationError[]>();
+  const unitErrors = new Map<string, UnitError[]>();
 
   for (const err of errors) {
     if (err.modelName !== modelName) {
@@ -109,18 +109,24 @@ function convertErrorDetails(
         isConsistencyError: err.unitErrorKind === SimlinUnitErrorKind.Consistency,
         details: err.message ?? undefined,
       };
-      const existing = unitErrors.get(ident) ?? [];
-      unitErrors = new Map(unitErrors);
-      unitErrors.set(ident, [...existing, unitError]);
+      let existing = unitErrors.get(ident);
+      if (!existing) {
+        existing = [];
+        unitErrors.set(ident, existing);
+      }
+      existing.push(unitError);
     } else {
       const eqError: EquationError = {
         start: err.startOffset ?? 0,
         end: err.endOffset ?? 0,
         code: err.code as unknown as ErrorCode,
       };
-      const existing = varErrors.get(ident) ?? [];
-      varErrors = new Map(varErrors);
-      varErrors.set(ident, [...existing, eqError]);
+      let existing = varErrors.get(ident);
+      if (!existing) {
+        existing = [];
+        varErrors.set(ident, existing);
+      }
+      existing.push(eqError);
     }
   }
 
@@ -1972,7 +1978,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const { varErrors, unitErrors } = convertErrorDetails(errors, modelName);
 
     let simError: SimError | undefined;
-    let modelErrors: readonly ModelError[] = [];
+    const modelErrors: ModelError[] = [];
     for (const err of errors) {
       if (err.modelName && err.modelName !== modelName) {
         continue;
@@ -1983,13 +1989,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           details: err.message ?? undefined,
         };
       } else if (!err.variableName) {
-        modelErrors = [
-          ...modelErrors,
-          {
-            code: err.code as unknown as ErrorCode,
-            details: err.message ?? undefined,
-          },
-        ];
+        modelErrors.push({
+          code: err.code as unknown as ErrorCode,
+          details: err.message ?? undefined,
+        });
       }
     }
     const cachedErrors: CachedErrorDetails = { varErrors, unitErrors, simError, modelErrors };

@@ -165,7 +165,7 @@ export function computePreRoutedOffsets(
     // For flows where both endpoints are selected, we translate their points by delta
     // so their anchor position is correct relative to the stock's new position.
     // This ensures translated flows reserve their slots and don't overlap with routed flows.
-    let allFlows: FlowViewElement[] = [];
+    const allFlows: FlowViewElement[] = [];
     for (const el of allElements) {
       if (el.type !== 'flow') continue;
       const pts = el.points;
@@ -185,9 +185,9 @@ export function computePreRoutedOffsets(
           x: p.x - delta.x,
           y: p.y - delta.y,
         }));
-        allFlows = [...allFlows, { ...el, points: translatedPoints }];
+        allFlows.push({ ...el, points: translatedPoints });
       } else {
-        allFlows = [...allFlows, el];
+        allFlows.push(el);
       }
     }
 
