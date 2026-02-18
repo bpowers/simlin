@@ -173,24 +173,39 @@ pub fn calculate_dominant_periods(
             }
         }
 
-        // Sort so that set comparison is order-independent -- the greedy
+        // Sorted copy for order-independent set comparison -- the greedy
         // accumulation order can vary between timesteps when scores swap.
-        dominant_names.sort();
+        let mut sorted_names = dominant_names.clone();
+        sorted_names.sort();
 
         // Skip timesteps with no meaningful dominance (e.g. initial step
-        // where all loop scores are zero or non-finite).
+        // where all loop scores are zero or non-finite). Finalize the
+        // current period first so dominance can't bridge across a gap.
         if combined == 0.0 {
+            if let Some(last) = periods.last_mut()
+                && score_count > 0
+            {
+                last.combined_score = score_sum / score_count as f64;
+            }
+            score_sum = 0.0;
+            score_count = 0;
             continue;
         }
 
-        // Try to extend the current period or start a new one
-        if let Some(last) = periods.last_mut()
-            && last.dominant_loops == dominant_names
+        // Try to extend the current period if the dominant set matches
+        // and there was no zero-score gap (score_count > 0).
+        // Compare sorted sets but store score-ordered names.
+        if score_count > 0
+            && let Some(last) = periods.last_mut()
         {
-            last.end = time;
-            score_sum += combined;
-            score_count += 1;
-            continue;
+            let mut last_sorted = last.dominant_loops.clone();
+            last_sorted.sort();
+            if last_sorted == sorted_names {
+                last.end = time;
+                score_sum += combined;
+                score_count += 1;
+                continue;
+            }
         }
 
         // Finalize the average for the previous period
@@ -439,8 +454,63 @@ mod tests {
                 .map(|p| &p.dominant_loops)
                 .collect::<Vec<_>>(),
         );
-        // Both loops should appear in the dominant set (sorted)
-        assert_eq!(periods[0].dominant_loops, vec!["R1", "R2"]);
+        // Both loops should appear in the dominant set, ordered by score
+        // (R1 has the higher score at the first timestep)
+        let mut names = periods[0].dominant_loops.clone();
+        names.sort();
+        assert_eq!(names, vec!["R1", "R2"]);
+    }
+
+    #[test]
+    fn test_dominant_periods_split_across_zero_gap() {
+        // R1 dominates at steps 0, 1, then has zero score at step 2,
+        // then dominates again at steps 3, 4. This should produce two
+        // separate periods, not one continuous period bridging the gap.
+        let loops = vec![FeedbackLoop {
+            name: "R1".to_string(),
+            polarity: LoopPolarity::Reinforcing,
+            variables: vec!["a".to_string()],
+            importance_series: vec![0.8, 0.7, 0.0, 0.9, 0.6],
+            dominant_period: None,
+        }];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(
+            periods.len(),
+            2,
+            "zero-score gap should split into two periods, got {:?}",
+            periods.iter().map(|p| (p.start, p.end)).collect::<Vec<_>>(),
+        );
+        assert!((periods[0].start - 0.0).abs() < f64::EPSILON);
+        assert!((periods[0].end - 1.0).abs() < f64::EPSILON);
+        assert!((periods[1].start - 3.0).abs() < f64::EPSILON);
+        assert!((periods[1].end - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_dominant_periods_score_ordering_preserved() {
+        // Verify that dominant_loops preserves score-based ordering,
+        // not alphabetical.
+        let loops = vec![
+            FeedbackLoop {
+                name: "B1".to_string(),
+                polarity: LoopPolarity::Balancing,
+                variables: vec!["a".to_string()],
+                importance_series: vec![0.6],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "A1".to_string(),
+                polarity: LoopPolarity::Balancing,
+                variables: vec!["b".to_string()],
+                importance_series: vec![0.3],
+                dominant_period: None,
+            },
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(periods.len(), 1);
+        // B1 has the higher score so should come first despite being
+        // alphabetically after A1.
+        assert_eq!(periods[0].dominant_loops[0], "B1");
     }
 
     #[test]
