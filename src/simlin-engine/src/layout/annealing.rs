@@ -373,6 +373,7 @@ fn perturb_layout<N: NodeId>(
         // Coupled motion: move strongest neighbor by 50% displacement
         if let Some(neighbor) = strongest_neighbor(&node_id, adjacency)
             && !moved.contains(&neighbor)
+            && can_perturb(&neighbor)
         {
             let n_limit = displacement_limit(&neighbor);
             apply_displacement(
@@ -803,6 +804,70 @@ mod tests {
             (aux_pos.x - 250.0).abs() < f64::EPSILON,
             "aux node should move freely within 200 limit: got {}",
             aux_pos.x
+        );
+    }
+
+    #[test]
+    fn test_neighbor_filter_prevents_neighbor_motion() {
+        // "a" can be perturbed, "b" cannot. Even though "b" is the
+        // strongest neighbor of "a", it must not be displaced.
+        let mut layout: Layout<String> = BTreeMap::new();
+        layout.insert("a".to_string(), Position::new(0.0, 0.0));
+        layout.insert("b".to_string(), Position::new(100.0, 100.0));
+        layout.insert("c".to_string(), Position::new(200.0, 200.0));
+        // "c" crosses "a->b" so we have a crossing to keep the annealer engaged
+        layout.insert("d".to_string(), Position::new(200.0, 0.0));
+
+        let build_segments = |lay: &Layout<String>| -> Vec<LineSegment> {
+            vec![
+                LineSegment {
+                    start: lay["a"],
+                    end: lay["c"],
+                    from_node: "a".to_string(),
+                    to_node: "c".to_string(),
+                },
+                LineSegment {
+                    start: lay["b"],
+                    end: lay["d"],
+                    from_node: "b".to_string(),
+                    to_node: "d".to_string(),
+                },
+            ]
+        };
+
+        let mut adj: AdjacencyMap<String> = HashMap::new();
+        adj.insert("a".to_string(), vec![("b".to_string(), 10.0)]);
+        adj.insert("b".to_string(), vec![("a".to_string(), 10.0)]);
+
+        let config = LayoutConfig {
+            annealing_iterations: 100,
+            annealing_temperature: 20.0,
+            annealing_cooling_rate: 0.99,
+            annealing_reheat_period: 25,
+            ..LayoutConfig::default()
+        };
+
+        let b_initial = layout[&"b".to_string()];
+
+        let result = run_annealing_with_filter(
+            &layout,
+            build_segments,
+            &config,
+            42,
+            |node| node != "b",
+            |_| 200.0,
+            &adj,
+        );
+
+        let b_final = result.layout[&"b".to_string()];
+        assert!(
+            (b_final.x - b_initial.x).abs() < f64::EPSILON
+                && (b_final.y - b_initial.y).abs() < f64::EPSILON,
+            "filtered node 'b' must not move, but got ({}, {}) vs initial ({}, {})",
+            b_final.x,
+            b_final.y,
+            b_initial.x,
+            b_initial.y,
         );
     }
 }
