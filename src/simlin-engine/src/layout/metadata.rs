@@ -177,6 +177,12 @@ pub fn calculate_dominant_periods(
         // accumulation order can vary between timesteps when scores swap.
         dominant_names.sort();
 
+        // Skip timesteps with no meaningful dominance (e.g. initial step
+        // where all loop scores are zero or non-finite).
+        if combined == 0.0 {
+            continue;
+        }
+
         // Try to extend the current period or start a new one
         if let Some(last) = periods.last_mut()
             && last.dominant_loops == dominant_names

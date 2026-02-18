@@ -1961,7 +1961,7 @@ fn try_detect_ltm_loops(
                 .get_series(&var_ident)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|v| v.is_finite())
+                .map(|v| if v.is_finite() { v } else { 0.0 })
                 .collect();
 
             feedback_loops.push(metadata::FeedbackLoop {
