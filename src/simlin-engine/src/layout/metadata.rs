@@ -134,6 +134,9 @@ pub fn calculate_dominant_periods(
     }
 
     let mut periods: Vec<DominantPeriod> = Vec::new();
+    // Track score accumulation for averaging combined_score over a period.
+    let mut score_sum: f64 = 0.0;
+    let mut score_count: usize = 0;
 
     for step in 0..n_steps {
         let time = start_time + (step as f64) * dt;
@@ -175,15 +178,33 @@ pub fn calculate_dominant_periods(
             && last.dominant_loops == dominant_names
         {
             last.end = time;
+            score_sum += combined;
+            score_count += 1;
             continue;
         }
 
+        // Finalize the average for the previous period
+        if let Some(last) = periods.last_mut()
+            && score_count > 0
+        {
+            last.combined_score = score_sum / score_count as f64;
+        }
+
+        score_sum = combined;
+        score_count = 1;
         periods.push(DominantPeriod {
             start: time,
             end: time,
             dominant_loops: dominant_names,
             combined_score: combined,
         });
+    }
+
+    // Finalize the last period's average
+    if let Some(last) = periods.last_mut()
+        && score_count > 0
+    {
+        last.combined_score = score_sum / score_count as f64;
     }
 
     periods
@@ -306,6 +327,13 @@ mod tests {
         assert!((periods[0].start - 0.0).abs() < f64::EPSILON);
         assert!((periods[0].end - 2.0).abs() < f64::EPSILON);
         assert_eq!(periods[0].dominant_loops, vec!["R1"]);
+        // combined_score should be the average across all 3 timesteps
+        let expected_avg = (0.8 + 0.7 + 0.9) / 3.0;
+        assert!(
+            (periods[0].combined_score - expected_avg).abs() < 1e-10,
+            "combined_score should be average ({expected_avg}), got {}",
+            periods[0].combined_score,
+        );
     }
 
     #[test]
@@ -331,6 +359,43 @@ mod tests {
         assert_eq!(periods.len(), 2);
         assert_eq!(periods[0].dominant_loops, vec!["R1"]);
         assert_eq!(periods[1].dominant_loops, vec!["B1"]);
+    }
+
+    #[test]
+    fn test_dominant_periods_combined_score_averaged_across_switch() {
+        // R1 dominates steps 0-1 (scores 0.6, 0.8), B1 dominates steps 2-3 (scores 0.7, 0.9)
+        let loops = vec![
+            FeedbackLoop {
+                name: "R1".to_string(),
+                polarity: LoopPolarity::Reinforcing,
+                variables: vec!["a".to_string()],
+                importance_series: vec![0.6, 0.8, 0.1, 0.1],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "B1".to_string(),
+                polarity: LoopPolarity::Balancing,
+                variables: vec!["b".to_string()],
+                importance_series: vec![0.2, 0.1, 0.7, 0.9],
+                dominant_period: None,
+            },
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(periods.len(), 2);
+
+        let r1_avg = (0.6 + 0.8) / 2.0;
+        assert!(
+            (periods[0].combined_score - r1_avg).abs() < 1e-10,
+            "R1 period combined_score should be average ({r1_avg}), got {}",
+            periods[0].combined_score,
+        );
+
+        let b1_avg = (0.7 + 0.9) / 2.0;
+        assert!(
+            (periods[1].combined_score - b1_avg).abs() < 1e-10,
+            "B1 period combined_score should be average ({b1_avg}), got {}",
+            periods[1].combined_score,
+        );
     }
 
     #[test]
