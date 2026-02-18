@@ -383,11 +383,18 @@ fn perturb_layout<N: NodeId>(
                 dy * 0.5,
                 n_limit,
             );
-            moved.insert(neighbor);
+            moved.insert(neighbor.clone());
+            if let Some(ni) = candidates.iter().position(|c| *c == neighbor) {
+                candidates.swap_remove(ni);
+            }
         }
 
-        // Remove from candidates to avoid perturbing same node twice
-        candidates.swap_remove(idx);
+        // Remove from candidates to avoid perturbing same node twice.
+        // Re-locate idx since swap_remove of the neighbor may have
+        // moved the primary node.
+        if let Some(pi) = candidates.iter().position(|c| *c == node_id) {
+            candidates.swap_remove(pi);
+        }
     }
 
     result

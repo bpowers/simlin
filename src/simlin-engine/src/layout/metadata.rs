@@ -173,6 +173,10 @@ pub fn calculate_dominant_periods(
             }
         }
 
+        // Sort so that set comparison is order-independent -- the greedy
+        // accumulation order can vary between timesteps when scores swap.
+        dominant_names.sort();
+
         // Try to extend the current period or start a new one
         if let Some(last) = periods.last_mut()
             && last.dominant_loops == dominant_names
@@ -396,6 +400,41 @@ mod tests {
             "B1 period combined_score should be average ({b1_avg}), got {}",
             periods[1].combined_score,
         );
+    }
+
+    #[test]
+    fn test_dominant_periods_same_set_different_order() {
+        // Both R1 and R2 are needed to reach 0.5 at every timestep, but
+        // their relative scores swap between steps. The dominant *set*
+        // is the same so this should produce a single period, not two.
+        let loops = vec![
+            FeedbackLoop {
+                name: "R1".to_string(),
+                polarity: LoopPolarity::Reinforcing,
+                variables: vec!["a".to_string()],
+                importance_series: vec![0.35, 0.20, 0.35],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "R2".to_string(),
+                polarity: LoopPolarity::Reinforcing,
+                variables: vec!["b".to_string()],
+                importance_series: vec![0.20, 0.35, 0.20],
+                dominant_period: None,
+            },
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(
+            periods.len(),
+            1,
+            "same dominant set with swapped order should produce one period, got {:?}",
+            periods
+                .iter()
+                .map(|p| &p.dominant_loops)
+                .collect::<Vec<_>>(),
+        );
+        // Both loops should appear in the dominant set (sorted)
+        assert_eq!(periods[0].dominant_loops, vec!["R1", "R2"]);
     }
 
     #[test]
