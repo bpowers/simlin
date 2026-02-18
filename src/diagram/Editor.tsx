@@ -639,7 +639,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     let sourceStockAttachingIdent: string | undefined;
     let uidToDelete: number | undefined;
     let updatedCloud: ViewElement | undefined;
-    let newClouds: ViewElement[] = [];
+    const newClouds: ViewElement[] = [];
 
     let nextUid = view.nextUid;
     const getUid = (uid: number) => {
@@ -726,7 +726,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
         [from, element] = UpdateCloudAndFlow(from, element as FlowViewElement, moveDelta);
         if (newCloud) {
-          newClouds = [...newClouds, from];
+          newClouds.push(from);
         } else if (updateCloud) {
           updatedCloud = from;
         }
@@ -796,7 +796,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
       [to, element] = UpdateCloudAndFlow(to, element as FlowViewElement, moveDelta);
       if (newCloud) {
-        newClouds = [...newClouds, to];
+        newClouds.push(to);
       } else if (updateCloud) {
         updatedCloud = to;
       }

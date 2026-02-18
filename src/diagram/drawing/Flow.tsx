@@ -993,7 +993,7 @@ export function normalizeFlowPoints(points: readonly Point[]): readonly Point[] 
   const firstPoint = first(points);
   const lastPoint = last(points);
 
-  let result: readonly Point[] = [firstPoint];
+  const result: Point[] = [firstPoint];
 
   for (let i = 1; i < points.length - 1; i++) {
     const prev = last(result);
@@ -1021,11 +1021,11 @@ export function normalizeFlowPoints(points: readonly Point[]): readonly Point[] 
       continue;
     }
 
-    result = [...result, curr];
+    result.push(curr);
   }
 
   // Always add the last point
-  result = [...result, lastPoint];
+  result.push(lastPoint);
 
   return result;
 }
