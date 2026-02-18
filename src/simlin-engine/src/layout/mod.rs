@@ -1088,8 +1088,6 @@ impl<'a> LayoutEngine<'a> {
                 annealing_round += 1;
 
                 if result.crossings >= prev_crossings {
-                    // No improvement -- keep current layout
-                    prev_crossings = result.crossings;
                     None
                 } else {
                     prev_crossings = result.crossings;
@@ -1834,7 +1832,7 @@ fn try_compile_model(
 fn extract_ast_deps(
     compiled_var: &crate::variable::Variable,
     compiled_model: &ModelStage1,
-) -> Vec<String> {
+) -> Option<Vec<String>> {
     let raw_deps = match compiled_var {
         crate::variable::Variable::Stock {
             init_ast: Some(ast),
@@ -1846,10 +1844,12 @@ fn extract_ast_deps(
         crate::variable::Variable::Module { inputs, .. } => {
             inputs.iter().map(|i| i.src.clone()).collect()
         }
-        _ => std::collections::HashSet::new(),
+        // No AST available (e.g. per-variable compilation error) --
+        // signal caller to fall back to string heuristics.
+        _ => return None,
     };
     let resolved = crate::model::resolve_non_private_dependencies(compiled_model, raw_deps);
-    resolved.into_iter().map(|id| id.to_string()).collect()
+    Some(resolved.into_iter().map(|id| id.to_string()).collect())
 }
 
 /// Build feedback loops from the persisted model loop_metadata (UIDs only,
@@ -1911,8 +1911,8 @@ fn try_detect_ltm_loops(
         let compiled = crate::project::Project::from(project_clone);
         let model_ident = Ident::new(&model_name_owned);
 
-        let loops_by_model = crate::ltm::detect_loops(&compiled).ok()?;
-        let model_loops = loops_by_model.get(&model_ident)?;
+        let compiled_model = compiled.models.get(&model_ident)?;
+        let model_loops = crate::ltm::detect_loops(compiled_model, &compiled).ok()?;
         if model_loops.is_empty() {
             return Some(Vec::new());
         }
@@ -1926,7 +1926,7 @@ fn try_detect_ltm_loops(
         vm.run_to_end().ok()?;
 
         let mut feedback_loops = Vec::new();
-        for loop_item in model_loops {
+        for loop_item in &model_loops {
             let polarity = match loop_item.polarity {
                 crate::ltm::LoopPolarity::Reinforcing => LoopPolarity::Reinforcing,
                 crate::ltm::LoopPolarity::Balancing => LoopPolarity::Balancing,
@@ -1969,10 +1969,11 @@ fn try_detect_ltm_loops(
 }
 
 /// Compute metadata for a model from its variable definitions and dependency structure.
-pub fn compute_metadata(project: &datamodel::Project, model_name: &str) -> ComputedMetadata {
-    let model = project
-        .get_model(model_name)
-        .expect("model not found in project");
+pub fn compute_metadata(
+    project: &datamodel::Project,
+    model_name: &str,
+) -> Option<ComputedMetadata> {
+    let model = project.get_model(model_name)?;
     let mut dep_graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut reverse_dep_graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut constants: BTreeSet<String> = BTreeSet::new();
@@ -2055,10 +2056,10 @@ pub fn compute_metadata(project: &datamodel::Project, model_name: &str) -> Compu
 
         let deps = if let Some(ref cm) = compiled_model {
             let ident_key = Ident::<Canonical>::new(&var_ident);
-            match cm.variables.get(&ident_key) {
-                Some(compiled_var) => extract_ast_deps(compiled_var, cm),
-                None => extract_equation_deps(var, &all_idents),
-            }
+            cm.variables
+                .get(&ident_key)
+                .and_then(|compiled_var| extract_ast_deps(compiled_var, cm))
+                .unwrap_or_else(|| extract_equation_deps(var, &all_idents))
         } else {
             extract_equation_deps(var, &all_idents)
         };
@@ -2139,7 +2140,7 @@ pub fn compute_metadata(project: &datamodel::Project, model_name: &str) -> Compu
         metadata::calculate_dominant_periods(&feedback_loops, specs.start, save_step)
     };
 
-    ComputedMetadata {
+    Some(ComputedMetadata {
         chains,
         feedback_loops,
         dominant_periods,
@@ -2149,7 +2150,7 @@ pub fn compute_metadata(project: &datamodel::Project, model_name: &str) -> Compu
         stock_to_inflows,
         stock_to_outflows,
         flow_to_stocks,
-    }
+    })
 }
 
 /// Extract variable dependencies from an equation using word-boundary
@@ -2417,10 +2418,9 @@ pub fn generate_layout(
     model_name: &str,
 ) -> Result<datamodel::StockFlow, String> {
     let config = LayoutConfig::default();
-    let model = project
-        .get_model(model_name)
-        .ok_or_else(|| format!("model '{}' not found in project", model_name))?;
-    let metadata = compute_metadata(project, model_name);
+    let not_found = || format!("model '{}' not found in project", model_name);
+    let model = project.get_model(model_name).ok_or_else(not_found)?;
+    let metadata = compute_metadata(project, model_name).ok_or_else(not_found)?;
     let engine = LayoutEngine::new(config, model, metadata);
     engine.generate_layout()
 }
@@ -2432,10 +2432,9 @@ pub fn generate_layout_with_config(
     mut config: LayoutConfig,
 ) -> Result<datamodel::StockFlow, String> {
     config.validate();
-    let model = project
-        .get_model(model_name)
-        .ok_or_else(|| format!("model '{}' not found in project", model_name))?;
-    let metadata = compute_metadata(project, model_name);
+    let not_found = || format!("model '{}' not found in project", model_name);
+    let model = project.get_model(model_name).ok_or_else(not_found)?;
+    let metadata = compute_metadata(project, model_name).ok_or_else(not_found)?;
     let engine = LayoutEngine::new(config, model, metadata);
     engine.generate_layout()
 }
@@ -2450,10 +2449,9 @@ pub fn generate_best_layout(
 
     let config = LayoutConfig::default();
     let seeds = LAYOUT_SEEDS;
-    let model = project
-        .get_model(model_name)
-        .ok_or_else(|| format!("model '{}' not found in project", model_name))?;
-    let metadata = compute_metadata(project, model_name);
+    let not_found = || format!("model '{}' not found in project", model_name);
+    let model = project.get_model(model_name).ok_or_else(not_found)?;
+    let metadata = compute_metadata(project, model_name).ok_or_else(not_found)?;
 
     let results: Vec<Result<LayoutResult, String>> = seeds
         .par_iter()
@@ -2479,7 +2477,10 @@ pub fn generate_best_layout(
 ///
 /// This is useful for analysis tools that want loop importance, dominant periods,
 /// or dependency information without paying the cost of SFDP + annealing.
-pub fn compute_layout_metadata(project: &datamodel::Project, model_name: &str) -> ComputedMetadata {
+pub fn compute_layout_metadata(
+    project: &datamodel::Project,
+    model_name: &str,
+) -> Option<ComputedMetadata> {
     compute_metadata(project, model_name)
 }
 
@@ -2787,7 +2788,7 @@ mod tests {
     #[test]
     fn test_compute_metadata_chains() {
         let project = test_project(simple_model());
-        let metadata = compute_metadata(&project, TEST_MODEL);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
 
         // Should detect one chain: population + births + deaths
         assert_eq!(metadata.chains.len(), 1);
@@ -2803,7 +2804,7 @@ mod tests {
     #[test]
     fn test_compute_metadata_dep_graph() {
         let project = test_project(simple_model());
-        let metadata = compute_metadata(&project, TEST_MODEL);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
 
         // births depends on population and birth_rate
         let births_deps = metadata.dep_graph.get("births").unwrap();
@@ -2814,7 +2815,7 @@ mod tests {
     #[test]
     fn test_compute_metadata_constants() {
         let project = test_project(simple_model());
-        let metadata = compute_metadata(&project, TEST_MODEL);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
 
         // birth_rate and death_rate are constants (scalar equations with no variable references)
         assert!(metadata.is_constant("birth_rate"));
@@ -3239,7 +3240,7 @@ mod tests {
         };
 
         let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
 
         assert!(
             metadata
@@ -3503,7 +3504,7 @@ mod tests {
         };
 
         let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
         assert_eq!(metadata.feedback_loops.len(), 1);
         assert_eq!(metadata.feedback_loops[0].name, "R1");
         assert_eq!(
@@ -3632,7 +3633,7 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
 
         let output_deps = metadata.dep_graph.get("output").unwrap();
         assert!(output_deps.contains("rate"), "output should depend on rate");
@@ -3689,7 +3690,7 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
 
         let output_deps = metadata.dep_graph.get("output").unwrap();
         assert!(
@@ -3797,11 +3798,74 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
 
         // Should have fallen back to persisted metadata since this minimal
         // model doesn't have sim_specs and can't simulate.
         assert_eq!(metadata.feedback_loops.len(), 1);
         assert_eq!(metadata.feedback_loops[0].name, "R1");
+    }
+
+    #[test]
+    fn test_compute_metadata_returns_none_for_unknown_model() {
+        let project = test_project(simple_model());
+        assert!(compute_metadata(&project, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_compute_metadata_falls_back_for_invalid_equation() {
+        // A variable with an unparseable equation should still get
+        // string-heuristic dependencies rather than being treated as a
+        // constant.
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "population".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["births".to_string()],
+                    outflows: vec![],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "births".to_string(),
+                    equation: datamodel::Equation::Scalar(
+                        "population *** totally_broken_syntax".to_string(),
+                        None,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let project = test_project(model);
+        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+
+        let births_deps = metadata.dep_graph.get("births").unwrap();
+        assert!(
+            births_deps.contains("population"),
+            "births should depend on population via string-heuristic fallback, got: {:?}",
+            births_deps,
+        );
+        assert!(
+            !metadata.constants.contains("births"),
+            "births should not be classified as a constant",
+        );
     }
 }

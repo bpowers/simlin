@@ -416,7 +416,7 @@ fn test_ltm_populates_loop_importance() {
     // The logistic growth model has known feedback loops; LTM should
     // populate importance_series for at least one.
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
-    let metadata = compute_metadata(&project, MAIN_MODEL);
+    let metadata = compute_metadata(&project, MAIN_MODEL).unwrap();
 
     assert!(
         !metadata.feedback_loops.is_empty(),
@@ -439,7 +439,7 @@ fn test_ltm_detects_polarity() {
     use simlin_engine::layout::metadata::LoopPolarity;
 
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
-    let metadata = compute_metadata(&project, MAIN_MODEL);
+    let metadata = compute_metadata(&project, MAIN_MODEL).unwrap();
 
     // The logistic growth model should have both reinforcing and balancing loops.
     let has_reinforcing = metadata
@@ -461,7 +461,7 @@ fn test_loops_sorted_by_average_importance() {
     use simlin_engine::layout::compute_metadata;
 
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
-    let metadata = compute_metadata(&project, MAIN_MODEL);
+    let metadata = compute_metadata(&project, MAIN_MODEL).unwrap();
 
     // Verify descending sort by average importance.
     for pair in metadata.feedback_loops.windows(2) {
@@ -479,7 +479,7 @@ fn test_compute_layout_metadata_has_dominant_periods() {
     use simlin_engine::layout::compute_layout_metadata;
 
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
-    let metadata = compute_layout_metadata(&project, MAIN_MODEL);
+    let metadata = compute_layout_metadata(&project, MAIN_MODEL).unwrap();
 
     assert!(
         !metadata.feedback_loops.is_empty(),
@@ -514,7 +514,7 @@ fn test_compute_layout_metadata_chains_sorted() {
     use simlin_engine::layout::compute_layout_metadata;
 
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
-    let metadata = compute_layout_metadata(&project, MAIN_MODEL);
+    let metadata = compute_layout_metadata(&project, MAIN_MODEL).unwrap();
 
     assert!(
         !metadata.chains.is_empty(),
@@ -537,7 +537,7 @@ fn test_compute_layout_metadata_dep_graph() {
     use simlin_engine::layout::compute_layout_metadata;
 
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
-    let metadata = compute_layout_metadata(&project, MAIN_MODEL);
+    let metadata = compute_layout_metadata(&project, MAIN_MODEL).unwrap();
 
     assert!(
         !metadata.dep_graph.is_empty(),
