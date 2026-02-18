@@ -265,7 +265,7 @@ def demonstrate_advanced_features():
     # 3. Loop Dominance Analysis
     print("\n3. Loop Dominance Analysis")
     print("-" * 40)
-    loop_analyzer = LoopDominanceAnalyzer(project)
+    loop_analyzer = LoopDominanceAnalyzer(model)
     
     if loop_analyzer.loops:
         dominance_df = loop_analyzer.analyze_dominance(model)
