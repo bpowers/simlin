@@ -183,19 +183,21 @@ The whole-word replacement uses Unicode XID rules (`is_word_char`,
 
 `generate_flow_to_stock_equation()` (`ltm_augment.rs:415`)
 
-Implements the corrected 2023 formula. The numerator uses `PREVIOUS()` to align
-timing: at time t, `PREVIOUS(flow)` is the flow value at t-1 that drove the
-stock change from t-1 to t.
+Implements the corrected 2023 formula (Schoenberg et al., Eq. 3). The numerator
+uses `PREVIOUS()` to align timing: at time t, `PREVIOUS(flow)` is the flow value
+at t-1 that drove the stock change from t-1 to t.
 
 ```
-numerator = sign * (PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow)))
+numerator = PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))
 denominator = (stock - PREVIOUS(stock)) - (PREVIOUS(stock) - PREVIOUS(PREVIOUS(stock)))
+link_score = sign * ABS(SAFEDIV(numerator, denominator, 0))
 ```
 
 The denominator is the second-order change in the stock (its "acceleration").
-Inflows get a positive sign; outflows get a negative sign. This equation returns
-NaN for the first two timesteps (insufficient history for second-order
-differences).
+The ratio is wrapped in `ABS()` because flow-to-stock polarity is structural:
+inflows always contribute positively (+1), outflows negatively (-1). The sign
+is applied outside the absolute value. This equation returns NaN for the first
+two timesteps (insufficient history for second-order differences).
 
 ### Stock-to-Flow Links
 

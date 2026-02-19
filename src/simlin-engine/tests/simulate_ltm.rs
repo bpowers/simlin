@@ -12,7 +12,7 @@ use std::result::Result as StdResult;
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::interpreter::Simulation;
 use simlin_engine::xmile;
-use simlin_engine::{Project, Results, Vm, ltm, ltm_finding};
+use simlin_engine::{Project, Results, Vm, json, ltm, ltm_finding};
 
 const LTM_TOLERANCE: f64 = 0.05;
 
@@ -450,6 +450,102 @@ fn discovery_decoupled_stocks() {
             in_exhaustive,
             "Discovered loop {} should exist in exhaustive results",
             found_loop.loop_info.format_path()
+        );
+    }
+}
+
+/// Checks for suspicious sign discontinuities in feedback loop relative score
+/// time series.
+///
+/// A sign discontinuity is when consecutive data points flip from negative
+/// to positive (or vice versa). When the magnitude barely changes across
+/// the flip (e.g., -0.169 -> +0.169), it indicates a bug in the LTM sign
+/// computation rather than genuinely changing loop behavior. A real polarity
+/// transition would show the score approaching zero before crossing.
+#[test]
+fn hero_culture_loop_sign_continuity() {
+    let f = File::open("../../test/hero_culture_ltm/hero_culture.sd.json").unwrap();
+    let reader = BufReader::new(f);
+    let json_project = json::Project::from_reader(reader).unwrap();
+    let datamodel_project: simlin_engine::datamodel::Project = json_project.into();
+
+    let project = Project::from(datamodel_project);
+    let ltm_project = project.with_ltm().unwrap();
+
+    let main_ident: Ident<Canonical> = Ident::new("main");
+    let loops = ltm::detect_loops(&ltm_project.models[&main_ident], &ltm_project).unwrap();
+    assert!(
+        !loops.is_empty(),
+        "expected feedback loops from LTM analysis"
+    );
+
+    let ltm_project = Rc::new(ltm_project);
+    let sim = Simulation::new(&ltm_project, "main").unwrap();
+    let results = sim.run_to_end().unwrap();
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for loop_item in &loops {
+        let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{}", loop_item.id);
+        let var_ident =
+            Ident::<Canonical>::from_str_unchecked(&Ident::new(&var_name).to_source_repr());
+
+        let offset = match results.offsets.get(&var_ident) {
+            Some(&off) => off,
+            None => continue,
+        };
+
+        // Extract the time series for this loop
+        let time_series: Vec<(f64, f64)> = results
+            .iter()
+            .enumerate()
+            .map(|(step, row)| {
+                let time = results.specs.start + results.specs.save_step * (step as f64);
+                (time, row[offset])
+            })
+            .collect();
+
+        if time_series.len() < 2 {
+            continue;
+        }
+
+        // Find sign flips
+        for i in 1..time_series.len() {
+            let (_, prev_val) = time_series[i - 1];
+            let (curr_t, curr_val) = time_series[i];
+
+            if prev_val == 0.0 || curr_val == 0.0 {
+                continue;
+            }
+            if prev_val.signum() == curr_val.signum() {
+                continue;
+            }
+
+            // Sign flipped. Check if the magnitude barely changed --
+            // that indicates a sign computation bug, not a genuine
+            // polarity transition.
+            let ratio = prev_val.abs() / curr_val.abs();
+            if ratio > 0.5 && ratio < 2.0 {
+                failures.push(format!(
+                    "loop {} ({}): suspicious sign flip at t={:.0} where magnitude barely changes \
+                     ({:.6} -> {:.6}, ratio={:.3}); \
+                     this looks like a sign computation bug, not a genuine polarity transition",
+                    loop_item.id,
+                    loop_item.format_path(),
+                    curr_t,
+                    prev_val,
+                    curr_val,
+                    ratio,
+                ));
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "Found {} suspicious sign discontinuities in loop scores:\n{}",
+            failures.len(),
+            failures.join("\n")
         );
     }
 }

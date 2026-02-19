@@ -371,8 +371,10 @@ fn generate_auxiliary_to_auxiliary_equation(
         HashSet::new()
     };
 
-    // Build the partial equation: substitute PREVIOUS(dep) for all deps except 'from'
-    let mut partial_eq = to_equation.clone();
+    // Build the partial equation: substitute PREVIOUS(dep) for all deps except 'from'.
+    // Lowercase equation text so identifiers match canonical (lowercase) dep names,
+    // since the equation parser is case-insensitive.
+    let mut partial_eq = to_equation.to_lowercase();
     for dep in &deps {
         if dep != from {
             // Replace whole word occurrences of the dependency
@@ -422,11 +424,17 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
 
     let sign = if is_inflow { "" } else { "-" };
 
-    // Using SAFEDIV to handle division by zero
+    // Per the corrected 2023 formula (Schoenberg et al., Eq. 3):
+    //   LS(inflow -> S)  = |Delta(i) / (Delta(S_t) - Delta(S_{t-dt}))| * (+1)
+    //   LS(outflow -> S) = |Delta(o) / (Delta(S_t) - Delta(S_{t-dt}))| * (-1)
+    //
+    // The polarity is structural (fixed +1/-1), not dynamic.  ABS ensures
+    // the magnitude is always positive; the sign is applied outside.
+    //
     // The numerator uses PREVIOUS values to align timing with the denominator.
     // At time t, the flow at t-1 (PREVIOUS(flow)) is what drove the stock change from t-1 to t.
     // We measure the change in that causal flow: flow(t-1) - flow(t-2).
-    let numerator = format!("{sign}(PREVIOUS({flow}) - PREVIOUS(PREVIOUS({flow})))");
+    let numerator = format!("(PREVIOUS({flow}) - PREVIOUS(PREVIOUS({flow})))");
     let denominator = format!(
         "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))"
     );
@@ -436,7 +444,7 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
         "if \
             (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
             then 0/0 \
-            else SAFEDIV({numerator}, {denominator}, 0)"
+            else {sign}ABS(SAFEDIV({numerator}, {denominator}, 0))"
     )
 }
 
@@ -466,8 +474,10 @@ fn generate_stock_to_flow_equation(
         HashSet::new()
     };
 
-    // Build the partial equation: substitute PREVIOUS(dep) for all deps except 'stock'
-    let mut partial_eq = flow_equation.clone();
+    // Build the partial equation: substitute PREVIOUS(dep) for all deps except 'stock'.
+    // Lowercase equation text so identifiers match canonical (lowercase) dep names,
+    // since the equation parser is case-insensitive.
+    let mut partial_eq = flow_equation.to_lowercase();
     for dep in &deps {
         if dep != stock {
             // Replace whole word occurrences of the dependency
@@ -763,16 +773,16 @@ mod tests {
         let equation = generate_link_score_equation(&from, &to, stock_var, all_vars);
 
         // Verify the EXACT equation structure for flow-to-stock
-        // Uses PREVIOUS in numerator to align timing with denominator
+        // ABS wraps the ratio; sign is fixed (+1 for inflows) per corrected 2023 formula
         // Returns NaN for first two timesteps when insufficient history
         let expected = "if \
             (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
             then 0/0 \
-            else SAFEDIV(\
+            else ABS(SAFEDIV(\
                 (PREVIOUS(inflow_rate) - PREVIOUS(PREVIOUS(inflow_rate))), \
                 ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
                 0\
-            )";
+            ))";
 
         assert_eq!(
             equation, expected,
@@ -802,16 +812,16 @@ mod tests {
         let equation = generate_link_score_equation(&from, &to, stock_var, all_vars);
 
         // Verify the EXACT equation structure for outflow-to-stock (negative sign)
-        // Uses PREVIOUS in numerator to align timing with denominator
+        // ABS wraps the ratio; sign is fixed (-1 for outflows) per corrected 2023 formula
         // Returns NaN for first two timesteps when insufficient history
         let expected = "if \
             (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
             then 0/0 \
-            else SAFEDIV(\
-                -(PREVIOUS(outflow_rate) - PREVIOUS(PREVIOUS(outflow_rate))), \
+            else -ABS(SAFEDIV(\
+                (PREVIOUS(outflow_rate) - PREVIOUS(PREVIOUS(outflow_rate))), \
                 ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
                 0\
-            )";
+            ))";
 
         assert_eq!(
             equation, expected,
@@ -1526,7 +1536,6 @@ mod tests {
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
         // This test validates the correct LTM paper formula implementation
-        // Note: 'S' becomes lowercase 's' in stock references but stays uppercase in partial equation
         // Sign term uses first-order stock change per LTM paper formula
         // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
@@ -1536,8 +1545,8 @@ mod tests {
                 ((inflow - PREVIOUS(inflow)) = 0) OR \
                 ((s - PREVIOUS(s)) = 0) \
                 then 0 \
-                else ABS(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), (inflow - PREVIOUS(inflow)), 0)) * \
-                SIGN(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), \
+                else ABS(SAFEDIV(((s * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), (inflow - PREVIOUS(inflow)), 0)) * \
+                SIGN(SAFEDIV(((s * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), \
                     (s - PREVIOUS(s)), 0))";
 
         assert_eq!(
