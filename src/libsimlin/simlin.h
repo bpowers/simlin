@@ -117,10 +117,10 @@ typedef struct {
   uintptr_t count;
 } SimlinLoops;
 
-// Opaque project structure
+// Opaque model structure
 typedef struct {
   uint8_t _private[0];
-} SimlinProject;
+} SimlinModel;
 
 // Opaque error structure returned by the API
 typedef struct {
@@ -159,10 +159,10 @@ typedef struct {
   SimlinUnitErrorKind unit_error_kind;
 } SimlinErrorDetail;
 
-// Opaque model structure
+// Opaque project structure
 typedef struct {
   uint8_t _private[0];
-} SimlinModel;
+} SimlinProject;
 
 #ifdef __cplusplus
 extern "C" {
@@ -287,6 +287,21 @@ const SimlinErrorDetail *simlin_error_get_details(const SimlinError *err);
 // The pointer must be either null or a valid `SimlinError` pointer that has not been freed.
 // The returned detail pointer is valid only as long as the error object is not freed.
 const SimlinErrorDetail *simlin_error_get_detail(const SimlinError *err, uintptr_t index);
+
+// Generate the best automatic layout for the named model and replace its
+// views in-place.
+//
+// Preserves the existing zoom level if the model already has a view with
+// zoom > 0. Works on all targets including WASM (uses a serial fallback
+// when rayon is unavailable).
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `model_name` must be a valid null-terminated UTF-8 string
+// - `out_error` may be null
+void simlin_project_diagram_sync(SimlinProject *project,
+                                 const char *model_name,
+                                 SimlinError **out_error);
 
 uint8_t *simlin_malloc(uintptr_t size);
 

@@ -62,7 +62,7 @@ Equation text flows through these stages in order:
 - **`src/ltm.rs`** - Loops That Matter: feedback loop detection and dominance analysis
 - **`src/ltm_augment.rs`** - Synthetic variable generation for loop instrumentation
 - **`src/diagram/`** - Diagram/sketch rendering: `elements.rs`, `connector.rs`, `flow.rs`, `render.rs`, `common.rs`, `constants.rs`, `label.rs`, `arrowhead.rs`
-- **`src/layout/`** - Automatic diagram layout generation: `mod.rs` (pipeline orchestration, public API), `sfdp.rs` (force-directed placement), `annealing.rs` (crossing reduction), `chain.rs` (stock-flow chain positioning), `config.rs` (layout parameters), `connector.rs` (link routing), `graph.rs` (graph data structures), `metadata.rs` (feedback loops, dominant periods), `placement.rs` (label optimization, normalization), `text.rs` (label sizing), `uid.rs` (UID management)
+- **`src/layout/`** - Automatic diagram layout generation (available on all targets including WASM; uses serial fallback when rayon is unavailable): `mod.rs` (pipeline orchestration, public API), `sfdp.rs` (force-directed placement), `annealing.rs` (crossing reduction), `chain.rs` (stock-flow chain positioning), `config.rs` (layout parameters), `connector.rs` (link routing), `graph.rs` (graph data structures), `metadata.rs` (feedback loops, dominant periods), `placement.rs` (label optimization, normalization), `text.rs` (label sizing), `uid.rs` (UID management)
 
 ## Generated files (do not edit by hand)
 

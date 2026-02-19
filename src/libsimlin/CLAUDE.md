@@ -51,6 +51,11 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
   - `simlin_analyze_get_loops()`, `simlin_analyze_get_links()`, `simlin_analyze_get_rel_loop_score()`
   - `simlin_free_loops()`, `simlin_free_links()`
 
+### Layout
+
+- **`src/layout.rs`** - Automatic diagram layout:
+  - `simlin_project_diagram_sync()` - Generate best layout for a model, replacing its views in-place. Preserves existing zoom. Works on all targets including WASM.
+
 ### Patching
 
 - **`src/patch.rs`** - JSON patch application:

@@ -2496,29 +2496,33 @@ pub fn generate_best_layout(
     project: &datamodel::Project,
     model_name: &str,
 ) -> Result<datamodel::StockFlow, String> {
-    use rayon::prelude::*;
-
     let config = LayoutConfig::default();
     let seeds = LAYOUT_SEEDS;
     let not_found = || format!("model '{}' not found in project", model_name);
     let model = project.get_model(model_name).ok_or_else(not_found)?;
     let metadata = compute_metadata(project, model_name).ok_or_else(not_found)?;
 
-    let results: Vec<Result<LayoutResult, String>> = seeds
-        .par_iter()
-        .map(|&seed| {
-            let mut cfg = config.clone();
-            cfg.annealing_random_seed = seed;
-            let engine = LayoutEngine::new(cfg, model, metadata.clone());
-            let view = engine.generate_layout()?;
-            let crossings = count_view_crossings(&view);
-            Ok(LayoutResult {
-                view,
-                crossings,
-                seed,
-            })
+    let generate = |&seed: &u64| {
+        let mut cfg = config.clone();
+        cfg.annealing_random_seed = seed;
+        let engine = LayoutEngine::new(cfg, model, metadata.clone());
+        let view = engine.generate_layout()?;
+        let crossings = count_view_crossings(&view);
+        Ok(LayoutResult {
+            view,
+            crossings,
+            seed,
         })
-        .collect();
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let results: Vec<Result<LayoutResult, String>> = {
+        use rayon::prelude::*;
+        seeds.par_iter().map(generate).collect()
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    let results: Vec<Result<LayoutResult, String>> = seeds.iter().map(generate).collect();
 
     select_best_layout(results)
 }

@@ -69,6 +69,20 @@ else
     exit 1
 fi
 
+# 1b. Check simlin.h is up to date with cbindgen
+echo -n "Checking simlin.h freshness... "
+CBINDGEN_OUTPUT="$(mktemp)"
+if cbindgen --config src/libsimlin/cbindgen.toml --crate simlin --output "$CBINDGEN_OUTPUT" 2>/dev/null && diff -q src/libsimlin/simlin.h "$CBINDGEN_OUTPUT" >/dev/null 2>&1; then
+    echo -e "${GREEN}✓${NC}"
+    rm -f "$CBINDGEN_OUTPUT"
+else
+    echo -e "${RED}✗${NC}"
+    echo -e "${RED}src/libsimlin/simlin.h is out of date${NC}"
+    echo -e "${YELLOW}Run 'cbindgen --config src/libsimlin/cbindgen.toml --crate simlin --output src/libsimlin/simlin.h' to regenerate${NC}"
+    rm -f "$CBINDGEN_OUTPUT"
+    exit 1
+fi
+
 # 2. Run Rust clippy
 echo -n "Running Rust clippy... "
 CLIPPY_OUTPUT="$(mktemp)"

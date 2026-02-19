@@ -199,6 +199,22 @@ else
     echo -e "    ${YELLOW}Install pnpm: npm install -g pnpm${NC}"
 fi
 
+# Check cbindgen (for simlin.h generation)
+echo -n "  cbindgen: "
+if command -v cbindgen >/dev/null 2>&1; then
+    CBINDGEN_VERSION="$(cbindgen --version 2>/dev/null | cut -d' ' -f2)"
+    echo -e "${GREEN}$CBINDGEN_VERSION${NC}"
+else
+    echo -n "installing... "
+    if cargo install cbindgen >/dev/null 2>&1; then
+        CBINDGEN_VERSION="$(cbindgen --version 2>/dev/null | cut -d' ' -f2)"
+        echo -e "${GREEN}$CBINDGEN_VERSION${NC}"
+    else
+        echo -e "${RED}failed to install${NC}"
+        echo -e "    ${YELLOW}Run 'cargo install cbindgen' manually${NC}"
+    fi
+fi
+
 # Check Python (optional, for pysimlin)
 echo -n "  Python: "
 if command -v python3 >/dev/null 2>&1; then
