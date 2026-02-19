@@ -4,17 +4,39 @@
 
 use crate::datamodel::view_element::LabelSide;
 
-const CHAR_WIDTH: f64 = 7.0;
 const LINE_HEIGHT: f64 = 14.0;
 const LABEL_PADDING: f64 = 4.0;
 
-/// Estimate text width based on character count.
-///
-/// Uses a simple heuristic: each character is approximately 7 pixels wide.
-/// This is a rough approximation suitable for layout planning, not precise
-/// text rendering.
+/// Per-character advance widths for Roboto-Light at 12pt/72dpi with
+/// HintingFull, matching the Praxis reference. Covers ASCII 32..=126;
+/// characters outside this range use ROBOTO_LIGHT_AVG.
+#[rustfmt::skip]
+const ROBOTO_LIGHT_12PT_WIDTHS: [f64; 95] = [
+    3.00, 3.00, 3.00, 7.00, 7.00, 9.00, 7.00, 2.00, 4.00, 4.00,
+    5.00, 7.00, 2.00, 3.00, 3.00, 5.00, 7.00, 7.00, 7.00, 7.00,
+    7.00, 7.00, 7.00, 7.00, 7.00, 7.00, 3.00, 2.00, 6.00, 7.00,
+    6.00, 5.00, 11.00, 8.00, 7.00, 8.00, 8.00, 7.00, 7.00, 8.00,
+    8.00, 3.00, 7.00, 8.00, 6.00, 10.00, 9.00, 8.00, 7.00, 8.00,
+    8.00, 7.00, 7.00, 8.00, 7.00, 11.00, 7.00, 7.00, 7.00, 3.00,
+    5.00, 3.00, 5.00, 5.00, 3.00, 6.00, 7.00, 6.00, 7.00, 6.00,
+    4.00, 7.00, 7.00, 3.00, 3.00, 6.00, 3.00, 11.00, 7.00, 7.00,
+    7.00, 7.00, 4.00, 6.00, 4.00, 7.00, 6.00, 9.00, 6.00, 6.00,
+    6.00, 4.00, 3.00, 4.00, 8.00,
+];
+const ROBOTO_LIGHT_AVG: f64 = 6.12;
+
+/// Estimate text width using per-character Roboto-Light 12pt advance widths.
 pub fn estimate_text_width(text: &str) -> f64 {
-    text.chars().count() as f64 * CHAR_WIDTH
+    text.chars()
+        .map(|c| {
+            let code = c as u32;
+            if (32..=126).contains(&code) {
+                ROBOTO_LIGHT_12PT_WIDTHS[(code - 32) as usize]
+            } else {
+                ROBOTO_LIGHT_AVG
+            }
+        })
+        .sum()
 }
 
 /// Estimate the bounding box of a label placed relative to an element.
@@ -29,11 +51,12 @@ pub fn estimate_label_bounds(
     elem_width: f64,
     elem_height: f64,
 ) -> (f64, f64, f64, f64) {
-    let formatted = format_label_with_line_breaks(text);
-    let lines: Vec<&str> = formatted.split('\n').collect();
+    // Labels are already formatted with line breaks when ViewElements are
+    // created, so split directly on '\n' rather than re-formatting.
+    let lines: Vec<&str> = text.split('\n').collect();
     let max_line_width = lines
         .iter()
-        .map(|line| line.chars().count() as f64 * CHAR_WIDTH)
+        .map(|line| estimate_text_width(line))
         .fold(0.0_f64, f64::max);
     let total_height = lines.len() as f64 * LINE_HEIGHT;
     let half_label_w = max_line_width / 2.0;
@@ -132,9 +155,30 @@ mod tests {
 
     #[test]
     fn test_estimate_text_width() {
-        assert!((estimate_text_width("hello") - 35.0).abs() < f64::EPSILON);
+        // "hello" = h(7) + e(6) + l(3) + l(3) + o(7) = 26
+        assert!((estimate_text_width("hello") - 26.0).abs() < f64::EPSILON);
         assert!((estimate_text_width("") - 0.0).abs() < f64::EPSILON);
-        assert!((estimate_text_width("a") - 7.0).abs() < f64::EPSILON);
+        // "a" = 6.0 in Roboto-Light 12pt
+        assert!((estimate_text_width("a") - 6.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_narrow_strings_measure_narrower_than_wide() {
+        let narrow = estimate_text_width("iii");
+        let wide = estimate_text_width("www");
+        assert!(
+            narrow < wide,
+            "narrow 'iii' ({narrow}) should be less than wide 'www' ({wide})"
+        );
+    }
+
+    #[test]
+    fn test_text_width_matches_praxis_reference() {
+        // Validate against known Praxis string-level measurements.
+        // Char-by-char summing omits kerning, so allow ~2px tolerance.
+        assert!((estimate_text_width("population") - 58.0).abs() < 2.0);
+        assert!((estimate_text_width("net_population") - 80.0).abs() < 2.0);
+        assert!((estimate_text_width("increase_rate") - 68.0).abs() < 2.0);
     }
 
     #[test]
@@ -240,6 +284,21 @@ mod tests {
         assert_eq!(
             format_label_with_line_breaks("taux de_croissance"),
             "taux de\ncroissance"
+        );
+    }
+
+    #[test]
+    fn test_estimate_label_bounds_already_formatted() {
+        // Labels are pre-formatted before being passed to estimate_label_bounds.
+        // Passing an already-broken label must not re-break it into 3 lines.
+        let pre_formatted = "net_population\nincrease_rate";
+        let (_, min_y, _, max_y) =
+            estimate_label_bounds(pre_formatted, 100.0, 50.0, LabelSide::Bottom, 18.0, 18.0);
+        let height = max_y - min_y;
+        let expected_two_lines = 2.0 * LINE_HEIGHT;
+        assert!(
+            (height - expected_two_lines).abs() < f64::EPSILON,
+            "pre-formatted 2-line label should measure 2 lines high ({expected_two_lines}), got {height}",
         );
     }
 }

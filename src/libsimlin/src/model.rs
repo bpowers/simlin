@@ -389,8 +389,9 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         }
     };
 
-    let var = match eng_model.variables.get(&*var_name) {
-        Some(v) => v,
+    let var_ident = engine::common::Ident::<engine::common::Canonical>::new(&var_name);
+    let deps_set = match engine::get_incoming_links(eng_model, &var_ident) {
+        Some(deps) => deps,
         None => {
             store_error(
                 out_error,
@@ -402,28 +403,6 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
             return;
         }
     };
-
-    let deps_set = match var {
-        engine::Variable::Stock { init_ast, .. } => {
-            if let Some(ast) = init_ast {
-                engine::identifier_set(ast, &[], None)
-            } else {
-                std::collections::HashSet::new()
-            }
-        }
-        engine::Variable::Var { ast, .. } => {
-            if let Some(ast) = ast {
-                engine::identifier_set(ast, &[], None)
-            } else {
-                std::collections::HashSet::new()
-            }
-        }
-        engine::Variable::Module { inputs, .. } => {
-            inputs.iter().map(|input| input.src.clone()).collect()
-        }
-    };
-
-    let deps_set = engine::resolve_non_private_dependencies(eng_model, deps_set);
     let mut deps: Vec<String> = deps_set
         .into_iter()
         .map(|ident| ident.to_string())

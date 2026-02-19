@@ -227,9 +227,36 @@ impl<'a> LayoutEngine<'a> {
         })
     }
 
-    /// Pick a starting stock for chain layout. Returns the first stock found.
+    /// Pick a starting stock for chain layout. Returns the stock with the
+    /// highest flow connectivity (inflows + outflows), breaking ties
+    /// alphabetically for determinism.
     fn pick_starting_stock<'b>(&self, stocks: &'b [String]) -> Option<&'b str> {
-        stocks.first().map(|s| s.as_str())
+        stocks
+            .iter()
+            .max_by(|a, b| {
+                let a_count = self
+                    .metadata
+                    .stock_to_inflows
+                    .get(a.as_str())
+                    .map_or(0, |v| v.len())
+                    + self
+                        .metadata
+                        .stock_to_outflows
+                        .get(a.as_str())
+                        .map_or(0, |v| v.len());
+                let b_count = self
+                    .metadata
+                    .stock_to_inflows
+                    .get(b.as_str())
+                    .map_or(0, |v| v.len())
+                    + self
+                        .metadata
+                        .stock_to_outflows
+                        .get(b.as_str())
+                        .map_or(0, |v| v.len());
+                a_count.cmp(&b_count).then_with(|| b.cmp(a))
+            })
+            .map(|s| s.as_str())
     }
 
     /// Layout a single chain at the given base position using BFS.
@@ -979,6 +1006,9 @@ impl<'a> LayoutEngine<'a> {
                     continue;
                 };
 
+                // Graph edges follow dep_graph direction (stock → flow for
+                // structural deps). Skip these since they're rendered as
+                // pipes, not connectors.
                 if let (Some(from_ident), Some(to_ident)) =
                     (node_to_ident.get(&edge.from), node_to_ident.get(&edge.to))
                     && is_structural_stock_flow(
@@ -1848,29 +1878,88 @@ fn try_compile_model(
     compiled.models.get(&model_ident).cloned()
 }
 
-/// Extract dependencies for a single variable using the compiled AST.
-/// Returns the set of canonical ident strings this variable depends on.
-fn extract_ast_deps(
-    compiled_var: &crate::variable::Variable,
-    compiled_model: &ModelStage1,
-) -> Option<Vec<String>> {
-    let raw_deps = match compiled_var {
-        crate::variable::Variable::Stock {
-            init_ast: Some(ast),
+/// Returns true if the compiled model has reliable AST-based dependency
+/// information for the given variable. When false (variable not found or
+/// has no AST due to a parse error), callers should fall back to
+/// string-heuristic extraction.
+fn has_compiled_ast(cm: &ModelStage1, ident: &Ident<Canonical>) -> bool {
+    matches!(
+        cm.variables.get(ident),
+        Some(crate::variable::Variable::Stock {
+            init_ast: Some(_),
             ..
-        } => crate::variable::identifier_set(ast, &[], None),
-        crate::variable::Variable::Var { ast: Some(ast), .. } => {
-            crate::variable::identifier_set(ast, &[], None)
-        }
-        crate::variable::Variable::Module { inputs, .. } => {
-            inputs.iter().map(|i| i.src.clone()).collect()
-        }
-        // No AST available (e.g. per-variable compilation error) --
-        // signal caller to fall back to string heuristics.
-        _ => return None,
+        }) | Some(crate::variable::Variable::Var { ast: Some(_), .. })
+            | Some(crate::variable::Variable::Module { .. })
+    )
+}
+
+/// Extract variable dependencies from an equation using word-boundary
+/// matching on the equation text. This is a heuristic that avoids requiring
+/// full model compilation; it can produce false positives for identifiers
+/// that collide with builtin function names and doesn't handle subscripted
+/// references. Used as a fallback when compilation fails or a variable has
+/// a parse error and no AST is available.
+fn extract_equation_deps(var: &datamodel::Variable, all_idents: &HashSet<String>) -> Vec<String> {
+    let equation = match var.get_equation() {
+        Some(eq) => eq,
+        None => return Vec::new(),
     };
-    let resolved = crate::model::resolve_non_private_dependencies(compiled_model, raw_deps);
-    Some(resolved.into_iter().map(|id| id.to_string()).collect())
+
+    let equation_texts: Vec<&str> = match equation {
+        datamodel::Equation::Scalar(text) => vec![text.as_str()],
+        datamodel::Equation::ApplyToAll(_, text) => vec![text.as_str()],
+        datamodel::Equation::Arrayed(_, entries) => entries
+            .iter()
+            .map(|(_, text, _, _)| text.as_str())
+            .collect(),
+    };
+    if equation_texts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut deps = Vec::new();
+    let lowered_texts: Vec<String> = equation_texts
+        .iter()
+        .map(|text| text.to_lowercase())
+        .collect();
+    let var_ident = canonicalize(var.get_ident());
+
+    for ident in all_idents {
+        if ident == var_ident.as_ref() {
+            continue;
+        }
+        if lowered_texts
+            .iter()
+            .any(|equation_lower| contains_ident(equation_lower, ident))
+        {
+            deps.push(ident.clone());
+        }
+    }
+
+    deps
+}
+
+/// Check if an identifier appears as a word boundary match in equation text.
+fn contains_ident(equation_lower: &str, ident: &str) -> bool {
+    let ident_lower = ident.to_lowercase();
+    let mut search_from = 0;
+    while let Some(pos) = equation_lower[search_from..].find(&ident_lower) {
+        let abs_pos = search_from + pos;
+        let end_pos = abs_pos + ident_lower.len();
+
+        let before_ok = abs_pos == 0
+            || !equation_lower.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
+                && equation_lower.as_bytes()[abs_pos - 1] != b'_';
+        let after_ok = end_pos >= equation_lower.len()
+            || !equation_lower.as_bytes()[end_pos].is_ascii_alphanumeric()
+                && equation_lower.as_bytes()[end_pos] != b'_';
+
+        if before_ok && after_ok {
+            return true;
+        }
+        search_from = abs_pos + 1;
+    }
+    false
 }
 
 /// Build feedback loops from the persisted model loop_metadata (UIDs only,
@@ -2055,8 +2144,6 @@ pub fn compute_metadata(
         }
     }
 
-    // Try AST-based dependency extraction via a compiled model.
-    // Falls back to string heuristics if compilation fails.
     let compiled_model = try_compile_model(project, model_name);
 
     let all_idents: HashSet<String> = model
@@ -2073,12 +2160,15 @@ pub fn compute_metadata(
         let var_ident = canonicalize(var.get_ident()).into_owned();
         dep_graph.entry(var_ident.clone()).or_default();
 
-        let deps = if let Some(ref cm) = compiled_model {
+        let deps: Vec<String> = if let Some(ref cm) = compiled_model {
             let ident_key = Ident::<Canonical>::new(&var_ident);
-            cm.variables
-                .get(&ident_key)
-                .and_then(|compiled_var| extract_ast_deps(compiled_var, cm))
-                .unwrap_or_else(|| extract_equation_deps(var, &all_idents))
+            if has_compiled_ast(cm, &ident_key) {
+                crate::model::get_incoming_links(cm, &ident_key)
+                    .map(|deps| deps.into_iter().map(|id| id.to_string()).collect())
+                    .unwrap_or_default()
+            } else {
+                extract_equation_deps(var, &all_idents)
+            }
         } else {
             extract_equation_deps(var, &all_idents)
         };
@@ -2182,76 +2272,6 @@ pub fn compute_metadata(
         stock_to_outflows,
         flow_to_stocks,
     })
-}
-
-/// Extract variable dependencies from an equation using word-boundary
-/// matching on the equation text. This is a heuristic that avoids requiring
-/// full model compilation; it can produce false positives for identifiers
-/// that collide with builtin function names and doesn't handle subscripted
-/// references. A future improvement would wire in the engine's AST-based
-/// dependency resolution (which requires a compiled model).
-fn extract_equation_deps(var: &datamodel::Variable, all_idents: &HashSet<String>) -> Vec<String> {
-    let equation = match var.get_equation() {
-        Some(eq) => eq,
-        None => return Vec::new(),
-    };
-
-    let equation_texts: Vec<&str> = match equation {
-        datamodel::Equation::Scalar(text) => vec![text.as_str()],
-        datamodel::Equation::ApplyToAll(_, text) => vec![text.as_str()],
-        datamodel::Equation::Arrayed(_, entries) => entries
-            .iter()
-            .map(|(_, text, _, _)| text.as_str())
-            .collect(),
-    };
-    if equation_texts.is_empty() {
-        return Vec::new();
-    }
-
-    // Tokenize equation and find references to known variables
-    let mut deps = Vec::new();
-    let lowered_texts: Vec<String> = equation_texts
-        .iter()
-        .map(|text| text.to_lowercase())
-        .collect();
-    let var_ident = canonicalize(var.get_ident());
-
-    for ident in all_idents {
-        if ident == var_ident.as_ref() {
-            continue; // Skip self-references
-        }
-        if lowered_texts
-            .iter()
-            .any(|equation_lower| contains_ident(equation_lower, ident))
-        {
-            deps.push(ident.clone());
-        }
-    }
-
-    deps
-}
-
-/// Check if an identifier appears as a word boundary match in equation text.
-fn contains_ident(equation_lower: &str, ident: &str) -> bool {
-    let ident_lower = ident.to_lowercase();
-    let mut search_from = 0;
-    while let Some(pos) = equation_lower[search_from..].find(&ident_lower) {
-        let abs_pos = search_from + pos;
-        let end_pos = abs_pos + ident_lower.len();
-
-        let before_ok = abs_pos == 0
-            || !equation_lower.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
-                && equation_lower.as_bytes()[abs_pos - 1] != b'_';
-        let after_ok = end_pos >= equation_lower.len()
-            || !equation_lower.as_bytes()[end_pos].is_ascii_alphanumeric()
-                && equation_lower.as_bytes()[end_pos] != b'_';
-
-        if before_ok && after_ok {
-            return true;
-        }
-        search_from = abs_pos + 1;
-    }
-    false
 }
 
 /// Detect stock-flow chains using union-find over stock/flow connections.
@@ -2879,6 +2899,74 @@ mod tests {
     }
 
     #[test]
+    fn test_is_structural_stock_flow_matches_dep_graph_direction() {
+        // dep_graph stores stock -> flow (stock depends on its inflows/outflows).
+        // is_structural_stock_flow(from=stock, to=flow) should return true.
+        let stock_inflows: HashMap<String, HashSet<String>> =
+            HashMap::from([("population".into(), HashSet::from(["births".into()]))]);
+        let stock_outflows: HashMap<String, HashSet<String>> =
+            HashMap::from([("population".into(), HashSet::from(["deaths".into()]))]);
+
+        assert!(is_structural_stock_flow(
+            "population",
+            "births",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+        assert!(is_structural_stock_flow(
+            "population",
+            "deaths",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+        // Reversed direction should NOT match
+        assert!(!is_structural_stock_flow(
+            "births",
+            "population",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+        // Unrelated pair should not match
+        assert!(!is_structural_stock_flow(
+            "birth_rate",
+            "births",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+    }
+
+    #[test]
+    fn test_is_structural_flow_stock_matches_connector_direction() {
+        // Connectors render as dependency -> dependent. For structural
+        // stock-flow deps, the connector goes from flow -> stock.
+        // is_structural_flow_stock(from=flow, to=stock) should return true.
+        let stock_inflows: HashMap<String, HashSet<String>> =
+            HashMap::from([("population".into(), HashSet::from(["births".into()]))]);
+        let stock_outflows: HashMap<String, HashSet<String>> =
+            HashMap::from([("population".into(), HashSet::from(["deaths".into()]))]);
+
+        assert!(is_structural_flow_stock(
+            "births",
+            "population",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+        assert!(is_structural_flow_stock(
+            "deaths",
+            "population",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+        // Reversed direction should NOT match
+        assert!(!is_structural_flow_stock(
+            "population",
+            "births",
+            &stock_inflows,
+            &stock_outflows,
+        ));
+    }
+
+    #[test]
     fn test_contains_ident_word_boundary() {
         assert!(contains_ident("a + b * c", "b"));
         assert!(!contains_ident("abc", "b"));
@@ -2961,6 +3049,36 @@ mod tests {
         let idents: HashSet<String> = ["stock", "x"].iter().map(|s| s.to_string()).collect();
         let deps = extract_equation_deps(&var, &idents);
         assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_extract_equation_deps_arrayed_uses_all_entries() {
+        let var = datamodel::Variable::Aux(datamodel::Aux {
+            ident: "arr".to_string(),
+            equation: datamodel::Equation::Arrayed(
+                vec!["dim".to_string()],
+                vec![
+                    ("a".to_string(), "foo".to_string(), None, None),
+                    ("b".to_string(), "bar".to_string(), None, None),
+                ],
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Public,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        });
+        let idents: HashSet<String> = ["arr", "foo", "bar"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let mut deps = extract_equation_deps(&var, &idents);
+        deps.sort();
+        assert_eq!(deps, vec!["bar", "foo"]);
     }
 
     #[test]
@@ -3425,36 +3543,6 @@ mod tests {
             .filter(|e| matches!(e, ViewElement::Aux(_)))
             .count();
         assert_eq!(aux_count, 2, "only non-module variables should be rendered");
-    }
-
-    #[test]
-    fn test_extract_equation_deps_arrayed_uses_all_entries() {
-        let var = datamodel::Variable::Aux(datamodel::Aux {
-            ident: "arr".to_string(),
-            equation: datamodel::Equation::Arrayed(
-                vec!["dim".to_string()],
-                vec![
-                    ("a".to_string(), "foo".to_string(), None, None),
-                    ("b".to_string(), "bar".to_string(), None, None),
-                ],
-            ),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Public,
-            compat: datamodel::Compat::default(),
-            ai_state: None,
-            uid: None,
-        });
-        let idents: HashSet<String> = ["arr", "foo", "bar"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        let mut deps = extract_equation_deps(&var, &idents);
-        deps.sort();
-        assert_eq!(deps, vec!["bar", "foo"]);
     }
 
     #[test]
@@ -3924,6 +4012,14 @@ mod tests {
         assert!(
             !metadata.constants.contains("births"),
             "births should not be classified as a constant",
+        );
+
+        // population should also depend on births via structural inflows
+        let pop_deps = metadata.dep_graph.get("population").unwrap();
+        assert!(
+            pop_deps.contains("births"),
+            "population should depend on births via structural inflows, got: {:?}",
+            pop_deps,
         );
     }
 

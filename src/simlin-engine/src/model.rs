@@ -1086,6 +1086,28 @@ pub fn resolve_non_private_dependencies(
     resolved
 }
 
+/// Extract the incoming links (dependencies) for a variable using its AST.
+///
+/// Returns `None` if the variable doesn't exist. Returns `Some(empty set)`
+/// for variables with no AST (e.g. per-variable compilation errors).
+/// Private/synthetic dependencies are resolved to their public sources.
+pub fn get_incoming_links(
+    model: &ModelStage1,
+    var_ident: &Ident<Canonical>,
+) -> Option<HashSet<Ident<Canonical>>> {
+    let var = model.variables.get(var_ident)?;
+    let raw_deps = match var {
+        Variable::Stock {
+            init_ast: Some(ast),
+            ..
+        } => identifier_set(ast, &[], None),
+        Variable::Var { ast: Some(ast), .. } => identifier_set(ast, &[], None),
+        Variable::Module { inputs, .. } => inputs.iter().map(|i| i.src.clone()).collect(),
+        _ => return Some(HashSet::new()),
+    };
+    Some(resolve_non_private_dependencies(model, raw_deps))
+}
+
 #[test]
 fn test_module_dependency() {
     let lynxes_model = x_model(
@@ -1120,6 +1142,41 @@ fn test_module_dependency() {
     ]
     .into_iter()
     .collect();
+}
+
+#[test]
+fn test_get_incoming_links_basic() {
+    let dm_model = x_model(
+        "test",
+        vec![
+            x_aux("rate", "0.1", None),
+            x_stock("population", "100", &["births"], &[], None),
+            x_flow("births", "population * rate", None),
+        ],
+    );
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![dm_model],
+        source: None,
+        ai_information: None,
+    };
+    let compiled = crate::project::Project::from(project);
+    let model = compiled.models.get(&Ident::new("test")).unwrap();
+
+    // "births" depends on "population" and "rate"
+    let births_deps = get_incoming_links(model, &Ident::new("births")).unwrap();
+    assert!(births_deps.contains(&Ident::new("population")));
+    assert!(births_deps.contains(&Ident::new("rate")));
+
+    // "rate" has no dependencies (constant)
+    let rate_deps = get_incoming_links(model, &Ident::new("rate")).unwrap();
+    assert!(rate_deps.is_empty());
+
+    // non-existent variable returns None
+    assert!(get_incoming_links(model, &Ident::new("nonexistent")).is_none());
 }
 
 #[test]
