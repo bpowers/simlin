@@ -151,9 +151,14 @@ fn to_lower_space_unicode(s: &str) -> String {
         }
     }
 
-    // Strip trailing whitespace in-place
-    let trimmed_len = result.trim_end_matches([' ', '_', '\t', '\n', '\r']).len();
-    result.truncate(trimmed_len);
+    // Strip trailing collapsed whitespace. After the main loop the only
+    // TLS-whitespace character that can appear in the result is ' ' (from
+    // collapsing). Raw '_', '\t', '\n', '\r' have already been consumed by
+    // the collapsing step, so we must NOT trim them here -- the only '_'
+    // that survives is part of an escaped "\_" sequence.
+    while result.ends_with(' ') {
+        result.pop();
+    }
 
     result
 }
@@ -569,6 +574,16 @@ mod tests {
         assert_eq!(to_lower_space("Café"), "café");
         assert_eq!(to_lower_space("NAÏVE"), "naïve");
         assert_eq!(to_lower_space("Über"), "über");
+    }
+
+    #[test]
+    fn test_to_lower_space_trailing_escaped_underscore() {
+        // Escaped underscore at end of string must be preserved identically
+        // regardless of whether the input takes the ASCII or Unicode path.
+        let ascii = to_lower_space("a\\_");
+        let unicode = to_lower_space("é\\_");
+        assert_eq!(ascii, "a\\_");
+        assert_eq!(unicode, "é\\_");
     }
 
     #[test]
