@@ -502,6 +502,126 @@ describe('WorkerBackend', () => {
     });
   });
 
+  describe('postMessage error handling', () => {
+    test('post throwing rejects the request and advances the queue', async () => {
+      let backendOnMessage: ((msg: WorkerResponse) => void) | null = null;
+      let callCount = 0;
+
+      const server = new WorkerServer((msg: WorkerResponse) => {
+        if (backendOnMessage) {
+          setTimeout(() => backendOnMessage!(msg), 0);
+        }
+      });
+
+      const backend = new WorkerBackend(
+        (msg: WorkerRequest) => {
+          callCount++;
+          if (callCount === 2) {
+            // Second postMessage call throws (simulating DataCloneError)
+            throw new Error('DataCloneError: could not clone');
+          }
+          setTimeout(() => server.handleMessage(msg), 0);
+        },
+        (callback: (msg: WorkerResponse) => void) => {
+          backendOnMessage = callback;
+        },
+      );
+
+      await backend.init(loadWasmSource());
+
+      const data = loadTestXmile();
+      // This is the call that will throw (callCount becomes 2)
+      const failingOp = backend.projectOpenXmile(data);
+      await expect(failingOp).rejects.toThrow(/DataCloneError/);
+
+      // The queue should NOT be stuck. Subsequent operations should work.
+      const handle = await backend.projectOpenXmile(data);
+      const count = await backend.projectGetModelCount(handle);
+      expect(count).toBe(1);
+    });
+
+    test('post throwing during queued operation does not break subsequent ops', async () => {
+      let backendOnMessage: ((msg: WorkerResponse) => void) | null = null;
+      let callCount = 0;
+
+      const server = new WorkerServer((msg: WorkerResponse) => {
+        if (backendOnMessage) {
+          setTimeout(() => backendOnMessage!(msg), 0);
+        }
+      });
+
+      const backend = new WorkerBackend(
+        (msg: WorkerRequest) => {
+          callCount++;
+          if (callCount === 3) {
+            throw new Error('transfer failed');
+          }
+          setTimeout(() => server.handleMessage(msg), 0);
+        },
+        (callback: (msg: WorkerResponse) => void) => {
+          backendOnMessage = callback;
+        },
+      );
+
+      await backend.init(loadWasmSource());
+
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+
+      // This queued op will fail when it tries to post
+      const failingOp = backend.projectGetModelCount(handle);
+      await expect(failingOp).rejects.toThrow(/transfer failed/);
+
+      // Queue should recover
+      const count = await backend.projectGetModelCount(handle);
+      expect(count).toBe(1);
+    });
+  });
+
+  describe('worker error handling', () => {
+    test('handleWorkerError rejects pending request', async () => {
+      const backend = new WorkerBackend(
+        (_msg: WorkerRequest) => {
+          // Don't deliver - simulates worker dying
+        },
+        (_callback: (msg: WorkerResponse) => void) => {},
+      );
+
+      const op1 = backend.init(loadWasmSource());
+
+      // Let microtasks drain so init's sendRequest actually submits
+      await new Promise((r) => setTimeout(r, 0));
+
+      backend.handleWorkerError(new Error('WASM trap: unreachable'));
+
+      await expect(op1).rejects.toThrow(/WASM trap/);
+    });
+
+    test('handleWorkerError rejects queued requests too', async () => {
+      const backend = new WorkerBackend(
+        (_msg: WorkerRequest) => {
+          // Don't deliver
+        },
+        (_callback: (msg: WorkerResponse) => void) => {},
+      );
+
+      const op1 = backend.init(loadWasmSource());
+
+      // Let microtasks drain so init becomes the active request
+      await new Promise((r) => setTimeout(r, 0));
+
+      // These go into the queue behind init (which is still pending)
+      const op2 = backend.projectOpenXmile(loadTestXmile());
+      const op3 = backend.projectOpenXmile(loadTestXmile());
+
+      backend.handleWorkerError(new Error('worker died'));
+
+      await expect(op1).rejects.toThrow(/worker died/);
+      await expect(op2).rejects.toThrow(/worker died/);
+      await expect(op3).rejects.toThrow(/worker died/);
+    });
+  });
+
   describe('delayed server (race condition regression)', () => {
     /**
      * Simulates the real-world race condition from the async WASM module bug:

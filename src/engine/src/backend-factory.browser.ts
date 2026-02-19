@@ -25,7 +25,7 @@ function createWorkerBackend(): WorkerBackend {
   });
   sharedWorker = worker;
 
-  return new WorkerBackend(
+  const backend = new WorkerBackend(
     (msg: WorkerRequest, transfer?: Transferable[]) => {
       if (transfer && transfer.length > 0) {
         worker.postMessage(msg, transfer);
@@ -39,6 +39,17 @@ function createWorkerBackend(): WorkerBackend {
       };
     },
   );
+
+  worker.onerror = (event: ErrorEvent) => {
+    event.preventDefault();
+    const error = new Error(`Worker error: ${event.message}`);
+    backend.handleWorkerError(error);
+    sharedBackend = null;
+    sharedWorker = null;
+    worker.terminate();
+  };
+
+  return backend;
 }
 
 export function getBackend(): EngineBackend {

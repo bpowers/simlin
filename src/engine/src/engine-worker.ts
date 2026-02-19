@@ -44,24 +44,53 @@ workerSelf.onmessage = (event: MessageEvent) => {
   }
 };
 
-import('./worker-server').then(({ WorkerServer }) => {
-  const server = new WorkerServer((msg: WorkerResponse, transfer?: Transferable[]) => {
-    if (transfer && transfer.length > 0) {
-      workerSelf.postMessage(msg, transfer);
-    } else {
-      workerSelf.postMessage(msg);
+import('./worker-server')
+  .then(({ WorkerServer }) => {
+    const server = new WorkerServer((msg: WorkerResponse, transfer?: Transferable[]) => {
+      if (transfer && transfer.length > 0) {
+        workerSelf.postMessage(msg, transfer);
+      } else {
+        workerSelf.postMessage(msg);
+      }
+    });
+
+    // Replay any messages that arrived while we were loading.
+    const buffered = pendingMessages!;
+    pendingMessages = null;
+    for (const msg of buffered) {
+      server.handleMessage(msg);
     }
+
+    // All future messages go directly to the server.
+    workerSelf.onmessage = (event: MessageEvent) => {
+      server.handleMessage(event.data);
+    };
+  })
+  .catch((err: unknown) => {
+    // If the dynamic import fails (e.g. WASM binary can't be loaded),
+    // reject all buffered messages so the main thread's queue doesn't hang.
+    const buffered = pendingMessages ?? [];
+    pendingMessages = null;
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    for (const msg of buffered) {
+      const req = msg as { requestId?: number };
+      if (typeof req.requestId === 'number') {
+        workerSelf.postMessage({
+          type: 'error',
+          requestId: req.requestId,
+          error: { name: 'Error', message: `Worker initialization failed: ${errorMsg}` },
+        });
+      }
+    }
+    // Future messages also get an error response.
+    workerSelf.onmessage = (event: MessageEvent) => {
+      const req = event.data as { requestId?: number };
+      if (typeof req.requestId === 'number') {
+        workerSelf.postMessage({
+          type: 'error',
+          requestId: req.requestId,
+          error: { name: 'Error', message: `Worker initialization failed: ${errorMsg}` },
+        });
+      }
+    };
   });
-
-  // Replay any messages that arrived while we were loading.
-  const buffered = pendingMessages!;
-  pendingMessages = null;
-  for (const msg of buffered) {
-    server.handleMessage(msg);
-  }
-
-  // All future messages go directly to the server.
-  workerSelf.onmessage = (event: MessageEvent) => {
-    server.handleMessage(event.data);
-  };
-});

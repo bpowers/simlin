@@ -94,8 +94,14 @@ export class WorkerBackend implements EngineBackend {
               this.processNext();
             },
           });
-          const msg = buildMessage(requestId);
-          this._post(msg, transfer);
+          try {
+            const msg = buildMessage(requestId);
+            this._post(msg, transfer);
+          } catch (err) {
+            this._pending.delete(requestId);
+            reject(err instanceof Error ? err : new Error(String(err)));
+            this.processNext();
+          }
         },
         reject,
       });
@@ -204,6 +210,28 @@ export class WorkerBackend implements EngineBackend {
       requestId,
     }));
     this._initialized = false;
+  }
+
+  /**
+   * Handle an unrecoverable worker error (WASM trap, uncaught exception).
+   * Rejects all pending and queued requests with the given error.
+   * Unlike terminate(), this does NOT set _terminated, so the backend
+   * can potentially be reused after the caller replaces the worker.
+   */
+  handleWorkerError(error: Error): void {
+    this._initialized = false;
+    this._initializing = false;
+    this._processing = false;
+
+    for (const [, pending] of this._pending) {
+      pending.reject(error);
+    }
+    this._pending.clear();
+
+    for (const entry of this._queue) {
+      entry.reject(error);
+    }
+    this._queue = [];
   }
 
   /**
