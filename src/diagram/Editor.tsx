@@ -1183,7 +1183,17 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
 
     const elements = view.elements.map((el) => updatedElements.get(el.uid) ?? el);
-    await this.updateView({ ...view, elements });
+    const newView = { ...view, elements };
+
+    // Optimistic update: apply moved positions to state immediately.
+    // Canvas clears its visual moveDelta offset synchronously after calling
+    // this handler, so without this update there would be a flash where
+    // elements render at old positions while the async engine round-trip
+    // (applyPatch + serialize) completes.
+    this.setView(newView);
+    this.setState({ projectVersion: this.state.projectVersion + 0.001 });
+
+    await this.updateView(newView);
   };
 
   handleDrawerToggle = (isOpen: boolean) => {

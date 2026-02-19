@@ -1539,4 +1539,85 @@ describe('Link arc adjustment during group movement', () => {
       expect(movedFlow2.y).toBe(210);
     });
   });
+
+  describe('View reconstruction pattern (handleSelectionMove)', () => {
+    // This tests the exact pattern used by Editor.handleSelectionMove to
+    // reconstruct the view element array from applyGroupMovement results.
+    // The pattern is: view.elements.map(el => updatedElements.get(el.uid) ?? el)
+    // This must produce an array where selected elements have new positions
+    // and unselected elements retain their original positions.
+
+    it('should produce a complete element array with moved positions for selected elements', () => {
+      const aux1 = makeAux(1, 100, 100);
+      const aux2 = makeAux(2, 200, 200);
+      const aux3 = makeAux(3, 300, 300);
+      const viewElements: readonly ViewElement[] = [aux1, aux2, aux3];
+
+      const selection = new Set<UID>([1, 3]);
+      const delta = { x: -10, y: -20 };
+
+      const { updatedElements } = applyGroupMovement({
+        elements: viewElements,
+        selection,
+        delta,
+      });
+
+      // Reconstruct the view array using the same pattern as handleSelectionMove
+      const elements = viewElements.map((el) => updatedElements.get(el.uid) ?? el);
+
+      expect(elements).toHaveLength(3);
+
+      // Selected elements should have moved positions
+      const moved1 = elements[0] as AuxViewElement;
+      expect(moved1.uid).toBe(1);
+      expect(moved1.x).toBe(110);
+      expect(moved1.y).toBe(120);
+
+      const moved3 = elements[2] as AuxViewElement;
+      expect(moved3.uid).toBe(3);
+      expect(moved3.x).toBe(310);
+      expect(moved3.y).toBe(320);
+
+      // Unselected element should retain original position
+      const unmoved2 = elements[1] as AuxViewElement;
+      expect(unmoved2.uid).toBe(2);
+      expect(unmoved2.x).toBe(200);
+      expect(unmoved2.y).toBe(200);
+    });
+
+    it('should produce correct positions for stock with attached flows', () => {
+      const stock = makeStock(1, 100, 100, [2], []);
+      const cloud = makeCloud(3, 2, 50, 100);
+      const flow = makeFlow(2, 75, 100, [
+        { x: 50, y: 100, attachedToUid: 3 },
+        { x: 100 - StockWidth / 2, y: 100, attachedToUid: 1 },
+      ]);
+      const aux = makeAux(4, 300, 300);
+      const viewElements: readonly ViewElement[] = [stock, flow, cloud, aux];
+
+      // Select only the stock -- flow endpoints attached to it should adjust
+      const selection = new Set<UID>([1]);
+      const delta = { x: -20, y: -10 };
+
+      const { updatedElements } = applyGroupMovement({
+        elements: viewElements,
+        selection,
+        delta,
+      });
+
+      const elements = viewElements.map((el) => updatedElements.get(el.uid) ?? el);
+
+      expect(elements).toHaveLength(4);
+
+      // Stock should have moved
+      const movedStock = elements[0] as StockViewElement;
+      expect(movedStock.x).toBe(120);
+      expect(movedStock.y).toBe(110);
+
+      // Unselected aux should not have moved
+      const unmovedAux = elements[3] as AuxViewElement;
+      expect(unmovedAux.x).toBe(300);
+      expect(unmovedAux.y).toBe(300);
+    });
+  });
 });
