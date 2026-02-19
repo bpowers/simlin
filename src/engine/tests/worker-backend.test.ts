@@ -621,7 +621,7 @@ describe('WorkerBackend', () => {
       await expect(op3).rejects.toThrow(/worker died/);
     });
 
-    test('terminate after handleWorkerError rejects stale references immediately', async () => {
+    test('handleWorkerError rejects new requests on stale references', async () => {
       const backend = new WorkerBackend(
         (_msg: WorkerRequest) => {},
         (_callback: (msg: WorkerResponse) => void) => {},
@@ -631,11 +631,12 @@ describe('WorkerBackend', () => {
       await new Promise((r) => setTimeout(r, 0));
 
       backend.handleWorkerError(new Error('WASM trap'));
-      backend.terminate();
 
       await expect(op1).rejects.toThrow(/WASM trap/);
 
-      // New requests on the stale reference should be immediately rejected
+      // handleWorkerError alone should reject new requests immediately --
+      // callers holding a stale reference must not be able to enqueue work
+      // on a dead worker.
       await expect(backend.projectOpenXmile(loadTestXmile())).rejects.toThrow(/terminated/i);
     });
   });

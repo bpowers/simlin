@@ -214,11 +214,13 @@ export class WorkerBackend implements EngineBackend {
 
   /**
    * Handle an unrecoverable worker error (WASM trap, uncaught exception).
-   * Rejects all pending and queued requests with the given error.
-   * Unlike terminate(), this does NOT set _terminated, so the backend
-   * can potentially be reused after the caller replaces the worker.
+   * Rejects all pending and queued requests with the given error and marks
+   * the backend as terminated so stale references (callers that captured
+   * the backend before the factory nulled the singleton) immediately reject
+   * instead of posting to a dead worker.
    */
   handleWorkerError(error: Error): void {
+    this._terminated = true;
     this._initialized = false;
     this._initializing = false;
     this._processing = false;
