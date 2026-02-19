@@ -42,10 +42,76 @@ fn strip_quotes(s: &str) -> &str {
 pub fn to_lower_space(s: &str) -> String {
     let s = strip_quotes(s);
 
+    // ASCII fast path: all whitespace and escaped-underscore checks involve
+    // only ASCII characters, so we can process entirely at the byte level
+    // and avoid char decoding and Peekable overhead.
+    if s.is_ascii() {
+        return to_lower_space_ascii(s.as_bytes());
+    }
+
+    to_lower_space_unicode(s)
+}
+
+/// ASCII-only fast path for `to_lower_space`. Processes bytes directly.
+fn to_lower_space_ascii(bytes: &[u8]) -> String {
+    let mut result = Vec::with_capacity(bytes.len());
+    let len = bytes.len();
+
+    // Skip leading whitespace
+    let mut i = 0;
+    while i < len && is_tls_whitespace_byte(bytes[i]) {
+        i += 1;
+    }
+
+    // Process bytes
+    while i < len {
+        let b = bytes[i];
+
+        // Escaped underscore: \_
+        if b == b'\\' && i + 1 < len && bytes[i + 1] == b'_' {
+            result.push(b'\\');
+            result.push(b'_');
+            i += 2;
+            continue;
+        }
+
+        // Whitespace collapse
+        if is_tls_whitespace_byte(b) {
+            while i + 1 < len && is_tls_whitespace_byte(bytes[i + 1]) {
+                i += 1;
+            }
+            result.push(b' ');
+            i += 1;
+            continue;
+        }
+
+        result.push(b.to_ascii_lowercase());
+        i += 1;
+    }
+
+    // Strip trailing whitespace
+    while result.last() == Some(&b' ') {
+        result.pop();
+    }
+
+    // Input was ASCII and we only wrote ASCII lowercase bytes, so this is
+    // always valid UTF-8, but the crate forbids unsafe so we use the
+    // infallible conversion that rechecks.
+    String::from_utf8(result).unwrap()
+}
+
+/// Byte-level equivalent of `is_tls_whitespace` for the ASCII fast path.
+#[inline(always)]
+fn is_tls_whitespace_byte(b: u8) -> bool {
+    b == b' ' || b == b'_' || b == b'\t' || b == b'\n' || b == b'\r'
+}
+
+/// Unicode slow path for `to_lower_space`.
+fn to_lower_space_unicode(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
 
-    // Step 2: Skip leading whitespace
+    // Skip leading whitespace
     while let Some(&c) = chars.peek() {
         if !is_tls_whitespace(c) {
             break;
@@ -53,7 +119,7 @@ pub fn to_lower_space(s: &str) -> String {
         chars.next();
     }
 
-    // Step 3: Process characters with inline lowercasing
+    // Process characters with inline lowercasing
     while let Some(c) = chars.next() {
         // Escaped underscore: \_
         if c == '\\' && chars.peek() == Some(&'_') {
@@ -85,7 +151,7 @@ pub fn to_lower_space(s: &str) -> String {
         }
     }
 
-    // Step 4: Strip trailing whitespace in-place
+    // Strip trailing whitespace in-place
     let trimmed_len = result.trim_end_matches([' ', '_', '\t', '\n', '\r']).len();
     result.truncate(trimmed_len);
 
@@ -480,6 +546,29 @@ mod tests {
     #[test]
     fn test_to_lower_space_non_ascii() {
         assert_eq!(to_lower_space("Foo\u{00B7}Bar"), "foo\u{00b7}bar");
+    }
+
+    #[test]
+    fn test_to_lower_space_ascii_fast_path() {
+        // Pure ASCII inputs that exercise the byte-level fast path
+        assert_eq!(to_lower_space("ABC"), "abc");
+        assert_eq!(to_lower_space("IF_THEN_ELSE"), "if then else");
+        assert_eq!(to_lower_space("  foo  "), "foo");
+        assert_eq!(to_lower_space("__bar__"), "bar");
+        assert_eq!(to_lower_space("a\t\tb\tc"), "a b c");
+        assert_eq!(to_lower_space("foo\\_bar"), "foo\\_bar");
+        assert_eq!(to_lower_space("\"QUOTED\""), "quoted");
+        assert_eq!(to_lower_space("x"), "x");
+        assert_eq!(to_lower_space(""), "");
+        assert_eq!(to_lower_space("   "), "");
+    }
+
+    #[test]
+    fn test_to_lower_space_unicode_slow_path() {
+        // Non-ASCII inputs that must go through the Unicode path
+        assert_eq!(to_lower_space("Café"), "café");
+        assert_eq!(to_lower_space("NAÏVE"), "naïve");
+        assert_eq!(to_lower_space("Über"), "über");
     }
 
     #[test]

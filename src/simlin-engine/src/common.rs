@@ -259,16 +259,38 @@ fn is_canonical(name: &str) -> bool {
         return false;
     }
 
+    // ASCII fast path: avoid char iteration and Unicode to_lowercase() entirely.
+    // The vast majority of identifiers are pure ASCII, so this is the common case.
+    if name.is_ascii() {
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            match b {
+                b'"' | b'.' | b' ' | b'\n' | b'\r' | b'\t' => return false,
+                b'\\' => {
+                    if i + 1 < bytes.len() {
+                        let next = bytes[i + 1];
+                        if next == b'\\' || next == b'n' || next == b'r' {
+                            return false;
+                        }
+                    }
+                }
+                b if b.is_ascii_uppercase() => return false,
+                _ => {}
+            }
+            i += 1;
+        }
+        return true;
+    }
+
+    // Unicode slow path: handles non-ASCII characters like middle dots,
+    // titlecase letters, etc.
     let mut chars = name.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            // Quotes would trigger the quoted-part stripping path
             '"' => return false,
-            // Unquoted periods become middle dots
             '.' => return false,
-            // Whitespace characters become underscores
             ' ' | '\n' | '\r' | '\t' | '\u{00A0}' => return false,
-            // Consecutive backslashes get collapsed
             '\\' => {
                 if let Some(&next) = chars.peek()
                     && (next == '\\' || next == 'n' || next == 'r')
@@ -386,6 +408,43 @@ fn test_is_canonical() {
     assert!(!is_canonical("trailing "));
     assert!(!is_canonical("a\tb"));
     assert!(!is_canonical("\ttab"));
+}
+
+#[test]
+fn test_is_canonical_ascii_fast_path() {
+    // Pure ASCII canonical names -- hit the byte-level fast path
+    assert!(is_canonical("x"));
+    assert!(is_canonical("abc_def_123"));
+    assert!(is_canonical("rate"));
+    assert!(is_canonical("a\\b")); // single backslash not followed by \, n, or r
+
+    // Pure ASCII non-canonical -- fast path must still reject
+    assert!(!is_canonical("ABC"));
+    assert!(!is_canonical("camelCase"));
+    assert!(!is_canonical("a.b"));
+    assert!(!is_canonical("\"q\""));
+    assert!(!is_canonical("a\\\\b"));
+    assert!(!is_canonical("a\\nb"));
+    assert!(!is_canonical("a\\rb"));
+    assert!(!is_canonical("a b"));
+    assert!(!is_canonical("a\tb"));
+    assert!(!is_canonical("a\nb"));
+    assert!(!is_canonical("a\rb"));
+}
+
+#[test]
+fn test_is_canonical_unicode_slow_path() {
+    // Non-ASCII canonical names -- must fall through to the Unicode path
+    assert!(is_canonical("café"));
+    assert!(is_canonical("naïve"));
+    assert!(is_canonical("model·variable"));
+
+    // Non-ASCII with uppercase Unicode -- Unicode path must reject
+    assert!(!is_canonical("Ünter"));
+    // Titlecase letter (not uppercase, but to_lowercase changes it)
+    assert!(!is_canonical("ǅ"));
+    // NBSP triggers whitespace rejection
+    assert!(!is_canonical("a\u{00A0}b"));
 }
 
 #[test]
