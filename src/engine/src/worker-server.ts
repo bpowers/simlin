@@ -503,7 +503,7 @@ export class WorkerServer {
    * transfer the WASM heap ArrayBuffer.
    */
   private sendBytesWithTransfer(requestId: number, result: Uint8Array): void {
-    const safe = this.detachableBytes(result);
+    const safe = this.detachable(result);
     this.postMessage({ type: 'success', requestId, result: safe }, [safe.buffer as ArrayBuffer]);
   }
 
@@ -511,20 +511,18 @@ export class WorkerServer {
    * Send a Float64Array result with zero-copy transfer.
    */
   private sendFloat64WithTransfer(requestId: number, result: Float64Array): void {
-    const safe = this.detachableFloat64(result);
+    const safe = this.detachable(result);
     this.postMessage({ type: 'success', requestId, result: safe }, [safe.buffer as ArrayBuffer]);
   }
 
-  private detachableBytes(view: Uint8Array): Uint8Array {
+  /**
+   * Ensure a typed array's buffer is independently owned (not a view
+   * into a larger allocation like WASM linear memory) so it can be
+   * safely transferred via postMessage without detaching shared memory.
+   */
+  private detachable<T extends Uint8Array | Float64Array>(view: T): T {
     if (view.buffer.byteLength !== view.byteLength || view.byteOffset !== 0) {
-      return view.slice();
-    }
-    return view;
-  }
-
-  private detachableFloat64(view: Float64Array): Float64Array {
-    if (view.buffer.byteLength !== view.byteLength || view.byteOffset !== 0) {
-      return view.slice();
+      return view.slice() as T;
     }
     return view;
   }

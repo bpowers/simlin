@@ -620,6 +620,24 @@ describe('WorkerBackend', () => {
       await expect(op2).rejects.toThrow(/worker died/);
       await expect(op3).rejects.toThrow(/worker died/);
     });
+
+    test('terminate after handleWorkerError rejects stale references immediately', async () => {
+      const backend = new WorkerBackend(
+        (_msg: WorkerRequest) => {},
+        (_callback: (msg: WorkerResponse) => void) => {},
+      );
+
+      const op1 = backend.init(loadWasmSource());
+      await new Promise((r) => setTimeout(r, 0));
+
+      backend.handleWorkerError(new Error('WASM trap'));
+      backend.terminate();
+
+      await expect(op1).rejects.toThrow(/WASM trap/);
+
+      // New requests on the stale reference should be immediately rejected
+      await expect(backend.projectOpenXmile(loadTestXmile())).rejects.toThrow(/terminated/i);
+    });
   });
 
   describe('delayed server (race condition regression)', () => {

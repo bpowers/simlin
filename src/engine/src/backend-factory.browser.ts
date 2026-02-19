@@ -44,6 +44,10 @@ function createWorkerBackend(): WorkerBackend {
     event.preventDefault();
     const error = new Error(`Worker error: ${event.message}`);
     backend.handleWorkerError(error);
+    // Mark the backend as terminated so stale references (callers that
+    // captured the old backend before sharedBackend was nulled) get an
+    // immediate "terminated" rejection instead of posting to a dead worker.
+    backend.terminate();
     sharedBackend = null;
     sharedWorker = null;
     worker.terminate();
