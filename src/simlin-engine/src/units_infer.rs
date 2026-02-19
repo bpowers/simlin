@@ -140,42 +140,114 @@ fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
     if inverse { lhs.reciprocal() } else { lhs }
 }
 
-fn substitute(
-    var: &str,
-    units: &UnitMap,
-    subst_sources: &[ConstraintSource],
+/// Maintains a `Vec<LocatedConstraint>` with an inverted index from metavar
+/// names to constraint indices, so that `substitute` only visits constraints
+/// that actually contain the target metavar.
+#[derive(Default)]
+struct ConstraintSet {
     constraints: Vec<LocatedConstraint>,
-) -> Vec<LocatedConstraint> {
-    constraints
-        .into_iter()
-        .map(|mut c| {
-            if let Some(exponent) = c.unit_map.map.remove(var) {
-                // Scale the units by the exponent magnitude.
-                // For example, if @x = seconds and we're substituting into @x^2,
-                // we need seconds^2, not just seconds.
-                let scaled_units = units.clone().exp(exponent.abs());
+    /// Maps metavar name (keys starting with '@') to indices in `constraints`.
+    metavar_index: HashMap<String, Vec<usize>>,
+}
 
-                let op = if exponent > 0 {
-                    UnitOp::Mul
-                } else {
-                    UnitOp::Div
-                };
-                c.unit_map = combine(op, c.unit_map, scaled_units);
-
-                // Merge sources from the substitution
-                for source in subst_sources {
-                    if !c
-                        .sources
-                        .iter()
-                        .any(|s| s.var == source.var && s.loc == source.loc)
-                    {
-                        c.sources.push(source.clone());
-                    }
+impl ConstraintSet {
+    fn from_vec(constraints: Vec<LocatedConstraint>) -> Self {
+        let mut metavar_index: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, c) in constraints.iter().enumerate() {
+            for key in c.unit_map.map.keys() {
+                if key.starts_with('@') {
+                    metavar_index.entry(key.clone()).or_default().push(i);
                 }
             }
-            c
-        })
-        .collect()
+        }
+        ConstraintSet {
+            constraints,
+            metavar_index,
+        }
+    }
+
+    fn pop(&mut self) -> Option<LocatedConstraint> {
+        let c = self.constraints.pop()?;
+        let idx = self.constraints.len();
+        for key in c.unit_map.map.keys() {
+            if key.starts_with('@')
+                && let Some(indices) = self.metavar_index.get_mut(key)
+            {
+                // The popped element is always the last, so its index
+                // is the largest value in the Vec -- just pop it.
+                if indices.last() == Some(&idx) {
+                    indices.pop();
+                } else {
+                    indices.retain(|&i| i != idx);
+                }
+                if indices.is_empty() {
+                    self.metavar_index.remove(key);
+                }
+            }
+        }
+        Some(c)
+    }
+
+    fn push(&mut self, c: LocatedConstraint) {
+        let idx = self.constraints.len();
+        for key in c.unit_map.map.keys() {
+            if key.starts_with('@') {
+                self.metavar_index.entry(key.clone()).or_default().push(idx);
+            }
+        }
+        self.constraints.push(c);
+    }
+
+    fn substitute(&mut self, var: &str, units: &UnitMap, subst_sources: &[ConstraintSource]) {
+        let affected = match self.metavar_index.remove(var) {
+            Some(indices) => indices,
+            None => return,
+        };
+        for idx in &affected {
+            let c = &mut self.constraints[*idx];
+            let exponent = match c.unit_map.map.remove(var) {
+                Some(e) => e,
+                None => continue,
+            };
+
+            let scaled_units = if exponent.abs() == 1 {
+                units.clone()
+            } else {
+                units.clone().exp(exponent.abs())
+            };
+
+            let op = if exponent > 0 {
+                UnitOp::Mul
+            } else {
+                UnitOp::Div
+            };
+            let taken = std::mem::take(&mut c.unit_map);
+            c.unit_map = combine(op, taken, scaled_units);
+
+            for source in subst_sources {
+                if !c
+                    .sources
+                    .iter()
+                    .any(|s| s.var == source.var && s.loc == source.loc)
+                {
+                    c.sources.push(source.clone());
+                }
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.constraints.len()
+    }
+
+    #[allow(dead_code)]
+    fn is_empty(&self) -> bool {
+        self.constraints.is_empty()
+    }
+
+    fn into_vec(self) -> Vec<LocatedConstraint> {
+        self.constraints
+    }
 }
 
 /// Splits a UnitMap into its metavariable part (signature) and concrete part (residual).
@@ -667,7 +739,7 @@ impl UnitInferer<'_> {
     #[allow(clippy::type_complexity)]
     fn unify(
         &self,
-        mut constraints: Vec<LocatedConstraint>,
+        constraints: Vec<LocatedConstraint>,
     ) -> std::result::Result<
         (
             HashMap<Ident<Canonical>, UnitMap>,
@@ -678,14 +750,12 @@ impl UnitInferer<'_> {
         let mut resolved_fvs: HashMap<Ident<Canonical>, UnitMap> = HashMap::new();
         // Track sources for each resolved variable in case of conflict
         let mut resolved_sources: HashMap<Ident<Canonical>, Vec<ConstraintSource>> = HashMap::new();
-        let mut final_constraints: Vec<LocatedConstraint> = Vec::with_capacity(constraints.len());
+        let mut pending = ConstraintSet::from_vec(constraints);
+        let mut finalized = ConstraintSet::default();
 
-        // FIXME: I think this is O(n^3) worst case; we could do better
-        //        by maintaining an index of metavar usage -> Units
         loop {
-            let initial_constraint_count = constraints.len();
-            while let Some(c) = constraints.pop() {
-                // dimensionless/identity unit: `1 == 1`; nothing to do
+            let initial_constraint_count = pending.len();
+            while let Some(c) = pending.pop() {
                 if c.is_empty() {
                     continue;
                 }
@@ -693,13 +763,12 @@ impl UnitInferer<'_> {
                     let var = var.to_owned();
                     let units = solve_for(&var, c.unit_map.clone());
                     let sources = c.sources.clone();
-                    constraints = substitute(&var, &units, &sources, constraints);
-                    final_constraints = substitute(&var, &units, &sources, final_constraints);
+                    pending.substitute(&var, &units, &sources);
+                    finalized.substitute(&var, &units, &sources);
                     let var_key = var.strip_prefix('@').unwrap();
                     let var_ident = Ident::<Canonical>::from_str_unchecked(var_key);
                     if let Some(existing_units) = resolved_fvs.get(&var_ident) {
                         if *existing_units != units {
-                            // Combine sources from both the new constraint and the existing one
                             let mut all_sources: Vec<(String, Option<Loc>)> =
                                 c.sources.iter().map(|s| (s.var.clone(), s.loc)).collect();
                             if let Some(existing_sources) = resolved_sources.get(&var_ident) {
@@ -724,17 +793,17 @@ impl UnitInferer<'_> {
                         resolved_sources.insert(var_ident, sources);
                     }
                 } else {
-                    final_constraints.push(c);
+                    finalized.push(c);
                 }
             }
-            // iterate to a fixed point
-            if final_constraints.len() == initial_constraint_count {
+            if finalized.len() == initial_constraint_count {
                 break;
             } else {
-                constraints = std::mem::take(&mut final_constraints);
+                pending = std::mem::take(&mut finalized);
             }
         }
 
+        let final_constraints = finalized.into_vec();
         let final_constraints = if final_constraints.is_empty() {
             None
         } else {
@@ -1412,8 +1481,9 @@ fn test_substitute_handles_higher_exponents() {
         .cloned()
         .collect();
 
-    let constraints = vec![test_constraint(constraint)];
-    let result = substitute(var, &units, &sources, constraints);
+    let mut set = ConstraintSet::from_vec(vec![test_constraint(constraint)]);
+    set.substitute(var, &units, &sources);
+    let result = set.into_vec();
 
     // After substitution: 1 == seconds^2 * meters
     assert_eq!(result.len(), 1);
@@ -1451,8 +1521,9 @@ fn test_substitute_handles_negative_higher_exponents() {
         .cloned()
         .collect();
 
-    let constraints = vec![test_constraint(constraint)];
-    let result = substitute(var, &units, &sources, constraints);
+    let mut set = ConstraintSet::from_vec(vec![test_constraint(constraint)]);
+    set.substitute(var, &units, &sources);
+    let result = set.into_vec();
 
     assert_eq!(result.len(), 1);
     let result_map = &result[0].unit_map;
