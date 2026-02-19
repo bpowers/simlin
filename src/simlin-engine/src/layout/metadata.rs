@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// A stock-flow chain: one or more stocks connected by flows.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub struct StockFlowChain {
     pub stocks: Vec<String>,
     pub flows: Vec<String>,
@@ -15,7 +15,7 @@ pub struct StockFlowChain {
 
 /// A time interval during which a specific set of loops dominates behavior.
 /// Consecutive timesteps with the same dominant loop set are grouped together.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct DominantPeriod {
     /// Start time of this period.
     pub start: f64,
@@ -28,7 +28,7 @@ pub struct DominantPeriod {
 }
 
 /// A feedback loop discovered via LTM analysis.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub struct FeedbackLoop {
     pub name: String,
     pub polarity: LoopPolarity,
@@ -37,7 +37,7 @@ pub struct FeedbackLoop {
     pub dominant_period: Option<DominantPeriod>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum LoopPolarity {
     Reinforcing,
     Balancing,
@@ -61,7 +61,7 @@ impl FeedbackLoop {
 }
 
 /// Pre-computed metadata for driving layout.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub struct ComputedMetadata {
     pub chains: Vec<StockFlowChain>,
     pub feedback_loops: Vec<FeedbackLoop>,
