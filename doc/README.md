@@ -3,7 +3,9 @@
 ## Architecture and Design
 
 - [architecture.md](architecture.md) -- Component descriptions, dependency graph, project structure
+- [design/ltm--loops-that-matter.md](design/ltm--loops-that-matter.md) -- LTM implementation design: data structures, synthetic variables, module handling
 - [design/mdl-parser.md](design/mdl-parser.md) -- Vensim MDL parser design history and implementation notes
+- [design/vdf.md](design/vdf.md) -- VDF binary format reverse-engineering and parser design
 
 ## Development Standards
 
@@ -21,20 +23,15 @@
 
 ## Domain Knowledge
 
-- [xmile-v1.0.html](xmile-v1.0.html) -- XMILE interchange format specification
+- [reference/xmile-v1.0.html](reference/xmile-v1.0.html) -- XMILE interchange format specification
+- [reference/ltm--loops-that-matter.md](reference/ltm--loops-that-matter.md) -- Loops That Matter technique: link scores, loop scores, algorithm reference
 - [array-design.md](array-design.md) -- Array/subscript design notes
-
-## Loops That Matter (LTM)
-
-- [ltm.md](ltm.md) -- Loops That Matter overview
-- [ltm-finding.md](ltm-finding.md) -- LTM loop finding documentation
-- [ltm_modules.md](ltm_modules.md) -- LTM modules documentation
 
 ## Research Papers
 
-- [eberlein2020-finding-the-loops-that-matter.pdf](eberlein2020-finding-the-loops-that-matter.pdf)
-- [schoenberg2020-loops-that-matter.pdf](schoenberg2020-loops-that-matter.pdf)
-- [schoenberg2023-improving-loops-that-matter.pdf](schoenberg2023-improving-loops-that-matter.pdf)
+- [reference/papers/eberlein2020-finding-the-loops-that-matter.pdf](reference/papers/eberlein2020-finding-the-loops-that-matter.pdf)
+- [reference/papers/schoenberg2020-loops-that-matter.pdf](reference/papers/schoenberg2020-loops-that-matter.pdf)
+- [reference/papers/schoenberg2023-improving-loops-that-matter.pdf](reference/papers/schoenberg2023-improving-loops-that-matter.pdf)
 
 ## Schemas
 
@@ -44,4 +41,3 @@
 ## Other
 
 - [population-model.png](population-model.png) -- Population model diagram
-- [xmile-v1.0_files/](xmile-v1.0_files/) -- Supporting images for the XMILE specification
