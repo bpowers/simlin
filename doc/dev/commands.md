@@ -53,11 +53,12 @@ Install: `cargo install cargo-llvm-cov`
 
 Results are saved in `target/criterion/` with HTML reports. See [benchmarks.md](benchmarks.md) for profiling instructions.
 
-## Protobuf
+## Generated Files
 
 | Command | Description |
 |---------|-------------|
 | `pnpm build:gen-protobufs` | Regenerate protobuf bindings (TypeScript + Rust) |
+| `cbindgen --config src/libsimlin/cbindgen.toml --crate simlin --output src/libsimlin/simlin.h` | Regenerate C header from FFI exports |
 
 ## Component-Specific Commands
 
