@@ -225,15 +225,20 @@ export class WorkerBackend implements EngineBackend {
     this._initializing = false;
     this._processing = false;
 
+    // Drain the queue before rejecting pending requests. pending.reject()
+    // calls processNext() which would otherwise dequeue and execute entries
+    // against the dead worker instead of rejecting them directly.
+    const queuedEntries = this._queue;
+    this._queue = [];
+
     for (const [, pending] of this._pending) {
       pending.reject(error);
     }
     this._pending.clear();
 
-    for (const entry of this._queue) {
+    for (const entry of queuedEntries) {
       entry.reject(error);
     }
-    this._queue = [];
   }
 
   /**
@@ -250,17 +255,19 @@ export class WorkerBackend implements EngineBackend {
 
     const error = new Error('WorkerBackend terminated');
 
-    // Reject all pending requests (sent to worker, awaiting response)
+    // Drain the queue before rejecting pending requests (same reason as
+    // handleWorkerError -- pending.reject() calls processNext()).
+    const queuedEntries = this._queue;
+    this._queue = [];
+
     for (const [, pending] of this._pending) {
       pending.reject(error);
     }
     this._pending.clear();
 
-    // Reject all queued requests (not yet sent to worker)
-    for (const entry of this._queue) {
+    for (const entry of queuedEntries) {
       entry.reject(error);
     }
-    this._queue = [];
   }
 
   configureWasm(config: WasmConfig): void {
