@@ -702,4 +702,118 @@ describe('WorkerServer', () => {
       expect(responses.length).toBe(0);
     });
   });
+
+  describe('safe buffer transfers', () => {
+    let sendAndWait: ReturnType<typeof createTestServer>['sendAndWait'];
+    let transfers: Transferable[][];
+
+    beforeEach(async () => {
+      transfers = [];
+      const responses: WorkerResponse[] = [];
+      const pendingResolvers = new Map<number, (resp: WorkerResponse) => void>();
+
+      const server = new WorkerServer((msg: WorkerResponse, transfer?: Transferable[]) => {
+        if (transfer) {
+          transfers.push(transfer);
+        }
+        responses.push(msg);
+        const resolver = pendingResolvers.get(msg.requestId);
+        if (resolver) {
+          pendingResolvers.delete(msg.requestId);
+          resolver(msg);
+        }
+      });
+
+      sendAndWait = (request: WorkerRequest): Promise<WorkerResponse> => {
+        return new Promise<WorkerResponse>((resolve) => {
+          pendingResolvers.set(request.requestId, resolve);
+          server.handleMessage(request);
+        });
+      };
+
+      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
+      const wasmBuffer = fs.readFileSync(wasmPath);
+      await sendAndWait({
+        type: 'init',
+        requestId: nextRequestId(),
+        wasmSource: wasmBuffer.buffer.slice(wasmBuffer.byteOffset, wasmBuffer.byteOffset + wasmBuffer.byteLength),
+      });
+    });
+
+    it('serialized protobuf buffer is independent (not a view into WASM memory)', async () => {
+      const xmile = loadTestXmile();
+      const openResp = await sendAndWait({
+        type: 'projectOpenXmile',
+        requestId: nextRequestId(),
+        data: xmile,
+      });
+      const projectHandle = (openResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
+
+      const resp = await sendAndWait({
+        type: 'projectSerializeProtobuf',
+        requestId: nextRequestId(),
+        handle: projectHandle,
+      });
+      expect(resp.type).toBe('success');
+      const result = (resp as Extract<WorkerResponse, { type: 'success' }>).result as Uint8Array;
+
+      // The result's buffer should own exactly the data (not a view into a larger buffer)
+      expect(result.byteOffset).toBe(0);
+      expect(result.buffer.byteLength).toBe(result.byteLength);
+
+      // Transfer list should contain exactly this buffer
+      expect(transfers.length).toBeGreaterThan(0);
+      const lastTransfer = transfers[transfers.length - 1];
+      expect(lastTransfer.length).toBe(1);
+      expect(lastTransfer[0]).toBe(result.buffer);
+    });
+
+    it('sim series buffer is independent (not a view into WASM memory)', async () => {
+      const xmile = loadTestXmile();
+      const openResp = await sendAndWait({
+        type: 'projectOpenXmile',
+        requestId: nextRequestId(),
+        data: xmile,
+      });
+      const projectHandle = (openResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
+
+      const modelResp = await sendAndWait({
+        type: 'projectGetModel',
+        requestId: nextRequestId(),
+        handle: projectHandle,
+        name: null,
+      });
+      const modelHandle = (modelResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
+
+      const simResp = await sendAndWait({
+        type: 'simNew',
+        requestId: nextRequestId(),
+        modelHandle,
+        enableLtm: false,
+      });
+      const simHandle = (simResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
+
+      await sendAndWait({
+        type: 'simRunToEnd',
+        requestId: nextRequestId(),
+        handle: simHandle,
+      });
+
+      transfers = [];
+      const seriesResp = await sendAndWait({
+        type: 'simGetSeries',
+        requestId: nextRequestId(),
+        handle: simHandle,
+        name: 'teacup_temperature',
+      });
+      expect(seriesResp.type).toBe('success');
+      const series = (seriesResp as Extract<WorkerResponse, { type: 'success' }>).result as Float64Array;
+
+      expect(series.byteOffset).toBe(0);
+      expect(series.buffer.byteLength).toBe(series.byteLength);
+
+      expect(transfers.length).toBe(1);
+      expect(transfers[0][0]).toBe(series.buffer);
+    });
+  });
 });

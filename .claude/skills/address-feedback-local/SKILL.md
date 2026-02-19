@@ -50,10 +50,11 @@ If codex provides ANY suggestions or identifies ANY issues:
 
 ### Step 2: Claude Review
 
-Run claude review using the PR number (from system-reminder or from when you created the PR), running again with a 30-minute timeout:
-```bash
-claude --dangerously-skip-permissions --model 'claude-opus-4-6' -p '/review <PR_NUMBER>'
-```
+Run a Claude code review by launching a sub-agent that invokes the `/review` skill.  Use the Task tool with `subagent_type: "general-purpose"` and a prompt like:
+
+> Use the Skill tool to invoke the "review" skill with argument "<PR_NUMBER>" to review PR #<PR_NUMBER>.
+
+Wait for the sub-agent to complete and use its returned review output.
 
 Think CRITICALLY about the output. Claude's response will include:
 - Positive observations about the code

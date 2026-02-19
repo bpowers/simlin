@@ -273,26 +273,25 @@ export class WorkerServer {
       case 'projectSerializeProtobuf': {
         const handle = this.getProjectHandle(request.handle);
         const result = this.backend.projectSerializeProtobuf(handle);
-        // Transfer the buffer for zero-copy
-        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        this.sendBytesWithTransfer(requestId, result);
         return;
       }
       case 'projectSerializeJson': {
         const handle = this.getProjectHandle(request.handle);
         const result = this.backend.projectSerializeJson(handle, request.format as SimlinJsonFormat);
-        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        this.sendBytesWithTransfer(requestId, result);
         return;
       }
       case 'projectSerializeXmile': {
         const handle = this.getProjectHandle(request.handle);
         const result = this.backend.projectSerializeXmile(handle);
-        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        this.sendBytesWithTransfer(requestId, result);
         return;
       }
       case 'projectRenderSvg': {
         const handle = this.getProjectHandle(request.handle);
         const result = this.backend.projectRenderSvg(handle, request.modelName);
-        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        this.sendBytesWithTransfer(requestId, result);
         return;
       }
       case 'projectGetErrors': {
@@ -342,7 +341,7 @@ export class WorkerServer {
       case 'modelGetVarJson': {
         const handle = this.getModelHandle(request.handle);
         const result = this.backend.modelGetVarJson(handle, request.varName);
-        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        this.sendBytesWithTransfer(requestId, result);
         return;
       }
       case 'modelGetVarNames': {
@@ -353,7 +352,7 @@ export class WorkerServer {
       case 'modelGetSimSpecsJson': {
         const handle = this.getModelHandle(request.handle);
         const result = this.backend.modelGetSimSpecsJson(handle);
-        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        this.sendBytesWithTransfer(requestId, result);
         return;
       }
 
@@ -416,8 +415,7 @@ export class WorkerServer {
       case 'simGetSeries': {
         const handle = this.getSimHandle(request.handle);
         const result = this.backend.simGetSeries(handle, request.name);
-        // Transfer Float64Array buffer for zero-copy
-        this.sendSuccessWithTransfer(requestId, result, [result.buffer as ArrayBuffer]);
+        this.sendFloat64WithTransfer(requestId, result);
         return;
       }
       case 'simGetVarNames': {
@@ -498,8 +496,35 @@ export class WorkerServer {
     this.postMessage({ type: 'success', requestId, result });
   }
 
-  private sendSuccessWithTransfer(requestId: number, result: unknown, transfer: Transferable[]): void {
-    this.postMessage({ type: 'success', requestId, result }, transfer);
+  /**
+   * Send a Uint8Array result with zero-copy transfer.
+   * Slices the data if the typed array's buffer is shared with a larger
+   * allocation (e.g. WASM linear memory), so we never accidentally
+   * transfer the WASM heap ArrayBuffer.
+   */
+  private sendBytesWithTransfer(requestId: number, result: Uint8Array): void {
+    const safe = this.detachable(result);
+    this.postMessage({ type: 'success', requestId, result: safe }, [safe.buffer as ArrayBuffer]);
+  }
+
+  /**
+   * Send a Float64Array result with zero-copy transfer.
+   */
+  private sendFloat64WithTransfer(requestId: number, result: Float64Array): void {
+    const safe = this.detachable(result);
+    this.postMessage({ type: 'success', requestId, result: safe }, [safe.buffer as ArrayBuffer]);
+  }
+
+  /**
+   * Ensure a typed array's buffer is independently owned (not a view
+   * into a larger allocation like WASM linear memory) so it can be
+   * safely transferred via postMessage without detaching shared memory.
+   */
+  private detachable<T extends Uint8Array | Float64Array>(view: T): T {
+    if (view.buffer.byteLength !== view.byteLength || view.byteOffset !== 0) {
+      return view.slice() as T;
+    }
+    return view;
   }
 
   private sendError(requestId: number, err: unknown): void {

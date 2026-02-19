@@ -493,11 +493,225 @@ describe('WorkerBackend', () => {
       await expect(op3).rejects.toThrow(/terminated/i);
     });
 
+    test('terminate does not post queued entries to the dead worker', async () => {
+      const postCalls: WorkerRequest[] = [];
+      let backendOnMessage: ((msg: WorkerResponse) => void) | null = null;
+
+      const server = new WorkerServer((msg: WorkerResponse) => {
+        if (backendOnMessage) {
+          setTimeout(() => backendOnMessage!(msg), 0);
+        }
+      });
+
+      const backend = new WorkerBackend(
+        (msg: WorkerRequest, _transfer?: Transferable[]) => {
+          postCalls.push(msg);
+          setTimeout(() => server.handleMessage(msg), 0);
+        },
+        (callback: (msg: WorkerResponse) => void) => {
+          backendOnMessage = callback;
+        },
+      );
+
+      await backend.init(loadWasmSource());
+
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+
+      // Fire one operation (becomes the active pending request)
+      const op1 = backend.projectGetModelCount(handle);
+      // Queue up more behind it
+      const op2 = backend.projectGetModelNames(handle);
+      const op3 = backend.projectGetErrors(handle);
+
+      const postCountBeforeTerminate = postCalls.length;
+
+      backend.terminate();
+
+      await expect(op1).rejects.toThrow(/terminated/i);
+      await expect(op2).rejects.toThrow(/terminated/i);
+      await expect(op3).rejects.toThrow(/terminated/i);
+
+      // Queued entries (op2, op3) should not have been posted
+      expect(postCalls.length).toBe(postCountBeforeTerminate);
+    });
+
     test('operations after terminate are rejected', async () => {
       const { backend } = createTestPair();
       await backend.init(loadWasmSource());
       backend.terminate();
 
+      await expect(backend.projectOpenXmile(loadTestXmile())).rejects.toThrow(/terminated/i);
+    });
+  });
+
+  describe('postMessage error handling', () => {
+    test('post throwing rejects the request and advances the queue', async () => {
+      let backendOnMessage: ((msg: WorkerResponse) => void) | null = null;
+      let callCount = 0;
+
+      const server = new WorkerServer((msg: WorkerResponse) => {
+        if (backendOnMessage) {
+          setTimeout(() => backendOnMessage!(msg), 0);
+        }
+      });
+
+      const backend = new WorkerBackend(
+        (msg: WorkerRequest) => {
+          callCount++;
+          if (callCount === 2) {
+            // Second postMessage call throws (simulating DataCloneError)
+            throw new Error('DataCloneError: could not clone');
+          }
+          setTimeout(() => server.handleMessage(msg), 0);
+        },
+        (callback: (msg: WorkerResponse) => void) => {
+          backendOnMessage = callback;
+        },
+      );
+
+      await backend.init(loadWasmSource());
+
+      const data = loadTestXmile();
+      // This is the call that will throw (callCount becomes 2)
+      const failingOp = backend.projectOpenXmile(data);
+      await expect(failingOp).rejects.toThrow(/DataCloneError/);
+
+      // The queue should NOT be stuck. Subsequent operations should work.
+      const handle = await backend.projectOpenXmile(data);
+      const count = await backend.projectGetModelCount(handle);
+      expect(count).toBe(1);
+    });
+
+    test('post throwing during queued operation does not break subsequent ops', async () => {
+      let backendOnMessage: ((msg: WorkerResponse) => void) | null = null;
+      let callCount = 0;
+
+      const server = new WorkerServer((msg: WorkerResponse) => {
+        if (backendOnMessage) {
+          setTimeout(() => backendOnMessage!(msg), 0);
+        }
+      });
+
+      const backend = new WorkerBackend(
+        (msg: WorkerRequest) => {
+          callCount++;
+          if (callCount === 3) {
+            throw new Error('transfer failed');
+          }
+          setTimeout(() => server.handleMessage(msg), 0);
+        },
+        (callback: (msg: WorkerResponse) => void) => {
+          backendOnMessage = callback;
+        },
+      );
+
+      await backend.init(loadWasmSource());
+
+      const data = loadTestXmile();
+      const handle = await backend.projectOpenXmile(data);
+
+      // This queued op will fail when it tries to post
+      const failingOp = backend.projectGetModelCount(handle);
+      await expect(failingOp).rejects.toThrow(/transfer failed/);
+
+      // Queue should recover
+      const count = await backend.projectGetModelCount(handle);
+      expect(count).toBe(1);
+    });
+  });
+
+  describe('worker error handling', () => {
+    test('handleWorkerError rejects pending request', async () => {
+      const backend = new WorkerBackend(
+        (_msg: WorkerRequest) => {
+          // Don't deliver - simulates worker dying
+        },
+        (_callback: (msg: WorkerResponse) => void) => {},
+      );
+
+      const op1 = backend.init(loadWasmSource());
+
+      // Let microtasks drain so init's sendRequest actually submits
+      await new Promise((r) => setTimeout(r, 0));
+
+      backend.handleWorkerError(new Error('WASM trap: unreachable'));
+
+      await expect(op1).rejects.toThrow(/WASM trap/);
+    });
+
+    test('handleWorkerError rejects queued requests too', async () => {
+      const backend = new WorkerBackend(
+        (_msg: WorkerRequest) => {
+          // Don't deliver
+        },
+        (_callback: (msg: WorkerResponse) => void) => {},
+      );
+
+      const op1 = backend.init(loadWasmSource());
+
+      // Let microtasks drain so init becomes the active request
+      await new Promise((r) => setTimeout(r, 0));
+
+      // These go into the queue behind init (which is still pending)
+      const op2 = backend.projectOpenXmile(loadTestXmile());
+      const op3 = backend.projectOpenXmile(loadTestXmile());
+
+      backend.handleWorkerError(new Error('worker died'));
+
+      await expect(op1).rejects.toThrow(/worker died/);
+      await expect(op2).rejects.toThrow(/worker died/);
+      await expect(op3).rejects.toThrow(/worker died/);
+    });
+
+    test('handleWorkerError does not post queued entries to the dead worker', async () => {
+      const postCalls: WorkerRequest[] = [];
+      const backend = new WorkerBackend(
+        (msg: WorkerRequest) => {
+          postCalls.push(msg);
+          // Don't deliver -- simulates worker dying
+        },
+        (_callback: (msg: WorkerResponse) => void) => {},
+      );
+
+      const op1 = backend.init(loadWasmSource());
+      await new Promise((r) => setTimeout(r, 0));
+
+      // op1 is now the active (pending) request
+      const postCountBeforeError = postCalls.length;
+      expect(postCountBeforeError).toBe(1);
+
+      // Queue up more operations behind the pending init
+      const op2 = backend.projectOpenXmile(loadTestXmile());
+      const op3 = backend.projectOpenXmile(loadTestXmile());
+
+      backend.handleWorkerError(new Error('worker died'));
+
+      await expect(op1).rejects.toThrow(/worker died/);
+      await expect(op2).rejects.toThrow(/worker died/);
+      await expect(op3).rejects.toThrow(/worker died/);
+
+      // No additional postMessage calls should have been made for the
+      // queued entries -- they should be rejected directly, not executed.
+      expect(postCalls.length).toBe(postCountBeforeError);
+    });
+
+    test('handleWorkerError rejects new requests on stale references', async () => {
+      const backend = new WorkerBackend(
+        (_msg: WorkerRequest) => {},
+        (_callback: (msg: WorkerResponse) => void) => {},
+      );
+
+      const op1 = backend.init(loadWasmSource());
+      await new Promise((r) => setTimeout(r, 0));
+
+      backend.handleWorkerError(new Error('WASM trap'));
+
+      await expect(op1).rejects.toThrow(/WASM trap/);
+
+      // handleWorkerError alone should reject new requests immediately --
+      // callers holding a stale reference must not be able to enqueue work
+      // on a dead worker.
       await expect(backend.projectOpenXmile(loadTestXmile())).rejects.toThrow(/terminated/i);
     });
   });

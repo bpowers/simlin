@@ -168,6 +168,7 @@ export const VALID_REQUEST_TYPES: ReadonlySet<string> = new Set([
   'projectRenderSvg',
   'projectGetErrors',
   'projectApplyPatch',
+  'modelGetName',
   'modelDispose',
   'modelGetIncomingLinks',
   'modelGetLinks',

@@ -94,8 +94,14 @@ export class WorkerBackend implements EngineBackend {
               this.processNext();
             },
           });
-          const msg = buildMessage(requestId);
-          this._post(msg, transfer);
+          try {
+            const msg = buildMessage(requestId);
+            this._post(msg, transfer);
+          } catch (err) {
+            this._pending.delete(requestId);
+            reject(err instanceof Error ? err : new Error(String(err)));
+            this.processNext();
+          }
         },
         reject,
       });
@@ -207,6 +213,35 @@ export class WorkerBackend implements EngineBackend {
   }
 
   /**
+   * Handle an unrecoverable worker error (WASM trap, uncaught exception).
+   * Rejects all pending and queued requests with the given error and marks
+   * the backend as terminated so stale references (callers that captured
+   * the backend before the factory nulled the singleton) immediately reject
+   * instead of posting to a dead worker.
+   */
+  handleWorkerError(error: Error): void {
+    this._terminated = true;
+    this._initialized = false;
+    this._initializing = false;
+    this._processing = false;
+
+    // Drain the queue before rejecting pending requests. pending.reject()
+    // calls processNext() which would otherwise dequeue and execute entries
+    // against the dead worker instead of rejecting them directly.
+    const queuedEntries = this._queue;
+    this._queue = [];
+
+    for (const [, pending] of this._pending) {
+      pending.reject(error);
+    }
+    this._pending.clear();
+
+    for (const entry of queuedEntries) {
+      entry.reject(error);
+    }
+  }
+
+  /**
    * Terminate this backend, rejecting all pending and queued requests.
    * After termination, all new requests will be immediately rejected.
    * Call this before terminating the underlying Worker to prevent
@@ -220,17 +255,19 @@ export class WorkerBackend implements EngineBackend {
 
     const error = new Error('WorkerBackend terminated');
 
-    // Reject all pending requests (sent to worker, awaiting response)
+    // Drain the queue before rejecting pending requests (same reason as
+    // handleWorkerError -- pending.reject() calls processNext()).
+    const queuedEntries = this._queue;
+    this._queue = [];
+
     for (const [, pending] of this._pending) {
       pending.reject(error);
     }
     this._pending.clear();
 
-    // Reject all queued requests (not yet sent to worker)
-    for (const entry of this._queue) {
+    for (const entry of queuedEntries) {
       entry.reject(error);
     }
-    this._queue = [];
   }
 
   configureWasm(config: WasmConfig): void {
