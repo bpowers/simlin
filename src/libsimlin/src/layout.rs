@@ -66,6 +66,17 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
 
     let mut project_locked = proj.project.lock().unwrap();
 
+    // Check model existence up front so we can distinguish "not found"
+    // (DoesNotExist) from internal layout failures (Generic).
+    if project_locked.datamodel.get_model(model_name_str).is_none() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::DoesNotExist)
+                .with_message(format!("model '{}' not found in project", model_name_str)),
+        );
+        return;
+    }
+
     // Preserve existing zoom if the model already has a view
     let existing_zoom = project_locked
         .datamodel
@@ -82,7 +93,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
             Err(msg) => {
                 store_error(
                     out_error,
-                    SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(msg),
+                    SimlinError::new(SimlinErrorCode::Generic).with_message(msg),
                 );
                 return;
             }
@@ -92,16 +103,10 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         layout.zoom = zoom;
     }
 
-    match project_locked.datamodel.get_model_mut(model_name_str) {
-        Some(model) => {
-            model.views = vec![engine::datamodel::View::StockFlow(layout)];
-        }
-        None => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::DoesNotExist)
-                    .with_message(format!("model '{}' not found in project", model_name_str)),
-            );
-        }
-    }
+    // Model existence was verified above, so this should always succeed.
+    let model = project_locked
+        .datamodel
+        .get_model_mut(model_name_str)
+        .unwrap();
+    model.views = vec![engine::datamodel::View::StockFlow(layout)];
 }
