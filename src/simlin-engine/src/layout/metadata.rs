@@ -175,14 +175,28 @@ pub fn calculate_dominant_periods(
             }
         }
 
-        // Pass 2: select dominant loops based on polarity totals
+        // Pass 2: select dominant loops from the winning polarity.
+        // Compare totals first so the larger polarity always wins,
+        // even when both exceed the 0.5 threshold.
         let mut dominant_names: Vec<String> = Vec::new();
         let mut combined = 0.0_f64;
 
-        if reinforcing_sum >= 0.5 {
-            // Accumulate positive-score loops until cumulative >= 0.5
+        let reinforcing_wins = reinforcing_sum >= balancing_sum;
+        let winning_sum = if reinforcing_wins {
+            reinforcing_sum
+        } else {
+            balancing_sum
+        };
+
+        if winning_sum >= 0.5 {
+            // Accumulate loops from winning polarity until cumulative >= 0.5
             for &(name, score) in &scored {
-                if score > 0.0 {
+                let dominated = if reinforcing_wins {
+                    score > 0.0
+                } else {
+                    score < 0.0
+                };
+                if dominated {
                     dominant_names.push(name.to_string());
                     combined += score.abs();
                     if combined >= 0.5 {
@@ -190,18 +204,7 @@ pub fn calculate_dominant_periods(
                     }
                 }
             }
-        } else if balancing_sum >= 0.5 {
-            // Accumulate negative-score loops until cumulative >= 0.5
-            for &(name, score) in &scored {
-                if score < 0.0 {
-                    dominant_names.push(name.to_string());
-                    combined += score.abs();
-                    if combined >= 0.5 {
-                        break;
-                    }
-                }
-            }
-        } else if reinforcing_sum >= balancing_sum {
+        } else if reinforcing_wins {
             // Fallback: use ALL loops from the higher-scoring polarity
             dominant_names = reinforcing_loops.iter().map(|s| s.to_string()).collect();
             combined = reinforcing_sum;
@@ -635,6 +638,50 @@ mod tests {
         let mut names = periods[0].dominant_loops.clone();
         names.sort();
         assert_eq!(names, vec!["R1", "R2"]);
+    }
+
+    #[test]
+    fn test_dominant_periods_picks_larger_polarity_when_both_exceed_threshold() {
+        // Both polarity totals exceed 0.5, but balancing has the larger
+        // aggregate. The winning polarity should be balancing, not
+        // reinforcing.
+        let loops = vec![
+            FeedbackLoop {
+                name: "R1".to_string(),
+                polarity: LoopPolarity::Reinforcing,
+                variables: vec!["a".to_string()],
+                importance_series: vec![0.6],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "B1".to_string(),
+                polarity: LoopPolarity::Balancing,
+                variables: vec!["b".to_string()],
+                importance_series: vec![-0.5],
+                dominant_period: None,
+            },
+            FeedbackLoop {
+                name: "B2".to_string(),
+                polarity: LoopPolarity::Balancing,
+                variables: vec!["c".to_string()],
+                importance_series: vec![-0.4],
+                dominant_period: None,
+            },
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(periods.len(), 1);
+        // Balancing total (0.9) > reinforcing total (0.6), so balancing
+        // should win even though reinforcing also exceeds 0.5.
+        assert!(
+            !periods[0].dominant_loops.contains(&"R1".to_string()),
+            "reinforcing should not dominate when balancing has larger total: {:?}",
+            periods[0].dominant_loops,
+        );
+        assert!(
+            periods[0].dominant_loops.contains(&"B1".to_string()),
+            "B1 should be in dominant set: {:?}",
+            periods[0].dominant_loops,
+        );
     }
 
     #[test]
