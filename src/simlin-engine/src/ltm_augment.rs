@@ -9,75 +9,108 @@
 //! module in stdlib/previous.stmx (not as a builtin function). The PREVIOUS module
 //! uses a stock-and-flow structure to store and return the previous timestep's value.
 
+use crate::ast::{Expr0, IndexExpr0, print_eqn};
+use crate::builtins::UntypedBuiltinFn;
 use crate::canonicalize;
 use crate::common::{Canonical, Ident, Result};
 use crate::datamodel::{self, Equation};
+use crate::lexer::LexerType;
 use crate::ltm::{CausalGraph, Link, Loop, detect_loops};
 use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
-use unicode_xid::UnicodeXID;
 
 // Type alias for clarity
 type SyntheticVariables = Vec<(Ident<Canonical>, datamodel::Variable)>;
 
-/// Replace whole-word occurrences of `pattern` with `replacement` in `text`.
-/// A word boundary is defined as the position where a Unicode identifier character
-/// (XID_Continue or underscore) meets a non-identifier character (or start/end of string).
-fn replace_whole_word(text: &str, pattern: &str, replacement: &str) -> String {
-    if pattern.is_empty() {
-        return text.to_string();
-    }
-
-    let mut result = String::with_capacity(text.len());
-    let mut remaining = text;
-    // Track the last character we processed to maintain boundary context across iterations
-    let mut prev_char: Option<char> = None;
-
-    while let Some(pos) = remaining.find(pattern) {
-        // Check if this is a word boundary match
-        let before_ok = if pos == 0 {
-            // At start of remaining slice - use tracked prev_char for context
-            prev_char.is_none_or(|c| !is_word_char(c))
-        } else {
-            let prev_c = remaining[..pos].chars().last().unwrap();
-            !is_word_char(prev_c)
-        };
-
-        let after_pos = pos + pattern.len();
-        let after_ok = if after_pos >= remaining.len() {
-            true
-        } else {
-            let next_char = remaining[after_pos..].chars().next().unwrap();
-            !is_word_char(next_char)
-        };
-
-        if before_ok && after_ok {
-            // This is a whole-word match, replace it
-            result.push_str(&remaining[..pos]);
-            result.push_str(replacement);
-            // Update prev_char to the last char of replacement
-            prev_char = replacement.chars().last();
-            remaining = &remaining[after_pos..];
-        } else {
-            // Not a whole-word match. Advance past the first character of where
-            // we found the pattern to continue searching with proper context.
-            let char_at_pos = remaining[pos..].chars().next().unwrap();
-            let char_len = char_at_pos.len_utf8();
-            result.push_str(&remaining[..pos + char_len]);
-            prev_char = Some(char_at_pos);
-            remaining = &remaining[pos + char_len..];
+/// Recursively walk an Expr0 tree, wrapping variable references that appear in
+/// `deps` with `PREVIOUS(...)`.  Function names in App nodes are never touched,
+/// so a variable named `max` won't corrupt `MAX(max, s)`.
+fn wrap_deps_in_previous(expr: Expr0, deps: &HashSet<Ident<Canonical>>) -> Expr0 {
+    match expr {
+        Expr0::Var(ref ident, loc) => {
+            let canonical = Ident::new(&canonicalize(ident.as_str()));
+            if deps.contains(&canonical) {
+                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+            } else {
+                expr
+            }
         }
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            let args = args
+                .into_iter()
+                .map(|a| wrap_deps_in_previous(a, deps))
+                .collect();
+            Expr0::App(UntypedBuiltinFn(name, args), loc)
+        }
+        Expr0::Op1(op, inner, loc) => {
+            Expr0::Op1(op, Box::new(wrap_deps_in_previous(*inner, deps)), loc)
+        }
+        Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
+            op,
+            Box::new(wrap_deps_in_previous(*lhs, deps)),
+            Box::new(wrap_deps_in_previous(*rhs, deps)),
+            loc,
+        ),
+        Expr0::If(cond, then_expr, else_expr, loc) => Expr0::If(
+            Box::new(wrap_deps_in_previous(*cond, deps)),
+            Box::new(wrap_deps_in_previous(*then_expr, deps)),
+            Box::new(wrap_deps_in_previous(*else_expr, deps)),
+            loc,
+        ),
+        Expr0::Subscript(ident, indices, loc) => {
+            let indices = indices
+                .into_iter()
+                .map(|idx| wrap_index_deps_in_previous(idx, deps))
+                .collect();
+            let canonical = Ident::new(&canonicalize(ident.as_str()));
+            let subscript = Expr0::Subscript(ident, indices, loc);
+            if deps.contains(&canonical) {
+                Expr0::App(
+                    UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
+                    loc,
+                )
+            } else {
+                subscript
+            }
+        }
+        Expr0::Const(..) => expr,
     }
-
-    result.push_str(remaining);
-    result
 }
 
-/// Check if a character is a word character for identifier boundaries.
-/// Uses Unicode XID_Continue to match Simlin's identifier rules, plus underscore.
-fn is_word_char(c: char) -> bool {
-    UnicodeXID::is_xid_continue(c) || c == '_'
+fn wrap_index_deps_in_previous(index: IndexExpr0, deps: &HashSet<Ident<Canonical>>) -> IndexExpr0 {
+    match index {
+        IndexExpr0::Expr(e) => IndexExpr0::Expr(wrap_deps_in_previous(e, deps)),
+        IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
+            wrap_deps_in_previous(l, deps),
+            wrap_deps_in_previous(r, deps),
+            loc,
+        ),
+        other => other,
+    }
+}
+
+/// Parse an equation, wrap all dependency references except `exclude` in PREVIOUS(),
+/// and return the resulting equation text.  Falls back to lowercased original text
+/// if parsing fails.
+fn build_partial_equation(
+    equation_text: &str,
+    deps: &HashSet<Ident<Canonical>>,
+    exclude: &Ident<Canonical>,
+) -> String {
+    let deps_to_wrap: HashSet<Ident<Canonical>> =
+        deps.iter().filter(|d| *d != exclude).cloned().collect();
+
+    if deps_to_wrap.is_empty() {
+        return equation_text.to_lowercase();
+    }
+
+    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
+        return equation_text.to_lowercase();
+    };
+
+    let transformed = wrap_deps_in_previous(ast, &deps_to_wrap);
+    print_eqn(&transformed)
 }
 
 /// Augment a project with LTM synthetic variables
@@ -371,15 +404,7 @@ fn generate_auxiliary_to_auxiliary_equation(
         HashSet::new()
     };
 
-    // Build the partial equation: substitute PREVIOUS(dep) for all deps except 'from'
-    let mut partial_eq = to_equation.clone();
-    for dep in &deps {
-        if dep != from {
-            // Replace whole word occurrences of the dependency
-            let replacement = format!("PREVIOUS({})", dep.as_str());
-            partial_eq = replace_whole_word(&partial_eq, dep.as_str(), &replacement);
-        }
-    }
+    let partial_eq = build_partial_equation(&to_equation, &deps, from);
 
     // Using SAFEDIV for both divisions
     // Note: We still need the outer check for when EITHER is zero, since we multiply the results
@@ -422,11 +447,17 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
 
     let sign = if is_inflow { "" } else { "-" };
 
-    // Using SAFEDIV to handle division by zero
+    // Per the corrected 2023 formula (Schoenberg et al., Eq. 3):
+    //   LS(inflow -> S)  = |Delta(i) / (Delta(S_t) - Delta(S_{t-dt}))| * (+1)
+    //   LS(outflow -> S) = |Delta(o) / (Delta(S_t) - Delta(S_{t-dt}))| * (-1)
+    //
+    // The polarity is structural (fixed +1/-1), not dynamic.  ABS ensures
+    // the magnitude is always positive; the sign is applied outside.
+    //
     // The numerator uses PREVIOUS values to align timing with the denominator.
     // At time t, the flow at t-1 (PREVIOUS(flow)) is what drove the stock change from t-1 to t.
     // We measure the change in that causal flow: flow(t-1) - flow(t-2).
-    let numerator = format!("{sign}(PREVIOUS({flow}) - PREVIOUS(PREVIOUS({flow})))");
+    let numerator = format!("(PREVIOUS({flow}) - PREVIOUS(PREVIOUS({flow})))");
     let denominator = format!(
         "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))"
     );
@@ -436,7 +467,7 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
         "if \
             (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
             then 0/0 \
-            else SAFEDIV({numerator}, {denominator}, 0)"
+            else {sign}ABS(SAFEDIV({numerator}, {denominator}, 0))"
     )
 }
 
@@ -466,15 +497,7 @@ fn generate_stock_to_flow_equation(
         HashSet::new()
     };
 
-    // Build the partial equation: substitute PREVIOUS(dep) for all deps except 'stock'
-    let mut partial_eq = flow_equation.clone();
-    for dep in &deps {
-        if dep != stock {
-            // Replace whole word occurrences of the dependency
-            let replacement = format!("PREVIOUS({})", dep.as_str());
-            partial_eq = replace_whole_word(&partial_eq, dep.as_str(), &replacement);
-        }
-    }
+    let partial_eq = build_partial_equation(&flow_equation, &deps, stock);
 
     // Check if this flow affects the stock (is it an inflow or outflow?)
     let stock_var = all_vars.get(stock);
@@ -580,6 +603,58 @@ fn create_aux_variable(name: &str, equation: &str) -> crate::datamodel::Variable
 mod tests {
     use super::*;
     use crate::test_common::TestProject;
+
+    #[test]
+    fn test_build_partial_equation_preserves_builtins() {
+        let mut deps = HashSet::new();
+        deps.insert(Ident::new("x"));
+        deps.insert(Ident::new("s"));
+        let exclude = Ident::new("x");
+
+        // MAX is a builtin — must not be rewritten even though "max" would
+        // match after lowercasing in the old approach.  The parse roundtrip
+        // lowercases function names, which is fine (case-insensitive language).
+        assert_eq!(
+            build_partial_equation("MAX(x, s)", &deps, &exclude),
+            "max(x, PREVIOUS(s))"
+        );
+    }
+
+    #[test]
+    fn test_build_partial_equation_simple() {
+        let mut deps = HashSet::new();
+        deps.insert(Ident::new("x"));
+        deps.insert(Ident::new("z"));
+        let exclude = Ident::new("x");
+
+        assert_eq!(
+            build_partial_equation("x * 2 + z", &deps, &exclude),
+            "x * 2 + PREVIOUS(z)"
+        );
+    }
+
+    #[test]
+    fn test_build_partial_equation_no_deps_to_wrap() {
+        let mut deps = HashSet::new();
+        deps.insert(Ident::new("x"));
+        let exclude = Ident::new("x");
+
+        assert_eq!(build_partial_equation("x * 2", &deps, &exclude), "x * 2");
+    }
+
+    #[test]
+    fn test_build_partial_equation_if_then_else() {
+        let mut deps = HashSet::new();
+        deps.insert(Ident::new("a"));
+        deps.insert(Ident::new("b"));
+        deps.insert(Ident::new("c"));
+        let exclude = Ident::new("a");
+
+        assert_eq!(
+            build_partial_equation("IF a > 0 THEN b ELSE c", &deps, &exclude),
+            "if (a > 0) then (PREVIOUS(b)) else (PREVIOUS(c))"
+        );
+    }
 
     #[test]
     fn test_generate_loop_score_equation() {
@@ -763,16 +838,16 @@ mod tests {
         let equation = generate_link_score_equation(&from, &to, stock_var, all_vars);
 
         // Verify the EXACT equation structure for flow-to-stock
-        // Uses PREVIOUS in numerator to align timing with denominator
+        // ABS wraps the ratio; sign is fixed (+1 for inflows) per corrected 2023 formula
         // Returns NaN for first two timesteps when insufficient history
         let expected = "if \
             (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
             then 0/0 \
-            else SAFEDIV(\
+            else ABS(SAFEDIV(\
                 (PREVIOUS(inflow_rate) - PREVIOUS(PREVIOUS(inflow_rate))), \
                 ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
                 0\
-            )";
+            ))";
 
         assert_eq!(
             equation, expected,
@@ -802,16 +877,16 @@ mod tests {
         let equation = generate_link_score_equation(&from, &to, stock_var, all_vars);
 
         // Verify the EXACT equation structure for outflow-to-stock (negative sign)
-        // Uses PREVIOUS in numerator to align timing with denominator
+        // ABS wraps the ratio; sign is fixed (-1 for outflows) per corrected 2023 formula
         // Returns NaN for first two timesteps when insufficient history
         let expected = "if \
             (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
             then 0/0 \
-            else SAFEDIV(\
-                -(PREVIOUS(outflow_rate) - PREVIOUS(PREVIOUS(outflow_rate))), \
+            else -ABS(SAFEDIV(\
+                (PREVIOUS(outflow_rate) - PREVIOUS(PREVIOUS(outflow_rate))), \
                 ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
                 0\
-            )";
+            ))";
 
         assert_eq!(
             equation, expected,
@@ -1452,6 +1527,49 @@ mod tests {
     }
 
     #[test]
+    fn test_link_score_with_builtin_name_collision() {
+        // Regression: a variable named "max" must not corrupt the MAX() builtin
+        // in the same equation.  The old string-based approach lowercased the
+        // entire equation then did whole-word replacement, turning
+        // MAX(max, s) into PREVIOUS(max)(PREVIOUS(max), s).
+        let project = TestProject::new("test_builtin_collision")
+            .aux("max_val", "10", None)
+            .aux("s", "5", None)
+            .aux("y", "MAX(max_val, s)", None)
+            .compile()
+            .expect("Project should compile");
+
+        let model = project
+            .models
+            .get(&Ident::new("main"))
+            .expect("Model should exist");
+        let all_vars = &model.variables;
+
+        let from = Ident::new("max_val");
+        let to = Ident::new("y");
+        let y_var = all_vars.get(&to).expect("Y variable should exist");
+
+        let equation = generate_link_score_equation(&from, &to, y_var, all_vars);
+
+        // The partial equation must preserve max as a function call and only
+        // wrap the variable `s` in PREVIOUS, not the function name.
+        // (The parse roundtrip lowercases function names — case-insensitive language.)
+        let expected = "if \
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                ((y - PREVIOUS(y)) = 0) OR ((max_val - PREVIOUS(max_val)) = 0) \
+                then 0 \
+                else ABS(SAFEDIV(((max(max_val, PREVIOUS(s))) - PREVIOUS(y)), (y - PREVIOUS(y)), 0)) * \
+                SIGN(SAFEDIV(((max(max_val, PREVIOUS(s))) - PREVIOUS(y)), (max_val - PREVIOUS(max_val)), 0))";
+
+        assert_eq!(
+            equation, expected,
+            "Builtin function names must not be corrupted by variable substitution"
+        );
+    }
+
+    #[test]
     fn test_equation_with_dollar_sign_variables() {
         // Test that equations with $ in variable names can be parsed using double quotes
         use crate::ast::{Expr0, print_eqn};
@@ -1490,12 +1608,9 @@ mod tests {
         let printed = print_eqn(&var_ast);
         println!("AST with quoted $ variable printed as: '{printed}'");
 
-        // Note: print_eqn outputs single quotes but parser needs double quotes
-        // This is a known limitation but doesn't affect our use case since we generate
-        // equations directly with double quotes, not through print_eqn
         assert_eq!(
-            printed, "$⁚ltm⁚link_score⁚x⁚y",
-            "print_eqn strips quotes from canonicalized name"
+            printed, "\"$⁚ltm⁚link_score⁚x⁚y\"",
+            "print_eqn re-quotes identifiers with special characters"
         );
     }
 
@@ -1526,7 +1641,6 @@ mod tests {
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
         // This test validates the correct LTM paper formula implementation
-        // Note: 'S' becomes lowercase 's' in stock references but stays uppercase in partial equation
         // Sign term uses first-order stock change per LTM paper formula
         // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
@@ -1536,141 +1650,14 @@ mod tests {
                 ((inflow - PREVIOUS(inflow)) = 0) OR \
                 ((s - PREVIOUS(s)) = 0) \
                 then 0 \
-                else ABS(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), (inflow - PREVIOUS(inflow)), 0)) * \
-                SIGN(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), \
+                else ABS(SAFEDIV(((s * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), (inflow - PREVIOUS(inflow)), 0)) * \
+                SIGN(SAFEDIV(((s * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), \
                     (s - PREVIOUS(s)), 0))";
 
         assert_eq!(
             equation, expected,
             "Equation must match LTM paper formula with first-order stock diff for sign"
         );
-    }
-
-    mod replace_whole_word_tests {
-        use super::super::replace_whole_word;
-
-        #[test]
-        fn test_simple_replacement() {
-            assert_eq!(
-                replace_whole_word("x + y", "x", "PREVIOUS(x)"),
-                "PREVIOUS(x) + y"
-            );
-        }
-
-        #[test]
-        fn test_no_partial_match_prefix() {
-            // "xy" should NOT match when looking for "x"
-            assert_eq!(replace_whole_word("xy + y", "x", "PREVIOUS(x)"), "xy + y");
-        }
-
-        #[test]
-        fn test_no_partial_match_suffix() {
-            // "ax" should NOT match when looking for "x"
-            assert_eq!(replace_whole_word("ax + y", "x", "PREVIOUS(x)"), "ax + y");
-        }
-
-        #[test]
-        fn test_multiple_occurrences() {
-            assert_eq!(replace_whole_word("x * x + x", "x", "z"), "z * z + z");
-        }
-
-        #[test]
-        fn test_at_start() {
-            assert_eq!(replace_whole_word("x + 1", "x", "y"), "y + 1");
-        }
-
-        #[test]
-        fn test_at_end() {
-            assert_eq!(replace_whole_word("1 + x", "x", "y"), "1 + y");
-        }
-
-        #[test]
-        fn test_whole_string() {
-            assert_eq!(replace_whole_word("x", "x", "y"), "y");
-        }
-
-        #[test]
-        fn test_with_underscore_boundary() {
-            // Underscores are word characters, so x_1 should NOT match "x"
-            assert_eq!(replace_whole_word("x_1 + x", "x", "y"), "x_1 + y");
-        }
-
-        #[test]
-        fn test_with_digit_boundary() {
-            // Digits are word characters, so x1 should NOT match "x"
-            assert_eq!(replace_whole_word("x1 + x", "x", "y"), "x1 + y");
-        }
-
-        #[test]
-        fn test_surrounded_by_operators() {
-            assert_eq!(replace_whole_word("a*x+b", "x", "y"), "a*y+b");
-        }
-
-        #[test]
-        fn test_in_parentheses() {
-            assert_eq!(replace_whole_word("(x)", "x", "y"), "(y)");
-        }
-
-        #[test]
-        fn test_complex_equation() {
-            let result = replace_whole_word(
-                "population * birth_rate",
-                "birth_rate",
-                "PREVIOUS(birth_rate)",
-            );
-            assert_eq!(result, "population * PREVIOUS(birth_rate)");
-        }
-
-        #[test]
-        fn test_no_match() {
-            assert_eq!(replace_whole_word("abc", "x", "y"), "abc");
-        }
-
-        #[test]
-        fn test_empty_string() {
-            assert_eq!(replace_whole_word("", "x", "y"), "");
-        }
-
-        #[test]
-        fn test_unicode_variable_name() {
-            assert_eq!(replace_whole_word("Å + b", "Å", "alpha"), "alpha + b");
-        }
-
-        #[test]
-        fn test_unicode_word_boundary() {
-            // Unicode letters adjacent to other Unicode letters should NOT be replaced
-            // because they form a single identifier
-            assert_eq!(replace_whole_word("Åβ + γ", "Å", "alpha"), "Åβ + γ");
-            // But standalone Unicode identifiers should be replaced
-            assert_eq!(replace_whole_word("Å + β", "Å", "alpha"), "alpha + β");
-        }
-
-        #[test]
-        fn test_mixed_ascii_unicode_boundary() {
-            // Unicode letter followed by ASCII should not match partial
-            assert_eq!(replace_whole_word("Åbc + x", "Å", "alpha"), "Åbc + x");
-            // ASCII followed by Unicode should not match partial
-            assert_eq!(replace_whole_word("aÅ + x", "Å", "alpha"), "aÅ + x");
-        }
-
-        #[test]
-        fn test_repeated_pattern_preserves_boundary_context() {
-            // "xx" should not have either x replaced - both are adjacent to word chars
-            assert_eq!(replace_whole_word("xx", "x", "y"), "xx");
-            // "xx + x" should only replace the standalone x
-            assert_eq!(replace_whole_word("xx + x", "x", "y"), "xx + y");
-            // Pattern appearing as prefix of longer identifier
-            assert_eq!(replace_whole_word("x1x + x", "x", "y"), "x1x + y");
-        }
-
-        #[test]
-        fn test_overlapping_pattern_occurrences() {
-            // "abab" with pattern "ab" - neither should be replaced
-            // First "ab" is followed by 'a', second "ab" is preceded by 'b'
-            assert_eq!(replace_whole_word("abab", "ab", "XY"), "abab");
-            // "ab + ab" - both should be replaced
-            assert_eq!(replace_whole_word("ab + ab", "ab", "XY"), "XY + XY");
-        }
     }
 
     #[test]

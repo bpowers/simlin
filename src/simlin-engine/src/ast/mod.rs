@@ -10,6 +10,7 @@ use crate::common::{CanonicalElementName, EquationResult, canonicalize};
 use crate::dimensions::Dimension;
 use crate::model::{ModelStage0, ScopeStage0};
 use crate::variable::Variable;
+use unicode_xid::UnicodeXID;
 
 mod array_view;
 mod expr0;
@@ -286,6 +287,35 @@ fn paren_if_necessary1(parent: &Expr2, child: &Expr2, eqn: String) -> String {
     }
 }
 
+/// Check whether a canonicalized identifier needs double-quoting to be
+/// re-parseable.  Names containing characters outside XID_Start/XID_Continue
+/// (like `$`, `⁚`, `/`) must be quoted.
+fn needs_quoting(canonical: &str) -> bool {
+    let mut chars = canonical.chars();
+    match chars.next() {
+        None => return true,
+        Some(c) if !UnicodeXID::is_xid_start(c) && c != '_' => return true,
+        _ => {}
+    }
+    for c in chars {
+        if !UnicodeXID::is_xid_continue(c) && c != '_' {
+            return true;
+        }
+    }
+    false
+}
+
+/// Canonicalize an identifier for display, re-quoting if the canonical form
+/// contains characters that can't appear in a bare identifier.
+fn print_ident(raw: &str) -> String {
+    let canonical = canonicalize(raw);
+    if needs_quoting(&canonical) {
+        format!("\"{}\"", canonical)
+    } else {
+        canonical.into_owned()
+    }
+}
+
 struct PrintVisitor {}
 
 impl Visitor<String> for PrintVisitor {
@@ -293,7 +323,7 @@ impl Visitor<String> for PrintVisitor {
         match expr {
             IndexExpr0::Wildcard(_) => "*".to_string(),
             IndexExpr0::StarRange(id, _) => {
-                format!("*:{}", &*crate::canonicalize(id.as_str()))
+                format!("*:{}", print_ident(id.as_str()))
             }
             IndexExpr0::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
             IndexExpr0::DimPosition(n, _) => format!("@{n}"),
@@ -304,18 +334,14 @@ impl Visitor<String> for PrintVisitor {
     fn walk(&mut self, expr: &Expr0) -> String {
         match expr {
             Expr0::Const(s, _, _) => s.clone(),
-            Expr0::Var(id, _) => {
-                // Canonicalize for display (lowercase, etc.)
-                canonicalize(id.as_str()).into_owned()
-            }
+            Expr0::Var(id, _) => print_ident(id.as_str()),
             Expr0::App(UntypedBuiltinFn(func, args), _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
                 format!("{}({})", func, args.join(", "))
             }
             Expr0::Subscript(id, args, _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
-                // Canonicalize identifier for display
-                format!("{}[{}]", &*canonicalize(id.as_str()), args.join(", "))
+                format!("{}[{}]", print_ident(id.as_str()), args.join(", "))
             }
             Expr0::Op1(op, l, _) => {
                 match op {
@@ -450,6 +476,39 @@ fn test_print_eqn() {
                 ]
             ),
             Loc::new(0, 14),
+        ))
+    );
+}
+
+#[test]
+fn test_print_eqn_quotes_special_identifiers() {
+    use crate::common::RawIdent;
+
+    // Identifiers with characters that aren't valid in bare identifiers
+    // must be wrapped in double quotes so the output is re-parseable.
+    assert_eq!(
+        "\"$⁚ltm⁚link_score⁚x⁚y\"",
+        print_eqn(&Expr0::Var(
+            RawIdent::new_from_str("\"$⁚ltm⁚link_score⁚x⁚y\""),
+            Loc::default(),
+        ))
+    );
+
+    // Normal identifiers should NOT be quoted
+    assert_eq!(
+        "population",
+        print_eqn(&Expr0::Var(
+            RawIdent::new_from_str("population"),
+            Loc::default(),
+        ))
+    );
+
+    // Identifiers with slashes (from quoted Vensim names) need re-quoting
+    assert_eq!(
+        "\"a/d\"",
+        print_eqn(&Expr0::Var(
+            RawIdent::new_from_str("\"a/d\""),
+            Loc::default(),
         ))
     );
 }

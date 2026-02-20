@@ -1,0 +1,973 @@
+{
+    "name": "main",
+    "simSpecs": {
+        "startTime": 0,
+        "endTime": 100,
+        "saveStep": 1,
+        "timeUnits": "Month"
+    },
+    "models": [
+        {
+            "name": "main",
+            "stocks": [
+                {
+                    "name": "hero_culture",
+                    "initialEquation": "10",
+                    "units": "dimensionless",
+                    "inflows": [
+                        "culture_reinforcement"
+                    ],
+                    "outflows": [
+                        "culture_decay"
+                    ],
+                    "documentation": "Organizational preference for and reliance on heroic firefighting (0-100 scale)"
+                },
+                {
+                    "name": "incidents",
+                    "initialEquation": "5",
+                    "units": "incidents",
+                    "inflows": [
+                        "incident_occurrence"
+                    ],
+                    "outflows": [
+                        "incident_resolution"
+                    ],
+                    "documentation": "Active incidents requiring resolution"
+                },
+                {
+                    "name": "system_reliability",
+                    "initialEquation": "80",
+                    "units": "dimensionless",
+                    "inflows": [
+                        "reliability_improvement"
+                    ],
+                    "outflows": [
+                        "reliability_erosion"
+                    ],
+                    "documentation": "Overall health and stability of the software systems (0-100 scale)"
+                },
+                {
+                    "name": "technical_debt",
+                    "initialEquation": "20",
+                    "units": "dimensionless",
+                    "inflows": [
+                        "debt_accumulation"
+                    ],
+                    "outflows": [
+                        "debt_paydown"
+                    ],
+                    "documentation": "Accumulated shortcuts, workarounds, and deferred maintenance (0-100 scale)"
+                }
+            ],
+            "flows": [
+                {
+                    "name": "culture_decay",
+                    "equation": "Hero_Culture * culture_decay_fraction",
+                    "units": "dimensionless/Month",
+                    "documentation": "Natural decay of hero culture without reinforcement"
+                },
+                {
+                    "name": "culture_reinforcement",
+                    "equation": "Incidents * heroic_response_fraction * hero_recognition_factor / response_time",
+                    "units": "dimensionless/Month",
+                    "documentation": "Recognition and rewards for firefighting reinforce hero culture"
+                },
+                {
+                    "name": "debt_accumulation",
+                    "equation": "Incidents * heroic_response_fraction * debt_per_heroic_fix / response_time",
+                    "units": "dimensionless/Month",
+                    "documentation": "Technical debt from heroic quick fixes that skip proper solutions"
+                },
+                {
+                    "name": "debt_paydown",
+                    "equation": "investment_in_prevention * debt_paydown_effectiveness",
+                    "units": "dimensionless/Month",
+                    "documentation": "Technical debt reduction through proper engineering investment"
+                },
+                {
+                    "name": "incident_occurrence",
+                    "equation": "base_incident_rate * (100 - System_Reliability) / 50 + Technical_Debt * debt_incident_factor",
+                    "units": "incidents/Month",
+                    "documentation": "New incidents arising from system fragility and technical debt"
+                },
+                {
+                    "name": "incident_resolution",
+                    "equation": "Incidents * (heroic_response_fraction + fundamental_fix_fraction) / response_time",
+                    "units": "incidents/Month",
+                    "documentation": "Incidents resolved through heroic intervention or fundamental fixes"
+                },
+                {
+                    "name": "reliability_erosion",
+                    "equation": "Incidents * heroic_response_fraction * quick_fix_erosion / response_time + Technical_Debt * debt_erosion_factor",
+                    "units": "dimensionless/Month",
+                    "documentation": "Reliability loss from quick fixes and mounting tech debt"
+                },
+                {
+                    "name": "reliability_improvement",
+                    "equation": "investment_in_prevention * prevention_effectiveness",
+                    "units": "dimensionless/Month",
+                    "documentation": "Improvements from proactive reliability investments"
+                }
+            ],
+            "auxiliaries": [
+                {
+                    "name": "base_incident_rate",
+                    "equation": "2",
+                    "units": "incidents/Month",
+                    "documentation": "Baseline rate of incidents in a normal system"
+                },
+                {
+                    "name": "culture_decay_fraction",
+                    "equation": "0.02",
+                    "units": "1/Month",
+                    "documentation": "Natural decay rate of hero culture"
+                },
+                {
+                    "name": "debt_erosion_factor",
+                    "equation": "0.02",
+                    "units": "1/Month",
+                    "documentation": "Rate at which technical debt erodes reliability"
+                },
+                {
+                    "name": "debt_incident_factor",
+                    "equation": "0.05",
+                    "units": "incidents/Month",
+                    "documentation": "Incidents generated per unit of technical debt"
+                },
+                {
+                    "name": "debt_paydown_effectiveness",
+                    "equation": "0.01",
+                    "units": "dimensionless",
+                    "documentation": "Rate at which prevention investment pays down debt"
+                },
+                {
+                    "name": "debt_per_heroic_fix",
+                    "equation": "0.3",
+                    "units": "dimensionless/incidents",
+                    "documentation": "Technical debt created per incident fixed heroically"
+                },
+                {
+                    "name": "fundamental_fix_fraction",
+                    "equation": "0.2 * (1 - Hero_Culture / 100)",
+                    "units": "dimensionless",
+                    "documentation": "Fraction of incidents fixed properly, decreases as hero culture dominates"
+                },
+                {
+                    "name": "hero_recognition_factor",
+                    "equation": "0.05",
+                    "units": "dimensionless/incidents",
+                    "documentation": "How much hero culture grows per heroic incident resolution"
+                },
+                {
+                    "name": "heroic_response_fraction",
+                    "equation": "0.3 * (1 + Hero_Culture / 50)",
+                    "units": "dimensionless",
+                    "documentation": "Fraction of incidents addressed heroically, increases with hero culture"
+                },
+                {
+                    "name": "investment_in_prevention",
+                    "equation": "total_engineering_capacity * (1 - Hero_Culture / 100) * prevention_priority",
+                    "units": "dimensionless/Month",
+                    "documentation": "Resources devoted to proactive reliability work"
+                },
+                {
+                    "name": "prevention_effectiveness",
+                    "equation": "0.02",
+                    "units": "dimensionless",
+                    "documentation": "How much reliability improves per unit of prevention investment"
+                },
+                {
+                    "name": "prevention_priority",
+                    "equation": "0.003",
+                    "units": "1/Month",
+                    "documentation": "Management priority given to prevention vs. feature work"
+                },
+                {
+                    "name": "quick_fix_erosion",
+                    "equation": "0.1",
+                    "units": "dimensionless/incidents",
+                    "documentation": "Reliability lost per incident resolved via quick fix"
+                },
+                {
+                    "name": "response_time",
+                    "equation": "2",
+                    "units": "Month",
+                    "documentation": "Average time to resolve an incident"
+                },
+                {
+                    "name": "total_engineering_capacity",
+                    "equation": "100",
+                    "units": "dimensionless",
+                    "documentation": "Total available engineering capacity (normalized)"
+                }
+            ],
+            "simSpecs": {
+                "startTime": 0,
+                "endTime": 100,
+                "saveStep": 1,
+                "timeUnits": "Month"
+            },
+            "views": [
+                {
+                    "elements": [
+                        {
+                            "labelSide": "bottom",
+                            "name": "hero\nculture",
+                            "type": "stock",
+                            "uid": 1,
+                            "x": 292.2497464049934,
+                            "y": 117.1173362583864
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "culture\ndecay",
+                            "points": [
+                                {
+                                    "attachedToUid": 1,
+                                    "x": 314.7497464049934,
+                                    "y": 117.1173362583864
+                                },
+                                {
+                                    "attachedToUid": 46,
+                                    "x": 414.749746404994,
+                                    "y": 117.1173362583864
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 5,
+                            "x": 364.7497464049937,
+                            "y": 117.1173362583864
+                        },
+                        {
+                            "flowUid": 5,
+                            "type": "cloud",
+                            "uid": 46,
+                            "x": 414.7497464049933,
+                            "y": 117.1173362583864
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "culture\nreinforcement",
+                            "points": [
+                                {
+                                    "attachedToUid": 47,
+                                    "x": 169.74974640499377,
+                                    "y": 117.1173362583864
+                                },
+                                {
+                                    "attachedToUid": 1,
+                                    "x": 269.7497464049934,
+                                    "y": 117.1173362583864
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 6,
+                            "x": 219.7497464049936,
+                            "y": 117.1173362583864
+                        },
+                        {
+                            "flowUid": 6,
+                            "type": "cloud",
+                            "uid": 47,
+                            "x": 169.74974640499363,
+                            "y": 117.1173362583864
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "incidents",
+                            "type": "stock",
+                            "uid": 2,
+                            "x": -14.73519702314688,
+                            "y": 72.52642257173449
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "incident\noccurrence",
+                            "points": [
+                                {
+                                    "attachedToUid": 48,
+                                    "x": -140.9031657731465,
+                                    "y": 71.83892257173449
+                                },
+                                {
+                                    "attachedToUid": 2,
+                                    "x": -37.23519702314688,
+                                    "y": 71.83892257173449
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 9,
+                            "x": -84.92019235732926,
+                            "y": 71.83892257173449
+                        },
+                        {
+                            "flowUid": 9,
+                            "type": "cloud",
+                            "uid": 48,
+                            "x": -140.90316577314636,
+                            "y": 71.83892257173449
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "incident\nresolution",
+                            "points": [
+                                {
+                                    "attachedToUid": 2,
+                                    "x": 7.764802976853119,
+                                    "y": 71.83892257173449
+                                },
+                                {
+                                    "attachedToUid": 51,
+                                    "x": 104.09683422685325,
+                                    "y": 71.83892257173449
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 10,
+                            "x": 60.081465618969986,
+                            "y": 71.83892257173449
+                        },
+                        {
+                            "flowUid": 10,
+                            "type": "cloud",
+                            "uid": 51,
+                            "x": 104.0968342268532,
+                            "y": 71.83892257173449
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "system\nreliability",
+                            "type": "stock",
+                            "uid": 3,
+                            "x": 57.4273738368795,
+                            "y": 380.3063271589219
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "reliability\nimprovement",
+                            "points": [
+                                {
+                                    "attachedToUid": 54,
+                                    "x": -65.49059491312052,
+                                    "y": 379.1852334089219
+                                },
+                                {
+                                    "attachedToUid": 3,
+                                    "x": 34.9273738368795,
+                                    "y": 379.1852334089219
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 12,
+                            "x": -15.072626163120518,
+                            "y": 379.1852334089219
+                        },
+                        {
+                            "flowUid": 12,
+                            "type": "cloud",
+                            "uid": 54,
+                            "x": -65.49059491312045,
+                            "y": 379.1852334089219
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "reliability\nerosion",
+                            "points": [
+                                {
+                                    "attachedToUid": 3,
+                                    "x": 79.9273738368795,
+                                    "y": 379.1852334089219
+                                },
+                                {
+                                    "attachedToUid": 56,
+                                    "x": 179.50940508688012,
+                                    "y": 379.1852334089219
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 11,
+                            "x": 129.86878008687978,
+                            "y": 379.1852334089219
+                        },
+                        {
+                            "flowUid": 11,
+                            "type": "cloud",
+                            "uid": 56,
+                            "x": 179.50940508688072,
+                            "y": 379.1852334089219
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "technical\ndebt",
+                            "type": "stock",
+                            "uid": 4,
+                            "x": 260.04413816508537,
+                            "y": 265.4363617919309
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "debt\naccumulation",
+                            "points": [
+                                {
+                                    "attachedToUid": 58,
+                                    "x": 64.36445066508645,
+                                    "y": 265.7488617919309
+                                },
+                                {
+                                    "attachedToUid": 4,
+                                    "x": 237.54413816508537,
+                                    "y": 265.7488617919309
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 7,
+                            "x": 150.95429441508597,
+                            "y": 265.7488617919309
+                        },
+                        {
+                            "flowUid": 7,
+                            "type": "cloud",
+                            "uid": 58,
+                            "x": 64.36445066508655,
+                            "y": 265.7488617919309
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "debt\npaydown",
+                            "points": [
+                                {
+                                    "attachedToUid": 4,
+                                    "x": 282.54413816508537,
+                                    "y": 268.4402680419309
+                                },
+                                {
+                                    "attachedToUid": 59,
+                                    "x": 410.47382566508566,
+                                    "y": 268.4402680419309
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 8,
+                            "x": 346.5089819150855,
+                            "y": 268.4402680419309
+                        },
+                        {
+                            "flowUid": 8,
+                            "type": "cloud",
+                            "uid": 59,
+                            "x": 410.47382566508566,
+                            "y": 268.4402680419309
+                        },
+                        {
+                            "labelSide": "left",
+                            "name": "base_incident\nrate",
+                            "type": "aux",
+                            "uid": 13,
+                            "x": -125.78055753298958,
+                            "y": 24.684207063413808
+                        },
+                        {
+                            "labelSide": "right",
+                            "name": "culture_decay\nfraction",
+                            "type": "aux",
+                            "uid": 14,
+                            "x": 442.00696697598823,
+                            "y": 51.154475429508295
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "debt_erosion\nfactor",
+                            "type": "aux",
+                            "uid": 15,
+                            "x": 132.20381012554446,
+                            "y": 433.4661343601142
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "debt_incident\nfactor",
+                            "type": "aux",
+                            "uid": 16,
+                            "x": -67.95792817354172,
+                            "y": 12.199870815182408
+                        },
+                        {
+                            "labelSide": "right",
+                            "name": "debt_paydown\neffectiveness",
+                            "type": "aux",
+                            "uid": 17,
+                            "x": 413.8327403904402,
+                            "y": 222.6991367902885
+                        },
+                        {
+                            "labelSide": "right",
+                            "name": "debt_per\nheroic_fix",
+                            "type": "aux",
+                            "uid": 18,
+                            "x": 182.00112702671433,
+                            "y": 285.57307841504473
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "fundamental\nfix_fraction",
+                            "type": "aux",
+                            "uid": 19,
+                            "x": 95.87756965903004,
+                            "y": 13.23299066450545
+                        },
+                        {
+                            "labelSide": "left",
+                            "name": "hero_recognition\nfactor",
+                            "type": "aux",
+                            "uid": 20,
+                            "x": 172.3849418831885,
+                            "y": 143.96474884889463
+                        },
+                        {
+                            "labelSide": "right",
+                            "name": "heroic_response\nfraction",
+                            "type": "aux",
+                            "uid": 21,
+                            "x": 203.2973880341898,
+                            "y": 193.88841007133576
+                        },
+                        {
+                            "labelSide": "right",
+                            "name": "investment_in\nprevention",
+                            "type": "aux",
+                            "uid": 22,
+                            "x": 253.50475861764568,
+                            "y": 490.97886997063733
+                        },
+                        {
+                            "labelSide": "left",
+                            "name": "prevention\neffectiveness",
+                            "type": "aux",
+                            "uid": 23,
+                            "x": -59.747502671621874,
+                            "y": 424.5617572818482
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "prevention\npriority",
+                            "type": "aux",
+                            "uid": 24,
+                            "x": 261.2867811541716,
+                            "y": 525.9676205650323
+                        },
+                        {
+                            "labelSide": "right",
+                            "name": "quick_fix\nerosion",
+                            "type": "aux",
+                            "uid": 25,
+                            "x": 179.38008131113904,
+                            "y": 416.5007105469708
+                        },
+                        {
+                            "labelSide": "left",
+                            "name": "response\ntime",
+                            "type": "aux",
+                            "uid": 26,
+                            "x": 132.9675566386154,
+                            "y": 180.59831207980537
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "total_engineering\ncapacity",
+                            "type": "aux",
+                            "uid": 27,
+                            "x": 172.83084153840105,
+                            "y": 512.6874900618711
+                        },
+                        {
+                            "arc": 85.68306955275175,
+                            "fromUid": 1,
+                            "toUid": 22,
+                            "type": "link",
+                            "uid": 60
+                        },
+                        {
+                            "arc": -137.02040727518573,
+                            "fromUid": 1,
+                            "toUid": 19,
+                            "type": "link",
+                            "uid": 61
+                        },
+                        {
+                            "arc": 132.46374047641552,
+                            "fromUid": 1,
+                            "toUid": 21,
+                            "type": "link",
+                            "uid": 62
+                        },
+                        {
+                            "arc": -45,
+                            "fromUid": 1,
+                            "toUid": 5,
+                            "type": "link",
+                            "uid": 63
+                        },
+                        {
+                            "fromUid": 14,
+                            "toUid": 5,
+                            "type": "link",
+                            "uid": 64
+                        },
+                        {
+                            "fromUid": 27,
+                            "toUid": 22,
+                            "type": "link",
+                            "uid": 65
+                        },
+                        {
+                            "fromUid": 26,
+                            "toUid": 6,
+                            "type": "link",
+                            "uid": 66
+                        },
+                        {
+                            "fromUid": 26,
+                            "toUid": 11,
+                            "type": "link",
+                            "uid": 67
+                        },
+                        {
+                            "fromUid": 26,
+                            "toUid": 7,
+                            "type": "link",
+                            "uid": 68
+                        },
+                        {
+                            "fromUid": 26,
+                            "toUid": 10,
+                            "type": "link",
+                            "uid": 69
+                        },
+                        {
+                            "fromUid": 16,
+                            "toUid": 9,
+                            "type": "link",
+                            "uid": 70
+                        },
+                        {
+                            "fromUid": 13,
+                            "toUid": 9,
+                            "type": "link",
+                            "uid": 71
+                        },
+                        {
+                            "fromUid": 20,
+                            "toUid": 6,
+                            "type": "link",
+                            "uid": 72
+                        },
+                        {
+                            "arc": -155.1712247786774,
+                            "fromUid": 4,
+                            "toUid": 9,
+                            "type": "link",
+                            "uid": 73
+                        },
+                        {
+                            "arc": 120.18941604133173,
+                            "fromUid": 4,
+                            "toUid": 11,
+                            "type": "link",
+                            "uid": 74
+                        },
+                        {
+                            "fromUid": 18,
+                            "toUid": 7,
+                            "type": "link",
+                            "uid": 75
+                        },
+                        {
+                            "fromUid": 25,
+                            "toUid": 11,
+                            "type": "link",
+                            "uid": 76
+                        },
+                        {
+                            "arc": -133.5317581669114,
+                            "fromUid": 21,
+                            "toUid": 10,
+                            "type": "link",
+                            "uid": 77
+                        },
+                        {
+                            "arc": -92.1268066119572,
+                            "fromUid": 21,
+                            "toUid": 6,
+                            "type": "link",
+                            "uid": 78
+                        },
+                        {
+                            "arc": 86.15551366901204,
+                            "fromUid": 21,
+                            "toUid": 11,
+                            "type": "link",
+                            "uid": 79
+                        },
+                        {
+                            "arc": 144.7243156542161,
+                            "fromUid": 21,
+                            "toUid": 7,
+                            "type": "link",
+                            "uid": 80
+                        },
+                        {
+                            "arc": 163.78015285584527,
+                            "fromUid": 22,
+                            "toUid": 12,
+                            "type": "link",
+                            "uid": 81
+                        },
+                        {
+                            "arc": -66.31065075959508,
+                            "fromUid": 22,
+                            "toUid": 8,
+                            "type": "link",
+                            "uid": 82
+                        },
+                        {
+                            "fromUid": 24,
+                            "toUid": 22,
+                            "type": "link",
+                            "uid": 83
+                        },
+                        {
+                            "fromUid": 15,
+                            "toUid": 11,
+                            "type": "link",
+                            "uid": 84
+                        },
+                        {
+                            "fromUid": 23,
+                            "toUid": 12,
+                            "type": "link",
+                            "uid": 85
+                        },
+                        {
+                            "arc": -45.52648351794884,
+                            "fromUid": 2,
+                            "toUid": 10,
+                            "type": "link",
+                            "uid": 86
+                        },
+                        {
+                            "arc": -9.23288886763275,
+                            "fromUid": 2,
+                            "toUid": 6,
+                            "type": "link",
+                            "uid": 87
+                        },
+                        {
+                            "arc": 57.91089684903259,
+                            "fromUid": 2,
+                            "toUid": 11,
+                            "type": "link",
+                            "uid": 88
+                        },
+                        {
+                            "arc": 44.46008261505752,
+                            "fromUid": 2,
+                            "toUid": 7,
+                            "type": "link",
+                            "uid": 89
+                        },
+                        {
+                            "arc": -130.97999034560712,
+                            "fromUid": 3,
+                            "toUid": 9,
+                            "type": "link",
+                            "uid": 90
+                        },
+                        {
+                            "arc": 100.2131737023967,
+                            "fromUid": 19,
+                            "toUid": 10,
+                            "type": "link",
+                            "uid": 91
+                        },
+                        {
+                            "fromUid": 17,
+                            "toUid": 8,
+                            "type": "link",
+                            "uid": 92
+                        }
+                    ],
+                    "kind": "stock_flow",
+                    "viewBox": {
+                        "x": 260.3638875720524,
+                        "y": 65.31457236083685,
+                        "width": 859,
+                        "height": 660
+                    },
+                    "zoom": 1
+                }
+            ],
+            "loopMetadata": [
+                {
+                    "uids": [
+                        7,
+                        4,
+                        11,
+                        3,
+                        9,
+                        2
+                    ],
+                    "name": "Technical Debt Spiral",
+                    "description": "A reinforcing loop where accumulated technical debt reduces system reliability, leading to more incidents, which further increases technical debt as quick fixes accumulate instead of proper solutions being implemented."
+                },
+                {
+                    "uids": [
+                        7,
+                        4,
+                        9,
+                        2
+                    ],
+                    "name": "Technical Debt Spiral",
+                    "description": "A reinforcing loop where accumulated technical debt increases incident occurrence, which further accumulates technical debt as teams address crises instead of preventing them, creating an escalating cycle of system instability."
+                },
+                {
+                    "uids": [
+                        6,
+                        1,
+                        22,
+                        8,
+                        4,
+                        11,
+                        3,
+                        9,
+                        2
+                    ],
+                    "name": "Technical Debt Spiral",
+                    "description": "A reinforcing loop where incidents and reliability erosion increase technical debt, which reduces investment in prevention and erodes hero culture, leading to more incidents and further degradation of system reliability."
+                },
+                {
+                    "uids": [
+                        6,
+                        1,
+                        21
+                    ],
+                    "name": "Hero Culture Reinforcement",
+                    "description": "A reinforcing loop where heroic responses strengthen hero culture, which in turn increases the fraction of heroic responses in the population, creating a self-amplifying cycle of cultural heroism."
+                },
+                {
+                    "uids": [
+                        6,
+                        1,
+                        21,
+                        7,
+                        4,
+                        11,
+                        3,
+                        9,
+                        2
+                    ],
+                    "name": "Technical Debt Spiral",
+                    "description": "A reinforcing cycle where incidents drive heroic responses that accumulate technical debt, which erodes system reliability and causes more incidents. This escalates hero culture and reinforces the cycle of crisis-driven development."
+                },
+                {
+                    "uids": [
+                        9,
+                        2,
+                        11,
+                        3
+                    ],
+                    "name": "Reliability Erosion Cycle",
+                    "description": "A reinforcing loop where increased incidents erode system reliability, which leads to more incident occurrences, further degrading reliability. This creates a downward spiral unless interrupted by corrective action."
+                },
+                {
+                    "uids": [
+                        6,
+                        1,
+                        22,
+                        12,
+                        3,
+                        9,
+                        2
+                    ],
+                    "name": "Safety Culture Virtuous Cycle",
+                    "description": "As incidents decrease and system reliability improves, a stronger hero culture and prevention investment reinforce safety-oriented culture, which further reduces incidents and strengthens reliability—creating a self-amplifying cycle of continuous safety improvement."
+                },
+                {
+                    "uids": [
+                        6,
+                        1,
+                        22,
+                        8,
+                        4,
+                        9,
+                        2
+                    ],
+                    "name": "Technical Debt Accumulation",
+                    "description": "A reinforcing loop where increasing incidents and technical debt discourage investment in prevention, allowing more debt to accumulate and incidents to proliferate. This cycle is self-reinforcing as mounting problems make it harder to break free from reactive, debt-driven operations."
+                },
+                {
+                    "uids": [
+                        6,
+                        1,
+                        21,
+                        7,
+                        4,
+                        9,
+                        2
+                    ],
+                    "name": "Hero Culture Debt Spiral",
+                    "description": "A reinforcing loop where heroic responses to incidents reinforce hero culture, which increases the fraction of heroic (quick-fix) responses, accumulating technical debt that leads to more incidents, perpetuating the cycle of heroism and cultural reinforcement."
+                },
+                {
+                    "uids": [
+                        10,
+                        2
+                    ],
+                    "name": "Incident Resolution",
+                    "description": "A balancing loop where increased incident resolution reduces the number of incidents in the system, creating a self-correcting mechanism that stabilizes incident levels."
+                },
+                {
+                    "uids": [
+                        5,
+                        1
+                    ],
+                    "name": "Cultural Renewal",
+                    "description": "As hero culture strengthens, it counteracts culture decay, stabilizing the cultural system. Conversely, as culture decay increases, it weakens hero culture, creating a self-correcting dynamic that prevents extreme cultural deterioration or dominance."
+                },
+                {
+                    "uids": [
+                        6,
+                        1,
+                        21,
+                        11,
+                        3,
+                        9,
+                        2
+                    ],
+                    "name": "Hero Culture Erosion Spiral",
+                    "description": "A reinforcing loop where hero culture and heroic responses mask underlying reliability problems, preventing necessary system improvements. As incidents occur and individuals heroically respond, this reinforces hero culture and reduces pressure to address root causes, allowing reliability to further erode and incidents to increase."
+                },
+                {
+                    "uids": [
+                        6,
+                        1,
+                        19,
+                        10,
+                        2
+                    ],
+                    "name": "Hero Culture Escalation",
+                    "description": "A reinforcing loop where hero culture reduces fundamental problem-solving (lowering the fundamental fix fraction), leading to more unresolved incidents. These incidents reinforce hero culture as individuals are praised for firefighting, perpetuating a cycle that prevents systemic improvements."
+                },
+                {
+                    "uids": [
+                        6,
+                        1,
+                        21,
+                        10,
+                        2
+                    ],
+                    "name": "Heroic Resolution Stabilization",
+                    "description": "As incidents occur, heroic responses resolve them, reducing incident frequency. Fewer incidents diminish hero culture reinforcement, which lowers the heroic response fraction, eventually allowing incidents to rise again. This balancing loop maintains incidents within a stable range through culture-driven response capacity."
+                }
+            ]
+        }
+    ]
+}

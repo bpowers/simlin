@@ -2,7 +2,7 @@
 
 ## Overview
 
-Simlin is a system dynamics (SD) modeling tool for building and simulating stock-and-flow models, including models from Vensim and Stella. The XMILE specification (`doc/xmile-v1.0.html`) is a crucial reference for simulation concepts, array/subscript notation, and equation syntax.
+Simlin is a system dynamics (SD) modeling tool for building and simulating stock-and-flow models, including models from Vensim and Stella. The XMILE specification (`doc/reference/xmile-v1.0.html`) is a crucial reference for simulation concepts, array/subscript notation, and equation syntax.
 
 The engine is in Rust, the interactive editor in TypeScript/React, the server and app in TypeScript. This is a monorepo without external users -- breaking changes are OK if tests pass. Exception: protobuf files must follow standard versioning (we have a DB with serialized instances).
 
