@@ -33,6 +33,7 @@ Each paper has a detailed markdown summary -- consult these first for paper-spec
 
 - [reference/papers/eberlein2020-finding-the-loops-that-matter--summary.md](reference/papers/eberlein2020-finding-the-loops-that-matter--summary.md) ([PDF](reference/papers/eberlein2020-finding-the-loops-that-matter.pdf))
 - [reference/papers/schoenberg2020-loops-that-matter--summary.md](reference/papers/schoenberg2020-loops-that-matter--summary.md) ([PDF](reference/papers/schoenberg2020-loops-that-matter.pdf))
+- [reference/papers/schoenberg2020.1-seamlessly-integrating-ltm--summary.md](reference/papers/schoenberg2020.1-seamlessly-integrating-ltm--summary.md) ([PDF](reference/papers/schoenberg2020.1-seamlessly-integrating-ltm.pdf))
 - [reference/papers/schoenberg2023-improving-loops-that-matter--summary.md](reference/papers/schoenberg2023-improving-loops-that-matter--summary.md) ([PDF](reference/papers/schoenberg2023-improving-loops-that-matter.pdf))
 
 ## Schemas
