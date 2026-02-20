@@ -1758,28 +1758,10 @@ mod tests {
                         "Score length should be > 0 for feedback links"
                     );
 
-                    // Check that scores contain reasonable values
-                    // Note: First timestep(s) will be NaN due to insufficient history for PREVIOUS()
-                    // For flow-to-stock links, first 2 timesteps are NaN (need PREVIOUS(PREVIOUS))
-                    // For other links, first timestep is NaN (need PREVIOUS)
+                    // All scores should be finite (initial timesteps are 0, not NaN)
                     let scores = std::slice::from_raw_parts(link.score, link.score_len);
-                    let is_flow_to_stock = from == "births" && to == "population";
-                    let skip_count = if is_flow_to_stock { 2 } else { 1 };
-
-                    // Check first timestep(s) are NaN
-                    for &score in scores.iter().take(skip_count.min(scores.len())) {
-                        assert!(
-                            score.is_nan(),
-                            "Early timesteps should be NaN due to insufficient history"
-                        );
-                    }
-
-                    // Check remaining scores are finite
-                    for &score in &scores[skip_count..] {
-                        assert!(
-                            score.is_finite(),
-                            "Score should be finite after initial timesteps"
-                        );
+                    for &score in scores {
+                        assert!(score.is_finite(), "All scores should be finite");
                     }
                 }
             }
@@ -1953,10 +1935,14 @@ mod tests {
             );
             assert_eq!(written, scores.len());
 
-            // Verify scores are reasonable
-            // Since there's only one loop, relative score should be 1.0
+            // No NaN values should be returned from the API
             for score in &scores {
-                assert!(score.is_finite());
+                assert!(score.is_finite(), "Scores should never be NaN");
+            }
+            // Initial timesteps are 0 (no dynamics yet); subsequent ones are 1.0
+            let nonzero: Vec<f64> = scores.iter().copied().filter(|s| *s != 0.0).collect();
+            assert!(!nonzero.is_empty(), "Should have non-zero scores");
+            for score in &nonzero {
                 assert_eq!(*score, 1.0, "Single loop should have relative score of 1.0");
             }
 

@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Ast, BinaryOp, Expr2};
+use crate::ast::{Ast, BinaryOp, Expr2, IndexExpr2};
 use crate::common::{Canonical, Ident, Result};
 use crate::model::ModelStage1;
 use crate::project::Project;
@@ -824,6 +824,50 @@ fn analyze_expr_polarity_with_context(
             }
             LinkPolarity::Unknown
         }
+        // Non-decreasing single-arg builtins: propagate inner polarity.
+        // Int (floor) is a step function with discontinuities, but is still
+        // non-decreasing, which is sufficient for polarity propagation.
+        Expr2::App(crate::builtins::BuiltinFn::Exp(inner), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Ln(inner), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Log10(inner), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Sqrt(inner), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Arctan(inner), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Int(inner), _, _) => {
+            analyze_expr_polarity_with_context(inner, from_var, current_polarity, variables)
+        }
+        // Max/Min (scalar two-arg form): non-decreasing in each argument
+        Expr2::App(crate::builtins::BuiltinFn::Max(a, Some(b)), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Min(a, Some(b)), _, _) => {
+            let pol_a =
+                analyze_expr_polarity_with_context(a, from_var, current_polarity, variables);
+            let pol_b =
+                analyze_expr_polarity_with_context(b, from_var, current_polarity, variables);
+            match (pol_a, pol_b) {
+                // When one side returns Unknown, we must check whether it actually
+                // references from_var. Unknown from an independent expression (e.g.
+                // a constant or unrelated variable) means we can use the other side's
+                // polarity. Unknown from a dependent expression (e.g. ABS(x)) means
+                // the result is truly non-monotonic.
+                (LinkPolarity::Unknown, known) => {
+                    if expr_references_var(a, from_var) {
+                        LinkPolarity::Unknown
+                    } else {
+                        known
+                    }
+                }
+                (known, LinkPolarity::Unknown) => {
+                    if expr_references_var(b, from_var) {
+                        LinkPolarity::Unknown
+                    } else {
+                        known
+                    }
+                }
+                // Both agree: propagate
+                (a_pol, b_pol) if a_pol == b_pol => a_pol,
+                // Disagree: unknown
+                _ => LinkPolarity::Unknown,
+            }
+        }
         Expr2::App(_, _, _) => LinkPolarity::Unknown,
         Expr2::Op2(op, left, right, _, _) => {
             let left_pol =
@@ -832,26 +876,47 @@ fn analyze_expr_polarity_with_context(
                 analyze_expr_polarity_with_context(right, from_var, current_polarity, variables);
 
             match op {
-                BinaryOp::Add => {
-                    // Addition preserves polarity
-                    if left_pol != LinkPolarity::Unknown {
-                        left_pol
-                    } else {
-                        right_pol
+                BinaryOp::Add => match (left_pol, right_pol) {
+                    (LinkPolarity::Unknown, pol) => {
+                        if expr_references_var(left, from_var) {
+                            LinkPolarity::Unknown
+                        } else {
+                            pol
+                        }
                     }
-                }
-                BinaryOp::Sub => {
-                    // Subtraction flips polarity of right operand
-                    if left_pol != LinkPolarity::Unknown {
-                        left_pol
-                    } else if right_pol != LinkPolarity::Unknown {
-                        flip_polarity(right_pol)
-                    } else {
-                        LinkPolarity::Unknown
+                    (pol, LinkPolarity::Unknown) => {
+                        if expr_references_var(right, from_var) {
+                            LinkPolarity::Unknown
+                        } else {
+                            pol
+                        }
                     }
-                }
+                    (a, b) if a == b => a,
+                    _ => LinkPolarity::Unknown,
+                },
+                BinaryOp::Sub => match (left_pol, right_pol) {
+                    (LinkPolarity::Unknown, pol) => {
+                        if expr_references_var(left, from_var) {
+                            LinkPolarity::Unknown
+                        } else {
+                            flip_polarity(pol)
+                        }
+                    }
+                    (pol, LinkPolarity::Unknown) => {
+                        if expr_references_var(right, from_var) {
+                            LinkPolarity::Unknown
+                        } else {
+                            pol
+                        }
+                    }
+                    (a, b) if a == flip_polarity(b) => a,
+                    _ => LinkPolarity::Unknown,
+                },
                 BinaryOp::Mul => {
-                    // Multiplication: combine polarities
+                    // Multiplication needs the SIGN of the other operand to determine
+                    // polarity, not just whether it's independent of from_var.
+                    // This is why Mul uses is_positive_constant/is_negative_constant
+                    // rather than the expr_references_var pattern used by Add/Sub/Div.
                     // If both have known polarity, combine them
                     if left_pol != LinkPolarity::Unknown && right_pol != LinkPolarity::Unknown {
                         // Positive * Positive = Positive
@@ -907,18 +972,24 @@ fn analyze_expr_polarity_with_context(
                         LinkPolarity::Unknown
                     }
                 }
-                BinaryOp::Div => {
-                    // Division: numerator preserves polarity, denominator flips polarity
-                    if left_pol != LinkPolarity::Unknown {
-                        // Variable in numerator preserves polarity
-                        left_pol
-                    } else if right_pol != LinkPolarity::Unknown {
-                        // Variable in denominator flips polarity
-                        flip_polarity(right_pol)
-                    } else {
-                        LinkPolarity::Unknown
+                BinaryOp::Div => match (left_pol, right_pol) {
+                    (LinkPolarity::Unknown, pol) => {
+                        if expr_references_var(left, from_var) {
+                            LinkPolarity::Unknown
+                        } else {
+                            flip_polarity(pol)
+                        }
                     }
-                }
+                    (pol, LinkPolarity::Unknown) => {
+                        if expr_references_var(right, from_var) {
+                            LinkPolarity::Unknown
+                        } else {
+                            pol
+                        }
+                    }
+                    (a, b) if a == flip_polarity(b) => a,
+                    _ => LinkPolarity::Unknown,
+                },
                 _ => LinkPolarity::Unknown,
             }
         }
@@ -962,6 +1033,47 @@ fn flip_polarity(pol: LinkPolarity) -> LinkPolarity {
         LinkPolarity::Positive => LinkPolarity::Negative,
         LinkPolarity::Negative => LinkPolarity::Positive,
         LinkPolarity::Unknown => LinkPolarity::Unknown,
+    }
+}
+
+/// Check whether an expression tree contains any reference to a specific variable.
+/// Used to distinguish "independent of from_var" (returns Unknown because expression
+/// doesn't reference from_var at all) from "non-monotonically dependent" (returns
+/// Unknown but DOES reference from_var, e.g. ABS(x)).
+fn expr_references_var(expr: &Expr2, var: &Ident<Canonical>) -> bool {
+    match expr {
+        Expr2::Const(_, _, _) => false,
+        Expr2::Var(ident, _, _) => ident == var,
+        Expr2::Subscript(ident, indices, _, _) => {
+            ident == var
+                || indices.iter().any(|idx| match idx {
+                    IndexExpr2::Expr(e) => expr_references_var(e, var),
+                    IndexExpr2::Range(lo, hi, _) => {
+                        expr_references_var(lo, var) || expr_references_var(hi, var)
+                    }
+                    IndexExpr2::Wildcard(_)
+                    | IndexExpr2::StarRange(_, _)
+                    | IndexExpr2::DimPosition(_, _) => false,
+                })
+        }
+        Expr2::App(builtin, _, _) => {
+            let mut found = false;
+            builtin.for_each_expr_ref(|child| {
+                if !found {
+                    found = expr_references_var(child, var);
+                }
+            });
+            found
+        }
+        Expr2::Op2(_, left, right, _, _) => {
+            expr_references_var(left, var) || expr_references_var(right, var)
+        }
+        Expr2::Op1(_, operand, _, _) => expr_references_var(operand, var),
+        Expr2::If(cond, t, f, _, _) => {
+            expr_references_var(cond, var)
+                || expr_references_var(t, var)
+                || expr_references_var(f, var)
+        }
     }
 }
 
@@ -2437,6 +2549,377 @@ mod tests {
             reinforcing_loop.id.starts_with("r"),
             "Reinforcing polarity loop should have 'r' prefix, got: {}",
             reinforcing_loop.id
+        );
+    }
+
+    #[test]
+    fn test_builtin_polarity_monotone_increasing() {
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
+        let empty_vars = HashMap::new();
+
+        // Exp(x), Ln(x), Log10(x), Sqrt(x), Arctan(x), Int(x) all propagate polarity
+        let monotone_fns: Vec<(&str, BuiltinFn<Expr2>)> = vec![
+            ("Exp", BuiltinFn::Exp(x_expr())),
+            ("Ln", BuiltinFn::Ln(x_expr())),
+            ("Log10", BuiltinFn::Log10(x_expr())),
+            ("Sqrt", BuiltinFn::Sqrt(x_expr())),
+            ("Arctan", BuiltinFn::Arctan(x_expr())),
+            ("Int", BuiltinFn::Int(x_expr())),
+        ];
+
+        for (name, builtin) in monotone_fns {
+            let expr = Expr2::App(builtin, None, Loc::default());
+            let ast = Ast::Scalar(expr);
+            let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
+            assert_eq!(
+                polarity,
+                LinkPolarity::Positive,
+                "{name}(x) should propagate positive polarity"
+            );
+        }
+    }
+
+    #[test]
+    fn test_builtin_polarity_monotone_negative_inner() {
+        use crate::ast::UnaryOp;
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        // -x has Negative polarity
+        let neg_x = || {
+            Box::new(Expr2::Op1(
+                UnaryOp::Negative,
+                Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
+                None,
+                Loc::default(),
+            ))
+        };
+        let empty_vars = HashMap::new();
+
+        let expr = Expr2::App(BuiltinFn::Exp(neg_x()), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
+        assert_eq!(
+            polarity,
+            LinkPolarity::Negative,
+            "Exp(-x) should have negative polarity"
+        );
+    }
+
+    #[test]
+    fn test_builtin_polarity_non_monotone_returns_unknown() {
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
+        let empty_vars = HashMap::new();
+
+        let non_monotone: Vec<(&str, BuiltinFn<Expr2>)> = vec![
+            ("Abs", BuiltinFn::Abs(x_expr())),
+            ("Sin", BuiltinFn::Sin(x_expr())),
+            ("Cos", BuiltinFn::Cos(x_expr())),
+            ("Sign", BuiltinFn::Sign(x_expr())),
+        ];
+
+        for (name, builtin) in non_monotone {
+            let expr = Expr2::App(builtin, None, Loc::default());
+            let ast = Ast::Scalar(expr);
+            let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
+            assert_eq!(
+                polarity,
+                LinkPolarity::Unknown,
+                "{name}(x) should return Unknown polarity"
+            );
+        }
+    }
+
+    #[test]
+    fn test_builtin_polarity_max_min_scalar() {
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
+        let const_5 = || Box::new(Expr2::Const("5".to_string(), 5.0, Loc::default()));
+        let empty_vars = HashMap::new();
+
+        // Max(x, 5): only x depends on from_var -> propagate x's polarity
+        let expr = Expr2::App(
+            BuiltinFn::Max(x_expr(), Some(const_5())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
+        assert_eq!(
+            polarity,
+            LinkPolarity::Positive,
+            "Max(x, 5) should propagate positive polarity"
+        );
+
+        // Min(5, x): only x depends on from_var -> propagate x's polarity
+        let expr = Expr2::App(
+            BuiltinFn::Min(const_5(), Some(x_expr())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
+        assert_eq!(
+            polarity,
+            LinkPolarity::Positive,
+            "Min(5, x) should propagate positive polarity"
+        );
+    }
+
+    #[test]
+    fn test_expr_references_var() {
+        use crate::ast::{Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        let y_var = Ident::new("y");
+        let x_expr = || Expr2::Var(x_var.clone(), None, Loc::default());
+        let const_5 = || Expr2::Const("5".to_string(), 5.0, Loc::default());
+
+        assert!(!expr_references_var(&const_5(), &x_var));
+        assert!(expr_references_var(&x_expr(), &x_var));
+        assert!(!expr_references_var(&x_expr(), &y_var));
+
+        // ABS(x) references x
+        let abs_x = Expr2::App(BuiltinFn::Abs(Box::new(x_expr())), None, Loc::default());
+        assert!(expr_references_var(&abs_x, &x_var));
+        assert!(!expr_references_var(&abs_x, &y_var));
+
+        // PULSE(1, 5) doesn't reference x
+        let pulse = Expr2::App(
+            BuiltinFn::Pulse(Box::new(const_5()), Box::new(const_5()), None),
+            None,
+            Loc::default(),
+        );
+        assert!(!expr_references_var(&pulse, &x_var));
+
+        // x + 5 references x
+        let add = Expr2::Op2(
+            BinaryOp::Add,
+            Box::new(x_expr()),
+            Box::new(const_5()),
+            None,
+            Loc::default(),
+        );
+        assert!(expr_references_var(&add, &x_var));
+        assert!(!expr_references_var(&add, &y_var));
+
+        // Subscript: array[x] references x through the index expression
+        use crate::ast::IndexExpr2;
+        let array_var = Ident::new("array");
+        let subscript_with_x = Expr2::Subscript(
+            array_var.clone(),
+            vec![IndexExpr2::Expr(x_expr())],
+            None,
+            Loc::default(),
+        );
+        assert!(
+            expr_references_var(&subscript_with_x, &x_var),
+            "array[x] should reference x through its index"
+        );
+        assert!(
+            expr_references_var(&subscript_with_x, &array_var),
+            "array[x] should reference array as the subscripted variable"
+        );
+        assert!(
+            !expr_references_var(&subscript_with_x, &y_var),
+            "array[x] should not reference y"
+        );
+
+        // Subscript with range: array[x..5] references x
+        let subscript_range = Expr2::Subscript(
+            array_var.clone(),
+            vec![IndexExpr2::Range(x_expr(), const_5(), Loc::default())],
+            None,
+            Loc::default(),
+        );
+        assert!(
+            expr_references_var(&subscript_range, &x_var),
+            "array[x..5] should reference x through range index"
+        );
+
+        // Subscript with constant index: array[5] doesn't reference x
+        let subscript_const = Expr2::Subscript(
+            array_var.clone(),
+            vec![IndexExpr2::Expr(const_5())],
+            None,
+            Loc::default(),
+        );
+        assert!(
+            !expr_references_var(&subscript_const, &x_var),
+            "array[5] should not reference x"
+        );
+    }
+
+    #[test]
+    fn test_max_min_polarity_with_non_monotone_arg() {
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
+        let abs_x = || Box::new(Expr2::App(BuiltinFn::Abs(x_expr()), None, Loc::default()));
+        let const_5 = || Box::new(Expr2::Const("5".to_string(), 5.0, Loc::default()));
+        let empty_vars = HashMap::new();
+
+        // MAX(ABS(x), x): ABS(x) is non-monotonically dependent on x,
+        // so overall polarity is unknown
+        let expr = Expr2::App(
+            BuiltinFn::Max(abs_x(), Some(x_expr())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Unknown,
+            "MAX(ABS(x), x) should be Unknown (non-monotonic arg)"
+        );
+
+        // MIN(ABS(x), x): same reasoning
+        let expr = Expr2::App(
+            BuiltinFn::Min(abs_x(), Some(x_expr())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Unknown,
+            "MIN(ABS(x), x) should be Unknown (non-monotonic arg)"
+        );
+
+        // MAX(5, x): constant is independent, propagate x's polarity
+        let expr = Expr2::App(
+            BuiltinFn::Max(const_5(), Some(x_expr())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Positive,
+            "MAX(5, x) should be Positive (constant is independent)"
+        );
+
+        // MAX(ABS(x), ABS(x)): both non-monotonic
+        let expr = Expr2::App(BuiltinFn::Max(abs_x(), Some(abs_x())), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Unknown,
+            "MAX(ABS(x), ABS(x)) should be Unknown"
+        );
+
+        // MAX(x, x): both positively dependent → Positive
+        let expr = Expr2::App(
+            BuiltinFn::Max(x_expr(), Some(x_expr())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Positive,
+            "MAX(x, x) should be Positive"
+        );
+
+        // MAX(PULSE(1, 5), x): PULSE doesn't depend on x → propagate x's polarity
+        let pulse = || {
+            Box::new(Expr2::App(
+                BuiltinFn::Pulse(const_5(), const_5(), None),
+                None,
+                Loc::default(),
+            ))
+        };
+        let expr = Expr2::App(
+            BuiltinFn::Max(pulse(), Some(x_expr())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Positive,
+            "MAX(PULSE(1,5), x) should be Positive (PULSE is independent)"
+        );
+    }
+
+    #[test]
+    fn test_add_sub_div_polarity_with_non_monotone_arg() {
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
+        let abs_x = || Box::new(Expr2::App(BuiltinFn::Abs(x_expr()), None, Loc::default()));
+        let const_5 = || Box::new(Expr2::Const("5".to_string(), 5.0, Loc::default()));
+        let empty_vars = HashMap::new();
+
+        // x + ABS(x): ABS(x) non-monotonically depends on x → Unknown
+        let expr = Expr2::Op2(BinaryOp::Add, x_expr(), abs_x(), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Unknown,
+            "x + ABS(x) should be Unknown"
+        );
+
+        // x + 5: 5 is independent → Positive
+        let expr = Expr2::Op2(BinaryOp::Add, x_expr(), const_5(), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Positive,
+            "x + 5 should be Positive"
+        );
+
+        // ABS(x) - x: ABS(x) non-monotonically depends on x → Unknown
+        let expr = Expr2::Op2(BinaryOp::Sub, abs_x(), x_expr(), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Unknown,
+            "ABS(x) - x should be Unknown"
+        );
+
+        // 5 - x: 5 is independent → flip(Positive) = Negative
+        let expr = Expr2::Op2(BinaryOp::Sub, const_5(), x_expr(), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Negative,
+            "5 - x should be Negative"
+        );
+
+        // x / ABS(x) = sign(x), non-monotonic → Unknown
+        let expr = Expr2::Op2(BinaryOp::Div, x_expr(), abs_x(), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Unknown,
+            "x / ABS(x) should be Unknown"
+        );
+
+        // x / 5: 5 is independent → Positive
+        let expr = Expr2::Op2(BinaryOp::Div, x_expr(), const_5(), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Positive,
+            "x / 5 should be Positive"
         );
     }
 

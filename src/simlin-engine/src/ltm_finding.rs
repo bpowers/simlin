@@ -477,11 +477,31 @@ fn rank_and_filter(found_loops: &mut Vec<FoundLoop>) {
     // Truncate to MAX_LOOPS
     found_loops.truncate(MAX_LOOPS);
 
-    // Compute total score for filtering by relative contribution
-    let total_avg_score: f64 = found_loops.iter().map(|l| l.avg_abs_score).sum();
-
-    if total_avg_score > 0.0 {
-        found_loops.retain(|l| l.avg_abs_score / total_avg_score >= MIN_CONTRIBUTION);
+    // Filter by peak per-timestep relative contribution: retain a loop if at
+    // any single timestep its |score| is >= MIN_CONTRIBUTION of the total |score|
+    // at that timestep. This keeps loops that are briefly dominant even if their
+    // average contribution is small.
+    let step_count = found_loops.first().map_or(0, |l| l.scores.len());
+    debug_assert!(
+        found_loops.iter().all(|l| l.scores.len() == step_count),
+        "all loops must have the same number of timesteps"
+    );
+    if step_count > 0 {
+        let mut timestep_totals: Vec<f64> = vec![0.0; step_count];
+        for fl in found_loops.iter() {
+            for (i, &(_, score)) in fl.scores.iter().enumerate() {
+                if !score.is_nan() {
+                    timestep_totals[i] += score.abs();
+                }
+            }
+        }
+        found_loops.retain(|l| {
+            l.scores.iter().enumerate().any(|(i, &(_, score))| {
+                !score.is_nan()
+                    && timestep_totals[i] > 0.0
+                    && score.abs() / timestep_totals[i] >= MIN_CONTRIBUTION
+            })
+        });
     }
 
     // Assign deterministic IDs (sorts by content key for stable naming)
@@ -963,10 +983,25 @@ mod tests {
     }
 
     /// Helper to create a FoundLoop with given variable names, polarity, and score.
+    /// Populates a single timestep of score data so per-timestep filtering works.
     fn make_found_loop(
         var_pairs: &[(&str, &str)],
         polarity: LoopPolarity,
         avg_abs_score: f64,
+    ) -> FoundLoop {
+        make_found_loop_with_scores(
+            var_pairs,
+            polarity,
+            avg_abs_score,
+            vec![(0.0, avg_abs_score)],
+        )
+    }
+
+    fn make_found_loop_with_scores(
+        var_pairs: &[(&str, &str)],
+        polarity: LoopPolarity,
+        avg_abs_score: f64,
+        scores: Vec<(f64, f64)>,
     ) -> FoundLoop {
         let links: Vec<Link> = var_pairs
             .iter()
@@ -983,7 +1018,7 @@ mod tests {
                 stocks: vec![],
                 polarity,
             },
-            scores: vec![],
+            scores,
             avg_abs_score,
         }
     }
@@ -1075,5 +1110,47 @@ mod tests {
         assert!(!loops[0].loop_info.id.is_empty());
         assert!(!loops[1].loop_info.id.is_empty());
         assert!(!loops[2].loop_info.id.is_empty());
+    }
+
+    #[test]
+    fn test_rank_and_filter_retains_briefly_dominant_loop() {
+        // A loop that is dominant at 1 out of 100 timesteps (strong spike) but
+        // has tiny average should be retained by per-timestep filtering.
+        let n = 100;
+
+        // Build score vectors: "spike" loop has score 100 at step 50, 0 elsewhere
+        let spike_scores: Vec<(f64, f64)> = (0..n)
+            .map(|i| {
+                let t = i as f64;
+                if i == 50 { (t, 100.0) } else { (t, 0.0) }
+            })
+            .collect();
+        // avg_abs_score = 100/100 = 1.0
+        let spike_loop = make_found_loop_with_scores(
+            &[("spike_a", "spike_b"), ("spike_b", "spike_a")],
+            LoopPolarity::Reinforcing,
+            1.0,
+            spike_scores,
+        );
+
+        // "steady" loop has score 50 at every step
+        let steady_scores: Vec<(f64, f64)> = (0..n).map(|i| (i as f64, 50.0)).collect();
+        let steady_loop = make_found_loop_with_scores(
+            &[("steady_a", "steady_b"), ("steady_b", "steady_a")],
+            LoopPolarity::Reinforcing,
+            50.0,
+            steady_scores,
+        );
+
+        let mut loops = vec![spike_loop, steady_loop];
+        rank_and_filter(&mut loops);
+
+        // Both loops should be retained: the spike loop has 100/(100+50) = 66.7%
+        // contribution at step 50, well above MIN_CONTRIBUTION.
+        assert_eq!(
+            loops.len(),
+            2,
+            "Briefly dominant loop should be retained by per-timestep filtering"
+        );
     }
 }

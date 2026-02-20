@@ -74,8 +74,8 @@ class TestLtmReinforcingLoop:
         sim = model.simulate(enable_ltm=True)
         sim.run_to_end()
 
-        abs_loop_score_var = f"$\u205altm\u205aabs_loop_score\u205a{r_loop.id}"
-        loop_scores = sim.get_series(abs_loop_score_var)
+        loop_score_var = f"$\u205altm\u205aloop_score\u205a{r_loop.id}"
+        loop_scores = sim.get_series(loop_score_var)
 
         # Filter out NaN and zero values (initial timesteps and equilibrium)
         valid_scores = [s for s in loop_scores if not math.isnan(s) and s != 0.0]
@@ -164,8 +164,8 @@ class TestLtmBalancingLoop:
         sim = model.simulate(enable_ltm=True)
         sim.run_to_end()
 
-        abs_loop_score_var = f"$\u205altm\u205aabs_loop_score\u205a{b_loop.id}"
-        loop_scores = sim.get_series(abs_loop_score_var)
+        loop_score_var = f"$\u205altm\u205aloop_score\u205a{b_loop.id}"
+        loop_scores = sim.get_series(loop_score_var)
 
         # Filter out NaN and zero values (initial timesteps and equilibrium)
         valid_scores = [s for s in loop_scores if not math.isnan(s) and s != 0.0]
