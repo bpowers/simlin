@@ -227,6 +227,54 @@ impl<Expr> BuiltinFn<Expr> {
         self.try_map(|e| Ok::<_, std::convert::Infallible>(f(e)))
             .unwrap()
     }
+
+    /// Call a closure on each expression argument by reference.
+    pub fn for_each_expr_ref<F>(&self, mut f: F)
+    where
+        F: FnMut(&Expr),
+    {
+        use BuiltinFn::*;
+        match self {
+            Lookup(a, b, _) | LookupForward(a, b, _) | LookupBackward(a, b, _) => {
+                f(a);
+                f(b);
+            }
+            Abs(a) | Arccos(a) | Arcsin(a) | Arctan(a) | Cos(a) | Exp(a) | Int(a) | Ln(a)
+            | Log10(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) | Size(a) | Stddev(a) | Sum(a) => f(a),
+            Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {}
+            Max(a, b) | Min(a, b) => {
+                f(a);
+                if let Some(b) = b {
+                    f(b);
+                }
+            }
+            Mean(args) => {
+                for a in args {
+                    f(a);
+                }
+            }
+            Pulse(a, b, c) | Ramp(a, b, c) | SafeDiv(a, b, c) => {
+                f(a);
+                f(b);
+                if let Some(c) = c {
+                    f(c);
+                }
+            }
+            Step(a, b) => {
+                f(a);
+                f(b);
+            }
+            Rank(a, rest) => {
+                f(a);
+                if let Some((b, c)) = rest {
+                    f(b);
+                    if let Some(c) = c {
+                        f(c);
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub fn is_0_arity_builtin_fn(name: &str) -> bool {

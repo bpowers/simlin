@@ -866,7 +866,7 @@ mod tests {
         let equation = generate_link_score_equation(&from, &to, y_var, all_vars);
 
         // Verify the EXACT equation structure
-        // Returns NaN at initial timestep when PREVIOUS values don't exist
+        // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
             then 0 \
@@ -905,7 +905,7 @@ mod tests {
 
         // Verify the EXACT equation structure for flow-to-stock
         // ABS wraps the ratio; sign is fixed (+1 for inflows) per corrected 2023 formula
-        // Returns NaN for first two timesteps when insufficient history
+        // Returns 0 for first two timesteps when insufficient history
         let expected = "if \
             (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
             then 0 \
@@ -944,7 +944,7 @@ mod tests {
 
         // Verify the EXACT equation structure for outflow-to-stock (negative sign)
         // ABS wraps the ratio; sign is fixed (-1 for outflows) per corrected 2023 formula
-        // Returns NaN for first two timesteps when insufficient history
+        // Returns 0 for first two timesteps when insufficient history
         let expected = "if \
             (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
             then 0 \
@@ -1111,7 +1111,7 @@ mod tests {
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
         // Verify the EXACT equation structure for module-to-variable link
-        // Returns NaN at initial timestep when PREVIOUS values don't exist
+        // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
             then 0 \
@@ -1176,7 +1176,7 @@ mod tests {
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
         // Verify the EXACT equation structure for variable-to-module link
-        // Returns NaN at initial timestep when PREVIOUS values don't exist
+        // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
             then 0 \
@@ -1235,7 +1235,7 @@ mod tests {
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
         // Verify the EXACT equation structure for module-to-module link
-        // Returns NaN at initial timestep when PREVIOUS values don't exist
+        // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
             then 0 \
@@ -1396,7 +1396,7 @@ mod tests {
 
         // Verify the EXACT equation structure for stock-to-flow
         // Sign term uses first-order stock change per LTM paper formula
-        // Returns NaN at initial timestep when PREVIOUS values don't exist
+        // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
             then 0 \
@@ -1442,7 +1442,7 @@ mod tests {
 
         // Verify the EXACT equation structure using SAFEDIV
         // Sign term uses first-order stock change per LTM paper formula
-        // Returns NaN at initial timestep when PREVIOUS values don't exist
+        // Returns 0 at initial timestep when PREVIOUS values don't exist
         // Non-stock dependencies (like rate) get wrapped in PREVIOUS()
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
@@ -1488,7 +1488,7 @@ mod tests {
 
         // Verify the EXACT equation structure using SAFEDIV
         // Sign term uses first-order stock change per LTM paper formula
-        // Returns NaN at initial timestep when PREVIOUS values don't exist
+        // Returns 0 at initial timestep when PREVIOUS values don't exist
         // Non-stock dependencies (like drain_time) get wrapped in PREVIOUS()
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
@@ -1532,7 +1532,7 @@ mod tests {
 
         // Verify the EXACT equation using SAFEDIV - note that non-stock dependencies get PREVIOUS()
         // Sign term uses first-order stock change per LTM paper formula
-        // Returns NaN at initial timestep when PREVIOUS values don't exist
+        // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
             then 0 \
@@ -1574,7 +1574,7 @@ mod tests {
 
         // When flow doesn't depend on stock, partial equation is just the constant
         // Sign term uses first-order stock change per LTM paper formula
-        // Returns NaN at initial timestep when PREVIOUS values don't exist
+        // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
             then 0 \
@@ -1708,7 +1708,7 @@ mod tests {
 
         // This test validates the correct LTM paper formula implementation
         // Sign term uses first-order stock change per LTM paper formula
-        // Returns NaN at initial timestep when PREVIOUS values don't exist
+        // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
             then 0 \

@@ -841,9 +841,25 @@ fn analyze_expr_polarity_with_context(
             let pol_b =
                 analyze_expr_polarity_with_context(b, from_var, current_polarity, variables);
             match (pol_a, pol_b) {
-                // Only one arg depends on from_var: propagate its polarity
-                (LinkPolarity::Unknown, known) => known,
-                (known, LinkPolarity::Unknown) => known,
+                // When one side returns Unknown, we must check whether it actually
+                // references from_var. Unknown from an independent expression (e.g.
+                // a constant or unrelated variable) means we can use the other side's
+                // polarity. Unknown from a dependent expression (e.g. ABS(x)) means
+                // the result is truly non-monotonic.
+                (LinkPolarity::Unknown, known) => {
+                    if expr_references_var(a, from_var) {
+                        LinkPolarity::Unknown
+                    } else {
+                        known
+                    }
+                }
+                (known, LinkPolarity::Unknown) => {
+                    if expr_references_var(b, from_var) {
+                        LinkPolarity::Unknown
+                    } else {
+                        known
+                    }
+                }
                 // Both agree: propagate
                 (a_pol, b_pol) if a_pol == b_pol => a_pol,
                 // Disagree: unknown
@@ -858,24 +874,42 @@ fn analyze_expr_polarity_with_context(
                 analyze_expr_polarity_with_context(right, from_var, current_polarity, variables);
 
             match op {
-                BinaryOp::Add => {
-                    // Addition preserves polarity
-                    if left_pol != LinkPolarity::Unknown {
-                        left_pol
-                    } else {
-                        right_pol
+                BinaryOp::Add => match (left_pol, right_pol) {
+                    (LinkPolarity::Unknown, pol) => {
+                        if expr_references_var(left, from_var) {
+                            LinkPolarity::Unknown
+                        } else {
+                            pol
+                        }
                     }
-                }
-                BinaryOp::Sub => {
-                    // Subtraction flips polarity of right operand
-                    if left_pol != LinkPolarity::Unknown {
-                        left_pol
-                    } else if right_pol != LinkPolarity::Unknown {
-                        flip_polarity(right_pol)
-                    } else {
-                        LinkPolarity::Unknown
+                    (pol, LinkPolarity::Unknown) => {
+                        if expr_references_var(right, from_var) {
+                            LinkPolarity::Unknown
+                        } else {
+                            pol
+                        }
                     }
-                }
+                    (a, b) if a == b => a,
+                    _ => LinkPolarity::Unknown,
+                },
+                BinaryOp::Sub => match (left_pol, right_pol) {
+                    (LinkPolarity::Unknown, pol) => {
+                        if expr_references_var(left, from_var) {
+                            LinkPolarity::Unknown
+                        } else {
+                            flip_polarity(pol)
+                        }
+                    }
+                    (pol, LinkPolarity::Unknown) => {
+                        if expr_references_var(right, from_var) {
+                            LinkPolarity::Unknown
+                        } else {
+                            pol
+                        }
+                    }
+                    (a, b) if a == flip_polarity(b) => a,
+                    _ => LinkPolarity::Unknown,
+                },
                 BinaryOp::Mul => {
                     // Multiplication: combine polarities
                     // If both have known polarity, combine them
@@ -933,18 +967,24 @@ fn analyze_expr_polarity_with_context(
                         LinkPolarity::Unknown
                     }
                 }
-                BinaryOp::Div => {
-                    // Division: numerator preserves polarity, denominator flips polarity
-                    if left_pol != LinkPolarity::Unknown {
-                        // Variable in numerator preserves polarity
-                        left_pol
-                    } else if right_pol != LinkPolarity::Unknown {
-                        // Variable in denominator flips polarity
-                        flip_polarity(right_pol)
-                    } else {
-                        LinkPolarity::Unknown
+                BinaryOp::Div => match (left_pol, right_pol) {
+                    (LinkPolarity::Unknown, pol) => {
+                        if expr_references_var(left, from_var) {
+                            LinkPolarity::Unknown
+                        } else {
+                            flip_polarity(pol)
+                        }
                     }
-                }
+                    (pol, LinkPolarity::Unknown) => {
+                        if expr_references_var(right, from_var) {
+                            LinkPolarity::Unknown
+                        } else {
+                            pol
+                        }
+                    }
+                    (a, b) if a == flip_polarity(b) => a,
+                    _ => LinkPolarity::Unknown,
+                },
                 _ => LinkPolarity::Unknown,
             }
         }
@@ -988,6 +1028,36 @@ fn flip_polarity(pol: LinkPolarity) -> LinkPolarity {
         LinkPolarity::Positive => LinkPolarity::Negative,
         LinkPolarity::Negative => LinkPolarity::Positive,
         LinkPolarity::Unknown => LinkPolarity::Unknown,
+    }
+}
+
+/// Check whether an expression tree contains any reference to a specific variable.
+/// Used to distinguish "independent of from_var" (returns Unknown because expression
+/// doesn't reference from_var at all) from "non-monotonically dependent" (returns
+/// Unknown but DOES reference from_var, e.g. ABS(x)).
+fn expr_references_var(expr: &Expr2, var: &Ident<Canonical>) -> bool {
+    match expr {
+        Expr2::Const(_, _, _) => false,
+        Expr2::Var(ident, _, _) => ident == var,
+        Expr2::Subscript(ident, _, _, _) => ident == var,
+        Expr2::App(builtin, _, _) => {
+            let mut found = false;
+            builtin.for_each_expr_ref(|child| {
+                if !found {
+                    found = expr_references_var(child, var);
+                }
+            });
+            found
+        }
+        Expr2::Op2(_, left, right, _, _) => {
+            expr_references_var(left, var) || expr_references_var(right, var)
+        }
+        Expr2::Op1(_, operand, _, _) => expr_references_var(operand, var),
+        Expr2::If(cond, t, f, _, _) => {
+            expr_references_var(cond, var)
+                || expr_references_var(t, var)
+                || expr_references_var(f, var)
+        }
     }
 }
 
@@ -2589,6 +2659,205 @@ mod tests {
             polarity,
             LinkPolarity::Positive,
             "Min(5, x) should propagate positive polarity"
+        );
+    }
+
+    #[test]
+    fn test_expr_references_var() {
+        use crate::ast::{Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        let y_var = Ident::new("y");
+        let x_expr = || Expr2::Var(x_var.clone(), None, Loc::default());
+        let const_5 = || Expr2::Const("5".to_string(), 5.0, Loc::default());
+
+        assert!(!expr_references_var(&const_5(), &x_var));
+        assert!(expr_references_var(&x_expr(), &x_var));
+        assert!(!expr_references_var(&x_expr(), &y_var));
+
+        // ABS(x) references x
+        let abs_x = Expr2::App(BuiltinFn::Abs(Box::new(x_expr())), None, Loc::default());
+        assert!(expr_references_var(&abs_x, &x_var));
+        assert!(!expr_references_var(&abs_x, &y_var));
+
+        // PULSE(1, 5) doesn't reference x
+        let pulse = Expr2::App(
+            BuiltinFn::Pulse(Box::new(const_5()), Box::new(const_5()), None),
+            None,
+            Loc::default(),
+        );
+        assert!(!expr_references_var(&pulse, &x_var));
+
+        // x + 5 references x
+        let add = Expr2::Op2(
+            BinaryOp::Add,
+            Box::new(x_expr()),
+            Box::new(const_5()),
+            None,
+            Loc::default(),
+        );
+        assert!(expr_references_var(&add, &x_var));
+        assert!(!expr_references_var(&add, &y_var));
+    }
+
+    #[test]
+    fn test_max_min_polarity_with_non_monotone_arg() {
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
+        let abs_x = || Box::new(Expr2::App(BuiltinFn::Abs(x_expr()), None, Loc::default()));
+        let const_5 = || Box::new(Expr2::Const("5".to_string(), 5.0, Loc::default()));
+        let empty_vars = HashMap::new();
+
+        // MAX(ABS(x), x): ABS(x) is non-monotonically dependent on x,
+        // so overall polarity is unknown
+        let expr = Expr2::App(
+            BuiltinFn::Max(abs_x(), Some(x_expr())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Unknown,
+            "MAX(ABS(x), x) should be Unknown (non-monotonic arg)"
+        );
+
+        // MIN(ABS(x), x): same reasoning
+        let expr = Expr2::App(
+            BuiltinFn::Min(abs_x(), Some(x_expr())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Unknown,
+            "MIN(ABS(x), x) should be Unknown (non-monotonic arg)"
+        );
+
+        // MAX(5, x): constant is independent, propagate x's polarity
+        let expr = Expr2::App(
+            BuiltinFn::Max(const_5(), Some(x_expr())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Positive,
+            "MAX(5, x) should be Positive (constant is independent)"
+        );
+
+        // MAX(ABS(x), ABS(x)): both non-monotonic
+        let expr = Expr2::App(BuiltinFn::Max(abs_x(), Some(abs_x())), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Unknown,
+            "MAX(ABS(x), ABS(x)) should be Unknown"
+        );
+
+        // MAX(x, x): both positively dependent → Positive
+        let expr = Expr2::App(
+            BuiltinFn::Max(x_expr(), Some(x_expr())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Positive,
+            "MAX(x, x) should be Positive"
+        );
+
+        // MAX(PULSE(1, 5), x): PULSE doesn't depend on x → propagate x's polarity
+        let pulse = || {
+            Box::new(Expr2::App(
+                BuiltinFn::Pulse(const_5(), const_5(), None),
+                None,
+                Loc::default(),
+            ))
+        };
+        let expr = Expr2::App(
+            BuiltinFn::Max(pulse(), Some(x_expr())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Positive,
+            "MAX(PULSE(1,5), x) should be Positive (PULSE is independent)"
+        );
+    }
+
+    #[test]
+    fn test_add_sub_div_polarity_with_non_monotone_arg() {
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
+        let abs_x = || Box::new(Expr2::App(BuiltinFn::Abs(x_expr()), None, Loc::default()));
+        let const_5 = || Box::new(Expr2::Const("5".to_string(), 5.0, Loc::default()));
+        let empty_vars = HashMap::new();
+
+        // x + ABS(x): ABS(x) non-monotonically depends on x → Unknown
+        let expr = Expr2::Op2(BinaryOp::Add, x_expr(), abs_x(), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Unknown,
+            "x + ABS(x) should be Unknown"
+        );
+
+        // x + 5: 5 is independent → Positive
+        let expr = Expr2::Op2(BinaryOp::Add, x_expr(), const_5(), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Positive,
+            "x + 5 should be Positive"
+        );
+
+        // ABS(x) - x: ABS(x) non-monotonically depends on x → Unknown
+        let expr = Expr2::Op2(BinaryOp::Sub, abs_x(), x_expr(), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Unknown,
+            "ABS(x) - x should be Unknown"
+        );
+
+        // 5 - x: 5 is independent → flip(Positive) = Negative
+        let expr = Expr2::Op2(BinaryOp::Sub, const_5(), x_expr(), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Negative,
+            "5 - x should be Negative"
+        );
+
+        // x / ABS(x) = sign(x), non-monotonic → Unknown
+        let expr = Expr2::Op2(BinaryOp::Div, x_expr(), abs_x(), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Unknown,
+            "x / ABS(x) should be Unknown"
+        );
+
+        // x / 5: 5 is independent → Positive
+        let expr = Expr2::Op2(BinaryOp::Div, x_expr(), const_5(), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        assert_eq!(
+            analyze_link_polarity(&ast, &x_var, &empty_vars),
+            LinkPolarity::Positive,
+            "x / 5 should be Positive"
         );
     }
 
