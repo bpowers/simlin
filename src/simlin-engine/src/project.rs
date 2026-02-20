@@ -347,7 +347,7 @@ mod tests {
         let has_loop_scores = main_model
             .variables
             .iter()
-            .any(|v| v.get_ident().starts_with("$⁚ltm⁚abs_loop_score⁚"));
+            .any(|v| v.get_ident().starts_with("$⁚ltm⁚loop_score⁚"));
 
         assert!(has_link_scores, "Should have link score variables");
         assert!(has_loop_scores, "Should have loop score variables");
@@ -396,7 +396,7 @@ mod tests {
         // Should have loop score variables
         let loop_score_vars: Vec<_> = var_names
             .iter()
-            .filter(|name| name.starts_with("$⁚ltm⁚abs_loop_score⁚"))
+            .filter(|name| name.starts_with("$⁚ltm⁚loop_score⁚"))
             .collect();
         assert!(
             !loop_score_vars.is_empty(),
@@ -527,7 +527,7 @@ mod tests {
         let loop_score_var = results
             .offsets
             .keys()
-            .find(|k| k.as_str().starts_with("$⁚ltm⁚abs_loop_score⁚"))
+            .find(|k| k.as_str().starts_with("$⁚ltm⁚loop_score⁚"))
             .expect("Should have a loop score variable");
 
         // Get the offset for this variable
@@ -535,10 +535,10 @@ mod tests {
         let num_timesteps = results.data.len() / results.offsets.len();
         let num_vars = results.offsets.len();
 
-        // Check values after the initial NaN timesteps, filtering out 0 (equilibrium)
+        // Filter out 0 (initial timesteps with no dynamics, and equilibrium)
         let valid_scores: Vec<f64> = (1..num_timesteps)
             .map(|step| results.data[step * num_vars + offset])
-            .filter(|v| !v.is_nan() && *v != 0.0)
+            .filter(|v| *v != 0.0)
             .collect();
 
         // For a balancing loop, all valid scores should be NEGATIVE
@@ -587,7 +587,7 @@ mod tests {
         let loop_score_var = results
             .offsets
             .keys()
-            .find(|k| k.as_str().starts_with("$⁚ltm⁚abs_loop_score⁚"))
+            .find(|k| k.as_str().starts_with("$⁚ltm⁚loop_score⁚"))
             .expect("Should have a loop score variable");
 
         // Get the offset for this variable
@@ -595,10 +595,10 @@ mod tests {
         let num_timesteps = results.data.len() / results.offsets.len();
         let num_vars = results.offsets.len();
 
-        // Check values after the initial NaN timesteps
+        // Filter out 0 (initial timesteps with no dynamics)
         let valid_scores: Vec<f64> = (1..num_timesteps)
             .map(|step| results.data[step * num_vars + offset])
-            .filter(|v| !v.is_nan() && *v != 0.0)
+            .filter(|v| *v != 0.0)
             .collect();
 
         // For a reinforcing loop, all valid scores should be POSITIVE
@@ -658,7 +658,7 @@ mod tests {
         let loop_score_count = main_model
             .variables
             .iter()
-            .filter(|v| v.get_ident().starts_with("$⁚ltm⁚abs_loop_score⁚"))
+            .filter(|v| v.get_ident().starts_with("$⁚ltm⁚loop_score⁚"))
             .count();
         assert_eq!(
             loop_score_count, 0,

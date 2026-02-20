@@ -824,6 +824,32 @@ fn analyze_expr_polarity_with_context(
             }
             LinkPolarity::Unknown
         }
+        // Monotonically increasing single-arg builtins: propagate inner polarity
+        Expr2::App(crate::builtins::BuiltinFn::Exp(inner), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Ln(inner), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Log10(inner), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Sqrt(inner), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Arctan(inner), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Int(inner), _, _) => {
+            analyze_expr_polarity_with_context(inner, from_var, current_polarity, variables)
+        }
+        // Max/Min (scalar two-arg form): non-decreasing in each argument
+        Expr2::App(crate::builtins::BuiltinFn::Max(a, Some(b)), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Min(a, Some(b)), _, _) => {
+            let pol_a =
+                analyze_expr_polarity_with_context(a, from_var, current_polarity, variables);
+            let pol_b =
+                analyze_expr_polarity_with_context(b, from_var, current_polarity, variables);
+            match (pol_a, pol_b) {
+                // Only one arg depends on from_var: propagate its polarity
+                (LinkPolarity::Unknown, known) => known,
+                (known, LinkPolarity::Unknown) => known,
+                // Both agree: propagate
+                (a_pol, b_pol) if a_pol == b_pol => a_pol,
+                // Disagree: unknown
+                _ => LinkPolarity::Unknown,
+            }
+        }
         Expr2::App(_, _, _) => LinkPolarity::Unknown,
         Expr2::Op2(op, left, right, _, _) => {
             let left_pol =
@@ -2437,6 +2463,132 @@ mod tests {
             reinforcing_loop.id.starts_with("r"),
             "Reinforcing polarity loop should have 'r' prefix, got: {}",
             reinforcing_loop.id
+        );
+    }
+
+    #[test]
+    fn test_builtin_polarity_monotone_increasing() {
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
+        let empty_vars = HashMap::new();
+
+        // Exp(x), Ln(x), Log10(x), Sqrt(x), Arctan(x), Int(x) all propagate polarity
+        let monotone_fns: Vec<(&str, BuiltinFn<Expr2>)> = vec![
+            ("Exp", BuiltinFn::Exp(x_expr())),
+            ("Ln", BuiltinFn::Ln(x_expr())),
+            ("Log10", BuiltinFn::Log10(x_expr())),
+            ("Sqrt", BuiltinFn::Sqrt(x_expr())),
+            ("Arctan", BuiltinFn::Arctan(x_expr())),
+            ("Int", BuiltinFn::Int(x_expr())),
+        ];
+
+        for (name, builtin) in monotone_fns {
+            let expr = Expr2::App(builtin, None, Loc::default());
+            let ast = Ast::Scalar(expr);
+            let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
+            assert_eq!(
+                polarity,
+                LinkPolarity::Positive,
+                "{name}(x) should propagate positive polarity"
+            );
+        }
+    }
+
+    #[test]
+    fn test_builtin_polarity_monotone_negative_inner() {
+        use crate::ast::expr0::UnaryOp;
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        // -x has Negative polarity
+        let neg_x = || {
+            Box::new(Expr2::Op1(
+                UnaryOp::Negative,
+                Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
+                None,
+                Loc::default(),
+            ))
+        };
+        let empty_vars = HashMap::new();
+
+        let expr = Expr2::App(BuiltinFn::Exp(neg_x()), None, Loc::default());
+        let ast = Ast::Scalar(expr);
+        let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
+        assert_eq!(
+            polarity,
+            LinkPolarity::Negative,
+            "Exp(-x) should have negative polarity"
+        );
+    }
+
+    #[test]
+    fn test_builtin_polarity_non_monotone_returns_unknown() {
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
+        let empty_vars = HashMap::new();
+
+        let non_monotone: Vec<(&str, BuiltinFn<Expr2>)> = vec![
+            ("Abs", BuiltinFn::Abs(x_expr())),
+            ("Sin", BuiltinFn::Sin(x_expr())),
+            ("Cos", BuiltinFn::Cos(x_expr())),
+            ("Sign", BuiltinFn::Sign(x_expr())),
+        ];
+
+        for (name, builtin) in non_monotone {
+            let expr = Expr2::App(builtin, None, Loc::default());
+            let ast = Ast::Scalar(expr);
+            let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
+            assert_eq!(
+                polarity,
+                LinkPolarity::Unknown,
+                "{name}(x) should return Unknown polarity"
+            );
+        }
+    }
+
+    #[test]
+    fn test_builtin_polarity_max_min_scalar() {
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::builtins::BuiltinFn;
+
+        let x_var = Ident::new("x");
+        let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
+        let const_5 = || Box::new(Expr2::Const("5".to_string(), 5.0, Loc::default()));
+        let empty_vars = HashMap::new();
+
+        // Max(x, 5): only x depends on from_var -> propagate x's polarity
+        let expr = Expr2::App(
+            BuiltinFn::Max(x_expr(), Some(const_5())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
+        assert_eq!(
+            polarity,
+            LinkPolarity::Positive,
+            "Max(x, 5) should propagate positive polarity"
+        );
+
+        // Min(5, x): only x depends on from_var -> propagate x's polarity
+        let expr = Expr2::App(
+            BuiltinFn::Min(const_5(), Some(x_expr())),
+            None,
+            Loc::default(),
+        );
+        let ast = Ast::Scalar(expr);
+        let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
+        assert_eq!(
+            polarity,
+            LinkPolarity::Positive,
+            "Min(5, x) should propagate positive polarity"
         );
     }
 

@@ -249,7 +249,7 @@ class Run:
 
                 # Get absolute loop score to determine runtime polarity
                 # The absolute score determines the sign (positive/negative)
-                abs_score_var = f"$\u205altm\u205aabs_loop_score\u205a{structural_loop.id}"
+                abs_score_var = f"$\u205altm\u205aloop_score\u205a{structural_loop.id}"
                 try:
                     abs_scores = self._sim.get_series(abs_score_var)
                     runtime_polarity = LoopPolarity.from_runtime_scores(abs_scores)

@@ -143,7 +143,7 @@ as a separator:
 | Variable | Pattern |
 |----------|---------|
 | Link score | `$⁚ltm⁚link_score⁚{from}⁚{to}` |
-| Absolute loop score | `$⁚ltm⁚abs_loop_score⁚{loop_id}` |
+| Loop score | `$⁚ltm⁚loop_score⁚{loop_id}` |
 | Relative loop score | `$⁚ltm⁚rel_loop_score⁚{loop_id}` |
 
 The `$` prefix prevents collisions with user-defined variables. The Unicode
@@ -384,6 +384,14 @@ transfer score.
    `SAFEDIV(loop_score, sum_of_abs_scores, 0)` with explicit division-by-zero
    protection, while the papers present the formula without discussing this edge
    case. This means zero-activity periods produce 0 rather than NaN.
+
+6. **Flow-to-stock numerator timing**: The flow-to-stock link score numerator uses
+   `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` rather than `flow - PREVIOUS(flow)`.
+   In Euler integration, the flow at t-1 drove the stock change from t-1 to t, so
+   `PREVIOUS(flow)` aligns the numerator and denominator to the same causal interval.
+   This produces results shifted by one DT compared to reference SD software
+   (Stella/iThink). The integration test (`tests/simulate_ltm.rs`) compensates by
+   shifting reference timestamps forward by DT when loading golden data.
 
 ## Test Coverage
 

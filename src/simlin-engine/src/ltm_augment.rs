@@ -245,7 +245,7 @@ fn generate_module_link_score_equation(
         return format!(
             "if \
                 (TIME = PREVIOUS(TIME)) \
-                then 0/0 \
+                then 0 \
                 else if \
                     (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
                     then 0 \
@@ -269,7 +269,7 @@ fn generate_module_link_score_equation(
                 return format!(
                     "if \
                         (TIME = PREVIOUS(TIME)) \
-                        then 0/0 \
+                        then 0 \
                         else if \
                             (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
                             then 0 \
@@ -294,7 +294,7 @@ fn generate_module_link_score_equation(
         return format!(
             "if \
                 (TIME = PREVIOUS(TIME)) \
-                then 0/0 \
+                then 0 \
                 else if \
                     (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
                     then 0 \
@@ -318,7 +318,7 @@ fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, da
 
     // First, generate absolute loop scores
     for loop_item in loops {
-        let var_name = format!("$⁚ltm⁚abs_loop_score⁚{}", loop_item.id);
+        let var_name = format!("$⁚ltm⁚loop_score⁚{}", loop_item.id);
 
         // Generate equation as product of link scores
         let equation = generate_loop_score_equation(loop_item);
@@ -332,13 +332,7 @@ fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, da
     for loop_item in loops {
         let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_item.id);
 
-        // Generate equation for relative loop score
-        let equation = if loops.len() == 1 {
-            // Single loop always has relative score of 1
-            "1".to_string()
-        } else {
-            generate_relative_loop_score_equation(&loop_item.id, loops)
-        };
+        let equation = generate_relative_loop_score_equation(&loop_item.id, loops);
 
         // Create the synthetic variable
         let ltm_var = create_aux_variable(&var_name, &equation);
@@ -424,7 +418,7 @@ fn generate_auxiliary_to_auxiliary_equation(
     format!(
         "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
                 then 0 \
@@ -466,7 +460,7 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
     format!(
         "if \
             (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
-            then 0/0 \
+            then 0 \
             else {sign}ABS(SAFEDIV({numerator}, {denominator}, 0))"
     )
 }
@@ -527,7 +521,7 @@ fn generate_stock_to_flow_equation(
     format!(
         "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 ({flow_diff} = 0) OR ({stock_diff} = 0) \
                 then 0 \
@@ -563,12 +557,12 @@ fn generate_loop_score_equation(loop_item: &Loop) -> String {
 fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> String {
     // Relative loop score = abs(loop_score) / sum(abs(all_loop_scores))
     // Use double quotes around variable names with $
-    let loop_score_var = format!("\"$⁚ltm⁚abs_loop_score⁚{loop_id}\"");
+    let loop_score_var = format!("\"$⁚ltm⁚loop_score⁚{loop_id}\"");
 
     // Build sum of absolute values of all loop scores
     let all_loop_scores: Vec<String> = all_loops
         .iter()
-        .map(|loop_item| format!("ABS(\"$⁚ltm⁚abs_loop_score⁚{}\")", loop_item.id))
+        .map(|loop_item| format!("ABS(\"$⁚ltm⁚loop_score⁚{}\")", loop_item.id))
         .collect();
 
     let sum_expr = if all_loop_scores.is_empty() {
@@ -710,12 +704,84 @@ mod tests {
         // Should use SAFEDIV for division by zero protection
         assert!(equation.contains("SAFEDIV"));
         // Should reference the specific loop score (with double quotes and $ prefix)
-        assert!(equation.contains("\"$⁚ltm⁚abs_loop_score⁚R1\""));
+        assert!(equation.contains("\"$⁚ltm⁚loop_score⁚R1\""));
         // Should have sum of all loop scores in denominator (with double quotes and $ prefix)
+        assert!(equation.contains("ABS(\"$⁚ltm⁚loop_score⁚R1\") + ABS(\"$⁚ltm⁚loop_score⁚B1\")"));
+    }
+
+    #[test]
+    fn test_single_loop_relative_score_uses_safediv() {
+        use crate::ltm::LoopPolarity;
+
+        let loops = vec![Loop {
+            id: "B1".to_string(),
+            links: vec![],
+            stocks: vec![],
+            polarity: LoopPolarity::Balancing,
+        }];
+
+        let equation = generate_relative_loop_score_equation("B1", &loops);
+
+        // Even with a single loop, the equation should use SAFEDIV to produce
+        // sign(score) rather than a hardcoded "1".
         assert!(
-            equation
-                .contains("ABS(\"$⁚ltm⁚abs_loop_score⁚R1\") + ABS(\"$⁚ltm⁚abs_loop_score⁚B1\")")
+            equation.contains("SAFEDIV"),
+            "Single-loop relative score should use SAFEDIV, got: {equation}"
         );
+        assert!(equation.contains("\"$⁚ltm⁚loop_score⁚B1\""));
+    }
+
+    #[test]
+    fn test_single_balancing_loop_relative_score_is_negative() {
+        use crate::test_common::TestProject;
+        use std::sync::Arc;
+
+        // Goal-seeking: level -> gap -> adjustment -> level (balancing)
+        let project = TestProject::new("test_single_balancing_rel")
+            .with_sim_time(0.0, 5.0, 0.25)
+            .aux("goal", "100", None)
+            .stock("level", "50", &["adjustment"], &[], None)
+            .aux("gap", "goal - level", None)
+            .aux("adjustment_time", "5", None)
+            .flow("adjustment", "gap / adjustment_time", None)
+            .compile()
+            .expect("Project should compile");
+
+        let ltm_project = project.with_ltm().expect("Should augment with LTM");
+        let project_rc = Arc::new(ltm_project);
+        let sim = crate::interpreter::Simulation::new(&project_rc, "main")
+            .expect("Should create simulation");
+        let results = sim
+            .run_to_end()
+            .expect("Simulation should run successfully");
+
+        // Find the relative loop score variable
+        let rel_var = results
+            .offsets
+            .keys()
+            .find(|k| k.as_str().starts_with("$⁚ltm⁚rel_loop_score⁚"))
+            .expect("Should have a relative loop score variable");
+
+        let offset = results.offsets[rel_var];
+        let num_vars = results.step_size;
+
+        // Initial timesteps have 0 scores (no dynamics yet); subsequent ones are -1
+        let scores: Vec<f64> = (0..results.step_count)
+            .map(|step| results.data[step * num_vars + offset])
+            .collect();
+
+        let nonzero_scores: Vec<f64> = scores.iter().copied().filter(|v| *v != 0.0).collect();
+        assert!(
+            !nonzero_scores.is_empty(),
+            "Should have some non-zero relative loop score values"
+        );
+
+        for score in &nonzero_scores {
+            assert!(
+                (*score - -1.0).abs() < 1e-6,
+                "Single balancing loop relative score should be -1, got {score}"
+            );
+        }
     }
 
     #[test]
@@ -773,7 +839,7 @@ mod tests {
         // Check for loop score variable
         let has_loop_score = vars
             .iter()
-            .any(|(name, _)| name.as_str().starts_with("$⁚ltm⁚abs_loop_score⁚"));
+            .any(|(name, _)| name.as_str().starts_with("$⁚ltm⁚loop_score⁚"));
         assert!(has_loop_score, "Should have loop score variable");
     }
 
@@ -803,7 +869,7 @@ mod tests {
         // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 ((y - PREVIOUS(y)) = 0) OR ((x - PREVIOUS(x)) = 0) \
                 then 0 \
@@ -842,7 +908,7 @@ mod tests {
         // Returns NaN for first two timesteps when insufficient history
         let expected = "if \
             (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
-            then 0/0 \
+            then 0 \
             else ABS(SAFEDIV(\
                 (PREVIOUS(inflow_rate) - PREVIOUS(PREVIOUS(inflow_rate))), \
                 ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
@@ -881,7 +947,7 @@ mod tests {
         // Returns NaN for first two timesteps when insufficient history
         let expected = "if \
             (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
-            then 0/0 \
+            then 0 \
             else -ABS(SAFEDIV(\
                 (PREVIOUS(outflow_rate) - PREVIOUS(PREVIOUS(outflow_rate))), \
                 ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
@@ -1048,7 +1114,7 @@ mod tests {
         // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 ((processed - PREVIOUS(processed)) = 0) OR ((smoother - PREVIOUS(smoother)) = 0) \
                 then 0 \
@@ -1113,7 +1179,7 @@ mod tests {
         // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 ((processor - PREVIOUS(processor)) = 0) OR ((raw_data - PREVIOUS(raw_data)) = 0) \
                 then 0 \
@@ -1172,7 +1238,7 @@ mod tests {
         // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 ((filter_b - PREVIOUS(filter_b)) = 0) OR ((filter_a - PREVIOUS(filter_a)) = 0) \
                 then 0 \
@@ -1333,7 +1399,7 @@ mod tests {
         // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 ((deaths - PREVIOUS(deaths)) = 0) OR \
                 ((population - PREVIOUS(population)) = 0) \
@@ -1380,7 +1446,7 @@ mod tests {
         // Non-stock dependencies (like rate) get wrapped in PREVIOUS()
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 ((production - PREVIOUS(production)) = 0) OR \
                 ((inventory - PREVIOUS(inventory)) = 0) \
@@ -1426,7 +1492,7 @@ mod tests {
         // Non-stock dependencies (like drain_time) get wrapped in PREVIOUS()
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 ((drainage - PREVIOUS(drainage)) = 0) OR \
                 ((water_tank - PREVIOUS(water_tank)) = 0) \
@@ -1469,7 +1535,7 @@ mod tests {
         // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 ((births - PREVIOUS(births)) = 0) OR \
                 ((population - PREVIOUS(population)) = 0) \
@@ -1511,7 +1577,7 @@ mod tests {
         // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 ((constant_flow - PREVIOUS(constant_flow)) = 0) OR \
                 ((unrelated_stock - PREVIOUS(unrelated_stock)) = 0) \
@@ -1556,7 +1622,7 @@ mod tests {
         // (The parse roundtrip lowercases function names — case-insensitive language.)
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 ((y - PREVIOUS(y)) = 0) OR ((max_val - PREVIOUS(max_val)) = 0) \
                 then 0 \
@@ -1645,7 +1711,7 @@ mod tests {
         // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
             (TIME = PREVIOUS(TIME)) \
-            then 0/0 \
+            then 0 \
             else if \
                 ((inflow - PREVIOUS(inflow)) = 0) OR \
                 ((s - PREVIOUS(s)) = 0) \
@@ -1723,7 +1789,7 @@ mod tests {
             .get(&main_ident)
             .map(|v| {
                 v.iter()
-                    .any(|(name, _)| name.as_str().contains("abs_loop_score"))
+                    .any(|(name, _)| name.as_str().contains("⁚loop_score⁚"))
             })
             .unwrap_or(false);
 
@@ -1737,7 +1803,7 @@ mod tests {
             .get(&main_ident)
             .map(|v| {
                 v.iter()
-                    .any(|(name, _)| name.as_str().contains("abs_loop_score"))
+                    .any(|(name, _)| name.as_str().contains("⁚loop_score⁚"))
             })
             .unwrap_or(false);
 
