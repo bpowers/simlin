@@ -13,7 +13,7 @@ use crate::variable::Variable;
 use unicode_xid::UnicodeXID;
 
 mod array_view;
-pub(crate) mod expr0;
+mod expr0;
 mod expr1;
 mod expr2;
 mod expr3;

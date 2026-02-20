@@ -2582,7 +2582,7 @@ mod tests {
 
     #[test]
     fn test_builtin_polarity_monotone_negative_inner() {
-        use crate::ast::expr0::UnaryOp;
+        use crate::ast::UnaryOp;
         use crate::ast::{Ast, Expr2, Loc};
         use crate::builtins::BuiltinFn;
 
