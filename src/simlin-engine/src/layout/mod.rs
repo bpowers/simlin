@@ -950,19 +950,18 @@ impl<'a> LayoutEngine<'a> {
             aux_index += 1;
         }
 
-        // Tighter spacing (k=75) and stronger attraction (c=3.0) than chain
-        // positioning because auxiliaries are individual nodes that should
-        // cluster near their dependencies.  Higher iteration count and
-        // slower cooling give the optimizer time to untangle dense graphs.
+        // Match Praxis `runSFDPWithAnnealing`: only K/C/MaxIter/CoolFactor
+        // are overridden for auxiliary layout. Other SFDP parameters stay at
+        // their defaults (notably p=-1.0 and step size=0.1) to avoid runaway
+        // repulsion that can fling disconnected chains far apart.
         let sfdp_config = SfdpConfig {
             k: 75.0,
             max_iterations: 5000,
-            convergence_threshold: 0.01,
-            initial_step_size: 75.0,
+            convergence_threshold: 0.001,
+            initial_step_size: 0.1,
             cooling_factor: 0.9995,
-            p: 2.0,
             c: 3.0,
-            beautify_leaves: true,
+            ..SfdpConfig::default()
         };
 
         let node_to_ident: HashMap<String, String> = var_to_node
@@ -3300,6 +3299,121 @@ mod tests {
             .filter(|e| matches!(e, ViewElement::Stock(_)))
             .collect();
         assert_eq!(stocks.len(), 2);
+    }
+
+    #[test]
+    fn test_generate_layout_disconnected_chains_do_not_explode_apart() {
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "stock_a".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec![],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "stock_b".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec![],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "stock_c".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec![],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(3),
+                }),
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "stock_d".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec![],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Public,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(4),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+        let project = test_project(model);
+        let result = generate_layout(&project, TEST_MODEL).unwrap();
+
+        let stock_positions: Vec<(f64, f64)> = result
+            .elements
+            .iter()
+            .filter_map(|e| {
+                if let ViewElement::Stock(s) = e {
+                    Some((s.x, s.y))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(stock_positions.len(), 4);
+
+        let min_x = stock_positions
+            .iter()
+            .map(|(x, _)| *x)
+            .fold(f64::INFINITY, f64::min);
+        let max_x = stock_positions
+            .iter()
+            .map(|(x, _)| *x)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_y = stock_positions
+            .iter()
+            .map(|(_, y)| *y)
+            .fold(f64::INFINITY, f64::min);
+        let max_y = stock_positions
+            .iter()
+            .map(|(_, y)| *y)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        // Disconnected chains should remain in a reasonable neighborhood, not
+        // be flung thousands of units apart by force configuration.
+        assert!(
+            max_x - min_x < 10_000.0,
+            "x span too large: {}",
+            max_x - min_x
+        );
+        assert!(
+            max_y - min_y < 10_000.0,
+            "y span too large: {}",
+            max_y - min_y
+        );
     }
 
     #[test]

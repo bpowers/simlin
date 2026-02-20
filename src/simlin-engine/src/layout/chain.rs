@@ -207,11 +207,14 @@ pub fn compute_chain_positions(
         }
     }
 
-    // Large ideal edge length (k=150) and weak attraction (c=0.5) keep
-    // chains well-separated, since each chain node represents an entire
-    // stock-flow group that will be expanded later.
+    // Match Praxis chain-phase SFDP tuning: larger ideal edge length and
+    // weaker attraction, plus long/slow cooling schedule.
     let sfdp_config = SfdpConfig {
         k: 150.0,
+        max_iterations: 5000,
+        convergence_threshold: 0.001,
+        initial_step_size: 0.1,
+        cooling_factor: 0.9995,
         c: 0.5,
         ..SfdpConfig::default()
     };
