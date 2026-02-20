@@ -6,6 +6,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { Project as EngineProject } from '@simlin/engine';
+import { previewDimensions, parseSvgDimensions } from '../render';
+
+const MAX_PREVIEW_SIZE = 800;
 
 function loadDefaultProject(name: string): string {
   const modelPath = path.join(__dirname, '..', '..', '..', 'default_projects', name, 'model.xmile');
@@ -15,8 +18,19 @@ function loadDefaultProject(name: string): string {
   return fs.readFileSync(modelPath, 'utf8');
 }
 
+function readPngDimensions(png: Uint8Array): { width: number; height: number } {
+  const buffer = Buffer.from(png);
+  if (buffer.length < 24) {
+    throw new Error('PNG data too short');
+  }
+  return {
+    width: buffer.readUInt32BE(16),
+    height: buffer.readUInt32BE(20),
+  };
+}
+
 // Simulate the server's preview generation pipeline:
-// XMILE -> engine -> protobuf -> engine -> PNG
+// XMILE -> engine -> protobuf -> engine -> SVG (for dims) -> PNG
 async function generatePreview(modelName: string): Promise<Uint8Array> {
   const xmile = loadDefaultProject(modelName);
 
@@ -25,10 +39,13 @@ async function generatePreview(modelName: string): Promise<Uint8Array> {
   const protobuf = await importProject.serializeProtobuf();
   await importProject.dispose();
 
-  // Step 2: Load from protobuf and render PNG (same as render.ts)
+  // Step 2: Load from protobuf, get SVG dimensions, render PNG (same as render.ts)
   const engineProject = await EngineProject.openProtobuf(protobuf);
   try {
-    return await engineProject.renderPng('main', 800);
+    const svg = await engineProject.renderSvgString('main');
+    const intrinsic = parseSvgDimensions(svg);
+    const dims = previewDimensions(intrinsic.width, intrinsic.height, MAX_PREVIEW_SIZE);
+    return await engineProject.renderPng('main', dims.width, dims.height);
   } finally {
     await engineProject.dispose();
   }
@@ -46,5 +63,13 @@ describe('model preview rendering', () => {
     expect(png[1]).toBe(80); // P
     expect(png[2]).toBe(78); // N
     expect(png[3]).toBe(71); // G
+  });
+
+  it('population preview is bounded by max preview size', async () => {
+    const png = await generatePreview('population');
+    const dims = readPngDimensions(png);
+
+    expect(dims.width).toBeLessThanOrEqual(MAX_PREVIEW_SIZE);
+    expect(dims.height).toBeLessThanOrEqual(MAX_PREVIEW_SIZE);
   });
 });
