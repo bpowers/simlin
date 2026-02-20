@@ -135,7 +135,9 @@ Where:
 - Negative: x and z change in opposite directions
 
 **Edge cases:** If x does not change, the link score is 0 (any loop through x is inactive).
-If z does not change, all links into z have score 0.
+If z does not change, all links into z have score 0. Note that a variable whose outgoing link
+scores are all 0 can still matter indirectly -- it may appear as a parameter in other equations
+and therefore affect other link scores.
 
 #### Computation
 
@@ -275,7 +277,7 @@ Impact(S1 -> S2) = (df/dS1) * (S1_dot / S2_dot)
 Relating link score to impact:
 
 ```
-LS(S1 -> S2) = Impact(S1 -> S2) * |S2_dot / S2_ddot| * Sign(S1_dot) / Sign(S2_dot)
+LS(S1 -> S2) = Impact(S1 -> S2) * |S2_dot / S2_ddot| * Sign(S1_dot) * Sign(S2_dot)
 ```
 
 Two differences:
@@ -475,7 +477,7 @@ contributions are constant.
 
 ### 8.1 The Loop Enumeration Problem
 
-For small models, all feedback loops can be enumerated (e.g., using Johnson's algorithm).
+For small models, all feedback loops can be enumerated (e.g., using Tarjan, 1973).
 For large models, the number of loops grows up to the factorial of the number of stocks:
 - **Urban Dynamics:** 43,722,744 loops
 - **World3-03:** 330,574 loops
@@ -577,7 +579,7 @@ Function Check_outbound_uses(variable, score):
     Add variable to STACK
 
     For each link from variable:
-        Call Check_outbound_uses(link.variable, score * |link.score|)
+        Call Check_outbound_uses(link.variable, score * link.score)
     End for each
 
     Set variable.visiting = false
@@ -597,28 +599,32 @@ End function
 ### 8.6 Why This Is a Heuristic
 
 Because the algorithm maximizes (rather than minimizes), it does **not guarantee finding
-the truly strongest loop**. The specific failure mode (demonstrated in the papers with a
-4-node example):
+the truly strongest loop**. In Dijkstra's shortest path algorithm, minimization guarantees
+optimality: once a node is reached with some cost, any later path through that node must
+cost at least as much. With maximization, this guarantee does not hold -- a weaker path to
+a node may be part of a stronger overall loop.
 
-Consider nodes a, b, c, d with links:
-- a->d: 100, a->b: 10
-- d->b: 100, d->c: 0.1
-- b->c: 10
-- c->a: 10
+The failure mechanism: if the search reaches variable b via a high-scoring intermediate path
+(setting b's best_score high), a later direct path to b with a lower cumulative score will
+be pruned. If that direct path would have completed a stronger loop than any loop found
+through the intermediate path, the strongest loop is missed.
 
-Starting from a:
-1. a->d (score 100) -> d->b (score 10000) -> b->c (score 100000) -> c->a: **loop found**
-   (a->d->b->c->a, score 1,000,000)
-2. Now best_score[b]=10000, best_score[c]=100000
-3. a->b (score 10): 10 < best_score[b]=10000, **pruned**
+The Eberlein and Schoenberg (2020) paper demonstrates this with a 4-node graph (Figure 7).
+The algorithm finds loop a->d->c->a (score 100) but misses the stronger loop a->b->c->a
+(score 1000). The miss occurs because the search from a reaches b via the path a->d->...->b
+with a high cumulative score, and when the direct a->b path is later considered, b's
+best_score causes it to be pruned.
 
-The loop a->b->c->a (score 10 * 10 * 10 = 1000) is missed because b was already visited
-with a much higher score via the d path. However, a->d->c->a would have score
-100 * 0.1 * 10 = 100, and the found loop (score 1,000,000) is the strongest.
+The authors note that starting the search from different stocks can recover missed loops
+(starting from b or c in the example above might find the missed loop). However, it is
+theoretically possible to construct graphs where the strongest loop is missed regardless of
+starting stock.
 
-The mitigating factor: starting from different stocks at different timesteps, and the
-consistent empirical finding that missed loops are **structurally very similar** to found
-loops (differing by only a few links).
+**Mitigating factors:**
+- The algorithm runs from every stock at every timestep, providing many opportunities to
+  discover each loop
+- Empirically, missed loops are **structurally very similar** to found loops -- they are
+  "siblings" that share most of their path but differ by a few links (see Section 8.7)
 
 ### 8.7 Completeness Evaluation
 
@@ -792,7 +798,7 @@ LS(S1 -> S2) = (df/dS1) * |S1_dot / S2_ddot|
 ### Relationship to Impact
 
 ```
-LS(S1 -> S2) = Impact(S1 -> S2) * |S2_dot / S2_ddot| * Sign(S1_dot) / Sign(S2_dot)
+LS(S1 -> S2) = Impact(S1 -> S2) * |S2_dot / S2_ddot| * Sign(S1_dot) * Sign(S2_dot)
 ```
 
 ### Multi-Stock Loop Score
@@ -829,3 +835,5 @@ where G_n is the n-th order loop gain and the product runs over all stocks in th
   and feedback structure decomposition." *System Dynamics Review* 20(4): 313--336.
 - Richardson, G. P. (1995). "Loop polarity, loop dominance, and the concept of dominant
   polarity." *System Dynamics Review* 11(1): 67--88.
+- Tarjan, R. (1973). "Enumeration of the elementary circuits of a directed graph." *SIAM
+  Journal on Computing* 2(3): 211--216.
