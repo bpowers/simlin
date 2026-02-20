@@ -7,48 +7,44 @@ import { previewDimensions, parseSvgDimensions } from '../render';
 describe('previewDimensions', () => {
   const MAX = 800;
 
-  it('constrains by width for landscape diagrams', () => {
+  it('constrains width for landscape diagrams', () => {
     const dims = previewDimensions(1000, 500, MAX);
     expect(dims.width).toBe(800);
-    expect(dims.height).toBe(400);
+    expect(dims.height).toBe(0);
   });
 
-  it('constrains by height for portrait diagrams', () => {
+  it('constrains height for portrait diagrams', () => {
     const dims = previewDimensions(200, 1000, MAX);
-    expect(dims.width).toBe(160);
+    expect(dims.width).toBe(0);
     expect(dims.height).toBe(800);
   });
 
-  it('constrains by width for square diagrams', () => {
+  it('constrains width for square diagrams', () => {
     const dims = previewDimensions(600, 600, MAX);
     expect(dims.width).toBe(800);
-    expect(dims.height).toBe(800);
+    expect(dims.height).toBe(0);
   });
 
-  it('preserves aspect ratio for landscape', () => {
+  it('only one dimension is non-zero for landscape', () => {
     const dims = previewDimensions(1600, 900, MAX);
-    const inputRatio = 1600 / 900;
-    const outputRatio = dims.width / dims.height;
-    expect(Math.abs(inputRatio - outputRatio)).toBeLessThan(0.02);
+    expect(dims.width).toBe(MAX);
+    expect(dims.height).toBe(0);
   });
 
-  it('preserves aspect ratio for portrait', () => {
+  it('only one dimension is non-zero for portrait', () => {
     const dims = previewDimensions(300, 1200, MAX);
-    const inputRatio = 300 / 1200;
-    const outputRatio = dims.width / dims.height;
-    expect(Math.abs(inputRatio - outputRatio)).toBeLessThan(0.02);
+    expect(dims.width).toBe(0);
+    expect(dims.height).toBe(MAX);
   });
 
-  it('neither dimension exceeds maxSize for landscape', () => {
-    const dims = previewDimensions(2000, 500, MAX);
-    expect(dims.width).toBeLessThanOrEqual(MAX);
-    expect(dims.height).toBeLessThanOrEqual(MAX);
-  });
-
-  it('neither dimension exceeds maxSize for portrait', () => {
-    const dims = previewDimensions(100, 2000, MAX);
-    expect(dims.width).toBeLessThanOrEqual(MAX);
-    expect(dims.height).toBeLessThanOrEqual(MAX);
+  it('avoids the width-precedence bug for portrait', () => {
+    // Regression: passing both width and height caused the engine to
+    // ignore the height constraint (width takes precedence).
+    // e.g. 101x2000 → previewDimensions should return {0, 800}
+    // so the engine constrains by height, not width.
+    const dims = previewDimensions(101, 2000, MAX);
+    expect(dims.width).toBe(0);
+    expect(dims.height).toBe(800);
   });
 
   it('returns zeros for zero-width input', () => {
@@ -69,12 +65,12 @@ describe('previewDimensions', () => {
 
   it('handles extreme aspect ratios without overflow', () => {
     const tall = previewDimensions(10, 10000, MAX);
+    expect(tall.width).toBe(0);
     expect(tall.height).toBe(800);
-    expect(tall.width).toBeLessThanOrEqual(800);
 
     const wide = previewDimensions(10000, 10, MAX);
     expect(wide.width).toBe(800);
-    expect(wide.height).toBeLessThanOrEqual(800);
+    expect(wide.height).toBe(0);
   });
 });
 

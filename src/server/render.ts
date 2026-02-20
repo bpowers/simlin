@@ -10,12 +10,12 @@ const RETINA_SCALE = 2;
 const MAX_PREVIEW_SIZE = MAX_PREVIEW_PX * RETINA_SCALE; // 800
 
 /**
- * Compute the width and height to pass to renderPng so that the
- * larger dimension is clamped to `maxSize` and aspect ratio is
- * preserved.
+ * Compute the single constraining dimension to pass to renderPng.
  *
- * When the diagram is wider than tall, width is constrained.
- * When taller than wide, height is constrained.
+ * Returns only the constraining dimension set to `maxSize`, with
+ * the other set to 0 so the engine derives it from the aspect ratio.
+ * This avoids the width-precedence bug where passing both non-zero
+ * causes the engine to ignore the height constraint.
  */
 export function previewDimensions(
   svgWidth: number,
@@ -26,13 +26,11 @@ export function previewDimensions(
     return { width: 0, height: 0 };
   }
   if (svgWidth >= svgHeight) {
-    // Landscape or square: constrain width, derive height
-    const scale = maxSize / svgWidth;
-    return { width: maxSize, height: Math.ceil(svgHeight * scale) };
+    // Landscape or square: constrain width, let the engine derive height
+    return { width: maxSize, height: 0 };
   }
-  // Portrait: constrain height, derive width
-  const scale = maxSize / svgHeight;
-  return { width: Math.ceil(svgWidth * scale), height: maxSize };
+  // Portrait: constrain height, let the engine derive width
+  return { width: 0, height: maxSize };
 }
 
 /**
