@@ -29,9 +29,11 @@
 
 ## Research Papers
 
-- [reference/papers/eberlein2020-finding-the-loops-that-matter.pdf](reference/papers/eberlein2020-finding-the-loops-that-matter.pdf)
-- [reference/papers/schoenberg2020-loops-that-matter.pdf](reference/papers/schoenberg2020-loops-that-matter.pdf)
-- [reference/papers/schoenberg2023-improving-loops-that-matter.pdf](reference/papers/schoenberg2023-improving-loops-that-matter.pdf)
+Each paper has a detailed markdown summary -- consult these first for paper-specific details before the PDFs.
+
+- [reference/papers/eberlein2020-finding-the-loops-that-matter--summary.md](reference/papers/eberlein2020-finding-the-loops-that-matter--summary.md) ([PDF](reference/papers/eberlein2020-finding-the-loops-that-matter.pdf))
+- [reference/papers/schoenberg2020-loops-that-matter--summary.md](reference/papers/schoenberg2020-loops-that-matter--summary.md) ([PDF](reference/papers/schoenberg2020-loops-that-matter.pdf))
+- [reference/papers/schoenberg2023-improving-loops-that-matter--summary.md](reference/papers/schoenberg2023-improving-loops-that-matter--summary.md) ([PDF](reference/papers/schoenberg2023-improving-loops-that-matter.pdf))
 
 ## Schemas
 
