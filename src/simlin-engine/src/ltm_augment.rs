@@ -1608,12 +1608,9 @@ mod tests {
         let printed = print_eqn(&var_ast);
         println!("AST with quoted $ variable printed as: '{printed}'");
 
-        // Note: print_eqn outputs single quotes but parser needs double quotes
-        // This is a known limitation but doesn't affect our use case since we generate
-        // equations directly with double quotes, not through print_eqn
         assert_eq!(
-            printed, "$⁚ltm⁚link_score⁚x⁚y",
-            "print_eqn strips quotes from canonicalized name"
+            printed, "\"$⁚ltm⁚link_score⁚x⁚y\"",
+            "print_eqn re-quotes identifiers with special characters"
         );
     }
 
