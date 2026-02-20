@@ -105,6 +105,43 @@ describe('DirectBackend', () => {
       expect(xmile.length).toBeGreaterThan(0);
     });
 
+    it('should render SVG', () => {
+      const svg = backend.projectRenderSvg(projectHandle, 'main');
+      expect(svg).toBeInstanceOf(Uint8Array);
+      expect(svg.length).toBeGreaterThan(0);
+      const svgString = new TextDecoder().decode(svg);
+      expect(svgString).toContain('<svg');
+    });
+
+    it('should render PNG at intrinsic size', () => {
+      const png = backend.projectRenderPng(projectHandle, 'main', 0, 0);
+      expect(png).toBeInstanceOf(Uint8Array);
+      expect(png.length).toBeGreaterThan(8);
+      // PNG signature: 137 80 78 71 13 10 26 10
+      expect(png[0]).toBe(137);
+      expect(png[1]).toBe(80);
+      expect(png[2]).toBe(78);
+      expect(png[3]).toBe(71);
+    });
+
+    it('should render PNG with explicit width', () => {
+      const png = backend.projectRenderPng(projectHandle, 'main', 400, 0);
+      expect(png).toBeInstanceOf(Uint8Array);
+      expect(png.length).toBeGreaterThan(8);
+      expect(png[0]).toBe(137);
+    });
+
+    it('should render PNG with explicit height', () => {
+      const png = backend.projectRenderPng(projectHandle, 'main', 0, 300);
+      expect(png).toBeInstanceOf(Uint8Array);
+      expect(png.length).toBeGreaterThan(8);
+      expect(png[0]).toBe(137);
+    });
+
+    it('should throw when rendering PNG for nonexistent model', () => {
+      expect(() => backend.projectRenderPng(projectHandle, 'nonexistent_xyz', 0, 0)).toThrow();
+    });
+
     it('should get loops', () => {
       const modelHandle = backend.projectGetModel(projectHandle, null);
       const loops = backend.modelGetLoops(modelHandle);

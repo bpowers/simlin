@@ -332,9 +332,6 @@ importers:
       '@simlin/core':
         specifier: workspace:*
         version: link:../core
-      '@simlin/diagram':
-        specifier: workspace:*
-        version: link:../diagram
       '@simlin/engine':
         specifier: workspace:*
         version: link:../engine
@@ -368,9 +365,6 @@ importers:
       passport-strategy:
         specifier: ^1.0.0
         version: 1.0.0
-      resvg-wasm:
-        specifier: ^0.5.0
-        version: 0.5.0
       serve-favicon:
         specifier: ^2.5.1
         version: 2.5.1
@@ -6486,10 +6480,6 @@ packages:
   restore-cursor@3.1.0:
     resolution: {integrity: sha512-l+sSefzHpj5qimhFSE5a8nufZYAM3sBSVMAPtYkmC+4EH2anSGaEMXSD0izRQbu9nfyQ9y5JrVmp7E8oZrUjvA==}
     engines: {node: '>=8'}
-
-  resvg-wasm@0.5.0:
-    resolution: {integrity: sha512-nnlqmoa1n/nBwIdDh8BzlwJezzL1cORCdsyaRhz1R215oUktA8THPs8tJRUZqW9pQAuajDUtuA+o1Q5RvgwuZA==}
-    engines: {node: '>=22'}
 
   ret@0.1.15:
     resolution: {integrity: sha512-TTlYpa+OL+vMMNG24xSlQGEJ3B/RzEfUlLct7b5G/ytav+wPrplCpVMFuwzXbkecJrb6IYo1iFb0S9v37754mg==}
@@ -15264,8 +15254,6 @@ snapshots:
     dependencies:
       onetime: 5.1.2
       signal-exit: 3.0.7
-
-  resvg-wasm@0.5.0: {}
 
   ret@0.1.15: {}
 

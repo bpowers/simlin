@@ -154,6 +154,64 @@ describe('High-Level API', () => {
       await project.dispose();
     });
 
+    it('should render SVG', async () => {
+      const project = await openTestProject();
+
+      const svg = await project.renderSvg('main');
+      expect(svg).toBeInstanceOf(Uint8Array);
+      expect(svg.length).toBeGreaterThan(0);
+
+      const svgString = new TextDecoder().decode(svg);
+      expect(svgString).toContain('<svg');
+
+      await project.dispose();
+    });
+
+    it('should render SVG string', async () => {
+      const project = await openTestProject();
+
+      const svgString = await project.renderSvgString('main');
+      expect(typeof svgString).toBe('string');
+      expect(svgString).toContain('<svg');
+
+      await project.dispose();
+    });
+
+    it('should render PNG at intrinsic size', async () => {
+      const project = await openTestProject();
+
+      const png = await project.renderPng('main');
+      expect(png).toBeInstanceOf(Uint8Array);
+      expect(png.length).toBeGreaterThan(8);
+
+      // Verify PNG signature
+      expect(png[0]).toBe(137);
+      expect(png[1]).toBe(80); // P
+      expect(png[2]).toBe(78); // N
+      expect(png[3]).toBe(71); // G
+
+      await project.dispose();
+    });
+
+    it('should render PNG with explicit width', async () => {
+      const project = await openTestProject();
+
+      const png = await project.renderPng('main', 800);
+      expect(png).toBeInstanceOf(Uint8Array);
+      expect(png.length).toBeGreaterThan(8);
+      expect(png[0]).toBe(137);
+
+      await project.dispose();
+    });
+
+    it('should throw for PNG render of nonexistent model', async () => {
+      const project = await openTestProject();
+
+      await expect(project.renderPng('nonexistent_model_xyz')).rejects.toThrow();
+
+      await project.dispose();
+    });
+
     it('should get loops via model', async () => {
       const project = await openTestProject();
 

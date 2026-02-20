@@ -16,6 +16,6 @@ For build/test/lint commands, see [doc/dev/commands.md](/doc/dev/commands.md).
 - `new-user.ts` -- New user handling
 - `server-init.ts` -- Server initialization
 - `route-handlers.ts` -- Route handler utilities
-- `render.ts` / `render-inner.ts` / `render-worker.ts` -- Server-side rendering
+- `render.ts` -- Server-side PNG rendering (delegates to the engine WASM)
 - `models/` -- Database interfaces (Firestore, etc.)
 - `schemas/` -- Data validation schemas

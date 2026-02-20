@@ -52,6 +52,14 @@ export type WorkerRequest =
   | { type: 'projectSerializeJson'; requestId: number; handle: WorkerProjectHandle; format: number }
   | { type: 'projectSerializeXmile'; requestId: number; handle: WorkerProjectHandle }
   | { type: 'projectRenderSvg'; requestId: number; handle: WorkerProjectHandle; modelName: string }
+  | {
+      type: 'projectRenderPng';
+      requestId: number;
+      handle: WorkerProjectHandle;
+      modelName: string;
+      width: number;
+      height: number;
+    }
   | { type: 'projectGetErrors'; requestId: number; handle: WorkerProjectHandle }
   | {
       type: 'projectApplyPatch';
@@ -166,6 +174,7 @@ export const VALID_REQUEST_TYPES: ReadonlySet<string> = new Set([
   'projectSerializeJson',
   'projectSerializeXmile',
   'projectRenderSvg',
+  'projectRenderPng',
   'projectGetErrors',
   'projectApplyPatch',
   'modelGetName',

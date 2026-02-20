@@ -269,6 +269,24 @@ export class Project {
   }
 
   /**
+   * Render a model's stock-and-flow diagram as a PNG image.
+   *
+   * Pass `width = 0` and `height = 0` (or omit them) to use the SVG's
+   * intrinsic dimensions. When only one dimension is non-zero the other
+   * is derived from the aspect ratio. When both are non-zero, `width`
+   * takes precedence.
+   *
+   * @param modelName Model name
+   * @param width Target width in pixels (0 for intrinsic)
+   * @param height Target height in pixels (0 for intrinsic)
+   * @returns PNG image data
+   */
+  async renderPng(modelName: string, width: number = 0, height: number = 0): Promise<Uint8Array> {
+    this.checkDisposed();
+    return await this._backend.projectRenderPng(this._handle, modelName, width, height);
+  }
+
+  /**
    * Get all errors in this project.
    * @returns Array of ErrorDetail objects
    */

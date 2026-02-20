@@ -15,7 +15,6 @@
     "lib.browser"
   ],
   "references": [
-    { "path": "../core/tsconfig.json" },
-    { "path": "../diagram/tsconfig.json" }
+    { "path": "../core/tsconfig.json" }
   ]
 }

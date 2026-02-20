@@ -294,6 +294,12 @@ export class WorkerServer {
         this.sendBytesWithTransfer(requestId, result);
         return;
       }
+      case 'projectRenderPng': {
+        const handle = this.getProjectHandle(request.handle);
+        const result = this.backend.projectRenderPng(handle, request.modelName, request.width, request.height);
+        this.sendBytesWithTransfer(requestId, result);
+        return;
+      }
       case 'projectGetErrors': {
         const handle = this.getProjectHandle(request.handle);
         this.sendSuccess(requestId, this.backend.projectGetErrors(handle));

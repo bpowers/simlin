@@ -172,3 +172,58 @@ export function simlin_project_render_svg(project: SimlinProjectPtr, modelName: 
     free(outErrPtr);
   }
 }
+
+/**
+ * Render a project model's diagram as a PNG image.
+ * @param project Project pointer
+ * @param modelName Model name
+ * @param width Target width in pixels (0 for intrinsic)
+ * @param height Target height in pixels (0 for intrinsic)
+ * @returns PNG image data
+ */
+export function simlin_project_render_png(
+  project: SimlinProjectPtr,
+  modelName: string,
+  width: number,
+  height: number,
+): Uint8Array {
+  const exports = getExports();
+  const renderFn = exports.simlin_project_render_png as (
+    proj: number,
+    name: number,
+    width: number,
+    height: number,
+    outBuf: number,
+    outLen: number,
+    outErr: number,
+  ) => void;
+
+  const namePtr = stringToWasm(modelName);
+  const outBufPtr = allocOutPtr();
+  const outLenPtr = allocOutUsize();
+  const outErrPtr = allocOutPtr();
+
+  try {
+    renderFn(project, namePtr, width, height, outBufPtr, outLenPtr, outErrPtr);
+    const errPtr = readOutPtr(outErrPtr);
+
+    if (errPtr !== 0) {
+      const code = simlin_error_get_code(errPtr);
+      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
+      simlin_error_free(errPtr);
+      throw new SimlinError(message, code, details);
+    }
+
+    const bufPtr = readOutPtr(outBufPtr);
+    const len = readOutUsize(outLenPtr);
+    const data = copyFromWasm(bufPtr, len);
+    free(bufPtr);
+    return data;
+  } finally {
+    free(namePtr);
+    free(outBufPtr);
+    free(outLenPtr);
+    free(outErrPtr);
+  }
+}
