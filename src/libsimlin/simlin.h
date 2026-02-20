@@ -706,7 +706,6 @@ void simlin_project_render_svg(SimlinProject *project,
                                uintptr_t *out_len,
                                SimlinError **out_error);
 
-#if defined(SIMLIN_PNG_RENDER)
 // Render a project model's diagram as a PNG image
 //
 // Renders the stock-and-flow diagram for the named model to a PNG image.
@@ -730,7 +729,6 @@ void simlin_project_render_png(SimlinProject *project,
                                uint8_t **out_buffer,
                                uintptr_t *out_len,
                                SimlinError **out_error);
-#endif
 
 // Creates a new simulation context
 //

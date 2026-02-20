@@ -4219,10 +4219,8 @@ fn test_render_svg_nonexistent_model() {
 // ── PNG rendering FFI tests ─────────────────────────────────────────
 
 /// PNG header magic bytes.
-#[cfg(feature = "png_render")]
 const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 
-#[cfg(feature = "png_render")]
 #[test]
 fn test_render_png() {
     let xmile_path = std::path::Path::new("testdata/SIR.stmx");
@@ -4265,7 +4263,7 @@ fn test_render_png() {
     }
 }
 
-#[cfg(feature = "png_render")]
+
 #[test]
 fn test_render_png_with_width() {
     let xmile_path = std::path::Path::new("testdata/SIR.stmx");
@@ -4308,7 +4306,7 @@ fn test_render_png_with_width() {
     }
 }
 
-#[cfg(feature = "png_render")]
+
 #[test]
 fn test_render_png_null_project() {
     unsafe {
@@ -4332,7 +4330,7 @@ fn test_render_png_null_project() {
     }
 }
 
-#[cfg(feature = "png_render")]
+
 #[test]
 fn test_render_png_null_model_name() {
     let xmile_path = std::path::Path::new("testdata/SIR.stmx");
@@ -4371,7 +4369,7 @@ fn test_render_png_null_model_name() {
     }
 }
 
-#[cfg(feature = "png_render")]
+
 #[test]
 fn test_render_png_nonexistent_model() {
     let xmile_path = std::path::Path::new("testdata/SIR.stmx");

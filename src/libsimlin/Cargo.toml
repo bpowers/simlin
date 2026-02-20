@@ -13,10 +13,9 @@ crate-type = ["staticlib", "rlib", "cdylib"]
 [features]
 default = []
 debug-derive = ["simlin-engine/debug-derive"]
-png_render = ["simlin-engine/png_render"]
 
 [dependencies]
-simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
+simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false, features = ["png_render"] }
 prost = "0.14"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }

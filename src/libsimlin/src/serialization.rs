@@ -394,7 +394,6 @@ pub unsafe extern "C" fn simlin_project_render_svg(
 /// - `model_name` must be a valid null-terminated UTF-8 string
 /// - `out_buffer` and `out_len` must be valid pointers
 /// - `out_error` may be null
-#[cfg(feature = "png_render")]
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_render_png(
     project: *mut SimlinProject,
