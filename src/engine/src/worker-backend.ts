@@ -392,6 +392,17 @@ export class WorkerBackend implements EngineBackend {
     }));
   }
 
+  projectRenderPng(handle: ProjectHandle, modelName: string, width: number, height: number): Promise<Uint8Array> {
+    return this.sendRequest<Uint8Array>((requestId) => ({
+      type: 'projectRenderPng',
+      requestId,
+      handle,
+      modelName,
+      width,
+      height,
+    }));
+  }
+
   projectGetErrors(handle: ProjectHandle): Promise<ErrorDetail[]> {
     return this.sendRequest<ErrorDetail[]>((requestId) => ({
       type: 'projectGetErrors',

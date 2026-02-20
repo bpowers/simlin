@@ -386,6 +386,86 @@ def open_json(json_data: bytes) -> Any:
     return project_ptr
 
 
+def render_svg(project_ptr: Any, model_name: str) -> bytes:
+    """Render a project model's diagram as SVG.
+
+    Args:
+        project_ptr: Pointer to a SimlinProject
+        model_name: Name of the model to render
+
+    Returns:
+        SVG data as UTF-8 bytes
+
+    Raises:
+        SimlinRuntimeError: If rendering fails
+    """
+    c_name = string_to_c(model_name)
+    output_ptr = ffi.new("uint8_t **")
+    output_len_ptr = ffi.new("uintptr_t *")
+    err_ptr = ffi.new("SimlinError **")
+
+    lib.simlin_project_render_svg(
+        project_ptr,
+        c_name,
+        output_ptr,
+        output_len_ptr,
+        err_ptr,
+    )
+    check_out_error(err_ptr, f"Render SVG for model '{model_name}'")
+
+    try:
+        return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))
+    finally:
+        lib.simlin_free(output_ptr[0])
+
+
+def render_png(
+    project_ptr: Any,
+    model_name: str,
+    width: int = 0,
+    height: int = 0,
+) -> bytes:
+    """Render a project model's diagram as a PNG image.
+
+    Pass ``width=0`` and ``height=0`` (or omit them) to use the SVG's
+    intrinsic dimensions. When only one dimension is non-zero the other
+    is derived from the aspect ratio. When both are non-zero, ``width``
+    takes precedence.
+
+    Args:
+        project_ptr: Pointer to a SimlinProject
+        model_name: Name of the model to render
+        width: Target width in pixels (0 for intrinsic)
+        height: Target height in pixels (0 for intrinsic)
+
+    Returns:
+        PNG image data as bytes
+
+    Raises:
+        SimlinRuntimeError: If rendering fails
+    """
+    c_name = string_to_c(model_name)
+    output_ptr = ffi.new("uint8_t **")
+    output_len_ptr = ffi.new("uintptr_t *")
+    err_ptr = ffi.new("SimlinError **")
+
+    lib.simlin_project_render_png(
+        project_ptr,
+        c_name,
+        width,
+        height,
+        output_ptr,
+        output_len_ptr,
+        err_ptr,
+    )
+    check_out_error(err_ptr, f"Render PNG for model '{model_name}'")
+
+    try:
+        return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))
+    finally:
+        lib.simlin_free(output_ptr[0])
+
+
 __all__ = [
     "_finalizer_refs",
     "_refs_lock",
@@ -403,6 +483,8 @@ __all__ = [
     "model_get_var_json",
     "model_get_var_names",
     "open_json",
+    "render_png",
+    "render_svg",
     "serialize_json",
     "string_to_c",
 ]

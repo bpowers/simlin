@@ -32,6 +32,12 @@ from ._ffi import (
     open_json as _ffi_open_json,
 )
 from ._ffi import (
+    render_png as _ffi_render_png,
+)
+from ._ffi import (
+    render_svg as _ffi_render_svg,
+)
+from ._ffi import (
     serialize_json as _ffi_serialize_json,
 )
 from .errors import ErrorDetail, SimlinImportError, SimlinRuntimeError
@@ -418,6 +424,65 @@ class Project:
                 return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))
             finally:
                 lib.simlin_free(output_ptr[0])
+
+    def render_svg(self, model_name: str = "main") -> bytes:
+        """Render a model's stock-and-flow diagram as SVG.
+
+        Args:
+            model_name: Name of the model to render (default: ``"main"``)
+
+        Returns:
+            SVG data as UTF-8 encoded bytes
+
+        Raises:
+            SimlinRuntimeError: If the model doesn't exist or rendering fails
+        """
+        with self._lock:
+            self._check_alive()
+            return _ffi_render_svg(self._ptr, model_name)
+
+    def render_svg_string(self, model_name: str = "main") -> str:
+        """Render a model's stock-and-flow diagram as an SVG string.
+
+        Convenience wrapper around :meth:`render_svg` that decodes the
+        result to a Python string.
+
+        Args:
+            model_name: Name of the model to render (default: ``"main"``)
+
+        Returns:
+            SVG string
+        """
+        return self.render_svg(model_name).decode("utf-8")
+
+    def render_png(
+        self,
+        model_name: str = "main",
+        *,
+        width: int = 0,
+        height: int = 0,
+    ) -> bytes:
+        """Render a model's stock-and-flow diagram as a PNG image.
+
+        Pass ``width=0`` and ``height=0`` (or omit them) to use the SVG's
+        intrinsic dimensions. When only one dimension is non-zero the other
+        is derived from the aspect ratio. When both are non-zero, ``width``
+        takes precedence.
+
+        Args:
+            model_name: Name of the model to render (default: ``"main"``)
+            width: Target width in pixels (0 for intrinsic)
+            height: Target height in pixels (0 for intrinsic)
+
+        Returns:
+            PNG image data as bytes
+
+        Raises:
+            SimlinRuntimeError: If the model doesn't exist or rendering fails
+        """
+        with self._lock:
+            self._check_alive()
+            return _ffi_render_png(self._ptr, model_name, width, height)
 
     def __enter__(self) -> Self:
         """Context manager entry point."""

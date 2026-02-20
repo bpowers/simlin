@@ -61,6 +61,7 @@ export interface EngineBackend {
   projectSerializeJson(handle: ProjectHandle, format: SimlinJsonFormat): MaybePromise<Uint8Array>;
   projectSerializeXmile(handle: ProjectHandle): MaybePromise<Uint8Array>;
   projectRenderSvg(handle: ProjectHandle, modelName: string): MaybePromise<Uint8Array>;
+  projectRenderPng(handle: ProjectHandle, modelName: string, width: number, height: number): MaybePromise<Uint8Array>;
   projectGetErrors(handle: ProjectHandle): MaybePromise<ErrorDetail[]>;
   projectApplyPatch(
     handle: ProjectHandle,

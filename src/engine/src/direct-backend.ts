@@ -28,6 +28,7 @@ import {
   simlin_project_open_vensim,
   simlin_project_serialize_xmile,
   simlin_project_render_svg,
+  simlin_project_render_png,
 } from './internal/import-export';
 import {
   simlin_model_unref,
@@ -274,6 +275,10 @@ export class DirectBackend implements EngineBackend {
 
   projectRenderSvg(handle: ProjectHandle, modelName: string): Uint8Array {
     return simlin_project_render_svg(this.getProjectPtr(handle), modelName);
+  }
+
+  projectRenderPng(handle: ProjectHandle, modelName: string, width: number, height: number): Uint8Array {
+    return simlin_project_render_png(this.getProjectPtr(handle), modelName, width, height);
   }
 
   projectGetErrors(handle: ProjectHandle): ErrorDetail[] {
