@@ -445,7 +445,7 @@ where
 }
 
 fn resolve_relative<'a>(
-    models: &'a HashMap<Ident<Canonical>, ModelStage0>,
+    models: &'a HashMap<Ident<Canonical>, &'a ModelStage0>,
     model_name: &str,
     ident: &str,
 ) -> Option<&'a VariableStage0> {
@@ -630,7 +630,7 @@ pub(crate) fn lower_variable(scope: &ScopeStage0, var_s0: &VariableStage0) -> Va
 // parent_module_name is the name of the model that has the module instantiation,
 // _not_ the name of the model this module instantiates
 pub(crate) fn resolve_module_input<'a>(
-    models: &HashMap<Ident<Canonical>, ModelStage0>,
+    models: &HashMap<Ident<Canonical>, &ModelStage0>,
     parent_model_name: &str,
     ident: &str,
     orig_src: &'a str,
@@ -788,7 +788,7 @@ impl ModelStage0 {
 }
 
 pub(crate) struct ScopeStage0<'a> {
-    pub models: &'a HashMap<Ident<Canonical>, ModelStage0>,
+    pub models: &'a HashMap<Ident<Canonical>, &'a ModelStage0>,
     pub dimensions: &'a DimensionsContext,
     pub model_name: &'a str,
 }
@@ -1236,7 +1236,7 @@ fn test_module_parse() {
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
 
-    let models: HashMap<Ident<Canonical>, ModelStage0> = vec![
+    let owned_models: HashMap<Ident<Canonical>, ModelStage0> = vec![
         ("main".to_string(), &main_model),
         ("lynxes".to_string(), &lynxes_model),
         ("hares".to_string(), &hares_model),
@@ -1249,6 +1249,8 @@ fn test_module_parse() {
         )
     })
     .collect();
+    let models: HashMap<Ident<Canonical>, &ModelStage0> =
+        owned_models.iter().map(|(k, v)| (k.clone(), v)).collect();
 
     let hares_var = &main_model.variables[2];
     assert_eq!("hares", hares_var.get_ident());
@@ -1268,15 +1270,18 @@ fn test_errors() {
         "main",
         vec![x_aux("aux_3", "unknown_variable * 3.14", None)],
     );
-    let models: HashMap<Ident<Canonical>, ModelStage0> = vec![("main".to_string(), &main_model)]
-        .into_iter()
-        .map(|(name, m)| {
-            (
-                Ident::new(&name),
-                ModelStage0::new(m, &[], &units_ctx, false),
-            )
-        })
-        .collect();
+    let owned_models: HashMap<Ident<Canonical>, ModelStage0> =
+        vec![("main".to_string(), &main_model)]
+            .into_iter()
+            .map(|(name, m)| {
+                (
+                    Ident::new(&name),
+                    ModelStage0::new(m, &[], &units_ctx, false),
+                )
+            })
+            .collect();
+    let models: HashMap<Ident<Canonical>, &ModelStage0> =
+        owned_models.iter().map(|(k, v)| (k.clone(), v)).collect();
 
     let model = {
         let no_module_inputs: ModuleInputSet = BTreeSet::new();
@@ -1286,7 +1291,7 @@ fn test_errors() {
             dimensions: &Default::default(),
             model_name: "main",
         };
-        let mut model = ModelStage1::new(&scope, &models[&*canonicalize("main")]);
+        let mut model = ModelStage1::new(&scope, models[&*canonicalize("main")]);
         model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
         model
     };
@@ -1403,7 +1408,7 @@ fn test_all_deps() {
         ],
     );
     let units_ctx = Context::new(&[], &Default::default()).unwrap();
-    let x_models: HashMap<Ident<Canonical>, ModelStage0> = vec![
+    let owned_x_models: HashMap<Ident<Canonical>, ModelStage0> = vec![
         ("mod_1".to_owned(), &mod_1_model),
         ("main".to_owned(), &main_model),
     ]
@@ -1415,11 +1420,13 @@ fn test_all_deps() {
         )
     })
     .collect();
+    let x_models: HashMap<Ident<Canonical>, &ModelStage0> =
+        owned_x_models.iter().map(|(k, v)| (k.clone(), v)).collect();
 
     let mut model_list = vec!["mod_1", "main"]
         .into_iter()
         .map(|name| {
-            let model_s0 = &x_models[&*canonicalize(name)];
+            let model_s0 = x_models[&*canonicalize(name)];
             let scope = ScopeStage0 {
                 models: &x_models,
                 dimensions: &Default::default(),

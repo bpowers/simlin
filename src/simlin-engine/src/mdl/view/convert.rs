@@ -63,7 +63,7 @@ pub fn build_views(
     // Convert views
     // Track start positions for group geometry (matches compose_views logic)
     let is_multi_view = views.len() > 1;
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(views.len());
     let start_x = 100;
     let mut start_y = 100;
 

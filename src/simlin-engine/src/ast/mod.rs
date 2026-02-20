@@ -92,7 +92,7 @@ impl<'a> ArrayContext<'a> {
     }
 
     fn get_model(&self, model_name: &str) -> Option<&'a ModelStage0> {
-        self.scope.models.get(&*canonicalize(model_name))
+        self.scope.models.get(&*canonicalize(model_name)).copied()
     }
 
     fn get_variable(
@@ -768,7 +768,7 @@ mod ast_tests {
         );
 
         let mut models = HashMap::new();
-        models.insert(Ident::new("test_model"), model_s0);
+        models.insert(Ident::new("test_model"), &model_s0);
 
         let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim]);
         let scope = ScopeStage0 {
@@ -861,7 +861,7 @@ mod ast_tests {
         );
 
         let mut models = HashMap::new();
-        models.insert(Ident::new("test_model"), model_s0);
+        models.insert(Ident::new("test_model"), &model_s0);
 
         let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim1, dim2]);
         let scope = ScopeStage0 {

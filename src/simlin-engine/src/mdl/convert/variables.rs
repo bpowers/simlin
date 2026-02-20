@@ -25,7 +25,7 @@ use crate::mdl::xmile_compat::format_number;
 impl<'input> ConversionContext<'input> {
     /// Build the final Project from collected symbols.
     pub(super) fn build_project(mut self) -> Result<Project, ConvertError> {
-        let mut variables: Vec<Variable> = Vec::new();
+        let mut variables: Vec<Variable> = Vec::with_capacity(self.symbols.len());
 
         for (name, info) in &self.symbols {
             // Skip unwanted variables (control vars)

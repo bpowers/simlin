@@ -48,25 +48,26 @@ fn test_fold_flows() {
     let inputs = &BTreeSet::new();
     let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
         HashMap::new();
-    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata> = HashMap::new();
+    let dummy_var = Variable::Var {
+        ident: Ident::new(""),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
     metadata.insert(
         Ident::new("a"),
         VariableMetadata {
             offset: 1,
             size: 1,
-            var: Variable::Var {
-                ident: Ident::new(""),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            },
+            var: &dummy_var,
         },
     );
     metadata.insert(
@@ -74,19 +75,7 @@ fn test_fold_flows() {
         VariableMetadata {
             offset: 2,
             size: 1,
-            var: Variable::Var {
-                ident: Ident::new(""),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            },
+            var: &dummy_var,
         },
     );
     metadata.insert(
@@ -94,19 +83,7 @@ fn test_fold_flows() {
         VariableMetadata {
             offset: 3,
             size: 1,
-            var: Variable::Var {
-                ident: Ident::new(""),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            },
+            var: &dummy_var,
         },
     );
     metadata.insert(
@@ -114,19 +91,7 @@ fn test_fold_flows() {
         VariableMetadata {
             offset: 4,
             size: 1,
-            var: Variable::Var {
-                ident: Ident::new(""),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            },
+            var: &dummy_var,
         },
     );
     let mut metadata2 = HashMap::new();
@@ -564,16 +529,77 @@ pub(crate) fn calc_module_model_map(
     all_models
 }
 
-// TODO: this should memoize
-pub(crate) fn build_metadata(
-    project: &Project,
+pub(crate) fn build_metadata<'p>(
+    project: &'p Project,
     model_name: &Ident<Canonical>,
     is_root: bool,
-) -> HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata>> {
-    let mut all_offsets: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata>> =
-        HashMap::new();
+    all_offsets: &mut HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'p>>>,
+) {
+    use std::sync::LazyLock;
 
-    let mut offsets: HashMap<Ident<Canonical>, VariableMetadata> = HashMap::new();
+    static IMPLICIT_TIME: LazyLock<Variable> = LazyLock::new(|| Variable::Var {
+        ident: Ident::new("time"),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    });
+    static IMPLICIT_DT: LazyLock<Variable> = LazyLock::new(|| Variable::Var {
+        ident: Ident::new("dt"),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    });
+    static IMPLICIT_INITIAL_TIME: LazyLock<Variable> = LazyLock::new(|| Variable::Var {
+        ident: Ident::new("initial_time"),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    });
+    static IMPLICIT_FINAL_TIME: LazyLock<Variable> = LazyLock::new(|| Variable::Var {
+        ident: Ident::new("final_time"),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    });
+
+    let model = &project.models[model_name];
+    let var_names: Vec<&Ident<Canonical>> = {
+        let mut var_names: Vec<_> = model.variables.keys().collect();
+        var_names.sort_unstable();
+        var_names
+    };
+    let var_count = var_names.len() + if is_root { IMPLICIT_VAR_COUNT } else { 0 };
+    let mut offsets: HashMap<Ident<Canonical>, VariableMetadata<'p>> =
+        HashMap::with_capacity(var_count);
+
     let mut i = 0;
     if is_root {
         offsets.insert(
@@ -581,19 +607,7 @@ pub(crate) fn build_metadata(
             VariableMetadata {
                 offset: 0,
                 size: 1,
-                var: Variable::Var {
-                    ident: Ident::new("time"),
-                    ast: None,
-                    init_ast: None,
-                    eqn: None,
-                    units: None,
-                    tables: vec![],
-                    non_negative: false,
-                    is_flow: false,
-                    is_table_only: false,
-                    errors: vec![],
-                    unit_errors: vec![],
-                },
+                var: &IMPLICIT_TIME,
             },
         );
         offsets.insert(
@@ -601,19 +615,7 @@ pub(crate) fn build_metadata(
             VariableMetadata {
                 offset: 1,
                 size: 1,
-                var: Variable::Var {
-                    ident: Ident::new("dt"),
-                    ast: None,
-                    init_ast: None,
-                    eqn: None,
-                    units: None,
-                    tables: vec![],
-                    non_negative: false,
-                    is_flow: false,
-                    is_table_only: false,
-                    errors: vec![],
-                    unit_errors: vec![],
-                },
+                var: &IMPLICIT_DT,
             },
         );
         offsets.insert(
@@ -621,19 +623,7 @@ pub(crate) fn build_metadata(
             VariableMetadata {
                 offset: 2,
                 size: 1,
-                var: Variable::Var {
-                    ident: Ident::new("initial_time"),
-                    ast: None,
-                    init_ast: None,
-                    eqn: None,
-                    units: None,
-                    tables: vec![],
-                    non_negative: false,
-                    is_flow: false,
-                    is_table_only: false,
-                    errors: vec![],
-                    unit_errors: vec![],
-                },
+                var: &IMPLICIT_INITIAL_TIME,
             },
         );
         offsets.insert(
@@ -641,38 +631,19 @@ pub(crate) fn build_metadata(
             VariableMetadata {
                 offset: 3,
                 size: 1,
-                var: Variable::Var {
-                    ident: Ident::new("final_time"),
-                    ast: None,
-                    init_ast: None,
-                    eqn: None,
-                    units: None,
-                    tables: vec![],
-                    non_negative: false,
-                    is_flow: false,
-                    is_table_only: false,
-                    errors: vec![],
-                    unit_errors: vec![],
-                },
+                var: &IMPLICIT_FINAL_TIME,
             },
         );
         i += IMPLICIT_VAR_COUNT;
     }
 
-    let model = Arc::clone(&project.models[model_name]);
-    let var_names: Vec<&Ident<Canonical>> = {
-        let mut var_names: Vec<_> = model.variables.keys().collect();
-        var_names.sort_unstable();
-        var_names
-    };
-
     for canonical_ident in var_names {
         let size = if let Variable::Module { model_name, .. } = &model.variables[canonical_ident] {
-            let all_sub_offsets = build_metadata(project, model_name, false);
-            let sub_offsets = &all_sub_offsets[model_name];
-            let sub_size: usize = sub_offsets.values().map(|metadata| metadata.size).sum();
-            all_offsets.extend(all_sub_offsets);
-            sub_size
+            if !all_offsets.contains_key(model_name) {
+                build_metadata(project, model_name, false, all_offsets);
+            }
+            let sub_offsets = &all_offsets[model_name];
+            sub_offsets.values().map(|metadata| metadata.size).sum()
         } else if let Some(Ast::ApplyToAll(dims, _)) = model.variables[canonical_ident].ast() {
             dims.iter().map(|dim| dim.len()).product()
         } else if let Some(Ast::Arrayed(dims, _)) = model.variables[canonical_ident].ast() {
@@ -685,19 +656,17 @@ pub(crate) fn build_metadata(
             VariableMetadata {
                 offset: i,
                 size,
-                var: model.variables[canonical_ident].clone(),
+                var: &model.variables[canonical_ident],
             },
         );
         i += size;
     }
 
     all_offsets.insert(model_name.clone(), offsets);
-
-    all_offsets
 }
 
 fn calc_n_slots(
-    all_metadata: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata>>,
+    all_metadata: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'_>>>,
     model_name: &Ident<Canonical>,
 ) -> usize {
     let metadata = &all_metadata[model_name];
@@ -728,7 +697,8 @@ impl<F: SimFloat> Module<F> {
         }
 
         let model_name: &Ident<Canonical> = &model.name;
-        let metadata = build_metadata(project, model_name, is_root);
+        let mut metadata = HashMap::with_capacity(project.models.len());
+        build_metadata(project, model_name, is_root, &mut metadata);
 
         let n_slots = calc_n_slots(&metadata, model_name);
         let var_names: Vec<&str> = {

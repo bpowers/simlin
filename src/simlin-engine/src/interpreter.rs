@@ -2021,7 +2021,8 @@ fn test_arrays() {
     }
 
     let main_ident = Ident::new("main");
-    let metadata = compiler::build_metadata(&parsed_project, &main_ident, true);
+    let mut metadata = HashMap::new();
+    compiler::build_metadata(&parsed_project, &main_ident, true, &mut metadata);
     let main_metadata = &metadata[&main_ident];
     assert_eq!(main_metadata[&*canonicalize("aux")].offset, 4);
     assert_eq!(main_metadata[&*canonicalize("aux")].size, 3);

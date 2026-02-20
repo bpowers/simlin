@@ -174,22 +174,19 @@ impl Project {
                 .map(|m| ModelStage0::new(m, &project_datamodel.dimensions, &units_ctx, false)),
         );
 
-        let models: HashMap<Ident<Canonical>, ModelStage0> = models_list
-            .iter()
-            .cloned()
-            .map(|m| (m.ident.clone(), m))
-            .collect();
+        let models: HashMap<Ident<Canonical>, &ModelStage0> =
+            models_list.iter().map(|m| (m.ident.clone(), m)).collect();
 
         let dims_ctx = DimensionsContext::from(&project_datamodel.dimensions);
         let mut models_list: Vec<ModelStage1> = models_list
-            .into_iter()
+            .iter()
             .map(|model| {
                 let scope = ScopeStage0 {
                     models: &models,
                     dimensions: &dims_ctx,
                     model_name: model.ident.as_str(),
                 };
-                ModelStage1::new(&scope, &model)
+                ModelStage1::new(&scope, model)
             })
             .collect();
 

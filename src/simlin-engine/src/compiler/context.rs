@@ -24,12 +24,11 @@ use super::subscript::{
 };
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
-pub(crate) struct VariableMetadata {
+#[derive(Clone, Copy)]
+pub(crate) struct VariableMetadata<'a> {
     pub(crate) offset: usize,
     pub(crate) size: usize,
-    // FIXME: this should be able to be borrowed
-    pub(crate) var: Variable,
+    pub(crate) var: &'a Variable,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -53,7 +52,8 @@ pub(crate) struct ContextCore<'a> {
     #[allow(dead_code)]
     pub(crate) dimensions_ctx: &'a DimensionsContext,
     pub(crate) model_name: &'a Ident<Canonical>,
-    pub(crate) metadata: &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata>>,
+    pub(crate) metadata:
+        &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'a>>>,
     pub(crate) module_models:
         &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>>,
     pub(crate) inputs: &'a BTreeSet<Ident<Canonical>>,
@@ -123,7 +123,7 @@ impl Context<'_> {
         self.get_submodel_offset(self.model_name, ident, true)
     }
 
-    pub(super) fn get_metadata(&self, ident: &Ident<Canonical>) -> Result<&VariableMetadata> {
+    pub(super) fn get_metadata(&self, ident: &Ident<Canonical>) -> Result<&VariableMetadata<'_>> {
         self.get_submodel_metadata(self.model_name, ident)
     }
 
@@ -309,7 +309,7 @@ impl Context<'_> {
         &self,
         model: &Ident<Canonical>,
         ident: &Ident<Canonical>,
-    ) -> Result<&VariableMetadata> {
+    ) -> Result<&VariableMetadata<'_>> {
         let metadata = &self.metadata[model];
         if let Some(pos) = ident.as_str().find('\u{00B7}') {
             let submodel_module_name = &ident.as_str()[..pos];
@@ -762,7 +762,7 @@ impl Context<'_> {
     }
 
     /// Helper to get variable metadata by offset
-    fn get_variable_metadata_by_offset(&self, offset: usize) -> Result<&VariableMetadata> {
+    fn get_variable_metadata_by_offset(&self, offset: usize) -> Result<&VariableMetadata<'_>> {
         let metadata = self.metadata.get(self.model_name).ok_or_else(|| {
             use crate::common::{Error, ErrorCode, ErrorKind};
             Error {
@@ -2007,25 +2007,39 @@ fn test_lower() {
     let inputs = &BTreeSet::new();
     let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
         HashMap::new();
-    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata> = HashMap::new();
+    let true_var = Variable::Var {
+        ident: Ident::new(""),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let false_var = Variable::Var {
+        ident: Ident::new(""),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
     metadata.insert(
         Ident::new("true_input"),
         VariableMetadata {
             offset: 7,
             size: 1,
-            var: Variable::Var {
-                ident: Ident::new(""),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            },
+            var: &true_var,
         },
     );
     metadata.insert(
@@ -2033,19 +2047,7 @@ fn test_lower() {
         VariableMetadata {
             offset: 8,
             size: 1,
-            var: Variable::Var {
-                ident: Ident::new(""),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            },
+            var: &false_var,
         },
     );
     let mut metadata2 = HashMap::new();
@@ -2104,25 +2106,39 @@ fn test_lower() {
     let inputs = &BTreeSet::new();
     let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
         HashMap::new();
-    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata> = HashMap::new();
+    let true_var = Variable::Var {
+        ident: Ident::new(""),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let false_var = Variable::Var {
+        ident: Ident::new(""),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
     metadata.insert(
         Ident::new("true_input"),
         VariableMetadata {
             offset: 7,
             size: 1,
-            var: Variable::Var {
-                ident: Ident::new(""),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            },
+            var: &true_var,
         },
     );
     metadata.insert(
@@ -2130,19 +2146,7 @@ fn test_lower() {
         VariableMetadata {
             offset: 8,
             size: 1,
-            var: Variable::Var {
-                ident: Ident::new(""),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            },
+            var: &false_var,
         },
     );
     let mut metadata2 = HashMap::new();
@@ -2192,7 +2196,7 @@ fn test_with_active_subscripts_reuses_dimension_storage() {
         CanonicalDimensionName::from_raw("letters"),
         3,
     )];
-    let metadata: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata>> =
+    let metadata: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'_>>> =
         HashMap::new();
     let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
         HashMap::new();

@@ -97,9 +97,10 @@ impl<'input> ConversionContext<'input> {
         let settings_parser = PostEquationParser::new(remaining);
         let settings = settings_parser.parse_settings();
 
+        let n_items = items.len();
         Ok(ConversionContext {
             items,
-            symbols: HashMap::new(),
+            symbols: HashMap::with_capacity(n_items),
             dimensions: Vec::new(),
             equivalences: HashMap::new(),
             sim_specs: SimSpecsBuilder {
