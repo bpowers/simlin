@@ -913,7 +913,10 @@ fn analyze_expr_polarity_with_context(
                     _ => LinkPolarity::Unknown,
                 },
                 BinaryOp::Mul => {
-                    // Multiplication: combine polarities
+                    // Multiplication needs the SIGN of the other operand to determine
+                    // polarity, not just whether it's independent of from_var.
+                    // This is why Mul uses is_positive_constant/is_negative_constant
+                    // rather than the expr_references_var pattern used by Add/Sub/Div.
                     // If both have known polarity, combine them
                     if left_pol != LinkPolarity::Unknown && right_pol != LinkPolarity::Unknown {
                         // Positive * Positive = Positive
