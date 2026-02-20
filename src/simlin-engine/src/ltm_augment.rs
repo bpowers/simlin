@@ -414,7 +414,7 @@ fn generate_auxiliary_to_auxiliary_equation(
         from = from.as_str()
     );
 
-    // Return NaN at the initial timestep when PREVIOUS values don't exist yet
+    // Return 0 at the initial timestep when PREVIOUS values don't exist yet
     format!(
         "if \
             (TIME = PREVIOUS(TIME)) \
@@ -456,7 +456,7 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
         "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))"
     );
 
-    // Return NaN for the first two timesteps when we don't have enough history for second-order differences
+    // Return 0 for the first two timesteps when we don't have enough history for second-order differences
     format!(
         "if \
             (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
@@ -517,7 +517,7 @@ fn generate_stock_to_flow_equation(
     let abs_part = format!("ABS(SAFEDIV({partial_change}, {flow_diff}, 0))");
     let sign_part = format!("SIGN(SAFEDIV({partial_change}, {stock_diff}, 0))");
 
-    // Return NaN at the initial timestep when PREVIOUS values don't exist yet
+    // Return 0 at the initial timestep when PREVIOUS values don't exist yet
     format!(
         "if \
             (TIME = PREVIOUS(TIME)) \
