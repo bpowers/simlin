@@ -487,9 +487,9 @@ fn test_print_eqn_quotes_special_identifiers() {
     // Identifiers with characters that aren't valid in bare identifiers
     // must be wrapped in double quotes so the output is re-parseable.
     assert_eq!(
-        "\"$⁚ltm⁚link_score⁚x⁚y\"",
+        "\"$⁚ltm⁚link_score⁚x→y\"",
         print_eqn(&Expr0::Var(
-            RawIdent::new_from_str("\"$⁚ltm⁚link_score⁚x⁚y\""),
+            RawIdent::new_from_str("\"$⁚ltm⁚link_score⁚x→y\""),
             Loc::default(),
         ))
     );

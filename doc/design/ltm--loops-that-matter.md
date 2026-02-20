@@ -218,42 +218,70 @@ in the target relative to total change in the source.
 
 ## Module Boundary Handling
 
-The implementation treats modules as **black boxes** at the LTM level. This is
-a deliberate simplification documented in `doc/ltm_modules.md`.
+The implementation uses **composite link scores** for dynamic modules (SMOOTH,
+DELAY, TREND, etc.), following Section 6 of Schoenberg & Eberlein (2020). The
+composite score is the product of internal link scores along the strongest
+internal pathway at each timestep.
 
-### How It Works
+### Module Classification
 
-When `CausalGraph::from_model()` encounters a module variable, it:
+Modules are classified by `classify_module_for_ltm()` (`ltm.rs`):
 
-1. Records edges from module input sources to the module variable itself
-   (`ltm.rs:195-199`)
-2. Recursively builds an internal `CausalGraph` for the module's model and
-   stores it in `module_graphs` (`ltm.rs:186-191`)
-3. During loop detection, cross-module loops are found by checking whether
-   internal loops connect to module inputs/outputs
-   (`find_cross_module_loops`, `ltm.rs:322`)
+- **Infrastructure** (PREVIOUS, INIT) -- used BY link score equations; never
+  analyzed to avoid infinite recursion.
+- **DynamicModule** -- has internal stocks (SMOOTH, DELAY, TREND, user-defined
+  modules with stocks). Gets composite link scores.
+- **Passthrough** -- no internal stocks; treated as black box with a transfer
+  score formula.
 
-For link score computation, module connections use the black-box transfer score
-formula rather than tracing through internal structure. This means a module
-instance acts as a single link in the loop, with its score representing the
-aggregate input-to-output transfer behavior.
+### How Composite Link Scores Work
 
-### Why Black Box
+1. **CausalGraph normalization**: When a variable references a module output via
+   the interpunct notation (`module·output`), the edge is normalized to point to
+   the module node itself (`normalize_module_ref` in `ltm.rs`). This ensures the
+   module participates correctly in loop detection.
 
-Three approaches were evaluated (documented in `doc/ltm_modules.md`):
+2. **Internal instrumentation**: For each DynamicModule model, `ltm_augment.rs`
+   generates internal link score variables with the `$⁚ltm⁚ilink⁚` prefix.
+   These are added to the stdlib model's datamodel representation via
+   `inject_ltm_vars()` in `project.rs`, which adds augmented stdlib models to
+   the datamodel. `base_from()` detects these overrides by name and skips
+   loading the stock version from generated code.
 
-1. **Black box** (chosen) -- Simple, matches user mental model, minimal overhead
-2. **Selective internal export** -- More accurate but complex, increases coupling
-3. **Hierarchical path weighting** -- Theoretically sound but computationally
-   expensive
+3. **Pathway enumeration**: `enumerate_module_pathways()` in `ltm.rs` finds all
+   simple paths from each input port to the output variable within the module's
+   internal causal graph. For smth1, the sole pathway is `input -> flow -> output`.
 
-The black-box approach was chosen because:
-- Most modules in practice are simple (SMOOTH, DELAY, etc.) where the
-  input-to-output relationship is well-characterized by a single transfer score
-- The 2023 paper's insight that aggregation level should not affect analysis
-  extends naturally to treating modules as aggregated submodels
-- Users think of modules as functional units, not as collections of internal
-  variables
+4. **Pathway scores**: For each pathway, a variable like `$⁚ltm⁚path⁚input⁚0`
+   is generated whose equation is the product of constituent internal link scores.
+
+5. **Composite selection**: For each input port, a composite variable
+   `$⁚ltm⁚composite⁚{port}` selects the pathway with the largest absolute
+   magnitude at each timestep. For a single pathway (most common), this is
+   just the pathway score. For multiple pathways, a nested `if ABS(p1) >= ABS(p2)
+   then p1 else p2` chain is generated.
+
+6. **Parent model reference**: The parent model's link score for
+   `input_src -> module_instance` references the module's composite via
+   interpunct notation: `"module·$⁚ltm⁚composite⁚port"`. The compiler resolves
+   this through the standard `module·var` mechanism in `context.rs`.
+
+### Variable Naming Conventions
+
+- **Parent link scores**: `$⁚ltm⁚link_score⁚{from}→{to}` (arrow separator
+  avoids ambiguity with module idents containing `⁚`)
+- **Internal link scores**: `$⁚ltm⁚ilink⁚{from}→{to}` (the `i` prefix
+  ensures discovery mode's `parse_link_offsets()` does not ingest them)
+- **Pathway scores**: `$⁚ltm⁚path⁚{port}⁚{index}`
+- **Composite scores**: `$⁚ltm⁚composite⁚{port}`
+
+### Loop Suppression
+
+Internal module-only loops (e.g., smth1's `output -> flow -> output`) are not
+reported in the parent model's loop list. The parent DFS traverses module nodes
+as opaque vertices and does not descend into module internals. Cross-module loops
+(where a loop passes through a module connecting to external variables) are
+detected by `find_cross_module_loops()` and reported with module nodes in the path.
 
 ## Polarity Analysis
 

@@ -331,7 +331,7 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
 
         let (score_ptr, score_len) = if has_ltm_scores {
             let link_score_var = format!(
-                "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{205A}{}",
+                "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
                 link.from.as_str(),
                 link.to.as_str()
             );
