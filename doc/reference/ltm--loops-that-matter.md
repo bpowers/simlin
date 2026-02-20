@@ -1,33 +1,29 @@
 # Loops That Matter (LTM): Technical Reference
 
-This document synthesizes five papers and the associated PhD thesis that collectively
-define the Loops That Matter method for loop dominance analysis in system dynamics models:
+This document provides a comprehensive technical reference for the **Loops That Matter
+(LTM)** method -- the current state of the art in loop dominance analysis for system
+dynamics models. LTM quantifies the contribution of each feedback loop to model behavior
+at each point in time, enabling practitioners to understand *which structural mechanisms
+drive observed dynamics*.
+
+The method, its scalability algorithm, its production implementation, and its extensions
+are defined across five papers and a PhD thesis:
 
 1. **Schoenberg, Davidsen, and Eberlein (2020)** -- "Understanding model behavior using
-   the Loops that Matter method." *System Dynamics Review* 36(2): 158--190. *Foundational
-   paper introducing link scores, loop scores, and dominance analysis.*
-
+   the Loops that Matter method." *System Dynamics Review* 36(2): 158--190.
 2. **Schoenberg, Hayward, and Eberlein (2023)** -- "Improving Loops that Matter." *System
-   Dynamics Review* 39(2): 140--151. *Corrects the flow-to-stock link score formula to
-   eliminate sensitivity to flow aggregation.*
-
+   Dynamics Review* 39(2): 140--151.
 3. **Eberlein and Schoenberg (2020)** -- "Finding the Loops that Matter." *Conference
-   paper. Describes the strongest-path loop discovery algorithm for models too large for
-   exhaustive loop enumeration.*
-
+   paper.*
 4. **Schoenberg and Eberlein (2020)** -- "Seamlessly Integrating Loops That Matter into
-   Model Development and Analysis." *Conference paper. Production implementation in the
-   Stella family of products: macro handling, discrete elements, simplified CLDs, and
-   builtin functions.*
+   Model Development and Analysis." *Conference paper.*
+5. **Schoenberg (2020)** -- "Loops that Matter." *PhD Thesis, University of Bergen.*
 
-5. **Schoenberg (2020)** -- "Loops that Matter." *PhD Thesis, University of Bergen.
-   Article-based dissertation providing the framing narrative, the LoopX visualization
-   tool, Feedback System Neural Networks (FSNN) for causal inference, and a synthesis of
-   all five articles.*
+All formulas presented below reflect the corrected versions from the 2023 paper, which
+supersede the original 2020 flow-to-stock formulations.
 
-The papers are presented here in logical order: the foundational method first, then its
-correction, then the scalability solution, then the production integration challenges,
-and finally the broader thesis-level synthesis.
+This reference intentionally excludes deprecated equations and focuses on the current
+operational method used in modern LTM implementations.
 
 ---
 
@@ -101,7 +97,7 @@ complex analytical toolset.
 | Property | EEA | PPM | Loop Impact | LTM |
 |----------|-----|-----|-------------|-----|
 | Scope | Whole model | Single stock | Single stock | Whole model (cycle partition) |
-| Integration link treatment | Second derivative | Second derivative | Second derivative | First derivative |
+| Integration link treatment | Second derivative | Second derivative | Second derivative | First-order flow change over second-order stock change |
 | Works at equilibrium? | Yes | No | No | No |
 | Identifies behavior modes? | Yes | Partial (7 patterns) | No | No |
 | Requires linearization? | Yes | No | No | No |
@@ -114,6 +110,48 @@ complex analytical toolset.
 LTM sacrifices equilibrium analysis and behavior mode identification in exchange for
 generality (works on any model type), simplicity (no specialized math), and accessibility
 (single checkbox in production software).
+
+### 1.3 Current State-of-the-Art Synthesis
+
+The mature LTM stack is best understood as four coupled layers, all required in practice:
+
+1. **Scoring layer (mathematical core):** The 2023-corrected link-score equations define
+   how instantaneous causal contribution is measured on links, including aggregation-invariant
+   flow-to-stock scoring. Loop scores are products of link scores; relative loop scores are
+   normalized products.
+2. **Discovery layer (scalability core):** Because large models cannot enumerate all loops,
+   the strongest-path heuristic discovers high-contribution loops at each timestep.
+3. **Representation layer (modeling-language core):** Macros, discrete elements, and
+   hidden internal structures are mapped into analyzable link/path constructs (composite
+   link scores, perfect-mixing approximation, loop trimming).
+4. **Communication layer (human-use core):** Simplified CLDs, composite relative loop
+   scores, polarity confidence, and animated link/loop views turn numeric scores into
+   interpretable structure-behavior narratives.
+
+The practical conclusion from the full literature set is that LTM is not "just an
+equation." It is an end-to-end analysis pipeline with explicit tradeoffs:
+
+- **Strong on applicability:** works on discrete/discontinuous models and production tools.
+- **Strong on interpretability:** direct structural attribution over time.
+- **Strong on scale:** usable in models with millions of loops via heuristic discovery.
+- **Weak on static mode decomposition:** does not provide EEA-style modal decomposition,
+  leverage-point elasticities, or equilibrium attribution.
+
+### 1.4 Practical Interpretation Rules
+
+For current practice, the papers converge on a few interpretation rules that should be
+treated as operational constraints:
+
+1. **Use relative loop scores for interpretation.** Raw loop scores are mathematically
+   meaningful but can become unbounded at dominance transitions.
+2. **Treat dominance as time-local and scenario-local.** Dominant loops vary over time and
+   can change across parameterizations; there is no universally dominant static loop set.
+3. **Do not infer "all important loops are found."** Strongest-path discovery is high-value
+   but heuristic; use `LOOPSCORE`/`PATHSCORE` when specific loops must be tracked.
+4. **Distinguish structural from behavioral polarity.** LTM reports structural polarity;
+   PPM/Impact polarity conventions differ and should not be conflated.
+5. **Do not over-interpret simplified CLDs.** They are explanatory projections, not full
+   causal graphs; use composite relative loop score and polarity confidence to judge loss.
 
 ---
 
@@ -228,54 +266,14 @@ After computing one timestep dt, for each non-stock variable `target`:
 This roughly doubles the number of equation evaluations vs. normal simulation (one
 re-evaluation per input per variable).
 
-### 3.2 Flow-to-Stock Link Score (Corrected Formula from 2023 Paper)
+### 3.2 Flow-to-Stock Link Score
 
-The original 2020 paper defined the flow-to-stock link score as:
-
-```
-Original (FLAWED):
-  LS(inflow -> S)  = |i / (i - o)| * (+1)
-  LS(outflow -> S) = |o / (i - o)| * (-1)
-```
-
-where i is the inflow rate, o is the outflow rate, and (i - o) is the net flow.
-
-#### The Problem: Aggregation Sensitivity
-
-This formula uses the **value** of the flow, not the **change** in the flow. This makes it
-sensitive to how flows are aggregated -- a purely cosmetic structural choice.
-
-**Example demonstrating the problem:**
-
-Consider a stock S (init=100) with separate inflow (in) and outflow (out):
-
-| Variable | Time 1 | Time 2 |
-|----------|--------|--------|
-| in       | 5      | 10     |
-| out      | 4      | 5      |
-| S        | 101    | 106    |
-
-Using the original formula:
-- LS_magnitude(in -> S) = |10 / (10 - 5)| = 2.0
-- LS_magnitude(out -> S) = |5 / (10 - 5)| = 1.0
-
-Now restructure the same model with a single net flow auxiliary (net = in - out):
-- Link from out to net (via instantaneous formula): |Delta_out(net) / Delta(net)| = |-1/4| = 0.25
-- Link from net to S is 1 (single flow)
-- Total: LS(out -> S) = 0.25
-
-**Result:** Mathematically identical models produce different scores (1.0 vs 0.25).
-
-The root cause is that flow values can be large relative to the net flow (e.g., two large
-flows nearly canceling), and how large depends on the structural choice of aggregated vs.
-disaggregated flows.
-
-#### The Corrected Formula
+For a stock S with inflow i and outflow o, the link scores from the flows to the stock
+are:
 
 ```
-Corrected (2023):
-  LS(inflow -> S)  = |Delta(i) / (Delta(S_t) - Delta(S_{t-dt}))| * (+1)
-  LS(outflow -> S) = |Delta(o) / (Delta(S_t) - Delta(S_{t-dt}))| * (-1)
+LS(inflow -> S)  = |Delta(i) / (Delta(S_t) - Delta(S_{t-dt}))| * (+1)
+LS(outflow -> S) = |Delta(o) / (Delta(S_t) - Delta(S_{t-dt}))| * (-1)
 ```
 
 Where:
@@ -284,25 +282,56 @@ Where:
 - **Delta(S_t)** = S(t) - S(t-dt) = net flow at time t (first-order change in stock)
 - **Delta(S_{t-dt})** = S(t-dt) - S(t-2dt) = net flow at time t-dt
 - **Delta(S_t) - Delta(S_{t-dt})** = change in net flow = second-order change in stock
-  (acceleration)
+  (the stock's acceleration)
 
 **Interpretation:**
-- The numerator is the first-order partial change in S with respect to the flow
-- The denominator is the second-order change in S
+- The numerator is the first-order partial change in S with respect to the flow: how much
+  did this particular flow change?
+- The denominator is the second-order change in S: how much did the stock's rate of change
+  (net flow) itself change?
 - The formula measures: the partial change in the stock due to this flow, relative to the
   stock's acceleration
+- Polarity is fixed: +1 for inflows (increasing the stock), -1 for outflows (decreasing
+  it)
 
-**Verification:** With the corrected formula on the disaggregated model:
-- Delta(S_t) = 5, Delta(S_{t-dt}) = 1, so denominator = 5 - 1 = 4
-- LS_magnitude(out -> S) = |1 / 4| = 0.25
+**Key design property -- aggregation invariance:** The formula uses the **change** in each
+flow, not the flow's value. This makes it invariant to how flows are structurally
+specified: combining two separate flows into one net flow (a purely cosmetic choice with no
+mathematical effect on the model) produces identical LTM results. This ensures that
+analysis depends only on the model's mathematical behavior, not on the modeler's structural
+presentation choices.
 
-This matches the aggregated model result. The formula is now **aggregation-invariant**.
+This aggregation invariance is the key 2023 correction. Any value-based flow-to-stock
+formulation is deprecated and should not be used.
 
-**Implementation note:** The corrected formula shows that there is no need for a separate
-calculation method for flow-to-stock links. Implementors can either: (a) use the corrected
-formula directly with disaggregated flows, or (b) automatically aggregate all flows into
-net flows and use link score 1 for all net-flow-to-stock links. Both produce identical
-results.
+**Edge cases:**
+- If the stock's acceleration is zero but the flow is changing (Delta(i) != 0 but
+  Delta(S_t) = Delta(S_{t-dt})): the link score approaches infinity. This occurs at
+  inflection points where loop dominance is shifting (Section 4.3).
+- If the flow is not changing (Delta(i) = 0): the link score is 0, correctly indicating
+  that this flow is not contributing to the stock's changing behavior.
+- If the stock is at equilibrium (both Delta(S_t) and Delta(S_{t-dt}) are zero, and flows
+  are constant): the result is 0/0, defined as 0. Any loop through a non-changing stock
+  has score 0.
+
+**Distinction from PPM and Loop Impact:** Those methods treat the flow-to-stock link the
+same as algebraic links, measuring the change in stock value relative to the change in flow
+value (effectively the second derivative of the stock). LTM instead measures the change in
+flow relative to the change in the stock's rate of change (the stock's acceleration). This
+difference is what enables LTM to define a single number for the importance of a whole
+loop, rather than being limited to effects on a single stock. The key algebraic mechanism:
+when chaining a stock-to-flow link score with a flow-to-stock link score, the intermediate
+flow's rate-of-change terms cancel (Section 3.4), collapsing the path to a simple
+expression involving only the endpoint stocks.
+
+**Computational note:** This formula requires one lagged net-flow term (Delta(S_{t-dt})).
+In practice, implementations define startup conventions for the first scored interval
+(typically reporting 0 until enough lagged values exist).
+
+**Implementation note:** This formula performs the same arithmetic operations as the
+instantaneous link score. Implementors can either: (a) use this formula directly with
+disaggregated flows, or (b) automatically aggregate all flows into net flows and use link
+score 1 for all net-flow-to-stock links. Both produce identical results.
 
 ### 3.3 Continuous-Time Form
 
@@ -314,10 +343,15 @@ LS(x -> z) = (dz/dx) * |x_dot / z_dot|
 
 where dz/dx is the partial derivative and x_dot, z_dot are time derivatives.
 
-The first term (dz/dx) is the **gain** between adjacent variables, as used in PPM and
-Impact methods. The second term converts potential contribution (sensitivity) to realized
-contribution. These gains obey the chain rule, so dz/dx is the gain regardless of how many
-auxiliary variables appear between x and z.
+The first term (dz/dx) is the **gain** between adjacent variables, as defined by Kampmann
+(2012) and Richardson (1995), and used in PPM and Impact methods. The second term converts
+potential contribution (sensitivity) to realized contribution. These gains obey the chain
+rule of partial differentiation, so dz/dx remains the gain regardless of how many auxiliary
+variables appear between x and z. Although the link score weights these gains by
+|x_dot / z_dot|, these weights cancel when applying the chain rule across a path. The
+result: **a path score between two variables always equals the gain multiplied by the
+relative time derivative of the two endpoint variables** -- regardless of the number of
+intermediate steps.
 
 For the flow-to-stock link:
 
@@ -326,7 +360,7 @@ LS(i -> S) = |di/dt / (d^2S/dt^2)|
 ```
 
 The numerator is the rate of change of the flow; the denominator is the stock's
-acceleration.
+acceleration (the second time derivative of S).
 
 ### 3.4 Link Score Between Adjacent Stocks
 
@@ -338,7 +372,13 @@ LS(S1 -> S2) = LS(S1 -> f) * LS(f -> S2)
              = (df/dS1) * |S1_dot / S2_ddot|
 ```
 
-The f_dot terms cancel in the chain -- a key algebraic property.
+The f_dot terms cancel in the chain. This cancellation is the **key algebraic mechanism**
+that enables LTM to produce model-wide scores rather than stock-specific ones. Because the
+intermediate flow's rate of change drops out, the stock-to-stock link score depends only on
+the gain between the stocks and the ratio of the source stock's velocity to the target
+stock's acceleration. This is what allows link scores to chain multiplicatively through
+arbitrarily long paths involving multiple stocks, producing a single loop score for the
+entire loop.
 
 ### 3.5 Relationship to Impact and PPM
 
@@ -361,12 +401,47 @@ Two differences:
    structure); PPM/Impact measure **behavioral polarity** (whether the link contributes to
    exponential or logarithmic behavior)
 
-For **single-stock models** where S2 = S1, Impact equals the loop gain G1. The relative
-loop score is then **identical to PPM** because all loops share the same weighting factor.
+#### Single-Stock Models: LTM Subsumes PPM
 
-For **multi-stock models**, LTM gives different results than PPM/Impact because cross-stock
-weighting factors differ. However, if link scores on a single stock are compared, results
-agree with other methods (except polarity convention).
+For single-stock models where S2 = S1, the Impact equals the loop gain G1 (Kampmann,
+2012). The loop score becomes a weighted loop gain:
+
+```
+LoopScore(L) = G1 / |S1_ddot / S1_dot|
+```
+
+Because **all loops in a single-stock model share the same weighting factor**
+(|S1_dot / S1_ddot|), the normalization in the relative loop score cancels this factor
+entirely. The relative loop score reduces to G_i / sum(|G_j|) for all loops j -- which is
+**identical to the PPM**. This means LTM subsumes PPM for first-order systems.
+
+#### Multi-Stock Models: LTM Diverges from PPM
+
+For multi-stock models, the weighting factors |Si_dot / Si_ddot| differ across stocks. Two
+loops that pass through different stocks receive different weightings, causing LTM to
+diverge from PPM. This divergence is the source of LTM's unique contribution: by weighting
+loops according to all the stocks they touch, LTM provides a **model-wide** measure of loop
+importance rather than a stock-specific one.
+
+However, if link scores are compared on a **single stock** within a multi-stock model, the
+results agree with PPM and Loop Impact (except for the polarity convention), because only
+that stock's weighting factor appears.
+
+The Loop Impact theorem (Hayward and Boswell, 2014, appendix 3) shows that for a two-stock
+loop:
+
+```
+Impact(S1 -> S2) * Impact(S2 -> S1) = G2  (the second-order loop gain)
+```
+
+Therefore for a two-stock loop:
+
+```
+LoopScore = G2 * |S1_dot / S1_ddot| * |S2_dot / S2_ddot|
+```
+
+This generalizes to n-stock loops: the loop score equals the n-th order loop gain weighted
+by the velocity-to-acceleration ratio of every stock in the loop.
 
 ---
 
@@ -387,7 +462,7 @@ loop score (balancing); an even number produces a positive score (reinforcing).
 
 - **Dimensionless.** Can be thought of as the "force" a feedback loop applies to the
   behavior of all stocks it connects.
-- **Consistent with the chain rule of differentiation** (proven in the 2020 paper's
+- **Consistent with the chain rule of differentiation** (proven in Schoenberg et al., 2020,
   Appendix B). It should not matter whether two variables are connected by one complicated
   equation or three variables with two simpler equations.
 - **Inactive links zero the loop:** Any loop containing a link with score 0 has loop
@@ -409,8 +484,8 @@ the product LS(x -> u) * LS(u -> z) equals LS(x -> z) computed directly.
 
 **Caveat:** This equivalence fails if the intermediate variable u does not change (Delta_u
 = 0). In that case, the link score through u becomes 0 even if both input and ultimate
-output are changing. The 2020 paper notes this helpfully shows the potential feedback path
-is not actually active.
+output are changing. This helpfully shows the potential feedback path is not actually
+active.
 
 ### 4.3 Behavior at Extremes
 
@@ -438,8 +513,17 @@ relative importance.
 
 ### 4.4 Relative Loop Score
 
-To compare loop contributions (and normalize away the infinities), the **relative loop
-score** divides by the sum of absolute loop scores:
+Raw loop scores can become very large, particularly when competing loops act on a shared
+stock. Consider a stock with a reinforcing and a balancing loop: if both loops' flows are
+large but nearly cancel (small net flow), the flow-to-stock link scores for both become
+large because the denominator (change in net flow) is small relative to the numerator
+(change in individual flows). The closer the competing flows are to each other, the bigger
+**both** raw loop scores become. Near inflection points -- where loop dominance is shifting
+-- raw scores approach infinity as the competing effects momentarily cancel. This is
+mathematically correct (the loops are exerting maximum "force" against each other) but makes
+raw scores unsuitable for direct interpretation.
+
+The **relative loop score** normalizes by the sum of absolute loop scores:
 
 ```
 RelativeLoopScore(L) = LoopScore(L) / sum_Y(|LoopScore(Y)|)
@@ -452,7 +536,8 @@ Properties:
 - Sign represents structural polarity (positive = reinforcing, negative = balancing)
 - Reports the fractional contribution of a loop to the change in value of all stocks at a
   point in time
-- Essential because raw loop scores can become very large near dominance shift points
+- Smoothly transitions through dominance shifts (the infinities cancel in the
+  normalization), making the transition from one dominant loop to another clearly visible
 - The sum of absolute relative loop scores equals 1.0 (or 100% when expressed as
   percentages)
 
@@ -724,9 +809,9 @@ ones, as demonstrated by the three-party arms race model (Section 12.2).
 - First computation after model initialization and first timestep
 - Computed at each dt using Euler integration
 - In principle compatible with Runge-Kutta and other integration methods
-- The corrected flow-to-stock formula requires values from two previous timesteps
-  (Delta(S_t) and Delta(S_{t-dt})), so link scores for flow-to-stock links are undefined
-  for the first two timesteps
+- The flow-to-stock formula requires values from two previous timesteps (Delta(S_t) and
+  Delta(S_{t-dt})), so link scores for flow-to-stock links are undefined for the first
+  two timesteps
 
 ### 9.2 Equation Re-evaluation Cost
 
@@ -742,14 +827,15 @@ Previous values of **all** variables must be retained between timesteps. The del
 computation requires both current and previous values for every variable. This doubles
 memory usage for variable storage.
 
-For the corrected flow-to-stock formula, the net flow from the *previous* timestep
+For the flow-to-stock formula, the net flow from the *previous* timestep
 (Delta(S_{t-dt})) must also be stored, requiring an additional value per stock.
 
 ### 9.4 Performance
 
 For models with 2-20 stocks and fewer than 50 feedback loops, the computational burden is
-dominated by loop finding, not score computation. Analysis of all models in the 2020 paper
-(including Forrester's 10-stock market growth model) takes less than 1 second total.
+dominated by loop finding, not score computation. Analysis of all models in Schoenberg
+et al. (2020) (including Forrester's 10-stock market growth model) takes less than 1
+second total.
 
 Link scores are computed for every link at every dt during simulation. For a model with L
 total links and T timesteps, this is L*T link score computations. Each link score
@@ -814,6 +900,13 @@ At the inflection point, absolute loop scores approach infinity (the two competi
 nearly cancel, driving the denominator toward zero). Relative loop scores smoothly
 transition through the crossover.
 
+**Structural insight:** Most links in this model have a constant score of 1.0 (they have
+only a single input). The only links whose scores change are the two at the **structural
+junction** between the reinforcing and balancing loops: "probability of contact with
+potentials -> potentials contacts with adopters" (B1's key link) and "adopter contacts ->
+potentials contacts with adopters" (R1's key link). LTM correctly identifies these
+structurally important links as the ones driving the dominance transition.
+
 ### 11.2 Yeast Alcohol Model
 
 **Structure:** Two stocks (Yeast Cells C, Alcohol A), two flows (Births B, Deaths D).
@@ -827,10 +920,16 @@ Four feedback loops: R (births), B1 (deaths), B2 (slowing births from alcohol), 
 4. **t=75.5-100:** B1 dominant (natural death at low population)
 
 Notable: R becomes effectively balancing around t=74 due to a formulation flaw (birth rate
-goes negative at high alcohol levels). At t=74, no single loop is dominant.
+goes negative at high alcohol levels). At t=74, no single loop is dominant. B2 and B3
+have local maxima in magnitude as they trade dominance.
+
+**Observation:** The number of stocks in a loop has no direct relationship to the number of
+relative loop score magnitude maxima. Loop dominance patterns are driven by the dynamic
+interactions between loops, not by loop length.
 
 Results agree with Ford's behavioral approach (Phaff et al., 2006), PPM, and Loop Impact,
-with minor differences in the exact assignment of Phase 3.
+with minor differences in the exact assignment of Phase 3. EEA agrees on most phases but
+points to B1 and B3 together for Phase 3 where LTM finds B3 solely dominant.
 
 ### 11.3 Inventory Workforce Model
 
@@ -844,9 +943,18 @@ contribution depends on "time to hire or fire." Increasing this parameter increa
 contribution, causing oscillations to become less damped and longer-lasting.
 
 LTM handles the oscillatory behavior cleanly -- loop scores maintain consistent relative
-contributions during oscillation. PPM-based methods produce sign changes during sinusoidal
-oscillation that complicate interpretation, even though the underlying relative
-contributions are constant.
+contributions during oscillation. This is a significant advantage over PPM-based methods,
+which produce sign changes during sinusoidal oscillation even though the underlying relative
+loop contributions are constant. Kampmann and Oliva (2008) explained that PPM's sign
+changes stem from its behavioral polarity convention: the same loop is reported as
+reinforcing during one phase of oscillation and balancing during the next, obscuring the
+structural reality that the loop's contribution is constant. LTM's structural polarity
+convention avoids this problem entirely, making oscillatory models substantially easier to
+analyze.
+
+**Equilibrium limitation:** Before the demand shock, the model is in equilibrium with all
+link scores at 0. LTM cannot inform analysis during this pre-shock period -- the method
+only becomes informative once behavior begins to change.
 
 ### 11.4 Economic Cycles Model (Mass, 1975)
 
@@ -935,7 +1043,7 @@ introducing carrying capacity.
 
 **Births, deaths, and carrying capacity:** Three loops: R1 (+50%), B1 (-36.17%),
 B2 (-13.83%). This dramatically shows the difference between a fragile equilibrium and one
-resulting from **shifting loop dominance**. The capacity constraint loop (B2) is at first
+resulting from **shifting loop dominance**. The capacity constraint loop (B1) is at first
 inactive but then becomes the bigger of the two balancing loops.
 
 **Pedagogical value:** LTM helps even with "obvious" models because "simply obvious" means
@@ -1021,7 +1129,6 @@ For each variable in the model:
     For each outbound link from variable:
         Set link.score = |link_score| at this timestep
     Sort outbound links by score descending
-    Set variable.best_score = 0
 ```
 
 Sorting by score ensures the first visit to a variable is likely the strongest, enabling
@@ -1031,13 +1138,14 @@ earlier pruning. This provides roughly a 3x speedup.
 
 ```
 For each stock in the model:
+    For each variable in the model:
+        Set variable.best_score = 0
     Set TARGET = stock
     Call Check_outbound_uses(stock, 1.0)
 ```
 
 All feedback loops contain at least one stock, so starting from every stock ensures all
-loops are reachable. The `best_score` values persist across stock iterations within a
-timestep (they are NOT reset between stocks).
+loops are reachable.
 
 #### Core Recursive Function
 
@@ -1071,7 +1179,8 @@ End function
 - `STACK` tracks the current DFS path for loop recording
 - `variable.visiting` detects cycles on the current path only (not all visited nodes)
 - `variable.best_score` tracks the highest cumulative score at which this variable has been
-  reached. Initialized to 0 before each *timestep* (not before each stock)
+  reached within the current traversal context; implementations must isolate this state so
+  one target stock search does not incorrectly prune another
 - The comparison uses **strict less-than**: equal scores DO explore further
 - The initial call uses score = 1.0 (multiplicative identity)
 - When a cycle back to TARGET is detected, the loop is recorded if unique
@@ -1463,8 +1572,9 @@ Both SFDs and simplified CLDs can be animated:
 
 Four approaches to link thickness were analyzed in the thesis:
 
-1. **Raw link scores:** Would explode to infinity near equilibrium transitions (the
-   denominator in link scores approaches 0). Unsuitable for direct visualization.
+1. **Raw link scores:** Can become unbounded around dominance transitions and other local
+   denominator-zero conditions (for example when acceleration terms approach 0). Unsuitable
+   for direct visualization.
 
 2. **Relative link magnitude** (normalized across all inputs of a dependent variable): This
    is the approach used. Yields a fraction in [0, 1]. The normalization is per-variable, so
@@ -1477,10 +1587,10 @@ Four approaches to link thickness were analyzed in the thesis:
    not scale visually.
 
 4. **Global normalization** (across all links at a timestep, or across all timesteps): Both
-   have problems. Per-timestep normalization makes equilibrium periods (when most scores
-   are near 0 but ratios blow up) dominate the visual. Per-simulation normalization makes
-   still-active model parts appear increasingly bright as other parts reach quiescence,
-   creating misleading impressions of relative importance.
+   have problems. Per-timestep normalization can over-amplify whichever small subset of
+   links remains active at that instant, creating unstable visual salience. Per-simulation
+   normalization makes still-active model parts appear increasingly bright as other parts
+   become quiescent, creating misleading impressions of relative importance.
 
 ### 13.13 Split Flow Rendering in SFDs
 
@@ -1556,23 +1666,80 @@ oscillation):
 ### 14.4 Challenges
 
 1. **Singularity problem:** Multiple causally-different models can produce
-   behaviorally-identical outputs. The trained model is one possible explanation, not a
-   proven fact. Validation requires empirical experimentation beyond behavior-matching.
+   behaviorally-identical outputs within a given range. The trained model is one possible
+   explanation -- a hypothesis about causal structure, not a proven fact. The neural
+   network is a universal approximator (Cybenko, 1989), so many different weight
+   configurations can produce the same behavioral output. The payoff surface has regions of
+   degeneracy where multiple configurations score equally well. Validation requires
+   empirical experimentation beyond behavior-matching. Matching behavior is necessary but
+   not sufficient for establishing causation.
 
-2. **Manifold coverage:** Each initialization explores a limited region of the state space
-   manifold. More initializations > more temporal samples from a single initialization
-   (diminishing returns from trajectory convergence).
+2. **Manifold coverage:** The ground truth system's dynamics trace out n-dimensional
+   manifold surfaces in state space. Each initialization explores a limited region of these
+   manifolds. Adding more temporal samples to one initialization yields diminishing
+   returns: the system quickly converges to a trajectory covering only a limited manifold
+   region. Adding **new initializations** from different starting states is far more
+   valuable, as each explores new manifold regions. For non-chaotic systems at the limit
+   of time, trajectories either cycle (oscillatory), converge to a point (equilibrium), or
+   never settle (chaotic). In oscillatory and equilibrium systems, each initialization
+   eventually stops providing new manifold information.
 
 3. **Confounders:** With a single initialization, correlated trajectories can create false
-   causal links. Multiple initializations from different starting states break these false
-   correlations precipitously.
+   causal links. If two state variables both rise simultaneously due to a third variable's
+   influence, the optimizer may learn a false direct link between them. Multiple
+   initializations from different starting states break these false correlations
+   precipitously: in a different initialization, the two variables may exhibit opposite
+   trajectories, forcing the optimizer to route causation through the true intermediary.
 
 4. **Activation function scaling:** tanh saturation at large values masks real differences.
-   Linear rescaling assumes roughly uniform data distribution. Logarithmic scaling may be
-   needed for exponentially distributed data.
+   After linear rescaling to [-1, 1], values of 0.7 and 1.0 both produce tanh outputs
+   near 1.0, masking potentially causally important differences. Linear rescaling assumes
+   roughly uniform data distribution; for exponentially distributed data (most observations
+   near 0, rare large values), it is "fundamentally incompatible." Logarithmic scaling may
+   be needed. The interaction between activation function, scaling function, and data
+   distribution is an open research question.
 
-5. **Endogenous forcing:** The method forces endogenous explanations. Including an
-   extraneous time series warps the payoff surface toward degeneracy.
+5. **Endogenous forcing:** The method forces endogenous explanations. Every state
+   variable's derivative is expressed as a function of other state variables. Including an
+   extraneous time series (one with no causal relationship to the system) warps the payoff
+   surface toward degeneracy: the universal approximation capability of the neural network
+   allows it to fit arbitrary patterns, creating false causal links to the extraneous
+   variable.
+
+### 14.5 Requirements for Real-World Application
+
+For FSNN to work on unknown systems, several demanding requirements must be met:
+
+1. **Known state variables:** The method requires knowing which observed quantities are the
+   state variables (stocks) of the system. In SD terms, you must know which variables
+   accumulate over time. This is a non-trivial assumption for real-world systems where the
+   stock structure may not be obvious.
+
+2. **Multiple unrelated instances:** Multiple genuinely independent instances of the system
+   must be studied, each sharing the same causal structure but operating from different
+   initial states. For ecological systems, this might mean studying multiple lakes; for
+   economic systems, multiple firms. The instances must be verified as independent: the
+   initial states of one instance should not appear as calculated values in any other
+   instance's trajectory.
+
+3. **Stationarity of causal structure:** All training instances must share the same causal
+   structure. If the system undergoes structural changes (a feedback loop appears or
+   disappears), the method will learn an "average" structure that may not accurately
+   represent any specific configuration.
+
+4. **Clean data:** Measurement error, missing data, and extraneous time series are all
+   problematic. The method has no way to distinguish measurement noise from actual causal
+   signals -- noise will be fitted as if it were real structure.
+
+5. **Known magnitude range:** The magnitude of state variables must be approximately known
+   for input rescaling. Underestimation causes saturation in the activation function;
+   overestimation clusters values near 0 where tanh is approximately linear, reducing the
+   neural network's nonlinear capacity.
+
+The thesis positions FSNN as a research program with considerable further study warranted,
+not a finished tool. If these challenges can be addressed, the method has the potential to
+identify causal structure in complex feedback systems where existing causal inference
+methods (which assume directed acyclic graphs) fundamentally cannot operate.
 
 ---
 
@@ -1583,8 +1750,10 @@ oscillation):
 When all stocks are unchanging, all loop scores are 0 by definition. EEA can provide
 information under equilibrium for near-linear models.
 
-Workarounds: introduce minute perturbations via STEP function, or analyze the transient
-approach to equilibrium.
+Workarounds: analyze the transient approach to equilibrium, or deliberately introduce a
+small perturbation (for example via `STEP`) when that intervention is substantively
+justified. The papers caution that artificial perturbations can distort interpretation in
+discrete or discontinuous settings.
 
 ### 15.2 Focus on Endogenous Behavior
 
@@ -1595,11 +1764,15 @@ Impact method (Hayward and Boswell, 2014) may be better suited for highly forced
 Link scores could in principle measure exogenous contributions, but this is not currently
 part of the method.
 
-### 15.3 Approximate Integration Sensitivity
+### 15.3 Numerical Integration and Sampling Effects
 
-The method as described uses Euler integration. Compatibility with Runge-Kutta and other
-methods has not been fully explored (though in principle it should work at the level of
-saved timesteps).
+The equations are defined on sampled trajectories, not on Euler-specific internals. In
+principle, LTM is compatible with Euler, Runge-Kutta, and other solvers as long as
+consistent timestep values are available for ceteris-paribus link-score evaluation.
+
+Remaining caveat: sampling and solver choices can change the discrete-time approximation of
+Delta terms, especially around sharp events and discontinuities. This affects numeric score
+profiles but does not change the method's conceptual definition.
 
 ### 15.4 Heuristic Nature of Loop Discovery
 
@@ -1711,18 +1884,19 @@ would most affect behavior. It identifies which loops dominate, but not where to
 
 ## 19. Summary of Key Formulas
 
-### Instantaneous Link Score (unchanged from 2020)
+### Instantaneous Link Score
 
 ```
 LS(x -> z) = |Delta_x(z) / Delta(z)| * sign(Delta_x(z) / Delta(x))
            = 0   if Delta(z) = 0 or Delta(x) = 0
 ```
 
-### Flow-to-Stock Link Score (corrected 2023)
+### Flow-to-Stock Link Score
 
 ```
 LS(inflow -> S)  = |Delta(i) / (Delta(S_t) - Delta(S_{t-dt}))| * (+1)
 LS(outflow -> S) = |Delta(o) / (Delta(S_t) - Delta(S_{t-dt}))| * (-1)
+           = 0   if Delta(S_t) = Delta(S_{t-dt}) and Delta(i) = 0 (or Delta(o) = 0)
 ```
 
 ### Loop Score
@@ -1779,8 +1953,18 @@ LS(S1 -> S2) = (df/dS1) * |S1_dot / S2_ddot|
 ### Relationship to Impact
 
 ```
+Impact(S1 -> S2) = (df/dS1) * (S1_dot / S2_dot)
 LS(S1 -> S2) = Impact(S1 -> S2) * |S2_dot / S2_ddot| * Sign(S1_dot) * Sign(S2_dot)
 ```
+
+### Single-Stock Loop Score (Weighted Loop Gain)
+
+```
+LoopScore(L) = G1 * |S1_dot / S1_ddot|
+```
+
+where G1 is the first-order loop gain. All loops share the same weighting factor, so
+RelativeLoopScore is identical to PPM for single-stock models.
 
 ### Multi-Stock Loop Score
 
@@ -1789,6 +1973,7 @@ LoopScore = G_n * product_i(|Si_dot / Si_ddot|)
 ```
 
 where G_n is the n-th order loop gain and the product runs over all stocks in the loop.
+For a two-stock loop: G2 = Impact(S1 -> S2) * Impact(S2 -> S1).
 
 ---
 
