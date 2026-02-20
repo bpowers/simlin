@@ -4,8 +4,8 @@
 
 //! Serialization FFI functions.
 //!
-//! Functions for serializing projects to protobuf, JSON, XMILE, and SVG
-//! formats. The memory for the output buffers is allocated via
+//! Functions for serializing projects to protobuf, JSON, XMILE, SVG, and
+//! PNG formats. The memory for the output buffers is allocated via
 //! `simlin_malloc` so that callers free it with `simlin_free`.
 
 use prost::Message;
@@ -373,6 +373,112 @@ pub unsafe extern "C" fn simlin_project_render_svg(
                 out_error,
                 SimlinError::new(SimlinErrorCode::Generic)
                     .with_message(format!("failed to render SVG: {err}")),
+            );
+        }
+    }
+}
+
+/// Render a project model's diagram as a PNG image
+///
+/// Renders the stock-and-flow diagram for the named model to a PNG image.
+/// The SVG is generated internally and then rasterized with the Roboto Light
+/// font embedded in the binary. Pass `width = 0` and `height = 0` to use
+/// the SVG's intrinsic dimensions. When only one dimension is non-zero the
+/// other is derived from the aspect ratio. When both are non-zero, `width`
+/// takes precedence and `height` is derived from the aspect ratio.
+///
+/// Caller must free output with `simlin_free`.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `model_name` must be a valid null-terminated UTF-8 string
+/// - `out_buffer` and `out_len` must be valid pointers
+/// - `out_error` may be null
+#[cfg(feature = "png_render")]
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_render_png(
+    project: *mut SimlinProject,
+    model_name: *const c_char,
+    width: u32,
+    height: u32,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let proj = ffi_try!(out_error, require_project(project));
+
+    if model_name.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("model name pointer must not be NULL"),
+        );
+        return;
+    }
+
+    let model_name_str = match CStr::from_ptr(model_name).to_str() {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("model name must not be empty"),
+            );
+            return;
+        }
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("model name is not valid UTF-8"),
+            );
+            return;
+        }
+    };
+
+    let opts = simlin_engine::diagram::PngRenderOpts {
+        width: if width > 0 { Some(width) } else { None },
+        height: if height > 0 { Some(height) } else { None },
+    };
+
+    let project_locked = proj.project.lock().unwrap();
+    match simlin_engine::diagram::render_png(&project_locked.datamodel, model_name_str, &opts) {
+        Ok(png_bytes) => {
+            let len = png_bytes.len();
+
+            let buf = simlin_malloc(len);
+            if buf.is_null() {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("allocation failed while rendering PNG"),
+                );
+                return;
+            }
+
+            std::ptr::copy_nonoverlapping(png_bytes.as_ptr(), buf, len);
+
+            *out_buffer = buf;
+            *out_len = len;
+        }
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to render PNG: {err}")),
             );
         }
     }

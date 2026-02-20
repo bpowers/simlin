@@ -36,6 +36,9 @@ item_types = ["constants", "enums", "structs", "unions", "typedefs", "opaque", "
 "SimlinError" = "SimlinError"
 "SimlinErrorDetail" = "SimlinErrorDetail"
 
+[defines]
+"feature = png_render" = "SIMLIN_PNG_RENDER"
+
 [enum]
 # Use the enum name as prefix
 rename_variants = "ScreamingSnakeCase"

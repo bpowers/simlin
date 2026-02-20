@@ -10,5 +10,9 @@ mod elements;
 mod flow;
 mod label;
 mod render;
+#[cfg(feature = "png_render")]
+mod render_png;
 
 pub use render::render_svg;
+#[cfg(feature = "png_render")]
+pub use render_png::{PngRenderOpts, render_png, svg_to_png};

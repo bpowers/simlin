@@ -47,8 +47,11 @@ def _header_to_cdef(header_text: str) -> str:
         if stripped.startswith("#include"):
             continue
 
-        # Skip #ifdef __cplusplus / extern "C" blocks
-        if stripped == "#ifdef __cplusplus":
+        # Skip #ifdef __cplusplus / extern "C" blocks and
+        # #if defined(...) feature-gated blocks (e.g. SIMLIN_PNG_RENDER)
+        if stripped == "#ifdef __cplusplus" or re.match(
+            r"#if\s+defined\(", stripped
+        ):
             skip_depth += 1
             continue
         if skip_depth > 0:

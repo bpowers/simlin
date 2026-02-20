@@ -706,6 +706,32 @@ void simlin_project_render_svg(SimlinProject *project,
                                uintptr_t *out_len,
                                SimlinError **out_error);
 
+#if defined(SIMLIN_PNG_RENDER)
+// Render a project model's diagram as a PNG image
+//
+// Renders the stock-and-flow diagram for the named model to a PNG image.
+// The SVG is generated internally and then rasterized with the Roboto Light
+// font embedded in the binary. Pass `width = 0` and `height = 0` to use
+// the SVG's intrinsic dimensions. When only one dimension is non-zero the
+// other is derived from the aspect ratio. When both are non-zero, `width`
+// takes precedence and `height` is derived from the aspect ratio.
+//
+// Caller must free output with `simlin_free`.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `model_name` must be a valid null-terminated UTF-8 string
+// - `out_buffer` and `out_len` must be valid pointers
+// - `out_error` may be null
+void simlin_project_render_png(SimlinProject *project,
+                               const char *model_name,
+                               uint32_t width,
+                               uint32_t height,
+                               uint8_t **out_buffer,
+                               uintptr_t *out_len,
+                               SimlinError **out_error);
+#endif
+
 // Creates a new simulation context
 //
 // # Safety

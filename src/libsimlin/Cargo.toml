@@ -13,6 +13,7 @@ crate-type = ["staticlib", "rlib", "cdylib"]
 [features]
 default = []
 debug-derive = ["simlin-engine/debug-derive"]
+png_render = ["simlin-engine/png_render"]
 
 [dependencies]
 simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
