@@ -96,7 +96,7 @@ The same model restructured with a single net flow:
 
 | Variable | Time 1 | Time 2 | Variable Change | Partial Change in net | Link Score Magnitude |
 |----------|--------|--------|-----------------|----------------------|---------------------|
-| in       | 5      | 10     | Delta(in) = 5   | Delta_in(net) = (10-4) - (10-5) = 1 ... actually = 5 | see below |
+| in       | 5      | 10     | Delta(in) = 5   | Delta_in(net) = (10-4) - 1 = 5 | see below |
 | out      | 4      | 5      | Delta(out) = 1  | Delta_out(net) = (5-5) - (5-4) = -1 | see below |
 | net      | 1      | 5      | Delta(net) = 4  | -- | -- |
 
@@ -253,13 +253,13 @@ Impact(S1 -> S2) = (df/dS1) * (S1_dot / S2_dot)        (Eq. 10)
 Comparing Eqs. 7 and 10:
 
 ```
-LS(S1 -> S2) = Impact(S1 -> S2) * |S2_dot / S2_ddot| * [Sign(S1_dot) / Sign(S2_dot)]    (Eq. 11)
+LS(S1 -> S2) = Impact(S1 -> S2) * |S2_dot / S2_ddot| * Sign(S1_dot) * Sign(S2_dot)    (Eq. 11)
 ```
 
 The link score and impact differ in two aspects:
 
 1. **Weighting by acceleration:** The factor `|S2_dot / S2_ddot|` weights the impact by the ratio of the target stock's velocity to its acceleration
-2. **Polarity convention:** The `Sign(S1_dot) / Sign(S2_dot)` factor reflects that:
+2. **Polarity convention:** The `Sign(S1_dot) * Sign(S2_dot)` factor reflects that:
    - **LTM link score** measures **structural polarity** (based on the model structure)
    - **Impact (and PPM)** measures **behavioral polarity** (whether the link contributes to exponential or logarithmic behavior)
 
@@ -415,7 +415,7 @@ Impact(S1 -> S2) = (df/dS1) * (S1_dot / S2_dot)
 
 **Eq. 11 (Relationship between link score and impact):**
 ```
-LS(S1 -> S2) = Impact(S1 -> S2) * |S2_dot / S2_ddot| * Sign(S1_dot) / Sign(S2_dot)
+LS(S1 -> S2) = Impact(S1 -> S2) * |S2_dot / S2_ddot| * Sign(S1_dot) * Sign(S2_dot)
 ```
 
 **Eq. 12 (Impact as loop gain for single-stock models):**

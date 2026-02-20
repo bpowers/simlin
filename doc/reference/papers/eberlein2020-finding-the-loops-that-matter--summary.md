@@ -74,8 +74,8 @@ However, the **pairwise reinforcing loops all have gain <= 1**, meaning if only 
 ### Behavior (Figure 2)
 
 **Figure 2** shows the behavior of the three stocks over 100 years:
-- **B's Arms** (dashed pink): Starts at 100, dips initially, then rises exponentially to ~200
-- **A's Arms** (solid blue): Starts at 50, rises and converges toward B, then rises exponentially
+- **B's Arms** (solid pink): Starts at 100, dips initially, then rises exponentially to ~200
+- **A's Arms** (dash-dot blue): Starts at 50, rises and converges toward B, then rises exponentially
 - **C's Arms** (dotted gray): Starts at 150, drops initially, converges with A and B, then all rise together in an arms race
 
 This demonstrates initial adjustment behavior followed by long-term exponential growth driven by the three-party loop.
@@ -84,10 +84,10 @@ This demonstrates initial adjustment behavior followed by long-term exponential 
 
 **Figure 3** shows the relative loop scores (percent of behavior each loop is responsible for) over 100 years. Each loop is plotted as a separate line:
 
-- **Early period (0-25 years):** The paired interactions (A and B, B and C, A and C) and self-corrections (A self, B self, C self) dominate. Scores range from about -40% to +60%. The model started far from a balanced trajectory, so adjustment loops are prominent.
+- **Early period (0-25 years):** The paired interactions (A and B, B and C, A and C) and self-corrections (A self, B self, C self) dominate. Scores range from about -80% to +60%. The model started far from a balanced trajectory, so adjustment loops are prominent.
 - **Later period (after ~50 years):** The two long loops (A to B to C, and A to C to B) dominate, accounting for essentially all of the behavior. The short loops become negligible.
 
-**Key insight:** All loops (including ones not in the independent set) are consequential at some point in the simulation. The important loops change over time and cannot be determined from static analysis.
+**Key insight:** Nearly all loops (including ones not in the independent set, with the paper noting a possible exception for the A-C interaction) are consequential at some point in the simulation. The important loops change over time and cannot be determined from static analysis.
 
 ---
 
@@ -161,30 +161,11 @@ The algorithm is inspired by Dijkstra's shortest path algorithm (1959):
 The maximization (rather than minimization) means the approach does **not guarantee finding the optimal solution**. The specific failure mode:
 
 **Figure 7** demonstrates the problem with a 4-node graph (a, b, c, d):
-- Link scores: a->d = 100, d->c = 10, c->b = 10, b->c = 10, a->b = 10, c->a = 0.1
+- The direct branch from `a` to `b` is weaker initially than going from `a` to `d`.
+- The search therefore prunes the direct `a -> b` path after reaching `b` via a higher-scoring intermediate path.
+- As stated in the paper, this can cause the algorithm to miss loop `a -> b -> c -> a` (score 1000) and instead find `a -> d -> c -> a` (score 100).
 
-Starting from a:
-1. Go to d (score 100), then c (score 100*10 = 1000... wait, the text says d->c is followed by c then b)
-
-Actually, the text describes: Starting from a, going to d gives score 100, then d->c gives 10 (cumulative: 100*10 = 1000?). Let me re-read: "Starting from a and going to d gives us a score of 100, then to c gives us 10, then to b 100."
-
-The path a->d->c->b has cumulative products at each step. But the key point is:
-- Path a->d->c reaches c with score 100 (a->d) * 10 (d->c) = ... the text says the numbers are link scores and going a->d gives 100, so the link a->d has score 100.
-- Going a->b directly gives score 10 (link a->b has score 10).
-- Since 100 > 10, the algorithm would not pursue the path through b after having already visited it through d.
-- But the loop **a->b->c->a** has score 10 * 10 * 0.1 = 10... no, let me re-read.
-
-The text states: "we would not find the loop a->b->c->a which has a score of 1000. Instead we would find a->d->c->a which has a score of 100."
-
-So the link scores in Figure 7 are:
-- a->d: 100
-- a->b: 10
-- d->c: (implied)
-- b->c: 10
-- c->a: 0.1 (shown in figure)
-- c->b: (shown as 10)
-
-The algorithm finds a->d->c->a (score 100) but misses a->b->c->a (score 1000) because when it reaches b via d->c->b, b already has a higher score from the d path, so the direct a->b path (score 10) is pruned.
+This is the core reason the strongest-path search is a heuristic rather than an exact optimizer.
 
 **Mitigating factor:** Starting the search from different stocks (b or c in this example) might discover the missed loop. However, it is theoretically possible (though difficult) to construct graphs where starting from any node fails to find the strongest loop.
 
@@ -409,7 +390,7 @@ Two sub-approaches:
 |--------|-------------|
 | **Figure 1** | Stock-and-flow diagram of the three-party arms race model (A, B, C) with stocks, flows, targets, and cross-connections. |
 | **Figure 2** | Time series of A's Arms, B's Arms, C's Arms over 100 years. Shows initial adjustment then exponential growth driven by the three-party loop. B starts at 100 and rises, A starts at 50 and converges upward, C starts at 150 and drops before rising. |
-| **Figure 3** | Relative loop scores (%) for all 8 loops over 100 years. Short-term: self-correction and pairwise loops dominate (scores range -40% to +60%). Long-term: the two three-party loops dominate (converging to ~+/-50%). |
+| **Figure 3** | Relative loop scores (%) for all 8 loops over 100 years. Short-term: self-correction and pairwise loops dominate (scores range -80% to +60%). Long-term: the two three-party loops dominate (converging to ~+/-50%). |
 | **Figure 4** | Stock-and-flow diagram of a simple two-stock model with conditional IF-THEN-ELSE equations creating decoupled feedback loops that activate at different times. |
 | **Figure 5** | Behavior of the two-stock model over 10 months. Shows Stock Flow 1, Stock Flow 2, and "From 1 to 2 loop" activity. Triangular/piecewise behavior as different loops activate and deactivate. |
 | **Figure 6** | Link scores for all 4 variable-to-flow links over 10 months. Flow-to-stock always 1. Stock_1->Flow_2 is 1 at time 5 only. Stock_2->Flow_1 is 0 until time 7 then 1. Demonstrates time-varying link activity. |

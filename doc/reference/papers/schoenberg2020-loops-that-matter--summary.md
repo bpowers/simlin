@@ -14,6 +14,8 @@ The central problem: the relationship between structure and behavior is fundamen
 
 Ford (1999) stated the field needs: (i) automated analysis tools applicable to models with many loops, and (ii) a clear and unambiguous understanding of loop dominance.
 
+The authors also explicitly frame LTM as a practicality improvement: they note it may not produce fundamentally new insights versus prior methods, but is intended to make high-quality loop dominance analysis easier to compute, interpret, and visualize.
+
 ### Definition of Loop Dominance
 
 The paper defines loop dominance as a concept applying to the **entirety of a model**, not just a single stock. Requirements:
@@ -117,6 +119,8 @@ The link score has two components:
 - The delta_xz value is reused for both magnitude and polarity computation.
 
 **Exception cases:** If x does not change, link score is 0 (loop through x is inactive). If z does not change, all links into/out of z have score 0.
+
+Nuance from the paper: a variable whose outgoing link scores are 0 can still matter indirectly (for example as a parameter affecting other equations and therefore other link scores).
 
 ### 4.2 Links With Integration (Flow-to-Stock)
 
@@ -289,9 +293,9 @@ Table 3 shows link scores and loop scores at five time points (T=1, 9.5, 9.5625,
 
 | Metric | T=1 | T=9.5 | T=9.5625 | T=9.625 | T=15 |
 |--------|-----|-------|----------|---------|------|
-| B1 loop score | 0.000 | -9.958 | -9,358 | -10.91 | -1.000 |
+| B1 loop score | 0.000 | -9.958 | -9358 | -10.91 | -1.000 |
 | B1 relative score | 0.000 | -0.465 | -0.488 | -0.512 | -1.000 |
-| R1 loop score | 1.000 | 11.46 | 9,806 | 10.41 | 0.000 |
+| R1 loop score | 1.000 | 11.46 | 9806 | 10.41 | 0.000 |
 | R1 relative score | 1.000 | 0.535 | 0.512 | 0.488 | 0.000 |
 
 The dominance shift occurs between T=9.5625 and T=9.625 (where the inflection occurs). Both relative scores pass through 0.5.
