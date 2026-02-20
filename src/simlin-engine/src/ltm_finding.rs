@@ -482,6 +482,10 @@ fn rank_and_filter(found_loops: &mut Vec<FoundLoop>) {
     // at that timestep. This keeps loops that are briefly dominant even if their
     // average contribution is small.
     let step_count = found_loops.first().map_or(0, |l| l.scores.len());
+    debug_assert!(
+        found_loops.iter().all(|l| l.scores.len() == step_count),
+        "all loops must have the same number of timesteps"
+    );
     if step_count > 0 {
         let mut timestep_totals: Vec<f64> = vec![0.0; step_count];
         for fl in found_loops.iter() {

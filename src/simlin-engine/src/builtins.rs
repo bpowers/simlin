@@ -229,6 +229,7 @@ impl<Expr> BuiltinFn<Expr> {
     }
 
     /// Call a closure on each expression argument by reference.
+    /// NOTE: keep variant coverage in sync with `try_map` above.
     pub fn for_each_expr_ref<F>(&self, mut f: F)
     where
         F: FnMut(&Expr),
