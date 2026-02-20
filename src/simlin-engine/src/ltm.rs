@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Ast, BinaryOp, Expr2};
+use crate::ast::{Ast, BinaryOp, Expr2, IndexExpr2};
 use crate::common::{Canonical, Ident, Result};
 use crate::model::ModelStage1;
 use crate::project::Project;
@@ -824,7 +824,9 @@ fn analyze_expr_polarity_with_context(
             }
             LinkPolarity::Unknown
         }
-        // Monotonically increasing single-arg builtins: propagate inner polarity
+        // Non-decreasing single-arg builtins: propagate inner polarity.
+        // Int (floor) is a step function with discontinuities, but is still
+        // non-decreasing, which is sufficient for polarity propagation.
         Expr2::App(crate::builtins::BuiltinFn::Exp(inner), _, _)
         | Expr2::App(crate::builtins::BuiltinFn::Ln(inner), _, _)
         | Expr2::App(crate::builtins::BuiltinFn::Log10(inner), _, _)
@@ -1039,7 +1041,18 @@ fn expr_references_var(expr: &Expr2, var: &Ident<Canonical>) -> bool {
     match expr {
         Expr2::Const(_, _, _) => false,
         Expr2::Var(ident, _, _) => ident == var,
-        Expr2::Subscript(ident, _, _, _) => ident == var,
+        Expr2::Subscript(ident, indices, _, _) => {
+            ident == var
+                || indices.iter().any(|idx| match idx {
+                    IndexExpr2::Expr(e) => expr_references_var(e, var),
+                    IndexExpr2::Range(lo, hi, _) => {
+                        expr_references_var(lo, var) || expr_references_var(hi, var)
+                    }
+                    IndexExpr2::Wildcard(_)
+                    | IndexExpr2::StarRange(_, _)
+                    | IndexExpr2::DimPosition(_, _) => false,
+                })
+        }
         Expr2::App(builtin, _, _) => {
             let mut found = false;
             builtin.for_each_expr_ref(|child| {
@@ -2699,6 +2712,52 @@ mod tests {
         );
         assert!(expr_references_var(&add, &x_var));
         assert!(!expr_references_var(&add, &y_var));
+
+        // Subscript: array[x] references x through the index expression
+        use crate::ast::IndexExpr2;
+        let array_var = Ident::new("array");
+        let subscript_with_x = Expr2::Subscript(
+            array_var.clone(),
+            vec![IndexExpr2::Expr(x_expr())],
+            None,
+            Loc::default(),
+        );
+        assert!(
+            expr_references_var(&subscript_with_x, &x_var),
+            "array[x] should reference x through its index"
+        );
+        assert!(
+            expr_references_var(&subscript_with_x, &array_var),
+            "array[x] should reference array as the subscripted variable"
+        );
+        assert!(
+            !expr_references_var(&subscript_with_x, &y_var),
+            "array[x] should not reference y"
+        );
+
+        // Subscript with range: array[x..5] references x
+        let subscript_range = Expr2::Subscript(
+            array_var.clone(),
+            vec![IndexExpr2::Range(x_expr(), const_5(), Loc::default())],
+            None,
+            Loc::default(),
+        );
+        assert!(
+            expr_references_var(&subscript_range, &x_var),
+            "array[x..5] should reference x through range index"
+        );
+
+        // Subscript with constant index: array[5] doesn't reference x
+        let subscript_const = Expr2::Subscript(
+            array_var.clone(),
+            vec![IndexExpr2::Expr(const_5())],
+            None,
+            Loc::default(),
+        );
+        assert!(
+            !expr_references_var(&subscript_const, &x_var),
+            "array[5] should not reference x"
+        );
     }
 
     #[test]
