@@ -712,12 +712,21 @@ impl CausalGraph {
     ) -> HashMap<Ident<Canonical>, Vec<Vec<Link>>> {
         let mut result: HashMap<Ident<Canonical>, Vec<Vec<Link>>> = HashMap::new();
 
-        // For each variable that feeds into the module graph, find paths to output.
-        // Input ports are variables that have no incoming edges from within the module
-        // (they're fed from outside via module inputs).
+        // Compute which nodes have incoming edges within the module.
+        // True input ports have no incoming edges -- they're fed from outside.
+        let mut has_incoming: HashSet<Ident<Canonical>> = HashSet::new();
+        for targets in self.edges.values() {
+            for target in targets {
+                has_incoming.insert(target.clone());
+            }
+        }
+
         for input_port in self.edges.keys() {
-            // Skip the output variable itself -- not an input port
             if input_port == output_name {
+                continue;
+            }
+            // Skip intermediate variables (they have incoming edges within the module)
+            if has_incoming.contains(input_port) {
                 continue;
             }
 

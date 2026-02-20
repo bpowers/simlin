@@ -555,6 +555,30 @@ fn hero_culture_loop_sign_continuity() {
 use simlin_engine::test_common::TestProject;
 use std::sync::Arc;
 
+/// Regression: SMTH1 with an explicit initial_value argument (3rd arg) must
+/// not cause LTM augmentation to reference a non-existent composite variable.
+/// The initial_value port is only used for stock initialization and has no
+/// runtime causal path to the output, so no composite is generated for it.
+#[test]
+fn test_smooth_with_initial_value_ltm() {
+    let project = TestProject::new("smooth_init_val")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("level", "50", &["adj"], &[], None)
+        .aux("init_val", "45", None)
+        .aux("gap", "100 - level", None)
+        .flow("adj", "SMTH1(gap, 5, init_val)", None)
+        .compile()
+        .expect("should compile");
+
+    let ltm_project = project
+        .with_ltm_all_links()
+        .expect("LTM augmentation should succeed even with initial_value port wired");
+
+    let ltm_rc = Arc::new(ltm_project);
+    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
+    let _results = sim.run_to_end().expect("should simulate");
+}
+
 #[test]
 fn test_smooth_goal_seeking_ltm() {
     // Goal-seeking model with SMOOTH in the feedback path:

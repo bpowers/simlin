@@ -23,6 +23,10 @@ use std::collections::{HashMap, HashSet};
 // Type alias for clarity
 type SyntheticVariables = Vec<(Ident<Canonical>, datamodel::Variable)>;
 
+/// Map from module model name to the set of input ports that have composite
+/// link score variables (i.e., ports with causal pathways to the output).
+type CompositePortMap = HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>>;
+
 /// Recursively walk an Expr0 tree, wrapping variable references that appear in
 /// `deps` with `PREVIOUS(...)`.  Function names in App nodes are never touched,
 /// so a variable named `max` won't corrupt `MAX(max, s)`.
@@ -133,11 +137,38 @@ pub fn generate_ltm_variables_all_links(
     generate_ltm_variables_inner(project, true)
 }
 
+/// Pre-compute which input ports on each dynamic stdlib module have causal
+/// pathways to the output. Only these ports get composite link score variables.
+fn compute_composite_ports(project: &Project) -> CompositePortMap {
+    let mut result = HashMap::new();
+    for (model_name, model) in &project.models {
+        if !model.implicit {
+            continue;
+        }
+        if classify_module_for_ltm(model_name, model) != ModuleLtmRole::DynamicModule {
+            continue;
+        }
+        let graph = match CausalGraph::from_model(model, project) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+        let output_ident = Ident::new("output");
+        let pathways = graph.enumerate_module_pathways(&output_ident);
+        let ports: HashSet<Ident<Canonical>> = pathways.keys().cloned().collect();
+        if !ports.is_empty() {
+            result.insert(model_name.clone(), ports);
+        }
+    }
+    result
+}
+
 fn generate_ltm_variables_inner(
     project: &Project,
     all_links_mode: bool,
 ) -> Result<HashMap<Ident<Canonical>, SyntheticVariables>> {
     let mut result = HashMap::new();
+
+    let composite_ports = compute_composite_ports(project);
 
     if all_links_mode {
         // Discovery mode: generate link score variables for ALL causal links
@@ -149,7 +180,8 @@ fn generate_ltm_variables_inner(
             let graph = CausalGraph::from_model(model, project)?;
             let links: HashSet<Link> = graph.all_links().into_iter().collect();
 
-            let link_score_vars = generate_link_score_variables(&links, &model.variables);
+            let link_score_vars =
+                generate_link_score_variables(&links, &model.variables, &composite_ports);
 
             let synthetic_vars: Vec<_> = link_score_vars.into_iter().collect();
             if !synthetic_vars.is_empty() {
@@ -176,7 +208,8 @@ fn generate_ltm_variables_inner(
                 }
             }
 
-            let link_score_vars = generate_link_score_variables(&loop_links, &model.variables);
+            let link_score_vars =
+                generate_link_score_variables(&loop_links, &model.variables, &composite_ports);
             let loop_score_vars = generate_loop_score_variables(&model_loops);
 
             for (var_name, var) in link_score_vars {
@@ -218,6 +251,7 @@ fn generate_ltm_variables_inner(
 fn generate_link_score_variables(
     links: &HashSet<Link>,
     variables: &HashMap<Ident<Canonical>, Variable>,
+    composite_ports: &CompositePortMap,
 ) -> HashMap<Ident<Canonical>, datamodel::Variable> {
     let mut link_vars = HashMap::new();
 
@@ -244,9 +278,9 @@ fn generate_link_score_variables(
                 {
                     let port = inputs.iter().find(|i| i.src == link.from).map(|i| &i.dst);
                     let has_composite = port.is_some()
-                        && model_name.as_str().starts_with("stdlib\u{205A}")
-                        && !model_name.as_str().contains("previous")
-                        && !model_name.as_str().contains("init");
+                        && composite_ports
+                            .get(model_name)
+                            .is_some_and(|ports| ports.contains(port.unwrap()));
 
                     if let (true, Some(port)) = (has_composite, port) {
                         let eq = generate_module_input_link_score_equation(&link.to, port);
@@ -1164,7 +1198,7 @@ mod tests {
         });
 
         // Generate link score variables
-        let link_vars = generate_link_score_variables(&links, &variables);
+        let link_vars = generate_link_score_variables(&links, &variables, &HashMap::new());
 
         // Check that a link score variable was created
         assert!(!link_vars.is_empty(), "Should generate module link score");
@@ -1442,7 +1476,7 @@ mod tests {
         });
 
         // Generate link score variables
-        let link_vars = generate_link_score_variables(&links, &variables);
+        let link_vars = generate_link_score_variables(&links, &variables, &HashMap::new());
 
         // Check that module link scores were generated
         assert_eq!(link_vars.len(), 2, "Should generate 2 link score variables");
@@ -2220,5 +2254,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_enumerate_module_pathways_excludes_intermediates() {
+        use crate::ltm::CausalGraph;
+
+        let project = TestProject::new("test_pathway_filter")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "10", None)
+            .aux("s", "SMTH1(x, 5)", None)
+            .compile()
+            .expect("should compile");
+
+        let smth1_ident = Ident::new("stdlib⁚smth1");
+        let smth1_model = project
+            .models
+            .get(&smth1_ident)
+            .expect("should have stdlib⁚smth1 model");
+
+        let graph = CausalGraph::from_model(smth1_model, &project).unwrap();
+        let output_ident = Ident::new("output");
+        let pathways = graph.enumerate_module_pathways(&output_ident);
+
+        // Only true input ports (no incoming edges within the module) should
+        // appear as keys -- intermediate variables like "flow" must be excluded.
+        for port_name in pathways.keys() {
+            assert_ne!(
+                port_name.as_str(),
+                "flow",
+                "Intermediate variable 'flow' should not be treated as an input port"
+            );
+        }
+    }
+
+    #[test]
+    fn test_smth1_no_composite_for_intermediate_variables() {
+        let project = TestProject::new("test_no_flow_composite")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "10", None)
+            .aux("s", "SMTH1(x, 5)", None)
+            .compile()
+            .expect("should compile");
+
+        let ltm_project = project
+            .with_ltm_all_links()
+            .expect("should augment with LTM");
+
+        let smth1_ident = Ident::new("stdlib⁚smth1");
+        let smth1_model = ltm_project
+            .models
+            .get(&smth1_ident)
+            .expect("should have stdlib⁚smth1 model");
+
+        let composite_vars: Vec<_> = smth1_model
+            .variables
+            .keys()
+            .filter(|k| k.as_str().contains("$⁚ltm⁚composite⁚"))
+            .collect();
+
+        // Composites should only exist for true input ports, not "flow"
+        for var in &composite_vars {
+            assert!(
+                !var.as_str().contains("composite⁚flow"),
+                "Should not have composite for intermediate variable 'flow', found: {}",
+                var.as_str()
+            );
+        }
+
+        // But should still have composites for actual input ports
+        assert!(
+            !composite_vars.is_empty(),
+            "Should still have composites for real input ports"
+        );
     }
 }
