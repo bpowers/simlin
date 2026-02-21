@@ -202,6 +202,7 @@ fn get_variable_dependencies(var: &Variable) -> Vec<Ident<Canonical>> {
 /// through the causal graph (i.e., they form a strongly connected component
 /// in the stock-to-stock reachability graph). Relative loop scores should
 /// only be compared within the same partition.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 pub struct CyclePartitions {
     /// Partitions as sorted Vecs of stock idents.
     /// Outer Vec is sorted by the lexicographically smallest stock in each partition.
@@ -213,11 +214,23 @@ pub struct CyclePartitions {
 impl CyclePartitions {
     /// Look up the partition index for a loop. Uses the loop's first stock.
     /// Returns None for loops with no stocks (e.g., cross-module loops).
+    ///
+    /// All stocks in a feedback loop are guaranteed to be in the same SCC:
+    /// if a loop passes through stocks A and B, there are paths A->B and B->A
+    /// through the loop, making them mutually reachable.
     pub fn partition_for_loop(&self, loop_item: &Loop) -> Option<usize> {
-        loop_item
+        let result = loop_item
             .stocks
             .first()
-            .and_then(|s| self.stock_partition.get(s).copied())
+            .and_then(|s| self.stock_partition.get(s).copied());
+        debug_assert!(
+            loop_item
+                .stocks
+                .iter()
+                .all(|s| { self.stock_partition.get(s).copied() == result }),
+            "all stocks in a loop must be in the same partition"
+        );
+        result
     }
 }
 
@@ -3681,6 +3694,39 @@ mod tests {
         assert_eq!(coupled[1].as_str(), "stock_b");
         assert_eq!(independent.len(), 1);
         assert_eq!(independent[0].as_str(), "stock_c");
+    }
+
+    #[test]
+    fn test_cycle_partitions_three_stock_chain_scc() {
+        // A -> B -> C -> A: all three mutually reachable through the chain
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("stock_a", "50", &["flow_ab"], &[], None),
+                x_flow("flow_ab", "stock_c * 0.1", None), // C -> A
+                x_stock("stock_b", "30", &["flow_bc"], &[], None),
+                x_flow("flow_bc", "stock_a * 0.2", None), // A -> B
+                x_stock("stock_c", "10", &["flow_ca"], &[], None),
+                x_flow("flow_ca", "stock_b * 0.05", None), // B -> C
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[model]);
+        let project = Project::from(project);
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+
+        let partitions = graph.compute_cycle_partitions();
+        assert_eq!(
+            partitions.partitions.len(),
+            1,
+            "3-stock chain should form one SCC"
+        );
+        assert_eq!(partitions.partitions[0].len(), 3);
+        assert_eq!(partitions.partitions[0][0].as_str(), "stock_a");
+        assert_eq!(partitions.partitions[0][1].as_str(), "stock_b");
+        assert_eq!(partitions.partitions[0][2].as_str(), "stock_c");
     }
 
     #[test]

@@ -379,16 +379,21 @@ fn generate_loop_score_variables(
         partition_groups.entry(partition).or_default().push(i);
     }
 
+    // Pre-collect IDs per partition group to avoid cloning Loop structs
+    let group_ids: HashMap<Option<usize>, Vec<&str>> = partition_groups
+        .iter()
+        .map(|(&partition, indices)| {
+            let ids: Vec<&str> = indices.iter().map(|&idx| loops[idx].id.as_str()).collect();
+            (partition, ids)
+        })
+        .collect();
+
     // Generate relative loop scores with partition-scoped denominators
     for loop_item in loops {
         let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_item.id);
         let partition = partitions.partition_for_loop(loop_item);
-        let group_indices = &partition_groups[&partition];
-        let same_group_loops: Vec<Loop> = group_indices
-            .iter()
-            .map(|&idx| loops[idx].clone())
-            .collect();
-        let equation = generate_relative_loop_score_equation(&loop_item.id, &same_group_loops);
+        let same_group_ids = &group_ids[&partition];
+        let equation = generate_relative_loop_score_equation(&loop_item.id, same_group_ids);
         let ltm_var = create_aux_variable(&var_name, &equation);
         loop_vars.insert(Ident::new(&var_name), ltm_var);
     }
@@ -607,16 +612,16 @@ fn generate_loop_score_equation(loop_item: &Loop) -> String {
     }
 }
 
-/// Generate the equation for a relative loop score variable
-fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> String {
-    // Relative loop score = abs(loop_score) / sum(abs(all_loop_scores))
-    // Use double quotes around variable names with $
+/// Generate the equation for a relative loop score variable.
+///
+/// `same_group_ids` contains the IDs of all loops in the same partition group
+/// (including this loop itself). The denominator sums only these loops.
+fn generate_relative_loop_score_equation(loop_id: &str, same_group_ids: &[&str]) -> String {
     let loop_score_var = format!("\"$⁚ltm⁚loop_score⁚{loop_id}\"");
 
-    // Build sum of absolute values of all loop scores
-    let all_loop_scores: Vec<String> = all_loops
+    let all_loop_scores: Vec<String> = same_group_ids
         .iter()
-        .map(|loop_item| format!("ABS(\"$⁚ltm⁚loop_score⁚{}\")", loop_item.id))
+        .map(|id| format!("ABS(\"$⁚ltm⁚loop_score⁚{id}\")"))
         .collect();
 
     let sum_expr = if all_loop_scores.is_empty() {
@@ -843,24 +848,7 @@ mod tests {
 
     #[test]
     fn test_generate_relative_loop_score_equation() {
-        use crate::ltm::LoopPolarity;
-
-        let loops = vec![
-            Loop {
-                id: "R1".to_string(),
-                links: vec![],
-                stocks: vec![],
-                polarity: LoopPolarity::Reinforcing,
-            },
-            Loop {
-                id: "B1".to_string(),
-                links: vec![],
-                stocks: vec![],
-                polarity: LoopPolarity::Balancing,
-            },
-        ];
-
-        let equation = generate_relative_loop_score_equation("R1", &loops);
+        let equation = generate_relative_loop_score_equation("R1", &["R1", "B1"]);
 
         // Should use SAFEDIV for division by zero protection
         assert!(equation.contains("SAFEDIV"));
@@ -872,16 +860,7 @@ mod tests {
 
     #[test]
     fn test_single_loop_relative_score_uses_safediv() {
-        use crate::ltm::LoopPolarity;
-
-        let loops = vec![Loop {
-            id: "B1".to_string(),
-            links: vec![],
-            stocks: vec![],
-            polarity: LoopPolarity::Balancing,
-        }];
-
-        let equation = generate_relative_loop_score_equation("B1", &loops);
+        let equation = generate_relative_loop_score_equation("B1", &["B1"]);
 
         // Even with a single loop, the equation should use SAFEDIV to produce
         // sign(score) rather than a hardcoded "1".
