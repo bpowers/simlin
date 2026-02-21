@@ -15,7 +15,9 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident, Result};
 use crate::datamodel::{self, Equation};
 use crate::lexer::LexerType;
-use crate::ltm::{CausalGraph, Link, Loop, ModuleLtmRole, classify_module_for_ltm, detect_loops};
+use crate::ltm::{
+    CausalGraph, CyclePartitions, Link, Loop, ModuleLtmRole, classify_module_for_ltm, detect_loops,
+};
 use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
@@ -199,6 +201,9 @@ fn generate_ltm_variables_inner(
                 continue;
             }
 
+            let graph = CausalGraph::from_model(model, project)?;
+            let partitions = graph.compute_cycle_partitions();
+
             let mut synthetic_vars = Vec::new();
 
             let mut loop_links = HashSet::new();
@@ -210,7 +215,7 @@ fn generate_ltm_variables_inner(
 
             let link_score_vars =
                 generate_link_score_variables(&loop_links, &model.variables, &composite_ports);
-            let loop_score_vars = generate_loop_score_variables(&model_loops);
+            let loop_score_vars = generate_loop_score_variables(&model_loops, &partitions);
 
             for (var_name, var) in link_score_vars {
                 synthetic_vars.push((var_name, var));
@@ -347,29 +352,48 @@ fn generate_module_link_score_equation(
     )
 }
 
-/// Generate loop score variables for all loops
-fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, datamodel::Variable> {
+/// Generate loop score variables for all loops.
+///
+/// Absolute loop scores are unchanged (product of link scores).
+/// Relative loop scores use partition-scoped denominators: each loop's
+/// relative score equation only references loops in the same partition.
+/// Loops with no stocks form their own unpartitioned group.
+fn generate_loop_score_variables(
+    loops: &[Loop],
+    partitions: &CyclePartitions,
+) -> HashMap<Ident<Canonical>, datamodel::Variable> {
     let mut loop_vars = HashMap::new();
 
-    // First, generate absolute loop scores
+    // First, generate absolute loop scores (unchanged)
     for loop_item in loops {
         let var_name = format!("$⁚ltm⁚loop_score⁚{}", loop_item.id);
-
-        // Generate equation as product of link scores
         let equation = generate_loop_score_equation(loop_item);
-
-        // Create the synthetic variable
         let ltm_var = create_aux_variable(&var_name, &equation);
         loop_vars.insert(Ident::new(&var_name), ltm_var);
     }
 
-    // Then, generate relative loop scores for all loops
+    // Group loops by partition for relative score computation
+    let mut partition_groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+    for (i, loop_item) in loops.iter().enumerate() {
+        let partition = partitions.partition_for_loop(loop_item);
+        partition_groups.entry(partition).or_default().push(i);
+    }
+
+    // Pre-collect IDs per partition group to avoid cloning Loop structs
+    let group_ids: HashMap<Option<usize>, Vec<&str>> = partition_groups
+        .iter()
+        .map(|(&partition, indices)| {
+            let ids: Vec<&str> = indices.iter().map(|&idx| loops[idx].id.as_str()).collect();
+            (partition, ids)
+        })
+        .collect();
+
+    // Generate relative loop scores with partition-scoped denominators
     for loop_item in loops {
         let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_item.id);
-
-        let equation = generate_relative_loop_score_equation(&loop_item.id, loops);
-
-        // Create the synthetic variable
+        let partition = partitions.partition_for_loop(loop_item);
+        let same_group_ids = &group_ids[&partition];
+        let equation = generate_relative_loop_score_equation(&loop_item.id, same_group_ids);
         let ltm_var = create_aux_variable(&var_name, &equation);
         loop_vars.insert(Ident::new(&var_name), ltm_var);
     }
@@ -588,16 +612,16 @@ fn generate_loop_score_equation(loop_item: &Loop) -> String {
     }
 }
 
-/// Generate the equation for a relative loop score variable
-fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> String {
-    // Relative loop score = abs(loop_score) / sum(abs(all_loop_scores))
-    // Use double quotes around variable names with $
+/// Generate the equation for a relative loop score variable.
+///
+/// `same_group_ids` contains the IDs of all loops in the same partition group
+/// (including this loop itself). The denominator sums only these loops.
+fn generate_relative_loop_score_equation(loop_id: &str, same_group_ids: &[&str]) -> String {
     let loop_score_var = format!("\"$⁚ltm⁚loop_score⁚{loop_id}\"");
 
-    // Build sum of absolute values of all loop scores
-    let all_loop_scores: Vec<String> = all_loops
+    let all_loop_scores: Vec<String> = same_group_ids
         .iter()
-        .map(|loop_item| format!("ABS(\"$⁚ltm⁚loop_score⁚{}\")", loop_item.id))
+        .map(|id| format!("ABS(\"$⁚ltm⁚loop_score⁚{id}\")"))
         .collect();
 
     let sum_expr = if all_loop_scores.is_empty() {
@@ -824,24 +848,7 @@ mod tests {
 
     #[test]
     fn test_generate_relative_loop_score_equation() {
-        use crate::ltm::LoopPolarity;
-
-        let loops = vec![
-            Loop {
-                id: "R1".to_string(),
-                links: vec![],
-                stocks: vec![],
-                polarity: LoopPolarity::Reinforcing,
-            },
-            Loop {
-                id: "B1".to_string(),
-                links: vec![],
-                stocks: vec![],
-                polarity: LoopPolarity::Balancing,
-            },
-        ];
-
-        let equation = generate_relative_loop_score_equation("R1", &loops);
+        let equation = generate_relative_loop_score_equation("R1", &["R1", "B1"]);
 
         // Should use SAFEDIV for division by zero protection
         assert!(equation.contains("SAFEDIV"));
@@ -853,16 +860,7 @@ mod tests {
 
     #[test]
     fn test_single_loop_relative_score_uses_safediv() {
-        use crate::ltm::LoopPolarity;
-
-        let loops = vec![Loop {
-            id: "B1".to_string(),
-            links: vec![],
-            stocks: vec![],
-            polarity: LoopPolarity::Balancing,
-        }];
-
-        let equation = generate_relative_loop_score_equation("B1", &loops);
+        let equation = generate_relative_loop_score_equation("B1", &["B1"]);
 
         // Even with a single loop, the equation should use SAFEDIV to produce
         // sign(score) rather than a hardcoded "1".
@@ -2326,6 +2324,176 @@ mod tests {
         assert!(
             !composite_vars.is_empty(),
             "Should still have composites for real input ports"
+        );
+    }
+
+    #[test]
+    fn test_relative_score_cross_partition_isolation() {
+        use crate::ltm::{CyclePartitions, LoopPolarity};
+
+        // 4 loops: L1,L2 share stock_a (partition 0), L3,L4 share stock_c (partition 1)
+        let loops = vec![
+            Loop {
+                id: "r1".to_string(),
+                links: vec![],
+                stocks: vec![Ident::new("stock_a")],
+                polarity: LoopPolarity::Reinforcing,
+            },
+            Loop {
+                id: "b1".to_string(),
+                links: vec![],
+                stocks: vec![Ident::new("stock_a")],
+                polarity: LoopPolarity::Balancing,
+            },
+            Loop {
+                id: "r2".to_string(),
+                links: vec![],
+                stocks: vec![Ident::new("stock_c")],
+                polarity: LoopPolarity::Reinforcing,
+            },
+            Loop {
+                id: "b2".to_string(),
+                links: vec![],
+                stocks: vec![Ident::new("stock_c")],
+                polarity: LoopPolarity::Balancing,
+            },
+        ];
+
+        let partitions = CyclePartitions {
+            partitions: vec![
+                vec![Ident::new("stock_a"), Ident::new("stock_b")],
+                vec![Ident::new("stock_c"), Ident::new("stock_d")],
+            ],
+            stock_partition: vec![
+                (Ident::new("stock_a"), 0),
+                (Ident::new("stock_b"), 0),
+                (Ident::new("stock_c"), 1),
+                (Ident::new("stock_d"), 1),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let vars = generate_loop_score_variables(&loops, &partitions);
+
+        // L1 (r1) relative score should reference r1 and b1, NOT r2 or b2
+        let r1_rel = vars
+            .get(&Ident::new("$⁚ltm⁚rel_loop_score⁚r1"))
+            .expect("should have r1 relative score");
+        let r1_eq = match r1_rel {
+            datamodel::Variable::Aux(aux) => match &aux.equation {
+                Equation::Scalar(eq) => eq.clone(),
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected aux variable"),
+        };
+        assert!(
+            r1_eq.contains("loop_score⁚r1"),
+            "r1 rel score should reference r1"
+        );
+        assert!(
+            r1_eq.contains("loop_score⁚b1"),
+            "r1 rel score should reference b1 (same partition)"
+        );
+        assert!(
+            !r1_eq.contains("loop_score⁚r2"),
+            "r1 rel score should NOT reference r2 (different partition)"
+        );
+        assert!(
+            !r1_eq.contains("loop_score⁚b2"),
+            "r1 rel score should NOT reference b2 (different partition)"
+        );
+
+        // L3 (r2) relative score should reference r2 and b2, NOT r1 or b1
+        let r2_rel = vars
+            .get(&Ident::new("$⁚ltm⁚rel_loop_score⁚r2"))
+            .expect("should have r2 relative score");
+        let r2_eq = match r2_rel {
+            datamodel::Variable::Aux(aux) => match &aux.equation {
+                Equation::Scalar(eq) => eq.clone(),
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected aux variable"),
+        };
+        assert!(
+            r2_eq.contains("loop_score⁚r2"),
+            "r2 rel score should reference r2"
+        );
+        assert!(
+            r2_eq.contains("loop_score⁚b2"),
+            "r2 rel score should reference b2 (same partition)"
+        );
+        assert!(
+            !r2_eq.contains("loop_score⁚r1"),
+            "r2 rel score should NOT reference r1 (different partition)"
+        );
+    }
+
+    #[test]
+    fn test_relative_score_unpartitioned_loops() {
+        use crate::ltm::{CyclePartitions, LoopPolarity};
+
+        // Mix of partitioned and unpartitioned loops
+        let loops = vec![
+            Loop {
+                id: "r1".to_string(),
+                links: vec![],
+                stocks: vec![Ident::new("stock_a")],
+                polarity: LoopPolarity::Reinforcing,
+            },
+            Loop {
+                id: "u1".to_string(),
+                links: vec![],
+                stocks: vec![], // unpartitioned (cross-module loop)
+                polarity: LoopPolarity::Undetermined,
+            },
+            Loop {
+                id: "u2".to_string(),
+                links: vec![],
+                stocks: vec![], // unpartitioned
+                polarity: LoopPolarity::Undetermined,
+            },
+        ];
+
+        let partitions = CyclePartitions {
+            partitions: vec![vec![Ident::new("stock_a")]],
+            stock_partition: vec![(Ident::new("stock_a"), 0)].into_iter().collect(),
+        };
+
+        let vars = generate_loop_score_variables(&loops, &partitions);
+
+        // r1 relative score: only references r1
+        let r1_eq = match &vars[&Ident::new("$⁚ltm⁚rel_loop_score⁚r1")] {
+            datamodel::Variable::Aux(aux) => match &aux.equation {
+                Equation::Scalar(eq) => eq.clone(),
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected aux variable"),
+        };
+        assert!(
+            !r1_eq.contains("loop_score⁚u1"),
+            "r1 should not reference unpartitioned u1"
+        );
+
+        // u1 relative score: references u1 and u2, not r1
+        let u1_eq = match &vars[&Ident::new("$⁚ltm⁚rel_loop_score⁚u1")] {
+            datamodel::Variable::Aux(aux) => match &aux.equation {
+                Equation::Scalar(eq) => eq.clone(),
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected aux variable"),
+        };
+        assert!(
+            u1_eq.contains("loop_score⁚u1"),
+            "u1 should reference itself"
+        );
+        assert!(
+            u1_eq.contains("loop_score⁚u2"),
+            "u1 should reference u2 (same unpartitioned group)"
+        );
+        assert!(
+            !u1_eq.contains("loop_score⁚r1"),
+            "u1 should NOT reference r1 (different group)"
         );
     }
 }

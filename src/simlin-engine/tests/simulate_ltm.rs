@@ -809,3 +809,177 @@ fn test_internal_smooth_loop_not_in_parent() {
         );
     }
 }
+
+// --- Cycle partition integration tests ---
+
+#[test]
+fn test_independent_subsystems_partitioned_relative_scores() {
+    // Two completely independent stock-flow loops:
+    // Subsystem 1 (balancing): stock_a (init=50), gap_a = 100 - stock_a, flow_a = gap_a / 5
+    // Subsystem 2 (reinforcing): stock_b (init=10), flow_b = stock_b * 0.1
+    //
+    // Each loop's relative score should be +/-1.0 for all non-zero timesteps,
+    // because each loop is the ONLY loop in its partition.
+    let project = TestProject::new("indep_subsystems")
+        .with_sim_time(0.0, 10.0, 0.25)
+        .stock("stock_a", "50", &["flow_a"], &[], None)
+        .aux("gap_a", "100 - stock_a", None)
+        .flow("flow_a", "gap_a / 5", None)
+        .stock("stock_b", "10", &["flow_b"], &[], None)
+        .flow("flow_b", "stock_b * 0.1", None)
+        .compile()
+        .expect("should compile");
+
+    let ltm_project = project.with_ltm().expect("LTM augmentation should succeed");
+    let ltm_rc = Arc::new(ltm_project);
+    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
+    let results = sim.run_to_end().expect("should simulate");
+
+    // Find relative loop score variables
+    let rel_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| k.as_str().starts_with("$⁚ltm⁚rel_loop_score⁚"))
+        .cloned()
+        .collect();
+
+    assert_eq!(
+        rel_vars.len(),
+        2,
+        "Should have exactly 2 relative loop score variables, found {}",
+        rel_vars.len()
+    );
+
+    // Each loop is alone in its partition, so each relative score should be +/-1.0
+    for var in &rel_vars {
+        let offset = results.offsets[var];
+        let scores: Vec<f64> = (0..results.step_count)
+            .map(|step| results.data[step * results.step_size + offset])
+            .collect();
+
+        let nonzero_scores: Vec<f64> = scores
+            .iter()
+            .copied()
+            .filter(|v| *v != 0.0 && !v.is_nan())
+            .collect();
+
+        assert!(
+            !nonzero_scores.is_empty(),
+            "Should have non-zero relative scores for {}",
+            var.as_str()
+        );
+
+        for score in &nonzero_scores {
+            assert!(
+                (score.abs() - 1.0).abs() < 1e-6,
+                "Single-loop-per-partition relative score should have |value| = 1, got {} for {}",
+                score,
+                var.as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn test_coupled_two_stock_single_partition() {
+    // Predator-prey: both stocks mutually reachable through flows
+    let project = TestProject::new("coupled_pred_prey")
+        .with_sim_time(0.0, 20.0, 0.25)
+        .stock("prey", "100", &["prey_births"], &["prey_deaths"], None)
+        .flow("prey_births", "prey * 0.1", None)
+        .flow("prey_deaths", "prey * predators * 0.01", None)
+        .stock("predators", "10", &["pred_births"], &["pred_deaths"], None)
+        .flow("pred_births", "predators * prey * 0.001", None)
+        .flow("pred_deaths", "predators * 0.05", None)
+        .compile()
+        .expect("should compile");
+
+    let main_ident: Ident<Canonical> = Ident::new("main");
+    let graph = ltm::CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+    let partitions = graph.compute_cycle_partitions();
+
+    // Both stocks should be in the same partition
+    assert_eq!(
+        partitions.partitions.len(),
+        1,
+        "Mutually-reachable stocks should be in one partition, got {}",
+        partitions.partitions.len()
+    );
+    assert_eq!(partitions.partitions[0].len(), 2);
+
+    // Verify simulation runs with LTM
+    let ltm_project = project.with_ltm().expect("LTM should succeed");
+    let ltm_rc = Arc::new(ltm_project);
+    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
+    let results = sim.run_to_end().expect("should simulate");
+
+    // Verify relative loop scores exist
+    let rel_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| k.as_str().starts_with("$⁚ltm⁚rel_loop_score⁚"))
+        .collect();
+    assert!(
+        !rel_vars.is_empty(),
+        "Should have relative loop score variables"
+    );
+}
+
+#[test]
+fn test_discovery_independent_subsystems() {
+    // Same two independent subsystems, but using discovery mode.
+    // Both subsystem loops should be retained.
+    let project = TestProject::new("indep_discovery")
+        .with_sim_time(0.0, 10.0, 0.25)
+        .stock("stock_a", "50", &["flow_a"], &[], None)
+        .aux("gap_a", "100 - stock_a", None)
+        .flow("flow_a", "gap_a / 5", None)
+        .stock("stock_b", "10", &["flow_b"], &[], None)
+        .flow("flow_b", "stock_b * 0.1", None)
+        .compile()
+        .expect("should compile");
+
+    let discovery_project = project
+        .with_ltm_all_links()
+        .expect("with_ltm_all_links should succeed");
+    let discovery_rc = Arc::new(discovery_project);
+
+    let sim = Simulation::new(&discovery_rc, "main").unwrap();
+    let results = sim.run_to_end().unwrap();
+
+    let found = ltm_finding::discover_loops(&results, &discovery_rc)
+        .expect("discover_loops should succeed");
+
+    assert!(
+        found.len() >= 2,
+        "Discovery should find at least 2 loops (one per subsystem), found {}",
+        found.len()
+    );
+}
+
+#[test]
+fn test_arms_race_single_partition() {
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let f = File::open("../../test/arms_race_3party/arms_race.stmx").unwrap();
+    let mut f = BufReader::new(f);
+    let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
+    let project = Project::from(datamodel_project);
+    let main_ident: Ident<Canonical> = Ident::new("main");
+    let graph = ltm::CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+    let partitions = graph.compute_cycle_partitions();
+
+    // All 3 stocks should be in a single partition (mutually reachable)
+    assert_eq!(
+        partitions.partitions.len(),
+        1,
+        "Arms race stocks should all be in one partition, got {}",
+        partitions.partitions.len()
+    );
+    assert_eq!(
+        partitions.partitions[0].len(),
+        3,
+        "Should have 3 stocks in the partition"
+    );
+}
