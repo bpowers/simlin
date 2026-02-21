@@ -284,13 +284,25 @@ Modules are classified by `classify_module_for_ltm()` (`ltm.rs`):
 - **Pathway scores**: `$⁚ltm⁚path⁚{port}⁚{index}`
 - **Composite scores**: `$⁚ltm⁚composite⁚{port}`
 
-### Loop Suppression
+### Loop Suppression and Module Stock Enrichment
 
 Internal module-only loops (e.g., smth1's `output -> flow -> output`) are not
-reported in the parent model's loop list. The parent DFS traverses module nodes
-as opaque vertices and does not descend into module internals. Cross-module loops
-(where a loop passes through a module connecting to external variables) are
-detected by `find_cross_module_loops()` and reported with module nodes in the path.
+reported in the parent model's loop list. Johnson's algorithm traverses module
+nodes as opaque vertices in the parent graph and does not descend into module
+internals, so these internal-only loops are naturally excluded.
+
+Loops that pass through modules (e.g., `stock -> module -> aux -> stock`) ARE
+found by Johnson's algorithm because module instances appear as regular nodes in
+the parent causal graph with incoming edges (from input sources) and outgoing
+edges (to downstream variables that reference the module output).
+
+After circuit detection, `enrich_with_module_stocks()` post-processes each loop:
+for any module node in the circuit, it identifies the relevant input port,
+uses `enumerate_module_pathways()` to find internal pathways from that port to
+the output, and collects internal stocks along those pathways. These stocks are
+namespaced with the module instance name (e.g., `smooth·smoothed`) and added to
+the loop's stock list. This ensures correct cycle partitioning when module
+internals contain stocks that participate in the feedback structure.
 
 ## Polarity Analysis
 
