@@ -45,7 +45,7 @@
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
-    "lint": "eslint .",
+    "lint": "eslint --cache --cache-location node_modules/.cache/eslint/ .",
     "prepublishOnly": "pnpm build",
     "deploy": "cp -r build/* public && cp -r build-component/static/js/* ./public/static/js/ && cp -r build-component/static/wasm/* ./public/static/wasm/ && rm public ../server/public ../server/default_projects",
     "deploy-clean": "git checkout HEAD -- ../../public/index.html ./public ../server/public ../server/default_projects && rm -r public/asset-manifest.json public/static/js public/static/wasm build build-component",

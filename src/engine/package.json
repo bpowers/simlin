@@ -52,7 +52,7 @@
   "scripts": {
     "needs-format": "prettier -l 'src/**/*.ts' 'tests/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts' 'tests/**/*.ts'",
-    "lint": "eslint src",
+    "lint": "eslint --cache --cache-location node_modules/.cache/eslint/ src",
     "clean": "rm -rf ./lib ./lib.browser ./core",
     "build": "./build.sh",
     "tsc": "tsc",

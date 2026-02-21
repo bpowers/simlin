@@ -16,179 +16,218 @@ echo "Running pre-commit checks..."
 
 cd "$REPO_ROOT"
 
+# --- Phase 1: Fast policy checks (parallel) ---
 
-# 0. Policy and lint checks (fast, run first)
-echo -n "Checking dependency policy... "
+POLICY_FAIL=0
 DEPS_OUTPUT="$(mktemp)"
-if python3 scripts/check-deps.py > "$DEPS_OUTPUT" 2>&1; then
+DOCS_OUTPUT="$(mktemp)"
+PLINT_OUTPUT="$(mktemp)"
+
+python3 scripts/check-deps.py > "$DEPS_OUTPUT" 2>&1 &
+PID_DEPS=$!
+python3 scripts/check-docs.py > "$DOCS_OUTPUT" 2>&1 &
+PID_DOCS=$!
+bash scripts/lint-project.sh > "$PLINT_OUTPUT" 2>&1 &
+PID_PLINT=$!
+
+echo -n "Checking dependency policy... "
+if wait $PID_DEPS; then
     echo -e "${GREEN}✓${NC}"
-    rm -f "$DEPS_OUTPUT"
 else
     echo -e "${RED}✗${NC}"
     echo -e "${RED}Dependency policy violation:${NC}"
     cat "$DEPS_OUTPUT"
-    rm -f "$DEPS_OUTPUT"
     echo -e "${YELLOW}See doc/architecture.md for the dependency graph${NC}"
-    exit 1
+    POLICY_FAIL=1
 fi
+rm -f "$DEPS_OUTPUT"
 
 echo -n "Checking documentation links... "
-DOCS_OUTPUT="$(mktemp)"
-if python3 scripts/check-docs.py > "$DOCS_OUTPUT" 2>&1; then
+if wait $PID_DOCS; then
     echo -e "${GREEN}✓${NC}"
-    rm -f "$DOCS_OUTPUT"
 else
     echo -e "${RED}✗${NC}"
     echo -e "${RED}Documentation link errors:${NC}"
     cat "$DOCS_OUTPUT"
-    rm -f "$DOCS_OUTPUT"
-    exit 1
+    POLICY_FAIL=1
 fi
+rm -f "$DOCS_OUTPUT"
 
 echo -n "Running project lint rules... "
-PLINT_OUTPUT="$(mktemp)"
-if bash scripts/lint-project.sh > "$PLINT_OUTPUT" 2>&1; then
+if wait $PID_PLINT; then
     echo -e "${GREEN}✓${NC}"
-    rm -f "$PLINT_OUTPUT"
 else
     echo -e "${RED}✗${NC}"
     echo -e "${RED}Project lint check failed:${NC}"
     cat "$PLINT_OUTPUT"
-    rm -f "$PLINT_OUTPUT"
+    POLICY_FAIL=1
+fi
+rm -f "$PLINT_OUTPUT"
+
+if [ "$POLICY_FAIL" -ne 0 ]; then
     exit 1
 fi
 
-# 1. Check Rust formatting
-echo -n "Checking Rust code formatting... "
-if cargo fmt --check >/dev/null 2>&1; then
+# --- Phase 2: Three parallel pipelines ---
+#
+# Pipeline A (Rust):  fmt -> cbindgen -> clippy & test (parallel)
+# Pipeline B (TS):    lint (parallel) -> build -> tsc & test (parallel)
+# Pipeline C (Python): pysimlin-tests.sh (builds release libsimlin internally)
+#
+# These pipelines are independent and run concurrently.
+
+PIPELINE_A_OUT="$(mktemp)"
+PIPELINE_B_OUT="$(mktemp)"
+PIPELINE_C_OUT="$(mktemp)"
+
+# Track PIDs for cleanup on failure
+PIPELINE_PIDS=()
+
+cleanup_pipelines() {
+    for pid in "${PIPELINE_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    done
+    rm -f "$PIPELINE_A_OUT" "$PIPELINE_B_OUT" "$PIPELINE_C_OUT"
+}
+
+# --- Pipeline A: Rust ---
+(
+    set -e
+
+    # 1. Check formatting
+    echo "[rust] Checking formatting..."
+    cargo fmt --check
+
+    # 2. Check simlin.h freshness
+    echo "[rust] Checking simlin.h freshness..."
+    CBINDGEN_TMP="$(mktemp)"
+    if cbindgen --config src/libsimlin/cbindgen.toml --crate simlin --output "$CBINDGEN_TMP" 2>/dev/null && diff -q src/libsimlin/simlin.h "$CBINDGEN_TMP" >/dev/null 2>&1; then
+        rm -f "$CBINDGEN_TMP"
+    else
+        rm -f "$CBINDGEN_TMP"
+        echo "src/libsimlin/simlin.h is out of date"
+        echo "Run: cbindgen --config src/libsimlin/cbindgen.toml --crate simlin --output src/libsimlin/simlin.h"
+        exit 1
+    fi
+
+    # 3. Clippy and tests in parallel (they share the build cache)
+    echo "[rust] Running clippy and tests..."
+    CLIPPY_TMP="$(mktemp)"
+    TEST_TMP="$(mktemp)"
+
+    cargo clippy --all-targets --all-features -- -D warnings > "$CLIPPY_TMP" 2>&1 &
+    PID_CLIPPY=$!
+    RUST_BACKTRACE=1 cargo test > "$TEST_TMP" 2>&1 &
+    PID_TEST=$!
+
+    RUST_FAIL=0
+    if ! wait $PID_CLIPPY; then
+        echo "Clippy found issues:"
+        cat "$CLIPPY_TMP"
+        RUST_FAIL=1
+    fi
+    if ! wait $PID_TEST; then
+        echo "Rust tests failed:"
+        cat "$TEST_TMP"
+        RUST_FAIL=1
+    fi
+    rm -f "$CLIPPY_TMP" "$TEST_TMP"
+    exit $RUST_FAIL
+) > "$PIPELINE_A_OUT" 2>&1 &
+PID_A=$!
+PIPELINE_PIDS+=($PID_A)
+
+# --- Pipeline B: TypeScript ---
+(
+    set -e
+
+    # Check if node_modules exists
+    if [ ! -d "node_modules" ]; then
+        echo "node_modules is missing."
+        echo "Run './scripts/dev-init.sh' to install dependencies and configure the environment."
+        exit 1
+    fi
+
+    # 1. Lint (parallel across packages via pnpm)
+    echo "[ts] Running linting..."
+    pnpm -r --parallel run lint
+
+    # 2. Build WASM and TS packages (needed for .d.ts files)
+    echo "[ts] Building..."
+    pnpm build
+
+    # 3. Type check and tests in parallel
+    echo "[ts] Running type check and tests..."
+    TSC_TMP="$(mktemp)"
+    TEST_TMP="$(mktemp)"
+
+    pnpm tsc > "$TSC_TMP" 2>&1 &
+    PID_TSC=$!
+    pnpm test > "$TEST_TMP" 2>&1 &
+    PID_TEST=$!
+
+    TS_FAIL=0
+    if ! wait $PID_TSC; then
+        echo "TypeScript type checking failed:"
+        cat "$TSC_TMP"
+        TS_FAIL=1
+    fi
+    if ! wait $PID_TEST; then
+        echo "TypeScript tests failed:"
+        cat "$TEST_TMP"
+        TS_FAIL=1
+    fi
+    rm -f "$TSC_TMP" "$TEST_TMP"
+    exit $TS_FAIL
+) > "$PIPELINE_B_OUT" 2>&1 &
+PID_B=$!
+PIPELINE_PIDS+=($PID_B)
+
+# --- Pipeline C: Python ---
+(
+    set -e
+    echo "[python] Running pysimlin tests..."
+    scripts/pysimlin-tests.sh
+) > "$PIPELINE_C_OUT" 2>&1 &
+PID_C=$!
+PIPELINE_PIDS+=($PID_C)
+
+# --- Wait for all pipelines and report results ---
+
+FAIL=0
+
+echo -n "Running Rust checks (fmt, cbindgen, clippy, test)... "
+if wait $PID_A; then
     echo -e "${GREEN}✓${NC}"
 else
     echo -e "${RED}✗${NC}"
-    echo -e "${RED}Rust code needs formatting${NC}"
-    echo -e "${YELLOW}Run 'cargo fmt' to fix formatting${NC}"
-    exit 1
+    cat "$PIPELINE_A_OUT"
+    FAIL=1
 fi
 
-# 1b. Check simlin.h is up to date with cbindgen
-echo -n "Checking simlin.h freshness... "
-CBINDGEN_OUTPUT="$(mktemp)"
-if cbindgen --config src/libsimlin/cbindgen.toml --crate simlin --output "$CBINDGEN_OUTPUT" 2>/dev/null && diff -q src/libsimlin/simlin.h "$CBINDGEN_OUTPUT" >/dev/null 2>&1; then
+echo -n "Running TypeScript checks (lint, build, tsc, test)... "
+if wait $PID_B; then
     echo -e "${GREEN}✓${NC}"
-    rm -f "$CBINDGEN_OUTPUT"
 else
     echo -e "${RED}✗${NC}"
-    echo -e "${RED}src/libsimlin/simlin.h is out of date${NC}"
-    echo -e "${YELLOW}Run 'cbindgen --config src/libsimlin/cbindgen.toml --crate simlin --output src/libsimlin/simlin.h' to regenerate${NC}"
-    rm -f "$CBINDGEN_OUTPUT"
-    exit 1
+    cat "$PIPELINE_B_OUT"
+    FAIL=1
 fi
 
-# 2. Run Rust clippy
-echo -n "Running Rust clippy... "
-CLIPPY_OUTPUT="$(mktemp)"
-if cargo clippy --all-targets --all-features -- -D warnings > "$CLIPPY_OUTPUT" 2>&1; then
-    echo -e "${GREEN}✓${NC}"
-    rm -f "$CLIPPY_OUTPUT"
-else
-    echo -e "${RED}✗${NC}"
-    echo -e "${RED}Clippy found issues:${NC}"
-    cat "$CLIPPY_OUTPUT"
-    rm -f "$CLIPPY_OUTPUT"
-    echo -e "${YELLOW}Run 'cargo clippy --all-targets --all-features -- -D warnings' to see errors${NC}"
-    exit 1
-fi
-
-# 3. Run Rust tests
-echo -n "Running Rust tests... "
-TEST_OUTPUT="$(mktemp)"
-if RUST_BACKTRACE=1 cargo test > "$TEST_OUTPUT" 2>&1; then
-    echo -e "${GREEN}✓${NC}"
-    rm -f "$TEST_OUTPUT"
-else
-    echo -e "${RED}✗${NC}"
-    echo -e "${RED}Rust tests failed:${NC}"
-    cat "$TEST_OUTPUT"
-    rm -f "$TEST_OUTPUT"
-    echo -e "${YELLOW}Run 'cargo test' to see failures${NC}"
-    exit 1
-fi
-
-# Check if node_modules exists
-if [ ! -d "node_modules" ]; then
-    echo -e "${RED}node_modules is missing.${NC}"
-    echo -e "${YELLOW}Run './scripts/dev-init.sh' to install dependencies and configure the environment.${NC}"
-    exit 1
-fi
-
-echo -n "Running TypeScript/JavaScript linting... "
-LINT_OUTPUT="$(mktemp)"
-if pnpm lint > "$LINT_OUTPUT" 2>&1; then
-    echo -e "${GREEN}✓${NC}"
-    rm -f "$LINT_OUTPUT"
-else
-    echo -e "${RED}✗${NC}"
-    echo -e "${RED}Linting failed:${NC}"
-    cat "$LINT_OUTPUT"
-    rm -f "$LINT_OUTPUT"
-    echo -e "${YELLOW}Run 'pnpm lint' to see errors${NC}"
-    exit 1
-fi
-
-# Build WASM and TS packages before type-checking, so that
-# .d.ts files from project references are up to date.
-echo -n "Building WASM module... "
-BUILD_OUTPUT="$(mktemp)"
-if pnpm build > "$BUILD_OUTPUT" 2>&1; then
-    echo -e "${GREEN}✓${NC}"
-    rm -f "$BUILD_OUTPUT"
-else
-    echo -e "${RED}✗${NC}"
-    echo -e "${RED}WASM build failed:${NC}"
-    cat "$BUILD_OUTPUT"
-    rm -f "$BUILD_OUTPUT"
-    echo -e "${YELLOW}Run 'pnpm build' to see errors${NC}"
-    exit 1
-fi
-
-echo -n "Checking TypeScript types... "
-TSC_OUTPUT="$(mktemp)"
-if pnpm tsc > "$TSC_OUTPUT" 2>&1; then
-    echo -e "${GREEN}✓${NC}"
-    rm -f "$TSC_OUTPUT"
-else
-    echo -e "${RED}✗${NC}"
-    echo -e "${RED}TypeScript type checking failed:${NC}"
-    cat "$TSC_OUTPUT"
-    rm -f "$TSC_OUTPUT"
-    echo -e "${YELLOW}Run 'pnpm tsc' to see errors${NC}"
-    exit 1
-fi
-
-echo -n "Running TypeScript tests... "
-TS_TEST_OUTPUT="$(mktemp)"
-if pnpm test > "$TS_TEST_OUTPUT" 2>&1; then
-    echo -e "${GREEN}✓${NC}"
-    rm -f "$TS_TEST_OUTPUT"
-else
-    echo -e "${RED}✗${NC}"
-    echo -e "${RED}TypeScript tests failed:${NC}"
-    cat "$TS_TEST_OUTPUT"
-    rm -f "$TS_TEST_OUTPUT"
-    echo -e "${YELLOW}Run 'pnpm test' to see failures${NC}"
-    exit 1
-fi
-
-# 5. Run pysimlin (Python) bindings tests on Python 3.11+
 echo -n "Running pysimlin tests (Python 3.11+)... "
-PY_OUT="$(mktemp)"
-if scripts/pysimlin-tests.sh > "$PY_OUT" 2>&1; then
+if wait $PID_C; then
     echo -e "${GREEN}✓${NC}"
-    rm -f "$PY_OUT"
 else
     echo -e "${RED}✗${NC}"
-    echo -e "${RED}pysimlin tests failed:${NC}"
-    cat "$PY_OUT"
-    rm -f "$PY_OUT"
+    cat "$PIPELINE_C_OUT"
+    FAIL=1
+fi
+
+rm -f "$PIPELINE_A_OUT" "$PIPELINE_B_OUT" "$PIPELINE_C_OUT"
+
+if [ "$FAIL" -ne 0 ]; then
+    echo -e "${RED}Pre-commit checks failed!${NC}"
     exit 1
 fi
 

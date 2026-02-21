@@ -24,8 +24,8 @@
     "format": "cargo fmt && pnpm js-format",
     "precommit": "pnpm js-needs-format && pnpm rust-needs-format && pnpm lint",
     "install-git-hooks": "cd .git/hooks && rm -f pre-commit && ln -s ../../scripts/pre-commit ./pre-commit",
-    "lint": "pnpm rust-lint && pnpm -r run lint",
-    "tsc": "pnpm --filter @simlin/core exec tsc --noEmit && pnpm --filter @simlin/diagram exec tsc --noEmit && pnpm --filter @simlin/server exec tsc --noEmit && pnpm --filter @simlin/app exec tsc --noEmit",
+    "lint": "pnpm rust-lint && pnpm -r --parallel run lint",
+    "tsc": "pnpm --filter @simlin/core --filter @simlin/diagram --filter @simlin/server --filter @simlin/app --parallel exec tsc --noEmit",
     "rust-lint": "cargo clippy",
     "start:firestore": "./scripts/start-emulators.sh",
     "start:backend": "pnpm --filter @simlin/server start:backend",
@@ -36,7 +36,7 @@
     "clean": "pnpm -r run clean && cargo clean",
     "deploy": "export NODE_ENV=production && pnpm clean && pnpm build && pnpm --filter @simlin/app deploy && gcloud app deploy ./.app.prod.yaml && pnpm --filter @simlin/app deploy-clean",
     "start": "node src/server/lib",
-    "test": "pnpm --filter @simlin/core test && pnpm --filter @simlin/diagram test && pnpm --filter @simlin/engine test && pnpm --filter @simlin/app test && pnpm --filter @simlin/server test",
+    "test": "pnpm --filter @simlin/core --filter @simlin/diagram --filter @simlin/engine --filter @simlin/app --filter @simlin/server --parallel run test",
     "test:ui": "playwright test",
     "test:ui:ui": "playwright test --ui"
   }

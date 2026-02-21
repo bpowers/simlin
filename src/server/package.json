@@ -54,7 +54,7 @@
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
-    "lint": "eslint .",
+    "lint": "eslint --cache --cache-location node_modules/.cache/eslint/ .",
     "prepublishOnly": "pnpm build",
     "clean": "rm -rf ./lib",
     "build": "tsc -p tsconfig.json",
