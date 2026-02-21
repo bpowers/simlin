@@ -34,7 +34,10 @@ if [ ! -f core/libsimlin.wasm ] || ! cmp -s "$WASM_SRC" core/libsimlin.wasm.raw;
   fi
 fi
 
-# Build TypeScript (tsc is incremental via .tsbuildinfo files)
+# Clean stale outputs (deleted/renamed sources leave orphan .js/.d.ts files).
+# tsbuildinfo files live in the project root, so incremental state survives.
+rm -rf lib lib.browser
+
 echo "Compiling TypeScript..."
 pnpm run tsc
 pnpm run tsc -p tsconfig.browser.json
