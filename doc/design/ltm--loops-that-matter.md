@@ -142,7 +142,7 @@ as a separator:
 
 | Variable | Pattern |
 |----------|---------|
-| Link score | `$⁚ltm⁚link_score⁚{from}⁚{to}` |
+| Link score | `$⁚ltm⁚link_score⁚{from}→{to}` |
 | Loop score | `$⁚ltm⁚loop_score⁚{loop_id}` |
 | Relative loop score | `$⁚ltm⁚rel_loop_score⁚{loop_id}` |
 
@@ -150,13 +150,13 @@ The `$` prefix prevents collisions with user-defined variables. The Unicode
 separator `⁚` (U+205A) was chosen because it is a valid XID_Continue character
 (so it works within identifiers) but is visually distinctive and virtually
 never appears in user-authored equations. In generated equations, these variable
-names are enclosed in double quotes (e.g., `"$⁚ltm⁚link_score⁚x⁚y"`) to ensure
+names are enclosed in double quotes (e.g., `"$⁚ltm⁚link_score⁚x→y"`) to ensure
 correct parsing by the lexer.
 
 The `discover_loops` function in `ltm_finding.rs` parses these names from
 `results.offsets` by matching the prefix `$⁚ltm⁚link_score⁚` and splitting
-the remainder on `⁚` to extract the `from` and `to` variable names
-(`parse_link_offsets`, `ltm_finding.rs:262-279`).
+the remainder on `→` to extract the `from` and `to` variable names
+(`parse_link_offsets`, `ltm_finding.rs`).
 
 ## Link Score Equations
 

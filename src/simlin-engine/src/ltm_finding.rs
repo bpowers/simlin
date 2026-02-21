@@ -107,7 +107,7 @@ impl SearchGraph {
     /// Build from simulation results at a specific timestep.
     ///
     /// Scans results.offsets for variables matching the LTM link score prefix
-    /// `$⁚ltm⁚link_score⁚{from}⁚{to}`, reads values at the given step,
+    /// `$⁚ltm⁚link_score⁚{from}→{to}`, reads values at the given step,
     /// and builds the adjacency list.
     fn from_results(
         results: &Results<f64>,
