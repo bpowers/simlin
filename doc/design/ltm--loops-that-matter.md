@@ -10,11 +10,11 @@ The implementation is split across three modules in `src/simlin-engine/src/`:
 
 | Module | Responsibility |
 |--------|---------------|
-| `ltm.rs` | Causal graph construction, loop detection (Johnson's algorithm), static polarity analysis |
+| `ltm.rs` | Causal graph construction, loop detection (Johnson's algorithm), static polarity analysis, cycle partitions |
 | `ltm_augment.rs` | Synthetic variable generation: link score, loop score, and relative loop score equations |
 | `ltm_finding.rs` | Strongest-path loop discovery algorithm for models too large for exhaustive enumeration |
 
-The entry points are two methods on `Project` (`src/simlin-engine/src/project.rs:37-94`):
+The entry points are two methods on `Project` (in `project.rs`):
 
 - **`with_ltm()`** -- Exhaustive mode. Detects all loops, generates synthetic
   variables for link scores, loop scores, and relative loop scores. Suitable for
@@ -25,12 +25,16 @@ The entry points are two methods on `Project` (`src/simlin-engine/src/project.rs
   runs `discover_loops()` from `ltm_finding.rs` to identify important loops from
   the simulation results.
 
-Both methods return a new `Project` augmented with synthetic variables. The
-original project is consumed (moved) rather than mutated.
+Both methods call `abort_if_arrayed()` first (LTM currently does not support
+array/subscripted variables) and return a new `Project` augmented with synthetic
+variables. The original project is consumed (moved) rather than mutated.
+Augmented models are injected via `inject_ltm_vars()`, which patches both
+user-model and stdlib-model datamodel representations so that `base_from()`
+picks up the augmented versions instead of the stock generated code.
 
 ## Key Data Structures
 
-### CausalGraph (`ltm.rs:151-160`)
+### CausalGraph (`ltm.rs`)
 
 ```rust
 pub struct CausalGraph {
@@ -42,25 +46,36 @@ pub struct CausalGraph {
 ```
 
 The adjacency-list representation of a model's causal structure. Built from a
-`ModelStage1` by `CausalGraph::from_model()` (`ltm.rs:164`), which:
+`ModelStage1` by `CausalGraph::from_model()`, which:
 
 - Creates edges from each variable's equation dependencies to the variable itself
 - Handles stocks specially: edges come from inflows and outflows, not from the
   stock's initial-value equation
-- Recursively builds sub-graphs for module instances (`module_graphs`), enabling
-  cross-module loop detection
+- For modules classified as `DynamicModule`, recursively builds sub-graphs
+  (`module_graphs`) to enable cross-module loop detection and module stock
+  enrichment
+- Normalizes module output references (e.g. `module·output`) to point to the
+  module node itself via `normalize_module_ref()`
 
-### Link (`ltm.rs:27-31`)
+### Link (`ltm.rs`)
 
 A single causal connection between two variables, with a statically-analyzed
-polarity (Positive, Negative, or Unknown).
+polarity (`Positive`, `Negative`, or `Unknown`).
 
-### Loop (`ltm.rs:36-41`)
+### Loop (`ltm.rs`)
 
-A feedback loop: a list of `Link`s forming a closed path, the stocks it contains,
-a polarity classification, and a deterministic ID (e.g., `r1`, `b2`, `u1`).
+A feedback loop: a list of `Link`s forming a closed path, the stocks it contains
+(including module-internal stocks), a polarity classification, and a deterministic
+ID (e.g., `r1`, `b2`, `u1`).
 
-### FoundLoop (`ltm_finding.rs:70-78`)
+### CyclePartitions (`ltm.rs`)
+
+Groups of stocks connected by feedback paths (strongly connected components in
+the stock-to-stock reachability graph). Each partition gets its own set of
+relative loop scores. Computed by `CausalGraph::compute_cycle_partitions()` using
+BFS reachability followed by Tarjan's SCC algorithm.
+
+### FoundLoop (`ltm_finding.rs`)
 
 Produced by discovery mode. Wraps a `Loop` with its signed score timeseries
 and average absolute score for ranking.
@@ -70,36 +85,76 @@ and average absolute score for ranking.
 ### Exhaustive Mode (`with_ltm`)
 
 1. `CausalGraph::from_model()` builds the causal graph
-2. `CausalGraph::find_loops()` uses Johnson's algorithm (`ltm.rs:235`) to enumerate
-   all elementary circuits via DFS (`dfs_circuits`, `ltm.rs:289`)
-3. Cross-module loops are detected separately (`find_cross_module_loops`, `ltm.rs:322`)
-4. Loops are deduplicated by node set (`deduplicate_loops`, `ltm.rs:704`)
-5. Deterministic IDs are assigned by sorting loops by their content key
-   (`assign_deterministic_loop_ids`, `ltm.rs:663`)
-6. `generate_ltm_variables()` (`ltm_augment.rs:86`) creates synthetic variables for
+2. `CausalGraph::find_loops()` uses Johnson's algorithm to enumerate all
+   elementary circuits via DFS (`find_circuits_from` / `dfs_circuits`)
+3. Module nodes appear as regular vertices in the parent graph; loops through
+   modules are found naturally by the same algorithm
+4. After circuit detection, `enrich_with_module_stocks()` post-processes each
+   loop: for any module node in the circuit, it identifies the relevant input
+   port and uses `enumerate_module_pathways()` to find internal pathways, then
+   collects internal stocks along those pathways (namespaced with the module
+   instance name, e.g. `smooth·smoothed`)
+5. Loops are deduplicated by sorted node set (`deduplicate_loops`)
+6. Deterministic IDs are assigned by sorting loops by their content key
+   (`assign_deterministic_loop_ids`)
+7. `generate_ltm_variables()` (`ltm_augment.rs`) creates synthetic variables for
    all links participating in any loop, plus loop score and relative loop score
-   variables
+   variables (with partition-scoped denominators)
 
 ### Discovery Mode (`with_ltm_all_links` + `discover_loops`)
 
-1. `generate_ltm_variables_all_links()` (`ltm_augment.rs:97`) calls
-   `CausalGraph::all_links()` (`ltm.rs:587`) to get every causal edge, then
-   generates link score variables for all of them. Loop score variables are NOT
-   generated at this stage.
+1. `generate_ltm_variables_all_links()` (`ltm_augment.rs`) calls
+   `CausalGraph::all_links()` to get every causal edge, then generates link score
+   variables for all of them. Loop score variables are NOT generated at this stage.
 2. The augmented project is simulated normally (interpreter or VM).
-3. Post-simulation, `discover_loops()` (`ltm_finding.rs:321`) runs the
-   strongest-path algorithm at each saved timestep:
-   - Parses link score variable names from `results.offsets` (`parse_link_offsets`,
-     `ltm_finding.rs:262`)
+3. Post-simulation, `discover_loops()` (`ltm_finding.rs`) runs the strongest-path
+   algorithm at each saved timestep:
+   - Parses link score variable names from `results.offsets` (`parse_link_offsets`)
    - Builds a `SearchGraph` per timestep from the link score values
-     (`SearchGraph::from_results`, `ltm_finding.rs:112`)
-   - Runs the strongest-path DFS (`find_strongest_loops`, `ltm_finding.rs:136`)
+     (`SearchGraph::from_results`)
+   - Runs the strongest-path DFS (`find_strongest_loops`)
    - Collects unique loop paths across all timesteps
 4. Each discovered path is converted to a `FoundLoop` with signed loop scores
    computed at every timestep from the raw link score results
 5. Loops are ranked by average absolute score, truncated to `MAX_LOOPS` (200),
-   filtered by `MIN_CONTRIBUTION` (0.1%), and assigned deterministic IDs
-   (`rank_and_filter`, `ltm_finding.rs:469`)
+   filtered by `MIN_CONTRIBUTION` (0.1%) with partition-aware thresholds, and
+   assigned deterministic IDs (`rank_and_filter`)
+
+## Cycle Partitions
+
+The implementation computes cycle partitions (groups of stocks connected by
+feedback loops) to ensure relative loop scores are only compared within the
+same structural group. This follows Section 8 of the reference: for models with
+disconnected stock groups, each subcomponent has a separate loop dominance profile.
+
+### How Partitions Are Computed
+
+1. `build_stock_reachability()` performs BFS from each stock through the full
+   causal graph (continuing past intermediate stocks) to determine which other
+   stocks are reachable
+2. `tarjan_scc()` runs Tarjan's strongly connected components algorithm on the
+   stock-to-stock reachability graph, with deterministic node ordering
+3. The resulting SCCs become partitions; each stock maps to exactly one partition
+
+### How Partitions Are Used
+
+- **Exhaustive mode**: `generate_loop_score_variables()` groups loops by partition.
+  Each loop's relative score equation denominates only against loops in the same
+  partition, ensuring structurally independent stock groups don't dilute each
+  other's scores.
+- **Discovery mode**: `rank_and_filter()` computes per-partition, per-timestep
+  score totals. A loop is retained if at any single timestep its absolute score
+  is >= `MIN_CONTRIBUTION` of its partition's total. This prevents globally tiny
+  but partition-dominant loops from being filtered out.
+
+### Module-Internal Stocks and Partitions
+
+Module-internal stocks (e.g. `smooth·smoothed`) are namespaced with the module
+instance name and included in loop stock lists via `enrich_with_module_stocks()`.
+These do not appear in the partition map (partitions are computed on the parent
+graph), but `CyclePartitions::partition_for_loop()` handles this gracefully: it
+finds the partition from any parent-level stock in the loop, with a debug
+assertion that all parent-level stocks agree.
 
 ## Synthetic Variable Approach
 
@@ -143,6 +198,9 @@ as a separator:
 | Variable | Pattern |
 |----------|---------|
 | Link score | `$⁚ltm⁚link_score⁚{from}→{to}` |
+| Internal link score | `$⁚ltm⁚ilink⁚{from}→{to}` |
+| Pathway score | `$⁚ltm⁚path⁚{port}⁚{index}` |
+| Composite score | `$⁚ltm⁚composite⁚{port}` |
 | Loop score | `$⁚ltm⁚loop_score⁚{loop_id}` |
 | Relative loop score | `$⁚ltm⁚rel_loop_score⁚{loop_id}` |
 
@@ -155,8 +213,9 @@ correct parsing by the lexer.
 
 The `discover_loops` function in `ltm_finding.rs` parses these names from
 `results.offsets` by matching the prefix `$⁚ltm⁚link_score⁚` and splitting
-the remainder on `→` to extract the `from` and `to` variable names
-(`parse_link_offsets`, `ltm_finding.rs`).
+the remainder on `→` (U+2192 RIGHTWARDS ARROW) to extract the `from` and `to`
+variable names. The `ilink` prefix for internal module link scores ensures
+discovery mode's parser does not accidentally ingest module-internal scores.
 
 ## Link Score Equations
 
@@ -165,23 +224,33 @@ three link types in the LTM method.
 
 ### Auxiliary-to-Auxiliary (Instantaneous Links)
 
-`generate_auxiliary_to_auxiliary_equation()` (`ltm_augment.rs:349`)
+`generate_auxiliary_to_auxiliary_equation()` in `ltm_augment.rs`.
 
 For a link from `x` to `z` where `z = f(x, y, ...)`:
 
-1. Take the equation text of `z`
-2. Replace every dependency except `x` with `PREVIOUS(dep)` using whole-word
-   substitution (`replace_whole_word`, `ltm_augment.rs:27`)
-3. This creates the ceteris-paribus partial equation
-4. The link score is: `|partial_eq - PREVIOUS(z)| / |z - PREVIOUS(z)| * sign(...)`
-
-The whole-word replacement uses Unicode XID rules (`is_word_char`,
-`ltm_augment.rs:79`) to avoid replacing substrings of longer identifiers
-(e.g., replacing `x` in `x_rate` would be incorrect).
+1. Get the equation text of `z`, preferring the post-compilation AST (via
+   `expr2_to_string`) over the original `eqn` field. This ensures that
+   identifiers in the equation match those in the dependency set (important for
+   modules: the `eqn` field holds the original text like `SMTH1(x, 5)` while
+   the AST holds the expanded form like `$⁚s⁚0⁚smth1·output`).
+2. Compute the dependency set from the AST via `identifier_set()`.
+3. Build the ceteris-paribus partial equation using `build_partial_equation()`,
+   which parses the equation into an `Expr0` AST, recursively walks the tree
+   wrapping variable references in `PREVIOUS()` for all dependencies except `x`
+   (`wrap_deps_in_previous`), and prints the result back to equation text. This
+   AST-based approach avoids the pitfalls of text-based replacement (e.g.,
+   replacing `x` inside `x_rate`, or corrupting function names like `MAX`).
+4. The link score is:
+   ```
+   if (TIME = PREVIOUS(TIME)) then 0
+   else if ((z - PREVIOUS(z)) = 0) OR ((x - PREVIOUS(x)) = 0) then 0
+   else ABS(SAFEDIV((partial_eq - PREVIOUS(z)), (z - PREVIOUS(z)), 0))
+      * SIGN(SAFEDIV((partial_eq - PREVIOUS(z)), (x - PREVIOUS(x)), 0))
+   ```
 
 ### Flow-to-Stock Links
 
-`generate_flow_to_stock_equation()` (`ltm_augment.rs:415`)
+`generate_flow_to_stock_equation()` in `ltm_augment.rs`.
 
 Implements the corrected 2023 formula (Schoenberg et al., Eq. 3). The numerator
 uses `PREVIOUS()` to align timing: at time t, `PREVIOUS(flow)` is the flow value
@@ -196,34 +265,40 @@ link_score = sign * ABS(SAFEDIV(numerator, denominator, 0))
 The denominator is the second-order change in the stock (its "acceleration").
 The ratio is wrapped in `ABS()` because flow-to-stock polarity is structural:
 inflows always contribute positively (+1), outflows negatively (-1). The sign
-is applied outside the absolute value. This equation returns NaN for the first
-two timesteps (insufficient history for second-order differences).
+is applied outside the absolute value. This equation returns 0 for the first
+two timesteps (insufficient history for second-order differences), guarded by
+`TIME = PREVIOUS(TIME)` and `PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))`.
 
 ### Stock-to-Flow Links
 
-`generate_stock_to_flow_equation()` (`ltm_augment.rs:444`)
+`generate_stock_to_flow_equation()` in `ltm_augment.rs`.
 
 Uses the standard instantaneous formula but recognizes that the "from" variable
-is a stock. The flow's equation is modified by replacing all non-stock
-dependencies with their `PREVIOUS()` values, isolating the stock's contribution.
+is a stock. The flow's equation is modified by `build_partial_equation()` to
+replace all non-stock dependencies with their `PREVIOUS()` values, isolating the
+stock's contribution.
 
 ### Module Links
 
-The implementation handles three module link cases:
+The implementation handles three module link cases in `generate_link_score_variables()`:
 
-- **Variable-to-module-input**: Uses composite link score reference when the
-  module has internal causal pathways (see composite link scores below), else
-  falls back to the black-box transfer-function formula.
-- **Module-output-to-variable**: Uses the standard ceteris-paribus formula
-  (`generate_auxiliary_to_auxiliary_equation`). The `build_partial_equation`
-  function normalizes interpunct references (e.g., `module·output`) to
-  match the module node identifier, so the module output is correctly
-  excluded from `PREVIOUS()` wrapping while other deps are held at their
-  previous values. Equation text is derived from the post-expansion AST
-  (via `expr2_to_string`) to ensure identifiers match the deps set.
-- **Module-to-module**: Uses a simplified black-box transfer-function formula
-  (`generate_module_link_score_equation`) since modules have no user-visible
-  equation for ceteris-paribus analysis.
+- **Variable-to-module-input** (`!from_is_module && to_is_module`): Uses composite
+  link score reference when the module has internal causal pathways (determined by
+  `compute_composite_ports()`). The link score variable references the module's
+  internal composite via interpunct notation (e.g., `module·$⁚ltm⁚composite⁚port`).
+  Falls back to the black-box transfer-function formula
+  (`generate_module_link_score_equation`) for modules without causal pathways.
+
+- **Module-output-to-variable** (`from_is_module && !to_is_module`): Uses the
+  standard ceteris-paribus formula (`generate_link_score_equation`). The
+  `build_partial_equation` function is module-ref-aware: `normalize_module_ref()`
+  strips interpunct suffixes so that module output references (e.g.,
+  `$⁚s⁚0⁚smth1·output`) are correctly excluded from `PREVIOUS()` wrapping while
+  other dependencies are held at their previous values.
+
+- **Module-to-module** (`from_is_module && to_is_module`): Uses the black-box
+  transfer-function formula (`generate_module_link_score_equation`) since modules
+  have no user-visible equation for ceteris-paribus analysis.
 
 ## Module Boundary Handling
 
@@ -234,55 +309,58 @@ internal pathway at each timestep.
 
 ### Module Classification
 
-Modules are classified by `classify_module_for_ltm()` (`ltm.rs`):
+Modules are classified by `classify_module_for_ltm()` in `ltm.rs`:
 
-- **Infrastructure** (PREVIOUS, INIT) -- used BY link score equations; never
+- **Infrastructure** (`PREVIOUS`, `INIT`) -- used BY link score equations; never
   analyzed to avoid infinite recursion.
 - **DynamicModule** -- has internal stocks (SMOOTH, DELAY, TREND, user-defined
-  modules with stocks). Gets composite link scores.
+  modules with stocks). Gets composite link scores and internal graph construction.
 - **Passthrough** -- no internal stocks; treated as black box with a transfer
   score formula.
+
+### Composite Port Pre-computation
+
+Before generating link score variables, `compute_composite_ports()` in
+`ltm_augment.rs` scans all implicit (stdlib) models classified as `DynamicModule`,
+builds their internal causal graphs, enumerates pathways from each input port to
+the output, and records which ports have valid causal pathways. This
+`CompositePortMap` is then used during link score generation to determine whether
+a variable-to-module link should use the composite reference or fall back to the
+black-box formula.
 
 ### How Composite Link Scores Work
 
 1. **CausalGraph normalization**: When a variable references a module output via
    the interpunct notation (`module·output`), the edge is normalized to point to
-   the module node itself (`normalize_module_ref` in `ltm.rs`). This ensures the
-   module participates correctly in loop detection.
+   the module node itself (`normalize_module_ref`). This ensures the module
+   participates correctly in loop detection.
 
-2. **Internal instrumentation**: For each DynamicModule model, `ltm_augment.rs`
-   generates internal link score variables with the `$⁚ltm⁚ilink⁚` prefix.
+2. **Internal instrumentation**: For each DynamicModule model,
+   `generate_module_internal_ltm_variables()` in `ltm_augment.rs` generates:
+   - Internal link score variables with the `$⁚ltm⁚ilink⁚` prefix for all
+     causal links within the module
+   - Pathway score variables (`$⁚ltm⁚path⁚{port}⁚{index}`) for each pathway,
+     computed as the product of constituent internal link scores
+   - Composite score variables (`$⁚ltm⁚composite⁚{port}`) that select the
+     pathway with the largest absolute magnitude at each timestep
+
    These are added to the stdlib model's datamodel representation via
-   `inject_ltm_vars()` in `project.rs`, which adds augmented stdlib models to
-   the datamodel. `base_from()` detects these overrides by name and skips
-   loading the stock version from generated code.
+   `inject_ltm_vars()` in `project.rs`.
 
 3. **Pathway enumeration**: `enumerate_module_pathways()` in `ltm.rs` finds all
    simple paths from each input port to the output variable within the module's
-   internal causal graph. For smth1, the sole pathway is `input -> flow -> output`.
+   internal causal graph. Input ports are identified as nodes with no incoming
+   edges within the module. For smth1, the sole pathway is `input -> flow -> output`.
 
-4. **Pathway scores**: For each pathway, a variable like `$⁚ltm⁚path⁚input⁚0`
-   is generated whose equation is the product of constituent internal link scores.
+4. **Composite selection**: `generate_max_abs_chain()` produces a deterministic
+   nested selection equation. For a single pathway, this is just the pathway
+   score. For multiple pathways, it generates a chain:
+   `if ABS(p1) >= ABS(p2) then p1 else p2`.
 
-5. **Composite selection**: For each input port, a composite variable
-   `$⁚ltm⁚composite⁚{port}` selects the pathway with the largest absolute
-   magnitude at each timestep. For a single pathway (most common), this is
-   just the pathway score. For multiple pathways, a nested `if ABS(p1) >= ABS(p2)
-   then p1 else p2` chain is generated.
-
-6. **Parent model reference**: The parent model's link score for
+5. **Parent model reference**: The parent model's link score for
    `input_src -> module_instance` references the module's composite via
    interpunct notation: `"module·$⁚ltm⁚composite⁚port"`. The compiler resolves
    this through the standard `module·var` mechanism in `context.rs`.
-
-### Variable Naming Conventions
-
-- **Parent link scores**: `$⁚ltm⁚link_score⁚{from}→{to}` (arrow separator
-  avoids ambiguity with module idents containing `⁚`)
-- **Internal link scores**: `$⁚ltm⁚ilink⁚{from}→{to}` (the `i` prefix
-  ensures discovery mode's `parse_link_offsets()` does not ingest them)
-- **Pathway scores**: `$⁚ltm⁚path⁚{port}⁚{index}`
-- **Composite scores**: `$⁚ltm⁚composite⁚{port}`
 
 ### Loop Suppression and Module Stock Enrichment
 
@@ -297,57 +375,83 @@ the parent causal graph with incoming edges (from input sources) and outgoing
 edges (to downstream variables that reference the module output).
 
 After circuit detection, `enrich_with_module_stocks()` post-processes each loop:
-for any module node in the circuit, it identifies the relevant input port,
-uses `enumerate_module_pathways()` to find internal pathways from that port to
-the output, and collects internal stocks along those pathways. These stocks are
-namespaced with the module instance name (e.g., `smooth·smoothed`) and added to
-the loop's stock list. This ensures correct cycle partitioning when module
-internals contain stocks that participate in the feedback structure.
+for any module node in the circuit, it identifies the predecessor in the circuit
+(the variable feeding into the module), determines which input port the
+predecessor maps to, uses `enumerate_module_pathways()` to find internal pathways
+from that port to the output, and collects internal stocks along those pathways.
+These stocks are namespaced with the module instance name using the interpunct
+separator (e.g., `smooth·smoothed`) and added to the loop's stock list. This
+ensures correct cycle partitioning when module internals contain stocks that
+participate in the feedback structure. If the input port cannot be determined or
+has no matching pathway, the enrichment falls back to including all stocks in the
+module's internal graph.
 
 ## Polarity Analysis
 
 ### Static Polarity
 
-`analyze_link_polarity()` (`ltm.rs:734`) determines link polarity from the AST
-at compile time. The analysis handles:
+`analyze_link_polarity()` in `ltm.rs` determines link polarity from the compiled
+AST (`Ast<Expr2>`) at compile time. The recursive analysis
+(`analyze_expr_polarity_with_context`) handles:
 
-- **Addition/subtraction**: Addition preserves polarity; subtraction flips the
-  right operand (`ltm.rs:835-852`)
-- **Multiplication**: Combines polarities (positive * negative = negative);
-  checks if one operand is a constant with known sign (`ltm.rs:853-909`)
-- **Division**: Numerator preserves, denominator flips (`ltm.rs:910-922`)
-- **Unary negation and NOT**: Flip polarity (`ltm.rs:925-933`)
-- **IF-THEN-ELSE**: Returns the common polarity if both branches agree, Unknown
-  otherwise (`ltm.rs:934-954`)
+- **Variable references**: Returns the current polarity context if the variable
+  matches `from_var` (accounting for module ref normalization), `Unknown` otherwise
+- **Addition**: Preserves polarity; if one operand is independent of `from_var`
+  (checked via `expr_references_var`), uses the other operand's polarity
+- **Subtraction**: Left operand preserves polarity; right operand flips. Same
+  independence check as addition.
+- **Multiplication**: Combines polarities (positive * negative = negative). When
+  one operand has unknown polarity, checks if the other is a positive or negative
+  constant (`is_positive_constant` / `is_negative_constant`) or a variable with
+  a constant equation (`is_positive_variable` / `is_negative_variable`)
+- **Division**: Numerator preserves polarity; denominator flips. Same independence
+  check as addition/subtraction.
+- **Unary negation and NOT**: Flip polarity
+- **IF-THEN-ELSE**: Returns the common polarity if both branches agree, `Unknown`
+  otherwise
 - **Lookup tables**: Analyzes monotonicity of graphical functions
-  (`analyze_graphical_function_polarity`, `ltm.rs:1010-1052`)
-- **Flow-to-stock**: Inflows are Positive, outflows are Negative
-  (`ltm.rs:614-623`)
+  (`analyze_graphical_function_polarity`) -- checks consecutive y-values to
+  determine if the table is monotonically increasing (Positive), decreasing
+  (Negative), or neither (Unknown). Combines with the argument's polarity.
+- **Non-decreasing builtins**: `EXP`, `LN`, `LOG10`, `SQRT`, `ARCTAN`, `INT` --
+  propagate the inner expression's polarity unchanged
+- **Max/Min (two-arg)**: Non-decreasing in each argument; if one operand returns
+  Unknown, checks whether it actually references `from_var` to distinguish
+  independent expressions from truly non-monotonic ones
+- **Flow-to-stock**: Inflows are `Positive`, outflows are `Negative` (fixed
+  structural polarity)
+- **Arrayed equations**: Checks all elements; returns `Unknown` if any two
+  elements disagree
 
-If any link in a loop has Unknown polarity, the loop's structural polarity is
-classified as Undetermined (`calculate_polarity`, `ltm.rs:637`).
+If any link in a loop has `Unknown` polarity, the loop's structural polarity is
+classified as `Undetermined` (`calculate_polarity`).
 
 ### Runtime Polarity
 
-`LoopPolarity::from_runtime_scores()` (`ltm.rs:96`) classifies polarity based
-on actual simulation results: all-positive means Reinforcing, all-negative means
-Balancing, mixed means Undetermined. This catches cases where nonlinear dynamics
-cause polarity to change during simulation (e.g., the yeast alcohol model from
-the papers).
+`LoopPolarity::from_runtime_scores()` in `ltm.rs` classifies polarity based
+on actual simulation results. It filters out NaN and zero values, then:
+- All remaining scores positive -> `Reinforcing`
+- All remaining scores negative -> `Balancing`
+- Mix of positive and negative -> `Undetermined`
+- No valid scores -> `None` (caller falls back to structural polarity)
+
+This catches cases where nonlinear dynamics cause polarity to change during
+simulation (e.g., the yeast alcohol model from the papers). In discovery mode,
+runtime polarity overrides structural polarity when available.
 
 ## Strongest-Path Algorithm
 
 The implementation in `ltm_finding.rs` follows Appendix I of Eberlein &
 Schoenberg (2020) closely.
 
-### SearchGraph (`ltm_finding.rs:59-64`)
+### SearchGraph (`ltm_finding.rs`)
 
 Built per timestep from simulation results. Edges are sorted by absolute score
-descending (`from_edges`, `ltm_finding.rs:82`), providing the ~3x speedup
-described in the paper by making the first visit to each variable likely the
-strongest.
+descending (`from_edges`), providing the ~3x speedup described in the paper by
+making the first visit to each variable likely the strongest. NaN scores are
+treated as 0.
 
-### Core DFS (`check_outbound_uses`, `ltm_finding.rs:185-237`)
+### Core DFS (`check_outbound_uses`)
 
 The recursive search follows the paper's pseudocode:
 
@@ -360,22 +464,36 @@ The recursive search follows the paper's pseudocode:
   start of each stock's search, following the paper's pseudocode (Section 12.5).
   This prevents one stock's search from pruning reachable loops when searching
   from a different stock.
-- **Deduplication**: `add_loop_if_unique` (`ltm_finding.rs:240`) uses sorted node
-  sets to prevent recording the same loop twice.
+- **Deduplication**: `add_loop_if_unique` uses sorted node sets to prevent
+  recording the same loop twice.
 
 ### Heuristic Nature
 
 The algorithm does not guarantee finding the truly strongest loop. The specific
 failure mode (demonstrated in the paper's Figure 7 and tested in
-`test_figure_7_paper` at `ltm_finding.rs:624`) is that visiting a node via a
-strong path sets a high `best_score` that prunes exploration via weaker paths
-that might lead to different (but still valid) loops.
+`test_figure_7_paper`) is that visiting a node via a strong path sets a high
+`best_score` that prunes exploration via weaker paths that might lead to
+different (but still valid) loops.
 
 The mitigation is twofold: (a) running the search at every timestep with different
 link scores tends to discover loops missed at other timesteps, and (b) resetting
 `best_score` per stock means different starting stocks can discover different
 loops. The papers' empirical evaluation shows that missed loops are consistently
 "siblings" of found loops, differing by only a few links.
+
+### Ranking and Filtering (`rank_and_filter`)
+
+After all timesteps are processed:
+
+1. Sort by average absolute score descending
+2. Truncate to `MAX_LOOPS` (200)
+3. Filter by per-timestep relative contribution within partition: retain a loop
+   if at any single timestep its absolute score is >= `MIN_CONTRIBUTION` (0.1%)
+   of the partition-scoped total at that timestep. This partition-aware filtering
+   prevents globally negligible loops that are dominant in their own partition
+   from being incorrectly removed.
+4. Assign deterministic polarity-based IDs (`r1`, `b1`, etc.)
+5. Re-sort by score descending for callers
 
 ## Current Limitations
 
@@ -397,23 +515,16 @@ this has not been explored in the implementation.
 The strongest-path algorithm runs at every saved timestep, each with O(V^2)
 complexity. For very large models (1000+ variables), this could become slow. The
 paper reports 10-20 seconds for Urban Dynamics (43M loops) on 2018 hardware, but
-the per-timestep saved-step approach is a simplification of the paper's "every
+the per-saved-timestep approach is a simplification of the paper's "every
 computational interval" strategy.
-
-### Module Internal Loops
-
-The black-box approach means internal feedback loops within modules are not
-analyzed by LTM. If a module contains internal feedback that is relevant to
-the parent model's behavior, it will be represented only by the aggregate
-transfer score.
 
 ## Divergences from the Papers
 
 1. **Per-timestep vs. per-dt search**: The papers describe running the
    strongest-path search at "every (or almost every) point in time," meaning each
    DT step. The implementation runs at each saved timestep (determined by
-   `save_step` in sim specs), which may be coarser. This is noted in
-   `doc/ltm-finding.md` as an intentional simplification.
+   `save_step` in sim specs), which may be coarser. This is an intentional
+   simplification that trades completeness for speed.
 
 2. **No composite network fallback**: The papers describe a two-tier strategy
    where models with fewer than ~1000 loops use exhaustive enumeration on a
@@ -421,14 +532,19 @@ transfer score.
    separate: `with_ltm()` for exhaustive and `with_ltm_all_links()` + `discover_loops()`
    for discovery. There is no automatic switching based on loop count.
 
-3. **Module handling**: The papers do not discuss module boundaries. The black-box
-   approach is an extension specific to this implementation.
+3. **Module handling**: The papers describe composite link scores for macros
+   (DELAY, SMOOTH) but do not discuss module boundaries as an implementation
+   concept. The Simlin implementation extends the macro approach to modules:
+   internal graphs are built recursively, pathways are enumerated, and composite
+   scores are computed at each timestep. Module stock enrichment (adding
+   module-internal stocks to loop stock lists) is an implementation-specific
+   extension that enables correct cycle partitioning.
 
 4. **PREVIOUS via stdlib module**: The `PREVIOUS()` function used in link score
    equations is implemented as a standard library module (`stdlib/previous.stmx`)
    using a stock-and-flow structure, not as a built-in function. This affects
    initial-timestep behavior: `TIME = PREVIOUS(TIME)` is used to detect the first
-   timestep and return NaN.
+   timestep and return 0.
 
 5. **Relative loop score formula**: The implementation uses
    `SAFEDIV(loop_score, sum_of_abs_scores, 0)` with explicit division-by-zero
@@ -443,25 +559,40 @@ transfer score.
    (Stella/iThink). The integration test (`tests/simulate_ltm.rs`) compensates by
    shifting reference timestamps forward by DT when loading golden data.
 
+7. **Ceteris-paribus via AST transformation**: The papers describe re-evaluating
+   equations with current values of one input and previous values of all others.
+   The implementation achieves this by parsing the equation into an AST,
+   recursively transforming it to wrap non-excluded dependencies in `PREVIOUS()`,
+   and printing the result back to equation text. This is done once at
+   augmentation time (not per-timestep), producing a static equation that the
+   simulation engine evaluates normally.
+
 ## Test Coverage
 
 ### Unit Tests
 
 - **`ltm.rs`**: Loop detection on known models (reinforcing, balancing, no-loop,
-  module, multi-module), polarity analysis (AST expressions, graphical functions,
-  flow-to-stock), runtime polarity classification, deduplication, deterministic
-  ID assignment, real model tests (fishbanks, logistic growth)
+  module, multi-module), polarity analysis (AST expressions including addition,
+  subtraction, multiplication, division, unary negation, IF-THEN-ELSE, graphical
+  functions, arrayed equations, Max/Min builtins), flow-to-stock polarity, runtime
+  polarity classification, deduplication, deterministic ID assignment, module
+  dependencies, empty variable ASTs, path formatting
 
 - **`ltm_augment.rs`**: Equation generation for all link types
-  (auxiliary-to-auxiliary, flow-to-stock, outflow-to-stock, stock-to-flow,
-  module links), whole-word replacement, loop score and relative loop score
-  equations, dollar-sign variable parsing
+  (auxiliary-to-auxiliary, flow-to-stock, stock-to-flow, module links),
+  AST-based partial equation building (`build_partial_equation`) with tests
+  for builtin function preservation, simple substitution, no-deps-to-wrap, and
+  IF-THEN-ELSE, loop score and relative loop score equations (including
+  single-loop SAFEDIV behavior and single-balancing-loop negative scores),
+  generated variable structure, end-to-end simulation with LTM
 
-- **`ltm_finding.rs`**: SearchGraph construction and sorting, trivial loop, Figure
-  7 from the paper, per-stock best_score reset, deduplication, empty graph,
-  zero-score edges, NaN handling, self-loops, disconnected components, link offset
-  parsing, ID assignment, rank-and-filter (truncation, contribution filtering,
-  ordering)
+- **`ltm_finding.rs`**: SearchGraph construction and edge sorting, trivial loop,
+  Figure 7 from the paper (demonstrating per-stock reset recovery), per-stock
+  best_score reset, deduplication, empty graph, zero-score edges (strict
+  less-than allows traversal), NaN handling, self-loops, disconnected components,
+  stocks without outbound edges, link offset parsing, ID assignment,
+  rank-and-filter (truncation, contribution filtering, ordering preservation,
+  briefly dominant loop retention, partition-aware filtering)
 
 ### Integration Tests (`tests/simulate_ltm.rs`)
 
