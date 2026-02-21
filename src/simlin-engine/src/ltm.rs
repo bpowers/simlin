@@ -165,7 +165,7 @@ pub(crate) fn classify_module_for_ltm(
 /// Normalize a module·output reference to just the module node.
 /// E.g., "$⁚s⁚0⁚smth1·output" becomes "$⁚s⁚0⁚smth1".
 /// Non-module references are returned unchanged.
-fn normalize_module_ref(ident: &Ident<Canonical>) -> Ident<Canonical> {
+pub(crate) fn normalize_module_ref(ident: &Ident<Canonical>) -> Ident<Canonical> {
     let s = ident.as_str();
     if let Some(pos) = s.find('\u{00B7}') {
         Ident::new(&s[..pos])
@@ -212,23 +212,29 @@ pub struct CyclePartitions {
 }
 
 impl CyclePartitions {
-    /// Look up the partition index for a loop. Uses the loop's first stock.
-    /// Returns None for loops with no stocks (e.g., cross-module loops).
+    /// Look up the partition index for a loop using its parent-level stocks.
+    /// Returns None for loops with no parent-level stocks.
     ///
-    /// All stocks in a feedback loop are guaranteed to be in the same SCC:
-    /// if a loop passes through stocks A and B, there are paths A->B and B->A
-    /// through the loop, making them mutually reachable.
+    /// Module-internal stocks (namespaced with interpunct, e.g.
+    /// `smooth·smoothed`) are implicitly in the same partition as the parent
+    /// stocks they coexist with in a loop, but they don't appear in the
+    /// partition map since partitions are computed on the parent graph.
+    ///
+    /// All *parent-level* stocks in a feedback loop are guaranteed to be in the
+    /// same SCC: if a loop passes through stocks A and B, there are paths
+    /// A->B and B->A through the loop, making them mutually reachable.
     pub fn partition_for_loop(&self, loop_item: &Loop) -> Option<usize> {
         let result = loop_item
             .stocks
-            .first()
-            .and_then(|s| self.stock_partition.get(s).copied());
+            .iter()
+            .find_map(|s| self.stock_partition.get(s).copied());
         debug_assert!(
             loop_item
                 .stocks
                 .iter()
-                .all(|s| { self.stock_partition.get(s).copied() == result }),
-            "all stocks in a loop must be in the same partition"
+                .filter_map(|s| self.stock_partition.get(s).copied())
+                .all(|p| Some(p) == result),
+            "all parent-level stocks in a loop must be in the same partition"
         );
         result
     }
@@ -422,18 +428,20 @@ impl CausalGraph {
         let mut nodes: Vec<_> = self.edges.keys().cloned().collect();
         nodes.sort_by(|a, b| a.as_str().cmp(b.as_str())); // Stable ordering
 
-        // Johnson's algorithm for finding elementary circuits
+        // Johnson's algorithm for finding elementary circuits.
+        // Module instances appear as regular nodes in the parent graph,
+        // so loops through modules are found naturally.
         for start_node in &nodes {
             let circuits = self.find_circuits_from(start_node);
             for circuit in circuits {
                 if circuit.len() > 1 {
-                    // Ignore self-loops for now
                     let links = self.circuit_to_links(&circuit);
-                    let stocks = self.find_stocks_in_loop(&circuit);
+                    let parent_stocks = self.find_stocks_in_loop(&circuit);
+                    let stocks = self.enrich_with_module_stocks(&circuit, parent_stocks);
                     let polarity = self.calculate_polarity(&links);
 
                     loops.push(Loop {
-                        id: String::new(), // Will be assigned later
+                        id: String::new(),
                         links,
                         stocks,
                         polarity,
@@ -442,11 +450,6 @@ impl CausalGraph {
             }
         }
 
-        // Also find loops that cross module boundaries (with placeholder for loop_id)
-        let mut dummy_id = 0;
-        let cross_module_loops = self.find_cross_module_loops(&mut dummy_id);
-        loops.extend(cross_module_loops);
-
         // Remove duplicate loops (same set of nodes)
         let mut unique_loops = self.deduplicate_loops(loops);
 
@@ -454,6 +457,63 @@ impl CausalGraph {
         self.assign_deterministic_loop_ids(&mut unique_loops);
 
         unique_loops
+    }
+
+    /// Enrich a loop's stock list with stocks from inside any DynamicModule
+    /// nodes that appear in the circuit. For each module node, we find the
+    /// internal pathway from the relevant input port to the output, and collect
+    /// all stocks along that pathway.
+    fn enrich_with_module_stocks(
+        &self,
+        circuit: &[Ident<Canonical>],
+        mut stocks: Vec<Ident<Canonical>>,
+    ) -> Vec<Ident<Canonical>> {
+        for (i, node) in circuit.iter().enumerate() {
+            let module_graph = match self.module_graphs.get(node) {
+                Some(g) => g,
+                None => continue,
+            };
+            let module_var = match self.variables.get(node) {
+                Some(Variable::Module { inputs, .. }) => inputs,
+                _ => continue,
+            };
+
+            // The predecessor in the circuit is the variable that feeds
+            // into this module.
+            let pred_idx = if i == 0 { circuit.len() - 1 } else { i - 1 };
+            let predecessor = &circuit[pred_idx];
+
+            // Find which input port the predecessor maps to.
+            let internal_port = module_var
+                .iter()
+                .find(|inp| &inp.src == predecessor)
+                .map(|inp| &inp.dst);
+
+            let output_ident = Ident::new("output");
+            let pathways = module_graph.enumerate_module_pathways(&output_ident);
+
+            let internal_stocks: Vec<Ident<Canonical>> = if let Some(port) = internal_port {
+                // Collect stocks from all pathways for the matched input port.
+                if let Some(paths) = pathways.get(port) {
+                    collect_stocks_from_pathways(module_graph, paths, node)
+                } else {
+                    // Port found in module inputs but no pathway exists for
+                    // it -- fall back to all module-internal stocks.
+                    all_module_stocks(module_graph, node)
+                }
+            } else {
+                // Predecessor doesn't match any module input (shouldn't happen
+                // with a well-formed graph). Conservative fallback.
+                all_module_stocks(module_graph, node)
+            };
+
+            for s in internal_stocks {
+                if !stocks.contains(&s) {
+                    stocks.push(s);
+                }
+            }
+        }
+        stocks
     }
 
     /// Find all circuits starting from a given node using DFS
@@ -492,247 +552,6 @@ impl CausalGraph {
                     visited.remove(neighbor);
                 }
             }
-        }
-
-        // If current is a module instance, also traverse into the module
-        if let Some(_module_graph) = self.module_graphs.get(current) {
-            // For now, skip traversing into modules in the basic DFS
-            // Cross-module loops are handled separately
-        }
-    }
-
-    /// Find loops that cross module boundaries
-    fn find_cross_module_loops(&self, loop_id: &mut usize) -> Vec<Loop> {
-        let mut cross_module_loops = Vec::new();
-        let mut visited_loops = HashSet::new();
-
-        // For each module instance
-        for (module_var, module_graph) in &self.module_graphs {
-            // Find loops within the module
-            let internal_loops = module_graph.find_loops();
-
-            // Check if any of these loops connect to external variables
-            for internal_loop in internal_loops {
-                // Check if this loop has connections that cross the module boundary
-                let crosses_boundary = self.check_loop_crosses_boundary(&internal_loop, module_var);
-
-                if crosses_boundary {
-                    // Create a new loop that represents the cross-module loop
-                    *loop_id += 1;
-                    let id = if internal_loop.polarity == LoopPolarity::Reinforcing {
-                        format!("R{loop_id}")
-                    } else {
-                        format!("B{loop_id}")
-                    };
-
-                    // Map the internal loop to the parent context
-                    let mapped_loop = self.map_loop_to_parent(internal_loop, module_var, id);
-
-                    // Create a unique key for this loop to avoid duplicates
-                    let loop_key = self.get_loop_key(&mapped_loop);
-                    if !visited_loops.contains(&loop_key) {
-                        visited_loops.insert(loop_key);
-                        cross_module_loops.push(mapped_loop);
-                    }
-                }
-            }
-        }
-
-        // Also find loops that span multiple modules
-        let multi_module_loops = self.find_multi_module_loops(loop_id, &visited_loops);
-        cross_module_loops.extend(multi_module_loops);
-
-        cross_module_loops
-    }
-
-    /// Find loops that span multiple module instances
-    fn find_multi_module_loops(&self, loop_id: &mut usize, visited: &HashSet<String>) -> Vec<Loop> {
-        let mut multi_module_loops = Vec::new();
-
-        // For each pair of module instances, check if they're connected via the parent
-        for (module_a, graph_a) in &self.module_graphs {
-            for (module_b, graph_b) in &self.module_graphs {
-                if module_a >= module_b {
-                    continue; // Avoid duplicates and self-pairs
-                }
-
-                // Check if there's a path from module_a outputs to module_b inputs
-                // and from module_b outputs back to module_a inputs
-                if let Some(connecting_loop) =
-                    self.find_inter_module_loop(module_a, graph_a, module_b, graph_b)
-                {
-                    *loop_id += 1;
-                    let id = if connecting_loop.polarity == LoopPolarity::Reinforcing {
-                        format!("R{loop_id}")
-                    } else {
-                        format!("B{loop_id}")
-                    };
-
-                    let mut loop_with_id = connecting_loop;
-                    loop_with_id.id = id;
-
-                    let loop_key = self.get_loop_key(&loop_with_id);
-                    if !visited.contains(&loop_key) {
-                        multi_module_loops.push(loop_with_id);
-                    }
-                }
-            }
-        }
-
-        multi_module_loops
-    }
-
-    /// Find a loop connecting two module instances
-    fn find_inter_module_loop(
-        &self,
-        module_a: &Ident<Canonical>,
-        _graph_a: &CausalGraph,
-        module_b: &Ident<Canonical>,
-        _graph_b: &CausalGraph,
-    ) -> Option<Loop> {
-        // Check if module outputs from A connect to module inputs of B
-        // and vice versa, forming a loop
-
-        // Get module definitions
-        let module_a_def = self.variables.get(module_a)?;
-        let module_b_def = self.variables.get(module_b)?;
-
-        if let (
-            Variable::Module {
-                inputs: inputs_a, ..
-            },
-            Variable::Module {
-                inputs: inputs_b, ..
-            },
-        ) = (module_a_def, module_b_def)
-        {
-            // Check for connections between the modules
-            let mut connecting_links = Vec::new();
-
-            // Check if any output of A connects to input of B
-            for input_b in inputs_b {
-                // See if this input comes from module A's context
-                if self.is_connected_through_parent(module_a, &input_b.src) {
-                    connecting_links.push(Link {
-                        from: module_a.clone(),
-                        to: module_b.clone(),
-                        polarity: LinkPolarity::Unknown,
-                    });
-                }
-            }
-
-            // Check if any output of B connects to input of A
-            for input_a in inputs_a {
-                if self.is_connected_through_parent(module_b, &input_a.src) {
-                    connecting_links.push(Link {
-                        from: module_b.clone(),
-                        to: module_a.clone(),
-                        polarity: LinkPolarity::Unknown,
-                    });
-                }
-            }
-
-            // If we have connections both ways, we have a loop
-            if connecting_links.len() >= 2 {
-                let polarity = self.calculate_polarity(&connecting_links);
-                return Some(Loop {
-                    id: String::new(), // Will be set by caller
-                    links: connecting_links,
-                    stocks: Vec::new(), // TODO: identify stocks in the path
-                    polarity,
-                });
-            }
-        }
-
-        None
-    }
-
-    /// Check if a module output is connected to a variable through the parent model
-    fn is_connected_through_parent(
-        &self,
-        from_module: &Ident<Canonical>,
-        to_var: &Ident<Canonical>,
-    ) -> bool {
-        // Check if there's a path from the module to the variable in the parent graph
-        if let Some(neighbors) = self.edges.get(from_module)
-            && neighbors.contains(to_var)
-        {
-            return true;
-        }
-        // Could do deeper path search here if needed
-        false
-    }
-
-    /// Generate a unique key for a loop to detect duplicates
-    fn get_loop_key(&self, loop_item: &Loop) -> String {
-        let mut vars: Vec<_> = loop_item
-            .links
-            .iter()
-            .flat_map(|link| vec![link.from.as_str(), link.to.as_str()])
-            .collect();
-        vars.sort();
-        vars.dedup();
-        vars.join(",")
-    }
-
-    /// Check if a loop within a module crosses the module boundary
-    fn check_loop_crosses_boundary(&self, loop_item: &Loop, module_var: &Ident<Canonical>) -> bool {
-        // Check if any variables in the loop connect to module inputs/outputs
-        if let Some(Variable::Module { inputs, .. }) = self.variables.get(module_var) {
-            // Check if any loop variables are connected to module inputs
-            for link in &loop_item.links {
-                for input in inputs {
-                    if link.from == input.dst || link.to == input.dst {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    /// Map a loop from within a module to the parent context
-    fn map_loop_to_parent(
-        &self,
-        loop_item: Loop,
-        module_var: &Ident<Canonical>,
-        id: String,
-    ) -> Loop {
-        // Map internal variable names to parent context
-        let mut mapped_links = Vec::new();
-
-        if let Some(Variable::Module { inputs, .. }) = self.variables.get(module_var) {
-            for link in loop_item.links {
-                // Check if the link involves module inputs/outputs
-                let mut mapped_from = link.from.clone();
-                let mut mapped_to = link.to.clone();
-
-                // Map internal variables to their external connections
-                for input in inputs {
-                    if link.from == input.dst {
-                        mapped_from = input.src.clone();
-                    }
-                    if link.to == input.dst {
-                        mapped_to = input.src.clone();
-                    }
-                }
-
-                mapped_links.push(Link {
-                    from: mapped_from,
-                    to: mapped_to,
-                    polarity: link.polarity,
-                });
-            }
-        } else {
-            // If we can't map, just use the original links
-            mapped_links = loop_item.links;
-        }
-
-        Loop {
-            id,
-            links: mapped_links,
-            stocks: loop_item.stocks, // TODO: also map stocks
-            polarity: loop_item.polarity,
         }
     }
 
@@ -1083,6 +902,48 @@ impl CausalGraph {
 
         unique_loops
     }
+}
+
+/// Collect stocks from a set of internal pathways, namespaced with the
+/// module instance name (using interpunct separator).
+fn collect_stocks_from_pathways(
+    module_graph: &CausalGraph,
+    paths: &[Vec<Link>],
+    module_name: &Ident<Canonical>,
+) -> Vec<Ident<Canonical>> {
+    let mut internal_stocks = Vec::new();
+    for path in paths {
+        for link in path {
+            for node in [&link.from, &link.to] {
+                if module_graph.stocks.contains(node) {
+                    let qualified = Ident::new(&format!(
+                        "{}\u{00B7}{}",
+                        module_name.as_str(),
+                        node.as_str()
+                    ));
+                    if !internal_stocks.contains(&qualified) {
+                        internal_stocks.push(qualified);
+                    }
+                }
+            }
+        }
+    }
+    internal_stocks
+}
+
+/// Fallback: collect ALL stocks from a module's internal graph, namespaced
+/// with the module instance name.
+fn all_module_stocks(
+    module_graph: &CausalGraph,
+    module_name: &Ident<Canonical>,
+) -> Vec<Ident<Canonical>> {
+    let mut stocks: Vec<_> = module_graph
+        .stocks
+        .iter()
+        .map(|s| Ident::new(&format!("{}\u{00B7}{}", module_name.as_str(), s.as_str())))
+        .collect();
+    stocks.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    stocks
 }
 
 /// Detect all feedback loops in a single model
@@ -1673,7 +1534,11 @@ mod tests {
                     None,
                 ),
                 x_aux("inventory_gap", "target_inventory - inventory", None),
-                x_module("smooth_inventory_gap", &[("inventory_gap", "input")], None),
+                x_module(
+                    "smooth_inventory_gap",
+                    &[("inventory_gap", "smooth_inventory_gap\u{00B7}input")],
+                    None,
+                ),
                 x_aux("target_inventory", "100", None),
                 x_aux("adjustment_rate", "0.1", None),
                 x_flow("sales", "10", None),
@@ -1696,11 +1561,13 @@ mod tests {
         let project = x_project(sim_specs, &[main_model, smooth_model]);
         let project = Project::from(project);
         let main_ident: Ident<Canonical> = Ident::new("main");
-        let _model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
 
-        // We expect to be able to handle models with modules without crashing
-        // The presence of modules shouldn't break loop detection
-        // (even if we find 0 loops, that's OK - the important thing is not crashing)
+        // With corrected module input format, we should find loops through the module
+        assert!(
+            !model_loops.is_empty(),
+            "Should find at least one loop through the module"
+        );
     }
 
     #[test]
@@ -1713,9 +1580,17 @@ mod tests {
             "main",
             vec![
                 x_aux("initial_value", "10", None),
-                x_module("processor_a", &[("initial_value", "input")], None),
+                x_module(
+                    "processor_a",
+                    &[("initial_value", "processor_a\u{00B7}input")],
+                    None,
+                ),
                 x_aux("intermediate", "processor_a", None), // Output from module A
-                x_module("processor_b", &[("intermediate", "input")], None),
+                x_module(
+                    "processor_b",
+                    &[("intermediate", "processor_b\u{00B7}input")],
+                    None,
+                ),
                 x_aux("feedback", "processor_b * 0.5", None), // Output from module B
                 x_aux("combined", "initial_value + feedback", None),
             ],
@@ -1745,12 +1620,15 @@ mod tests {
         );
         let project = Project::from(project);
 
-        // Test should complete without crashing
         let main_ident: Ident<Canonical> = Ident::new("main");
-        let _model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
 
-        // The enhanced detection might find cross-module loops
-        // The exact count isn't critical; what matters is proper handling
+        // This model has no feedback loop (initial_value is a constant, no
+        // path from output back to input), so no loops should be found.
+        assert!(
+            model_loops.is_empty(),
+            "Model without feedback should have no loops"
+        );
     }
 
     #[test]
@@ -1883,110 +1761,6 @@ mod tests {
         assert!(
             deps.is_empty(),
             "Dependencies must be empty for variable without AST"
-        );
-    }
-
-    #[test]
-    fn test_causal_graph_get_loop_key() {
-        // Test the get_loop_key function (covers lines 428-436)
-        let graph = CausalGraph {
-            edges: HashMap::new(),
-            stocks: HashSet::new(),
-            variables: HashMap::new(),
-            module_graphs: HashMap::new(),
-        };
-
-        let loop_item = Loop {
-            id: "R1".to_string(),
-            links: vec![
-                Link {
-                    from: Ident::new("z"),
-                    to: Ident::new("x"),
-                    polarity: LinkPolarity::Positive,
-                },
-                Link {
-                    from: Ident::new("x"),
-                    to: Ident::new("y"),
-                    polarity: LinkPolarity::Positive,
-                },
-                Link {
-                    from: Ident::new("y"),
-                    to: Ident::new("z"),
-                    polarity: LinkPolarity::Positive,
-                },
-            ],
-            stocks: vec![],
-            polarity: LoopPolarity::Reinforcing,
-        };
-
-        let key = graph.get_loop_key(&loop_item);
-        // Key should have sorted, deduplicated variables
-        assert_eq!(
-            key, "x,y,z",
-            "Loop key should be sorted, deduplicated variables"
-        );
-
-        // Test with duplicate variables (shouldn't happen but tests dedup)
-        let loop_with_dups = Loop {
-            id: "R2".to_string(),
-            links: vec![
-                Link {
-                    from: Ident::new("a"),
-                    to: Ident::new("b"),
-                    polarity: LinkPolarity::Positive,
-                },
-                Link {
-                    from: Ident::new("b"),
-                    to: Ident::new("a"),
-                    polarity: LinkPolarity::Positive,
-                },
-            ],
-            stocks: vec![],
-            polarity: LoopPolarity::Reinforcing,
-        };
-
-        let key2 = graph.get_loop_key(&loop_with_dups);
-        assert_eq!(key2, "a,b", "Should deduplicate variables");
-    }
-
-    #[test]
-    fn test_causal_graph_is_connected_through_parent() {
-        // Test is_connected_through_parent function (covers lines 412-424)
-        let mut graph = CausalGraph {
-            edges: HashMap::new(),
-            stocks: HashSet::new(),
-            variables: HashMap::new(),
-            module_graphs: HashMap::new(),
-        };
-
-        let module_var = Ident::new("smoother");
-        let output_var = Ident::new("smoothed_output");
-        let unconnected_var = Ident::new("unrelated");
-
-        // Add edge from module to output
-        graph
-            .edges
-            .entry(module_var.clone())
-            .or_default()
-            .push(output_var.clone());
-
-        // Test connected case
-        assert!(
-            graph.is_connected_through_parent(&module_var, &output_var),
-            "Module should be connected to output"
-        );
-
-        // Test unconnected case
-        assert!(
-            !graph.is_connected_through_parent(&module_var, &unconnected_var),
-            "Module should not be connected to unrelated variable"
-        );
-
-        // Test non-existent module
-        let non_existent = Ident::new("non_existent");
-        assert!(
-            !graph.is_connected_through_parent(&non_existent, &output_var),
-            "Non-existent module should not be connected"
         );
     }
 
@@ -2197,84 +1971,6 @@ mod tests {
             polarity,
             LinkPolarity::Negative,
             "NOT should flip polarity from positive to negative"
-        );
-    }
-
-    #[test]
-    fn test_check_loop_crosses_boundary() {
-        // Test check_loop_crosses_boundary (covers lines 440-450)
-        use crate::variable::ModuleInput;
-
-        let mut graph = CausalGraph {
-            edges: HashMap::new(),
-            stocks: HashSet::new(),
-            variables: HashMap::new(),
-            module_graphs: HashMap::new(),
-        };
-
-        // Create a module with inputs
-        let input_dst = Ident::new("input");
-        let module_var = Variable::Module {
-            ident: Ident::new("processor"),
-            model_name: Ident::new("process_model"),
-            units: None,
-            inputs: vec![ModuleInput {
-                src: Ident::new("external_input"),
-                dst: input_dst.clone(),
-            }],
-            errors: vec![],
-            unit_errors: vec![],
-        };
-
-        let module_ident = Ident::new("processor");
-        graph.variables.insert(module_ident.clone(), module_var);
-
-        // Create a loop that includes the module input
-        let loop_crossing = Loop {
-            id: "R1".to_string(),
-            links: vec![
-                Link {
-                    from: input_dst.clone(),
-                    to: Ident::new("internal_var"),
-                    polarity: LinkPolarity::Positive,
-                },
-                Link {
-                    from: Ident::new("internal_var"),
-                    to: input_dst.clone(),
-                    polarity: LinkPolarity::Positive,
-                },
-            ],
-            stocks: vec![],
-            polarity: LoopPolarity::Reinforcing,
-        };
-
-        assert!(
-            graph.check_loop_crosses_boundary(&loop_crossing, &module_ident),
-            "Loop with module input should cross boundary"
-        );
-
-        // Create a loop that doesn't cross boundary
-        let loop_internal = Loop {
-            id: "R2".to_string(),
-            links: vec![
-                Link {
-                    from: Ident::new("var1"),
-                    to: Ident::new("var2"),
-                    polarity: LinkPolarity::Positive,
-                },
-                Link {
-                    from: Ident::new("var2"),
-                    to: Ident::new("var1"),
-                    polarity: LinkPolarity::Positive,
-                },
-            ],
-            stocks: vec![],
-            polarity: LoopPolarity::Reinforcing,
-        };
-
-        assert!(
-            !graph.check_loop_crosses_boundary(&loop_internal, &module_ident),
-            "Loop without module input should not cross boundary"
         );
     }
 
@@ -3836,5 +3532,275 @@ mod tests {
             partitions.partition_for_loop(&loop_b)
         );
         assert!(partitions.partition_for_loop(&loop_no_stocks).is_none());
+    }
+
+    #[test]
+    fn test_loop_through_module_has_internal_stocks() {
+        use crate::testutils::x_module;
+
+        // Parent model: inventory -> production -> desired_production ->
+        //   smooth_inventory_gap (module) -> inventory_gap -> inventory
+        let main_model = x_model(
+            "main",
+            vec![
+                x_stock("inventory", "100", &["production"], &["sales"], None),
+                x_flow("production", "desired_production", None),
+                x_aux(
+                    "desired_production",
+                    "smooth_inventory_gap * adjustment_rate",
+                    None,
+                ),
+                x_aux("inventory_gap", "target_inventory - inventory", None),
+                x_module(
+                    "smooth_inventory_gap",
+                    &[("inventory_gap", "smooth_inventory_gap\u{00B7}input")],
+                    None,
+                ),
+                x_aux("target_inventory", "100", None),
+                x_aux("adjustment_rate", "0.1", None),
+                x_flow("sales", "10", None),
+            ],
+        );
+
+        // SMOOTH-like module with an internal stock
+        let smooth_model = x_model(
+            "smooth_inventory_gap",
+            vec![
+                x_aux("input", "0", None),
+                x_stock("smoothed", "0", &["change_in_smooth"], &[], None),
+                x_flow("change_in_smooth", "(input - smoothed) / smooth_time", None),
+                x_aux("smooth_time", "3", None),
+                x_aux("output", "smoothed", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[main_model, smooth_model]);
+        let project = Project::from(project);
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+
+        // Should find a loop that passes through the module
+        assert!(
+            !model_loops.is_empty(),
+            "Should detect at least one loop through the module"
+        );
+
+        // The loop should include both the parent stock and the module-internal stock
+        let has_inventory = model_loops
+            .iter()
+            .any(|l| l.stocks.iter().any(|s| s.as_str() == "inventory"));
+        assert!(
+            has_inventory,
+            "Should find a loop containing the parent stock 'inventory'"
+        );
+
+        let has_internal_stock = model_loops.iter().any(|l| {
+            l.stocks
+                .iter()
+                .any(|s| s.as_str() == "smooth_inventory_gap\u{00B7}smoothed")
+        });
+        assert!(
+            has_internal_stock,
+            "Loop through module should include module-internal stock \
+             'smooth_inventory_gap\u{00B7}smoothed'. Found stocks: {:?}",
+            model_loops
+                .iter()
+                .flat_map(|l| l.stocks.iter().map(|s| s.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_loop_through_modules_with_intermediate_variables() {
+        use crate::testutils::x_module;
+
+        // stock -> flow -> module_a -> aux_x -> aux_y -> module_b -> result -> stock
+        let main_model = x_model(
+            "main",
+            vec![
+                x_stock("tank", "100", &["inflow"], &[], None),
+                x_flow("inflow", "result", None),
+                x_module("module_a", &[("tank", "module_a\u{00B7}input")], None),
+                x_aux("aux_x", "module_a * 2", None),
+                x_aux("aux_y", "aux_x + 1", None),
+                x_module("module_b", &[("aux_y", "module_b\u{00B7}input")], None),
+                x_aux("result", "module_b * 0.5", None),
+            ],
+        );
+
+        let module_a_model = x_model(
+            "module_a",
+            vec![
+                x_aux("input", "0", None),
+                x_stock("buffer_a", "0", &["fill_a"], &[], None),
+                x_flow("fill_a", "(input - buffer_a) / 2", None),
+                x_aux("output", "buffer_a", None),
+            ],
+        );
+
+        let module_b_model = x_model(
+            "module_b",
+            vec![
+                x_aux("input", "0", None),
+                x_stock("buffer_b", "0", &["fill_b"], &[], None),
+                x_flow("fill_b", "(input - buffer_b) / 3", None),
+                x_aux("output", "buffer_b", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[main_model, module_a_model, module_b_model]);
+        let project = Project::from(project);
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+
+        // The loop should be found (Johnson's finds it through module nodes)
+        assert!(
+            !model_loops.is_empty(),
+            "Should detect a loop through two modules with intermediate variables"
+        );
+
+        // Collect all stocks from all found loops
+        let all_stocks: HashSet<&str> = model_loops
+            .iter()
+            .flat_map(|l| l.stocks.iter().map(|s| s.as_str()))
+            .collect();
+
+        assert!(
+            all_stocks.contains("tank"),
+            "Should include parent stock 'tank'. Found: {all_stocks:?}"
+        );
+        assert!(
+            all_stocks.contains("module_a\u{00B7}buffer_a"),
+            "Should include module_a internal stock. Found: {all_stocks:?}"
+        );
+        assert!(
+            all_stocks.contains("module_b\u{00B7}buffer_b"),
+            "Should include module_b internal stock. Found: {all_stocks:?}"
+        );
+    }
+
+    #[test]
+    fn test_loop_through_three_modules() {
+        use crate::testutils::x_module;
+
+        // stock -> module_a -> aux1 -> module_b -> aux2 -> module_c -> result -> stock
+        let main_model = x_model(
+            "main",
+            vec![
+                x_stock("level", "50", &["adjustment"], &[], None),
+                x_flow("adjustment", "output_c", None),
+                x_module("module_a", &[("level", "module_a\u{00B7}input")], None),
+                x_aux("mid1", "module_a", None),
+                x_module("module_b", &[("mid1", "module_b\u{00B7}input")], None),
+                x_aux("mid2", "module_b", None),
+                x_module("module_c", &[("mid2", "module_c\u{00B7}input")], None),
+                x_aux("output_c", "module_c * 0.1", None),
+            ],
+        );
+
+        let make_module = |name: &str, stock_name: &str| {
+            x_model(
+                name,
+                vec![
+                    x_aux("input", "0", None),
+                    x_stock(stock_name, "0", &["fill"], &[], None),
+                    x_flow("fill", &format!("(input - {stock_name}) / 2"), None),
+                    x_aux("output", stock_name, None),
+                ],
+            )
+        };
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(
+            sim_specs,
+            &[
+                main_model,
+                make_module("module_a", "buf_a"),
+                make_module("module_b", "buf_b"),
+                make_module("module_c", "buf_c"),
+            ],
+        );
+        let project = Project::from(project);
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+
+        assert!(
+            !model_loops.is_empty(),
+            "Should detect a loop through three modules"
+        );
+
+        let all_stocks: HashSet<&str> = model_loops
+            .iter()
+            .flat_map(|l| l.stocks.iter().map(|s| s.as_str()))
+            .collect();
+
+        assert!(
+            all_stocks.contains("level"),
+            "Should include parent stock. Found: {all_stocks:?}"
+        );
+        assert!(
+            all_stocks.contains("module_a\u{00B7}buf_a"),
+            "Should include module_a stock. Found: {all_stocks:?}"
+        );
+        assert!(
+            all_stocks.contains("module_b\u{00B7}buf_b"),
+            "Should include module_b stock. Found: {all_stocks:?}"
+        );
+        assert!(
+            all_stocks.contains("module_c\u{00B7}buf_c"),
+            "Should include module_c stock. Found: {all_stocks:?}"
+        );
+    }
+
+    #[test]
+    fn test_internal_module_loops_not_in_parent() {
+        use crate::testutils::x_module;
+
+        // A model with a module that has internal feedback,
+        // but no feedback loop in the parent model.
+        let main_model = x_model(
+            "main",
+            vec![
+                x_aux("input_signal", "10", None),
+                x_module(
+                    "smoother",
+                    &[("input_signal", "smoother\u{00B7}input")],
+                    None,
+                ),
+                x_aux("result", "smoother", None),
+            ],
+        );
+
+        // Module with internal feedback: smoothed -> change_in_smooth -> smoothed
+        let smooth_model = x_model(
+            "smoother",
+            vec![
+                x_aux("input", "0", None),
+                x_stock("smoothed", "0", &["change_in_smooth"], &[], None),
+                x_flow("change_in_smooth", "(input - smoothed) / smooth_time", None),
+                x_aux("smooth_time", "3", None),
+                x_aux("output", "smoothed", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[main_model, smooth_model]);
+        let project = Project::from(project);
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+
+        // No feedback loop exists in the parent model (no path from result back
+        // to input_signal). The module's INTERNAL feedback loop should NOT be
+        // reported at the parent level.
+        assert!(
+            model_loops.is_empty(),
+            "Internal module loops should not appear in parent. Found: {:?}",
+            model_loops
+                .iter()
+                .map(|l| l.format_path())
+                .collect::<Vec<_>>()
+        );
     }
 }

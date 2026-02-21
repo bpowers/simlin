@@ -17,6 +17,7 @@ use crate::datamodel::{self, Equation};
 use crate::lexer::LexerType;
 use crate::ltm::{
     CausalGraph, CyclePartitions, Link, Loop, ModuleLtmRole, classify_module_for_ltm, detect_loops,
+    normalize_module_ref,
 };
 use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
@@ -104,8 +105,11 @@ fn build_partial_equation(
     deps: &HashSet<Ident<Canonical>>,
     exclude: &Ident<Canonical>,
 ) -> String {
-    let deps_to_wrap: HashSet<Ident<Canonical>> =
-        deps.iter().filter(|d| *d != exclude).cloned().collect();
+    let deps_to_wrap: HashSet<Ident<Canonical>> = deps
+        .iter()
+        .filter(|d| *d != exclude && normalize_module_ref(d) != *exclude)
+        .cloned()
+        .collect();
 
     if deps_to_wrap.is_empty() {
         return equation_text.to_lowercase();
@@ -298,11 +302,21 @@ fn generate_link_score_variables(
                         link_vars.insert(Ident::new(&var_name), ltm_var);
                     }
                 }
+            } else if from_is_module && !to_is_module {
+                // module -> downstream: use standard ceteris-paribus formula.
+                // build_partial_equation is module-ref-aware and excludes
+                // interpunct refs that normalize to the module node from
+                // PREVIOUS wrapping.  generate_auxiliary_to_auxiliary_equation
+                // derives equation text from the AST so identifiers match
+                // post-module-expansion deps.
+                if let Some(to_var) = variables.get(&link.to) {
+                    let equation =
+                        generate_link_score_equation(&link.from, &link.to, to_var, variables);
+                    let ltm_var = create_aux_variable(&var_name, &equation);
+                    link_vars.insert(Ident::new(&var_name), ltm_var);
+                }
             } else {
-                // module -> downstream or module -> module: use black box formula.
-                // The aux-to-aux formula doesn't work here because the consumer's
-                // equation references module·output (with interpunct) not the
-                // module node directly.
+                // module -> module: no downstream equation to analyze
                 let eq = generate_module_link_score_equation(&link.from, &link.to, variables);
                 let ltm_var = create_aux_variable(&var_name, &eq);
                 link_vars.insert(Ident::new(&var_name), ltm_var);
@@ -437,17 +451,40 @@ fn generate_auxiliary_to_auxiliary_equation(
     to: &Ident<Canonical>,
     to_var: &Variable,
 ) -> String {
-    // Get the equation text of the 'to' variable
-    let to_equation = match to_var {
-        Variable::Stock {
-            eqn: Some(Equation::Scalar(eq)),
-            ..
-        } => eq.clone(),
-        Variable::Var {
-            eqn: Some(Equation::Scalar(eq)),
-            ..
-        } => eq.clone(),
-        _ => "0".to_string(), // Default if no equation
+    use crate::ast::Ast;
+
+    // Get the equation text of the 'to' variable.  Prefer the AST when
+    // available because the `eqn` field holds the *original* text (e.g.,
+    // "SMTH1(x, 5)") while the AST holds the post-module-expansion form
+    // (e.g., Var("$⁚s⁚0⁚smth1·output")).  Using the AST-derived text
+    // ensures the identifiers in the equation match those in `deps`.
+    let to_equation = if let Some(ast) = to_var.ast() {
+        match ast {
+            Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => crate::patch::expr2_to_string(expr),
+            _ => match to_var {
+                Variable::Stock {
+                    eqn: Some(Equation::Scalar(eq)),
+                    ..
+                }
+                | Variable::Var {
+                    eqn: Some(Equation::Scalar(eq)),
+                    ..
+                } => eq.clone(),
+                _ => "0".to_string(),
+            },
+        }
+    } else {
+        match to_var {
+            Variable::Stock {
+                eqn: Some(Equation::Scalar(eq)),
+                ..
+            }
+            | Variable::Var {
+                eqn: Some(Equation::Scalar(eq)),
+                ..
+            } => eq.clone(),
+            _ => "0".to_string(),
+        }
     };
 
     // Get dependencies of the 'to' variable
@@ -459,18 +496,16 @@ fn generate_auxiliary_to_auxiliary_equation(
 
     let partial_eq = build_partial_equation(&to_equation, &deps, from);
 
+    let from_q = quote_ident(from.as_str());
+    let to_q = quote_ident(to.as_str());
+
     // Using SAFEDIV for both divisions
     // Note: We still need the outer check for when EITHER is zero, since we multiply the results
     let abs_part = format!(
-        "ABS(SAFEDIV((({partial_eq}) - PREVIOUS({to})), ({to} - PREVIOUS({to})), 0))",
-        partial_eq = partial_eq,
-        to = to.as_str()
+        "ABS(SAFEDIV((({partial_eq}) - PREVIOUS({to_q})), ({to_q} - PREVIOUS({to_q})), 0))",
     );
     let sign_part = format!(
-        "SIGN(SAFEDIV((({partial_eq}) - PREVIOUS({to})), ({from} - PREVIOUS({from})), 0))",
-        partial_eq = partial_eq,
-        to = to.as_str(),
-        from = from.as_str()
+        "SIGN(SAFEDIV((({partial_eq}) - PREVIOUS({to_q})), ({from_q} - PREVIOUS({from_q})), 0))",
     );
 
     // Return 0 at the initial timestep when PREVIOUS values don't exist yet
@@ -479,13 +514,9 @@ fn generate_auxiliary_to_auxiliary_equation(
             (TIME = PREVIOUS(TIME)) \
             then 0 \
             else if \
-                (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
+                (({to_q} - PREVIOUS({to_q})) = 0) OR (({from_q} - PREVIOUS({from_q})) = 0) \
                 then 0 \
                 else {abs_part} * {sign_part}",
-        to = to.as_str(),
-        from = from.as_str(),
-        abs_part = abs_part,
-        sign_part = sign_part
     )
 }
 
@@ -1493,16 +1524,14 @@ mod tests {
             "Should generate link score for module to output"
         );
 
-        // Check that the equations use the black box formula
-        // Remove debug output
+        // input->module uses black box, module->downstream uses ceteris-paribus
         for var in link_vars.values() {
             if let datamodel::Variable::Aux(aux) = var
                 && let datamodel::Equation::Scalar(eq) = &aux.equation
             {
-                // Module link scores should use the black box formula
                 assert!(
-                    eq.contains("SIGN"),
-                    "Module link should include SIGN for polarity"
+                    eq.contains("SIGN") || eq.contains("SAFEDIV"),
+                    "Module link should include SIGN or SAFEDIV"
                 );
                 assert!(
                     eq.contains("PREVIOUS"),
@@ -2494,6 +2523,183 @@ mod tests {
         assert!(
             !u1_eq.contains("loop_score⁚r1"),
             "u1 should NOT reference r1 (different group)"
+        );
+    }
+
+    #[test]
+    fn test_build_partial_equation_excludes_module_output_ref() {
+        // When `exclude` is a normalized module node, interpunct refs that
+        // normalize to the same module should also be excluded from PREVIOUS
+        // wrapping (they represent the same causal influence).
+        let mut deps = HashSet::new();
+        deps.insert(Ident::new("$⁚s⁚0⁚smth1\u{00B7}output"));
+        deps.insert(Ident::new("other"));
+
+        let exclude = Ident::new("$⁚s⁚0⁚smth1");
+
+        // Equation text uses the quoted interpunct ref as it would appear
+        // after expr2_to_string round-trips the post-expansion AST.
+        let eq_text = r#""$⁚s⁚0⁚smth1·output" * 0.5 + other * 0.5"#;
+
+        let partial = build_partial_equation(eq_text, &deps, &exclude);
+
+        assert!(
+            partial.contains("PREVIOUS(other)"),
+            "other should be wrapped in PREVIOUS, got: {partial}"
+        );
+        assert!(
+            !partial.contains("PREVIOUS(\"$"),
+            "module output ref should NOT be wrapped in PREVIOUS, got: {partial}"
+        );
+    }
+
+    #[test]
+    fn test_module_to_downstream_uses_ceteris_paribus() {
+        // When a module output feeds into a downstream variable alongside
+        // other inputs, the link score should use the ceteris-paribus
+        // (SAFEDIV) formula, not the black-box ABS(ΔTo/ΔTo) formula.
+        use crate::ast::{Ast, Expr2};
+        use crate::builtins::Loc;
+        use crate::ltm::{Link, LinkPolarity};
+
+        let mut variables = HashMap::new();
+
+        let module_var = Variable::Module {
+            ident: Ident::new("$⁚combined⁚0⁚smth1"),
+            model_name: Ident::new("stdlib⁚smth1"),
+            units: None,
+            inputs: vec![],
+            errors: vec![],
+            unit_errors: vec![],
+        };
+        variables.insert(Ident::new("$⁚combined⁚0⁚smth1"), module_var);
+
+        // Build a downstream variable whose AST references the module output
+        // plus another input: module·output * 0.5 + other * 0.5
+        let module_output_ref = Ident::new("$⁚combined⁚0⁚smth1\u{00B7}output");
+        let ast = Ast::Scalar(Expr2::Op2(
+            crate::ast::BinaryOp::Add,
+            Box::new(Expr2::Op2(
+                crate::ast::BinaryOp::Mul,
+                Box::new(Expr2::Var(module_output_ref, None, Loc::default())),
+                Box::new(Expr2::Const("0.5".to_string(), 0.5, Loc::default())),
+                None,
+                Loc::default(),
+            )),
+            Box::new(Expr2::Op2(
+                crate::ast::BinaryOp::Mul,
+                Box::new(Expr2::Var(Ident::new("other"), None, Loc::default())),
+                Box::new(Expr2::Const("0.5".to_string(), 0.5, Loc::default())),
+                None,
+                Loc::default(),
+            )),
+            None,
+            Loc::default(),
+        ));
+
+        let downstream_var = Variable::Var {
+            ident: Ident::new("combined"),
+            ast: Some(ast),
+            init_ast: None,
+            eqn: Some(Equation::Scalar(
+                "SMTH1(x, 3) * 0.5 + other * 0.5".to_string(),
+            )),
+            units: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            unit_errors: vec![],
+        };
+        variables.insert(Ident::new("combined"), downstream_var);
+
+        let other_var = Variable::Var {
+            ident: Ident::new("other"),
+            ast: None,
+            init_ast: None,
+            eqn: Some(Equation::Scalar("TIME * 3".to_string())),
+            units: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            unit_errors: vec![],
+        };
+        variables.insert(Ident::new("other"), other_var);
+
+        let mut links = HashSet::new();
+        links.insert(Link {
+            from: Ident::new("$⁚combined⁚0⁚smth1"),
+            to: Ident::new("combined"),
+            polarity: LinkPolarity::Positive,
+        });
+
+        let link_vars = generate_link_score_variables(&links, &variables, &HashMap::new());
+        assert_eq!(link_vars.len(), 1);
+
+        let var_name = Ident::new("$⁚ltm⁚link_score⁚$⁚combined⁚0⁚smth1→combined");
+        let var = link_vars
+            .get(&var_name)
+            .expect("should have link score variable");
+
+        let eq = match var {
+            datamodel::Variable::Aux(aux) => match &aux.equation {
+                datamodel::Equation::Scalar(s) => s.clone(),
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected aux variable"),
+        };
+
+        assert!(
+            eq.contains("SAFEDIV"),
+            "module-to-downstream link should use ceteris-paribus formula with SAFEDIV, got: {eq}"
+        );
+        assert!(
+            eq.contains("PREVIOUS(other)"),
+            "ceteris-paribus should wrap 'other' in PREVIOUS, got: {eq}"
+        );
+    }
+
+    #[test]
+    fn test_module_link_score_equation_with_dollar_ident_aux_to_aux() {
+        // Verify that the aux-to-aux path produces parseable equations when
+        // the `from` identifier contains special characters ($ and ⁚).
+        use crate::ast::{Ast, Expr2};
+        use crate::builtins::Loc;
+
+        let from = Ident::new("$⁚smoothed_level⁚0⁚smth1");
+
+        let module_output_ref = Ident::new("$⁚smoothed_level⁚0⁚smth1\u{00B7}output");
+        let ast = Ast::Scalar(Expr2::Var(module_output_ref, None, Loc::default()));
+
+        let to_var = Variable::Var {
+            ident: Ident::new("smoothed_level"),
+            ast: Some(ast),
+            init_ast: None,
+            eqn: Some(Equation::Scalar("SMTH1(level, 3)".to_string())),
+            units: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            unit_errors: vec![],
+        };
+
+        let to = Ident::new("smoothed_level");
+        let eq = generate_auxiliary_to_auxiliary_equation(&from, &to, &to_var);
+
+        let result = crate::ast::Expr0::new(&eq, crate::lexer::LexerType::Equation);
+        assert!(
+            result.is_ok(),
+            "aux-to-aux equation with dollar ident should parse: {eq}\nError: {result:?}"
+        );
+        let ast = result.unwrap();
+        assert!(
+            ast.is_some(),
+            "aux-to-aux equation with dollar ident should produce an AST: {eq}"
         );
     }
 }
