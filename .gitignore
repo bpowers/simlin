@@ -91,3 +91,6 @@ __pycache__/
 
 # Hypothesis test database
 .hypothesis/
+
+# Review loop state (per-working-copy)
+.review-timestamp
