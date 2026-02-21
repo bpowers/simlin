@@ -92,12 +92,7 @@ def _header_to_cdef(header_text: str) -> str:
     return "typedef size_t uintptr_t;\n\n" + text
 
 
-header_text = header_path.read_text()
-cdef_content = _header_to_cdef(header_text)
-ffibuilder.cdef(cdef_content)
-
-
-def get_library_path() -> str:
+def _get_library_path() -> str:
     lib_name = "libsimlin.a"
     # Common locations: native release, cross-target release, then debug
     workspace_target = repo_root / "target"
@@ -118,34 +113,40 @@ def get_library_path() -> str:
     )
 
 
-asan_enabled = str(os.environ.get("ASAN", "")).lower() in ("1", "true", "yes", "on")
+# The ffibuilder setup below is only needed at build time (when running from
+# the repo tree where simlin.h exists).  At runtime the precompiled _clib
+# extension is already in the wheel, so skip this when the header is absent.
+if header_path.exists():
+    header_text = header_path.read_text()
+    cdef_content = _header_to_cdef(header_text)
+    ffibuilder.cdef(cdef_content)
 
-extra_compile_args = []
-extra_link_args = []
+    asan_enabled = str(os.environ.get("ASAN", "")).lower() in ("1", "true", "yes", "on")
 
-if platform.system() == "Linux":
-    extra_link_args.append("-lm")
-    extra_link_args.append("-lstdc++")
+    extra_compile_args: list[str] = []
+    extra_link_args: list[str] = []
 
-if asan_enabled:
-    # Ensure the CFFI module is compiled and linked with ASan when consuming a
-    # sanitized libsimlin.a. This avoids unresolved sanitizer symbols.
-    extra_compile_args.append("-fsanitize=address")
-    extra_link_args.append("-fsanitize=address")
+    if platform.system() == "Linux":
+        extra_link_args.append("-lm")
+        extra_link_args.append("-lstdc++")
 
-ffibuilder.set_source(
-    "simlin._clib",
-    """
-    #include <stdint.h>
-    #include <stdbool.h>
-    #include "simlin.h"
-    """,
-    include_dirs=[str(libsimlin_dir)],
-    libraries=[],
-    extra_objects=[get_library_path()],
-    extra_link_args=extra_link_args,
-    extra_compile_args=extra_compile_args,
-)
+    if asan_enabled:
+        extra_compile_args.append("-fsanitize=address")
+        extra_link_args.append("-fsanitize=address")
+
+    ffibuilder.set_source(
+        "simlin._clib",
+        """
+        #include <stdint.h>
+        #include <stdbool.h>
+        #include "simlin.h"
+        """,
+        include_dirs=[str(libsimlin_dir)],
+        libraries=[],
+        extra_objects=[_get_library_path()],
+        extra_link_args=extra_link_args,
+        extra_compile_args=extra_compile_args,
+    )
 
 
 if __name__ == "__main__":

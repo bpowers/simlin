@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from simlin._ffi_build import _header_to_cdef
+import os
+from pathlib import Path
 
+import pytest
+
+from simlin._ffi_build import _header_to_cdef
 
 SAMPLE_HEADER = """\
 #ifndef SIMLIN_ENGINE2_H
@@ -90,9 +94,12 @@ class TestHeaderToCdef:
 
     def test_real_header_parses(self) -> None:
         """The actual simlin.h should transform without error."""
-        from pathlib import Path
-
-        header_path = Path(__file__).resolve().parents[2] / "libsimlin" / "simlin.h"
+        if env_root := os.environ.get("SIMLIN_REPO_ROOT"):
+            header_path = Path(env_root) / "src" / "libsimlin" / "simlin.h"
+        else:
+            header_path = Path(__file__).resolve().parents[2] / "libsimlin" / "simlin.h"
+        if not header_path.exists():
+            pytest.skip(f"simlin.h not found at {header_path}")
         header_text = header_path.read_text()
         cdef = _header_to_cdef(header_text)
         assert "simlin_project_open_xmile" in cdef
