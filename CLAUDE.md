@@ -94,6 +94,12 @@ IMPORTANT: If feedback seems non-actionable, it means you need comments explaini
 ### libsimlin API Design
 Keep the FFI surface small and orthogonal. Prefer composable primitives over bulk endpoints. Do NOT add bulk/batch variants to paper over caller-side concurrency issues.
 
+## Tracking Discovered Issues
+
+When you discover something wrong or concerning during your work -- tech debt, design limitations, broken tooling, missing CI checks, unintended consequences of a committed design, deferred review feedback -- it must be explicitly tracked. Never silently drop these observations.
+
+Spawn the `track-issue` agent (via the Task tool with `subagent_type: "track-issue"`) with a description of the problem. The agent checks for duplicates in GitHub issues and [doc/tech-debt.md](/doc/tech-debt.md), then files the item if it's not already tracked. Using a sub-agent preserves your context on the main task.
+
 ## Generated/Noise Paths
 
 Treat these as generated output unless the task explicitly targets them:

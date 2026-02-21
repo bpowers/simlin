@@ -87,6 +87,8 @@ Ignore suggestions that:
 - Would add unnecessary complexity
 - The reviewer convinced itself weren't actually problems
 
+**Deferred feedback**: Suggestions that are valid but out of scope for this PR (theoretical edge cases, future enhancements, design limitations that don't affect current usage) must NOT be silently dropped. For each such item, spawn the `track-issue` agent (via the Task tool with `subagent_type: "track-issue"`) with a detailed description of the concern. The agent will check for duplicates and file a GitHub issue or tech-debt entry as appropriate.
+
 If ANY feedback would genuinely improve the code:
 - Think deeply about each piece of feedback
 - Identify the ROOT CAUSE, not just the symptom
