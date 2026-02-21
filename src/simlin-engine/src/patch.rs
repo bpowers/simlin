@@ -663,12 +663,12 @@ fn rename_index_expr(
     }
 }
 
-fn expr2_to_string(expr: &Expr2) -> String {
+pub(crate) fn expr2_to_string(expr: &Expr2) -> String {
     let expr0 = expr2_to_expr0(expr);
     crate::ast::print_eqn(&expr0)
 }
 
-fn expr2_to_expr0(expr: &Expr2) -> Expr0 {
+pub(crate) fn expr2_to_expr0(expr: &Expr2) -> Expr0 {
     match expr {
         Expr2::Const(text, value, loc) => Expr0::Const(text.clone(), *value, *loc),
         Expr2::Var(ident, _, loc) => Expr0::Var(RawIdent::new(ident.to_source_repr()), *loc),
@@ -697,7 +697,7 @@ fn expr2_to_expr0(expr: &Expr2) -> Expr0 {
     }
 }
 
-fn index_expr2_to_index_expr0(index: &IndexExpr2) -> crate::ast::IndexExpr0 {
+pub(crate) fn index_expr2_to_index_expr0(index: &IndexExpr2) -> crate::ast::IndexExpr0 {
     use crate::ast::IndexExpr0;
     match index {
         IndexExpr2::Wildcard(loc) => IndexExpr0::Wildcard(*loc),
@@ -712,7 +712,7 @@ fn index_expr2_to_index_expr0(index: &IndexExpr2) -> crate::ast::IndexExpr0 {
     }
 }
 
-fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn<Expr0> {
+pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn<Expr0> {
     use crate::builtins::BuiltinFn;
     match builtin {
         BuiltinFn::Lookup(table_expr, index_expr, _) => UntypedBuiltinFn(

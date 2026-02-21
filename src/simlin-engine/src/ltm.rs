@@ -165,7 +165,7 @@ pub(crate) fn classify_module_for_ltm(
 /// Normalize a module·output reference to just the module node.
 /// E.g., "$⁚s⁚0⁚smth1·output" becomes "$⁚s⁚0⁚smth1".
 /// Non-module references are returned unchanged.
-fn normalize_module_ref(ident: &Ident<Canonical>) -> Ident<Canonical> {
+pub(crate) fn normalize_module_ref(ident: &Ident<Canonical>) -> Ident<Canonical> {
     let s = ident.as_str();
     if let Some(pos) = s.find('\u{00B7}') {
         Ident::new(&s[..pos])

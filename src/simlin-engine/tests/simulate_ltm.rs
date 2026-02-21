@@ -982,3 +982,73 @@ fn test_arms_race_single_partition() {
         "Should have 3 stocks in the partition"
     );
 }
+
+#[test]
+fn test_module_output_multi_input_link_score_magnitude() {
+    // When a module output shares a downstream equation with another input,
+    // the link score for module -> downstream should NOT always be magnitude 1.
+    // It should reflect the partial contribution of the module output.
+    //
+    // Model: level (stock) -> adjustment (flow) -> level
+    //        combined = SMTH1(level, 3) * 0.5 + other_input * 0.5
+    //        other_input = TIME * 3
+    //        adjustment = 100 - combined
+    //
+    // The SMTH1 output and other_input both contribute ~50% to combined.
+    let project = TestProject::new("module_multi_input")
+        .with_sim_time(0.0, 20.0, 0.25)
+        .stock("level", "50", &["adjustment"], &[], None)
+        .aux("other_input", "TIME * 3", None)
+        .aux(
+            "combined",
+            "SMTH1(level, 3) * 0.5 + other_input * 0.5",
+            None,
+        )
+        .flow("adjustment", "100 - combined", None)
+        .compile()
+        .expect("should compile");
+
+    let ltm_project = project
+        .with_ltm_all_links()
+        .expect("LTM augmentation should succeed");
+    let ltm_rc = Arc::new(ltm_project);
+
+    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
+    let results = sim.run_to_end().expect("simulation should run");
+
+    // Find the link score for the smth1 module -> combined
+    let module_link_offset = results
+        .offsets
+        .iter()
+        .find(|(k, _)| {
+            let s = k.as_str();
+            s.starts_with("$⁚ltm⁚link_score⁚") && s.contains("smth1") && s.ends_with("→combined")
+        })
+        .map(|(_, &offset)| offset);
+
+    let offset =
+        module_link_offset.expect("should have a link score variable for module -> combined");
+
+    // Check link scores after the initial settling period (skip t=0 and first
+    // few steps where PREVIOUS values are not yet populated).
+    let mut found_non_unity = false;
+    for step in 8..results.step_count {
+        let value = results.data[step * results.step_size + offset];
+        if value.is_nan() || value == 0.0 {
+            continue;
+        }
+        let magnitude = value.abs();
+        if magnitude < 0.95 {
+            found_non_unity = true;
+            break;
+        }
+    }
+
+    assert!(
+        found_non_unity,
+        "module -> combined link score magnitude should be significantly less than 1 \
+         when the downstream variable has multiple inputs contributing. \
+         All observed magnitudes were >= 0.95, indicating the black-box formula is \
+         still being used."
+    );
+}

@@ -207,14 +207,23 @@ Uses the standard instantaneous formula but recognizes that the "from" variable
 is a stock. The flow's equation is modified by replacing all non-stock
 dependencies with their `PREVIOUS()` values, isolating the stock's contribution.
 
-### Module Links (Black Box)
+### Module Links
 
-`generate_module_link_score_equation()` (`ltm_augment.rs:200`)
+The implementation handles three module link cases:
 
-Module connections use a simplified transfer-function formula. The implementation
-checks three cases: module-output-to-variable, variable-to-module-input, and
-module-to-module. All three use the same basic formula measuring total change
-in the target relative to total change in the source.
+- **Variable-to-module-input**: Uses composite link score reference when the
+  module has internal causal pathways (see composite link scores below), else
+  falls back to the black-box transfer-function formula.
+- **Module-output-to-variable**: Uses the standard ceteris-paribus formula
+  (`generate_auxiliary_to_auxiliary_equation`). The `build_partial_equation`
+  function normalizes interpunct references (e.g., `module·output`) to
+  match the module node identifier, so the module output is correctly
+  excluded from `PREVIOUS()` wrapping while other deps are held at their
+  previous values. Equation text is derived from the post-expansion AST
+  (via `expr2_to_string`) to ensure identifiers match the deps set.
+- **Module-to-module**: Uses a simplified black-box transfer-function formula
+  (`generate_module_link_score_equation`) since modules have no user-visible
+  equation for ceteris-paribus analysis.
 
 ## Module Boundary Handling
 
