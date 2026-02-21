@@ -90,6 +90,7 @@ cleanup_pipelines() {
     done
     rm -f "$PIPELINE_A_OUT" "$PIPELINE_B_OUT" "$PIPELINE_C_OUT"
 }
+trap cleanup_pipelines EXIT INT TERM
 
 # --- Pipeline A: Rust ---
 (

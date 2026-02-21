@@ -15,11 +15,12 @@ cargo build --release --manifest-path src/libsimlin/Cargo.toml
 
 cd src/pysimlin
 
-# Only rebuild the CFFI extension if the static library is newer than the .so,
-# or if the .so doesn't exist yet.
+# Only rebuild the CFFI extension if the static library, header, or build
+# script is newer than the .so (or the .so doesn't exist yet).
 LIBSIMLIN_A="$REPO_ROOT/target/release/libsimlin.a"
+SIMLIN_H="$REPO_ROOT/src/libsimlin/simlin.h"
 CFFI_SO=$(find simlin -maxdepth 1 -name '_clib*.so' -print -quit 2>/dev/null || true)
-if [ -z "$CFFI_SO" ] || [ "$LIBSIMLIN_A" -nt "$CFFI_SO" ] || [ simlin/_ffi_build.py -nt "$CFFI_SO" ]; then
+if [ -z "$CFFI_SO" ] || [ "$LIBSIMLIN_A" -nt "$CFFI_SO" ] || [ "$SIMLIN_H" -nt "$CFFI_SO" ] || [ simlin/_ffi_build.py -nt "$CFFI_SO" ]; then
   echo "Rebuilding CFFI extension..."
   rm -f simlin/_clib*.so
   rm -rf build/

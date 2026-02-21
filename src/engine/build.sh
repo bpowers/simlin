@@ -9,12 +9,16 @@ cd "$DIR"
 echo "Building libsimlin for wasm32-unknown-unknown..."
 cargo build -p simlin --lib --release --target wasm32-unknown-unknown --no-default-features
 
-# Copy WASM only if it changed (avoids re-running wasm-opt and invalidating
-# downstream TypeScript builds when Rust source is unchanged).
+# Copy WASM only if the raw cargo output changed (avoids re-running wasm-opt
+# and invalidating downstream TypeScript builds when Rust source is unchanged).
+# We compare against a stashed copy of the pre-optimization WASM because
+# wasm-opt transforms core/libsimlin.wasm in-place, making it differ from
+# the raw cargo output even when nothing changed.
 mkdir -p core
 WASM_SRC="../../target/wasm32-unknown-unknown/release/simlin.wasm"
-if [ ! -f core/libsimlin.wasm ] || ! cmp -s "$WASM_SRC" core/libsimlin.wasm; then
+if [ ! -f core/libsimlin.wasm ] || ! cmp -s "$WASM_SRC" core/libsimlin.wasm.raw; then
   cp "$WASM_SRC" core/libsimlin.wasm
+  cp "$WASM_SRC" core/libsimlin.wasm.raw
 
   # Optimize WASM if wasm-opt is available
   if command -v wasm-opt &> /dev/null && [ "1" != "${DISABLE_WASM_OPT-0}" ]; then
