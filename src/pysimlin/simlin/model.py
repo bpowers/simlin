@@ -305,12 +305,12 @@ class _ModelEditContext:
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         tb: TracebackType | None,
-    ) -> bool:
+    ) -> None:
         if exc_type is not None:
-            return False
+            return
 
         if not self._patch.has_operations():
-            return False
+            return
 
         project = self._model._project
         if project is None:
@@ -329,8 +329,6 @@ class _ModelEditContext:
 
         # Invalidate caches since model state has changed
         self._model._invalidate_caches()
-
-        return False
 
 
 class Model:
@@ -447,11 +445,13 @@ class Model:
                 )
 
             # Convert to Python strings and free C memory
-            deps = []
+            deps: list[str] = []
             for i in range(count):
                 if c_deps[i] != ffi.NULL:
-                    deps.append(c_to_string(c_deps[i]))
+                    name = c_to_string(c_deps[i])
                     free_c_string(c_deps[i])
+                    if name is not None:
+                        deps.append(name)
 
             return deps
 

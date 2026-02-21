@@ -11,8 +11,8 @@ import threading
 import weakref
 from typing import TYPE_CHECKING, Any
 
-# Import the compiled CFFI extension
-from ._clib import ffi, lib
+# Import the compiled CFFI extension (generated at build time by _ffi_build.py)
+from ._clib import ffi, lib  # type: ignore[import-not-found]
 
 if TYPE_CHECKING:
     from .errors import ErrorDetail
@@ -50,7 +50,8 @@ def string_to_c(s: str | None) -> Any:
 def c_to_string(c_str: Any) -> str | None:
     if c_str == ffi.NULL:
         return None
-    return ffi.string(c_str).decode("utf-8")
+    result: str = ffi.string(c_str).decode("utf-8")
+    return result
 
 
 def free_c_string(c_str: Any) -> None:
@@ -71,7 +72,8 @@ def get_error_string(error_code: Any) -> str:
     if c_str == ffi.NULL:
         return f"Unknown error code: {error_code}"
     # Note: simlin_error_str returns a const static string that should NOT be freed
-    return ffi.string(c_str).decode("utf-8")
+    result: str = ffi.string(c_str).decode("utf-8")
+    return result
 
 
 def extract_error_details(err_ptr: Any) -> list[Any]:

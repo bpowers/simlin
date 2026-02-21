@@ -35,12 +35,12 @@ def validate_dt(value: Any) -> str:
         return str(value)
 
     if isinstance(value, str):
-        value = value.strip()
-        if not value:
+        s = value.strip()
+        if not s:
             raise ValueError("dt cannot be an empty string")
 
         # Check for reciprocal format like "1/4"
-        match = _DT_RECIPROCAL_PATTERN.match(value)
+        match = _DT_RECIPROCAL_PATTERN.match(s)
         if match:
             numerator = float(match.group(1))
             denominator = float(match.group(2))
@@ -50,17 +50,17 @@ def validate_dt(value: Any) -> str:
                 raise ValueError(f"dt numerator must be positive, got {numerator}")
             if denominator < 0:
                 raise ValueError(f"dt denominator must be positive, got {denominator}")
-            return value
+            return s
 
         # Try to parse as a plain number
         try:
-            num_value = float(value)
+            num_value = float(s)
             if num_value <= 0:
-                raise ValueError(f"dt must be positive, got {value}")
-            return value
+                raise ValueError(f"dt must be positive, got {s}")
+            return s
         except ValueError:
             raise ValueError(
-                f"Invalid dt format: {value!r}. Expected a positive number or "
+                f"Invalid dt format: {s!r}. Expected a positive number or "
                 f"reciprocal notation like '1/4'"
             ) from None
 

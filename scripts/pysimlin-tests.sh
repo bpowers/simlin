@@ -31,6 +31,9 @@ uv pip install setuptools
 uv run python setup.py build_ext --inplace 2>/dev/null || true
 cd "$REPO_ROOT"
 
+echo "Running pysimlin type checking..."
+uv run --directory src/pysimlin mypy simlin/
+
 echo "Running pysimlin tests..."
 uv run --directory src/pysimlin pytest -q --no-cov tests/
 

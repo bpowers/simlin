@@ -175,6 +175,53 @@ jobs:
       - name: Run TypeScript tests
         run: pnpm test
 
+  pysimlin:
+    name: pysimlin type check and tests
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-pysimlin-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-pysimlin-
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Build libsimlin
+        run: cargo build --release --manifest-path src/libsimlin/Cargo.toml
+
+      - name: Install pysimlin with dev dependencies
+        working-directory: src/pysimlin
+        run: |
+          uv sync --extra dev
+          uv pip install setuptools
+          uv run python setup.py build_ext --inplace 2>/dev/null || true
+
+      - name: Type check with mypy
+        working-directory: src/pysimlin
+        run: uv run mypy simlin/
+
+      - name: Run tests
+        working-directory: src/pysimlin
+        run: uv run pytest -q --no-cov tests/
+
   policy:
     name: Policy checks
     runs-on: ubuntu-latest

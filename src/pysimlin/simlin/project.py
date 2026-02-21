@@ -182,11 +182,13 @@ class Project:
                 )
 
             # Convert to Python strings and free C memory
-            names = []
+            names: list[str] = []
             for i in range(count):
                 if c_names[i] != ffi.NULL:
-                    names.append(c_to_string(c_names[i]))
+                    name = c_to_string(c_names[i])
                     free_c_string(c_names[i])
+                    if name is not None:
+                        names.append(name)
 
             return names
 

@@ -298,7 +298,7 @@ class Run:
         if len(time_index) == 0:
             return ()
 
-        dominant_loop_sets = []
+        dominant_loop_sets: list[frozenset[str]] = []
 
         for t_idx in range(len(time_index)):
             loop_scores = []

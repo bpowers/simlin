@@ -328,7 +328,7 @@ def _create_converter() -> cattrs.Converter:
     def unstructure_view_element(elem: ViewElement) -> dict[str, Any]:
         elem_type = type(elem)
         if elem_type in _view_element_cls_to_name:
-            result = conv.unstructure(elem)
+            result: dict[str, Any] = conv.unstructure(elem)
             result["type"] = _view_element_cls_to_name[elem_type]
             return result
         valid_types = ", ".join(t.__name__ for t in _view_element_cls_to_name)
@@ -336,7 +336,7 @@ def _create_converter() -> cattrs.Converter:
             f"Unknown view element type: {elem_type.__name__}. Expected one of: {valid_types}"
         )
 
-    def structure_view_element(d: dict[str, Any], _: type) -> ViewElement:
+    def structure_view_element(d: dict[str, Any], _: Any) -> ViewElement:
         type_name = d.get("type")
         data = {k: v for k, v in d.items() if k != "type"}
 
@@ -411,7 +411,7 @@ def _create_converter() -> cattrs.Converter:
         )
 
     def structure_link_view_element(d: dict[str, Any], _: type) -> LinkViewElement:
-        multi_points = None
+        multi_points: list[LinkPoint] = []
         if d.get("multiPoints"):
             multi_points = [conv.structure(p, LinkPoint) for p in d["multiPoints"]]
         return LinkViewElement(
@@ -685,7 +685,9 @@ def _create_converter() -> cattrs.Converter:
 
     # View: handle elements list
     def structure_view(d: dict[str, Any], _: type) -> View:
-        elements = [structure_view_element(e, ViewElement) for e in d.get("elements", [])]
+        elements: list[ViewElement] = [
+            structure_view_element(e, ViewElement) for e in d.get("elements", [])
+        ]
         view_box = None
         if d.get("viewBox"):
             vb = d["viewBox"]
