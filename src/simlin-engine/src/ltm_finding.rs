@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::{Canonical, Ident, Result};
 #[cfg(test)]
 use crate::ltm::Link;
-use crate::ltm::{CausalGraph, Loop, LoopPolarity};
+use crate::ltm::{CausalGraph, CyclePartitions, Loop, LoopPolarity};
 use crate::project::Project;
 use crate::results::Results;
 
@@ -453,7 +453,8 @@ pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<F
         });
     }
 
-    rank_and_filter(&mut found_loops);
+    let partitions = causal_graph.compute_cycle_partitions();
+    rank_and_filter(&mut found_loops, &partitions);
 
     Ok(found_loops)
 }
@@ -462,10 +463,15 @@ pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<F
 ///
 /// 1. Sort by average |score| descending
 /// 2. Truncate to MAX_LOOPS (200)
-/// 3. Filter loops contributing less than MIN_CONTRIBUTION (0.1%) of total score
+///    NOTE: This truncation happens before partition-aware filtering. A loop
+///    dominant in a small partition but globally ranked below 200th could be
+///    truncated. In practice MAX_LOOPS is generous enough that this is
+///    extremely unlikely.
+/// 3. Filter loops contributing less than MIN_CONTRIBUTION (0.1%) of
+///    partition-scoped total score at any timestep
 /// 4. Assign deterministic polarity-based IDs (r1, b1, etc.)
 /// 5. Re-sort by score descending for callers
-fn rank_and_filter(found_loops: &mut Vec<FoundLoop>) {
+fn rank_and_filter(found_loops: &mut Vec<FoundLoop>, partitions: &CyclePartitions) {
     // Sort by average |score| descending
     found_loops.sort_by(|a, b| {
         b.avg_abs_score
@@ -476,31 +482,53 @@ fn rank_and_filter(found_loops: &mut Vec<FoundLoop>) {
     // Truncate to MAX_LOOPS
     found_loops.truncate(MAX_LOOPS);
 
-    // Filter by peak per-timestep relative contribution: retain a loop if at
-    // any single timestep its |score| is >= MIN_CONTRIBUTION of the total |score|
-    // at that timestep. This keeps loops that are briefly dominant even if their
-    // average contribution is small.
+    // Filter by peak per-timestep relative contribution within partition:
+    // retain a loop if at any single timestep its |score| is >= MIN_CONTRIBUTION
+    // of the partition-scoped total |score| at that timestep.
     let step_count = found_loops.first().map_or(0, |l| l.scores.len());
     debug_assert!(
         found_loops.iter().all(|l| l.scores.len() == step_count),
         "all loops must have the same number of timesteps"
     );
     if step_count > 0 {
-        let mut timestep_totals: Vec<f64> = vec![0.0; step_count];
-        for fl in found_loops.iter() {
-            for (i, &(_, score)) in fl.scores.iter().enumerate() {
-                if !score.is_nan() {
-                    timestep_totals[i] += score.abs();
+        // Group loops by partition
+        let mut partition_groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+        for (i, fl) in found_loops.iter().enumerate() {
+            let partition = partitions.partition_for_loop(&fl.loop_info);
+            partition_groups.entry(partition).or_default().push(i);
+        }
+
+        // Compute per-partition, per-timestep totals
+        let mut partition_totals: HashMap<Option<usize>, Vec<f64>> = HashMap::new();
+        for (&partition, indices) in &partition_groups {
+            let mut totals = vec![0.0; step_count];
+            for &idx in indices {
+                for (i, &(_, score)) in found_loops[idx].scores.iter().enumerate() {
+                    if !score.is_nan() {
+                        totals[i] += score.abs();
+                    }
                 }
             }
+            partition_totals.insert(partition, totals);
         }
-        found_loops.retain(|l| {
-            l.scores.iter().enumerate().any(|(i, &(_, score))| {
-                !score.is_nan()
-                    && timestep_totals[i] > 0.0
-                    && score.abs() / timestep_totals[i] >= MIN_CONTRIBUTION
-            })
-        });
+
+        // Assign partition key to each loop before retain (since retain borrows mutably)
+        let loop_partitions: Vec<Option<usize>> = found_loops
+            .iter()
+            .map(|fl| partitions.partition_for_loop(&fl.loop_info))
+            .collect();
+
+        let mut keep = vec![false; found_loops.len()];
+        for (idx, fl) in found_loops.iter().enumerate() {
+            let partition = loop_partitions[idx];
+            let totals = &partition_totals[&partition];
+            keep[idx] = fl.scores.iter().enumerate().any(|(i, &(_, score))| {
+                !score.is_nan() && totals[i] > 0.0 && score.abs() / totals[i] >= MIN_CONTRIBUTION
+            });
+        }
+
+        let mut keep_iter = keep.iter();
+        found_loops.retain(|_| *keep_iter.next().unwrap());
     }
 
     // Assign deterministic IDs (sorts by content key for stable naming)
@@ -985,11 +1013,13 @@ mod tests {
     /// Populates a single timestep of score data so per-timestep filtering works.
     fn make_found_loop(
         var_pairs: &[(&str, &str)],
+        stocks: &[&str],
         polarity: LoopPolarity,
         avg_abs_score: f64,
     ) -> FoundLoop {
         make_found_loop_with_scores(
             var_pairs,
+            stocks,
             polarity,
             avg_abs_score,
             vec![(0.0, avg_abs_score)],
@@ -998,6 +1028,7 @@ mod tests {
 
     fn make_found_loop_with_scores(
         var_pairs: &[(&str, &str)],
+        stocks: &[&str],
         polarity: LoopPolarity,
         avg_abs_score: f64,
         scores: Vec<(f64, f64)>,
@@ -1014,7 +1045,7 @@ mod tests {
             loop_info: Loop {
                 id: String::new(),
                 links,
-                stocks: vec![],
+                stocks: stocks.iter().map(|s| Ident::new(s)).collect(),
                 polarity,
             },
             scores,
@@ -1022,15 +1053,30 @@ mod tests {
         }
     }
 
+    /// Create a CyclePartitions where all given stocks are in a single partition.
+    fn single_partition(stocks: &[&str]) -> CyclePartitions {
+        let stock_idents: Vec<Ident<Canonical>> = stocks.iter().map(|s| Ident::new(s)).collect();
+        let stock_partition: HashMap<Ident<Canonical>, usize> =
+            stock_idents.iter().map(|s| (s.clone(), 0)).collect();
+        CyclePartitions {
+            partitions: vec![stock_idents],
+            stock_partition,
+        }
+    }
+
     #[test]
     fn test_rank_and_filter_truncates_to_max_loops() {
         // Create MAX_LOOPS + 50 loops and verify truncation
+        let stock_names: Vec<String> = (0..MAX_LOOPS + 50)
+            .map(|i| format!("stock_{i:04}"))
+            .collect();
         let mut loops: Vec<FoundLoop> = (0..MAX_LOOPS + 50)
             .map(|i| {
                 let name_a = format!("var_a_{i:04}");
                 let name_b = format!("var_b_{i:04}");
                 make_found_loop(
                     &[(&name_a, &name_b), (&name_b, &name_a)],
+                    &[&stock_names[i]],
                     LoopPolarity::Reinforcing,
                     // Give all loops equal score so none are filtered by MIN_CONTRIBUTION
                     1.0,
@@ -1038,8 +1084,12 @@ mod tests {
             })
             .collect();
 
+        // All stocks in one partition so filtering works like before
+        let all_stocks: Vec<&str> = stock_names.iter().map(|s| s.as_str()).collect();
+        let partitions = single_partition(&all_stocks);
+
         assert_eq!(loops.len(), MAX_LOOPS + 50);
-        rank_and_filter(&mut loops);
+        rank_and_filter(&mut loops, &partitions);
         assert_eq!(
             loops.len(),
             MAX_LOOPS,
@@ -1056,17 +1106,20 @@ mod tests {
         let mut loops = vec![
             make_found_loop(
                 &[("big_a", "big_b"), ("big_b", "big_a")],
+                &["stock_x"],
                 LoopPolarity::Reinforcing,
                 1000.0,
             ),
             make_found_loop(
                 &[("tiny_a", "tiny_b"), ("tiny_b", "tiny_a")],
+                &["stock_x"],
                 LoopPolarity::Balancing,
                 0.0001,
             ),
         ];
 
-        rank_and_filter(&mut loops);
+        let partitions = single_partition(&["stock_x"]);
+        rank_and_filter(&mut loops, &partitions);
 
         // Only the dominant loop should remain
         assert_eq!(
@@ -1082,22 +1135,26 @@ mod tests {
         let mut loops = vec![
             make_found_loop(
                 &[("low_a", "low_b"), ("low_b", "low_a")],
+                &["stock_x"],
                 LoopPolarity::Balancing,
                 1.0,
             ),
             make_found_loop(
                 &[("high_a", "high_b"), ("high_b", "high_a")],
+                &["stock_x"],
                 LoopPolarity::Reinforcing,
                 100.0,
             ),
             make_found_loop(
                 &[("mid_a", "mid_b"), ("mid_b", "mid_a")],
+                &["stock_x"],
                 LoopPolarity::Reinforcing,
                 50.0,
             ),
         ];
 
-        rank_and_filter(&mut loops);
+        let partitions = single_partition(&["stock_x"]);
+        rank_and_filter(&mut loops, &partitions);
 
         // Should be sorted by score descending
         assert_eq!(loops.len(), 3);
@@ -1127,6 +1184,7 @@ mod tests {
         // avg_abs_score = 100/100 = 1.0
         let spike_loop = make_found_loop_with_scores(
             &[("spike_a", "spike_b"), ("spike_b", "spike_a")],
+            &["stock_x"],
             LoopPolarity::Reinforcing,
             1.0,
             spike_scores,
@@ -1136,13 +1194,15 @@ mod tests {
         let steady_scores: Vec<(f64, f64)> = (0..n).map(|i| (i as f64, 50.0)).collect();
         let steady_loop = make_found_loop_with_scores(
             &[("steady_a", "steady_b"), ("steady_b", "steady_a")],
+            &["stock_x"],
             LoopPolarity::Reinforcing,
             50.0,
             steady_scores,
         );
 
+        let partitions = single_partition(&["stock_x"]);
         let mut loops = vec![spike_loop, steady_loop];
-        rank_and_filter(&mut loops);
+        rank_and_filter(&mut loops, &partitions);
 
         // Both loops should be retained: the spike loop has 100/(100+50) = 66.7%
         // contribution at step 50, well above MIN_CONTRIBUTION.
@@ -1150,6 +1210,55 @@ mod tests {
             loops.len(),
             2,
             "Briefly dominant loop should be retained by per-timestep filtering"
+        );
+    }
+
+    #[test]
+    fn test_rank_and_filter_partitioned_filtering() {
+        // Two partitions: partition A has a dominant loop and a tiny loop.
+        // Partition B has a single loop that would be globally negligible
+        // but is the ONLY loop in its partition.
+        //
+        // Without partition-aware filtering, loop_b would be filtered out
+        // because its score is tiny relative to the global total.
+        // With partition-aware filtering, it's retained because it's 100%
+        // of its partition's total.
+        let mut loops = vec![
+            make_found_loop(
+                &[("big_a", "big_b"), ("big_b", "big_a")],
+                &["stock_a"],
+                LoopPolarity::Reinforcing,
+                1000.0,
+            ),
+            make_found_loop(
+                &[("small_a", "small_b"), ("small_b", "small_a")],
+                &["stock_a"],
+                LoopPolarity::Balancing,
+                100.0,
+            ),
+            make_found_loop(
+                &[("other_a", "other_b"), ("other_b", "other_a")],
+                &["stock_x"],
+                LoopPolarity::Reinforcing,
+                0.01,
+            ),
+        ];
+
+        let partitions = CyclePartitions {
+            partitions: vec![vec![Ident::new("stock_a")], vec![Ident::new("stock_x")]],
+            stock_partition: vec![(Ident::new("stock_a"), 0), (Ident::new("stock_x"), 1)]
+                .into_iter()
+                .collect(),
+        };
+
+        rank_and_filter(&mut loops, &partitions);
+
+        // All 3 loops should be retained: the "other" loop is 100% of
+        // its own partition's total at its timestep
+        assert_eq!(
+            loops.len(),
+            3,
+            "Loop dominant in its own partition should be retained even if globally tiny"
         );
     }
 }

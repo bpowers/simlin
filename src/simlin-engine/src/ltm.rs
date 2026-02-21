@@ -4,7 +4,7 @@
 
 //! Loops That Matter (LTM) implementation for loop dominance analysis
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::ast::{Ast, BinaryOp, Expr2, IndexExpr2};
 use crate::common::{Canonical, Ident, Result};
@@ -194,6 +194,113 @@ fn get_variable_dependencies(var: &Variable) -> Vec<Ident<Canonical>> {
             }
         }
     }
+}
+
+/// Cycle partitions: groups of stocks connected by feedback loops.
+///
+/// Two stocks are in the same partition if they are mutually reachable
+/// through the causal graph (i.e., they form a strongly connected component
+/// in the stock-to-stock reachability graph). Relative loop scores should
+/// only be compared within the same partition.
+pub struct CyclePartitions {
+    /// Partitions as sorted Vecs of stock idents.
+    /// Outer Vec is sorted by the lexicographically smallest stock in each partition.
+    pub partitions: Vec<Vec<Ident<Canonical>>>,
+    /// Stock -> partition index (into `partitions`).
+    pub stock_partition: HashMap<Ident<Canonical>, usize>,
+}
+
+impl CyclePartitions {
+    /// Look up the partition index for a loop. Uses the loop's first stock.
+    /// Returns None for loops with no stocks (e.g., cross-module loops).
+    pub fn partition_for_loop(&self, loop_item: &Loop) -> Option<usize> {
+        loop_item
+            .stocks
+            .first()
+            .and_then(|s| self.stock_partition.get(s).copied())
+    }
+}
+
+/// Standard Tarjan's SCC algorithm on a directed graph of stock nodes.
+///
+/// Takes a deterministically-ordered list of stock nodes and a reachability
+/// map, returns strongly connected components.
+fn tarjan_scc(
+    nodes: &[Ident<Canonical>],
+    reachability: &HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>>,
+) -> Vec<Vec<Ident<Canonical>>> {
+    struct TarjanState {
+        index_counter: usize,
+        stack: Vec<Ident<Canonical>>,
+        on_stack: HashSet<Ident<Canonical>>,
+        indices: HashMap<Ident<Canonical>, usize>,
+        lowlinks: HashMap<Ident<Canonical>, usize>,
+        sccs: Vec<Vec<Ident<Canonical>>>,
+    }
+
+    fn strongconnect(
+        v: &Ident<Canonical>,
+        reachability: &HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>>,
+        state: &mut TarjanState,
+    ) {
+        state.indices.insert(v.clone(), state.index_counter);
+        state.lowlinks.insert(v.clone(), state.index_counter);
+        state.index_counter += 1;
+        state.stack.push(v.clone());
+        state.on_stack.insert(v.clone());
+
+        if let Some(neighbors) = reachability.get(v) {
+            let mut sorted_neighbors: Vec<_> = neighbors.iter().collect();
+            sorted_neighbors.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+            for w in sorted_neighbors {
+                if !state.indices.contains_key(w) {
+                    strongconnect(w, reachability, state);
+                    let w_lowlink = state.lowlinks[w];
+                    let v_lowlink = state.lowlinks.get_mut(v).unwrap();
+                    if w_lowlink < *v_lowlink {
+                        *v_lowlink = w_lowlink;
+                    }
+                } else if state.on_stack.contains(w) {
+                    let w_index = state.indices[w];
+                    let v_lowlink = state.lowlinks.get_mut(v).unwrap();
+                    if w_index < *v_lowlink {
+                        *v_lowlink = w_index;
+                    }
+                }
+            }
+        }
+
+        if state.lowlinks[v] == state.indices[v] {
+            let mut scc = Vec::new();
+            loop {
+                let w = state.stack.pop().unwrap();
+                state.on_stack.remove(&w);
+                scc.push(w.clone());
+                if &w == v {
+                    break;
+                }
+            }
+            state.sccs.push(scc);
+        }
+    }
+
+    let mut state = TarjanState {
+        index_counter: 0,
+        stack: Vec::new(),
+        on_stack: HashSet::new(),
+        indices: HashMap::new(),
+        lowlinks: HashMap::new(),
+        sccs: Vec::new(),
+    };
+
+    for node in nodes {
+        if !state.indices.contains_key(node) {
+            strongconnect(node, reachability, &mut state);
+        }
+    }
+
+    state.sccs
 }
 
 /// Graph representation for loop detection
@@ -751,6 +858,72 @@ impl CausalGraph {
             .filter(|node| self.stocks.contains(*node))
             .cloned()
             .collect()
+    }
+
+    /// Compute cycle partitions: groups of stocks connected by feedback paths.
+    ///
+    /// Uses BFS through the full causal graph to build stock-to-stock reachability,
+    /// then Tarjan's SCC algorithm to group mutually-reachable stocks.
+    pub fn compute_cycle_partitions(&self) -> CyclePartitions {
+        let reachability = self.build_stock_reachability();
+        let mut stock_names: Vec<Ident<Canonical>> = self.stocks.iter().cloned().collect();
+        stock_names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+        let sccs = tarjan_scc(&stock_names, &reachability);
+
+        let mut partitions: Vec<Vec<Ident<Canonical>>> = sccs
+            .into_iter()
+            .map(|mut scc| {
+                scc.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                scc
+            })
+            .collect();
+        partitions.sort_by(|a, b| a[0].as_str().cmp(b[0].as_str()));
+
+        let mut stock_partition = HashMap::new();
+        for (idx, partition) in partitions.iter().enumerate() {
+            for stock in partition {
+                stock_partition.insert(stock.clone(), idx);
+            }
+        }
+
+        CyclePartitions {
+            partitions,
+            stock_partition,
+        }
+    }
+
+    /// BFS from each stock through the full causal graph to find which other
+    /// stocks are reachable. Continues past intermediate stocks so that
+    /// transitive reachability is captured.
+    fn build_stock_reachability(&self) -> HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>> {
+        let mut reachability: HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>> = HashMap::new();
+
+        for stock in &self.stocks {
+            let mut visited = HashSet::new();
+            let mut queue = VecDeque::new();
+
+            visited.insert(stock.clone());
+            queue.push_back(stock.clone());
+
+            while let Some(current) = queue.pop_front() {
+                if let Some(neighbors) = self.edges.get(&current) {
+                    for neighbor in neighbors {
+                        if visited.insert(neighbor.clone()) {
+                            queue.push_back(neighbor.clone());
+                        }
+                    }
+                }
+            }
+
+            let reachable_stocks: HashSet<Ident<Canonical>> = visited
+                .into_iter()
+                .filter(|node| self.stocks.contains(node) && node != stock)
+                .collect();
+            reachability.insert(stock.clone(), reachable_stocks);
+        }
+
+        reachability
     }
 
     /// Return all causal links in the model with their computed polarity.
@@ -3385,5 +3558,237 @@ mod tests {
             classify_module_for_ltm(&smth1_ident, smth1_model),
             ModuleLtmRole::DynamicModule
         );
+    }
+
+    // --- Cycle Partition tests ---
+
+    #[test]
+    fn test_cycle_partitions_single_stock_self_loop() {
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("stock", "100", &["flow"], &[], None),
+                x_flow("flow", "stock * 0.1", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[model]);
+        let project = Project::from(project);
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+
+        let partitions = graph.compute_cycle_partitions();
+        assert_eq!(partitions.partitions.len(), 1);
+        assert_eq!(partitions.partitions[0].len(), 1);
+        assert_eq!(partitions.partitions[0][0].as_str(), "stock");
+        assert_eq!(partitions.stock_partition[&Ident::new("stock")], 0);
+    }
+
+    #[test]
+    fn test_cycle_partitions_two_independent_stocks() {
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("alpha", "50", &["flow_a"], &[], None),
+                x_flow("flow_a", "alpha * 0.1", None),
+                x_stock("beta", "10", &["flow_b"], &[], None),
+                x_flow("flow_b", "beta * 0.2", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[model]);
+        let project = Project::from(project);
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+
+        let partitions = graph.compute_cycle_partitions();
+        assert_eq!(partitions.partitions.len(), 2);
+        // Sorted by first element: alpha < beta
+        assert_eq!(partitions.partitions[0], vec![Ident::new("alpha")]);
+        assert_eq!(partitions.partitions[1], vec![Ident::new("beta")]);
+        assert_ne!(
+            partitions.stock_partition[&Ident::new("alpha")],
+            partitions.stock_partition[&Ident::new("beta")]
+        );
+    }
+
+    #[test]
+    fn test_cycle_partitions_two_mutually_reachable_stocks() {
+        // prey <-> predators through flows
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("prey", "100", &["prey_births"], &["prey_deaths"], None),
+                x_flow("prey_births", "prey * 0.1", None),
+                x_flow("prey_deaths", "prey * predators * 0.01", None),
+                x_stock("predators", "10", &["pred_births"], &["pred_deaths"], None),
+                x_flow("pred_births", "predators * prey * 0.001", None),
+                x_flow("pred_deaths", "predators * 0.05", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[model]);
+        let project = Project::from(project);
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+
+        let partitions = graph.compute_cycle_partitions();
+        assert_eq!(
+            partitions.partitions.len(),
+            1,
+            "Mutually-reachable stocks should be in one partition"
+        );
+        assert_eq!(partitions.partitions[0].len(), 2);
+        assert_eq!(partitions.partitions[0][0].as_str(), "predators");
+        assert_eq!(partitions.partitions[0][1].as_str(), "prey");
+        assert_eq!(
+            partitions.stock_partition[&Ident::new("prey")],
+            partitions.stock_partition[&Ident::new("predators")]
+        );
+    }
+
+    #[test]
+    fn test_cycle_partitions_three_stocks_two_partitions() {
+        // a <-> b (coupled), c independent
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("stock_a", "50", &["flow_ab"], &[], None),
+                x_flow("flow_ab", "stock_b * 0.1", None),
+                x_stock("stock_b", "30", &["flow_ba"], &[], None),
+                x_flow("flow_ba", "stock_a * 0.2", None),
+                x_stock("stock_c", "10", &["flow_c"], &[], None),
+                x_flow("flow_c", "stock_c * 0.05", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[model]);
+        let project = Project::from(project);
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+
+        let partitions = graph.compute_cycle_partitions();
+        assert_eq!(partitions.partitions.len(), 2);
+        // {stock_a, stock_b} and {stock_c}
+        let coupled = &partitions.partitions[0];
+        let independent = &partitions.partitions[1];
+        assert_eq!(coupled.len(), 2);
+        assert_eq!(coupled[0].as_str(), "stock_a");
+        assert_eq!(coupled[1].as_str(), "stock_b");
+        assert_eq!(independent.len(), 1);
+        assert_eq!(independent[0].as_str(), "stock_c");
+    }
+
+    #[test]
+    fn test_cycle_partitions_one_way_path() {
+        // a -> b but not b -> a: two separate partitions
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("stock_a", "50", &["flow_a"], &[], None),
+                x_flow("flow_a", "stock_a * 0.1", None),
+                x_stock("stock_b", "30", &["flow_b"], &[], None),
+                x_flow("flow_b", "stock_a * 0.2", None), // b depends on a, but a doesn't depend on b
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[model]);
+        let project = Project::from(project);
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+
+        let partitions = graph.compute_cycle_partitions();
+        assert_eq!(
+            partitions.partitions.len(),
+            2,
+            "One-way path should yield two separate partitions"
+        );
+        assert_ne!(
+            partitions.stock_partition[&Ident::new("stock_a")],
+            partitions.stock_partition[&Ident::new("stock_b")]
+        );
+    }
+
+    #[test]
+    fn test_cycle_partitions_determinism() {
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("stock_a", "50", &["flow_ab"], &[], None),
+                x_flow("flow_ab", "stock_b * 0.1", None),
+                x_stock("stock_b", "30", &["flow_ba"], &[], None),
+                x_flow("flow_ba", "stock_a * 0.2", None),
+                x_stock("stock_c", "10", &["flow_c"], &[], None),
+                x_flow("flow_c", "stock_c * 0.05", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[model]);
+        let project = Project::from(project);
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+
+        let p1 = graph.compute_cycle_partitions();
+        let p2 = graph.compute_cycle_partitions();
+
+        assert_eq!(p1.partitions.len(), p2.partitions.len());
+        for (a, b) in p1.partitions.iter().zip(p2.partitions.iter()) {
+            let a_names: Vec<&str> = a.iter().map(|i| i.as_str()).collect();
+            let b_names: Vec<&str> = b.iter().map(|i| i.as_str()).collect();
+            assert_eq!(a_names, b_names);
+        }
+    }
+
+    #[test]
+    fn test_cycle_partitions_partition_for_loop() {
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("stock_a", "50", &["flow_a"], &[], None),
+                x_flow("flow_a", "stock_a * 0.1", None),
+                x_stock("stock_b", "10", &["flow_b"], &[], None),
+                x_flow("flow_b", "stock_b * 0.2", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[model]);
+        let project = Project::from(project);
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+        let partitions = graph.compute_cycle_partitions();
+
+        let loop_a = Loop {
+            id: "r1".to_string(),
+            links: vec![],
+            stocks: vec![Ident::new("stock_a")],
+            polarity: LoopPolarity::Reinforcing,
+        };
+        let loop_b = Loop {
+            id: "r2".to_string(),
+            links: vec![],
+            stocks: vec![Ident::new("stock_b")],
+            polarity: LoopPolarity::Reinforcing,
+        };
+        let loop_no_stocks = Loop {
+            id: "u1".to_string(),
+            links: vec![],
+            stocks: vec![],
+            polarity: LoopPolarity::Undetermined,
+        };
+
+        assert!(partitions.partition_for_loop(&loop_a).is_some());
+        assert!(partitions.partition_for_loop(&loop_b).is_some());
+        assert_ne!(
+            partitions.partition_for_loop(&loop_a),
+            partitions.partition_for_loop(&loop_b)
+        );
+        assert!(partitions.partition_for_loop(&loop_no_stocks).is_none());
     }
 }
