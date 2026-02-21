@@ -362,15 +362,13 @@ fn discovery_arms_race_3party() {
     // Discovery mode
     let found = discover_loops_from_path(model_path);
 
-    // The heuristic finds 3 of 7 loops: the 3 self-adjustment (balancing) loops.
-    // The pairwise and three-way reinforcing loops are pruned by best_score
-    // persistence -- once the strong self-loops set high scores on shared nodes,
-    // the weaker cross-stock paths can't improve on them. This is expected
-    // behavior for the strongest-path heuristic on symmetric models.
+    // With per-stock reset, discovery finds all 7 loops: each stock starts
+    // with fresh best_scores, so pairwise and three-way reinforcing loops are
+    // no longer pruned by scores from earlier stocks' self-loop searches.
     assert_eq!(
         found.len(),
-        3,
-        "Discovery should find 3 loops in arms race model, found {}",
+        7,
+        "Discovery should find all 7 loops in arms race model, found {}",
         found.len()
     );
 
@@ -418,8 +416,9 @@ fn discovery_decoupled_stocks() {
     let found = discover_loops_from_path(model_path);
 
     // The heuristic finds 2 of 3 loops: the self-loops for each stock.
-    // One cross-stock loop is pruned by best_score persistence. This is
-    // expected for the strongest-path heuristic.
+    // The cross-stock loop is missed by the within-stock heuristic (the
+    // strong self-loop paths set high best_scores on shared nodes during
+    // each stock's own search, pruning the weaker cross-stock path).
     assert_eq!(
         found.len(),
         2,

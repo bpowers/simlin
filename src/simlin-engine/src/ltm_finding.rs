@@ -137,19 +137,18 @@ impl SearchGraph {
         let mut found_loops: Vec<Vec<Ident<Canonical>>> = Vec::new();
         let mut seen_sets: HashSet<Vec<String>> = HashSet::new();
 
-        // Initialize best_score for all variables to 0.
-        // This persists across all stock iterations within a timestep.
-        let mut best_score: HashMap<Ident<Canonical>, f64> = HashMap::new();
-        for var in self.adj.keys() {
-            best_score.insert(var.clone(), 0.0);
-        }
-        // Also ensure stocks are in best_score even if they have no outbound edges
+        // For each stock, set TARGET = stock and run the DFS.
+        // Reset best_score per stock so one stock's search does not prune
+        // loops reachable from another stock (Section 12.5 of the reference).
         for stock in &self.stocks {
-            best_score.entry(stock.clone()).or_insert(0.0);
-        }
+            let mut best_score: HashMap<Ident<Canonical>, f64> = HashMap::new();
+            for var in self.adj.keys() {
+                best_score.insert(var.clone(), 0.0);
+            }
+            for s in &self.stocks {
+                best_score.entry(s.clone()).or_insert(0.0);
+            }
 
-        // For each stock, set TARGET = stock and run the DFS
-        for stock in &self.stocks {
             let mut visiting: HashSet<Ident<Canonical>> = HashSet::new();
             let mut stack: Vec<Ident<Canonical>> = Vec::new();
 
@@ -175,7 +174,7 @@ impl SearchGraph {
     /// `target`: the stock we're trying to return to
     /// `visiting`: set of variables on the current DFS path
     /// `stack`: the current path for recording discovered loops
-    /// `best_score`: highest score seen at each variable (persists across stock iterations)
+    /// `best_score`: highest score seen at each variable (reset for each target stock)
     ///
     /// Recursion depth is bounded by the number of unique variables in the model
     /// (the `visiting` set prevents revisiting nodes on the current path). For
@@ -687,49 +686,50 @@ mod tests {
 
         let loops = graph.find_strongest_loops();
 
-        // The algorithm should find exactly one loop: [a, d, b, c]
-        // (the strongest path). Other loops (a->b->c->a and a->d->c->a)
-        // are pruned because the a->d->b path dominates and sets high
-        // best_scores.
+        // With per-stock reset, each stock starts with fresh best_scores.
+        // From stock a: finds [a,d,b,c] (the 4-node loop).
+        // From stock b: finds [b,c,a] (the a->b->c->a loop, score 1000).
+        // From stock c: finds [c,a,d] (the a->d->c->a loop, score 100).
+        // From stock d: all loops already seen (deduped).
+        //
+        // The paper's Figure 7 demonstrates the heuristic's failure mode
+        // within a single stock's search (a->b->c->a is missed when
+        // starting from a), but per-stock reset recovers it from stock b.
         assert_eq!(
             loops.len(),
-            1,
-            "Figure 7: should find exactly one loop (the strongest), found {}",
+            3,
+            "Figure 7: should find all 3 loops with per-stock reset, found {}",
             loops.len()
         );
 
-        let loop_nodes = sorted_node_set(&loops[0]);
+        let mut loop_sets: Vec<Vec<String>> = loops.iter().map(|l| sorted_node_set(l)).collect();
+        loop_sets.sort();
         assert_eq!(
-            loop_nodes,
-            vec!["a", "b", "c", "d"],
-            "Figure 7: the found loop should contain all four nodes"
+            loop_sets,
+            vec![
+                vec!["a", "b", "c"],
+                vec!["a", "b", "c", "d"],
+                vec!["a", "c", "d"],
+            ],
         );
     }
 
-    // --- Test 4: best_score persistence across stock iterations ---
+    // --- Test 4: best_score resets per stock ---
 
     #[test]
-    fn test_best_score_persistence() {
-        // Create a graph where searching from stock A sets high best_scores
-        // that should prevent stock B from finding anything.
-        //
+    fn test_best_score_resets_per_stock() {
         // Graph:
         //   a -> x (score 1000)
-        //   x -> a (score 1000)  -- loop through a
+        //   x -> a (score 1000)  -- strong loop through a
         //   b -> x (score 1)     -- weak path from b
         //   x -> b (score 1)     -- weak path back
         //
-        // When searching from a (TARGET=a):
-        //   check(a, 1.0) -> best_score[a]=1.0
-        //     check(x, 1000) -> best_score[x]=1000
-        //       check(a, 1M) -> a is visiting, a=TARGET, FOUND [a, x]
-        //       check(b, 1000) -> best_score[b]=1000
-        //         (b has no outbound edges in this test besides x, already visiting)
+        // With per-stock reset, each stock starts with fresh best_scores:
         //
-        // When searching from b (TARGET=b):
-        //   check(b, 1.0) -> 1.0 < best_score[b]=1000: PRUNED
+        // TARGET=a: finds [a, x] (strong loop)
+        // TARGET=b: best_scores reset to 0, finds [b, x] (weak loop)
         //
-        // So only one loop should be found.
+        // Both loops are found because stock B is not pruned by stock A's scores.
         let graph = SearchGraph::from_edges(
             edges(&[
                 ("a", "x", 1000.0),
@@ -742,15 +742,16 @@ mod tests {
 
         let loops = graph.find_strongest_loops();
 
-        // Only the a-x loop should be found; b-x is pruned by best_score
         assert_eq!(
             loops.len(),
-            1,
-            "Should find only one loop due to best_score persistence"
+            2,
+            "Per-stock reset should find both loops, found {}",
+            loops.len()
         );
 
-        let loop_nodes = sorted_node_set(&loops[0]);
-        assert_eq!(loop_nodes, vec!["a", "x"]);
+        let mut loop_sets: Vec<Vec<String>> = loops.iter().map(|l| sorted_node_set(l)).collect();
+        loop_sets.sort();
+        assert_eq!(loop_sets, vec![vec!["a", "x"], vec!["b", "x"]]);
     }
 
     // --- Test 5: Loop deduplication ---

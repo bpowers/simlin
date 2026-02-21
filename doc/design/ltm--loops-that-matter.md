@@ -335,10 +335,10 @@ The recursive search follows the paper's pseudocode:
 - **Pruning**: `best_score` tracks the highest accumulated score at which each
   variable has been reached. Strict less-than comparison (`score < best_score`)
   prunes weaker paths; equal scores are explored.
-- **Persistence**: `best_score` is initialized once per timestep and persists
-  across all stock iterations within that timestep. This is critical -- it means
-  a strong loop found starting from stock A can prevent weaker loops from being
-  found when starting from stock B.
+- **Per-stock reset**: `best_score` is reset to zero for all variables at the
+  start of each stock's search, following the paper's pseudocode (Section 12.5).
+  This prevents one stock's search from pruning reachable loops when searching
+  from a different stock.
 - **Deduplication**: `add_loop_if_unique` (`ltm_finding.rs:240`) uses sorted node
   sets to prevent recording the same loop twice.
 
@@ -350,9 +350,10 @@ failure mode (demonstrated in the paper's Figure 7 and tested in
 strong path sets a high `best_score` that prunes exploration via weaker paths
 that might lead to different (but still valid) loops.
 
-The mitigation is that running the search at every timestep with different link
-scores tends to discover loops that are structurally similar to any missed ones.
-The papers' empirical evaluation shows that missed loops are consistently
+The mitigation is twofold: (a) running the search at every timestep with different
+link scores tends to discover loops missed at other timesteps, and (b) resetting
+`best_score` per stock means different starting stocks can discover different
+loops. The papers' empirical evaluation shows that missed loops are consistently
 "siblings" of found loops, differing by only a few links.
 
 ## Current Limitations
@@ -436,9 +437,10 @@ transfer score.
   equations, dollar-sign variable parsing
 
 - **`ltm_finding.rs`**: SearchGraph construction and sorting, trivial loop, Figure
-  7 from the paper, best_score persistence, deduplication, empty graph, zero-score
-  edges, NaN handling, self-loops, disconnected components, link offset parsing,
-  ID assignment, rank-and-filter (truncation, contribution filtering, ordering)
+  7 from the paper, per-stock best_score reset, deduplication, empty graph,
+  zero-score edges, NaN handling, self-loops, disconnected components, link offset
+  parsing, ID assignment, rank-and-filter (truncation, contribution filtering,
+  ordering)
 
 ### Integration Tests (`tests/simulate_ltm.rs`)
 
@@ -454,7 +456,7 @@ transfer score.
   exhaustive enumeration on the logistic growth model
 
 - **`discovery_arms_race_3party`**: Tests the three-party arms race model from the
-  papers (7 exhaustive loops; discovery finds 3 due to heuristic pruning)
+  papers (7 exhaustive loops; discovery finds all 7 with per-stock reset)
 
 - **`discovery_decoupled_stocks`**: Tests time-varying loop activation where
   different loops become active at different timesteps
