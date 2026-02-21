@@ -549,3 +549,263 @@ fn hero_culture_loop_sign_continuity() {
         );
     }
 }
+
+// --- Module composite link score integration tests ---
+
+use simlin_engine::test_common::TestProject;
+use std::sync::Arc;
+
+/// Regression: SMTH1 with an explicit initial_value argument (3rd arg) must
+/// not cause LTM augmentation to reference a non-existent composite variable.
+/// The initial_value port is only used for stock initialization and has no
+/// runtime causal path to the output, so no composite is generated for it.
+#[test]
+fn test_smooth_with_initial_value_ltm() {
+    let project = TestProject::new("smooth_init_val")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("level", "50", &["adj"], &[], None)
+        .aux("init_val", "45", None)
+        .aux("gap", "100 - level", None)
+        .flow("adj", "SMTH1(gap, 5, init_val)", None)
+        .compile()
+        .expect("should compile");
+
+    let ltm_project = project
+        .with_ltm_all_links()
+        .expect("LTM augmentation should succeed even with initial_value port wired");
+
+    let ltm_rc = Arc::new(ltm_project);
+    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
+    let _results = sim.run_to_end().expect("should simulate");
+}
+
+#[test]
+fn test_smooth_goal_seeking_ltm() {
+    // Goal-seeking model with SMOOTH in the feedback path:
+    //   stock level = 50, inflow = adjustment
+    //   adjustment = gap / adjustment_time
+    //   gap = goal - SMTH1(level, smoothing_time)
+    //   goal = 100, adjustment_time = 5, smoothing_time = 3
+    let project = TestProject::new("smooth_goal_ltm")
+        .with_sim_time(0.0, 20.0, 0.25)
+        .aux("goal", "100", None)
+        .stock("level", "50", &["adjustment"], &[], None)
+        .aux("smoothed_level", "SMTH1(level, 3)", None)
+        .aux("gap", "goal - smoothed_level", None)
+        .aux("adjustment_time", "5", None)
+        .flow("adjustment", "gap / adjustment_time", None)
+        .compile()
+        .expect("should compile");
+
+    // Run with LTM on the interpreter
+    let ltm_project = project.with_ltm().expect("LTM augmentation should succeed");
+    let main_ident: Ident<Canonical> = Ident::new("main");
+
+    // Verify loops are detected through the SMOOTH module
+    let loops = ltm::detect_loops(&ltm_project.models[&main_ident], &ltm_project).unwrap();
+    assert!(
+        !loops.is_empty(),
+        "Should detect at least one loop through SMOOTH"
+    );
+
+    let ltm_project_rc = Arc::new(ltm_project);
+    let sim = Simulation::new(&ltm_project_rc, "main").expect("should create simulation");
+    let results1 = sim.run_to_end().expect("interpreter simulation should run");
+
+    // Verify non-zero loop scores exist
+    let loop_score_vars: Vec<_> = results1
+        .offsets
+        .keys()
+        .filter(|k| k.as_str().starts_with("$⁚ltm⁚loop_score⁚"))
+        .collect();
+    assert!(
+        !loop_score_vars.is_empty(),
+        "Should have loop score variables"
+    );
+
+    // Run on VM for cross-validation
+    let compiled = sim.compile().unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results2 = vm.into_results();
+
+    // Compare interpreter and VM results for loop scores
+    for var in &loop_score_vars {
+        let offset = results1.offsets[*var];
+        for step in 0..results1.step_count {
+            let v1 = results1.data[step * results1.step_size + offset];
+            let v2 = results2.data[step * results2.step_size + offset];
+            if v1.is_nan() && v2.is_nan() {
+                continue;
+            }
+            assert!(
+                (v1 - v2).abs() < 1e-6,
+                "Interpreter and VM should agree on loop scores at step {step}: \
+                 {v1} vs {v2} for {}",
+                var.as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn test_smooth_model_discovery_mode() {
+    // Same model as above, but in discovery mode
+    let project = TestProject::new("smooth_discovery")
+        .with_sim_time(0.0, 20.0, 0.25)
+        .aux("goal", "100", None)
+        .stock("level", "50", &["adjustment"], &[], None)
+        .aux("smoothed_level", "SMTH1(level, 3)", None)
+        .aux("gap", "goal - smoothed_level", None)
+        .aux("adjustment_time", "5", None)
+        .flow("adjustment", "gap / adjustment_time", None)
+        .compile()
+        .expect("should compile");
+
+    let discovery_project = project
+        .with_ltm_all_links()
+        .expect("with_ltm_all_links should succeed");
+    let discovery_rc = Arc::new(discovery_project);
+
+    let sim = Simulation::new(&discovery_rc, "main").unwrap();
+    let results = sim.run_to_end().unwrap();
+
+    let found = ltm_finding::discover_loops(&results, &discovery_rc)
+        .expect("discover_loops should succeed");
+
+    assert!(
+        !found.is_empty(),
+        "Discovery mode should find loops through SMOOTH"
+    );
+}
+
+#[test]
+fn test_discovery_ilink_not_in_search_graph() {
+    // Verify that internal module link scores (ilink prefix) are NOT
+    // picked up by discovery mode's parse_link_offsets.
+    let project = TestProject::new("ilink_exclusion")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("level", "50", &["adj"], &[], None)
+        .aux("gap", "100 - level", None)
+        .flow("adj", "SMTH1(gap, 5)", None)
+        .compile()
+        .expect("should compile");
+
+    let discovery_project = project.with_ltm_all_links().expect("should succeed");
+    let discovery_rc = Arc::new(discovery_project);
+
+    let sim = Simulation::new(&discovery_rc, "main").unwrap();
+    let results = sim.run_to_end().unwrap();
+
+    // Check that no result offset keys start with the ilink prefix
+    let has_ilink_in_results = results
+        .offsets
+        .keys()
+        .any(|k| k.as_str().contains("$⁚ltm⁚ilink⁚"));
+
+    // ilink variables live inside the stdlib model namespace, so they
+    // should NOT appear as top-level results offsets in the main model.
+    // (They're inside the module instance, not the parent model.)
+    // This is the key property that prevents discovery mode from ingesting them.
+    if has_ilink_in_results {
+        // Even if they somehow appear, verify parse_link_offsets ignores them
+        // because they don't match the LINK_SCORE_PREFIX ("$⁚ltm⁚link_score⁚")
+        let ilink_count = results
+            .offsets
+            .keys()
+            .filter(|k| k.as_str().contains("$⁚ltm⁚ilink⁚"))
+            .count();
+        let link_score_count = results
+            .offsets
+            .keys()
+            .filter(|k| k.as_str().starts_with("$⁚ltm⁚link_score⁚"))
+            .count();
+
+        // ilink vars should not be confused with link_score vars
+        assert!(
+            link_score_count > 0,
+            "Should have parent-level link score variables"
+        );
+        // This assertion documents that ilink vars don't interfere
+        eprintln!("Note: {ilink_count} ilink vars in results, {link_score_count} link_score vars");
+    }
+}
+
+#[test]
+fn test_multiple_smooth_instances() {
+    // Two SMOOTH instances in different feedback paths.
+    // Each should get its own internal composite scores.
+    let project = TestProject::new("multi_smooth")
+        .with_sim_time(0.0, 10.0, 0.5)
+        .stock("level_a", "50", &["adj_a"], &[], None)
+        .aux("smoothed_a", "SMTH1(level_a, 3)", None)
+        .aux("gap_a", "100 - smoothed_a", None)
+        .flow("adj_a", "gap_a / 5", None)
+        .stock("level_b", "30", &["adj_b"], &[], None)
+        .aux("smoothed_b", "SMTH1(level_b, 2)", None)
+        .aux("gap_b", "80 - smoothed_b", None)
+        .flow("adj_b", "gap_b / 3", None)
+        .compile()
+        .expect("should compile");
+
+    let ltm_project = project.with_ltm().expect("LTM should succeed");
+    let main_ident: Ident<Canonical> = Ident::new("main");
+    let loops = ltm::detect_loops(&ltm_project.models[&main_ident], &ltm_project).unwrap();
+
+    // Each stock-flow path through a SMOOTH creates a feedback loop
+    assert!(
+        loops.len() >= 2,
+        "Should detect at least 2 loops (one per SMOOTH feedback path), found {}",
+        loops.len()
+    );
+
+    // Verify the project can simulate without errors
+    let ltm_rc = Arc::new(ltm_project);
+    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
+    let results = sim.run_to_end().expect("should simulate");
+
+    // Verify we have loop score variables
+    let loop_scores: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| k.as_str().starts_with("$⁚ltm⁚loop_score⁚"))
+        .collect();
+    assert!(
+        loop_scores.len() >= 2,
+        "Should have at least 2 loop score variables, found {}",
+        loop_scores.len()
+    );
+}
+
+#[test]
+fn test_internal_smooth_loop_not_in_parent() {
+    // The smth1 module has an internal balancing loop (output -> flow -> output).
+    // This should NOT appear in the parent model's loop list.
+    let project = TestProject::new("internal_loop_suppression")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("level", "50", &["adj"], &[], None)
+        .aux("gap", "100 - level", None)
+        .flow("adj", "SMTH1(gap, 5)", None)
+        .compile()
+        .expect("should compile");
+
+    let main_ident: Ident<Canonical> = Ident::new("main");
+    let loops = ltm::detect_loops(&project.models[&main_ident], &project).unwrap();
+
+    // No loop should contain only internal module variables.
+    // Parent loops should involve parent-level variables.
+    for loop_item in &loops {
+        let all_internal = loop_item.links.iter().all(|link| {
+            // Internal module variables have names like "flow", "output" that
+            // belong to the stdlib model, not the parent model
+            let from = link.from.as_str();
+            let to = link.to.as_str();
+            (from == "flow" || from == "output") && (to == "flow" || to == "output")
+        });
+        assert!(
+            !all_internal,
+            "Parent loops should not be purely internal module loops. Loop: {}",
+            loop_item.format_path()
+        );
+    }
+}

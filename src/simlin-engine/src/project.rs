@@ -35,30 +35,14 @@ impl Project {
 
     /// Create a new project with LTM instrumentation
     pub fn with_ltm(self) -> crate::common::Result<Self> {
-        // TODO: the current LTM implementation needs extensions to work with arrayed models.
         abort_if_arrayed(&self)?;
 
         let ltm_vars = generate_ltm_variables(&self)?;
         if ltm_vars.is_empty() {
-            // No loops detected, return original Project
             return Ok(self);
         }
 
-        let mut new_datamodel = self.datamodel.clone();
-
-        // Augment all the models with their synthetic LTM variables
-        for model in &mut new_datamodel.models {
-            let model_name = canonicalize(&model.name);
-
-            if let Some(synthetic_vars) = ltm_vars.get(&*model_name) {
-                for (_, var) in synthetic_vars {
-                    model.variables.push(var.clone());
-                }
-            }
-        }
-
-        // Rebuild the Project with the added LTM variables
-        Ok(Project::from(new_datamodel))
+        Ok(Project::from(inject_ltm_vars(self.datamodel, &ltm_vars)))
     }
 
     /// Create a new project with link score variables for ALL causal links.
@@ -78,19 +62,7 @@ impl Project {
             return Ok(self);
         }
 
-        let mut new_datamodel = self.datamodel.clone();
-
-        for model in &mut new_datamodel.models {
-            let model_name = canonicalize(&model.name);
-
-            if let Some(synthetic_vars) = ltm_vars.get(&*model_name) {
-                for (_, var) in synthetic_vars {
-                    model.variables.push(var.clone());
-                }
-            }
-        }
-
-        Ok(Project::from(new_datamodel))
+        Ok(Project::from(inject_ltm_vars(self.datamodel, &ltm_vars)))
     }
 }
 
@@ -128,6 +100,53 @@ impl From<datamodel::Project> for Project {
     }
 }
 
+/// Inject LTM synthetic variables into the datamodel.
+///
+/// For user models (present in `datamodel.models`), variables are appended
+/// directly. For stdlib models (not in `datamodel.models`), we fetch the
+/// stock model from generated code, add the synthetic variables, and append
+/// it to `datamodel.models`. `base_from()` detects these overrides by name
+/// and skips loading the generated version.
+fn inject_ltm_vars(
+    mut datamodel: datamodel::Project,
+    ltm_vars: &HashMap<Ident<Canonical>, Vec<(Ident<Canonical>, datamodel::Variable)>>,
+) -> datamodel::Project {
+    let existing_model_names: std::collections::HashSet<String> = datamodel
+        .models
+        .iter()
+        .map(|m| canonicalize(&m.name).into_owned())
+        .collect();
+
+    for model in &mut datamodel.models {
+        let model_name = canonicalize(&model.name);
+        if let Some(synthetic_vars) = ltm_vars.get(&*model_name) {
+            for (_, var) in synthetic_vars {
+                model.variables.push(var.clone());
+            }
+        }
+    }
+
+    // Add augmented stdlib models to the datamodel
+    for (model_name, synthetic_vars) in ltm_vars {
+        let name_str = model_name.as_str();
+        if let Some(func_name) = name_str.strip_prefix("stdlib\u{205A}") {
+            let canonical_name = canonicalize(name_str).into_owned();
+            if existing_model_names.contains(&canonical_name) {
+                continue;
+            }
+            if let Some(mut stdlib_dm) = crate::stdlib::get(func_name) {
+                stdlib_dm.name = name_str.to_string();
+                for (_, var) in synthetic_vars {
+                    stdlib_dm.variables.push(var.clone());
+                }
+                datamodel.models.push(stdlib_dm);
+            }
+        }
+    }
+
+    datamodel
+}
+
 impl Project {
     pub(crate) fn base_from<F>(project_datamodel: datamodel::Project, mut model_cb: F) -> Self
     where
@@ -157,22 +176,43 @@ impl Project {
                     Default::default()
                 });
 
-        // next, pull in all the models from the stdlib
+        // Build set of model names present in the datamodel so we can detect
+        // when a stdlib model has been overridden (e.g., by LTM augmentation
+        // adding synthetic variables to a stdlib model's definition).
+        let datamodel_model_names: std::collections::HashSet<String> = project_datamodel
+            .models
+            .iter()
+            .map(|m| canonicalize(&m.name).into_owned())
+            .collect();
+
+        // Pull in stdlib models, skipping any that are overridden in the datamodel.
         let mut models_list: Vec<ModelStage0> = crate::stdlib::MODEL_NAMES
             .iter()
+            .filter(|name| {
+                let canonical = canonicalize(&format!("stdlib\u{205A}{name}")).into_owned();
+                !datamodel_model_names.contains(&canonical)
+            })
             .map(|name| crate::stdlib::get(name).unwrap())
             .map(|x_model| {
                 ModelStage0::new(&x_model, &project_datamodel.dimensions, &units_ctx, true)
             })
             .collect();
 
-        // extend the list with the models from the project/XMILE file
-        models_list.extend(
-            project_datamodel
-                .models
+        // Extend with models from the project/XMILE file. When a datamodel
+        // model has the same name as a stdlib model it replaces, mark it
+        // as implicit so the compiler treats it the same as the original.
+        models_list.extend(project_datamodel.models.iter().map(|m| {
+            let canonical_name = canonicalize(&m.name);
+            let is_stdlib_override = crate::stdlib::MODEL_NAMES
                 .iter()
-                .map(|m| ModelStage0::new(m, &project_datamodel.dimensions, &units_ctx, false)),
-        );
+                .any(|name| canonicalize(&format!("stdlib\u{205A}{name}")) == canonical_name);
+            ModelStage0::new(
+                m,
+                &project_datamodel.dimensions,
+                &units_ctx,
+                is_stdlib_override,
+            )
+        }));
 
         let models: HashMap<Ident<Canonical>, &ModelStage0> =
             models_list.iter().map(|m| (m.ident.clone(), m)).collect();
@@ -406,10 +446,10 @@ mod tests {
         // Verify specific link scores exist
         let has_pop_to_births = var_names
             .iter()
-            .any(|name| name.contains("link_score⁚population⁚births"));
+            .any(|name| name.contains("link_score⁚population→births"));
         let has_births_to_pop = var_names
             .iter()
-            .any(|name| name.contains("link_score⁚births⁚population"));
+            .any(|name| name.contains("link_score⁚births→population"));
 
         assert!(
             has_pop_to_births || has_births_to_pop,

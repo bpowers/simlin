@@ -125,6 +125,55 @@ impl LoopPolarity {
     }
 }
 
+/// Classification of a module's role in LTM analysis.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModuleLtmRole {
+    /// PREVIOUS, INIT -- LTM infrastructure modules, never analyze
+    Infrastructure,
+    /// Has internal stocks (SMOOTH, DELAY, TREND, user-defined modules with stocks)
+    DynamicModule,
+    /// No internal stocks -- pure passthrough
+    Passthrough,
+}
+
+/// Classify a module model for LTM analysis.
+///
+/// Infrastructure modules (PREVIOUS, INIT) are used BY link score equations
+/// and must never be analyzed to avoid infinite recursion. Dynamic modules
+/// contain stocks and need composite link scores. Stateless modules are
+/// passthroughs.
+pub(crate) fn classify_module_for_ltm(
+    model_name: &Ident<Canonical>,
+    module_model: &ModelStage1,
+) -> ModuleLtmRole {
+    let name = model_name.as_str();
+    if name == "stdlib⁚previous" || name == "stdlib⁚init" {
+        return ModuleLtmRole::Infrastructure;
+    }
+    if module_model
+        .variables
+        .values()
+        .any(|v| matches!(v, Variable::Stock { .. }))
+    {
+        ModuleLtmRole::DynamicModule
+    } else {
+        ModuleLtmRole::Passthrough
+    }
+}
+
+/// Normalize a module·output reference to just the module node.
+/// E.g., "$⁚s⁚0⁚smth1·output" becomes "$⁚s⁚0⁚smth1".
+/// Non-module references are returned unchanged.
+fn normalize_module_ref(ident: &Ident<Canonical>) -> Ident<Canonical> {
+    let s = ident.as_str();
+    if let Some(pos) = s.find('\u{00B7}') {
+        Ident::new(&s[..pos])
+    } else {
+        ident.clone()
+    }
+}
+
 /// Get direct dependencies from a Variable
 fn get_variable_dependencies(var: &Variable) -> Vec<Ident<Canonical>> {
     match var {
@@ -148,15 +197,25 @@ fn get_variable_dependencies(var: &Variable) -> Vec<Ident<Canonical>> {
 }
 
 /// Graph representation for loop detection
+impl std::fmt::Debug for CausalGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CausalGraph {{ edges: {:?}, stocks: {:?} }}",
+            self.edges, self.stocks
+        )
+    }
+}
+
 pub struct CausalGraph {
     /// Adjacency list representation
-    edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+    pub(crate) edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
     /// Set of stocks in the model
-    stocks: HashSet<Ident<Canonical>>,
+    pub(crate) stocks: HashSet<Ident<Canonical>>,
     /// Variables in the model for polarity analysis
-    variables: HashMap<Ident<Canonical>, Variable>,
+    pub(crate) variables: HashMap<Ident<Canonical>, Variable>,
     /// Module instances and their internal graphs
-    module_graphs: HashMap<Ident<Canonical>, Box<CausalGraph>>,
+    pub(crate) module_graphs: HashMap<Ident<Canonical>, Box<CausalGraph>>,
 }
 
 impl CausalGraph {
@@ -184,7 +243,8 @@ impl CausalGraph {
             {
                 // Build internal graph for this module instance if we have the model
                 if let Some(module_model) = project.models.get(model_name)
-                    && !module_model.implicit
+                    && classify_module_for_ltm(model_name, module_model)
+                        == ModuleLtmRole::DynamicModule
                 {
                     // Recursively build graph for the module
                     let module_graph = CausalGraph::from_model(module_model, project)?;
@@ -216,8 +276,11 @@ impl CausalGraph {
                     // equation for the stock's initial value
                     let deps = get_variable_dependencies(var);
                     for dep in deps {
-                        // Create edge from dependency to variable
-                        edges.entry(dep.clone()).or_default().push(var_name.clone());
+                        let normalized_dep = normalize_module_ref(&dep);
+                        edges
+                            .entry(normalized_dep)
+                            .or_default()
+                            .push(var_name.clone());
                     }
                 }
             }
@@ -569,6 +632,118 @@ impl CausalGraph {
         links
     }
 
+    /// Convert an OPEN path (not a closed circuit) to a list of links.
+    /// Unlike `circuit_to_links`, does NOT add a closing link from last to first.
+    pub(crate) fn path_to_links(&self, path: &[Ident<Canonical>]) -> Vec<Link> {
+        let mut links = Vec::new();
+        for i in 0..path.len().saturating_sub(1) {
+            let from = &path[i];
+            let to = &path[i + 1];
+            let polarity = self.get_link_polarity(from, to);
+            links.push(Link {
+                from: from.clone(),
+                to: to.clone(),
+                polarity,
+            });
+        }
+        links
+    }
+
+    /// Find all simple paths from `from` to `to` using DFS with a visited set.
+    /// Returns sequences of node idents forming open paths.
+    pub(crate) fn find_all_simple_paths(
+        &self,
+        from: &Ident<Canonical>,
+        to: &Ident<Canonical>,
+        max_depth: usize,
+    ) -> Vec<Vec<Ident<Canonical>>> {
+        let mut paths = Vec::new();
+        let mut current_path = vec![from.clone()];
+        let mut visited = HashSet::new();
+        visited.insert(from.clone());
+
+        self.dfs_simple_paths(
+            from,
+            to,
+            &mut current_path,
+            &mut visited,
+            &mut paths,
+            max_depth,
+        );
+
+        paths
+    }
+
+    fn dfs_simple_paths(
+        &self,
+        current: &Ident<Canonical>,
+        target: &Ident<Canonical>,
+        path: &mut Vec<Ident<Canonical>>,
+        visited: &mut HashSet<Ident<Canonical>>,
+        paths: &mut Vec<Vec<Ident<Canonical>>>,
+        max_depth: usize,
+    ) {
+        if path.len() > max_depth {
+            return;
+        }
+
+        if let Some(neighbors) = self.edges.get(current) {
+            for neighbor in neighbors {
+                if neighbor == target {
+                    let mut complete_path = path.clone();
+                    complete_path.push(neighbor.clone());
+                    paths.push(complete_path);
+                } else if !visited.contains(neighbor) {
+                    visited.insert(neighbor.clone());
+                    path.push(neighbor.clone());
+                    self.dfs_simple_paths(neighbor, target, path, visited, paths, max_depth);
+                    path.pop();
+                    visited.remove(neighbor);
+                }
+            }
+        }
+    }
+
+    /// Enumerate internal pathways through a module from each input port to the
+    /// output. Returns a map from input port name to the list of open paths.
+    pub(crate) fn enumerate_module_pathways(
+        &self,
+        output_name: &Ident<Canonical>,
+    ) -> HashMap<Ident<Canonical>, Vec<Vec<Link>>> {
+        let mut result: HashMap<Ident<Canonical>, Vec<Vec<Link>>> = HashMap::new();
+
+        // Compute which nodes have incoming edges within the module.
+        // True input ports have no incoming edges -- they're fed from outside.
+        let mut has_incoming: HashSet<Ident<Canonical>> = HashSet::new();
+        for targets in self.edges.values() {
+            for target in targets {
+                has_incoming.insert(target.clone());
+            }
+        }
+
+        for input_port in self.edges.keys() {
+            if input_port == output_name {
+                continue;
+            }
+            // Skip intermediate variables (they have incoming edges within the module)
+            if has_incoming.contains(input_port) {
+                continue;
+            }
+
+            let raw_paths = self.find_all_simple_paths(input_port, output_name, 20);
+            if raw_paths.is_empty() {
+                continue;
+            }
+
+            let link_paths: Vec<Vec<Link>> =
+                raw_paths.iter().map(|p| self.path_to_links(p)).collect();
+
+            result.insert(input_port.clone(), link_paths);
+        }
+
+        result
+    }
+
     /// Find stocks in a loop
     pub fn find_stocks_in_loop(&self, circuit: &[Ident<Canonical>]) -> Vec<Ident<Canonical>> {
         circuit
@@ -781,7 +956,8 @@ fn analyze_expr_polarity_with_context(
     match expr {
         Expr2::Const(_, _, _) => LinkPolarity::Unknown,
         Expr2::Var(ident, _, _) => {
-            if ident == from_var {
+            let normalized = normalize_module_ref(ident);
+            if &normalized == from_var || ident == from_var {
                 current_polarity
             } else {
                 LinkPolarity::Unknown
@@ -1043,7 +1219,7 @@ fn flip_polarity(pol: LinkPolarity) -> LinkPolarity {
 fn expr_references_var(expr: &Expr2, var: &Ident<Canonical>) -> bool {
     match expr {
         Expr2::Const(_, _, _) => false,
-        Expr2::Var(ident, _, _) => ident == var,
+        Expr2::Var(ident, _, _) => ident == var || &normalize_module_ref(ident) == var,
         Expr2::Subscript(ident, indices, _, _) => {
             ident == var
                 || indices.iter().any(|idx| match idx {
@@ -3008,5 +3184,206 @@ mod tests {
                 (curr.from.as_str(), curr.to.as_str())
             );
         }
+    }
+
+    #[test]
+    fn test_normalize_module_ref() {
+        // Non-module ref passes through unchanged
+        let plain = Ident::new("x");
+        assert_eq!(normalize_module_ref(&plain).as_str(), "x");
+
+        // Module·output ref normalized to just the module node
+        let module_out = Ident::new("$⁚s⁚0⁚smth1\u{00B7}output");
+        assert_eq!(normalize_module_ref(&module_out).as_str(), "$⁚s⁚0⁚smth1");
+
+        // Ident with ⁚ but no · passes through unchanged
+        let internal = Ident::new("$⁚ltm⁚link_score⁚x→y");
+        assert_eq!(
+            normalize_module_ref(&internal).as_str(),
+            "$⁚ltm⁚link_score⁚x→y"
+        );
+    }
+
+    #[test]
+    fn test_module_output_dep_normalized() {
+        use crate::test_common::TestProject;
+
+        // s = SMTH1(x, 5) creates an implicit module "$⁚s⁚0⁚smth1".
+        // s's equation becomes a reference to "$⁚s⁚0⁚smth1·output".
+        // After normalization, the edge should go from the module node to s
+        // (stripping the ·output suffix).
+        let project = TestProject::new("test_mod_norm")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "10", None)
+            .aux("s", "SMTH1(x, 5)", None)
+            .aux("y", "s * 2", None)
+            .compile()
+            .expect("should compile");
+
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let model = &project.models[&main_ident];
+        let graph = CausalGraph::from_model(model, &project).unwrap();
+
+        let smth1_var = model
+            .variables
+            .keys()
+            .find(|k| k.as_str().contains("smth1"))
+            .expect("should have smth1 module variable");
+
+        let s_ident = Ident::new("s");
+        let has_module_to_s = graph
+            .edges
+            .get(smth1_var)
+            .map(|targets| targets.contains(&s_ident))
+            .unwrap_or(false);
+
+        assert!(
+            has_module_to_s,
+            "Should have an edge from smth1 module to s (after normalization). \
+             Edges: {:?}",
+            graph.edges
+        );
+
+        // Also verify there's NO phantom "module·output" node in the graph
+        let has_phantom = graph.edges.keys().any(|k| k.as_str().contains('\u{00B7}'));
+        assert!(
+            !has_phantom,
+            "Should not have any module·output phantom nodes in edges"
+        );
+    }
+
+    #[test]
+    fn test_module_polarity_through_output_ref() {
+        use crate::test_common::TestProject;
+
+        // s = SMTH1(x, 5) creates module ref "$⁚s⁚0⁚smth1·output" in s's AST.
+        // The polarity of module -> s should be positive (s = module·output, identity).
+        // The polarity of s -> y should be positive (y = s * 2).
+        let project = TestProject::new("test_mod_pol")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "10", None)
+            .aux("s", "SMTH1(x, 5)", None)
+            .aux("y", "s * 2", None)
+            .compile()
+            .expect("should compile");
+
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let model = &project.models[&main_ident];
+        let graph = CausalGraph::from_model(model, &project).unwrap();
+
+        let smth1_var = model
+            .variables
+            .keys()
+            .find(|k| k.as_str().contains("smth1"))
+            .expect("should have smth1 module variable");
+
+        let s_ident = Ident::new("s");
+        let polarity = graph.get_link_polarity(smth1_var, &s_ident);
+
+        assert_eq!(
+            polarity,
+            LinkPolarity::Positive,
+            "Polarity from smth1 module to s should be positive (s references module·output), got {:?}",
+            polarity
+        );
+    }
+
+    #[test]
+    fn test_regression_causal_graph_after_implicit_instantiation() {
+        use crate::test_common::TestProject;
+
+        let project = TestProject::new("test_implicit_inst")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "10", None)
+            .aux("s", "SMTH1(x, 5)", None)
+            .compile()
+            .expect("should compile");
+
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let model = &project.models[&main_ident];
+
+        // After compilation, the parent model should have a Module variable for smth1
+        let has_module = model
+            .variables
+            .values()
+            .any(|v| matches!(v, Variable::Module { .. }));
+
+        assert!(
+            has_module,
+            "Parent model should contain a Module variable for the smth1 instance"
+        );
+    }
+
+    #[test]
+    fn test_classify_previous_as_infrastructure() {
+        use crate::test_common::TestProject;
+
+        // PREVIOUS is used by LTM link score equations, so any LTM-augmented
+        // project will have it.
+        let project = TestProject::new("test_classify_prev")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("level", "50", &["adj"], &[], None)
+            .flow("adj", "(100 - level) / 5", None)
+            .compile()
+            .expect("should compile");
+
+        let ltm_project = project.with_ltm().expect("should augment with LTM");
+        let prev_ident = Ident::new("stdlib⁚previous");
+        let prev_model = ltm_project
+            .models
+            .get(&prev_ident)
+            .expect("should have stdlib⁚previous model");
+
+        assert_eq!(
+            classify_module_for_ltm(&prev_ident, prev_model),
+            ModuleLtmRole::Infrastructure
+        );
+    }
+
+    #[test]
+    fn test_classify_init_as_infrastructure() {
+        use crate::test_common::TestProject;
+
+        let project = TestProject::new("test_classify_init")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("level", "50", &["adj"], &[], None)
+            .flow("adj", "(100 - level) / 5", None)
+            .compile()
+            .expect("should compile");
+
+        let ltm_project = project.with_ltm().expect("should augment with LTM");
+        let init_ident = Ident::new("stdlib⁚init");
+        let init_model = ltm_project
+            .models
+            .get(&init_ident)
+            .expect("should have stdlib⁚init model");
+
+        assert_eq!(
+            classify_module_for_ltm(&init_ident, init_model),
+            ModuleLtmRole::Infrastructure
+        );
+    }
+
+    #[test]
+    fn test_classify_smth1_as_dynamic() {
+        use crate::test_common::TestProject;
+
+        let project = TestProject::new("test_classify_smth1")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "10", None)
+            .aux("s", "SMTH1(x, 5)", None)
+            .compile()
+            .expect("should compile");
+
+        let smth1_ident = Ident::new("stdlib⁚smth1");
+        let smth1_model = project
+            .models
+            .get(&smth1_ident)
+            .expect("should have stdlib⁚smth1 model");
+
+        assert_eq!(
+            classify_module_for_ltm(&smth1_ident, smth1_model),
+            ModuleLtmRole::DynamicModule
+        );
     }
 }

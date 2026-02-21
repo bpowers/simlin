@@ -41,8 +41,8 @@ const MIN_CONTRIBUTION: f64 = 0.001;
 /// Prefix for link score synthetic variables
 const LINK_SCORE_PREFIX: &str = "$⁚ltm⁚link_score⁚";
 
-/// Separator character in LTM variable names (U+205A TWO DOT PUNCTUATION)
-const LTM_SEP: char = '⁚';
+/// Separator between from/to in link score variable names (U+2192 RIGHTWARDS ARROW)
+const LTM_LINK_SEP: char = '→';
 
 // --- Internal types ---
 
@@ -107,7 +107,7 @@ impl SearchGraph {
     /// Build from simulation results at a specific timestep.
     ///
     /// Scans results.offsets for variables matching the LTM link score prefix
-    /// `$⁚ltm⁚link_score⁚{from}⁚{to}`, reads values at the given step,
+    /// `$⁚ltm⁚link_score⁚{from}→{to}`, reads values at the given step,
     /// and builds the adjacency list.
     fn from_results(
         results: &Results<f64>,
@@ -265,11 +265,10 @@ fn parse_link_offsets(results: &Results<f64>) -> Vec<LinkOffset> {
     for (var_name, &offset) in &results.offsets {
         let name_str = var_name.as_str();
         if let Some(suffix) = name_str.strip_prefix(LINK_SCORE_PREFIX) {
-            // Split on the separator to get from and to
-            let parts: Vec<&str> = suffix.split(LTM_SEP).collect();
-            if parts.len() == 2 {
-                let from = Ident::new(parts[0]);
-                let to = Ident::new(parts[1]);
+            // Split on the arrow separator to get from and to
+            if let Some((from_str, to_str)) = suffix.split_once(LTM_LINK_SEP) {
+                let from = Ident::new(from_str);
+                let to = Ident::new(to_str);
                 link_offsets.push(((from, to), offset));
             }
         }
@@ -874,8 +873,8 @@ mod tests {
         // Test the link offset parsing from variable names.
         // Use Ident::new() directly to match how the interpreter stores keys.
         let mut offsets = HashMap::new();
-        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚population⁚births"), 0usize);
-        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚births⁚population"), 1usize);
+        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚population→births"), 0usize);
+        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚births→population"), 1usize);
         offsets.insert(Ident::new("population"), 2usize);
 
         let results = Results {

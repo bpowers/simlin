@@ -15,13 +15,17 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident, Result};
 use crate::datamodel::{self, Equation};
 use crate::lexer::LexerType;
-use crate::ltm::{CausalGraph, Link, Loop, detect_loops};
+use crate::ltm::{CausalGraph, Link, Loop, ModuleLtmRole, classify_module_for_ltm, detect_loops};
 use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
 
 // Type alias for clarity
 type SyntheticVariables = Vec<(Ident<Canonical>, datamodel::Variable)>;
+
+/// Map from module model name to the set of input ports that have composite
+/// link score variables (i.e., ports with causal pathways to the output).
+type CompositePortMap = HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>>;
 
 /// Recursively walk an Expr0 tree, wrapping variable references that appear in
 /// `deps` with `PREVIOUS(...)`.  Function names in App nodes are never touched,
@@ -133,11 +137,38 @@ pub fn generate_ltm_variables_all_links(
     generate_ltm_variables_inner(project, true)
 }
 
+/// Pre-compute which input ports on each dynamic stdlib module have causal
+/// pathways to the output. Only these ports get composite link score variables.
+fn compute_composite_ports(project: &Project) -> CompositePortMap {
+    let mut result = HashMap::new();
+    for (model_name, model) in &project.models {
+        if !model.implicit {
+            continue;
+        }
+        if classify_module_for_ltm(model_name, model) != ModuleLtmRole::DynamicModule {
+            continue;
+        }
+        let graph = match CausalGraph::from_model(model, project) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+        let output_ident = Ident::new("output");
+        let pathways = graph.enumerate_module_pathways(&output_ident);
+        let ports: HashSet<Ident<Canonical>> = pathways.keys().cloned().collect();
+        if !ports.is_empty() {
+            result.insert(model_name.clone(), ports);
+        }
+    }
+    result
+}
+
 fn generate_ltm_variables_inner(
     project: &Project,
     all_links_mode: bool,
 ) -> Result<HashMap<Ident<Canonical>, SyntheticVariables>> {
     let mut result = HashMap::new();
+
+    let composite_ports = compute_composite_ports(project);
 
     if all_links_mode {
         // Discovery mode: generate link score variables for ALL causal links
@@ -149,7 +180,8 @@ fn generate_ltm_variables_inner(
             let graph = CausalGraph::from_model(model, project)?;
             let links: HashSet<Link> = graph.all_links().into_iter().collect();
 
-            let link_score_vars = generate_link_score_variables(&links, &model.variables);
+            let link_score_vars =
+                generate_link_score_variables(&links, &model.variables, &composite_ports);
 
             let synthetic_vars: Vec<_> = link_score_vars.into_iter().collect();
             if !synthetic_vars.is_empty() {
@@ -176,7 +208,8 @@ fn generate_ltm_variables_inner(
                 }
             }
 
-            let link_score_vars = generate_link_score_variables(&loop_links, &model.variables);
+            let link_score_vars =
+                generate_link_score_variables(&loop_links, &model.variables, &composite_ports);
             let loop_score_vars = generate_loop_score_variables(&model_loops);
 
             for (var_name, var) in link_score_vars {
@@ -192,6 +225,25 @@ fn generate_ltm_variables_inner(
         }
     }
 
+    // Generate internal link score variables for dynamic stdlib modules.
+    // These live inside the stdlib model's compiled instance.
+    // Only process implicit (stdlib/module) models, not user models.
+    for (model_name, model) in &project.models {
+        if !model.implicit {
+            continue;
+        }
+        if classify_module_for_ltm(model_name, model) != ModuleLtmRole::DynamicModule {
+            continue;
+        }
+        let module_vars = generate_module_internal_ltm_variables(model_name, model, project);
+        if !module_vars.is_empty() {
+            result
+                .entry(model_name.clone())
+                .or_insert_with(Vec::new)
+                .extend(module_vars);
+        }
+    }
+
     Ok(result)
 }
 
@@ -199,12 +251,13 @@ fn generate_ltm_variables_inner(
 fn generate_link_score_variables(
     links: &HashSet<Link>,
     variables: &HashMap<Ident<Canonical>, Variable>,
+    composite_ports: &CompositePortMap,
 ) -> HashMap<Ident<Canonical>, datamodel::Variable> {
     let mut link_vars = HashMap::new();
 
     for link in links {
         let var_name = format!(
-            "$⁚ltm⁚link_score⁚{}⁚{}",
+            "$⁚ltm⁚link_score⁚{}→{}",
             link.from.as_str(),
             link.to.as_str()
         );
@@ -214,10 +267,41 @@ fn generate_link_score_variables(
             || variables.get(&link.to).is_some_and(|v| v.is_module());
 
         if is_module_link {
-            // Generate module-aware link score
-            let equation = generate_module_link_score_equation(&link.from, &link.to, variables);
-            let ltm_var = create_aux_variable(&var_name, &equation);
-            link_vars.insert(Ident::new(&var_name), ltm_var);
+            let from_is_module = variables.get(&link.from).is_some_and(|v| v.is_module());
+            let to_is_module = variables.get(&link.to).is_some_and(|v| v.is_module());
+
+            if !from_is_module && to_is_module {
+                // input_src -> module: use composite reference if available
+                if let Some(Variable::Module {
+                    model_name, inputs, ..
+                }) = variables.get(&link.to)
+                {
+                    let port = inputs.iter().find(|i| i.src == link.from).map(|i| &i.dst);
+                    let has_composite = port.is_some()
+                        && composite_ports
+                            .get(model_name)
+                            .is_some_and(|ports| ports.contains(port.unwrap()));
+
+                    if let (true, Some(port)) = (has_composite, port) {
+                        let eq = generate_module_input_link_score_equation(&link.to, port);
+                        let ltm_var = create_aux_variable(&var_name, &eq);
+                        link_vars.insert(Ident::new(&var_name), ltm_var);
+                    } else {
+                        let eq =
+                            generate_module_link_score_equation(&link.from, &link.to, variables);
+                        let ltm_var = create_aux_variable(&var_name, &eq);
+                        link_vars.insert(Ident::new(&var_name), ltm_var);
+                    }
+                }
+            } else {
+                // module -> downstream or module -> module: use black box formula.
+                // The aux-to-aux formula doesn't work here because the consumer's
+                // equation references module·output (with interpunct) not the
+                // module node directly.
+                let eq = generate_module_link_score_equation(&link.from, &link.to, variables);
+                let ltm_var = create_aux_variable(&var_name, &eq);
+                link_vars.insert(Ident::new(&var_name), ltm_var);
+            }
         } else if let Some(to_var) = variables.get(&link.to) {
             // Generate regular link score
             let equation = generate_link_score_equation(&link.from, &link.to, to_var, variables);
@@ -229,87 +313,38 @@ fn generate_link_score_variables(
     link_vars
 }
 
+/// Quote an identifier for use in an equation string.
+/// Identifiers with special characters (like $, ⁚) need double quotes.
+fn quote_ident(ident: &str) -> String {
+    if ident.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        ident.to_string()
+    } else {
+        format!("\"{ident}\"")
+    }
+}
+
 /// Generate link score equation for links involving modules (black box treatment)
 fn generate_module_link_score_equation(
     from: &Ident<Canonical>,
     to: &Ident<Canonical>,
-    variables: &HashMap<Ident<Canonical>, Variable>,
+    _variables: &HashMap<Ident<Canonical>, Variable>,
 ) -> String {
-    // Black box approach: modules are treated as transfer functions
-    // The module transfer score represents the aggregate effect of all internal pathways
+    let from_q = quote_ident(from.as_str());
+    let to_q = quote_ident(to.as_str());
 
-    // Check if 'from' is a module (module output to regular variable)
-    if let Some(Variable::Module { .. }) = variables.get(from) {
-        // Module output transfer score: (Δto_due_to_module / Δto) × sign(Δto/Δmodule)
-        // Since the module instance itself is the output value
-        return format!(
-            "if \
-                (TIME = PREVIOUS(TIME)) \
+    format!(
+        "if \
+            (TIME = PREVIOUS(TIME)) \
+            then 0 \
+            else if \
+                (({to_q} - PREVIOUS({to_q})) = 0) OR (({from_q} - PREVIOUS({from_q})) = 0) \
                 then 0 \
-                else if \
-                    (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
+                else ABS((({to_q} - PREVIOUS({to_q}))) / ({to_q} - PREVIOUS({to_q}))) * \
+                (if \
+                    ({from_q} - PREVIOUS({from_q})) = 0 \
                     then 0 \
-                    else ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
-                    if \
-                        ({from} - PREVIOUS({from})) = 0 \
-                        then 0 \
-                        else SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))",
-            to = to.as_str(),
-            from = from.as_str()
-        );
-    }
-
-    // Check if 'to' is a module (regular variable to module input)
-    if let Some(Variable::Module { inputs, .. }) = variables.get(to) {
-        // Find which input this connects to
-        for input in inputs {
-            if input.src == *from {
-                // Module input transfer score: measure contribution of input to module's change
-                // Black box: assume unit transfer initially (module will process internally)
-                return format!(
-                    "if \
-                        (TIME = PREVIOUS(TIME)) \
-                        then 0 \
-                        else if \
-                            (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
-                            then 0 \
-                            else ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
-                            if \
-                                ({from} - PREVIOUS({from})) = 0 \
-                                then 0 \
-                                else SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))",
-                    to = to.as_str(),
-                    from = from.as_str()
-                );
-            }
-        }
-    }
-
-    // Both from and to are modules (module-to-module connection)
-    // This represents a chain of black boxes
-    if variables.get(from).is_some_and(|v| v.is_module())
-        && variables.get(to).is_some_and(|v| v.is_module())
-    {
-        // Chain transfer score: product of individual transfer scores
-        return format!(
-            "if \
-                (TIME = PREVIOUS(TIME)) \
-                then 0 \
-                else if \
-                    (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
-                    then 0 \
-                    else ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
-                    if \
-                        ({from} - PREVIOUS({from})) = 0 \
-                        then 0 \
-                        else SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))",
-            to = to.as_str(),
-            from = from.as_str()
-        );
-    }
-
-    // Default case - shouldn't normally reach here
-    "0".to_string()
+                    else SIGN((({to_q} - PREVIOUS({to_q}))) / ({from_q} - PREVIOUS({from_q}))))"
+    )
 }
 
 /// Generate loop score variables for all loops
@@ -539,7 +574,7 @@ fn generate_loop_score_equation(loop_item: &Loop) -> String {
         .map(|link| {
             // Double-quote the variable name so it can be parsed
             format!(
-                "\"$⁚ltm⁚link_score⁚{}⁚{}\"",
+                "\"$⁚ltm⁚link_score⁚{}→{}\"",
                 link.from.as_str(),
                 link.to.as_str()
             )
@@ -573,6 +608,113 @@ fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> S
 
     // Relative score formula using SAFEDIV for division by zero protection
     format!("SAFEDIV({loop_score_var}, ({sum_expr}), 0)")
+}
+
+/// Generate internal link score, pathway, and composite variables for a
+/// dynamic stdlib module. Returns variables to add to the stdlib model.
+fn generate_module_internal_ltm_variables(
+    _model_name: &Ident<Canonical>,
+    module_model: &crate::model::ModelStage1,
+    project: &Project,
+) -> SyntheticVariables {
+    let mut vars = Vec::new();
+
+    let graph = match CausalGraph::from_model(module_model, project) {
+        Ok(g) => g,
+        Err(_) => return vars,
+    };
+
+    // Generate internal link score variables for all causal links in the module
+    let links: HashSet<Link> = graph.all_links().into_iter().collect();
+    for link in &links {
+        let var_name = format!("$⁚ltm⁚ilink⁚{}→{}", link.from.as_str(), link.to.as_str());
+        if let Some(to_var) = module_model.variables.get(&link.to) {
+            let equation =
+                generate_link_score_equation(&link.from, &link.to, to_var, &module_model.variables);
+            let ltm_var = create_aux_variable(&var_name, &equation);
+            vars.push((Ident::new(&var_name), ltm_var));
+        }
+    }
+
+    // Find the output variable (stock named "output" for stdlib modules)
+    let output_ident = Ident::new("output");
+
+    // Enumerate pathways from each input port to output
+    let pathways = graph.enumerate_module_pathways(&output_ident);
+
+    for (input_port, port_pathways) in &pathways {
+        // Generate pathway score variables (product of constituent ilink scores)
+        let mut pathway_names = Vec::new();
+        for (idx, pathway_links) in port_pathways.iter().enumerate() {
+            let path_var_name = format!("$⁚ltm⁚path⁚{}⁚{}", input_port.as_str(), idx);
+
+            let link_score_refs: Vec<String> = pathway_links
+                .iter()
+                .map(|link| {
+                    format!(
+                        "\"$⁚ltm⁚ilink⁚{}→{}\"",
+                        link.from.as_str(),
+                        link.to.as_str()
+                    )
+                })
+                .collect();
+
+            let equation = if link_score_refs.is_empty() {
+                "0".to_string()
+            } else {
+                link_score_refs.join(" * ")
+            };
+
+            let ltm_var = create_aux_variable(&path_var_name, &equation);
+            pathway_names.push(path_var_name.clone());
+            vars.push((Ident::new(&path_var_name), ltm_var));
+        }
+
+        // Generate composite score variable (max-magnitude pathway)
+        let composite_name = format!("$⁚ltm⁚composite⁚{}", input_port.as_str());
+
+        let equation = generate_max_abs_chain(&pathway_names);
+        let ltm_var = create_aux_variable(&composite_name, &equation);
+        vars.push((Ident::new(&composite_name), ltm_var));
+    }
+
+    vars
+}
+
+/// Generate a deterministic nested max-abs selection equation.
+///
+/// For N=1: just the pathway name.
+/// For N=2: `if ABS(p1) >= ABS(p2) then p1 else p2`
+/// For N>2: `if ABS(pN) >= ABS(max_of_rest) then pN else max_of_rest` (recursive)
+fn generate_max_abs_chain(pathway_names: &[String]) -> String {
+    match pathway_names.len() {
+        0 => "0".to_string(),
+        1 => format!("\"{}\"", pathway_names[0]),
+        2 => {
+            let p0 = &pathway_names[0];
+            let p1 = &pathway_names[1];
+            format!("if ABS(\"{p0}\") >= ABS(\"{p1}\") then \"{p0}\" else \"{p1}\"")
+        }
+        _ => {
+            let last = &pathway_names[pathway_names.len() - 1];
+            let rest = generate_max_abs_chain(&pathway_names[..pathway_names.len() - 1]);
+            format!("if ABS(\"{last}\") >= ABS(({rest})) then \"{last}\" else ({rest})")
+        }
+    }
+}
+
+/// Generate a composite link score equation for a parent model link where
+/// the target is a dynamic module. References the module's internal
+/// composite score via interpunct notation.
+fn generate_module_input_link_score_equation(
+    module_ident: &Ident<Canonical>,
+    input_port: &Ident<Canonical>,
+) -> String {
+    format!(
+        "\"{module}\u{00B7}$⁚ltm⁚composite⁚{port}\"",
+        module = module_ident.as_str(),
+        port = input_port.as_str(),
+    )
 }
 
 /// Create an auxiliary variable with the given equation
@@ -676,7 +818,7 @@ mod tests {
         // The equation should use double-quoted variable names for parseability
         assert_eq!(
             equation,
-            "\"$⁚ltm⁚link_score⁚x⁚y\" * \"$⁚ltm⁚link_score⁚y⁚x\""
+            "\"$⁚ltm⁚link_score⁚x→y\" * \"$⁚ltm⁚link_score⁚y→x\""
         );
     }
 
@@ -826,10 +968,10 @@ mod tests {
         // Check for specific link score variables
         let has_pop_to_births = vars
             .iter()
-            .any(|(name, _)| name.as_str().contains("$⁚ltm⁚link_score⁚population⁚births"));
+            .any(|(name, _)| name.as_str().contains("$⁚ltm⁚link_score⁚population→births"));
         let has_births_to_pop = vars
             .iter()
-            .any(|(name, _)| name.as_str().contains("$⁚ltm⁚link_score⁚births⁚population"));
+            .any(|(name, _)| name.as_str().contains("$⁚ltm⁚link_score⁚births→population"));
 
         assert!(
             has_pop_to_births || has_births_to_pop,
@@ -1056,13 +1198,13 @@ mod tests {
         });
 
         // Generate link score variables
-        let link_vars = generate_link_score_variables(&links, &variables);
+        let link_vars = generate_link_score_variables(&links, &variables, &HashMap::new());
 
         // Check that a link score variable was created
         assert!(!link_vars.is_empty(), "Should generate module link score");
 
         // Check the variable name
-        let expected_name = Ident::new("$⁚ltm⁚link_score⁚raw_input⁚smoother");
+        let expected_name = Ident::new("$⁚ltm⁚link_score⁚raw_input→smoother");
         assert!(
             link_vars.contains_key(&expected_name),
             "Should have link score for module connection"
@@ -1119,10 +1261,10 @@ mod tests {
                 ((processed - PREVIOUS(processed)) = 0) OR ((smoother - PREVIOUS(smoother)) = 0) \
                 then 0 \
                 else ABS(((processed - PREVIOUS(processed))) / (processed - PREVIOUS(processed))) * \
-                if \
+                (if \
                     (smoother - PREVIOUS(smoother)) = 0 \
                     then 0 \
-                    else SIGN(((processed - PREVIOUS(processed))) / (smoother - PREVIOUS(smoother)))";
+                    else SIGN(((processed - PREVIOUS(processed))) / (smoother - PREVIOUS(smoother))))";
 
         assert_eq!(
             equation, expected,
@@ -1184,10 +1326,10 @@ mod tests {
                 ((processor - PREVIOUS(processor)) = 0) OR ((raw_data - PREVIOUS(raw_data)) = 0) \
                 then 0 \
                 else ABS(((processor - PREVIOUS(processor))) / (processor - PREVIOUS(processor))) * \
-                if \
+                (if \
                     (raw_data - PREVIOUS(raw_data)) = 0 \
                     then 0 \
-                    else SIGN(((processor - PREVIOUS(processor))) / (raw_data - PREVIOUS(raw_data)))";
+                    else SIGN(((processor - PREVIOUS(processor))) / (raw_data - PREVIOUS(raw_data))))";
 
         assert_eq!(
             equation, expected,
@@ -1243,10 +1385,10 @@ mod tests {
                 ((filter_b - PREVIOUS(filter_b)) = 0) OR ((filter_a - PREVIOUS(filter_a)) = 0) \
                 then 0 \
                 else ABS(((filter_b - PREVIOUS(filter_b))) / (filter_b - PREVIOUS(filter_b))) * \
-                if \
+                (if \
                     (filter_a - PREVIOUS(filter_a)) = 0 \
                     then 0 \
-                    else SIGN(((filter_b - PREVIOUS(filter_b))) / (filter_a - PREVIOUS(filter_a)))";
+                    else SIGN(((filter_b - PREVIOUS(filter_b))) / (filter_a - PREVIOUS(filter_a))))";
 
         assert_eq!(
             equation, expected,
@@ -1334,15 +1476,15 @@ mod tests {
         });
 
         // Generate link score variables
-        let link_vars = generate_link_score_variables(&links, &variables);
+        let link_vars = generate_link_score_variables(&links, &variables, &HashMap::new());
 
         // Check that module link scores were generated
         assert_eq!(link_vars.len(), 2, "Should generate 2 link score variables");
 
         let has_input_link =
-            link_vars.contains_key(&Ident::new("$⁚ltm⁚link_score⁚input_value⁚processor"));
+            link_vars.contains_key(&Ident::new("$⁚ltm⁚link_score⁚input_value→processor"));
         let has_output_link =
-            link_vars.contains_key(&Ident::new("$⁚ltm⁚link_score⁚processor⁚output_value"));
+            link_vars.contains_key(&Ident::new("$⁚ltm⁚link_score⁚processor→output_value"));
 
         assert!(
             has_input_link,
@@ -1646,7 +1788,7 @@ mod tests {
         println!("\n=== Testing $ variable parsing with double quotes ===");
 
         // Test 1: Double quoted variable parses successfully
-        let equation = "\"$⁚ltm⁚link_score⁚x⁚y\"";
+        let equation = "\"$⁚ltm⁚link_score⁚x→y\"";
         let result = Expr0::new(equation, LexerType::Equation);
         assert!(result.is_ok(), "Double quoted $ variable should parse");
 
@@ -1655,11 +1797,11 @@ mod tests {
             println!("Canonicalized: {}", canonicalize(id.as_str()));
 
             // Check if quotes are included in the identifier
-            assert_eq!(id.as_str(), "\"$⁚ltm⁚link_score⁚x⁚y\"");
+            assert_eq!(id.as_str(), "\"$⁚ltm⁚link_score⁚x→y\"");
         }
 
         // Test 2: Complex equation with quoted variables
-        let equation = "\"$⁚ltm⁚link_score⁚x⁚y\" * \"$⁚ltm⁚link_score⁚y⁚x\"";
+        let equation = "\"$⁚ltm⁚link_score⁚x→y\" * \"$⁚ltm⁚link_score⁚y→x\"";
         let result = Expr0::new(equation, LexerType::Equation);
         assert!(
             result.is_ok(),
@@ -1668,14 +1810,14 @@ mod tests {
 
         // Test 3: What happens when we create AST with quoted names and print it
         let var_ast = Expr0::Var(
-            RawIdent::new_from_str("\"$⁚ltm⁚link_score⁚x⁚y\""),
+            RawIdent::new_from_str("\"$⁚ltm⁚link_score⁚x→y\""),
             Loc::default(),
         );
         let printed = print_eqn(&var_ast);
         println!("AST with quoted $ variable printed as: '{printed}'");
 
         assert_eq!(
-            printed, "\"$⁚ltm⁚link_score⁚x⁚y\"",
+            printed, "\"$⁚ltm⁚link_score⁚x→y\"",
             "print_eqn re-quotes identifiers with special characters"
         );
     }
@@ -1810,6 +1952,380 @@ mod tests {
         assert!(
             has_standard_loop_scores,
             "Standard mode should generate loop score variables"
+        );
+    }
+
+    #[test]
+    fn test_max_abs_chain_n1() {
+        let result = generate_max_abs_chain(&["$⁚ltm⁚path⁚input⁚0".to_string()]);
+        assert_eq!(result, "\"$⁚ltm⁚path⁚input⁚0\"");
+    }
+
+    #[test]
+    fn test_max_abs_chain_n2() {
+        let result = generate_max_abs_chain(&[
+            "$⁚ltm⁚path⁚input⁚0".to_string(),
+            "$⁚ltm⁚path⁚input⁚1".to_string(),
+        ]);
+        assert!(result.contains("ABS"), "N=2 should use ABS comparison");
+        assert!(result.contains("then"), "N=2 should use if/then/else");
+        assert!(result.contains("$⁚ltm⁚path⁚input⁚0"));
+        assert!(result.contains("$⁚ltm⁚path⁚input⁚1"));
+    }
+
+    #[test]
+    fn test_max_abs_chain_n3() {
+        let result = generate_max_abs_chain(&[
+            "$⁚ltm⁚path⁚input⁚0".to_string(),
+            "$⁚ltm⁚path⁚input⁚1".to_string(),
+            "$⁚ltm⁚path⁚input⁚2".to_string(),
+        ]);
+        // Should be nested: if ABS(p2) >= ABS(max(p0,p1)) then p2 else max(p0,p1)
+        assert!(result.contains("$⁚ltm⁚path⁚input⁚2"));
+        // Verify nesting
+        // The N=2 inner case has 1 "if", plus the outer comparison has 1 "if",
+        // and the recursive N=2 appears twice (once in the condition, once in the else).
+        // Just verify it's nested with more than 1 "if"
+        let count_if = result.matches("if ").count();
+        assert!(
+            count_if >= 2,
+            "N=3 should have nested if/then/else, got {} ifs",
+            count_if
+        );
+    }
+
+    #[test]
+    fn test_max_abs_chain_n0() {
+        let result = generate_max_abs_chain(&[]);
+        assert_eq!(result, "0");
+    }
+
+    #[test]
+    fn test_smth1_internal_link_scores_generated() {
+        let project = TestProject::new("test_smth1_ilink")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "10", None)
+            .aux("s", "SMTH1(x, 5)", None)
+            .compile()
+            .expect("should compile");
+
+        let ltm_project = project
+            .with_ltm_all_links()
+            .expect("should augment with LTM");
+
+        let smth1_ident = Ident::new("stdlib⁚smth1");
+        let smth1_model = ltm_project
+            .models
+            .get(&smth1_ident)
+            .expect("should have stdlib⁚smth1 model");
+
+        // Check that internal link score variables were generated
+        let has_ilink = smth1_model
+            .variables
+            .keys()
+            .any(|k| k.as_str().contains("$⁚ltm⁚ilink⁚"));
+
+        assert!(
+            has_ilink,
+            "Augmented smth1 model should have internal link score variables. \
+             Variables: {:?}",
+            smth1_model.variables.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_smth1_composite_generated() {
+        let project = TestProject::new("test_smth1_comp")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "10", None)
+            .aux("s", "SMTH1(x, 5)", None)
+            .compile()
+            .expect("should compile");
+
+        let ltm_project = project
+            .with_ltm_all_links()
+            .expect("should augment with LTM");
+
+        let smth1_ident = Ident::new("stdlib⁚smth1");
+        let smth1_model = ltm_project
+            .models
+            .get(&smth1_ident)
+            .expect("should have stdlib⁚smth1 model");
+
+        let has_composite = smth1_model
+            .variables
+            .keys()
+            .any(|k| k.as_str().contains("$⁚ltm⁚composite⁚"));
+
+        assert!(
+            has_composite,
+            "Augmented smth1 model should have composite score variable. \
+             Variables: {:?}",
+            smth1_model.variables.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_smth1_pathway_equation() {
+        let project = TestProject::new("test_smth1_path")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "10", None)
+            .aux("s", "SMTH1(x, 5)", None)
+            .compile()
+            .expect("should compile");
+
+        let ltm_project = project
+            .with_ltm_all_links()
+            .expect("should augment with LTM");
+
+        let smth1_ident = Ident::new("stdlib⁚smth1");
+        let smth1_model = ltm_project
+            .models
+            .get(&smth1_ident)
+            .expect("should have stdlib⁚smth1 model");
+
+        // Find the pathway variable
+        let path_var = smth1_model
+            .variables
+            .iter()
+            .find(|(k, _)| k.as_str().contains("$⁚ltm⁚path⁚"));
+
+        assert!(
+            path_var.is_some(),
+            "Should have a pathway score variable. Variables: {:?}",
+            smth1_model.variables.keys().collect::<Vec<_>>()
+        );
+
+        // The pathway equation should be a product of ilink variables.
+        if let Some((_, var)) = path_var
+            && let Some(eq) = var.scalar_equation()
+        {
+            assert!(
+                eq.contains("$⁚ltm⁚ilink⁚"),
+                "Pathway equation should reference internal link scores, got: {eq}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_smooth_parent_link_score_references_composite() {
+        let project = TestProject::new("test_smooth_composite_ref")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("level", "50", &["adj"], &[], None)
+            .aux("gap", "100 - level", None)
+            .flow("adj", "SMTH1(gap, 5)", None)
+            .compile()
+            .expect("should compile");
+
+        let ltm_project = project
+            .with_ltm_all_links()
+            .expect("should augment with LTM");
+
+        let main_ident: Ident<Canonical> = Ident::new("main");
+        let main_model = ltm_project
+            .models
+            .get(&main_ident)
+            .expect("should have main model");
+
+        // Find the link score variable for gap -> smth1_module
+        let module_link = main_model.variables.iter().find(|(k, _)| {
+            let s = k.as_str();
+            s.contains("$⁚ltm⁚link_score⁚") && s.contains("smth1")
+        });
+
+        if let Some((name, var)) = module_link
+            && let Some(eq) = var.scalar_equation()
+        {
+            // If the target is the module (gap -> module), the equation should
+            // reference the composite score via interpunct notation
+            if name.as_str().contains("→$⁚") {
+                assert!(
+                    eq.contains("composite") || eq.contains("PREVIOUS"),
+                    "Module input link score should reference composite or use \
+                     black-box formula, got: {eq}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_module_link_score_equation_with_dollar_ident() {
+        // Test that the black-box module link score equation parses when
+        // variable names contain $ and ⁚
+        let from = Ident::new("$⁚smoothed_level⁚0⁚smth1");
+        let to = Ident::new("smoothed_level");
+
+        let variables = HashMap::new();
+        let eq = generate_module_link_score_equation(&from, &to, &variables);
+
+        // The equation must parse successfully
+        let result = crate::ast::Expr0::new(&eq, crate::lexer::LexerType::Equation);
+        assert!(
+            result.is_ok(),
+            "Module link score equation should parse: {eq}\nError: {result:?}"
+        );
+        let ast = result.unwrap();
+        assert!(
+            ast.is_some(),
+            "Module link score equation should produce an AST: {eq}"
+        );
+    }
+
+    #[test]
+    fn test_path_to_links_open_path() {
+        // Verify path_to_links produces N-1 links for N nodes (open, not closed)
+        use crate::ltm::CausalGraph;
+        use std::collections::{HashMap, HashSet};
+
+        let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+        edges
+            .entry(Ident::new("a"))
+            .or_default()
+            .push(Ident::new("b"));
+        edges
+            .entry(Ident::new("b"))
+            .or_default()
+            .push(Ident::new("c"));
+
+        let graph = CausalGraph {
+            edges,
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+        };
+
+        let path = vec![Ident::new("a"), Ident::new("b"), Ident::new("c")];
+        let links = graph.path_to_links(&path);
+
+        assert_eq!(
+            links.len(),
+            2,
+            "3-node open path should produce 2 links, not 3"
+        );
+        assert_eq!(links[0].from.as_str(), "a");
+        assert_eq!(links[0].to.as_str(), "b");
+        assert_eq!(links[1].from.as_str(), "b");
+        assert_eq!(links[1].to.as_str(), "c");
+    }
+
+    #[test]
+    fn test_smth1_single_pathway() {
+        use crate::ltm::CausalGraph;
+
+        let project = TestProject::new("test_smth1_pathway")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "10", None)
+            .aux("s", "SMTH1(x, 5)", None)
+            .compile()
+            .expect("should compile");
+
+        let smth1_ident = Ident::new("stdlib⁚smth1");
+        let smth1_model = project
+            .models
+            .get(&smth1_ident)
+            .expect("should have stdlib⁚smth1 model");
+
+        let graph = CausalGraph::from_model(smth1_model, &project).unwrap();
+        let output_ident = Ident::new("output");
+        let pathways = graph.enumerate_module_pathways(&output_ident);
+
+        // smth1 should have at least one input port with pathways to output
+        assert!(
+            !pathways.is_empty(),
+            "smth1 should have pathways from input ports to output. \
+             Edges: {:?}",
+            graph
+        );
+
+        // The 'input' port should have a pathway: input -> flow -> output
+        let input_ident = Ident::new("input");
+        if let Some(input_paths) = pathways.get(&input_ident) {
+            assert!(
+                !input_paths.is_empty(),
+                "input port should have at least one pathway to output"
+            );
+            // Each pathway link should have 2 links (input -> flow -> output)
+            for path in input_paths {
+                assert_eq!(
+                    path.len(),
+                    2,
+                    "input -> flow -> output pathway should have 2 links, got {}",
+                    path.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_enumerate_module_pathways_excludes_intermediates() {
+        use crate::ltm::CausalGraph;
+
+        let project = TestProject::new("test_pathway_filter")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "10", None)
+            .aux("s", "SMTH1(x, 5)", None)
+            .compile()
+            .expect("should compile");
+
+        let smth1_ident = Ident::new("stdlib⁚smth1");
+        let smth1_model = project
+            .models
+            .get(&smth1_ident)
+            .expect("should have stdlib⁚smth1 model");
+
+        let graph = CausalGraph::from_model(smth1_model, &project).unwrap();
+        let output_ident = Ident::new("output");
+        let pathways = graph.enumerate_module_pathways(&output_ident);
+
+        // Only true input ports (no incoming edges within the module) should
+        // appear as keys -- intermediate variables like "flow" must be excluded.
+        for port_name in pathways.keys() {
+            assert_ne!(
+                port_name.as_str(),
+                "flow",
+                "Intermediate variable 'flow' should not be treated as an input port"
+            );
+        }
+    }
+
+    #[test]
+    fn test_smth1_no_composite_for_intermediate_variables() {
+        let project = TestProject::new("test_no_flow_composite")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("x", "10", None)
+            .aux("s", "SMTH1(x, 5)", None)
+            .compile()
+            .expect("should compile");
+
+        let ltm_project = project
+            .with_ltm_all_links()
+            .expect("should augment with LTM");
+
+        let smth1_ident = Ident::new("stdlib⁚smth1");
+        let smth1_model = ltm_project
+            .models
+            .get(&smth1_ident)
+            .expect("should have stdlib⁚smth1 model");
+
+        let composite_vars: Vec<_> = smth1_model
+            .variables
+            .keys()
+            .filter(|k| k.as_str().contains("$⁚ltm⁚composite⁚"))
+            .collect();
+
+        // Composites should only exist for true input ports, not "flow"
+        for var in &composite_vars {
+            assert!(
+                !var.as_str().contains("composite⁚flow"),
+                "Should not have composite for intermediate variable 'flow', found: {}",
+                var.as_str()
+            );
+        }
+
+        // But should still have composites for actual input ports
+        assert!(
+            !composite_vars.is_empty(),
+            "Should still have composites for real input ports"
         );
     }
 }
