@@ -91,5 +91,3 @@ __pycache__/
 
 # Hypothesis test database
 .hypothesis/
-
-.ai-tool-config
