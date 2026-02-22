@@ -12,13 +12,10 @@ pub mod subscript;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use ordered_float::OrderedFloat;
-
 use crate::ast::{Ast, Loc};
 use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result};
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
-use crate::float::SimFloat;
 use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::variable::Variable;
@@ -38,9 +35,9 @@ type VariableOffsetMap = HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (us
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(PartialEq, Clone)]
-pub struct Var<F: SimFloat> {
+pub struct Var {
     pub(crate) ident: Ident<Canonical>,
-    pub(crate) ast: Vec<Expr<F>>,
+    pub(crate) ast: Vec<Expr>,
 }
 
 #[test]
@@ -112,10 +109,10 @@ fn test_fold_flows() {
         false,
     );
 
-    assert_eq!(Ok(None), ctx.fold_flows::<f64>(&[]));
+    assert_eq!(Ok(None), ctx.fold_flows(&[]));
     assert_eq!(
         Ok(Some(Expr::Var(1, Loc::default()))),
-        ctx.fold_flows::<f64>(&[Ident::new("a")])
+        ctx.fold_flows(&[Ident::new("a")])
     );
     assert_eq!(
         Ok(Some(Expr::Op2(
@@ -124,18 +121,18 @@ fn test_fold_flows() {
             Box::new(Expr::Var(4, Loc::default())),
             Loc::default(),
         ))),
-        ctx.fold_flows::<f64>(&[Ident::new("a"), Ident::new("d")])
+        ctx.fold_flows(&[Ident::new("a"), Ident::new("d")])
     );
 
     // Test that fold_flows returns an error for non-existent flows
-    let result = ctx.fold_flows::<f64>(&[Ident::new("nonexistent")]);
+    let result = ctx.fold_flows(&[Ident::new("nonexistent")]);
     assert!(result.is_err(), "Expected error for non-existent flow");
 }
 
-impl<F: SimFloat> Var<F> {
+impl Var {
     pub(crate) fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         // if this variable is overriden by a module input, our expression is easy
-        let ast: Vec<Expr<F>> = if let Some((off, _ident)) = ctx
+        let ast: Vec<Expr> = if let Some((off, _ident)) = ctx
             .inputs
             .iter()
             .enumerate()
@@ -158,7 +155,7 @@ impl<F: SimFloat> Var<F> {
                     // Create input set for module lookup key
                     let input_set: BTreeSet<Ident<Canonical>> =
                         inputs.iter().map(|mi| mi.dst.clone()).collect();
-                    let inputs: Vec<Expr<F>> = inputs
+                    let inputs: Vec<Expr> = inputs
                         .into_iter()
                         .map(|mi| Expr::Var(ctx.get_offset(&mi.src).unwrap(), Loc::default()))
                         .collect();
@@ -184,7 +181,7 @@ impl<F: SimFloat> Var<F> {
                             }
                             Ast::ApplyToAll(dims, ast) => {
                                 let active_dims = Arc::<[Dimension]>::from(dims.clone());
-                                let exprs: Result<Vec<Vec<Expr<F>>>> = SubscriptIterator::new(dims)
+                                let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
                                     .enumerate()
                                     .map(|(i, subscripts)| {
                                         let ctx = ctx.with_active_subscripts(
@@ -205,7 +202,7 @@ impl<F: SimFloat> Var<F> {
                             }
                             Ast::Arrayed(dims, elements) => {
                                 let active_dims = Arc::<[Dimension]>::from(dims.clone());
-                                let exprs: Result<Vec<Vec<Expr<F>>>> = SubscriptIterator::new(dims)
+                                let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
                                     .enumerate()
                                     .map(|(i, subscripts)| {
                                         let subscript_str = subscripts.join(",");
@@ -237,7 +234,7 @@ impl<F: SimFloat> Var<F> {
                             )],
                             Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _) => {
                                 let active_dims = Arc::<[Dimension]>::from(dims.clone());
-                                let exprs: Result<Vec<Expr<F>>> = SubscriptIterator::new(dims)
+                                let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                     .enumerate()
                                     .map(|(i, subscripts)| {
                                         let ctx = ctx.with_active_subscripts(
@@ -288,7 +285,7 @@ impl<F: SimFloat> Var<F> {
                         }
                         Ast::ApplyToAll(dims, ast) => {
                             let active_dims = Arc::<[Dimension]>::from(dims.clone());
-                            let exprs: Result<Vec<Vec<Expr<F>>>> = SubscriptIterator::new(dims)
+                            let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
                                 .enumerate()
                                 .map(|(i, subscripts)| {
                                     let ctx = ctx
@@ -304,7 +301,7 @@ impl<F: SimFloat> Var<F> {
                         }
                         Ast::Arrayed(dims, elements) => {
                             let active_dims = Arc::<[Dimension]>::from(dims.clone());
-                            let exprs: Result<Vec<Vec<Expr<F>>>> = SubscriptIterator::new(dims)
+                            let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
                                 .enumerate()
                                 .map(|(i, subscripts)| {
                                     let subscript_str = subscripts.join(",");
@@ -338,7 +335,7 @@ impl<F: SimFloat> Var<F> {
 /// Since temp IDs restart at 0 for each lower() call, the same ID may be
 /// reused across different expressions with different sizes. We track the
 /// maximum size per ID to ensure the temp buffer is large enough for all uses.
-fn extract_temp_sizes<F: SimFloat>(expr: &Expr<F>, temp_sizes_map: &mut HashMap<u32, usize>) {
+fn extract_temp_sizes(expr: &Expr, temp_sizes_map: &mut HashMap<u32, usize>) {
     match expr {
         Expr::AssignTemp(id, inner, view) => {
             let size = view.dims.iter().product::<usize>();
@@ -393,10 +390,7 @@ fn extract_temp_sizes<F: SimFloat>(expr: &Expr<F>, temp_sizes_map: &mut HashMap<
 }
 
 /// Extract temp sizes from builtin function arguments.
-fn extract_temp_sizes_from_builtin<F: SimFloat>(
-    builtin: &BuiltinFn<F>,
-    temp_sizes_map: &mut HashMap<u32, usize>,
-) {
+fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut HashMap<u32, usize>) {
     match builtin {
         BuiltinFn::Lookup(_, expr, _)
         | BuiltinFn::LookupForward(_, expr, _)
@@ -464,27 +458,27 @@ fn extract_temp_sizes_from_builtin<F: SimFloat>(
 /// interpreter compatibility.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
-pub(crate) struct VarInitial<F: SimFloat> {
+pub(crate) struct VarInitial {
     pub(crate) ident: Ident<Canonical>,
     /// Sorted, deduplicated offsets extracted from AssignCurr nodes.
     pub(crate) offsets: Vec<usize>,
-    pub(crate) ast: Vec<Expr<F>>,
+    pub(crate) ast: Vec<Expr>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-pub struct Module<F: SimFloat> {
+pub struct Module {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) inputs: HashSet<Ident<Canonical>>,
     pub(crate) n_slots: usize,         // number of f64s we need storage for
     pub(crate) n_temps: usize,         // number of temporary arrays
     pub(crate) temp_sizes: Vec<usize>, // size of each temporary array
-    pub(crate) runlist_initials: Vec<Expr<F>>,
-    pub(crate) runlist_initials_by_var: Vec<VarInitial<F>>,
-    pub(crate) runlist_flows: Vec<Expr<F>>,
-    pub(crate) runlist_stocks: Vec<Expr<F>>,
+    pub(crate) runlist_initials: Vec<Expr>,
+    pub(crate) runlist_initials_by_var: Vec<VarInitial>,
+    pub(crate) runlist_flows: Vec<Expr>,
+    pub(crate) runlist_stocks: Vec<Expr>,
     pub(crate) offsets: VariableOffsetMap,
     pub(crate) runlist_order: Vec<Ident<Canonical>>,
-    pub(crate) tables: HashMap<Ident<Canonical>, Vec<Table<F>>>,
+    pub(crate) tables: HashMap<Ident<Canonical>, Vec<Table>>,
     /// All dimensions from the project, for bytecode compilation
     pub(crate) dimensions: Vec<Dimension>,
     /// DimensionsContext for subdimension relationship lookups
@@ -674,7 +668,7 @@ fn calc_n_slots(
     metadata.values().map(|v| v.size).sum()
 }
 
-impl<F: SimFloat> Module<F> {
+impl Module {
     pub(crate) fn new(
         project: &Project,
         model: Arc<ModelStage1>,
@@ -757,24 +751,24 @@ impl<F: SimFloat> Module<F> {
             .runlist_initials
             .iter()
             .map(|ident| build_var(ident, true))
-            .collect::<Result<Vec<Var<F>>>>()?;
+            .collect::<Result<Vec<Var>>>()?;
         let flow_vars = instantiation
             .runlist_flows
             .iter()
             .map(|ident| build_var(ident, false))
-            .collect::<Result<Vec<Var<F>>>>()?;
+            .collect::<Result<Vec<Var>>>()?;
         let stock_vars = instantiation
             .runlist_stocks
             .iter()
             .map(|ident| build_var(ident, false))
-            .collect::<Result<Vec<Var<F>>>>()?;
+            .collect::<Result<Vec<Var>>>()?;
 
         let mut runlist_order = Vec::with_capacity(flow_vars.len() + stock_vars.len());
         runlist_order.extend(flow_vars.iter().map(|v| v.ident.clone()));
         runlist_order.extend(stock_vars.iter().map(|v| v.ident.clone()));
 
         // Build per-variable initials before flattening
-        let runlist_initials_by_var: Vec<VarInitial<F>> = initial_vars
+        let runlist_initials_by_var: Vec<VarInitial> = initial_vars
             .iter()
             .map(|v| {
                 let mut offsets: Vec<usize> = v
@@ -799,9 +793,9 @@ impl<F: SimFloat> Module<F> {
             .collect();
 
         // Flatten out the variables so that we're just dealing with lists of expressions
-        let runlist_initials: Vec<Expr<F>> = initial_vars.into_iter().flat_map(|v| v.ast).collect();
-        let runlist_flows: Vec<Expr<F>> = flow_vars.into_iter().flat_map(|v| v.ast).collect();
-        let runlist_stocks: Vec<Expr<F>> = stock_vars.into_iter().flat_map(|v| v.ast).collect();
+        let runlist_initials: Vec<Expr> = initial_vars.into_iter().flat_map(|v| v.ast).collect();
+        let runlist_flows: Vec<Expr> = flow_vars.into_iter().flat_map(|v| v.ast).collect();
+        let runlist_stocks: Vec<Expr> = stock_vars.into_iter().flat_map(|v| v.ast).collect();
 
         // Extract temp array information from all runlists
         let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
@@ -820,7 +814,7 @@ impl<F: SimFloat> Module<F> {
             temp_sizes[id as usize] = size;
         }
 
-        let tables: Result<HashMap<Ident<Canonical>, Vec<Table<F>>>> = var_names
+        let tables: Result<HashMap<Ident<Canonical>, Vec<Table>>> = var_names
             .iter()
             .map(|id| {
                 let canonical_id = Ident::new(id);
@@ -828,7 +822,7 @@ impl<F: SimFloat> Module<F> {
             })
             .filter(|(_, v)| !v.tables().is_empty())
             .map(|(id, v)| {
-                let tables_result: Result<Vec<Table<F>>> =
+                let tables_result: Result<Vec<Table>> =
                     v.tables().iter().map(|t| Table::new(id, t)).collect();
                 (id, tables_result)
             })
@@ -870,19 +864,16 @@ impl<F: SimFloat> Module<F> {
         })
     }
 
-    pub fn compile(&self) -> Result<CompiledModule<F>>
-    where
-        OrderedFloat<F>: Eq + std::hash::Hash,
-    {
+    pub fn compile(&self) -> Result<CompiledModule> {
         Compiler::new(self).compile()
     }
 }
 
 #[cfg(test)]
-impl<F: SimFloat> Module<F> {
+impl Module {
     /// Get flow expressions for a variable (may be multiple for A2A arrays).
     /// Returns all AssignCurr expressions that target offsets within this variable's range.
-    pub fn get_flow_exprs(&self, var_name: &str) -> Vec<&Expr<F>> {
+    pub fn get_flow_exprs(&self, var_name: &str) -> Vec<&Expr> {
         let canonical_name = Ident::new(var_name);
 
         // Look up the variable's offset range
@@ -909,7 +900,7 @@ impl<F: SimFloat> Module<F> {
 
     /// Get initial expressions for a variable (may be multiple for A2A arrays).
     /// Returns all AssignCurr expressions in the initials runlist for this variable.
-    pub fn get_initial_exprs(&self, var_name: &str) -> Vec<&Expr<F>> {
+    pub fn get_initial_exprs(&self, var_name: &str) -> Vec<&Expr> {
         let canonical_name = Ident::new(var_name);
 
         // Look up the variable's offset range

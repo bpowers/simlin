@@ -6,50 +6,44 @@ use std::collections::BTreeSet;
 
 use crate::ast::{ArrayView, BinaryOp, Loc};
 use crate::common::{Canonical, Ident, Result};
-use crate::float::SimFloat;
 use crate::sim_err;
 
 use super::dimensions::UnaryOp;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
-pub struct Table<F: SimFloat> {
-    pub data: Vec<(F, F)>,
+pub struct Table {
+    pub data: Vec<(f64, f64)>,
 }
 
-impl<F: SimFloat> Table<F> {
+impl Table {
     pub(super) fn new(ident: &str, t: &crate::variable::Table) -> Result<Self> {
         if t.x.len() != t.y.len() {
             return sim_err!(BadTable, ident.to_string());
         }
 
-        let data: Vec<(F, F)> =
-            t.x.iter()
-                .copied()
-                .zip(t.y.iter().copied())
-                .map(|(x, y)| (F::from_f64(x), F::from_f64(y)))
-                .collect();
+        let data: Vec<(f64, f64)> = t.x.iter().copied().zip(t.y.iter().copied()).collect();
 
         Ok(Self { data })
     }
 }
 
-pub(crate) type BuiltinFn<F> = crate::builtins::BuiltinFn<Expr<F>>;
+pub(crate) type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
 
 /// Represents a single subscript index in a dynamic Subscript expression.
 /// This enum distinguishes between single-element access and range access,
 /// enabling proper bytecode generation for dynamic ranges.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(PartialEq, Clone)]
-pub enum SubscriptIndex<F: SimFloat> {
+pub enum SubscriptIndex {
     /// Single element access - evaluates to a 1-based index
-    Single(Expr<F>),
+    Single(Expr),
     /// Range access - start and end expressions (1-based, inclusive)
     /// Used for dynamic ranges like arr[start:end] where bounds are variables
-    Range(Expr<F>, Expr<F>),
+    Range(Expr, Expr),
 }
 
-impl<F: SimFloat> SubscriptIndex<F> {
+impl SubscriptIndex {
     #[cfg(test)]
     pub(crate) fn strip_loc(self) -> Self {
         match self {
@@ -64,35 +58,35 @@ impl<F: SimFloat> SubscriptIndex<F> {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(PartialEq, Clone)]
 #[allow(dead_code)]
-pub enum Expr<F: SimFloat> {
-    Const(F, Loc),
+pub enum Expr {
+    Const(f64, Loc),
     Var(usize, Loc), // offset
     /// Dynamic subscript with possible range indices
     /// (offset, subscript indices, dimension sizes, location)
-    Subscript(usize, Vec<SubscriptIndex<F>>, Vec<usize>, Loc),
+    Subscript(usize, Vec<SubscriptIndex>, Vec<usize>, Loc),
     StaticSubscript(usize, ArrayView, Loc), // offset, precomputed view, location
     TempArray(u32, ArrayView, Loc),         // temp id, view into temp array, location
     TempArrayElement(u32, ArrayView, usize, Loc), // temp id, view, element index, location
     Dt(Loc),
-    App(BuiltinFn<F>, Loc),
+    App(BuiltinFn, Loc),
     /// EvalModule(module_ident, model_name, input_set, args)
     /// input_set is needed to look up the correct compiled module when a model has multiple instantiations
     EvalModule(
         Ident<Canonical>,
         Ident<Canonical>,
         BTreeSet<Ident<Canonical>>,
-        Vec<Expr<F>>,
+        Vec<Expr>,
     ),
     ModuleInput(usize, Loc),
-    Op2(BinaryOp, Box<Expr<F>>, Box<Expr<F>>, Loc),
-    Op1(UnaryOp, Box<Expr<F>>, Loc),
-    If(Box<Expr<F>>, Box<Expr<F>>, Box<Expr<F>>, Loc),
-    AssignCurr(usize, Box<Expr<F>>),
-    AssignNext(usize, Box<Expr<F>>),
-    AssignTemp(u32, Box<Expr<F>>, ArrayView), // temp id, expression to evaluate, view info
+    Op2(BinaryOp, Box<Expr>, Box<Expr>, Loc),
+    Op1(UnaryOp, Box<Expr>, Loc),
+    If(Box<Expr>, Box<Expr>, Box<Expr>, Loc),
+    AssignCurr(usize, Box<Expr>),
+    AssignNext(usize, Box<Expr>),
+    AssignTemp(u32, Box<Expr>, ArrayView), // temp id, expression to evaluate, view info
 }
 
-impl<F: SimFloat> Expr<F> {
+impl Expr {
     pub(super) fn get_loc(&self) -> Loc {
         match self {
             Expr::Const(_, loc) => *loc,
@@ -227,9 +221,9 @@ impl<F: SimFloat> Expr<F> {
 }
 
 #[allow(dead_code)]
-pub(super) fn decompose_array_temps<F: SimFloat>(
-    expr: Expr<F>,
+pub(super) fn decompose_array_temps(
+    expr: Expr,
     next_temp_id: usize,
-) -> Result<(Expr<F>, Vec<Expr<F>>, usize)> {
+) -> Result<(Expr, Vec<Expr>, usize)> {
     Ok((expr, vec![], next_temp_id))
 }
