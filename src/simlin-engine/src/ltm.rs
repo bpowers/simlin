@@ -459,6 +459,32 @@ impl CausalGraph {
         unique_loops
     }
 
+    /// Find all elementary circuits as deduplicated node lists.
+    /// Only needs edges -- does not compute polarity or assign IDs.
+    pub(crate) fn find_circuit_node_lists(&self) -> Vec<Vec<Ident<Canonical>>> {
+        let mut nodes: Vec<_> = self.edges.keys().cloned().collect();
+        nodes.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+        let mut all_circuits = Vec::new();
+        let mut seen_sets: HashSet<String> = HashSet::new();
+
+        for start_node in &nodes {
+            let circuits = self.find_circuits_from(start_node);
+            for circuit in circuits {
+                if circuit.len() > 1 {
+                    let mut node_set: Vec<&str> = circuit.iter().map(|n| n.as_str()).collect();
+                    node_set.sort();
+                    let key = node_set.join(",");
+                    if seen_sets.insert(key) {
+                        all_circuits.push(circuit);
+                    }
+                }
+            }
+        }
+
+        all_circuits
+    }
+
     /// Enrich a loop's stock list with stocks from inside any DynamicModule
     /// nodes that appear in the circuit. For each module node, we find the
     /// internal pathway from the relevant input port to the output, and collect
@@ -841,43 +867,7 @@ impl CausalGraph {
 
     /// Assign deterministic IDs to loops based on their content
     fn assign_deterministic_loop_ids(&self, loops: &mut [Loop]) {
-        // Sort loops by a deterministic key based on their content
-        loops.sort_by_key(|loop_item| {
-            // Create a deterministic key from the loop's variables
-            let mut vars: Vec<String> = loop_item
-                .links
-                .iter()
-                .flat_map(|link| vec![link.from.as_str().to_string(), link.to.as_str().to_string()])
-                .collect();
-            vars.sort();
-            vars.dedup();
-            vars.join("_")
-        });
-
-        // Now assign IDs based on polarity and position in sorted order
-        let mut r_counter = 1;
-        let mut b_counter = 1;
-        let mut u_counter = 1;
-
-        for loop_item in loops.iter_mut() {
-            loop_item.id = match loop_item.polarity {
-                LoopPolarity::Reinforcing => {
-                    let id = format!("r{r_counter}");
-                    r_counter += 1;
-                    id
-                }
-                LoopPolarity::Balancing => {
-                    let id = format!("b{b_counter}");
-                    b_counter += 1;
-                    id
-                }
-                LoopPolarity::Undetermined => {
-                    let id = format!("u{u_counter}");
-                    u_counter += 1;
-                    id
-                }
-            };
-        }
+        assign_loop_ids(loops);
     }
 
     /// Remove duplicate loops (same set of nodes in different order)
@@ -944,6 +934,45 @@ fn all_module_stocks(
         .collect();
     stocks.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     stocks
+}
+
+/// Assign deterministic IDs to loops based on their polarity and content.
+/// Standalone function for use by tracked functions in db.rs.
+pub(crate) fn assign_loop_ids(loops: &mut [Loop]) {
+    loops.sort_by_key(|loop_item| {
+        let mut vars: Vec<String> = loop_item
+            .links
+            .iter()
+            .flat_map(|link| vec![link.from.as_str().to_string(), link.to.as_str().to_string()])
+            .collect();
+        vars.sort();
+        vars.dedup();
+        vars.join("_")
+    });
+
+    let mut r_counter = 1;
+    let mut b_counter = 1;
+    let mut u_counter = 1;
+
+    for loop_item in loops.iter_mut() {
+        loop_item.id = match loop_item.polarity {
+            LoopPolarity::Reinforcing => {
+                let id = format!("r{r_counter}");
+                r_counter += 1;
+                id
+            }
+            LoopPolarity::Balancing => {
+                let id = format!("b{b_counter}");
+                b_counter += 1;
+                id
+            }
+            LoopPolarity::Undetermined => {
+                let id = format!("u{u_counter}");
+                u_counter += 1;
+                id
+            }
+        };
+    }
 }
 
 /// Detect all feedback loops in a single model

@@ -989,6 +989,642 @@ pub fn model_dependency_graph(
     }
 }
 
+// ── LTM tracked functions ──────────────────────────────────────────────
+
+/// Causal edge structure for a model, built from variable dependency sets
+/// and structural info (stock inflows/outflows, module refs).
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct CausalEdgesResult {
+    /// Adjacency list: from_var -> {to_var1, to_var2, ...}
+    pub edges: HashMap<String, BTreeSet<String>>,
+    /// Stock variables in the model
+    pub stocks: BTreeSet<String>,
+    /// Module var_name -> model_name for dynamic modules
+    pub dynamic_modules: HashMap<String, String>,
+}
+
+/// Deduplicated loop circuits as node name lists.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct LoopCircuitsResult {
+    pub circuits: Vec<Vec<String>>,
+}
+
+/// Stock-to-stock cycle partitions.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct CyclePartitionsResult {
+    pub partitions: Vec<Vec<String>>,
+    pub stock_partition: HashMap<String, usize>,
+}
+
+/// A single LTM synthetic variable definition (name + equation text).
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct LtmSyntheticVar {
+    pub name: String,
+    pub equation: String,
+}
+
+/// Result of LTM variable generation for a model.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct LtmVariablesResult {
+    pub vars: Vec<LtmSyntheticVar>,
+}
+
+/// Strip interpunct (middot) module output qualifiers, e.g.
+/// `$⁚s⁚0⁚smth1·output` → `$⁚s⁚0⁚smth1`.
+fn normalize_module_ref_str(s: &str) -> String {
+    if let Some(pos) = s.find('\u{00B7}') {
+        s[..pos].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Construct a lightweight CausalGraph from a CausalEdgesResult.
+/// Variables and module_graphs are empty -- suitable for graph algorithms
+/// (circuit finding, SCC computation) but not for polarity analysis.
+fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::CausalGraph {
+    use crate::common::{Canonical, Ident};
+    use std::collections::HashSet;
+
+    let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = result
+        .edges
+        .iter()
+        .map(|(from, tos)| {
+            (
+                Ident::new(from),
+                tos.iter().map(|t| Ident::new(t)).collect(),
+            )
+        })
+        .collect();
+    let stocks: HashSet<Ident<Canonical>> = result.stocks.iter().map(|s| Ident::new(s)).collect();
+
+    crate::ltm::CausalGraph {
+        edges,
+        stocks,
+        variables: HashMap::new(),
+        module_graphs: HashMap::new(),
+    }
+}
+
+/// Build the causal edge structure for a model from salsa-tracked
+/// dependency sets and structural variable info.
+///
+/// Reads `variable_direct_dependencies` (establishing salsa dep on dep
+/// sets) and `parse_source_variable` (for implicit variable details like
+/// module input refs). Salsa backdating ensures that when equation text
+/// changes without changing the resulting edge structure, the cached
+/// result is reused and downstream graph algorithms are skipped.
+#[salsa::tracked(returns(ref))]
+pub fn model_causal_edges(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> CausalEdgesResult {
+    let source_vars = model.variables(db);
+    let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut stocks = BTreeSet::new();
+    let mut dynamic_modules = HashMap::new();
+
+    for (name, source_var) in source_vars.iter() {
+        let kind = source_var.kind(db);
+
+        match kind {
+            SourceVariableKind::Stock => {
+                stocks.insert(name.clone());
+                for flow in source_var
+                    .inflows(db)
+                    .iter()
+                    .chain(source_var.outflows(db).iter())
+                {
+                    let canonical_flow = canonicalize(flow).into_owned();
+                    edges
+                        .entry(canonical_flow)
+                        .or_default()
+                        .insert(name.clone());
+                }
+            }
+            SourceVariableKind::Module => {
+                for mr in source_var.module_refs(db).iter() {
+                    let canonical_src = canonicalize(&mr.src).into_owned();
+                    edges.entry(canonical_src).or_default().insert(name.clone());
+                }
+                let model_name = source_var.model_name(db);
+                if !model_name.is_empty() {
+                    dynamic_modules.insert(name.clone(), model_name.clone());
+                }
+            }
+            _ => {
+                let deps = variable_direct_dependencies(db, *source_var, project);
+                for dep in &deps.dt_deps {
+                    let normalized = normalize_module_ref_str(dep);
+                    edges.entry(normalized).or_default().insert(name.clone());
+                }
+            }
+        }
+
+        // Include implicit variables (module instances from SMOOTH/DELAY expansion)
+        let parsed = parse_source_variable(db, *source_var, project);
+        for implicit_dm_var in &parsed.implicit_vars {
+            let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+
+            match implicit_dm_var {
+                datamodel::Variable::Stock(s) => {
+                    stocks.insert(imp_name.clone());
+                    for flow in s.inflows.iter().chain(s.outflows.iter()) {
+                        let canonical_flow = canonicalize(flow).into_owned();
+                        edges
+                            .entry(canonical_flow)
+                            .or_default()
+                            .insert(imp_name.clone());
+                    }
+                }
+                datamodel::Variable::Module(m) => {
+                    for mr in &m.references {
+                        let canonical_src = canonicalize(&mr.src).into_owned();
+                        edges
+                            .entry(canonical_src)
+                            .or_default()
+                            .insert(imp_name.clone());
+                    }
+                    dynamic_modules.insert(imp_name.clone(), m.model_name.clone());
+                }
+                _ => {
+                    // For implicit flows/auxes, get deps from the parent's
+                    // variable_direct_dependencies result.
+                    let deps = variable_direct_dependencies(db, *source_var, project);
+                    if let Some(implicit_dep) =
+                        deps.implicit_vars.iter().find(|iv| iv.name == imp_name)
+                    {
+                        for dep in &implicit_dep.dt_deps {
+                            let normalized = normalize_module_ref_str(dep);
+                            edges
+                                .entry(normalized)
+                                .or_default()
+                                .insert(imp_name.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    CausalEdgesResult {
+        edges,
+        stocks,
+        dynamic_modules,
+    }
+}
+
+/// Find all elementary loop circuits in a model's causal graph.
+///
+/// Depends on `model_causal_edges`, so loop detection is cached when
+/// the edge structure hasn't changed (even if equation text changed).
+#[salsa::tracked(returns(ref))]
+pub fn model_loop_circuits(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> LoopCircuitsResult {
+    let edges_result = model_causal_edges(db, model, project);
+    let graph = causal_graph_from_edges(edges_result);
+    let circuits = graph.find_circuit_node_lists();
+    LoopCircuitsResult {
+        circuits: circuits
+            .into_iter()
+            .map(|c| c.into_iter().map(|n| n.to_string()).collect())
+            .collect(),
+    }
+}
+
+/// Compute stock-to-stock cycle partitions (SCCs) for a model.
+///
+/// Depends on `model_causal_edges`, so partition computation is cached
+/// when the edge structure hasn't changed.
+#[salsa::tracked(returns(ref))]
+pub fn model_cycle_partitions(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> CyclePartitionsResult {
+    let edges_result = model_causal_edges(db, model, project);
+    let graph = causal_graph_from_edges(edges_result);
+    let cp = graph.compute_cycle_partitions();
+    CyclePartitionsResult {
+        partitions: cp
+            .partitions
+            .into_iter()
+            .map(|p| p.into_iter().map(|s| s.to_string()).collect())
+            .collect(),
+        stock_partition: cp
+            .stock_partition
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    }
+}
+
+/// Reconstruct `Variable` objects from salsa-tracked parse results for
+/// all variables in a model (including implicit variables).
+fn reconstruct_model_variables(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> HashMap<crate::common::Ident<crate::common::Canonical>, crate::variable::Variable> {
+    use crate::common::{Canonical, Ident};
+
+    let source_vars = model.variables(db);
+    let dims = source_dims_to_datamodel(project.dimensions(db));
+    let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
+    let models = HashMap::new();
+    let scope = crate::model::ScopeStage0 {
+        models: &models,
+        dimensions: &dim_context,
+        model_name: "",
+    };
+
+    let mut variables: HashMap<Ident<Canonical>, crate::variable::Variable> = HashMap::new();
+
+    for (name, source_var) in source_vars.iter() {
+        let parsed = parse_source_variable(db, *source_var, project);
+        let lowered = crate::model::lower_variable(&scope, &parsed.variable);
+        variables.insert(Ident::new(name), lowered);
+
+        // Add implicit variables (module instances from SMOOTH/DELAY expansion)
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap_or_default();
+        for implicit_dm_var in &parsed.implicit_vars {
+            let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+            let mut dummy_implicits = Vec::new();
+            let parsed_imp = crate::variable::parse_var(
+                &dims,
+                implicit_dm_var,
+                &mut dummy_implicits,
+                &units_ctx,
+                |mi| Ok(Some(mi.clone())),
+            );
+            let lowered_imp = crate::model::lower_variable(&scope, &parsed_imp);
+            variables.insert(Ident::new(&imp_name), lowered_imp);
+        }
+    }
+
+    variables
+}
+
+/// Compute stdlib composite ports (cached in a process-wide OnceLock).
+/// These are static properties of stdlib models and never change.
+///
+/// Uses a separate thread for initialization because `Project::from()`
+/// creates its own salsa db, which conflicts if we're inside a tracked
+/// function query on the caller's db.
+fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap {
+    use std::sync::OnceLock;
+    static PORTS: OnceLock<crate::ltm_augment::CompositePortMap> = OnceLock::new();
+    PORTS.get_or_init(|| {
+        std::thread::spawn(|| {
+            use crate::common::{Canonical, Ident};
+
+            let mut models = Vec::new();
+            for name in &[
+                "smooth", "delay1", "delay3", "trend", "init", "previous",
+            ] {
+                if let Some(mut dm_model) = crate::stdlib::get(name) {
+                    dm_model.name = format!("stdlib\u{205A}{name}");
+                    models.push(dm_model);
+                }
+            }
+
+            if models.is_empty() {
+                return HashMap::<Ident<Canonical>, std::collections::HashSet<Ident<Canonical>>>::new();
+            }
+
+            let dm_project = datamodel::Project {
+                name: "stdlib_composite".to_string(),
+                sim_specs: datamodel::SimSpecs::default(),
+                dimensions: vec![],
+                units: vec![],
+                models,
+                source: None,
+                ai_information: None,
+            };
+
+            let project = crate::project::Project::from(dm_project);
+            crate::ltm_augment::compute_composite_ports(&project)
+        }).join().expect("stdlib composite ports thread panicked")
+    })
+}
+
+/// Generate LTM synthetic variables for a user model (exhaustive mode).
+///
+/// Reads cached loop circuits and cycle partitions (graph algorithms
+/// skipped when deps unchanged), then generates link score, loop score,
+/// and relative loop score equations.
+#[salsa::tracked(returns(ref))]
+pub fn model_ltm_synthetic_variables(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> LtmVariablesResult {
+    use crate::common::{Canonical, Ident};
+    use crate::ltm::{CyclePartitions, Link, Loop, assign_loop_ids};
+    use std::collections::HashSet;
+
+    let circuits_result = model_loop_circuits(db, model, project);
+    if circuits_result.circuits.is_empty() {
+        return LtmVariablesResult { vars: vec![] };
+    }
+
+    let partitions_result = model_cycle_partitions(db, model, project);
+    let edges_result = model_causal_edges(db, model, project);
+
+    // Reconstruct Variable objects for polarity analysis + equation generation
+    let variables = reconstruct_model_variables(db, model, project);
+
+    // Build CausalGraph with variables for polarity analysis
+    let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
+        .edges
+        .iter()
+        .map(|(from, tos)| {
+            (
+                Ident::new(from),
+                tos.iter().map(|t| Ident::new(t)).collect(),
+            )
+        })
+        .collect();
+    let stocks: HashSet<Ident<Canonical>> =
+        edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
+
+    let graph = crate::ltm::CausalGraph {
+        edges,
+        stocks,
+        variables: variables.clone(),
+        module_graphs: HashMap::new(),
+    };
+
+    // Convert circuits to Loops with polarity
+    let mut loops: Vec<Loop> = circuits_result
+        .circuits
+        .iter()
+        .map(|circuit_strs| {
+            let circuit: Vec<Ident<Canonical>> =
+                circuit_strs.iter().map(|s| Ident::new(s)).collect();
+            let links = graph.circuit_to_links(&circuit);
+            let parent_stocks = graph.find_stocks_in_loop(&circuit);
+            let polarity = graph.calculate_polarity(&links);
+            Loop {
+                id: String::new(),
+                links,
+                stocks: parent_stocks,
+                polarity,
+            }
+        })
+        .collect();
+
+    assign_loop_ids(&mut loops);
+
+    // Collect all links from loops
+    let mut loop_links: HashSet<Link> = HashSet::new();
+    for loop_item in &loops {
+        for link in &loop_item.links {
+            loop_links.insert(link.clone());
+        }
+    }
+
+    // Reconstruct CyclePartitions from cached result
+    let partitions = CyclePartitions {
+        partitions: partitions_result
+            .partitions
+            .iter()
+            .map(|p| p.iter().map(|s| Ident::new(s)).collect())
+            .collect(),
+        stock_partition: partitions_result
+            .stock_partition
+            .iter()
+            .map(|(k, v)| (Ident::new(k), *v))
+            .collect(),
+    };
+
+    let composite_ports = get_stdlib_composite_ports();
+    let link_vars =
+        crate::ltm_augment::generate_link_score_variables(&loop_links, &variables, composite_ports);
+    let loop_vars = crate::ltm_augment::generate_loop_score_variables(&loops, &partitions);
+
+    let mut vars = Vec::new();
+    for (name, var) in link_vars.into_iter().chain(loop_vars.into_iter()) {
+        let equation = match var.get_equation() {
+            Some(datamodel::Equation::Scalar(eq)) => eq.clone(),
+            _ => String::new(),
+        };
+        vars.push(LtmSyntheticVar {
+            name: name.to_string(),
+            equation,
+        });
+    }
+
+    // Sort for deterministic output
+    vars.sort_by(|a, b| a.name.cmp(&b.name));
+
+    LtmVariablesResult { vars }
+}
+
+/// Generate LTM link score variables for ALL causal links (discovery mode).
+///
+/// Unlike `model_ltm_synthetic_variables` which only generates variables
+/// for links in detected loops, this generates link scores for every
+/// causal edge. No loop or relative loop scores are generated.
+#[salsa::tracked(returns(ref))]
+pub fn model_ltm_all_link_synthetic_variables(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> LtmVariablesResult {
+    use crate::common::{Canonical, Ident};
+    use crate::ltm::Link;
+    use std::collections::HashSet;
+
+    let edges_result = model_causal_edges(db, model, project);
+    let variables = reconstruct_model_variables(db, model, project);
+
+    // Build CausalGraph for polarity analysis
+    let graph_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
+        .edges
+        .iter()
+        .map(|(from, tos)| {
+            (
+                Ident::new(from),
+                tos.iter().map(|t| Ident::new(t)).collect(),
+            )
+        })
+        .collect();
+    let stocks: HashSet<Ident<Canonical>> =
+        edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
+
+    let graph = crate::ltm::CausalGraph {
+        edges: graph_edges,
+        stocks,
+        variables: variables.clone(),
+        module_graphs: HashMap::new(),
+    };
+
+    let all_links: HashSet<Link> = graph.all_links().into_iter().collect();
+
+    let composite_ports = get_stdlib_composite_ports();
+    let link_vars =
+        crate::ltm_augment::generate_link_score_variables(&all_links, &variables, composite_ports);
+
+    let mut vars: Vec<LtmSyntheticVar> = link_vars
+        .into_iter()
+        .map(|(name, var)| {
+            let equation = match var.get_equation() {
+                Some(datamodel::Equation::Scalar(eq)) => eq.clone(),
+                _ => String::new(),
+            };
+            LtmSyntheticVar {
+                name: name.to_string(),
+                equation,
+            }
+        })
+        .collect();
+
+    vars.sort_by(|a, b| a.name.cmp(&b.name));
+    LtmVariablesResult { vars }
+}
+
+/// Generate internal LTM variables for a stdlib dynamic module.
+///
+/// Since stdlib models are static, this computes once and caches forever.
+#[salsa::tracked(returns(ref))]
+pub fn module_ltm_synthetic_variables(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> LtmVariablesResult {
+    use crate::common::{Canonical, Ident};
+
+    // Reconstruct the module's variables
+    let variables = reconstruct_model_variables(db, model, project);
+
+    // Check if this is a dynamic module (has stocks)
+    let has_stocks = variables
+        .values()
+        .any(|v| matches!(v, crate::variable::Variable::Stock { .. }));
+    if !has_stocks {
+        return LtmVariablesResult { vars: vec![] };
+    }
+
+    // Build a ModelStage1-like structure for the module
+    let edges_result = model_causal_edges(db, model, project);
+    let graph_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
+        .edges
+        .iter()
+        .map(|(from, tos)| {
+            (
+                Ident::new(from),
+                tos.iter().map(|t| Ident::new(t)).collect(),
+            )
+        })
+        .collect();
+    let stocks: std::collections::HashSet<Ident<Canonical>> =
+        edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
+
+    let graph = crate::ltm::CausalGraph {
+        edges: graph_edges,
+        stocks,
+        variables: variables.clone(),
+        module_graphs: HashMap::new(),
+    };
+
+    // Generate internal link scores for all causal links in the module
+    let mut vars = Vec::new();
+    let links: std::collections::HashSet<crate::ltm::Link> =
+        graph.all_links().into_iter().collect();
+
+    for link in &links {
+        let var_name = format!(
+            "$\u{205A}ltm\u{205A}ilink\u{205A}{}\u{2192}{}",
+            link.from.as_str(),
+            link.to.as_str()
+        );
+        if let Some(to_var) = variables.get(&link.to) {
+            let equation = crate::ltm_augment::generate_link_score_equation_for_link(
+                &link.from, &link.to, to_var, &variables,
+            );
+            vars.push(LtmSyntheticVar {
+                name: var_name,
+                equation,
+            });
+        }
+    }
+
+    // Enumerate pathways from input ports to output
+    let output_ident = Ident::new("output");
+    let pathways = graph.enumerate_module_pathways(&output_ident);
+
+    for (input_port, port_pathways) in &pathways {
+        let mut pathway_names = Vec::new();
+        for (idx, pathway_links) in port_pathways.iter().enumerate() {
+            let path_var_name = format!(
+                "$\u{205A}ltm\u{205A}path\u{205A}{}\u{205A}{}",
+                input_port.as_str(),
+                idx
+            );
+
+            let link_score_refs: Vec<String> = pathway_links
+                .iter()
+                .map(|link| {
+                    format!(
+                        "\"$\u{205A}ltm\u{205A}ilink\u{205A}{}\u{2192}{}\"",
+                        link.from.as_str(),
+                        link.to.as_str()
+                    )
+                })
+                .collect();
+
+            let equation = if link_score_refs.is_empty() {
+                "0".to_string()
+            } else {
+                link_score_refs.join(" * ")
+            };
+
+            pathway_names.push(path_var_name.clone());
+            vars.push(LtmSyntheticVar {
+                name: path_var_name,
+                equation,
+            });
+        }
+
+        // Generate composite score variable (max-magnitude pathway)
+        let composite_name = format!(
+            "$\u{205A}ltm\u{205A}composite\u{205A}{}",
+            input_port.as_str()
+        );
+        let equation = generate_max_abs_chain_str(&pathway_names);
+        vars.push(LtmSyntheticVar {
+            name: composite_name,
+            equation,
+        });
+    }
+
+    vars.sort_by(|a, b| a.name.cmp(&b.name));
+    LtmVariablesResult { vars }
+}
+
+/// Generate a nested max-abs selection equation from pathway variable names.
+fn generate_max_abs_chain_str(pathway_names: &[String]) -> String {
+    match pathway_names.len() {
+        0 => "0".to_string(),
+        1 => format!("\"{}\"", pathway_names[0]),
+        2 => {
+            let p0 = &pathway_names[0];
+            let p1 = &pathway_names[1];
+            format!("if ABS(\"{p0}\") >= ABS(\"{p1}\") then \"{p0}\" else \"{p1}\"")
+        }
+        _ => {
+            let last = &pathway_names[pathway_names.len() - 1];
+            let rest = generate_max_abs_chain_str(&pathway_names[..pathway_names.len() - 1]);
+            format!("if ABS(\"{last}\") >= ABS(({rest})) then \"{last}\" else ({rest})")
+        }
+    }
+}
+
 // ── Sync result ────────────────────────────────────────────────────────
 
 /// Result of syncing a datamodel::Project into the salsa database.
@@ -2386,6 +3022,300 @@ mod tests {
             !graph.initial_dependencies["population"].is_empty()
                 || graph.initial_dependencies["population"].is_empty(),
             "stock initial deps depend on its equation"
+        );
+    }
+
+    fn feedback_loop_project() -> datamodel::Project {
+        datamodel::Project {
+            name: "feedback".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Stock(datamodel::Stock {
+                        ident: "population".to_string(),
+                        equation: datamodel::Equation::Scalar("100".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        inflows: vec!["births".to_string()],
+                        outflows: vec![],
+                        non_negative: false,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Flow(datamodel::Flow {
+                        ident: "births".to_string(),
+                        equation: datamodel::Equation::Scalar(
+                            "population * birth_rate".to_string(),
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "birth_rate".to_string(),
+                        equation: datamodel::Equation::Scalar("0.1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        }
+    }
+
+    #[test]
+    fn test_normalize_module_ref_str() {
+        assert_eq!(normalize_module_ref_str("foo\u{00B7}output"), "foo");
+        assert_eq!(normalize_module_ref_str("plain_name"), "plain_name");
+        assert_eq!(normalize_module_ref_str(""), "");
+    }
+
+    #[test]
+    fn test_generate_max_abs_chain_str() {
+        assert_eq!(generate_max_abs_chain_str(&[]), "0");
+        assert_eq!(generate_max_abs_chain_str(&["p0".into()]), "\"p0\"");
+        let two = generate_max_abs_chain_str(&["p0".into(), "p1".into()]);
+        assert!(two.contains("ABS"));
+        assert!(two.contains("p0"));
+        assert!(two.contains("p1"));
+        let three = generate_max_abs_chain_str(&["p0".into(), "p1".into(), "p2".into()]);
+        assert!(three.contains("p2"));
+    }
+
+    #[test]
+    fn test_model_causal_edges_feedback_loop() {
+        let db = SimlinDb::default();
+        let project = feedback_loop_project();
+        let result = sync_from_datamodel(&db, &project);
+        let model = result.models["main"].source;
+
+        let edges = model_causal_edges(&db, model, result.project);
+
+        assert!(edges.stocks.contains("population"));
+        // births flows into population, so births -> population edge exists
+        assert!(
+            edges
+                .edges
+                .get("births")
+                .is_some_and(|t| t.contains("population")),
+            "births should have edge to population (stock inflow)"
+        );
+        // births = population * birth_rate, so population -> births and birth_rate -> births
+        assert!(
+            edges
+                .edges
+                .get("population")
+                .is_some_and(|t| t.contains("births")),
+            "population should have edge to births (dep)"
+        );
+        assert!(
+            edges
+                .edges
+                .get("birth_rate")
+                .is_some_and(|t| t.contains("births")),
+            "birth_rate should have edge to births (dep)"
+        );
+    }
+
+    #[test]
+    fn test_model_loop_circuits_finds_feedback() {
+        let db = SimlinDb::default();
+        let project = feedback_loop_project();
+        let result = sync_from_datamodel(&db, &project);
+        let model = result.models["main"].source;
+
+        let circuits = model_loop_circuits(&db, model, result.project);
+
+        // population -> births -> population is the single feedback loop
+        assert!(
+            !circuits.circuits.is_empty(),
+            "should find at least one circuit"
+        );
+        let has_pop_births_loop = circuits
+            .circuits
+            .iter()
+            .any(|c| c.contains(&"population".to_string()) && c.contains(&"births".to_string()));
+        assert!(has_pop_births_loop, "should find population-births loop");
+    }
+
+    #[test]
+    fn test_model_cycle_partitions_single_stock() {
+        let db = SimlinDb::default();
+        let project = feedback_loop_project();
+        let result = sync_from_datamodel(&db, &project);
+        let model = result.models["main"].source;
+
+        let partitions = model_cycle_partitions(&db, model, result.project);
+
+        // Single stock should yield one partition
+        assert!(
+            !partitions.partitions.is_empty(),
+            "should have at least one partition"
+        );
+        assert!(
+            partitions.stock_partition.contains_key("population"),
+            "population should be in a partition"
+        );
+    }
+
+    #[test]
+    fn test_model_ltm_synthetic_variables_generates_scores() {
+        let db = SimlinDb::default();
+        let project = feedback_loop_project();
+        let result = sync_from_datamodel(&db, &project);
+        let model = result.models["main"].source;
+
+        let ltm = model_ltm_synthetic_variables(&db, model, result.project);
+
+        // Should generate link scores and loop scores for the feedback loop
+        assert!(!ltm.vars.is_empty(), "should generate LTM variables");
+
+        let has_link_score = ltm.vars.iter().any(|v| v.name.contains("link_score"));
+        assert!(has_link_score, "should have link score variables");
+
+        let has_loop_score = ltm.vars.iter().any(|v| v.name.contains("loop_score"));
+        assert!(has_loop_score, "should have loop score variables");
+
+        // All vars should have non-empty equations
+        for var in &ltm.vars {
+            assert!(
+                !var.equation.is_empty(),
+                "var {} should have non-empty equation",
+                var.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_ltm_all_link_synthetic_variables_discovery_mode() {
+        let db = SimlinDb::default();
+        let project = feedback_loop_project();
+        let result = sync_from_datamodel(&db, &project);
+        let model = result.models["main"].source;
+
+        let ltm = model_ltm_all_link_synthetic_variables(&db, model, result.project);
+
+        assert!(!ltm.vars.is_empty(), "should generate link score variables");
+
+        // Discovery mode should NOT generate loop scores
+        let has_loop_score = ltm.vars.iter().any(|v| v.name.contains("loop_score"));
+        assert!(
+            !has_loop_score,
+            "discovery mode should not have loop scores"
+        );
+
+        let has_link_score = ltm.vars.iter().any(|v| v.name.contains("link_score"));
+        assert!(has_link_score, "should have link score variables");
+    }
+
+    #[test]
+    fn test_model_ltm_no_loops_empty() {
+        let db = SimlinDb::default();
+        // Simple project has just a constant -- no loops
+        let project = simple_project();
+        let result = sync_from_datamodel(&db, &project);
+        let model = result.models["main"].source;
+
+        let ltm = model_ltm_synthetic_variables(&db, model, result.project);
+        assert!(ltm.vars.is_empty(), "no loops should produce no LTM vars");
+    }
+
+    #[test]
+    fn test_ltm_caching_equation_change_no_dep_change() {
+        use salsa::Setter;
+
+        let mut db = SimlinDb::default();
+        let project = feedback_loop_project();
+        let (source_project, births_src, source_model) = {
+            let result = sync_from_datamodel(&db, &project);
+            (
+                result.project,
+                result.models["main"].variables["births"].source,
+                result.models["main"].source,
+            )
+        };
+
+        // Prime the cache
+        let circuits_before = model_loop_circuits(&db, source_model, source_project);
+        let circuits_ptr_before = circuits_before as *const LoopCircuitsResult;
+
+        // Change births equation from "population * birth_rate" to
+        // "birth_rate * population" -- same deps, different equation text
+        births_src.set_equation(&mut db).to(SourceEquation::Scalar(
+            "birth_rate * population".to_string(),
+        ));
+
+        // Loop circuits should be pointer-equal (cached) because the
+        // causal edge structure hasn't changed
+        let circuits_after = model_loop_circuits(&db, source_model, source_project);
+        let circuits_ptr_after = circuits_after as *const LoopCircuitsResult;
+        assert_eq!(
+            circuits_ptr_before, circuits_ptr_after,
+            "loop circuits should be cached when deps don't change"
+        );
+    }
+
+    #[test]
+    fn test_ltm_caching_dep_change_recomputes_circuits() {
+        use salsa::Setter;
+
+        let mut db = SimlinDb::default();
+        let project = feedback_loop_project();
+        let (source_project, births_src, source_model) = {
+            let result = sync_from_datamodel(&db, &project);
+            (
+                result.project,
+                result.models["main"].variables["births"].source,
+                result.models["main"].source,
+            )
+        };
+
+        // Prime the cache
+        let circuits_before = model_loop_circuits(&db, source_model, source_project);
+        assert!(
+            !circuits_before.circuits.is_empty(),
+            "should have circuits initially"
+        );
+
+        // Change births to a constant -- breaks the feedback loop
+        births_src
+            .set_equation(&mut db)
+            .to(SourceEquation::Scalar("10".to_string()));
+
+        let circuits_after = model_loop_circuits(&db, source_model, source_project);
+        assert!(
+            circuits_after.circuits.is_empty(),
+            "should have no circuits after breaking loop"
         );
     }
 }
