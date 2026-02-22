@@ -188,7 +188,7 @@ impl From<Error> for EquationError {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
     Import,
     Model,
@@ -196,7 +196,7 @@ pub enum ErrorKind {
     Variable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Error {
     pub kind: ErrorKind,
     pub code: ErrorCode,

@@ -84,7 +84,7 @@ pub use ffi_error::{ErrorDetail as ErrorDetailData, FfiError, SimlinError};
 
 /// Error codes for the C API
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimlinErrorCode {
     /// Success - no error
     NoError = 0,

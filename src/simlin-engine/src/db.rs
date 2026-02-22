@@ -4,7 +4,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use salsa::Accumulator;
+
 use crate::canonicalize;
+use crate::common::{EquationError, Error, UnitError};
 use crate::datamodel;
 
 // ── Database ───────────────────────────────────────────────────────────
@@ -23,6 +26,28 @@ impl salsa::Database for SimlinDb {}
 
 #[salsa::db]
 impl Db for SimlinDb {}
+
+// ── Accumulator ───────────────────────────────────────────────────────
+
+#[salsa::accumulator]
+pub struct CompilationDiagnostic(pub Diagnostic);
+
+/// A single compilation diagnostic emitted by tracked functions.
+/// Carries enough context (model name, optional variable name) for
+/// downstream formatting without re-walking the model tree.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Diagnostic {
+    pub model: String,
+    pub variable: Option<String>,
+    pub error: DiagnosticError,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DiagnosticError {
+    Equation(EquationError),
+    Model(Error),
+    Unit(UnitError),
+}
 
 // ── Interned identifiers ───────────────────────────────────────────────
 
@@ -989,6 +1014,48 @@ pub fn model_dependency_graph(
     }
 }
 
+// ── Diagnostic collection ──────────────────────────────────────────────
+
+/// Per-model tracked function that collects compilation diagnostics from
+/// already-cached tracked functions and pushes them to the accumulator.
+///
+/// This runs PARALLEL to the existing error-field path: tracked functions
+/// still populate struct fields for backward compatibility, but this
+/// function also pushes the same errors into the salsa accumulator so
+/// callers can eventually read diagnostics purely from the DB.
+#[salsa::tracked]
+pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
+    let model_name = model.name(db).clone();
+    let source_vars = model.variables(db);
+
+    for (var_name, source_var) in source_vars.iter() {
+        let parsed = parse_source_variable(db, *source_var, project);
+        let variable = &parsed.variable;
+
+        if let Some(errors) = variable.equation_errors() {
+            for err in errors {
+                CompilationDiagnostic(Diagnostic {
+                    model: model_name.clone(),
+                    variable: Some(var_name.clone()),
+                    error: DiagnosticError::Equation(err),
+                })
+                .accumulate(db);
+            }
+        }
+
+        if let Some(errors) = variable.unit_errors() {
+            for err in errors {
+                CompilationDiagnostic(Diagnostic {
+                    model: model_name.clone(),
+                    variable: Some(var_name.clone()),
+                    error: DiagnosticError::Unit(err),
+                })
+                .accumulate(db);
+            }
+        }
+    }
+}
+
 // ── LTM tracked functions ──────────────────────────────────────────────
 
 /// Causal edge structure for a model, built from variable dependency sets
@@ -1623,6 +1690,31 @@ fn generate_max_abs_chain_str(pathway_names: &[String]) -> String {
             format!("if ABS(\"{last}\") >= ABS(({rest})) then \"{last}\" else ({rest})")
         }
     }
+}
+
+// ── Diagnostic collection helpers ──────────────────────────────────────
+
+/// Collect all `CompilationDiagnostic`s accumulated during
+/// `model_all_diagnostics` for a single model.
+pub fn collect_model_diagnostics(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> Vec<Diagnostic> {
+    model_all_diagnostics::accumulated::<CompilationDiagnostic>(db, model, project)
+        .into_iter()
+        .map(|cd| cd.0.clone())
+        .collect()
+}
+
+/// Collect all diagnostics for every model in a synced project.
+pub fn collect_all_diagnostics(db: &SimlinDb, sync: &SyncResult<'_>) -> Vec<Diagnostic> {
+    let mut all = Vec::new();
+    for synced_model in sync.models.values() {
+        let diags = collect_model_diagnostics(db, synced_model.source, sync.project);
+        all.extend(diags);
+    }
+    all
 }
 
 // ── Sync result ────────────────────────────────────────────────────────
@@ -3316,6 +3408,327 @@ mod tests {
         assert!(
             circuits_after.circuits.is_empty(),
             "should have no circuits after breaking loop"
+        );
+    }
+
+    // ── Accumulator parity tests ──────────────────────────────────────
+
+    #[test]
+    fn test_accumulator_no_errors_for_valid_project() {
+        let db = SimlinDb::default();
+        let project = simple_project();
+        let sync = sync_from_datamodel(&db, &project);
+
+        let diags = collect_all_diagnostics(&db, &sync);
+        assert!(
+            diags.is_empty(),
+            "valid project should produce no diagnostics"
+        );
+    }
+
+    #[test]
+    fn test_accumulator_parse_error_bad_equation() {
+        let db = SimlinDb::default();
+        // "if then" is a syntax error (missing condition/consequent)
+        let project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "broken".to_string(),
+                    equation: datamodel::Equation::Scalar("if then".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let sync = sync_from_datamodel(&db, &project);
+
+        // Verify struct field path also shows an error
+        let parsed = parse_source_variable(
+            &db,
+            sync.models["main"].variables["broken"].source,
+            sync.project,
+        );
+        assert!(
+            parsed.variable.equation_errors().is_some(),
+            "struct fields should show equation errors for 'if then'"
+        );
+
+        let diags = collect_all_diagnostics(&db, &sync);
+        assert!(!diags.is_empty(), "bad equation should produce diagnostics");
+
+        let d = &diags[0];
+        assert_eq!(d.model, "main");
+        assert_eq!(d.variable.as_deref(), Some("broken"));
+        assert!(
+            matches!(&d.error, DiagnosticError::Equation(_)),
+            "expected equation error, got {:?}",
+            d.error
+        );
+    }
+
+    #[test]
+    fn test_accumulator_parity_with_struct_fields() {
+        use std::collections::HashSet;
+
+        let db = SimlinDb::default();
+        let project = datamodel::Project {
+            name: "parity".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "good".to_string(),
+                        equation: datamodel::Equation::Scalar("42".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "bad_syntax".to_string(),
+                        equation: datamodel::Equation::Scalar("if then".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "empty".to_string(),
+                        equation: datamodel::Equation::Scalar(String::new()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let sync = sync_from_datamodel(&db, &project);
+
+        // Collect from accumulator
+        let accum_diags = collect_all_diagnostics(&db, &sync);
+
+        // Collect from struct fields (parse_source_variable results)
+        let mut field_equation_errors: HashSet<(String, crate::common::EquationError)> =
+            HashSet::new();
+        for (var_name, synced_var) in &sync.models["main"].variables {
+            let parsed = parse_source_variable(&db, synced_var.source, sync.project);
+            if let Some(errors) = parsed.variable.equation_errors() {
+                for err in errors {
+                    field_equation_errors.insert((var_name.clone(), err));
+                }
+            }
+        }
+
+        // Extract equation errors from accumulator
+        let mut accum_equation_errors: HashSet<(String, crate::common::EquationError)> =
+            HashSet::new();
+        for d in &accum_diags {
+            if let DiagnosticError::Equation(err) = &d.error
+                && let Some(var) = &d.variable
+            {
+                accum_equation_errors.insert((var.clone(), err.clone()));
+            }
+        }
+
+        assert_eq!(
+            field_equation_errors, accum_equation_errors,
+            "accumulator equation errors must match struct field errors"
+        );
+    }
+
+    #[test]
+    fn test_accumulator_multiple_models() {
+        let db = SimlinDb::default();
+        let project = datamodel::Project {
+            name: "multi_err".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                datamodel::Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "x".to_string(),
+                        equation: datamodel::Equation::Scalar("if then".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    })],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                },
+                datamodel::Model {
+                    name: "sub".to_string(),
+                    sim_specs: None,
+                    variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "y".to_string(),
+                        equation: datamodel::Equation::Scalar("if then".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    })],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                },
+            ],
+            source: None,
+            ai_information: None,
+        };
+
+        let sync = sync_from_datamodel(&db, &project);
+        let diags = collect_all_diagnostics(&db, &sync);
+
+        let models_with_errors: std::collections::HashSet<&str> =
+            diags.iter().map(|d| d.model.as_str()).collect();
+        assert!(
+            models_with_errors.contains("main"),
+            "main model should have errors"
+        );
+        assert!(
+            models_with_errors.contains("sub"),
+            "sub model should have errors"
+        );
+    }
+
+    #[test]
+    fn test_accumulator_incrementality() {
+        use salsa::Setter;
+
+        let mut db = SimlinDb::default();
+        let project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "alpha".to_string(),
+                        equation: datamodel::Equation::Scalar("if then".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "beta".to_string(),
+                        equation: datamodel::Equation::Scalar("10".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        // Extract the salsa IDs we need (they are Copy) before dropping sync
+        let (alpha_src, source_model, source_project) = {
+            let sync = sync_from_datamodel(&db, &project);
+            let alpha_src = sync.models["main"].variables["alpha"].source;
+            let source_model = sync.models["main"].source;
+            let source_project = sync.project;
+
+            // Initially: alpha has errors, beta does not
+            let diags1 = collect_all_diagnostics(&db, &sync);
+            assert_eq!(
+                diags1
+                    .iter()
+                    .filter(|d| d.variable.as_deref() == Some("alpha"))
+                    .count(),
+                1,
+                "alpha should have 1 error"
+            );
+            assert_eq!(
+                diags1
+                    .iter()
+                    .filter(|d| d.variable.as_deref() == Some("beta"))
+                    .count(),
+                0,
+                "beta should have no errors"
+            );
+
+            (alpha_src, source_model, source_project)
+        };
+
+        // Fix alpha's equation (needs &mut db)
+        alpha_src
+            .set_equation(&mut db)
+            .to(SourceEquation::Scalar("42".to_string()));
+
+        let diags2 = collect_model_diagnostics(&db, source_model, source_project);
+        assert!(
+            diags2.is_empty(),
+            "after fixing alpha, no diagnostics expected"
         );
     }
 }

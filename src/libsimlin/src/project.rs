@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use crate::ffi;
 use crate::ffi_error::{FfiError, SimlinError};
 use crate::ffi_try;
-use crate::patch::gather_error_details;
+use crate::patch::gather_error_details_with_db;
 use crate::{
     build_simlin_error, clear_out_error, compile_simulation, drop_c_string, new_synced_db,
     require_project, store_anyhow_error, store_error, SimlinErrorCode, SimlinModel, SimlinProject,
@@ -617,7 +617,10 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     };
 
     let project_locked = proj.project.lock().unwrap();
-    let (all_errors, _, _) = gather_error_details(&project_locked);
+    let db_locked = proj.db.lock().unwrap();
+    let sync = engine::db::sync_from_datamodel(&db_locked, &project_locked.datamodel);
+    let (all_errors, _, _) =
+        gather_error_details_with_db(&project_locked, Some((&db_locked, &sync)));
 
     if all_errors.is_empty() {
         return ptr::null_mut();

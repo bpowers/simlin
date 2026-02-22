@@ -289,7 +289,45 @@ pub(crate) fn gather_error_details(
     Option<engine::Error>,
     Option<engine::CompiledSimulation>,
 ) {
+    gather_error_details_with_db(project, None)
+}
+
+/// Variant that can also collect from the salsa accumulator when a
+/// synced database is provided. Diagnostics from both sources are
+/// deduplicated by (model, variable, code) triple.
+pub(crate) fn gather_error_details_with_db(
+    project: &engine::Project,
+    db_sync: Option<(&engine::db::SimlinDb, &engine::db::SyncResult<'_>)>,
+) -> (
+    Vec<ErrorDetailData>,
+    Option<engine::Error>,
+    Option<engine::CompiledSimulation>,
+) {
     let mut all_errors = collect_project_errors(project);
+
+    // If a synced database is available, also collect from the accumulator
+    // and merge (deduplicated by model+variable+code).
+    if let Some((db, sync)) = db_sync {
+        use std::collections::HashSet;
+
+        let existing_keys: HashSet<(Option<String>, Option<String>, SimlinErrorCode)> = all_errors
+            .iter()
+            .map(|e| (e.model_name.clone(), e.variable_name.clone(), e.code))
+            .collect();
+
+        let diags = engine::db::collect_all_diagnostics(db, sync);
+        for diag in &diags {
+            let formatted = errors::format_diagnostic(diag);
+            let key = (
+                formatted.model_name.clone(),
+                formatted.variable_name.clone(),
+                SimlinErrorCode::from(formatted.code),
+            );
+            if !existing_keys.contains(&key) {
+                all_errors.push(ErrorDetailBuilder::from_formatted(formatted));
+            }
+        }
+    }
 
     let (compiled, sim_error) = match compile_simulation(project, "main") {
         Ok(compiled) => match Vm::new(compiled.clone()) {
