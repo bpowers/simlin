@@ -558,8 +558,8 @@ mod tests {
     // --- ray_rect_intersection tests ---
 
     fn assert_on_rect_boundary(p: Point, cx: f64, cy: f64, hw: f64, hh: f64) {
-        let on_left_right = (p.x - cx).abs() - hw < 1e-6;
-        let on_top_bottom = (p.y - cy).abs() - hh < 1e-6;
+        let on_left_right = ((p.x - cx).abs() - hw).abs() < 1e-6;
+        let on_top_bottom = ((p.y - cy).abs() - hh).abs() < 1e-6;
         assert!(
             on_left_right || on_top_bottom,
             "Point ({}, {}) is not on boundary of rect centered ({}, {}) with hw={}, hh={}",
