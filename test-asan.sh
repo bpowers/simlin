@@ -10,10 +10,13 @@ if [[ "$OSTYPE" != "linux-gnu"* ]]; then
     exit 1
 fi
 
+# Pin nightly version to avoid type-check failures in dependencies
+NIGHTLY_TOOLCHAIN="${NIGHTLY_TOOLCHAIN:-nightly-2026-02-21}"
+
 # Install nightly toolchain if not present
-if ! rustup toolchain list | grep -q "nightly"; then
-    echo "Installing nightly toolchain with rust-src..."
-    rustup toolchain install nightly --component rust-src
+if ! rustup toolchain list | grep -q "$NIGHTLY_TOOLCHAIN"; then
+    echo "Installing $NIGHTLY_TOOLCHAIN toolchain with rust-src..."
+    rustup toolchain install "$NIGHTLY_TOOLCHAIN" --component rust-src
 fi
 
 # Set up ASAN environment
@@ -32,13 +35,13 @@ echo "Using target: $TARGET"
 echo "Testing xmutil package..."
 RUST_BACKTRACE=1 \
 ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:verbosity=0:print_stats=1:halt_on_error=0" \
-cargo +nightly test -Zbuild-std --target "$TARGET" -p xmutil 2>&1 | tee asan-test.log
+cargo +"$NIGHTLY_TOOLCHAIN" test -Zbuild-std --target "$TARGET" -p xmutil 2>&1 | tee asan-test.log
 
 echo ""
 echo "Testing simlin-engine with xmutil feature..."
 RUST_BACKTRACE=1 \
 ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:verbosity=0:print_stats=1:halt_on_error=0" \
-cargo +nightly test -Zbuild-std --target "$TARGET" -p simlin-engine --features "xmutil,file_io" 2>&1 | tee -a asan-test.log
+cargo +"$NIGHTLY_TOOLCHAIN" test -Zbuild-std --target "$TARGET" -p simlin-engine --features "xmutil,file_io" 2>&1 | tee -a asan-test.log
 
 echo ""
 echo "=== ASAN Summary ==="
