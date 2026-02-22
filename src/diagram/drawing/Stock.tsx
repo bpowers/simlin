@@ -10,13 +10,13 @@ import { StockViewElement, ViewElement, variableIsArrayed } from '@simlin/core/d
 import { defined, Series } from '@simlin/core/common';
 
 import { displayName, mergeBounds, Point, Rect } from './common';
+import { StockWidth, StockHeight } from './default';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
 
 import styles from './Stock.module.css';
 
-export const StockWidth = 45;
-export const StockHeight = 35;
+export { StockWidth, StockHeight };
 
 export interface StockProps {
   isSelected: boolean;

@@ -13,7 +13,7 @@ import {
 
 import { Arrowhead } from './Arrowhead';
 import { Circle, isInf, isZero, Point, Rect, square } from './common';
-import { ArrowheadRadius, AuxRadius, StraightLineMax } from './default';
+import { ArrowheadRadius, AuxRadius, StockWidth, StockHeight, ModuleWidth, ModuleHeight, StraightLineMax } from './default';
 import styles from './Connector.module.css';
 
 export const ArrayedOffset = 3;
@@ -53,6 +53,65 @@ const degToRad = (d: number): number => {
 const radToDeg = (r: number): number => {
   return (r * 180) / PI;
 };
+
+export function rayRectIntersection(cx: number, cy: number, hw: number, hh: number, θ: number): Point {
+  const cosT = cos(θ);
+  const sinT = sin(θ);
+
+  let t: number;
+  if (isZero(cosT)) {
+    t = hh / Math.abs(sinT);
+  } else if (isZero(sinT)) {
+    t = hw / Math.abs(cosT);
+  } else {
+    const tX = hw / Math.abs(cosT);
+    const tY = hh / Math.abs(sinT);
+    t = Math.min(tX, tY);
+  }
+
+  return {
+    x: cx + t * cosT,
+    y: cy + t * sinT,
+  };
+}
+
+export function circleRectIntersections(circ: Circle, cx: number, cy: number, hw: number, hh: number): Point[] {
+  const eps = 1e-9;
+  const points: Point[] = [];
+
+  // Horizontal edges (y = cy +/- hh)
+  for (const yEdge of [cy - hh, cy + hh]) {
+    const dy = yEdge - circ.y;
+    const disc = circ.r * circ.r - dy * dy;
+    if (disc >= 0) {
+      const sqrtDisc = sqrt(disc);
+      for (const x of [circ.x + sqrtDisc, circ.x - sqrtDisc]) {
+        if (x >= cx - hw - eps && x <= cx + hw + eps) {
+          points.push({ x, y: yEdge });
+        }
+      }
+    }
+  }
+
+  // Vertical edges (x = cx +/- hw)
+  for (const xEdge of [cx - hw, cx + hw]) {
+    const dx = xEdge - circ.x;
+    const disc = circ.r * circ.r - dx * dx;
+    if (disc >= 0) {
+      const sqrtDisc = sqrt(disc);
+      for (const y of [circ.y + sqrtDisc, circ.y - sqrtDisc]) {
+        if (y >= cy - hh - eps && y <= cy + hh + eps) {
+          const isDup = points.some((p) => Math.abs(p.x - xEdge) < eps && Math.abs(p.y - y) < eps);
+          if (!isDup) {
+            points.push({ x: xEdge, y });
+          }
+        }
+      }
+    }
+  }
+
+  return points;
+}
 
 export function takeoffθ(props: Pick<ConnectorProps, 'element' | 'from' | 'to' | 'arcPoint'>): number {
   const { element, from, to, arcPoint } = props;
@@ -106,25 +165,49 @@ export function takeoffθ(props: Pick<ConnectorProps, 'element' | 'from' | 'to' 
 }
 
 export function intersectElementArc(element: ViewElement, circ: Circle, inv: boolean): Point {
+  const { cx, cy } = getVisualCenter(element);
+
+  if (element.type === 'stock' || element.type === 'module') {
+    const hw = element.type === 'stock' ? StockWidth / 2 : ModuleWidth / 2;
+    const hh = element.type === 'stock' ? StockHeight / 2 : ModuleHeight / 2;
+
+    const intersections = circleRectIntersections(circ, cx, cy, hw, hh);
+    if (intersections.length === 0) {
+      const dir = atan2(cy - circ.y, cx - circ.x);
+      return rayRectIntersection(cx, cy, hw, hh, dir);
+    }
+
+    // Use a reference point on the arc to pick the correct intersection.
+    // atan (not tan) gives a monotonic, bounded angular offset that avoids
+    // discontinuities when rApprox/circ.r crosses tan's asymptotes.
+    const rApprox = Math.max(hw, hh);
+    const offθ = Math.atan(rApprox / circ.r);
+    const elementCenterθ = atan2(cy - circ.y, cx - circ.x);
+    const targetθ = elementCenterθ + (inv ? 1 : -1) * offθ;
+    const target: Point = {
+      x: circ.x + circ.r * cos(targetθ),
+      y: circ.y + circ.r * sin(targetθ),
+    };
+
+    let best = intersections[0];
+    let bestDist = square(best.x - target.x) + square(best.y - target.y);
+    for (let i = 1; i < intersections.length; i++) {
+      const d = square(intersections[i].x - target.x) + square(intersections[i].y - target.y);
+      if (d < bestDist) {
+        best = intersections[i];
+        bestDist = d;
+      }
+    }
+    return best;
+  }
+
   let r: number = AuxRadius;
-  // FIXME: actually calculate intersections
-  if (element.type === 'module') {
-    r = 25;
-  } else if (element.type === 'stock') {
-    r = 15;
-  } else if (element.isZeroRadius) {
+  if (element.isZeroRadius) {
     r = 0;
   }
 
-  const { cx, cy } = getVisualCenter(element);
-
-  // the angle that when added or subtracted from
-  // elementCenterθ results in the point where the arc
-  // intersects with the shape
   const offθ = tan(r / circ.r);
   const elementCenterθ = atan2(cy - circ.y, cx - circ.x);
-
-  // FIXME: can we do this without an inverse flag?
 
   return {
     x: circ.x + circ.r * cos(elementCenterθ + (inv ? 1 : -1) * offθ),
@@ -183,18 +266,19 @@ export class Connector extends React.PureComponent<ConnectorProps> {
     this.props.onSelection(this.props.element, e, true);
   };
 
-  private static intersectElementStraight(element: ViewElement, θ: number): Point {
-    let r: number = AuxRadius;
-    // FIXME: actually calculate intersections
-    if (element.type === 'module') {
-      r = 25;
-    } else if (element.type === 'stock') {
-      r = 15;
-    } else if (element.isZeroRadius) {
-      r = 0;
+  static intersectElementStraight(element: ViewElement, θ: number): Point {
+    const { cx, cy } = getVisualCenter(element);
+
+    if (element.type === 'stock') {
+      return rayRectIntersection(cx, cy, StockWidth / 2, StockHeight / 2, θ);
+    } else if (element.type === 'module') {
+      return rayRectIntersection(cx, cy, ModuleWidth / 2, ModuleHeight / 2, θ);
     }
 
-    const { cx, cy } = getVisualCenter(element);
+    let r: number = AuxRadius;
+    if (element.isZeroRadius) {
+      r = 0;
+    }
 
     return {
       x: cx + r * cos(θ),

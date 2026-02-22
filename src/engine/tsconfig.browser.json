@@ -2,7 +2,7 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "outDir": "lib.browser",
-    "tsBuildInfoFile": "lib.browser/tsconfig.browser.tsbuildinfo",
+    "tsBuildInfoFile": "./tsconfig.browser.tsbuildinfo",
     "module": "esnext",
     "paths": {
       "@simlin/engine/internal/wasm": ["src/internal/wasm.browser.ts"],

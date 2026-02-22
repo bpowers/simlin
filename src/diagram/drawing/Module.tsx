@@ -8,13 +8,12 @@ import { ModuleViewElement } from '@simlin/core/datamodel';
 import { defined } from '@simlin/core/common';
 
 import { displayName, Rect } from './common';
-import { ModuleRadius } from './default';
+import { ModuleRadius, ModuleWidth, ModuleHeight } from './default';
 import { Label } from './Label';
 
 import styles from './Module.module.css';
 
-export const ModuleWidth = 55;
-export const ModuleHeight = 45;
+export { ModuleWidth, ModuleHeight };
 
 export interface ModuleProps {
   isSelected: boolean;

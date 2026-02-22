@@ -12,8 +12,17 @@ import {
   Flow,
 } from '@simlin/core/datamodel';
 
-import { Connector, circleFromPoints, getVisualCenter, ArrayedOffset } from '../drawing/Connector';
-import { AuxRadius } from '../drawing/default';
+import {
+  Connector,
+  circleFromPoints,
+  getVisualCenter,
+  intersectElementArc,
+  rayRectIntersection,
+  circleRectIntersections,
+  ArrayedOffset,
+} from '../drawing/Connector';
+import { AuxRadius, StockWidth, StockHeight } from '../drawing/default';
+import { square, Circle, Point } from '../drawing/common';
 
 function makeAux(uid: number, x: number, y: number, isArrayed: boolean = false): AuxViewElement {
   const auxVar: Aux = isArrayed
@@ -425,6 +434,186 @@ describe('Connector routing', () => {
       // so they should not have the array offset applied
       expect(visual.cx).toBe(100);
       expect(visual.cy).toBe(100);
+    });
+  });
+
+  describe('rayRectIntersection', () => {
+    const hw = StockWidth / 2;  // 22.5
+    const hh = StockHeight / 2; // 17.5
+
+    function assertOnRectBoundary(p: Point, cx: number, cy: number, hw: number, hh: number) {
+      const onLeftRight = Math.abs(Math.abs(p.x - cx) - hw) < 1e-6;
+      const onTopBottom = Math.abs(Math.abs(p.y - cy) - hh) < 1e-6;
+      expect(onLeftRight || onTopBottom).toBe(true);
+      expect(Math.abs(p.x - cx)).toBeLessThanOrEqual(hw + 1e-6);
+      expect(Math.abs(p.y - cy)).toBeLessThanOrEqual(hh + 1e-6);
+    }
+
+    it('should hit right edge for theta=0', () => {
+      const p = rayRectIntersection(100, 100, hw, hh, 0);
+      expect(p.x).toBeCloseTo(122.5);
+      expect(p.y).toBeCloseTo(100);
+    });
+
+    it('should hit bottom edge for theta=PI/2', () => {
+      const p = rayRectIntersection(100, 100, hw, hh, Math.PI / 2);
+      expect(p.x).toBeCloseTo(100);
+      expect(p.y).toBeCloseTo(117.5);
+    });
+
+    it('should hit left edge for theta=PI', () => {
+      const p = rayRectIntersection(100, 100, hw, hh, Math.PI);
+      expect(p.x).toBeCloseTo(77.5);
+      expect(p.y).toBeCloseTo(100);
+    });
+
+    it('should hit top edge for theta=-PI/2', () => {
+      const p = rayRectIntersection(100, 100, hw, hh, -Math.PI / 2);
+      expect(p.x).toBeCloseTo(100);
+      expect(p.y).toBeCloseTo(82.5);
+    });
+
+    it('should preserve angle and land on boundary for various angles', () => {
+      const cx = 50;
+      const cy = 80;
+      for (const angleDeg of [15, 30, 60, 75, 120, 210, 300, 350]) {
+        const theta = (angleDeg / 180) * Math.PI;
+        const p = rayRectIntersection(cx, cy, hw, hh, theta);
+        const actualTheta = Math.atan2(p.y - cy, p.x - cx);
+        let diff = Math.abs(actualTheta - theta);
+        if (diff > Math.PI) diff = 2 * Math.PI - diff;
+        expect(diff).toBeLessThan(1e-6);
+        assertOnRectBoundary(p, cx, cy, hw, hh);
+      }
+    });
+  });
+
+  describe('circleRectIntersections', () => {
+    const hw = StockWidth / 2;
+    const hh = StockHeight / 2;
+
+    function assertOnCircle(p: Point, circ: Circle) {
+      const dist = Math.sqrt(square(p.x - circ.x) + square(p.y - circ.y));
+      expect(Math.abs(dist - circ.r)).toBeLessThan(1e-6);
+    }
+
+    function assertOnRectBoundary(p: Point, cx: number, cy: number, hw: number, hh: number) {
+      const onLeftRight = Math.abs(Math.abs(p.x - cx) - hw) < 1e-6;
+      const onTopBottom = Math.abs(Math.abs(p.y - cy) - hh) < 1e-6;
+      expect(onLeftRight || onTopBottom).toBe(true);
+    }
+
+    it('should return empty for circle far from rectangle', () => {
+      const circ = { x: 500, y: 500, r: 10 };
+      expect(circleRectIntersections(circ, 0, 0, hw, hh)).toHaveLength(0);
+    });
+
+    it('should return empty for circle entirely inside rectangle', () => {
+      const circ = { x: 0, y: 0, r: 5 };
+      expect(circleRectIntersections(circ, 0, 0, hw, hh)).toHaveLength(0);
+    });
+
+    it('should find intersections on right edge', () => {
+      const circ = { x: 30, y: 0, r: 10 };
+      const points = circleRectIntersections(circ, 0, 0, hw, hh);
+      expect(points.length).toBeGreaterThan(0);
+      for (const p of points) {
+        assertOnCircle(p, circ);
+        assertOnRectBoundary(p, 0, 0, hw, hh);
+      }
+    });
+
+    it('should find 8 intersections for circle centered at rect center with r=25', () => {
+      const circ = { x: 0, y: 0, r: 25 };
+      const points = circleRectIntersections(circ, 0, 0, hw, hh);
+      expect(points).toHaveLength(8);
+      for (const p of points) {
+        assertOnCircle(p, circ);
+        assertOnRectBoundary(p, 0, 0, hw, hh);
+      }
+    });
+
+    it('should not duplicate corner points', () => {
+      // 3-4-5 right triangle corner distance
+      const testHw = 3;
+      const testHh = 4;
+      const cornerDist = Math.sqrt(testHw * testHw + testHh * testHh);
+      const circ = { x: 0, y: 0, r: cornerDist };
+      const points = circleRectIntersections(circ, 0, 0, testHw, testHh);
+      expect(points).toHaveLength(4);
+    });
+  });
+
+  describe('intersectElementStraight with stocks', () => {
+    it('should hit left edge when approaching from the left', () => {
+      const stock = makeStock(2, 200, 100);
+      const theta = Math.PI; // approaching from left means connector angle is PI
+      const p = Connector.intersectElementStraight(stock, theta);
+      expect(p.x).toBeCloseTo(200 - StockWidth / 2);
+      expect(p.y).toBeCloseTo(100);
+    });
+
+    it('should hit top edge when approaching from above', () => {
+      const stock = makeStock(2, 200, 200);
+      const theta = Math.PI / 2; // approaching from above
+      const p = Connector.intersectElementStraight(stock, theta);
+      expect(p.x).toBeCloseTo(200);
+      expect(p.y).toBeCloseTo(200 + StockHeight / 2);
+    });
+
+    it('should not change behavior for auxiliaries', () => {
+      const aux = makeAux(1, 200, 100);
+      const theta = 0;
+      const p = Connector.intersectElementStraight(aux, theta);
+      expect(p.x).toBeCloseTo(200 + AuxRadius);
+      expect(p.y).toBeCloseTo(100);
+    });
+  });
+
+  describe('intersectElementArc with stocks', () => {
+    it('should place endpoint on stock boundary', () => {
+      const stock = makeStock(2, 200, 200);
+      const circ: Circle = {
+        x: 100,
+        y: 100,
+        r: Math.sqrt(square(200 - 100) + square(200 - 100)),
+      };
+      const end = intersectElementArc(stock, circ, false);
+      // Should be on the stock boundary
+      const dx = Math.abs(end.x - 200);
+      const dy = Math.abs(end.y - 200);
+      const onLeftRight = Math.abs(dx - StockWidth / 2) < 1e-6;
+      const onTopBottom = Math.abs(dy - StockHeight / 2) < 1e-6;
+      expect(onLeftRight || onTopBottom).toBe(true);
+    });
+
+    it('should place endpoint on arc circle', () => {
+      const stock = makeStock(2, 200, 200);
+      const r = Math.sqrt(square(200 - 100) + square(200 - 100));
+      const circ: Circle = { x: 100, y: 100, r };
+      const end = intersectElementArc(stock, circ, false);
+      const dist = Math.sqrt(square(end.x - circ.x) + square(end.y - circ.y));
+      expect(Math.abs(dist - circ.r)).toBeLessThan(1e-6);
+    });
+
+    it('should produce different points for inv=true vs inv=false', () => {
+      const stock = makeStock(2, 200, 200);
+      const circ: Circle = { x: 150, y: 50, r: 180 };
+      const endNoInv = intersectElementArc(stock, circ, false);
+      const endInv = intersectElementArc(stock, circ, true);
+      const dist = Math.sqrt(square(endNoInv.x - endInv.x) + square(endNoInv.y - endInv.y));
+      expect(dist).toBeGreaterThan(1);
+    });
+
+    it('should produce different points for inv flag even with small arc radius', () => {
+      const stock = makeStock(2, 200, 200);
+      // Small arc radius where rApprox/circ.r > pi/2 would cause tan()
+      // to cross an asymptote (22.5 / 13 > pi/2)
+      const circ: Circle = { x: 190, y: 190, r: 13 };
+      const endNoInv = intersectElementArc(stock, circ, false);
+      const endInv = intersectElementArc(stock, circ, true);
+      const dist = Math.sqrt(square(endNoInv.x - endInv.x) + square(endNoInv.y - endInv.y));
+      expect(dist).toBeGreaterThan(1);
     });
   });
 });

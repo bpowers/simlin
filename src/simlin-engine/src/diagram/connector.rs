@@ -13,12 +13,83 @@ use crate::diagram::common::{
 };
 use crate::diagram::constants::*;
 
-const fn element_radius(element: &ViewElement) -> f64 {
+enum ElementShape {
+    Circle { r: f64 },
+    Rect { hw: f64, hh: f64 },
+}
+
+fn element_shape(element: &ViewElement) -> ElementShape {
     match element {
-        ViewElement::Module(_) => 25.0,
-        ViewElement::Stock(_) => 15.0,
-        _ => AUX_RADIUS,
+        ViewElement::Stock(_) => ElementShape::Rect {
+            hw: STOCK_WIDTH / 2.0,
+            hh: STOCK_HEIGHT / 2.0,
+        },
+        ViewElement::Module(_) => ElementShape::Rect {
+            hw: MODULE_WIDTH / 2.0,
+            hh: MODULE_HEIGHT / 2.0,
+        },
+        _ => ElementShape::Circle { r: AUX_RADIUS },
     }
+}
+
+fn ray_rect_intersection(cx: f64, cy: f64, hw: f64, hh: f64, theta: f64) -> Point {
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+
+    let t = if is_zero(cos_t) {
+        hh / sin_t.abs()
+    } else if is_zero(sin_t) {
+        hw / cos_t.abs()
+    } else {
+        let t_x = hw / cos_t.abs();
+        let t_y = hh / sin_t.abs();
+        t_x.min(t_y)
+    };
+
+    Point {
+        x: cx + t * cos_t,
+        y: cy + t * sin_t,
+    }
+}
+
+fn circle_rect_intersections(circ: &Circle, cx: f64, cy: f64, hw: f64, hh: f64) -> Vec<Point> {
+    let eps = 1e-9;
+    let mut points = Vec::with_capacity(8);
+
+    // Horizontal edges (y = cy +/- hh)
+    for y_edge in [cy - hh, cy + hh] {
+        let dy = y_edge - circ.y;
+        let disc = circ.r * circ.r - dy * dy;
+        if disc >= 0.0 {
+            let sqrt_disc = disc.sqrt();
+            for x in [circ.x + sqrt_disc, circ.x - sqrt_disc] {
+                if x >= cx - hw - eps && x <= cx + hw + eps {
+                    points.push(Point { x, y: y_edge });
+                }
+            }
+        }
+    }
+
+    // Vertical edges (x = cx +/- hw)
+    for x_edge in [cx - hw, cx + hw] {
+        let dx = x_edge - circ.x;
+        let disc = circ.r * circ.r - dx * dx;
+        if disc >= 0.0 {
+            let sqrt_disc = disc.sqrt();
+            for y in [circ.y + sqrt_disc, circ.y - sqrt_disc] {
+                if y >= cy - hh - eps && y <= cy + hh + eps {
+                    let is_dup = points
+                        .iter()
+                        .any(|p| (p.x - x_edge).abs() < eps && (p.y - y).abs() < eps);
+                    if !is_dup {
+                        points.push(Point { x: x_edge, y });
+                    }
+                }
+            }
+        }
+    }
+
+    points
 }
 
 fn is_element_arrayed(element: &ViewElement, is_arrayed_fn: &dyn Fn(&str) -> bool) -> bool {
@@ -82,12 +153,14 @@ fn intersect_element_straight(
     theta: f64,
     is_arrayed_fn: &dyn Fn(&str) -> bool,
 ) -> Point {
-    let r = element_radius(element);
-
     let (cx, cy) = get_visual_center(element, is_arrayed_fn);
-    Point {
-        x: cx + r * theta.cos(),
-        y: cy + r * theta.sin(),
+
+    match element_shape(element) {
+        ElementShape::Circle { r } => Point {
+            x: cx + r * theta.cos(),
+            y: cy + r * theta.sin(),
+        },
+        ElementShape::Rect { hw, hh } => ray_rect_intersection(cx, cy, hw, hh, theta),
     }
 }
 
@@ -97,18 +170,48 @@ fn intersect_element_arc(
     inv: bool,
     is_arrayed_fn: &dyn Fn(&str) -> bool,
 ) -> Point {
-    let r = element_radius(element);
-
     let (cx, cy) = get_visual_center(element, is_arrayed_fn);
-    // Matches TypeScript: Math.tan(r / circ.r), not atan
-    let off_theta = (r / circ.r).tan();
-    let element_center_theta = (cy - circ.y).atan2(cx - circ.x);
 
-    Point {
-        x: circ.x
-            + circ.r * (element_center_theta + if inv { 1.0 } else { -1.0 } * off_theta).cos(),
-        y: circ.y
-            + circ.r * (element_center_theta + if inv { 1.0 } else { -1.0 } * off_theta).sin(),
+    match element_shape(element) {
+        ElementShape::Circle { r } => {
+            // Matches TypeScript: Math.tan(r / circ.r), not atan
+            let off_theta = (r / circ.r).tan();
+            let element_center_theta = (cy - circ.y).atan2(cx - circ.x);
+            let theta = element_center_theta + if inv { 1.0 } else { -1.0 } * off_theta;
+
+            Point {
+                x: circ.x + circ.r * theta.cos(),
+                y: circ.y + circ.r * theta.sin(),
+            }
+        }
+        ElementShape::Rect { hw, hh } => {
+            let intersections = circle_rect_intersections(circ, cx, cy, hw, hh);
+            if intersections.is_empty() {
+                let dir = (cy - circ.y).atan2(cx - circ.x);
+                return ray_rect_intersection(cx, cy, hw, hh, dir);
+            }
+
+            // Use a reference point on the arc to pick the correct intersection.
+            // atan (not tan) gives a monotonic, bounded angular offset that avoids
+            // discontinuities when r_approx/circ.r crosses tan's asymptotes.
+            let r_approx = hw.max(hh);
+            let off_theta = (r_approx / circ.r).atan();
+            let element_center_theta = (cy - circ.y).atan2(cx - circ.x);
+            let target_theta = element_center_theta + if inv { 1.0 } else { -1.0 } * off_theta;
+            let target = Point {
+                x: circ.x + circ.r * target_theta.cos(),
+                y: circ.y + circ.r * target_theta.sin(),
+            };
+
+            intersections
+                .into_iter()
+                .min_by(|a, b| {
+                    let da = square(a.x - target.x) + square(a.y - target.y);
+                    let db = square(b.x - target.x) + square(b.y - target.y);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap()
+        }
     }
 }
 
@@ -451,5 +554,357 @@ mod tests {
         let svg = render_connector(&link, &from, &to, &not_arrayed);
         assert!(svg.contains("<g>"));
         assert!(svg.contains("simlin-arrowhead-link"));
+    }
+
+    // --- ray_rect_intersection tests ---
+
+    fn assert_on_rect_boundary(p: Point, cx: f64, cy: f64, hw: f64, hh: f64) {
+        let on_left_right = ((p.x - cx).abs() - hw).abs() < 1e-6;
+        let on_top_bottom = ((p.y - cy).abs() - hh).abs() < 1e-6;
+        assert!(
+            on_left_right || on_top_bottom,
+            "Point ({}, {}) is not on boundary of rect centered ({}, {}) with hw={}, hh={}",
+            p.x,
+            p.y,
+            cx,
+            cy,
+            hw,
+            hh
+        );
+        assert!(
+            (p.x - cx).abs() <= hw + 1e-6,
+            "x={} is outside rect x-range",
+            p.x
+        );
+        assert!(
+            (p.y - cy).abs() <= hh + 1e-6,
+            "y={} is outside rect y-range",
+            p.y
+        );
+    }
+
+    #[test]
+    fn test_ray_rect_cardinal_right() {
+        let p = ray_rect_intersection(100.0, 100.0, 22.5, 17.5, 0.0);
+        assert!((p.x - 122.5).abs() < 1e-6);
+        assert!((p.y - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_ray_rect_cardinal_down() {
+        let p = ray_rect_intersection(100.0, 100.0, 22.5, 17.5, PI / 2.0);
+        assert!((p.x - 100.0).abs() < 1e-6);
+        assert!((p.y - 117.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_ray_rect_cardinal_left() {
+        let p = ray_rect_intersection(100.0, 100.0, 22.5, 17.5, PI);
+        assert!((p.x - 77.5).abs() < 1e-6);
+        assert!((p.y - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_ray_rect_cardinal_up() {
+        let p = ray_rect_intersection(100.0, 100.0, 22.5, 17.5, -PI / 2.0);
+        assert!((p.x - 100.0).abs() < 1e-6);
+        assert!((p.y - 82.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_ray_rect_diagonal_45_hits_top_bottom() {
+        // For a 45x35 rect (hw=22.5, hh=17.5), 45 degrees hits the
+        // right edge since hw > hh: t_x = 22.5, t_y = 17.5, min is t_y
+        // Wait: t_x = hw/|cos(45)| = 22.5/0.707 = 31.8
+        //       t_y = hh/|sin(45)| = 17.5/0.707 = 24.7
+        // So t_y < t_x, ray hits top/bottom edge first
+        let p = ray_rect_intersection(0.0, 0.0, 22.5, 17.5, PI / 4.0);
+        assert!((p.y - 17.5).abs() < 1e-6, "should hit bottom edge");
+        assert_on_rect_boundary(p, 0.0, 0.0, 22.5, 17.5);
+    }
+
+    #[test]
+    fn test_ray_rect_preserves_angle() {
+        let cx = 50.0;
+        let cy = 80.0;
+        for angle_deg in [15.0, 30.0, 60.0, 75.0, 120.0, 210.0, 300.0, 350.0] {
+            let theta = deg_to_rad(angle_deg);
+            let p = ray_rect_intersection(cx, cy, 22.5, 17.5, theta);
+            let actual_theta = (p.y - cy).atan2(p.x - cx);
+            let diff = (actual_theta - theta).abs();
+            let diff = if diff > PI { 2.0 * PI - diff } else { diff };
+            assert!(
+                diff < 1e-6,
+                "angle mismatch at {} degrees: expected {}, got {}",
+                angle_deg,
+                theta,
+                actual_theta
+            );
+            assert_on_rect_boundary(p, cx, cy, 22.5, 17.5);
+        }
+    }
+
+    // --- circle_rect_intersections tests ---
+
+    fn assert_on_circle(p: Point, circ: &Circle) {
+        let dist = (square(p.x - circ.x) + square(p.y - circ.y)).sqrt();
+        assert!(
+            (dist - circ.r).abs() < 1e-6,
+            "Point ({}, {}) is not on circle center ({}, {}) r={}. dist={}",
+            p.x,
+            p.y,
+            circ.x,
+            circ.y,
+            circ.r,
+            dist
+        );
+    }
+
+    #[test]
+    fn test_circle_rect_no_intersection() {
+        // Circle far from rectangle
+        let circ = Circle {
+            x: 500.0,
+            y: 500.0,
+            r: 10.0,
+        };
+        let points = circle_rect_intersections(&circ, 0.0, 0.0, 22.5, 17.5);
+        assert!(points.is_empty());
+    }
+
+    #[test]
+    fn test_circle_rect_inside_no_intersection() {
+        // Circle entirely inside rectangle
+        let circ = Circle {
+            x: 0.0,
+            y: 0.0,
+            r: 5.0,
+        };
+        let points = circle_rect_intersections(&circ, 0.0, 0.0, 22.5, 17.5);
+        assert!(points.is_empty());
+    }
+
+    #[test]
+    fn test_circle_rect_crosses_right_edge() {
+        // Circle centered to the right, crossing the right edge
+        let circ = Circle {
+            x: 30.0,
+            y: 0.0,
+            r: 10.0,
+        };
+        let points = circle_rect_intersections(&circ, 0.0, 0.0, 22.5, 17.5);
+        assert!(!points.is_empty());
+        for p in &points {
+            assert_on_circle(*p, &circ);
+            assert_on_rect_boundary(*p, 0.0, 0.0, 22.5, 17.5);
+        }
+    }
+
+    #[test]
+    fn test_circle_rect_large_circle_multiple_edges() {
+        // Large circle centered outside, crossing multiple edges
+        let circ = Circle {
+            x: 50.0,
+            y: 0.0,
+            r: 50.0,
+        };
+        let points = circle_rect_intersections(&circ, 0.0, 0.0, 22.5, 17.5);
+        assert!(
+            points.len() >= 2,
+            "expected at least 2 intersections, got {}",
+            points.len()
+        );
+        for p in &points {
+            assert_on_circle(*p, &circ);
+            assert_on_rect_boundary(*p, 0.0, 0.0, 22.5, 17.5);
+        }
+    }
+
+    #[test]
+    fn test_circle_rect_centered_at_rect_center() {
+        // Circle centered at rectangle center; r=25 is between
+        // max(hw,hh)=22.5 and corner distance=28.5, so it crosses all 4 edges
+        let circ = Circle {
+            x: 0.0,
+            y: 0.0,
+            r: 25.0,
+        };
+        let points = circle_rect_intersections(&circ, 0.0, 0.0, 22.5, 17.5);
+        assert_eq!(
+            points.len(),
+            8,
+            "expected 8 intersections (2 per edge), got {}",
+            points.len()
+        );
+        for p in &points {
+            assert_on_circle(*p, &circ);
+            assert_on_rect_boundary(*p, 0.0, 0.0, 22.5, 17.5);
+        }
+    }
+
+    #[test]
+    fn test_circle_rect_no_corner_duplicates() {
+        // Circle passing through corner of rectangle should not duplicate
+        let hw: f64 = 3.0;
+        let hh: f64 = 4.0;
+        let corner_dist = (hw * hw + hh * hh).sqrt();
+        let circ = Circle {
+            x: 0.0,
+            y: 0.0,
+            r: corner_dist,
+        };
+        let points = circle_rect_intersections(&circ, 0.0, 0.0, hw, hh);
+        // Should have exactly 4 corners, no duplicates
+        assert_eq!(
+            points.len(),
+            4,
+            "expected 4 corner points, got {}",
+            points.len()
+        );
+    }
+
+    // --- intersect_element_straight with stock tests ---
+
+    #[test]
+    fn test_straight_connector_to_stock_from_left() {
+        let stock = make_stock_ve(200.0, 100.0, "s", 2);
+
+        // theta = 0 (pointing right toward stock)
+        let end = intersect_element_straight(&stock, PI, &not_arrayed);
+        // Should hit the left edge of the stock: x = 200 - 22.5 = 177.5
+        assert!((end.x - 177.5).abs() < 1e-6, "x={}, expected 177.5", end.x);
+        assert!((end.y - 100.0).abs() < 1e-6, "y={}, expected 100.0", end.y);
+    }
+
+    #[test]
+    fn test_straight_connector_to_stock_from_above() {
+        let stock = make_stock_ve(200.0, 200.0, "s", 2);
+
+        // theta = -PI/2 (pointing up, so connector approaches from above)
+        let end = intersect_element_straight(&stock, PI / 2.0, &not_arrayed);
+        // Should hit the top edge of the stock: y = 200 - 17.5 = 182.5
+        assert!((end.x - 200.0).abs() < 1e-6, "x={}, expected 200.0", end.x);
+        assert!((end.y - 217.5).abs() < 1e-6, "y={}, expected 217.5", end.y);
+    }
+
+    #[test]
+    fn test_straight_connector_to_stock_diagonal() {
+        let stock = make_stock_ve(200.0, 200.0, "s", 2);
+        let theta = deg_to_rad(225.0); // approaching from bottom-right
+
+        let end = intersect_element_straight(&stock, theta, &not_arrayed);
+        assert_on_rect_boundary(end, 200.0, 200.0, STOCK_WIDTH / 2.0, STOCK_HEIGHT / 2.0);
+    }
+
+    #[test]
+    fn test_straight_connector_to_aux_unchanged() {
+        let aux = make_aux_ve(200.0, 100.0, "a", 1);
+        let theta = 0.0;
+
+        let end = intersect_element_straight(&aux, theta, &not_arrayed);
+        // Should use circle formula with AUX_RADIUS
+        assert!((end.x - (200.0 + AUX_RADIUS)).abs() < 1e-6);
+        assert!((end.y - 100.0).abs() < 1e-6);
+    }
+
+    // --- intersect_element_arc with stock tests ---
+
+    #[test]
+    fn test_arc_connector_to_stock_on_boundary() {
+        let stock = make_stock_ve(200.0, 200.0, "s", 2);
+        // Arc circle that passes through the stock center
+        let circ = Circle {
+            x: 100.0,
+            y: 100.0,
+            r: (square(200.0 - 100.0) + square(200.0 - 100.0)).sqrt(),
+        };
+
+        let end = intersect_element_arc(&stock, &circ, false, &not_arrayed);
+        assert_on_rect_boundary(end, 200.0, 200.0, STOCK_WIDTH / 2.0, STOCK_HEIGHT / 2.0);
+    }
+
+    #[test]
+    fn test_arc_connector_to_stock_on_arc_circle() {
+        let stock = make_stock_ve(200.0, 200.0, "s", 2);
+        let circ = Circle {
+            x: 100.0,
+            y: 100.0,
+            r: (square(200.0 - 100.0) + square(200.0 - 100.0)).sqrt(),
+        };
+
+        let end = intersect_element_arc(&stock, &circ, false, &not_arrayed);
+        assert_on_circle(end, &circ);
+    }
+
+    #[test]
+    fn test_arc_connector_to_aux_unchanged() {
+        let aux = make_aux_ve(200.0, 200.0, "a", 1);
+        let circ = Circle {
+            x: 100.0,
+            y: 100.0,
+            r: (square(200.0 - 100.0) + square(200.0 - 100.0)).sqrt(),
+        };
+
+        let end = intersect_element_arc(&aux, &circ, false, &not_arrayed);
+        // Should still be on the circle (existing behavior)
+        assert_on_circle(end, &circ);
+    }
+
+    #[test]
+    fn test_arc_connector_to_stock_inv_flag_matters() {
+        let stock = make_stock_ve(200.0, 200.0, "s", 2);
+        let circ = Circle {
+            x: 150.0,
+            y: 50.0,
+            r: 180.0,
+        };
+
+        let end_no_inv = intersect_element_arc(&stock, &circ, false, &not_arrayed);
+        let end_inv = intersect_element_arc(&stock, &circ, true, &not_arrayed);
+
+        // The two points should be different (different sides of the element)
+        let dx = end_no_inv.x - end_inv.x;
+        let dy = end_no_inv.y - end_inv.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+        assert!(
+            dist > 1.0,
+            "inv flag should produce different points, got dist={}",
+            dist
+        );
+    }
+
+    #[test]
+    fn test_arc_connector_to_stock_small_radius_inv_matters() {
+        let stock = make_stock_ve(200.0, 200.0, "s", 2);
+        // Small arc radius where r_approx/circ.r > pi/2 would cause tan()
+        // to cross an asymptote (22.5 / 13 ≈ 1.73 > pi/2 ≈ 1.57)
+        let circ = Circle {
+            x: 190.0,
+            y: 190.0,
+            r: 13.0,
+        };
+
+        let end_no_inv = intersect_element_arc(&stock, &circ, false, &not_arrayed);
+        let end_inv = intersect_element_arc(&stock, &circ, true, &not_arrayed);
+
+        assert_on_rect_boundary(
+            end_no_inv,
+            200.0,
+            200.0,
+            STOCK_WIDTH / 2.0,
+            STOCK_HEIGHT / 2.0,
+        );
+        assert_on_rect_boundary(end_inv, 200.0, 200.0, STOCK_WIDTH / 2.0, STOCK_HEIGHT / 2.0);
+        assert_on_circle(end_no_inv, &circ);
+        assert_on_circle(end_inv, &circ);
+
+        let dx = end_no_inv.x - end_inv.x;
+        let dy = end_no_inv.y - end_inv.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+        assert!(
+            dist > 1.0,
+            "inv flag should select different points even with small arc radius, got dist={}",
+            dist
+        );
     }
 }
