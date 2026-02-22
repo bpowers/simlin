@@ -281,11 +281,8 @@ impl Project {
                     .get(&model.name)
                     .unwrap_or(&no_instantiations);
                 // Use cached path when we have a synced model in the salsa db
-                if let Some(synced_model) = sync_result.models.get(model.name.as_str()) {
+                if sync_result.models.contains_key(model.name.as_str()) {
                     model.set_dependencies_cached(
-                        &salsa_db,
-                        synced_model.source,
-                        sync_result.project,
                         &models,
                         &project_datamodel.dimensions,
                         instantiations,

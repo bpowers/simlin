@@ -1083,20 +1083,10 @@ impl ModelStage1 {
     /// (module output deps, stock filtering in modules).
     pub(crate) fn set_dependencies_cached(
         &mut self,
-        salsa_db: &dyn db::Db,
-        source_model: db::SourceModel,
-        source_project: db::SourceProject,
         models: &HashMap<Ident<Canonical>, &ModelStage1>,
         dimensions: &[Dimension],
         instantiations: &BTreeSet<ModuleInputSet>,
     ) {
-        // Prime the salsa cache for per-variable dependency extraction.
-        // This ensures subsequent calls to variable_direct_dependencies are
-        // fast (cache hits) when the equation text changes but deps don't.
-        for source_var in source_model.variables(salsa_db).values() {
-            let _ = db::variable_direct_dependencies(salsa_db, *source_var, source_project);
-        }
-
         let mut var_names: Vec<&Ident<Canonical>> = self.variables.keys().collect();
         var_names.sort_unstable();
 

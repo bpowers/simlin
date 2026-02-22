@@ -3109,11 +3109,10 @@ mod tests {
             "births should not depend on stock in dt phase"
         );
 
-        // In initial phase, stock is treated normally
+        // Stock equation is "100" (constant), so initial deps are empty
         assert!(
-            !graph.initial_dependencies["population"].is_empty()
-                || graph.initial_dependencies["population"].is_empty(),
-            "stock initial deps depend on its equation"
+            graph.initial_dependencies["population"].is_empty(),
+            "stock with constant equation should have empty initial deps"
         );
     }
 
