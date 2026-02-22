@@ -276,6 +276,9 @@ pub struct SimlinErrorDetail {
 pub struct SimlinProject {
     pub(crate) project: Mutex<engine::Project>,
     pub(crate) db: Mutex<engine::db::SimlinDb>,
+    /// Cached compilation from the last successful `apply_patch` validation.
+    /// Consumed by `sim_new` to avoid recompiling when nothing has changed.
+    pub(crate) cached_compilation: Mutex<Option<engine::CompiledSimulation>>,
     pub(crate) ref_count: AtomicUsize,
 }
 

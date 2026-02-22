@@ -5398,3 +5398,376 @@ fn test_sim_get_var_count_and_names() {
         simlin_project_unref(proj);
     }
 }
+
+// ── Phase 7: Cached compilation tests ──────────────────────────────────
+
+#[test]
+fn test_patch_then_sim_uses_cached_compilation() {
+    let datamodel = TestProject::new("cached_compile")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * birth_rate", None)
+        .flow("deaths", "population * 0.01", None)
+        .aux("birth_rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // Apply a patch that modifies birth_rate
+        let patch_json = r#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "upsertAux",
+                            "payload": { "aux": { "name": "birth_rate", "equation": "0.03" } }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected_errors: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected_errors,
+            &mut out_error,
+        );
+        assert!(out_error.is_null(), "patch should succeed");
+        if !collected_errors.is_null() {
+            simlin_error_free(collected_errors);
+        }
+
+        // The cache should now be populated
+        assert!(
+            (*proj).cached_compilation.lock().unwrap().is_some(),
+            "cached compilation should be populated after successful patch"
+        );
+
+        // Create simulation (should use cache)
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+        assert!(out_error.is_null());
+
+        let sim = simlin_sim_new(model, false, &mut out_error);
+        assert!(!sim.is_null());
+        assert!(out_error.is_null());
+
+        // Cache should be consumed
+        assert!(
+            (*proj).cached_compilation.lock().unwrap().is_none(),
+            "cached compilation should be consumed after sim_new"
+        );
+
+        // Run simulation and verify results reflect the patched value
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+
+        // birth_rate should be 0.03 (patched value), so population should grow
+        // faster than with 0.02
+        let c_name = CString::new("population").unwrap();
+        let mut step_count: usize = 0;
+        simlin_sim_get_stepcount(sim, &mut step_count, &mut out_error);
+        assert!(out_error.is_null());
+        assert!(step_count > 0);
+
+        let mut series = vec![0.0f64; step_count];
+        let mut written: usize = 0;
+        simlin_sim_get_series(
+            sim,
+            c_name.as_ptr(),
+            series.as_mut_ptr(),
+            step_count,
+            &mut written,
+            &mut out_error,
+        );
+        assert!(out_error.is_null());
+        assert_eq!(written, step_count);
+        assert!((series[0] - 100.0).abs() < 1e-9);
+        assert!(*series.last().unwrap() > 100.0, "population should grow");
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_dry_run_patch_does_not_cache() {
+    let datamodel = TestProject::new("dry_run_cache")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * 0.02", None)
+        .flow("deaths", "population * 0.01", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // Apply a dry-run patch
+        let patch_json = r#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "upsertAux",
+                            "payload": { "aux": { "name": "growth_rate", "equation": "0.05" } }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected_errors: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            true, // dry_run
+            true,
+            &mut collected_errors,
+            &mut out_error,
+        );
+        if !collected_errors.is_null() {
+            simlin_error_free(collected_errors);
+        }
+
+        // Cache should NOT be populated after dry-run
+        assert!(
+            (*proj).cached_compilation.lock().unwrap().is_none(),
+            "cached compilation should not be set after dry-run patch"
+        );
+
+        // Simulation should still work (compiles from scratch)
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, false, &mut out_error);
+        assert!(!sim.is_null());
+        assert!(out_error.is_null());
+
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_multiple_patches_then_sim() {
+    let datamodel = TestProject::new("multi_patch")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * birth_rate", None)
+        .flow("deaths", "population * 0.01", None)
+        .aux("birth_rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        // First patch: change birth_rate to 0.03
+        let patch1 = r#"{
+            "models": [{ "name": "main", "ops": [
+                { "type": "upsertAux", "payload": { "aux": { "name": "birth_rate", "equation": "0.03" } } }
+            ]}]
+        }"#;
+        let patch1_bytes = patch1.as_bytes();
+        let mut collected1: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch1_bytes.as_ptr(),
+            patch1_bytes.len(),
+            false,
+            true,
+            &mut collected1,
+            &mut out_error,
+        );
+        assert!(out_error.is_null());
+        if !collected1.is_null() {
+            simlin_error_free(collected1);
+        }
+
+        // Second patch: change birth_rate to 0.05
+        let patch2 = r#"{
+            "models": [{ "name": "main", "ops": [
+                { "type": "upsertAux", "payload": { "aux": { "name": "birth_rate", "equation": "0.05" } } }
+            ]}]
+        }"#;
+        let patch2_bytes = patch2.as_bytes();
+        let mut collected2: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch2_bytes.as_ptr(),
+            patch2_bytes.len(),
+            false,
+            true,
+            &mut collected2,
+            &mut out_error,
+        );
+        assert!(out_error.is_null());
+        if !collected2.is_null() {
+            simlin_error_free(collected2);
+        }
+
+        // sim_new should use the cache from the SECOND patch (0.05)
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, false, &mut out_error);
+        assert!(!sim.is_null());
+        assert!(out_error.is_null());
+
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+
+        // With birth_rate=0.05 and death_rate=0.01, net growth is 4%/period,
+        // so after 10 periods: 100 * (1.04)^10 ~ 148. Verify it's above 140.
+        let c_name = CString::new("population").unwrap();
+        let mut step_count: usize = 0;
+        simlin_sim_get_stepcount(sim, &mut step_count, &mut out_error);
+        assert!(out_error.is_null());
+
+        let mut series = vec![0.0f64; step_count];
+        let mut written: usize = 0;
+        simlin_sim_get_series(
+            sim,
+            c_name.as_ptr(),
+            series.as_mut_ptr(),
+            step_count,
+            &mut written,
+            &mut out_error,
+        );
+        assert!(out_error.is_null());
+        let final_pop = *series.last().unwrap();
+        assert!(
+            final_pop > 140.0,
+            "population with 5% net growth should exceed 140 after 10 periods, got {final_pop}"
+        );
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_sim_without_prior_patch_compiles_normally() {
+    let datamodel = TestProject::new("no_patch_sim")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * 0.02", None)
+        .flow("deaths", "population * 0.01", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // No cache should exist on a fresh project
+        assert!((*proj).cached_compilation.lock().unwrap().is_none());
+
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+
+        // sim_new should compile from scratch when no cache exists
+        let sim = simlin_sim_new(model, false, &mut out_error);
+        assert!(!sim.is_null());
+        assert!(out_error.is_null());
+
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+
+        let c_name = CString::new("population").unwrap();
+        let mut step_count: usize = 0;
+        simlin_sim_get_stepcount(sim, &mut step_count, &mut out_error);
+        assert!(out_error.is_null());
+        assert!(step_count > 0);
+
+        let mut series = vec![0.0f64; step_count];
+        let mut written: usize = 0;
+        simlin_sim_get_series(
+            sim,
+            c_name.as_ptr(),
+            series.as_mut_ptr(),
+            step_count,
+            &mut written,
+            &mut out_error,
+        );
+        assert!(out_error.is_null());
+        assert!((series[0] - 100.0).abs() < 1e-9);
+        assert!(*series.last().unwrap() > 100.0);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_patch_then_ltm_sim_compiles_normally() {
+    let datamodel = TestProject::new("ltm_cache_bypass")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * birth_rate", None)
+        .flow("deaths", "population * 0.01", None)
+        .aux("birth_rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        // Apply a patch to populate the cache
+        let patch_json = r#"{
+            "models": [{ "name": "main", "ops": [
+                { "type": "upsertAux", "payload": { "aux": { "name": "birth_rate", "equation": "0.03" } } }
+            ]}]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut out_error,
+        );
+        assert!(out_error.is_null());
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        // Cache should exist
+        assert!((*proj).cached_compilation.lock().unwrap().is_some());
+
+        // Create LTM simulation -- should bypass cache and compile with LTM
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, true, &mut out_error);
+        assert!(!sim.is_null());
+        assert!(out_error.is_null());
+
+        // Cache should still exist (LTM path doesn't consume it)
+        assert!((*proj).cached_compilation.lock().unwrap().is_some());
+
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

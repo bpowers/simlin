@@ -284,16 +284,27 @@ fn collect_project_errors(project: &engine::Project) -> Vec<ErrorDetailData> {
 
 pub(crate) fn gather_error_details(
     project: &engine::Project,
-) -> (Vec<ErrorDetailData>, Option<engine::Error>) {
+) -> (
+    Vec<ErrorDetailData>,
+    Option<engine::Error>,
+    Option<engine::CompiledSimulation>,
+) {
     let mut all_errors = collect_project_errors(project);
-    let sim_error = compile_simulation(project, "main").and_then(Vm::new).err();
 
-    if let Some(error) = sim_error.clone() {
-        let formatted = errors::format_simulation_error("main", &error);
+    let (compiled, sim_error) = match compile_simulation(project, "main") {
+        Ok(compiled) => match Vm::new(compiled.clone()) {
+            Ok(_vm) => (Some(compiled), None),
+            Err(err) => (Some(compiled), Some(err)),
+        },
+        Err(err) => (None, Some(err)),
+    };
+
+    if let Some(ref error) = sim_error {
+        let formatted = errors::format_simulation_error("main", error);
         all_errors.push(ErrorDetailBuilder::from_formatted(formatted));
     }
 
-    (all_errors, sim_error)
+    (all_errors, sim_error, compiled)
 }
 
 fn first_error_code(
@@ -390,7 +401,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
 
     let staged_project = engine::Project::from(staged_datamodel);
 
-    let (all_errors, sim_error) = gather_error_details(&staged_project);
+    let (all_errors, sim_error, compiled) = gather_error_details(&staged_project);
 
     // Check for blocking errors (not including unit warnings, which are handled separately)
     let maybe_first_code = if !allow_errors {
@@ -448,6 +459,9 @@ pub(crate) unsafe fn apply_project_patch_internal(
         let db_locked = project_ref.db.lock().unwrap();
         engine::db::sync_from_datamodel(&db_locked, &project_locked.datamodel);
         drop(db_locked);
+
+        // Cache successful compilation for reuse by sim_new
+        *project_ref.cached_compilation.lock().unwrap() = compiled;
     }
 }
 

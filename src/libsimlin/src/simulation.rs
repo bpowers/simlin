@@ -51,34 +51,48 @@ pub unsafe extern "C" fn simlin_sim_new(
     let project_ptr = model_ref.project;
     let project_ref = &*project_ptr;
 
-    let cloned_project = {
-        let project_locked = project_ref.project.lock().unwrap();
-        project_locked.clone()
+    // Try the cached compilation from the last successful apply_patch.
+    // The cache is only valid for non-LTM simulations since LTM augments the
+    // project with synthetic variables before compiling.
+    let cached = if !enable_ltm {
+        project_ref.cached_compilation.lock().unwrap().take()
+    } else {
+        None
     };
 
-    let project_variant = if enable_ltm {
-        match cloned_project.with_ltm() {
-            Ok(proj) => proj,
-            Err(err) => {
-                store_ffi_error(out_error, ffi_error_from_engine(&err));
-                return ptr::null_mut();
-            }
+    let (compiled, vm, vm_error) = if let Some(compiled) = cached {
+        match Vm::new(compiled.clone()) {
+            Ok(vm) => (Some(compiled), Some(vm), None),
+            Err(err) => (Some(compiled), None, Some(err)),
         }
     } else {
-        cloned_project
+        let cloned_project = {
+            let project_locked = project_ref.project.lock().unwrap();
+            project_locked.clone()
+        };
+
+        let project_variant = if enable_ltm {
+            match cloned_project.with_ltm() {
+                Ok(proj) => proj,
+                Err(err) => {
+                    store_ffi_error(out_error, ffi_error_from_engine(&err));
+                    return ptr::null_mut();
+                }
+            }
+        } else {
+            cloned_project
+        };
+
+        match compile_simulation(&project_variant, &model_ref.model_name) {
+            Ok(compiled) => match Vm::new(compiled.clone()) {
+                Ok(vm) => (Some(compiled), Some(vm), None),
+                Err(err) => (Some(compiled), None, Some(err)),
+            },
+            Err(err) => (None, None, Some(err)),
+        }
     };
 
     crate::model_ref(model);
-
-    // Compile the simulation and cache the CompiledSimulation for reset reuse.
-    let (compiled, vm, vm_error) = match compile_simulation(&project_variant, &model_ref.model_name)
-    {
-        Ok(compiled) => match Vm::new(compiled.clone()) {
-            Ok(vm) => (Some(compiled), Some(vm), None),
-            Err(err) => (Some(compiled), None, Some(err)),
-        },
-        Err(err) => (None, None, Some(err)),
-    };
     let sim = Box::new(SimlinSim {
         model: model_ref as *const _,
         enable_ltm,

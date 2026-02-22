@@ -64,6 +64,7 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
         Ok(Box::into_raw(Box::new(SimlinProject {
             project: Mutex::new(project),
             db: Mutex::new(db),
+            cached_compilation: Mutex::new(None),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -144,6 +145,7 @@ pub unsafe extern "C" fn simlin_project_open_json(
         Ok(Box::into_raw(Box::new(SimlinProject {
             project: Mutex::new(project),
             db: Mutex::new(db),
+            cached_compilation: Mutex::new(None),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -470,6 +472,7 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
             let boxed = Box::new(SimlinProject {
                 project: Mutex::new(project),
                 db: Mutex::new(db),
+                cached_compilation: Mutex::new(None),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -530,6 +533,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
             let boxed = Box::new(SimlinProject {
                 project: Mutex::new(project),
                 db: Mutex::new(db),
+                cached_compilation: Mutex::new(None),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -613,7 +617,7 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     };
 
     let project_locked = proj.project.lock().unwrap();
-    let (all_errors, _) = gather_error_details(&project_locked);
+    let (all_errors, _, _) = gather_error_details(&project_locked);
 
     if all_errors.is_empty() {
         return ptr::null_mut();
