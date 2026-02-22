@@ -356,6 +356,11 @@ pub unsafe extern "C" fn simlin_project_add_model(
 
     // Rebuild the project's internal structures
     *project_locked = engine::Project::from(project_locked.datamodel.clone());
+    drop(project_locked);
+
+    // Invalidate the cached compilation since the project changed outside
+    // the apply_patch path
+    proj.cached_compilation.lock().unwrap().take();
 }
 
 /// Gets a model from a project by name
