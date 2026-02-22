@@ -1339,14 +1339,16 @@ fn reconstruct_model_variables(
 /// Compute stdlib composite ports (cached in a process-wide OnceLock).
 /// These are static properties of stdlib models and never change.
 ///
-/// Uses a separate thread for initialization because `Project::from()`
-/// creates its own salsa db, which conflicts if we're inside a tracked
-/// function query on the caller's db.
+/// On native targets, uses a separate thread for initialization because
+/// `Project::from()` creates its own salsa db, which conflicts if we're
+/// inside a tracked function query on the caller's db.
+/// On wasm32, threads are unavailable so we initialize directly (safe
+/// because WASM is single-threaded).
 fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap {
     use std::sync::OnceLock;
     static PORTS: OnceLock<crate::ltm_augment::CompositePortMap> = OnceLock::new();
     PORTS.get_or_init(|| {
-        std::thread::spawn(|| {
+        let compute = || {
             use crate::common::{Canonical, Ident};
 
             let mut models = Vec::new();
@@ -1375,7 +1377,19 @@ fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap
 
             let project = crate::project::Project::from(dm_project);
             crate::ltm_augment::compute_composite_ports(&project)
-        }).join().expect("stdlib composite ports thread panicked")
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::thread::spawn(compute)
+                .join()
+                .expect("stdlib composite ports thread panicked")
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            compute()
+        }
     })
 }
 
