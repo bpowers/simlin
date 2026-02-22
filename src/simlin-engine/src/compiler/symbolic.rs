@@ -928,7 +928,7 @@ pub(crate) fn resolve_module(
 
     Ok(CompiledModule {
         ident: sym.ident.clone(),
-        n_slots: sym.n_slots,
+        n_slots: layout.n_slots,
         context: Arc::new(ByteCodeContext {
             graphical_functions: sym.graphical_functions.clone(),
             modules: module_decls,
@@ -1626,5 +1626,50 @@ mod tests {
             )],
         );
         compile_and_roundtrip(&dm_project, "main");
+    }
+
+    #[test]
+    fn test_resolve_uses_layout_n_slots_not_symbolic() {
+        use std::collections::BTreeSet;
+        use std::sync::Arc;
+
+        let dm_project = x_project(
+            default_sim_specs(),
+            &[x_model(
+                "main",
+                vec![x_aux("a", "1", None), x_aux("b", "a + 1", None)],
+            )],
+        );
+        let project = crate::project::Project::from(dm_project.clone());
+        let main_ident = crate::common::Ident::new("main");
+        let model = Arc::clone(&project.models[&main_ident]);
+        let inputs: BTreeSet<crate::common::Ident<crate::common::Canonical>> = BTreeSet::new();
+        let module = crate::compiler::Module::new(&project, model, &inputs, true).unwrap();
+        let compiled = module.compile().unwrap();
+
+        let model_offsets = &module.offsets[&main_ident];
+        let layout = VariableLayout::from_offset_map(model_offsets, module.n_slots);
+        let sym = symbolize_module(&compiled, &layout).unwrap();
+
+        // Create a layout with more slots (simulating a variable addition)
+        let mut bigger_entries = layout.entries.clone();
+        bigger_entries.insert(
+            "new_var".to_string(),
+            LayoutEntry {
+                offset: layout.n_slots,
+                size: 1,
+            },
+        );
+        let bigger_layout = VariableLayout::new(bigger_entries, layout.n_slots + 1);
+
+        let resolved = resolve_module(&sym, &bigger_layout).unwrap();
+        assert_eq!(
+            resolved.n_slots, bigger_layout.n_slots,
+            "resolved module should use layout's n_slots, not the stale symbolic value"
+        );
+        assert_ne!(
+            resolved.n_slots, sym.n_slots,
+            "resolved n_slots should differ from symbolic n_slots when layout changed"
+        );
     }
 }

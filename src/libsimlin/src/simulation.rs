@@ -52,9 +52,10 @@ pub unsafe extern "C" fn simlin_sim_new(
     let project_ref = &*project_ptr;
 
     // Try the cached compilation from the last successful apply_patch.
-    // The cache is only valid for non-LTM simulations since LTM augments the
-    // project with synthetic variables before compiling.
-    let cached = if !enable_ltm {
+    // The cache is only valid for non-LTM "main" model simulations since:
+    // - LTM augments the project with synthetic variables before compiling
+    // - The cache is populated by compiling "main" in gather_error_details
+    let cached = if !enable_ltm && model_ref.model_name.as_str() == "main" {
         project_ref.cached_compilation.lock().unwrap().take()
     } else {
         None

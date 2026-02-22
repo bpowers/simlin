@@ -925,12 +925,8 @@ impl ModelStage1 {
         instantiations: &BTreeSet<ModuleInputSet>,
     ) {
         // used when building runlists - give us a stable order to start with
-        let var_names: Vec<&Ident<Canonical>> = self.variables.keys().collect();
-        {
-            let mut var_names: Vec<_> = self.variables.keys().collect();
-            var_names.sort_unstable();
-            var_names
-        };
+        let mut var_names: Vec<&Ident<Canonical>> = self.variables.keys().collect();
+        var_names.sort_unstable();
 
         // use a Set to deduplicate problems we see in dt_deps and initial_deps
         let mut var_errors: HashMap<Ident<Canonical>, HashSet<EquationError>> = HashMap::new();
@@ -1101,12 +1097,8 @@ impl ModelStage1 {
             let _ = db::variable_direct_dependencies(salsa_db, *source_var, source_project);
         }
 
-        let var_names: Vec<&Ident<Canonical>> = self.variables.keys().collect();
-        {
-            let mut var_names: Vec<_> = self.variables.keys().collect();
-            var_names.sort_unstable();
-            var_names
-        };
+        let mut var_names: Vec<&Ident<Canonical>> = self.variables.keys().collect();
+        var_names.sort_unstable();
 
         let mut var_errors: HashMap<Ident<Canonical>, HashSet<EquationError>> = HashMap::new();
         let mut errors: Vec<Error> = Vec::new();
