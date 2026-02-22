@@ -177,9 +177,11 @@ export function intersectElementArc(element: ViewElement, circ: Circle, inv: boo
       return rayRectIntersection(cx, cy, hw, hh, dir);
     }
 
-    // Use circular approximation as reference to pick the correct intersection
+    // Use a reference point on the arc to pick the correct intersection.
+    // atan (not tan) gives a monotonic, bounded angular offset that avoids
+    // discontinuities when rApprox/circ.r crosses tan's asymptotes.
     const rApprox = Math.max(hw, hh);
-    const offθ = tan(rApprox / circ.r);
+    const offθ = Math.atan(rApprox / circ.r);
     const elementCenterθ = atan2(cy - circ.y, cx - circ.x);
     const targetθ = elementCenterθ + (inv ? 1 : -1) * offθ;
     const target: Point = {

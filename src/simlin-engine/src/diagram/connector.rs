@@ -191,10 +191,11 @@ fn intersect_element_arc(
                 return ray_rect_intersection(cx, cy, hw, hh, dir);
             }
 
-            // Use the circular approximation as a reference point to pick the
-            // correct intersection (handles the inv flag naturally)
+            // Use a reference point on the arc to pick the correct intersection.
+            // atan (not tan) gives a monotonic, bounded angular offset that avoids
+            // discontinuities when r_approx/circ.r crosses tan's asymptotes.
             let r_approx = hw.max(hh);
-            let off_theta = (r_approx / circ.r).tan();
+            let off_theta = (r_approx / circ.r).atan();
             let element_center_theta = (cy - circ.y).atan2(cx - circ.x);
             let target_theta = element_center_theta + if inv { 1.0 } else { -1.0 } * off_theta;
             let target = Point {
@@ -868,6 +869,41 @@ mod tests {
         assert!(
             dist > 1.0,
             "inv flag should produce different points, got dist={}",
+            dist
+        );
+    }
+
+    #[test]
+    fn test_arc_connector_to_stock_small_radius_inv_matters() {
+        let stock = make_stock_ve(200.0, 200.0, "s", 2);
+        // Small arc radius where r_approx/circ.r > pi/2 would cause tan()
+        // to cross an asymptote (22.5 / 13 ≈ 1.73 > pi/2 ≈ 1.57)
+        let circ = Circle {
+            x: 190.0,
+            y: 190.0,
+            r: 13.0,
+        };
+
+        let end_no_inv = intersect_element_arc(&stock, &circ, false, &not_arrayed);
+        let end_inv = intersect_element_arc(&stock, &circ, true, &not_arrayed);
+
+        assert_on_rect_boundary(
+            end_no_inv,
+            200.0,
+            200.0,
+            STOCK_WIDTH / 2.0,
+            STOCK_HEIGHT / 2.0,
+        );
+        assert_on_rect_boundary(end_inv, 200.0, 200.0, STOCK_WIDTH / 2.0, STOCK_HEIGHT / 2.0);
+        assert_on_circle(end_no_inv, &circ);
+        assert_on_circle(end_inv, &circ);
+
+        let dx = end_no_inv.x - end_inv.x;
+        let dy = end_no_inv.y - end_inv.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+        assert!(
+            dist > 1.0,
+            "inv flag should select different points even with small arc radius, got dist={}",
             dist
         );
     }

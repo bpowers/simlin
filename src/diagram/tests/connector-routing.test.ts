@@ -604,5 +604,16 @@ describe('Connector routing', () => {
       const dist = Math.sqrt(square(endNoInv.x - endInv.x) + square(endNoInv.y - endInv.y));
       expect(dist).toBeGreaterThan(1);
     });
+
+    it('should produce different points for inv flag even with small arc radius', () => {
+      const stock = makeStock(2, 200, 200);
+      // Small arc radius where rApprox/circ.r > pi/2 would cause tan()
+      // to cross an asymptote (22.5 / 13 > pi/2)
+      const circ: Circle = { x: 190, y: 190, r: 13 };
+      const endNoInv = intersectElementArc(stock, circ, false);
+      const endInv = intersectElementArc(stock, circ, true);
+      const dist = Math.sqrt(square(endNoInv.x - endInv.x) + square(endNoInv.y - endInv.y));
+      expect(dist).toBeGreaterThan(1);
+    });
   });
 });
