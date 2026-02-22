@@ -22,8 +22,8 @@ use crate::ffi_error::{FfiError, SimlinError};
 use crate::ffi_try;
 use crate::patch::gather_error_details;
 use crate::{
-    build_simlin_error, clear_out_error, compile_simulation, drop_c_string, require_project,
-    store_anyhow_error, store_error, SimlinErrorCode, SimlinModel, SimlinProject,
+    build_simlin_error, clear_out_error, compile_simulation, drop_c_string, new_synced_db,
+    require_project, store_anyhow_error, store_error, SimlinErrorCode, SimlinModel, SimlinProject,
 };
 
 /// Open a project from binary protobuf data
@@ -60,8 +60,10 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
         })?;
 
         let project: engine::Project = engine_serde::deserialize(pb_project).into();
+        let db = new_synced_db(&project);
         Ok(Box::into_raw(Box::new(SimlinProject {
             project: Mutex::new(project),
+            db: Mutex::new(db),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -138,8 +140,10 @@ pub unsafe extern "C" fn simlin_project_open_json(
         };
 
         let project: engine::Project = datamodel_project.into();
+        let db = new_synced_db(&project);
         Ok(Box::into_raw(Box::new(SimlinProject {
             project: Mutex::new(project),
+            db: Mutex::new(db),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -462,8 +466,10 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
     match simlin_engine::open_xmile(&mut reader) {
         Ok(datamodel_project) => {
             let project: engine::Project = datamodel_project.into();
+            let db = new_synced_db(&project);
             let boxed = Box::new(SimlinProject {
                 project: Mutex::new(project),
+                db: Mutex::new(db),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -520,8 +526,10 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
     match simlin_engine::open_vensim(contents) {
         Ok(datamodel_project) => {
             let project: engine::Project = datamodel_project.into();
+            let db = new_synced_db(&project);
             let boxed = Box::new(SimlinProject {
                 project: Mutex::new(project),
+                db: Mutex::new(db),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)

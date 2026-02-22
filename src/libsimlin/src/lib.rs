@@ -275,6 +275,7 @@ pub struct SimlinErrorDetail {
 /// Opaque project structure
 pub struct SimlinProject {
     pub(crate) project: Mutex<engine::Project>,
+    pub(crate) db: Mutex<engine::db::SimlinDb>,
     pub(crate) ref_count: AtomicUsize,
 }
 
@@ -308,6 +309,12 @@ pub struct SimlinSim {
 }
 
 // ── shared helpers (pub(crate)) ────────────────────────────────────────
+
+pub(crate) fn new_synced_db(project: &engine::Project) -> engine::db::SimlinDb {
+    let db = engine::db::SimlinDb::default();
+    engine::db::sync_from_datamodel(&db, &project.datamodel);
+    db
+}
 
 pub(crate) fn clear_out_error(out_error: *mut *mut SimlinError) {
     if out_error.is_null() {

@@ -24,6 +24,7 @@ pub mod common;
 pub mod compat;
 mod compiler;
 pub mod datamodel;
+pub mod db;
 pub mod diagram;
 mod dimensions;
 pub mod float;

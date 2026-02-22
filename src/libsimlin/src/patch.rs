@@ -443,6 +443,11 @@ pub(crate) unsafe fn apply_project_patch_internal(
     if !dry_run {
         let mut project_locked = project_ref.project.lock().unwrap();
         *project_locked = staged_project;
+
+        // Resync the salsa database with updated project state
+        let db_locked = project_ref.db.lock().unwrap();
+        engine::db::sync_from_datamodel(&db_locked, &project_locked.datamodel);
+        drop(db_locked);
     }
 }
 
