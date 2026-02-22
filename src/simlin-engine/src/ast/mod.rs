@@ -27,7 +27,7 @@ pub use expr2::{ArrayBounds, Expr2, Expr2Context, IndexExpr2};
 pub use expr3::{Expr3, Expr3LowerContext, IndexExpr3, Pass1Context};
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub enum Ast<Expr> {
     Scalar(Expr),
     ApplyToAll(Vec<Dimension>, Expr),

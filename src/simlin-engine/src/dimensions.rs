@@ -11,7 +11,7 @@ use crate::common::{CanonicalDimensionName, CanonicalElementName};
 use crate::datamodel;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub struct NamedDimension {
     pub elements: Vec<CanonicalElementName>,
     pub indexed_elements: HashMap<CanonicalElementName, usize>,
@@ -86,7 +86,7 @@ impl Clone for RelationshipCache {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub enum Dimension {
     Indexed(CanonicalDimensionName, u32),
     Named(CanonicalDimensionName, NamedDimension),

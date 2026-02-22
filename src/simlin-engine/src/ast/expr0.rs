@@ -8,7 +8,7 @@ use crate::lexer::LexerType;
 use std::result::Result as StdResult;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Hash, Copy, Clone)]
+#[derive(PartialEq, Eq, Hash, Copy, Clone, salsa::Update)]
 pub enum UnaryOp {
     Positive,
     Negative,
@@ -19,7 +19,7 @@ pub enum UnaryOp {
 /// BinaryOp enumerates the different operators supported in
 /// system dynamics equations.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Hash, Copy, Clone)]
+#[derive(PartialEq, Eq, Hash, Copy, Clone, salsa::Update)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -64,7 +64,7 @@ impl BinaryOp {
 /// Expr0 represents a parsed equation, before any calls to
 /// builtin functions have been checked/resolved.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, salsa::Update)]
 pub enum Expr0 {
     Const(String, f64, Loc),
     Var(RawIdent, Loc),
@@ -76,7 +76,7 @@ pub enum Expr0 {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, salsa::Update)]
 pub enum IndexExpr0 {
     Wildcard(Loc),
     StarRange(RawIdent, Loc),

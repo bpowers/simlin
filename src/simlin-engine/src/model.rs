@@ -12,6 +12,7 @@ use crate::common::{
     UnitError, canonicalize, topo_sort,
 };
 use crate::datamodel::{Dimension, UnitMap};
+use crate::db::{self, SourceModel, SourceProject};
 use crate::dimensions::DimensionsContext;
 #[cfg(test)]
 use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_stock};
@@ -759,6 +760,70 @@ impl ModelStage0 {
 
         {
             // FIXME: this is an unfortunate API choice
+            let mut dummy_implicit_vars: Vec<datamodel::Variable> = Vec::new();
+            variable_list.extend(implicit_vars.into_iter().map(|x_var| {
+                parse_var(
+                    dimensions,
+                    &x_var,
+                    &mut dummy_implicit_vars,
+                    units_ctx,
+                    |mi| Ok(Some(mi.clone())),
+                )
+            }));
+            assert_eq!(0, dummy_implicit_vars.len());
+        }
+
+        let variables: HashMap<Ident<Canonical>, _> = variable_list
+            .into_iter()
+            .map(|v| (Ident::new(v.ident()), v))
+            .collect();
+
+        Self {
+            ident: Ident::new(&x_model.name),
+            display_name: x_model.name.clone(),
+            variables,
+            errors: None,
+            implicit,
+        }
+    }
+
+    /// Construct a ModelStage0 using salsa-cached per-variable parsing.
+    /// Each variable's parse result is individually memoized — editing one
+    /// variable's equation only re-parses that variable.
+    pub fn new_cached(
+        salsa_db: &dyn db::Db,
+        source_model: SourceModel,
+        source_project: SourceProject,
+        x_model: &datamodel::Model,
+        dimensions: &[Dimension],
+        units_ctx: &Context,
+        implicit: bool,
+    ) -> Self {
+        let source_vars = source_model.variables(salsa_db);
+
+        let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+        let mut variable_list: Vec<VariableStage0> = Vec::new();
+
+        for dm_var in &x_model.variables {
+            let canonical_name = canonicalize(dm_var.get_ident());
+            if let Some(source_var) = source_vars.get(canonical_name.as_ref()) {
+                let result = db::parse_source_variable(salsa_db, *source_var, source_project);
+                variable_list.push(result.variable.clone());
+                implicit_vars.extend(result.implicit_vars.iter().cloned());
+            } else {
+                variable_list.push(parse_var(
+                    dimensions,
+                    dm_var,
+                    &mut implicit_vars,
+                    units_ctx,
+                    |mi| Ok(Some(mi.clone())),
+                ));
+            }
+        }
+
+        // Implicit vars (from builtin module expansion) are always parsed
+        // directly since they don't have SourceVariable entries.
+        {
             let mut dummy_implicit_vars: Vec<datamodel::Variable> = Vec::new();
             variable_list.extend(implicit_vars.into_iter().map(|x_var| {
                 parse_var(

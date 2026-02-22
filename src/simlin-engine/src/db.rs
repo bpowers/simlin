@@ -70,6 +70,8 @@ pub struct SourceProject {
     #[returns(ref)]
     pub dimensions: Vec<SourceDimension>,
     #[returns(ref)]
+    pub units: Vec<SourceUnit>,
+    #[returns(ref)]
     pub model_names: Vec<String>,
 }
 
@@ -79,10 +81,14 @@ pub struct SourceModel {
     pub name: String,
     #[returns(ref)]
     pub variable_names: Vec<String>,
+    #[returns(ref)]
+    pub variables: HashMap<String, SourceVariable>,
 }
 
 #[salsa::input]
 pub struct SourceVariable {
+    #[returns(ref)]
+    pub ident: String,
     #[returns(ref)]
     pub equation: SourceEquation,
     pub kind: SourceVariableKind,
@@ -100,6 +106,8 @@ pub struct SourceVariable {
     pub model_name: String,
     pub non_negative: bool,
     pub can_be_module_input: bool,
+    #[returns(ref)]
+    pub compat: datamodel::Compat,
 }
 
 // ── Mirror types for salsa compatibility ───────────────────────────────
@@ -185,6 +193,14 @@ pub struct SourceGraphicalFunctionScale {
 pub struct SourceModuleReference {
     pub src: String,
     pub dst: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub struct SourceUnit {
+    pub name: String,
+    pub equation: Option<String>,
+    pub disabled: bool,
+    pub aliases: Vec<String>,
 }
 
 // ── Conversion from datamodel types ────────────────────────────────────
@@ -307,6 +323,240 @@ impl From<&datamodel::ModuleReference> for SourceModuleReference {
     }
 }
 
+impl From<&datamodel::Unit> for SourceUnit {
+    fn from(unit: &datamodel::Unit) -> Self {
+        SourceUnit {
+            name: unit.name.clone(),
+            equation: unit.equation.clone(),
+            disabled: unit.disabled,
+            aliases: unit.aliases.clone(),
+        }
+    }
+}
+
+// ── Reconstruct helpers ────────────────────────────────────────────────
+//
+// Convert Source* types back to datamodel types for use with the existing
+// parsing pipeline (parse_var, lower_variable).
+
+pub fn source_dims_to_datamodel(dims: &[SourceDimension]) -> Vec<datamodel::Dimension> {
+    dims.iter()
+        .map(|sd| {
+            let elements = match &sd.elements {
+                SourceDimensionElements::Indexed(size) => {
+                    datamodel::DimensionElements::Indexed(*size)
+                }
+                SourceDimensionElements::Named(names) => {
+                    datamodel::DimensionElements::Named(names.clone())
+                }
+            };
+            datamodel::Dimension {
+                name: sd.name.clone(),
+                elements,
+                maps_to: sd.maps_to.clone(),
+            }
+        })
+        .collect()
+}
+
+fn source_units_to_datamodel(units: &[SourceUnit]) -> Vec<datamodel::Unit> {
+    units
+        .iter()
+        .map(|su| datamodel::Unit {
+            name: su.name.clone(),
+            equation: su.equation.clone(),
+            disabled: su.disabled,
+            aliases: su.aliases.clone(),
+        })
+        .collect()
+}
+
+fn source_sim_specs_to_datamodel(specs: &SourceSimSpecs) -> datamodel::SimSpecs {
+    datamodel::SimSpecs {
+        start: specs.start,
+        stop: specs.stop,
+        dt: match &specs.dt {
+            SourceDt::Dt(v) => datamodel::Dt::Dt(*v),
+            SourceDt::Reciprocal(v) => datamodel::Dt::Reciprocal(*v),
+        },
+        save_step: specs.save_step.as_ref().map(|dt| match dt {
+            SourceDt::Dt(v) => datamodel::Dt::Dt(*v),
+            SourceDt::Reciprocal(v) => datamodel::Dt::Reciprocal(*v),
+        }),
+        sim_method: match specs.sim_method {
+            SourceSimMethod::Euler => datamodel::SimMethod::Euler,
+            SourceSimMethod::RungeKutta2 => datamodel::SimMethod::RungeKutta2,
+            SourceSimMethod::RungeKutta4 => datamodel::SimMethod::RungeKutta4,
+        },
+        time_units: specs.time_units.clone(),
+    }
+}
+
+fn source_gf_to_datamodel(gf: &SourceGraphicalFunction) -> datamodel::GraphicalFunction {
+    datamodel::GraphicalFunction {
+        kind: match gf.kind {
+            SourceGraphicalFunctionKind::Continuous => datamodel::GraphicalFunctionKind::Continuous,
+            SourceGraphicalFunctionKind::Extrapolate => {
+                datamodel::GraphicalFunctionKind::Extrapolate
+            }
+            SourceGraphicalFunctionKind::Discrete => datamodel::GraphicalFunctionKind::Discrete,
+        },
+        x_points: gf.x_points.clone(),
+        y_points: gf.y_points.clone(),
+        x_scale: datamodel::GraphicalFunctionScale {
+            min: gf.x_scale.min,
+            max: gf.x_scale.max,
+        },
+        y_scale: datamodel::GraphicalFunctionScale {
+            min: gf.y_scale.min,
+            max: gf.y_scale.max,
+        },
+    }
+}
+
+fn source_equation_to_datamodel(eq: &SourceEquation) -> datamodel::Equation {
+    match eq {
+        SourceEquation::Scalar(s) => datamodel::Equation::Scalar(s.clone()),
+        SourceEquation::ApplyToAll(dims, s) => {
+            datamodel::Equation::ApplyToAll(dims.clone(), s.clone())
+        }
+        SourceEquation::Arrayed(dims, elements) => datamodel::Equation::Arrayed(
+            dims.clone(),
+            elements
+                .iter()
+                .map(|e| {
+                    (
+                        e.subscript.clone(),
+                        e.equation.clone(),
+                        e.gf_equation.clone(),
+                        e.gf.as_ref().map(source_gf_to_datamodel),
+                    )
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// Reconstruct a `datamodel::Variable` from a `SourceVariable`.
+pub fn reconstruct_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Variable {
+    let ident = var.ident(db).clone();
+    let equation = source_equation_to_datamodel(var.equation(db));
+    let units = var.units(db).clone();
+    let non_negative = var.non_negative(db);
+    let can_be_module_input = var.can_be_module_input(db);
+    let compat = var.compat(db).clone();
+
+    match var.kind(db) {
+        SourceVariableKind::Stock => datamodel::Variable::Stock(datamodel::Stock {
+            ident,
+            equation,
+            documentation: String::new(),
+            units,
+            inflows: var.inflows(db).clone(),
+            outflows: var.outflows(db).clone(),
+            non_negative,
+            can_be_module_input,
+            visibility: datamodel::Visibility::Private,
+            ai_state: None,
+            uid: None,
+            compat,
+        }),
+        SourceVariableKind::Flow => datamodel::Variable::Flow(datamodel::Flow {
+            ident,
+            equation,
+            documentation: String::new(),
+            units,
+            gf: var.gf(db).as_ref().map(source_gf_to_datamodel),
+            non_negative,
+            can_be_module_input,
+            visibility: datamodel::Visibility::Private,
+            ai_state: None,
+            uid: None,
+            compat,
+        }),
+        SourceVariableKind::Aux => datamodel::Variable::Aux(datamodel::Aux {
+            ident,
+            equation,
+            documentation: String::new(),
+            units,
+            gf: var.gf(db).as_ref().map(source_gf_to_datamodel),
+            can_be_module_input,
+            visibility: datamodel::Visibility::Private,
+            ai_state: None,
+            uid: None,
+            compat,
+        }),
+        SourceVariableKind::Module => datamodel::Variable::Module(datamodel::Module {
+            ident,
+            model_name: var.model_name(db).clone(),
+            documentation: String::new(),
+            units,
+            references: var
+                .module_refs(db)
+                .iter()
+                .map(|mr| datamodel::ModuleReference {
+                    src: mr.src.clone(),
+                    dst: mr.dst.clone(),
+                })
+                .collect(),
+            can_be_module_input,
+            visibility: datamodel::Visibility::Private,
+            ai_state: None,
+            uid: None,
+        }),
+    }
+}
+
+// ── Tracked functions ──────────────────────────────────────────────────
+
+/// Result of parsing a single variable, including any implicit variables
+/// generated by builtin expansion (e.g., DELAY1, SMTH create internal stocks).
+#[derive(Clone, PartialEq, salsa::Update)]
+pub struct ParsedVariableResult {
+    pub variable: crate::model::VariableStage0,
+    pub implicit_vars: Vec<datamodel::Variable>,
+}
+
+impl std::fmt::Debug for ParsedVariableResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedVariableResult")
+            .field("ident", &self.variable.ident())
+            .field("implicit_vars_count", &self.implicit_vars.len())
+            .finish()
+    }
+}
+
+/// Per-variable tracked function for parsing. Salsa memoizes the result
+/// and only re-executes when the specific SourceVariable fields that were
+/// read have changed. This means editing one variable's equation does NOT
+/// re-parse other variables.
+#[salsa::tracked(returns(ref))]
+pub fn parse_source_variable(
+    db: &dyn Db,
+    var: SourceVariable,
+    project: SourceProject,
+) -> ParsedVariableResult {
+    let dims = source_dims_to_datamodel(project.dimensions(db));
+
+    let dm_units = source_units_to_datamodel(project.units(db));
+    let dm_sim_specs = source_sim_specs_to_datamodel(project.sim_specs(db));
+    let units_ctx =
+        crate::units::Context::new_with_builtins(&dm_units, &dm_sim_specs).unwrap_or_default();
+
+    let dm_var = reconstruct_variable(db, var);
+
+    let mut implicit_vars = Vec::new();
+    let variable =
+        crate::variable::parse_var(&dims, &dm_var, &mut implicit_vars, &units_ctx, |mi| {
+            Ok(Some(mi.clone()))
+        });
+
+    ParsedVariableResult {
+        variable,
+        implicit_vars,
+    }
+}
+
 // ── Sync result ────────────────────────────────────────────────────────
 
 /// Result of syncing a datamodel::Project into the salsa database.
@@ -333,8 +583,6 @@ pub struct SyncedVariable<'db> {
 ///
 /// Creates `SourceProject`, `SourceModel`, and `SourceVariable` inputs in
 /// the database, along with interned `ModelId` and `VariableId` identifiers.
-/// For Phase 2, these inputs are populated but not yet read by the
-/// compilation pipeline.
 pub fn sync_from_datamodel<'db>(
     db: &'db SimlinDb,
     project: &datamodel::Project,
@@ -350,6 +598,7 @@ pub fn sync_from_datamodel<'db>(
             .iter()
             .map(SourceDimension::from)
             .collect(),
+        project.units.iter().map(SourceUnit::from).collect(),
         model_names,
     );
 
@@ -365,15 +614,15 @@ pub fn sync_from_datamodel<'db>(
             .map(|v| v.get_ident().to_string())
             .collect();
 
-        let source_model = SourceModel::new(db, dm_model.name.clone(), variable_names);
-
         let mut variables = HashMap::new();
+        let mut source_var_map = HashMap::new();
 
         for dm_var in &dm_model.variables {
             let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
             let var_id = VariableId::new(db, canonical_var_name.clone());
 
-            let source_var = source_variable_from_datamodel(db, dm_var, &dm_model.name);
+            let source_var = source_variable_from_datamodel(db, dm_var);
+            source_var_map.insert(canonical_var_name.clone(), source_var);
 
             variables.insert(
                 canonical_var_name,
@@ -383,6 +632,9 @@ pub fn sync_from_datamodel<'db>(
                 },
             );
         }
+
+        let source_model =
+            SourceModel::new(db, dm_model.name.clone(), variable_names, source_var_map);
 
         models.insert(
             canonical_model_name,
@@ -400,11 +652,8 @@ pub fn sync_from_datamodel<'db>(
     }
 }
 
-fn source_variable_from_datamodel(
-    db: &SimlinDb,
-    var: &datamodel::Variable,
-    model_name: &str,
-) -> SourceVariable {
+fn source_variable_from_datamodel(db: &SimlinDb, var: &datamodel::Variable) -> SourceVariable {
+    let ident = var.get_ident().to_string();
     let kind = SourceVariableKind::from_datamodel_variable(var);
 
     let equation = var
@@ -430,13 +679,15 @@ fn source_variable_from_datamodel(
         _ => Vec::new(),
     };
 
-    let module_refs = match var {
-        datamodel::Variable::Module(m) => m
-            .references
-            .iter()
-            .map(SourceModuleReference::from)
-            .collect(),
-        _ => Vec::new(),
+    let (module_refs, referenced_model_name) = match var {
+        datamodel::Variable::Module(m) => (
+            m.references
+                .iter()
+                .map(SourceModuleReference::from)
+                .collect(),
+            m.model_name.clone(),
+        ),
+        _ => (Vec::new(), String::new()),
     };
 
     let non_negative = match var {
@@ -447,8 +698,16 @@ fn source_variable_from_datamodel(
 
     let can_be_module_input = var.can_be_module_input();
 
+    let compat = match var {
+        datamodel::Variable::Stock(s) => s.compat.clone(),
+        datamodel::Variable::Flow(f) => f.compat.clone(),
+        datamodel::Variable::Aux(a) => a.compat.clone(),
+        datamodel::Variable::Module(_) => datamodel::Compat::default(),
+    };
+
     SourceVariable::new(
         db,
+        ident,
         equation,
         kind,
         units,
@@ -456,9 +715,10 @@ fn source_variable_from_datamodel(
         inflows,
         outflows,
         module_refs,
-        model_name.to_string(),
+        referenced_model_name,
         non_negative,
         can_be_module_input,
+        compat,
     )
 }
 
@@ -940,5 +1200,238 @@ mod tests {
         assert_eq!(specs.dt, SourceDt::Reciprocal(4.0));
         assert_eq!(specs.save_step, Some(SourceDt::Dt(0.5)));
         assert_eq!(specs.sim_method, SourceSimMethod::RungeKutta4);
+    }
+
+    #[test]
+    fn test_parse_source_variable_scalar() {
+        use crate::ast::Expr0;
+        use crate::variable::Variable;
+
+        let db = SimlinDb::default();
+        let project = simple_project();
+        let result = sync_from_datamodel(&db, &project);
+
+        let pop_var = result.models["main"].variables["population"].source;
+        let parsed = parse_source_variable(&db, pop_var, result.project);
+
+        // Should parse to a Var (aux) with equation "100"
+        assert!(matches!(&parsed.variable, Variable::Var { .. }));
+        assert_eq!(parsed.variable.ident(), "population");
+
+        // Should have a valid AST with a constant 100.0
+        let ast = parsed.variable.ast();
+        assert!(ast.is_some());
+        if let Some(crate::ast::Ast::Scalar(Expr0::Const(_, val, _))) = ast {
+            assert_eq!(*val, 100.0);
+        } else {
+            panic!("Expected Scalar(Const(100.0)), got {:?}", ast);
+        }
+    }
+
+    #[test]
+    fn test_parse_source_variable_stock() {
+        use crate::variable::Variable;
+
+        let db = SimlinDb::default();
+        let project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Stock(datamodel::Stock {
+                        ident: "inventory".to_string(),
+                        equation: datamodel::Equation::Scalar("100".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        inflows: vec!["production".to_string()],
+                        outflows: vec!["sales".to_string()],
+                        non_negative: true,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Flow(datamodel::Flow {
+                        ident: "production".to_string(),
+                        equation: datamodel::Equation::Scalar("10".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Flow(datamodel::Flow {
+                        ident: "sales".to_string(),
+                        equation: datamodel::Equation::Scalar("5".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let result = sync_from_datamodel(&db, &project);
+
+        // Parse the stock variable
+        let stock_var = result.models["main"].variables["inventory"].source;
+        let parsed = parse_source_variable(&db, stock_var, result.project);
+        assert!(matches!(&parsed.variable, Variable::Stock { .. }));
+        assert_eq!(parsed.variable.ident(), "inventory");
+
+        // Parse a flow variable
+        let flow_var = result.models["main"].variables["production"].source;
+        let parsed = parse_source_variable(&db, flow_var, result.project);
+        assert!(matches!(
+            &parsed.variable,
+            Variable::Var { is_flow: true, .. }
+        ));
+        assert_eq!(parsed.variable.ident(), "production");
+    }
+
+    #[test]
+    fn test_parse_source_variable_matches_direct_parse() {
+        use crate::variable::parse_var;
+
+        let db = SimlinDb::default();
+        let project = simple_project();
+        let result = sync_from_datamodel(&db, &project);
+
+        // Parse via tracked function
+        let pop_var = result.models["main"].variables["population"].source;
+        let tracked_result = parse_source_variable(&db, pop_var, result.project);
+
+        // Parse directly via parse_var for comparison
+        let dm_var = &project.models[0].variables[0];
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let mut implicit_vars = Vec::new();
+        let direct_result = parse_var(
+            &project.dimensions,
+            dm_var,
+            &mut implicit_vars,
+            &units_ctx,
+            |mi| Ok(Some(mi.clone())),
+        );
+
+        // The tracked function and direct parse should produce equivalent results
+        assert_eq!(tracked_result.variable.ident(), direct_result.ident());
+        assert_eq!(
+            tracked_result.variable.equation_errors().is_some(),
+            direct_result.equation_errors().is_some()
+        );
+    }
+
+    #[test]
+    fn test_incrementality_unchanged_variable_not_reparsed() {
+        use salsa::Setter;
+
+        let mut db = SimlinDb::default();
+        let project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "alpha".to_string(),
+                        equation: datamodel::Equation::Scalar("10".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "beta".to_string(),
+                        equation: datamodel::Equation::Scalar("20".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let (source_project, alpha_src, beta_src) = {
+            let result = sync_from_datamodel(&db, &project);
+            (
+                result.project,
+                result.models["main"].variables["alpha"].source,
+                result.models["main"].variables["beta"].source,
+            )
+        };
+
+        // Initial parse of both variables to prime the cache
+        let beta_ptr_before = {
+            let alpha_result = parse_source_variable(&db, alpha_src, source_project);
+            let beta_result = parse_source_variable(&db, beta_src, source_project);
+            assert_eq!(alpha_result.variable.ident(), "alpha");
+            assert_eq!(beta_result.variable.ident(), "beta");
+            beta_result as *const ParsedVariableResult
+        };
+
+        // Modify only alpha's equation; beta is unchanged
+        alpha_src
+            .set_equation(&mut db)
+            .to(SourceEquation::Scalar("42".to_string()));
+
+        // Re-parse both: alpha should have new result, beta should be cached
+        let alpha_result_2 = parse_source_variable(&db, alpha_src, source_project);
+        let beta_result_2 = parse_source_variable(&db, beta_src, source_project);
+
+        // Alpha's parse result should reflect the new equation
+        if let Some(crate::ast::Ast::Scalar(crate::ast::Expr0::Const(_, val, _))) =
+            alpha_result_2.variable.ast()
+        {
+            assert_eq!(*val, 42.0);
+        } else {
+            panic!(
+                "Expected alpha to parse as Const(42.0), got {:?}",
+                alpha_result_2.variable.ast()
+            );
+        }
+
+        // Beta should be pointer-equal (same &ParsedVariableResult from cache)
+        let beta_ptr_after = beta_result_2 as *const ParsedVariableResult;
+        assert_eq!(
+            beta_ptr_before, beta_ptr_after,
+            "beta should be returned from salsa cache (pointer-equal) since it was not modified"
+        );
     }
 }

@@ -10,7 +10,7 @@ use crate::canonicalize;
 use crate::common::{DimensionName, ElementName};
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Default, Eq, Clone)]
+#[derive(Default, Eq, Clone, salsa::Update)]
 pub struct UnitMap {
     pub map: BTreeMap<String, i32>,
     pub ctx: Option<Vec<String>>,
@@ -163,7 +163,7 @@ impl FromIterator<(String, i32)> for UnitMap {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, salsa::Update)]
 pub enum GraphicalFunctionKind {
     Continuous,
     Extrapolate,
@@ -171,14 +171,14 @@ pub enum GraphicalFunctionKind {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct GraphicalFunction {
     pub kind: GraphicalFunctionKind,
     pub x_points: Option<Vec<f64>>,
@@ -188,7 +188,7 @@ pub struct GraphicalFunction {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub enum Equation {
     Scalar(String),
     ApplyToAll(Vec<DimensionName>, String),
@@ -204,7 +204,7 @@ pub enum Equation {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default, salsa::Update)]
 pub struct Compat {
     pub active_initial: Option<String>,
 }
@@ -216,14 +216,14 @@ impl Compat {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, salsa::Update)]
 pub enum Visibility {
     Private,
     Public,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, salsa::Update)]
 pub enum AiState {
     A, // No information
     B, // Human created. Will only occur when a modeler adds content using AI to an existing model. (Depending on the software implementation these may always be reported as F).
@@ -236,7 +236,7 @@ pub enum AiState {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct Stock {
     pub ident: String,
     pub equation: Equation,
@@ -253,7 +253,7 @@ pub struct Stock {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct Flow {
     pub ident: String,
     pub equation: Equation,
@@ -269,7 +269,7 @@ pub struct Flow {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct Aux {
     pub ident: String,
     pub equation: Equation,
@@ -283,14 +283,14 @@ pub struct Aux {
     pub compat: Compat,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub struct ModuleReference {
     pub src: String,
     pub dst: String,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub struct Module {
     pub ident: String,
     pub model_name: String,
@@ -304,7 +304,7 @@ pub struct Module {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub enum Variable {
     Stock(Stock),
     Flow(Flow),

@@ -22,7 +22,7 @@ use crate::units::parse_units;
 use crate::{ErrorCode, eqn_err, units};
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct Table {
     pub x: Vec<f64>,
     pub y: Vec<f64>,
@@ -63,7 +63,7 @@ impl Table {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub struct ModuleInput {
     // the Variable identifier in the current model we will use for input
     pub src: Ident<Canonical>,
@@ -72,7 +72,7 @@ pub struct ModuleInput {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub enum Variable<MI = ModuleInput, E = Expr2> {
     Stock {
         ident: Ident<Canonical>,

@@ -153,11 +153,8 @@ impl Project {
         F: FnMut(&HashMap<Ident<Canonical>, &ModelStage1>, &Context, &mut ModelStage1),
     {
         use crate::common::{ErrorCode, ErrorKind, topo_sort};
+        use crate::db::{SimlinDb, sync_from_datamodel};
         use crate::model::enumerate_modules;
-
-        // first, build the unit context.
-        // TODO: there is probably a shared/common core of units we should
-        //       pull in
 
         let mut project_errors = vec![];
 
@@ -176,6 +173,10 @@ impl Project {
                     Default::default()
                 });
 
+        // Set up salsa database for incremental per-variable caching.
+        let salsa_db = SimlinDb::default();
+        let sync_result = sync_from_datamodel(&salsa_db, &project_datamodel);
+
         // Build set of model names present in the datamodel so we can detect
         // when a stdlib model has been overridden (e.g., by LTM augmentation
         // adding synthetic variables to a stdlib model's definition).
@@ -186,6 +187,7 @@ impl Project {
             .collect();
 
         // Pull in stdlib models, skipping any that are overridden in the datamodel.
+        // Stdlib models use direct parsing (no salsa caching).
         let mut models_list: Vec<ModelStage0> = crate::stdlib::MODEL_NAMES
             .iter()
             .filter(|name| {
@@ -198,20 +200,32 @@ impl Project {
             })
             .collect();
 
-        // Extend with models from the project/XMILE file. When a datamodel
-        // model has the same name as a stdlib model it replaces, mark it
-        // as implicit so the compiler treats it the same as the original.
+        // User models use salsa-cached per-variable parsing when the model
+        // has a corresponding SourceModel in the sync result.
         models_list.extend(project_datamodel.models.iter().map(|m| {
             let canonical_name = canonicalize(&m.name);
             let is_stdlib_override = crate::stdlib::MODEL_NAMES
                 .iter()
                 .any(|name| canonicalize(&format!("stdlib\u{205A}{name}")) == canonical_name);
-            ModelStage0::new(
-                m,
-                &project_datamodel.dimensions,
-                &units_ctx,
-                is_stdlib_override,
-            )
+
+            if let Some(synced_model) = sync_result.models.get(canonical_name.as_ref()) {
+                ModelStage0::new_cached(
+                    &salsa_db,
+                    synced_model.source,
+                    sync_result.project,
+                    m,
+                    &project_datamodel.dimensions,
+                    &units_ctx,
+                    is_stdlib_override,
+                )
+            } else {
+                ModelStage0::new(
+                    m,
+                    &project_datamodel.dimensions,
+                    &units_ctx,
+                    is_stdlib_override,
+                )
+            }
         }));
 
         let models: HashMap<Ident<Canonical>, &ModelStage0> =
