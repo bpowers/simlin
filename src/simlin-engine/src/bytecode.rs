@@ -44,8 +44,7 @@ pub(crate) const STACK_CAPACITY: usize = 64;
 
 /// Lookup interpolation mode for graphical function tables.
 #[repr(u8)]
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LookupMode {
     /// Linear interpolation between points (standard LOOKUP behavior)
     Interpolate = 0,
@@ -61,8 +60,7 @@ pub enum LookupMode {
 
 /// Runtime dimension information stored in ByteCodeContext.
 /// Used for dynamic array operations like star ranges and broadcasting.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DimensionInfo {
     /// Index into names table for this dimension's name
     pub name_id: NameId,
@@ -101,8 +99,7 @@ impl DimensionInfo {
 
 /// Subdimension relationship for star ranges like `*:SubDim`.
 /// Describes which parent indices a subdimension maps to.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SubdimensionRelation {
     /// Index of parent dimension in dimensions table
     pub parent_dim_id: DimId,
@@ -152,8 +149,7 @@ impl SubdimensionRelation {
 
 /// Sparse mapping for a single dimension in a RuntimeView.
 /// Used when iterating over non-contiguous elements.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RuntimeSparseMapping {
     /// Which dimension (0-indexed) in the view is sparse
     pub dim_index: u8,
@@ -483,8 +479,7 @@ impl RuntimeView {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BuiltinId {
     Abs,
     Arccos,
@@ -509,8 +504,7 @@ pub(crate) enum BuiltinId {
     Tan,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Op2 {
     Add,
     Sub,
@@ -963,8 +957,7 @@ pub struct ModuleDeclaration {
     pub(crate) off: usize, // offset within the parent module
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct ArrayDefinition {
     pub(crate) dimensions: Vec<usize>,

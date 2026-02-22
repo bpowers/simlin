@@ -8,6 +8,7 @@ pub mod dimensions;
 pub mod expr;
 pub mod pretty;
 pub mod subscript;
+pub(crate) mod symbolic;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
