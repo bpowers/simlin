@@ -3031,17 +3031,15 @@ pub fn compile_var_fragment(
                 let sym_views: Vec<_> = ctx
                     .static_views
                     .iter()
-                    .filter_map(|sv| {
-                        crate::compiler::symbolic::symbolize_static_view(sv, &rmap).ok()
-                    })
-                    .collect();
+                    .map(|sv| crate::compiler::symbolic::symbolize_static_view(sv, &rmap))
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
                 let sym_mods: Vec<_> = ctx
                     .modules
                     .iter()
-                    .filter_map(|md| {
-                        crate::compiler::symbolic::symbolize_module_decl(md, &rmap).ok()
-                    })
-                    .collect();
+                    .map(|md| crate::compiler::symbolic::symbolize_module_decl(md, &rmap))
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
 
                 let temp_sizes_vec: Vec<(u32, usize)> =
                     temp_sizes_map.iter().map(|(&k, &v)| (k, v)).collect();
