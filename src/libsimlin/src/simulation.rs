@@ -51,25 +51,12 @@ pub unsafe extern "C" fn simlin_sim_new(
     let project_ptr = model_ref.project;
     let project_ref = &*project_ptr;
 
-    // Try the cached compilation from the last successful apply_patch.
-    // The cache is only valid for non-LTM "main" model simulations since:
-    // - LTM augments the project with synthetic variables before compiling
-    // - The cache is populated by compiling "main" in gather_error_details
-    let cached = if !enable_ltm && model_ref.model_name.as_str() == "main" {
-        project_ref.cached_compilation.lock().unwrap().take()
-    } else {
-        None
-    };
-
-    let (compiled, vm, vm_error) = if let Some(compiled) = cached {
-        match Vm::new(compiled.clone()) {
-            Ok(vm) => (Some(compiled), Some(vm), None),
-            Err(err) => (Some(compiled), None, Some(err)),
-        }
-    } else if !enable_ltm {
-        // Try salsa-based incremental compilation first.
-        // Falls back to monolithic if the incremental path doesn't support
-        // this model configuration (e.g., multi-model with modules).
+    let (compiled, vm, vm_error) = if !enable_ltm {
+        // Try salsa-based incremental compilation first. The DB is kept
+        // in sync by apply_patch and project constructors, so this is
+        // typically a cache hit when nothing changed since the last patch.
+        // Falls back to the monolithic path when the incremental path
+        // does not yet support this model (e.g. certain module patterns).
         let incremental_result = {
             let db = project_ref.db.lock().unwrap();
             let sync_state = project_ref.sync_state.lock().unwrap();
@@ -88,7 +75,6 @@ pub unsafe extern "C" fn simlin_sim_new(
                 Err(err) => (Some(compiled), None, Some(err)),
             }
         } else {
-            // Fall back to monolithic compilation
             let cloned_project = {
                 let project_locked = project_ref.project.lock().unwrap();
                 project_locked.clone()

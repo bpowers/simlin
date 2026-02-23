@@ -65,7 +65,6 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
             project: Mutex::new(project),
             db: Mutex::new(db),
             sync_state: Mutex::new(Some(sync_state)),
-            cached_compilation: Mutex::new(None),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -147,7 +146,6 @@ pub unsafe extern "C" fn simlin_project_open_json(
             project: Mutex::new(project),
             db: Mutex::new(db),
             sync_state: Mutex::new(Some(sync_state)),
-            cached_compilation: Mutex::new(None),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -371,10 +369,6 @@ pub unsafe extern "C" fn simlin_project_add_model(
     *proj.sync_state.lock().unwrap() = Some(new_state);
 
     drop(project_locked);
-
-    // Invalidate the cached compilation since the project changed outside
-    // the apply_patch path
-    proj.cached_compilation.lock().unwrap().take();
 }
 
 /// Gets a model from a project by name
@@ -492,7 +486,6 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
                 project: Mutex::new(project),
                 db: Mutex::new(db),
                 sync_state: Mutex::new(Some(sync_state)),
-                cached_compilation: Mutex::new(None),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -554,7 +547,6 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
                 project: Mutex::new(project),
                 db: Mutex::new(db),
                 sync_state: Mutex::new(Some(sync_state)),
-                cached_compilation: Mutex::new(None),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)

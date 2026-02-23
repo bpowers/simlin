@@ -282,19 +282,10 @@ fn collect_project_errors(project: &engine::Project) -> Vec<ErrorDetailData> {
         .collect()
 }
 
-pub(crate) fn gather_error_details(
-    project: &engine::Project,
-) -> (
-    Vec<ErrorDetailData>,
-    Option<engine::Error>,
-    Option<engine::CompiledSimulation>,
-) {
-    gather_error_details_with_db(project, None)
-}
-
-/// Variant that can also collect from the salsa accumulator when a
-/// synced database is provided. Diagnostics from both sources are
-/// deduplicated by (model, variable, code) triple.
+/// Collects all static analysis errors and attempts compilation to find
+/// simulation-time errors. When a synced salsa database is provided,
+/// uses incremental compilation and merges accumulator diagnostics
+/// (deduplicated by model+variable+code triple).
 pub(crate) fn gather_error_details_with_db(
     project: &engine::Project,
     db_sync: Option<(&engine::db::SimlinDb, &engine::db::SyncResult<'_>)>,
@@ -329,6 +320,9 @@ pub(crate) fn gather_error_details_with_db(
         }
     }
 
+    // Use the monolithic compilation path for simulatability checks.
+    // The incremental path is used in simlin_sim_new where it matters
+    // for avoiding double-compilation; here we only need to detect errors.
     let (compiled, sim_error) = match compile_simulation(project, "main") {
         Ok(compiled) => match Vm::new(compiled.clone()) {
             Ok(_vm) => (Some(compiled), None),
@@ -439,7 +433,22 @@ pub(crate) unsafe fn apply_project_patch_internal(
 
     let staged_project = engine::Project::from(staged_datamodel);
 
-    let (all_errors, sim_error, compiled) = gather_error_details(&staged_project);
+    // Eagerly sync the salsa DB with the staged datamodel so that
+    // accumulator diagnostics are available for error collection and
+    // the DB is ready for simlin_sim_new on commit. If the patch is
+    // rejected or this is a dry run, we restore the previous state.
+    let mut db = project_ref.db.lock().unwrap();
+    let prev_state = project_ref.sync_state.lock().unwrap().take();
+    let staged_sync_state = engine::db::sync_from_datamodel_incremental(
+        &mut db,
+        &staged_project.datamodel,
+        prev_state.as_ref(),
+    );
+
+    let staged_sync = staged_sync_state.to_sync_result();
+    let (all_errors, sim_error, _compiled) =
+        gather_error_details_with_db(&staged_project, Some((&db, &staged_sync)));
+    drop(db);
 
     // Check for blocking errors (not including unit warnings, which are handled separately)
     let maybe_first_code = if !allow_errors {
@@ -478,37 +487,43 @@ pub(crate) unsafe fn apply_project_patch_internal(
         *out_collected_errors = aggregate.into_raw();
     }
 
+    let rejected = maybe_first_code.is_some() || new_unit_warning.is_some();
+
     if let Some(code) = maybe_first_code {
         let error = build_simlin_error(code, &all_errors);
         store_error(out_error, error);
-        return;
     }
 
     if let Some((code, message)) = new_unit_warning {
         store_error(out_error, SimlinError::new(code).with_message(message));
+    }
+
+    if rejected || dry_run {
+        // Revert the DB to the previous sync state since we are not
+        // committing these changes.
+        if let Some(prev) = prev_state {
+            let mut db = project_ref.db.lock().unwrap();
+            let restored = engine::db::sync_from_datamodel_incremental(
+                &mut db,
+                &{
+                    let project_locked = project_ref.project.lock().unwrap();
+                    project_locked.datamodel.clone()
+                },
+                Some(&prev),
+            );
+            drop(db);
+            *project_ref.sync_state.lock().unwrap() = Some(restored);
+        } else {
+            *project_ref.sync_state.lock().unwrap() = None;
+        }
         return;
     }
 
-    if !dry_run {
-        let mut project_locked = project_ref.project.lock().unwrap();
-        *project_locked = staged_project;
-
-        // Incrementally sync the persistent salsa DB, reusing existing
-        // input handles so that downstream tracked queries for unchanged
-        // variables stay cached.
-        let mut db = project_ref.db.lock().unwrap();
-        let prev_state = project_ref.sync_state.lock().unwrap().take();
-        let new_state = engine::db::sync_from_datamodel_incremental(
-            &mut db,
-            &project_locked.datamodel,
-            prev_state.as_ref(),
-        );
-        drop(db);
-        *project_ref.sync_state.lock().unwrap() = Some(new_state);
-
-        // Cache successful compilation for reuse by sim_new
-        *project_ref.cached_compilation.lock().unwrap() = compiled;
-    }
+    // Commit: persist the staged project and the already-synced DB state.
+    let mut project_locked = project_ref.project.lock().unwrap();
+    *project_locked = staged_project;
+    drop(project_locked);
+    *project_ref.sync_state.lock().unwrap() = Some(staged_sync_state);
 }
 
 // ── FFI entry point ────────────────────────────────────────────────────

@@ -5575,11 +5575,11 @@ fn test_sim_get_var_count_and_names() {
     }
 }
 
-// ── Phase 7: Cached compilation tests ──────────────────────────────────
+// ── Phase 7: Incremental compilation integration tests ─────────────────
 
 #[test]
-fn test_patch_then_sim_uses_cached_compilation() {
-    let datamodel = TestProject::new("cached_compile")
+fn test_patch_then_sim_uses_incremental_compilation() {
+    let datamodel = TestProject::new("incr_compile")
         .with_sim_time(0.0, 10.0, 1.0)
         .stock("population", "100", &["births"], &["deaths"], None)
         .flow("births", "population * birth_rate", None)
@@ -5620,13 +5620,7 @@ fn test_patch_then_sim_uses_cached_compilation() {
             simlin_error_free(collected_errors);
         }
 
-        // The cache should now be populated
-        assert!(
-            (*proj).cached_compilation.lock().unwrap().is_some(),
-            "cached compilation should be populated after successful patch"
-        );
-
-        // Create simulation (should use cache)
+        // Create simulation via incremental compilation
         let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
         assert!(!model.is_null());
         assert!(out_error.is_null());
@@ -5634,12 +5628,6 @@ fn test_patch_then_sim_uses_cached_compilation() {
         let sim = simlin_sim_new(model, false, &mut out_error);
         assert!(!sim.is_null());
         assert!(out_error.is_null());
-
-        // Cache should be consumed
-        assert!(
-            (*proj).cached_compilation.lock().unwrap().is_none(),
-            "cached compilation should be consumed after sim_new"
-        );
 
         // Run simulation and verify results reflect the patched value
         simlin_sim_run_to_end(sim, &mut out_error);
@@ -5675,8 +5663,8 @@ fn test_patch_then_sim_uses_cached_compilation() {
 }
 
 #[test]
-fn test_dry_run_patch_does_not_cache() {
-    let datamodel = TestProject::new("dry_run_cache")
+fn test_dry_run_patch_does_not_affect_project() {
+    let datamodel = TestProject::new("dry_run_incr")
         .with_sim_time(0.0, 10.0, 1.0)
         .stock("population", "100", &["births"], &["deaths"], None)
         .flow("births", "population * 0.02", None)
@@ -5715,13 +5703,8 @@ fn test_dry_run_patch_does_not_cache() {
             simlin_error_free(collected_errors);
         }
 
-        // Cache should NOT be populated after dry-run
-        assert!(
-            (*proj).cached_compilation.lock().unwrap().is_none(),
-            "cached compilation should not be set after dry-run patch"
-        );
-
-        // Simulation should still work (compiles from scratch)
+        // Simulation should still work with original model (dry-run
+        // should not have modified the project or its salsa DB state)
         let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
         assert!(!model.is_null());
 
@@ -5796,7 +5779,7 @@ fn test_multiple_patches_then_sim() {
             simlin_error_free(collected2);
         }
 
-        // sim_new should use the cache from the SECOND patch (0.05)
+        // sim_new should compile with the latest DB state (birth_rate=0.05)
         let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
         assert!(!model.is_null());
 
@@ -5848,14 +5831,11 @@ fn test_sim_without_prior_patch_compiles_normally() {
     let proj = open_project_from_datamodel(&datamodel);
 
     unsafe {
-        // No cache should exist on a fresh project
-        assert!((*proj).cached_compilation.lock().unwrap().is_none());
-
         let mut out_error: *mut SimlinError = ptr::null_mut();
         let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
         assert!(!model.is_null());
 
-        // sim_new should compile from scratch when no cache exists
+        // sim_new should compile via incremental path from fresh DB
         let sim = simlin_sim_new(model, false, &mut out_error);
         assert!(!sim.is_null());
         assert!(out_error.is_null());
@@ -5891,7 +5871,7 @@ fn test_sim_without_prior_patch_compiles_normally() {
 
 #[test]
 fn test_patch_then_ltm_sim_compiles_normally() {
-    let datamodel = TestProject::new("ltm_cache_bypass")
+    let datamodel = TestProject::new("ltm_incr_bypass")
         .with_sim_time(0.0, 10.0, 1.0)
         .stock("population", "100", &["births"], &["deaths"], None)
         .flow("births", "population * birth_rate", None)
@@ -5903,7 +5883,7 @@ fn test_patch_then_ltm_sim_compiles_normally() {
     unsafe {
         let mut out_error: *mut SimlinError = ptr::null_mut();
 
-        // Apply a patch to populate the cache
+        // Apply a patch
         let patch_json = r#"{
             "models": [{ "name": "main", "ops": [
                 { "type": "upsertAux", "payload": { "aux": { "name": "birth_rate", "equation": "0.03" } } }
@@ -5925,19 +5905,13 @@ fn test_patch_then_ltm_sim_compiles_normally() {
             simlin_error_free(collected);
         }
 
-        // Cache should exist
-        assert!((*proj).cached_compilation.lock().unwrap().is_some());
-
-        // Create LTM simulation -- should bypass cache and compile with LTM
+        // Create LTM simulation -- uses monolithic pipeline, not incremental
         let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
         assert!(!model.is_null());
 
         let sim = simlin_sim_new(model, true, &mut out_error);
         assert!(!sim.is_null());
         assert!(out_error.is_null());
-
-        // Cache should still exist (LTM path doesn't consume it)
-        assert!((*proj).cached_compilation.lock().unwrap().is_some());
 
         simlin_sim_run_to_end(sim, &mut out_error);
         assert!(out_error.is_null());

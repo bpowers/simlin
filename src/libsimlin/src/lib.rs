@@ -278,9 +278,6 @@ pub struct SimlinProject {
     pub(crate) db: Mutex<engine::db::SimlinDb>,
     /// Salsa input handles from the last sync, enabling incremental updates.
     pub(crate) sync_state: Mutex<Option<engine::db::PersistentSyncState>>,
-    /// Cached compilation from the last successful `apply_patch` validation.
-    /// Consumed by `sim_new` to avoid recompiling when nothing has changed.
-    pub(crate) cached_compilation: Mutex<Option<engine::CompiledSimulation>>,
     pub(crate) ref_count: AtomicUsize,
 }
 
