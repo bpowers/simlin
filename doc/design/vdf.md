@@ -136,14 +136,34 @@ The `field3` values are more consistent:
 | 2 | Name table | 500 | Variable names; identified by field5 high bits |
 | 3 | Unknown (all zeros) | 135 | Always 32 bytes of zeros |
 | 4 | Unknown metadata | 500 | Variable-length; content unclear |
-| 5 | Degenerate/marker | 500 | Tiny region; next section header starts before data offset (see note) |
-| 6 | Unknown metadata | 100 | Variable-length |
+| 5 | Degenerate/marker | 500 | Degenerate in small files; in array-heavy files contains set-like `n,0,refs...` entries |
+| 6 | Unknown metadata | 100 | Starts with a parseable `count + slot-ref list` stream in all observed files |
 | 7 | Display settings | 500 | Graph/display configuration data |
 
 **Note on section 5**: In small models, this is a degenerate section where
 the next section's header starts before this section's data offset, yielding
 `region_data_size() == 0`. This appears to be an intentional structural quirk
 rather than a parsing error. In the zambaqui model, section 5 has real content.
+
+**Section 6 leading stream**: The beginning of section 6 consistently decodes as
+variable-length entries of the form:
+
+```
+  u32 n_refs;
+  u32 refs[n_refs];
+```
+
+where each `refs[i]` is a valid section-1 offset (and usually a slotted name
+offset). This stream terminates before trailing non-stream metadata bytes.
+
+Observed entry counts (best alignment):
+- water: 7
+- pop: 8
+- econ: 79
+- WRLD3: 342 (with one 4-byte prefix before the stream)
+- zambaqui: 335
+
+This stream is structurally stable but is not yet the OT mapping table.
 
 **Identifying sections by position, not field4**: The slot table section is
 always at index 1 and the name table section is always at index 2. Their
@@ -225,7 +245,7 @@ The slot data's purpose remains unknown.
 | bact  | 204 bytes   | 10         | 16          |
 | water | 268 bytes   | 14         | 16          |
 | pop   | 300 bytes   | 16         | 16          |
-| WRLD3 | 6764 bytes  | 138        | variable    |
+| WRLD3 | 6764 bytes  | 404        | mostly 16 (some 32/48/64) |
 
 
 ## 5. Name table (section 2)
@@ -264,10 +284,11 @@ variable names but do not correspond to any simulation variable or OT entry.
 
 ### Name completeness
 
-For small models, the name table contains all model variables and all names
-have slot table entries. For larger models (WRLD3), additional names exist
-past the slotted portion within the section's region. The slot table count
-is auto-detected rather than relying on the section header.
+For small models, all parsed names are slotted. For medium/large models,
+the section header's `field1` is **not** a reliable slotted-name boundary.
+The parser now identifies slot count as the largest structurally-valid slot
+table immediately before section 2 (typically followed by marker
+`0x00430000`).
 
 ### Observed counts
 
@@ -276,7 +297,8 @@ is auto-detected rather than relying on the section header.
 | bact  | 10           | 10          | 5      | 2      | 0     | 2        | 3          |
 | water | 14           | 14          | 5      | 2      | 2     | 1        | 5          |
 | pop   | 16           | 16          | 5      | 2      | 1     | 0        | 8          |
-| WRLD3 | 138          | ~178        | 5      | ~20    | ?     | 6+       | ~104       |
+| econ  | 94           | 100         | 5      | 2      | 5     | 6         | 83         |
+| WRLD3 | 404          | 404         | 5      | 20     | 14    | 13        | 352        |
 
 
 ## 6. Variable metadata records
@@ -298,7 +320,8 @@ positions. All records at the same 64-byte alignment are included regardless.
 | bact  | 7       | 8          | 2            |
 | water | 12      | 10         | 3            |
 | pop   | 16      | 13         | 2            |
-| WRLD3 | 334     | 297        | 45           |
+| econ  | 71      | 78         | 3            |
+| WRLD3 | 317     | 297        | 30           |
 
 ### Field descriptions
 
@@ -343,6 +366,10 @@ All fields are u32 (little-endian, at 4-byte offsets within the record):
                   gives the correct OT index. For large models, some f[11]
                   values exceed the OT count, meaning the field has a
                   different interpretation for those records.
+                  A robust structural invariant does hold: unique in-range
+                  f[11] values (0 < f[11] < OT count), sorted ascending,
+                  partition OT indices 1..OT_count-1 into contiguous ranges.
+                  This is exposed as `VdfFile::record_ot_ranges()`.
 
   f[12]   +48     Byte offset into section 1 data. Groups records into
                   clusters: multiple records sharing the same f[12] value
@@ -374,12 +401,34 @@ or structural metadata), filter on:
 Some VDFs (notably `pop`) mix control records (f[1]=23) and model records
 in the same f[12] group.
 
+### Record-derived OT ranges
+
+Even when name mapping is unresolved, in-range record starts provide a
+deterministic OT partition:
+
+1. Collect unique starts where `0 < f[11] < offset_table_count`
+2. Sort starts
+3. Form ranges `[start_i, start_{i+1})`, with the last ending at OT_count
+
+Observed counts on key files:
+
+| Model | OT entries | Range count | Coverage of OT[1..] |
+|-------|------------|-------------|-----------------------|
+| water | 10         | 8           | 9 / 9                 |
+| econ  | 78         | 61          | 77 / 77               |
+| WRLD3 | 297        | 234         | 296 / 296             |
+| zambaqui | 1276    | 306         | 1275 / 1275           |
+
+For array-heavy files, large range lengths (e.g., 82/164/328 in zambaqui)
+indicate multi-entry blocks (array/table-like regions), even though exact
+name/element decoding remains unresolved.
+
 
 ## 7. Slot table
 
-An array of N u32 values (one per name in the name table), located between
-the last variable metadata record and the name table section. There are
-typically 0-4 bytes of padding between the slot table and the section magic.
+An array of N u32 values (typically one per slotted name), located between
+the last variable metadata record and the name table section. Immediately
+after the table there is often a 4-byte marker `0x00430000` before section 2.
 
 Each value is a byte offset relative to section 1's data start. For small
 models, the offsets have uniform stride 16. For larger models, the stride
@@ -387,8 +436,8 @@ varies (variable-length slot metadata per entry).
 
 ### Validation
 
-The slot table is identified by checking that the N u32 values immediately
-before the name table section:
+The slot table is identified by scanning backward from section 2 and choosing
+the **largest** N whose u32 values satisfy:
 - Are all unique (no duplicates)
 - Are all 4-byte aligned (`value % 4 == 0`)
 - Are all within section 1's data size
@@ -501,6 +550,10 @@ enables direct name-to-record matching:
 This is implemented in `VdfFile::build_deterministic_ot_map()` and validated
 against simulation output for bact, water, and pop models (all produce
 perfect matches).
+
+Additionally, `VdfFile::record_ot_ranges()` provides deterministic structural
+partitioning of OT indices across small and large files; this is useful for
+separating scalar vs multi-entry blocks before name decoding.
 
 ### What fails: deterministic mapping for large models
 
@@ -665,12 +718,24 @@ In small models, section 5's next section header starts before section 5's
 data offset, yielding `region_data_size() == 0`. This is a structural quirk.
 Parsers should handle degenerate sections gracefully.
 
-### Unslotted names (WRLD3)
+In array-heavy files (e.g. zambaqui), section 5 has real content and starts
+with repeated entries shaped like:
 
-For WRLD3, the name table section contains ~178 names but only 138 have
-slot table entries. The remaining ~40 names use the same u16-length-prefixed
-encoding and include variable names. The slot table count is auto-detected
-by the parser.
+```
+  u32 n;
+  u32 zero;      // observed 0
+  u32 refs[n+1];
+```
+
+All `refs` are valid section-1 offsets. The exact semantic meaning of these
+sets is still unresolved.
+
+### Unslotted names
+
+Unslotted tails still occur in some files (for example, econ has 6 unslotted
+generated helper names), but WRLD3 itself is fully slotted (404/404) once the
+slot table is detected using maximal structural validation rather than
+`section[2].field1`.
 
 ### f[11] overflow in large models
 
@@ -711,10 +776,11 @@ and field5 meaning changes based on section position.
 4. **What is f[2]?** Monotonically increasing across records, possibly a
    byte offset, but into what structure is unclear.
 
-5. **What do sections 3-7 contain?** Sections 3, 4, and 6 have structured
-   data that hasn't been decoded. Section 7 appears to contain display/graph
-   settings (f32 values matching axis ranges have been observed).
+5. **What do sections 3-7 contain?** Sections 4 and 7 are still largely
+   unknown. Section 6's leading `count+refs` stream and section 5's
+   array-heavy `n,0,refs...` sets are now structurally decoded, but their
+   complete semantic role in OT/name mapping remains unresolved.
 
-6. **What determines the slot table count?** For WRLD3, ~40 of ~178 names
-   lack slot table entries. The parser auto-detects the slot count. It's
-   unclear what determines which names get slot entries.
+6. **How do we map names/elements to OT indices for large files?** Slot table
+   extent is now decoded reliably, but the full deterministic
+   name/element-to-OT mapping is still unresolved for large models.
