@@ -3709,3 +3709,130 @@ fn test_incremental_teacup_xmile_file() {
         first_temp
     );
 }
+
+// ====================================================================
+// Fix #3: model-specific sim_specs override
+// ====================================================================
+
+#[test]
+fn test_model_sim_specs_override() {
+    let project_specs = datamodel::SimSpecs {
+        start: 0.0,
+        stop: 10.0,
+        dt: datamodel::Dt::Dt(1.0),
+        save_step: None,
+        sim_method: datamodel::SimMethod::Euler,
+        time_units: None,
+    };
+    let model_specs = datamodel::SimSpecs {
+        start: 5.0,
+        stop: 20.0,
+        dt: datamodel::Dt::Dt(0.5),
+        save_step: None,
+        sim_method: datamodel::SimMethod::Euler,
+        time_units: None,
+    };
+    let dm_project = datamodel::Project {
+        name: "test_override".to_string(),
+        sim_specs: project_specs.clone(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: Some(model_specs.clone()),
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "x".to_string(),
+                equation: datamodel::Equation::Scalar("1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &dm_project);
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let specs = &compiled.specs;
+
+    assert!(
+        (specs.start - 5.0).abs() < f64::EPSILON,
+        "start should be 5.0 (from model specs), got {}",
+        specs.start
+    );
+    assert!(
+        (specs.stop - 20.0).abs() < f64::EPSILON,
+        "stop should be 20.0 (from model specs), got {}",
+        specs.stop
+    );
+    assert!(
+        (specs.dt - 0.5).abs() < f64::EPSILON,
+        "dt should be 0.5 (from model specs), got {}",
+        specs.dt
+    );
+}
+
+#[test]
+fn test_model_sim_specs_defaults_to_project() {
+    let project_specs = datamodel::SimSpecs {
+        start: 0.0,
+        stop: 10.0,
+        dt: datamodel::Dt::Dt(1.0),
+        save_step: None,
+        sim_method: datamodel::SimMethod::Euler,
+        time_units: None,
+    };
+    let dm_project = datamodel::Project {
+        name: "test_no_override".to_string(),
+        sim_specs: project_specs.clone(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "x".to_string(),
+                equation: datamodel::Equation::Scalar("1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &dm_project);
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let specs = &compiled.specs;
+
+    assert!(
+        (specs.start - 0.0).abs() < f64::EPSILON,
+        "start should be 0.0 (from project specs), got {}",
+        specs.start
+    );
+    assert!(
+        (specs.stop - 10.0).abs() < f64::EPSILON,
+        "stop should be 10.0 (from project specs), got {}",
+        specs.stop
+    );
+}

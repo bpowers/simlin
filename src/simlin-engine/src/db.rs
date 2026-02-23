@@ -122,6 +122,9 @@ pub struct SourceModel {
     pub variable_names: Vec<String>,
     #[returns(ref)]
     pub variables: HashMap<String, SourceVariable>,
+    /// Per-model sim_specs override (None means use project-level specs)
+    #[returns(ref)]
+    pub model_sim_specs: Option<SourceSimSpecs>,
 }
 
 #[salsa::input]
@@ -2073,8 +2076,14 @@ pub fn sync_from_datamodel<'db>(
         // variable_names must use canonical names to match source_var_map keys
         let variable_names: Vec<String> = source_var_map.keys().cloned().collect();
 
-        let source_model =
-            SourceModel::new(db, dm_model.name.clone(), variable_names, source_var_map);
+        let model_sim_specs = dm_model.sim_specs.as_ref().map(SourceSimSpecs::from);
+        let source_model = SourceModel::new(
+            db,
+            dm_model.name.clone(),
+            variable_names,
+            source_var_map,
+            model_sim_specs,
+        );
 
         source_model_map.insert(canonical_model_name.clone(), source_model);
 
@@ -2349,6 +2358,11 @@ pub fn sync_from_datamodel_incremental(
                 source_model.set_name(db).to(dm_model.name.clone());
             }
 
+            let new_model_sim_specs = dm_model.sim_specs.as_ref().map(SourceSimSpecs::from);
+            if *source_model.model_sim_specs(&*db) != new_model_sim_specs {
+                source_model.set_model_sim_specs(db).to(new_model_sim_specs);
+            }
+
             // Process variables
             let mut new_vars = HashMap::new();
             let mut source_var_map = HashMap::new();
@@ -2428,8 +2442,14 @@ pub fn sync_from_datamodel_incremental(
             // variable_names must use canonical names to match source_var_map keys
             let variable_names: Vec<String> = source_var_map.keys().cloned().collect();
 
-            let source_model =
-                SourceModel::new(&*db, dm_model.name.clone(), variable_names, source_var_map);
+            let model_sim_specs = dm_model.sim_specs.as_ref().map(SourceSimSpecs::from);
+            let source_model = SourceModel::new(
+                &*db,
+                dm_model.name.clone(),
+                variable_names,
+                source_var_map,
+                model_sim_specs,
+            );
 
             new_models.insert(
                 canonical_model_name,
@@ -3089,7 +3109,8 @@ pub fn assemble_module(
     is_root: bool,
 ) -> Result<crate::bytecode::CompiledModule, String> {
     use crate::compiler::symbolic::{
-        SymbolicCompiledInitial, SymbolicCompiledModule, concatenate_fragments, resolve_module,
+        ContextResourceCounts, SymbolicCompiledInitial, SymbolicCompiledModule,
+        concatenate_fragments, resolve_module,
     };
 
     let dep_graph = model_dependency_graph(db, model, project);
@@ -3097,18 +3118,21 @@ pub fn assemble_module(
     let source_vars = model.variables(db);
     let model_name = model.name(db).clone();
 
-    // Collect fragments for each phase
+    // Collect fragments for each phase, tracking missing variables
     let mut initial_frags: Vec<(String, &crate::compiler::symbolic::PerVarBytecodes)> = Vec::new();
     let mut flow_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = Vec::new();
     let mut stock_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = Vec::new();
+    let mut missing_vars: Vec<String> = Vec::new();
 
-    // Process variables in runlist order
+    // Process variables in runlist order (fix #2: track missing fragments)
     for var_name in &dep_graph.runlist_initials {
         if let Some(svar) = source_vars.get(var_name.as_str())
             && let Some(result) = compile_var_fragment(db, *svar, model, project, is_root)
             && let Some(ref bc) = result.fragment.initial_bytecodes
         {
             initial_frags.push((var_name.clone(), bc));
+        } else {
+            missing_vars.push(var_name.clone());
         }
     }
 
@@ -3118,6 +3142,8 @@ pub fn assemble_module(
             && let Some(ref bc) = result.fragment.flow_bytecodes
         {
             flow_frags.push(bc);
+        } else {
+            missing_vars.push(var_name.clone());
         }
     }
 
@@ -3127,35 +3153,90 @@ pub fn assemble_module(
             && let Some(ref bc) = result.fragment.stock_bytecodes
         {
             stock_frags.push(bc);
+        } else {
+            missing_vars.push(var_name.clone());
         }
     }
 
-    // Concatenate and resolve each phase
-    let flows_concat = concatenate_fragments(&flow_frags);
-    let stocks_concat = concatenate_fragments(&stock_frags);
-
-    // Build per-variable initials (each variable gets its own bytecode)
-    let initial_refs: Vec<&crate::compiler::symbolic::PerVarBytecodes> =
-        initial_frags.iter().map(|(_, bc)| *bc).collect();
-    let _initials_concat = concatenate_fragments(&initial_refs);
-
-    // Build SymbolicCompiledInitial for each initial variable
-    let mut compiled_initials: Vec<SymbolicCompiledInitial> = Vec::new();
-    for (name, bc) in &initial_frags {
-        compiled_initials.push(SymbolicCompiledInitial {
-            ident: Ident::new(name),
-            bytecode: bc.symbolic.clone(),
-        });
+    if !missing_vars.is_empty() {
+        return Err(format!(
+            "failed to compile fragments for variables: {}",
+            missing_vars.join(", ")
+        ));
     }
 
-    // Merge all context data from all phases
+    // Compute context resource base offsets for each phase so that flows
+    // and stocks reference the same resource namespace as the all-phases
+    // merge. The all-phases ordering is: initials, then flows, then stocks.
+    let initial_refs: Vec<&crate::compiler::symbolic::PerVarBytecodes> =
+        initial_frags.iter().map(|(_, bc)| *bc).collect();
+    let initial_counts = ContextResourceCounts::from_fragments(&initial_refs);
+    let flow_counts = ContextResourceCounts::from_fragments(&flow_frags);
+
+    let no_base = ContextResourceCounts::default();
+    let flow_base = initial_counts.clone();
+    let stock_base = ContextResourceCounts {
+        graphical_functions: initial_counts.graphical_functions + flow_counts.graphical_functions,
+        modules: initial_counts.modules + flow_counts.modules,
+        views: initial_counts.views + flow_counts.views,
+        temps: initial_counts.temps + flow_counts.temps,
+        dim_lists: initial_counts.dim_lists + flow_counts.dim_lists,
+    };
+
+    let flows_concat = concatenate_fragments(&flow_frags, &flow_base)?;
+    let stocks_concat = concatenate_fragments(&stock_frags, &stock_base)?;
+
+    // Build SymbolicCompiledInitial for each initial variable, renumbered
+    // so context resource IDs (GFs, modules, views, temps, dim_lists) match
+    // the all-phases merge. Literal IDs are local to each initial's bytecode
+    // so they get no base offset.
+    let mut compiled_initials: Vec<SymbolicCompiledInitial> = Vec::new();
+    let mut init_gf_off: u16 = 0;
+    let mut init_mod_off: u16 = 0;
+    let mut init_view_off: u16 = 0;
+    let mut init_temp_off: u32 = 0;
+    let mut init_dl_off: u16 = 0;
+    for (name, bc) in &initial_frags {
+        let renumbered_code: Vec<crate::compiler::symbolic::SymbolicOpcode> = bc
+            .symbolic
+            .code
+            .iter()
+            .map(|op| {
+                crate::compiler::symbolic::renumber_opcode(
+                    op,
+                    0, // literals are local to each initial's bytecode
+                    init_gf_off,
+                    init_mod_off,
+                    init_view_off,
+                    init_temp_off,
+                    init_dl_off,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        compiled_initials.push(SymbolicCompiledInitial {
+            ident: Ident::new(name),
+            bytecode: crate::compiler::symbolic::SymbolicByteCode {
+                literals: bc.symbolic.literals.clone(),
+                code: renumbered_code,
+            },
+        });
+        init_gf_off += bc.graphical_functions.len() as u16;
+        init_mod_off += bc.module_decls.len() as u16;
+        init_view_off += bc.static_views.len() as u16;
+        for (id, _) in &bc.temp_sizes {
+            init_temp_off = init_temp_off.max(*id + 1);
+        }
+        init_dl_off += bc.dim_lists.len() as u16;
+    }
+
+    // Build the all-phases merge for shared context (GFs, modules, views, temps, dim_lists)
     let all_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = initial_frags
         .iter()
         .map(|(_, bc)| *bc)
         .chain(flow_frags.iter().copied())
         .chain(stock_frags.iter().copied())
         .collect();
-    let merged = concatenate_fragments(&all_frags);
+    let merged = concatenate_fragments(&all_frags, &no_base)?;
 
     // Build dimension metadata from project dimensions (mirrors Compiler::populate_dimension_metadata)
     let dm_dims = source_dims_to_datamodel(project.dimensions(db));
@@ -3281,9 +3362,18 @@ pub fn assemble_simulation(
         }
     }
 
-    // Build Specs from project sim specs
-    let sim_specs_dm = source_sim_specs_to_datamodel(project.sim_specs(db));
-    let specs = crate::vm::Specs::from(&sim_specs_dm);
+    // Build Specs, preferring model-level sim_specs override when present
+    // (mirrors the monolithic path in interpreter.rs compile_project)
+    let main_model_canonical = canonicalize(main_model_name);
+    let specs = if let Some(source_model) = project_models.get(main_model_canonical.as_ref())
+        && let Some(ref model_specs) = *source_model.model_sim_specs(db)
+    {
+        let sim_specs_dm = source_sim_specs_to_datamodel(model_specs);
+        crate::vm::Specs::from(&sim_specs_dm)
+    } else {
+        let sim_specs_dm = source_sim_specs_to_datamodel(project.sim_specs(db));
+        crate::vm::Specs::from(&sim_specs_dm)
+    };
 
     // Compute flattened offsets for variable name -> offset mapping
     let offsets = calc_flattened_offsets_incremental(db, project, main_model_name);

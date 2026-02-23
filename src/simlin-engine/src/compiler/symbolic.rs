@@ -1038,10 +1038,49 @@ pub(crate) struct ConcatenatedBytecodes {
     pub dim_lists: Vec<(u8, [u16; 4])>,
 }
 
+/// Resource counts for shared context resources across fragments.
+/// Used to compute base offsets when concatenating multiple phases into
+/// a single resource namespace. Literals are excluded because each phase's
+/// bytecode has its own literal pool.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ContextResourceCounts {
+    pub graphical_functions: u16,
+    pub modules: u16,
+    pub views: u16,
+    pub temps: u32,
+    pub dim_lists: u16,
+}
+
+impl ContextResourceCounts {
+    /// Sum the context resource counts from a set of per-variable fragments.
+    pub fn from_fragments(fragments: &[&PerVarBytecodes]) -> Self {
+        let mut counts = ContextResourceCounts::default();
+        for frag in fragments {
+            counts.graphical_functions += frag.graphical_functions.len() as u16;
+            counts.modules += frag.module_decls.len() as u16;
+            counts.views += frag.static_views.len() as u16;
+            for (id, _) in &frag.temp_sizes {
+                counts.temps = counts.temps.max(*id + 1);
+            }
+            counts.dim_lists += frag.dim_lists.len() as u16;
+        }
+        counts
+    }
+}
+
 /// Merge multiple `PerVarBytecodes` into a single stream, renumbering
 /// `LiteralId`, `GraphicalFunctionId`, `ModuleId`, `ViewId`, `TempId`,
 /// and `DimListId` to avoid collisions across fragments.
-pub(crate) fn concatenate_fragments(fragments: &[&PerVarBytecodes]) -> ConcatenatedBytecodes {
+///
+/// `ctx_base` provides context resource ID offsets inherited from preceding
+/// phases. Literal IDs are always phase-local (each phase's bytecode has
+/// its own literal pool) so they are not affected by `ctx_base`.
+/// When assembling a single phase in isolation, pass
+/// `ContextResourceCounts::default()`.
+pub(crate) fn concatenate_fragments(
+    fragments: &[&PerVarBytecodes],
+    ctx_base: &ContextResourceCounts,
+) -> Result<ConcatenatedBytecodes, String> {
     let mut merged_literals: Vec<f64> = Vec::new();
     let mut merged_code: Vec<SymbolicOpcode> = Vec::new();
     let mut merged_gf: Vec<Vec<(f64, f64)>> = Vec::new();
@@ -1051,12 +1090,13 @@ pub(crate) fn concatenate_fragments(fragments: &[&PerVarBytecodes]) -> Concatena
     let mut merged_dim_lists: Vec<(u8, [u16; 4])> = Vec::new();
 
     for frag in fragments {
+        // Literals are phase-local; no ctx_base offset needed
         let lit_offset = merged_literals.len() as u16;
-        let gf_offset = merged_gf.len() as u16;
-        let mod_offset = merged_modules.len() as u16;
-        let view_offset = merged_views.len() as u16;
-        let temp_offset = merged_temp_sizes.len() as u32;
-        let dl_offset = merged_dim_lists.len() as u16;
+        let gf_offset = merged_gf.len() as u16 + ctx_base.graphical_functions;
+        let mod_offset = merged_modules.len() as u16 + ctx_base.modules;
+        let view_offset = merged_views.len() as u16 + ctx_base.views;
+        let temp_offset = merged_temp_sizes.len() as u32 + ctx_base.temps;
+        let dl_offset = merged_dim_lists.len() as u16 + ctx_base.dim_lists;
 
         merged_literals.extend_from_slice(&frag.symbolic.literals);
         merged_gf.extend_from_slice(&frag.graphical_functions);
@@ -1095,7 +1135,7 @@ pub(crate) fn concatenate_fragments(fragments: &[&PerVarBytecodes]) -> Concatena
                 view_offset,
                 temp_offset,
                 dl_offset,
-            ));
+            )?);
         }
     }
 
@@ -1110,7 +1150,7 @@ pub(crate) fn concatenate_fragments(fragments: &[&PerVarBytecodes]) -> Concatena
         offset += size;
     }
 
-    ConcatenatedBytecodes {
+    Ok(ConcatenatedBytecodes {
         bytecode: SymbolicByteCode {
             literals: merged_literals,
             code: merged_code,
@@ -1121,11 +1161,14 @@ pub(crate) fn concatenate_fragments(fragments: &[&PerVarBytecodes]) -> Concatena
         temp_offsets,
         temp_total_size: offset,
         dim_lists: merged_dim_lists,
-    }
+    })
 }
 
 /// Renumber resource IDs within a single opcode.
-fn renumber_opcode(
+///
+/// Returns `Err` if any offset arithmetic would overflow the target ID type
+/// (e.g. temp_off > u8::MAX or gf_off > u8::MAX).
+pub(crate) fn renumber_opcode(
     op: &SymbolicOpcode,
     lit_off: u16,
     gf_off: u16,
@@ -1133,10 +1176,24 @@ fn renumber_opcode(
     view_off: u16,
     temp_off: u32,
     dl_off: u16,
-) -> SymbolicOpcode {
+) -> Result<SymbolicOpcode, String> {
+    if temp_off > u8::MAX as u32 {
+        return Err(format!(
+            "temp offset {} exceeds TempId capacity (u8::MAX = {})",
+            temp_off,
+            u8::MAX
+        ));
+    }
+    if gf_off > u8::MAX as u16 {
+        return Err(format!(
+            "graphical function offset {} exceeds GraphicalFunctionId capacity (u8::MAX = {})",
+            gf_off,
+            u8::MAX
+        ));
+    }
     let temp_off_u8 = temp_off as u8;
     let gf_off_u8 = gf_off as u8;
-    match op {
+    Ok(match op {
         SymbolicOpcode::LoadConstant { id } => SymbolicOpcode::LoadConstant { id: *id + lit_off },
         SymbolicOpcode::AssignConstCurr { var, literal_id } => SymbolicOpcode::AssignConstCurr {
             var: var.clone(),
@@ -1201,7 +1258,7 @@ fn renumber_opcode(
         },
         // All other opcodes have no resource IDs to renumber
         other => other.clone(),
-    }
+    })
 }
 
 // ============================================================================
@@ -2293,5 +2350,145 @@ mod tests {
         assert_eq!(beta.size, 3);
 
         assert!(layout.get("gamma").is_none());
+    }
+
+    // ====================================================================
+    // renumber_opcode bounds checking (fix #5)
+    // ====================================================================
+
+    #[test]
+    fn test_renumber_opcode_temp_offset_overflow() {
+        let op = SymbolicOpcode::LoadTempDynamic { temp_id: 0 };
+        let err = renumber_opcode(&op, 0, 0, 0, 0, 300, 0).unwrap_err();
+        assert!(
+            err.contains("TempId capacity"),
+            "expected TempId overflow error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_renumber_opcode_gf_offset_overflow() {
+        let op = SymbolicOpcode::Lookup {
+            base_gf: 0,
+            table_count: 1,
+            mode: LookupMode::Interpolate,
+        };
+        let err = renumber_opcode(&op, 0, 300, 0, 0, 0, 0).unwrap_err();
+        assert!(
+            err.contains("GraphicalFunctionId capacity"),
+            "expected GF overflow error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_renumber_opcode_at_boundary() {
+        // u8::MAX = 255, so temp_off=255 should succeed
+        let op = SymbolicOpcode::LoadTempDynamic { temp_id: 0 };
+        assert!(renumber_opcode(&op, 0, 0, 0, 0, 255, 0).is_ok());
+
+        // gf_off=255 should succeed
+        let op = SymbolicOpcode::Lookup {
+            base_gf: 0,
+            table_count: 1,
+            mode: LookupMode::Interpolate,
+        };
+        assert!(renumber_opcode(&op, 0, 255, 0, 0, 0, 0).is_ok());
+    }
+
+    // ====================================================================
+    // concatenate_fragments with base offsets (fix #1)
+    // ====================================================================
+
+    #[test]
+    fn test_concatenate_with_base_offsets() {
+        // Fragment A has 1 GF and its opcode references GF 0
+        let frag_a = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![1.0],
+                code: vec![
+                    SymbolicOpcode::Lookup {
+                        base_gf: 0,
+                        table_count: 1,
+                        mode: LookupMode::Interpolate,
+                    },
+                    SymbolicOpcode::Ret,
+                ],
+            },
+            graphical_functions: vec![vec![(0.0, 0.0), (1.0, 1.0)]],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![],
+            dim_lists: vec![],
+        };
+
+        // Fragment B has 1 GF and its opcode references GF 0
+        let frag_b = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![2.0],
+                code: vec![
+                    SymbolicOpcode::Lookup {
+                        base_gf: 0,
+                        table_count: 1,
+                        mode: LookupMode::Interpolate,
+                    },
+                    SymbolicOpcode::Ret,
+                ],
+            },
+            graphical_functions: vec![vec![(0.0, 0.0), (2.0, 2.0)]],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![],
+            dim_lists: vec![],
+        };
+
+        // Without base offsets, both fragments get independent numbering
+        let no_base = ContextResourceCounts::default();
+        let merged_no_base = concatenate_fragments(&[&frag_a, &frag_b], &no_base).unwrap();
+        // frag_a's GF stays at 0, frag_b's GF becomes 1
+        assert_eq!(merged_no_base.graphical_functions.len(), 2);
+        match &merged_no_base.bytecode.code[1] {
+            SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 1),
+            other => panic!("expected Lookup, got {:?}", other),
+        }
+
+        // With base offset of 5 GFs (simulating 5 GFs from a preceding phase),
+        // frag_a's GF should be renumbered to 5, frag_b's to 6
+        let base = ContextResourceCounts {
+            graphical_functions: 5,
+            ..ContextResourceCounts::default()
+        };
+        let merged_with_base = concatenate_fragments(&[&frag_a, &frag_b], &base).unwrap();
+        match &merged_with_base.bytecode.code[0] {
+            SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 5),
+            other => panic!("expected Lookup, got {:?}", other),
+        }
+        match &merged_with_base.bytecode.code[1] {
+            SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 6),
+            other => panic!("expected Lookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resource_counts_from_fragments() {
+        let frag = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![1.0, 2.0, 3.0],
+                code: vec![SymbolicOpcode::Ret],
+            },
+            graphical_functions: vec![vec![(0.0, 1.0)], vec![(1.0, 2.0)]],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![(0, 4), (1, 8)],
+            dim_lists: vec![vec![1, 2]],
+        };
+
+        let counts = ContextResourceCounts::from_fragments(&[&frag]);
+        assert_eq!(counts.graphical_functions, 2);
+        assert_eq!(counts.modules, 0);
+        assert_eq!(counts.views, 0);
+        assert_eq!(counts.temps, 2);
+        assert_eq!(counts.dim_lists, 1);
     }
 }

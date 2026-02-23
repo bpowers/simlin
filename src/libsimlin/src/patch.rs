@@ -502,13 +502,16 @@ pub(crate) unsafe fn apply_project_patch_internal(
         // Revert the DB to the previous sync state since we are not
         // committing these changes.
         if let Some(prev) = prev_state {
+            // Clone the datamodel before acquiring the db lock to maintain
+            // consistent lock ordering: project -> db -> sync_state
+            let original_datamodel = {
+                let project_locked = project_ref.project.lock().unwrap();
+                project_locked.datamodel.clone()
+            };
             let mut db = project_ref.db.lock().unwrap();
             let restored = engine::db::sync_from_datamodel_incremental(
                 &mut db,
-                &{
-                    let project_locked = project_ref.project.lock().unwrap();
-                    project_locked.datamodel.clone()
-                },
+                &original_datamodel,
                 Some(&prev),
             );
             drop(db);
