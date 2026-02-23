@@ -417,9 +417,13 @@ pub(crate) unsafe fn apply_project_patch_internal(
         collect_models_with_unit_warnings(&project_locked)
     };
 
-    let mut staged_datamodel = {
+    // Save the original datamodel before patching so we can restore the
+    // db on reject/dry_run without re-acquiring the project lock (which
+    // would violate the project -> db -> sync_state lock ordering).
+    let (mut staged_datamodel, original_datamodel) = {
         let project_locked = project_ref.project.lock().unwrap();
-        project_locked.datamodel.clone()
+        let dm = project_locked.datamodel.clone();
+        (dm.clone(), dm)
     };
 
     if let Err(err) = engine::apply_patch(&mut staged_datamodel, patch) {
@@ -433,11 +437,10 @@ pub(crate) unsafe fn apply_project_patch_internal(
 
     let staged_project = engine::Project::from(staged_datamodel);
 
-    // Eagerly sync the salsa DB with the staged datamodel so that
-    // accumulator diagnostics are available for error collection and
-    // the DB is ready for simlin_sim_new on commit. If the patch is
-    // rejected or this is a dry run, we restore the previous state.
-    // Clone (not take) so concurrent readers still see valid state.
+    // Hold the db lock for the entire sync-evaluate-decide cycle so that
+    // concurrent readers (simlin_sim_new, simlin_project_get_errors) never
+    // observe staged state for patches that are ultimately rejected or
+    // are dry runs.
     let mut db = project_ref.db.lock().unwrap();
     let prev_state = project_ref.sync_state.lock().unwrap().clone();
     let staged_sync_state = engine::db::sync_from_datamodel_incremental(
@@ -449,7 +452,6 @@ pub(crate) unsafe fn apply_project_patch_internal(
     let staged_sync = staged_sync_state.to_sync_result();
     let (all_errors, sim_error, _compiled) =
         gather_error_details_with_db(&staged_project, Some((&db, &staged_sync)));
-    drop(db);
 
     // Check for blocking errors (not including unit warnings, which are handled separately)
     let maybe_first_code = if !allow_errors {
@@ -500,30 +502,27 @@ pub(crate) unsafe fn apply_project_patch_internal(
     }
 
     if rejected || dry_run {
-        // Revert the DB to the previous sync state since we are not
-        // committing these changes.
-        // Clone the datamodel before acquiring the db lock to maintain
-        // consistent lock ordering: project -> db -> sync_state
-        let original_datamodel = {
-            let project_locked = project_ref.project.lock().unwrap();
-            project_locked.datamodel.clone()
-        };
-        let mut db = project_ref.db.lock().unwrap();
+        // Restore the db and sync_state atomically (while still holding
+        // the db lock) so no concurrent reader can observe staged state.
         let restored = engine::db::sync_from_datamodel_incremental(
             &mut db,
             &original_datamodel,
             prev_state.as_ref(),
         );
-        drop(db);
         *project_ref.sync_state.lock().unwrap() = Some(restored);
+        drop(db);
         return;
     }
 
-    // Commit: persist the staged project and the already-synced DB state.
+    // Commit: update sync_state while still holding db lock so the
+    // incremental path (db + sync_state) is atomically consistent for
+    // concurrent readers. Then release db before updating project
+    // to maintain lock ordering (project -> db -> sync_state).
+    *project_ref.sync_state.lock().unwrap() = Some(staged_sync_state);
+    drop(db);
+
     let mut project_locked = project_ref.project.lock().unwrap();
     *project_locked = staged_project;
-    drop(project_locked);
-    *project_ref.sync_state.lock().unwrap() = Some(staged_sync_state);
 }
 
 // ── FFI entry point ────────────────────────────────────────────────────
