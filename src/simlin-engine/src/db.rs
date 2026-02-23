@@ -3373,7 +3373,7 @@ pub fn assemble_simulation(
                 )
             })?;
 
-            let is_root = name.as_str() == main_model_name;
+            let is_root = canonicalize(name.as_str()) == main_model_canonical;
             let compiled = assemble_module(db, *source_model, project, is_root)?;
             let module_key: crate::vm::ModuleKey = ((*name).clone(), inputs.clone());
             compiled_modules.insert(module_key, compiled);
@@ -3394,7 +3394,7 @@ pub fn assemble_simulation(
     };
 
     // Compute flattened offsets for variable name -> offset mapping
-    let offsets = calc_flattened_offsets_incremental(db, project, main_model_name);
+    let offsets = calc_flattened_offsets_incremental(db, project, main_model_name, true);
     let offsets: HashMap<Ident<Canonical>, usize> =
         offsets.into_iter().map(|(k, (off, _))| (k, off)).collect();
 
@@ -3487,10 +3487,9 @@ fn calc_flattened_offsets_incremental(
     db: &dyn Db,
     project: SourceProject,
     model_name: &str,
+    is_root: bool,
 ) -> HashMap<Ident<Canonical>, (usize, usize)> {
     use crate::common::{Canonical, Ident};
-
-    let is_root = model_name == "main";
     let project_models = project.models(db);
     let canonical_name = canonicalize(model_name);
 
@@ -3515,63 +3514,63 @@ fn calc_flattened_offsets_incremental(
     sorted_names.sort_unstable();
 
     for ident in &sorted_names {
-        let size = if let Some(svar) = source_vars.get(ident.as_str()) {
-            if svar.kind(db) == SourceVariableKind::Module {
-                let sub_model_name = svar.model_name(db);
-                let sub_offsets = calc_flattened_offsets_incremental(db, project, sub_model_name);
-                let mut sub_var_names: Vec<&Ident<Canonical>> = sub_offsets.keys().collect();
-                sub_var_names.sort_unstable();
-                for sub_name in &sub_var_names {
-                    let (sub_off, sub_size) = sub_offsets[*sub_name];
-                    let ident_canonical = Ident::new(ident.as_str());
-                    let sub_canonical = Ident::new(sub_name.as_str());
-                    offsets.insert(
-                        Ident::<Canonical>::from_unchecked(format!(
-                            "{}.{}",
-                            ident_canonical.to_source_repr(),
-                            sub_canonical.to_source_repr()
-                        )),
-                        (i + sub_off, sub_size),
-                    );
-                }
-                let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
-                sub_size
-            } else {
-                let var_sz = variable_size(db, *svar, project);
-                if var_sz > 1 {
-                    // Array variable: produce per-element offsets
-                    let dims = variable_dimensions(db, *svar, project);
-                    if !dims.is_empty() {
-                        for (j, subscripts) in
-                            crate::dimensions::SubscriptIterator::new(dims).enumerate()
-                        {
-                            let subscript = subscripts.join(",");
-                            let ident_canonical = Ident::new(ident.as_str());
-                            let subscripted_ident = Ident::<Canonical>::from_unchecked(format!(
-                                "{}[{}]",
+        let size =
+            if let Some(svar) = source_vars.get(ident.as_str()) {
+                if svar.kind(db) == SourceVariableKind::Module {
+                    let sub_model_name = svar.model_name(db);
+                    let sub_offsets =
+                        calc_flattened_offsets_incremental(db, project, sub_model_name, false);
+                    let mut sub_var_names: Vec<&Ident<Canonical>> = sub_offsets.keys().collect();
+                    sub_var_names.sort_unstable();
+                    for sub_name in &sub_var_names {
+                        let (sub_off, sub_size) = sub_offsets[*sub_name];
+                        let ident_canonical = Ident::new(ident.as_str());
+                        let sub_canonical = Ident::new(sub_name.as_str());
+                        offsets.insert(
+                            Ident::<Canonical>::from_unchecked(format!(
+                                "{}.{}",
                                 ident_canonical.to_source_repr(),
-                                subscript
-                            ));
-                            offsets.insert(subscripted_ident, (i + j, 1));
-                        }
+                                sub_canonical.to_source_repr()
+                            )),
+                            (i + sub_off, sub_size),
+                        );
                     }
+                    let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
+                    sub_size
                 } else {
-                    let ident_canonical = Ident::new(ident.as_str());
-                    offsets.insert(
-                        Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
-                        (i, 1),
-                    );
+                    let var_sz = variable_size(db, *svar, project);
+                    if var_sz > 1 {
+                        // Array variable: produce per-element offsets
+                        let dims = variable_dimensions(db, *svar, project);
+                        if !dims.is_empty() {
+                            for (j, subscripts) in
+                                crate::dimensions::SubscriptIterator::new(dims).enumerate()
+                            {
+                                let subscript = subscripts.join(",");
+                                let ident_canonical = Ident::new(ident.as_str());
+                                let subscripted_ident = Ident::<Canonical>::from_unchecked(
+                                    format!("{}[{}]", ident_canonical.to_source_repr(), subscript),
+                                );
+                                offsets.insert(subscripted_ident, (i + j, 1));
+                            }
+                        }
+                    } else {
+                        let ident_canonical = Ident::new(ident.as_str());
+                        offsets.insert(
+                            Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
+                            (i, 1),
+                        );
+                    }
+                    var_sz
                 }
-                var_sz
-            }
-        } else {
-            let ident_canonical = Ident::new(ident.as_str());
-            offsets.insert(
-                Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
-                (i, 1),
-            );
-            1
-        };
+            } else {
+                let ident_canonical = Ident::new(ident.as_str());
+                offsets.insert(
+                    Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
+                    (i, 1),
+                );
+                1
+            };
         i += size;
     }
 
