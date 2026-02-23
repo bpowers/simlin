@@ -160,3 +160,13 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Count**: 44 in simlin-engine, 6 in libsimlin (as of 2026-02-15)
 - **Owner**: unassigned
 - **Last reviewed**: 2026-02-15
+
+### 17. Flaky Hypothesis Tests Under Parallel Execution in pysimlin
+
+- **Component**: pysimlin (src/pysimlin)
+- **Severity**: medium
+- **Description**: Three Hypothesis property-based tests in `tests/test_json_types.py` fail intermittently with `HealthCheck.too_slow` when run under parallel execution (e.g., 16 pytest-xdist workers). The affected tests are `TestSchemaCompliance::test_flow_validates_against_schema`, `TestPatchRoundtrip::test_upsert_stock_roundtrip`, and `TestJsonRoundtrip::test_stock_roundtrip`. All three pass reliably in isolation. The root cause is that Hypothesis's `too_slow` health check measures wall-clock time per example, which inflates under CPU contention from parallel workers sharing resources. Possible fixes include suppressing the `too_slow` health check via `@settings(suppress_health_check=[HealthCheck.too_slow])` on the affected tests, increasing the Hypothesis deadline, or marking these tests to run in a serial group via pytest-xdist's `@pytest.mark.xdist_group`.
+- **Measure**: `cd src/pysimlin && python -m pytest tests/test_json_types.py::TestSchemaCompliance::test_flow_validates_against_schema tests/test_json_types.py::TestPatchRoundtrip::test_upsert_stock_roundtrip tests/test_json_types.py::TestJsonRoundtrip::test_stock_roundtrip -n 16 --count 5`
+- **Count**: 3 flaky tests (as of 2026-02-23)
+- **Owner**: unassigned
+- **Last reviewed**: 2026-02-23
