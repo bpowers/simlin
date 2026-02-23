@@ -3975,3 +3975,252 @@ fn test_malformed_graphical_function_fails_fragment() {
         "compile_var_fragment should return None for malformed graphical function"
     );
 }
+
+#[test]
+fn test_sparse_per_element_gfs_preserve_table_indices() {
+    // When an arrayed variable has per-element graphical functions but some
+    // elements lack a GF, the table vector must contain empty placeholders
+    // to keep table[element_offset] aligned.  Without placeholders, later
+    // elements would get the wrong lookup table.
+    let project = datamodel::Project {
+        name: "sparse_gf".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Dim".to_string(),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "lookup_var".to_string(),
+                equation: datamodel::Equation::Arrayed(
+                    vec!["Dim".to_string()],
+                    vec![
+                        // Element A: has a GF
+                        (
+                            "A".to_string(),
+                            "time".to_string(),
+                            None,
+                            Some(datamodel::GraphicalFunction {
+                                kind: datamodel::GraphicalFunctionKind::Continuous,
+                                x_points: Some(vec![0.0, 10.0]),
+                                y_points: vec![100.0, 200.0],
+                                x_scale: datamodel::GraphicalFunctionScale {
+                                    min: 0.0,
+                                    max: 10.0,
+                                },
+                                y_scale: datamodel::GraphicalFunctionScale {
+                                    min: 0.0,
+                                    max: 200.0,
+                                },
+                            }),
+                        ),
+                        // Element B: NO GF (placeholder needed)
+                        ("B".to_string(), "time".to_string(), None, None),
+                        // Element C: has a different GF
+                        (
+                            "C".to_string(),
+                            "time".to_string(),
+                            None,
+                            Some(datamodel::GraphicalFunction {
+                                kind: datamodel::GraphicalFunctionKind::Continuous,
+                                x_points: Some(vec![0.0, 10.0]),
+                                y_points: vec![500.0, 600.0],
+                                x_scale: datamodel::GraphicalFunctionScale {
+                                    min: 0.0,
+                                    max: 10.0,
+                                },
+                                y_scale: datamodel::GraphicalFunctionScale {
+                                    min: 0.0,
+                                    max: 600.0,
+                                },
+                            }),
+                        ),
+                    ],
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let var = sync.models["main"].variables["lookup_var"].source;
+
+    // extract_tables_from_source_var must produce exactly 3 tables (one per
+    // element), including an empty placeholder for element B.
+    let tables = extract_tables_from_source_var(&db, &var);
+    assert_eq!(
+        tables.len(),
+        3,
+        "should have 3 tables (including empty placeholder for element B), got {}",
+        tables.len()
+    );
+    assert!(
+        !tables[0].data.is_empty(),
+        "element A should have a non-empty table"
+    );
+    assert!(
+        tables[1].data.is_empty(),
+        "element B should have an empty placeholder table"
+    );
+    assert!(
+        !tables[2].data.is_empty(),
+        "element C should have a non-empty table"
+    );
+
+    // Ensure the model still compiles successfully through the incremental path.
+    let result = compile_project_incremental(&db, sync.project, "main");
+    assert!(
+        result.is_ok(),
+        "model with sparse per-element GFs should compile: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_implicit_module_offsets_in_flattened_map() {
+    // SMOOTH creates implicit MODULE variables whose sub-models contain
+    // multiple slots.  calc_flattened_offsets_incremental must account for
+    // the full sub-model size, not just 1 slot per implicit var.
+    let project = datamodel::Project {
+        name: "smooth_offsets".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "input".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "delay_time".to_string(),
+                    equation: datamodel::Equation::Scalar("2".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "smoothed".to_string(),
+                    equation: datamodel::Equation::Scalar("SMTH1(input, delay_time)".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // Add a variable after the SMOOTH to verify its offset isn't
+                // shifted by undercounting the implicit module's size.
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "trailing".to_string(),
+                    equation: datamodel::Equation::Scalar("42".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+
+    // Compile through the incremental path.
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("SMOOTH model should compile incrementally");
+
+    // The flattened offsets should match the layout: implicit MODULE vars
+    // must occupy their sub-model's full slot count.
+    let layout = compute_layout(&db, sync.models["main"].source, sync.project, true);
+    let offsets = calc_flattened_offsets_incremental(&db, sync.project, "main", true);
+
+    // The total size from offsets should equal the layout's n_slots.
+    let offsets_total: usize = if offsets.is_empty() {
+        0
+    } else {
+        offsets
+            .values()
+            .map(|(off, size)| off + size)
+            .max()
+            .unwrap_or(0)
+    };
+    assert_eq!(
+        offsets_total, layout.n_slots,
+        "flattened offsets total ({offsets_total}) must match layout n_slots ({})",
+        layout.n_slots
+    );
+
+    // Verify the simulation runs and produces correct results.
+    let mut vm = crate::vm::Vm::new(compiled).expect("VM should build");
+    vm.run_to_end().expect("simulation should run to end");
+
+    // "trailing" should be 42 at every timestep.
+    let trailing_ident: crate::common::Ident<crate::common::Canonical> =
+        crate::common::Ident::new("trailing");
+    let trailing_series = vm
+        .get_series(&trailing_ident)
+        .expect("trailing variable should be in results");
+    for (t, &val) in trailing_series.iter().enumerate() {
+        assert!(
+            (val - 42.0).abs() < 1e-6,
+            "trailing should be 42.0 at step {t}, got {val}"
+        );
+    }
+}

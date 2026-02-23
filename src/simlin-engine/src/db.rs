@@ -2875,16 +2875,21 @@ fn extract_tables_from_source_var(
     let eq = source_var.equation(db);
 
     // For arrayed equations with per-element graphical functions, build one
-    // table per element (matching variable.rs build_tables).
+    // table per element (matching variable.rs build_tables).  Elements without
+    // a GF get an empty placeholder so that table[element_offset] stays aligned.
     if let SourceEquation::Arrayed(_, elements) = eq {
         let has_element_gfs = elements.iter().any(|e| e.gf.is_some());
         if has_element_gfs {
             return elements
                 .iter()
-                .filter_map(|e| {
-                    let dm_gf = e.gf.as_ref().map(source_gf_to_datamodel)?;
-                    let var_table = crate::variable::parse_table(&Some(dm_gf)).ok()??;
-                    crate::compiler::Table::new(ident, &var_table).ok()
+                .map(|e| {
+                    e.gf.as_ref()
+                        .and_then(|gf| {
+                            let dm_gf = source_gf_to_datamodel(gf);
+                            let var_table = crate::variable::parse_table(&Some(dm_gf)).ok()??;
+                            crate::compiler::Table::new(ident, &var_table).ok()
+                        })
+                        .unwrap_or(crate::compiler::Table { data: vec![] })
                 })
                 .collect();
         }
@@ -4864,18 +4869,50 @@ fn calc_flattened_offsets_incremental(
         i += size;
     }
 
-    // Include implicit variables (SMOOTH, DELAY, TREND builtins) after explicit variables
+    // Include implicit variables (SMOOTH, DELAY, TREND builtins) after explicit variables.
+    // Implicit MODULE vars (from builtin expansion) occupy their sub-model's full
+    // slot count, mirroring compute_layout's handling at the VariableLayout level.
     let implicit_info = model_implicit_var_info(db, *source_model, project);
     let mut implicit_names: Vec<&String> = implicit_info.keys().collect();
     implicit_names.sort_unstable();
     for name in implicit_names {
         let info = &implicit_info[name];
         let ident_canonical = Ident::new(name.as_str());
-        offsets.insert(
-            Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
-            (i, info.size),
-        );
-        i += info.size;
+
+        if info.is_module {
+            if let Some(sub_model_name) = &info.model_name {
+                let sub_offsets =
+                    calc_flattened_offsets_incremental(db, project, sub_model_name, false);
+                let mut sub_var_names: Vec<&Ident<Canonical>> = sub_offsets.keys().collect();
+                sub_var_names.sort_unstable();
+                for sub_name in &sub_var_names {
+                    let (sub_off, sub_size) = sub_offsets[*sub_name];
+                    let sub_canonical = Ident::new(sub_name.as_str());
+                    offsets.insert(
+                        Ident::<Canonical>::from_unchecked(format!(
+                            "{}.{}",
+                            ident_canonical.to_source_repr(),
+                            sub_canonical.to_source_repr()
+                        )),
+                        (i + sub_off, sub_size),
+                    );
+                }
+                let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
+                i += sub_size;
+            } else {
+                offsets.insert(
+                    Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
+                    (i, info.size),
+                );
+                i += info.size;
+            }
+        } else {
+            offsets.insert(
+                Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
+                (i, info.size),
+            );
+            i += info.size;
+        }
     }
 
     offsets
