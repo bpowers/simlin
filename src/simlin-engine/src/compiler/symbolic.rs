@@ -1079,7 +1079,14 @@ pub(crate) fn concatenate_fragments(fragments: &[&PerVarBytecodes]) -> Concatena
             merged_temp_sizes[new_id as usize] = merged_temp_sizes[new_id as usize].max(*size);
         }
 
-        for op in &frag.symbolic.code {
+        // Strip trailing Ret from each fragment -- we add a single Ret at the end
+        let code = &frag.symbolic.code;
+        let end = if code.last() == Some(&SymbolicOpcode::Ret) {
+            code.len() - 1
+        } else {
+            code.len()
+        };
+        for op in &code[..end] {
             merged_code.push(renumber_opcode(
                 op,
                 lit_offset,
@@ -1090,6 +1097,10 @@ pub(crate) fn concatenate_fragments(fragments: &[&PerVarBytecodes]) -> Concatena
                 dl_offset,
             ));
         }
+    }
+
+    if !merged_code.is_empty() {
+        merged_code.push(SymbolicOpcode::Ret);
     }
 
     let mut temp_offsets = Vec::with_capacity(merged_temp_sizes.len());
