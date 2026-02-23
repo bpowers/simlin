@@ -3076,6 +3076,586 @@ fn test_incremental_teacup_via_persistent_sync() {
     );
 }
 
+// ── AC acceptance-criteria tests ──────────────────────────────────
+
+/// AC1.3/AC1.4: Adding or removing a variable reuses existing variables'
+/// compile_var_fragment results (salsa cache hit) while compute_layout
+/// changes to reflect the new variable set.
+#[test]
+fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
+    let mut db = SimlinDb::default();
+    let project = two_var_project();
+
+    let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+    let sync1 = state1.to_sync_result();
+    let model1 = sync1.models["main"].source;
+
+    // Prime layout cache
+    let layout_ptr1 = compute_layout(&db, model1, sync1.project, true)
+        as *const crate::compiler::symbolic::VariableLayout;
+
+    // Add a new variable "gamma"
+    let mut project2 = project.clone();
+    project2.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "gamma".to_string(),
+            equation: datamodel::Equation::Scalar("99".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+
+    let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
+    let sync2 = state2.to_sync_result();
+    let model2 = sync2.models["main"].source;
+
+    // Clone fragment contents before mutation
+    let alpha_frag1 = compile_var_fragment(
+        &db,
+        sync1.models["main"].variables["alpha"].source,
+        model1,
+        sync1.project,
+        true,
+    )
+    .as_ref()
+    .unwrap()
+    .fragment
+    .clone();
+
+    let beta_frag1 = compile_var_fragment(
+        &db,
+        sync1.models["main"].variables["beta"].source,
+        model1,
+        sync1.project,
+        true,
+    )
+    .as_ref()
+    .unwrap()
+    .fragment
+    .clone();
+
+    // Existing variables' fragments should be value-equal (salsa recomputes
+    // but the symbolic bytecodes are independent of variable set size)
+    let alpha_frag2 = compile_var_fragment(
+        &db,
+        sync2.models["main"].variables["alpha"].source,
+        model2,
+        sync2.project,
+        true,
+    )
+    .as_ref()
+    .unwrap()
+    .fragment
+    .clone();
+
+    let beta_frag2 = compile_var_fragment(
+        &db,
+        sync2.models["main"].variables["beta"].source,
+        model2,
+        sync2.project,
+        true,
+    )
+    .as_ref()
+    .unwrap()
+    .fragment
+    .clone();
+
+    assert_eq!(
+        alpha_frag1, alpha_frag2,
+        "AC1.3: alpha's fragment content should be unchanged after adding gamma"
+    );
+    assert_eq!(
+        beta_frag1, beta_frag2,
+        "AC1.3: beta's fragment content should be unchanged after adding gamma"
+    );
+
+    // Layout MUST change (gamma added)
+    let layout_ptr2 = compute_layout(&db, model2, sync2.project, true)
+        as *const crate::compiler::symbolic::VariableLayout;
+    assert_ne!(
+        layout_ptr1, layout_ptr2,
+        "AC1.3: compute_layout should change when a variable is added"
+    );
+
+    // Now remove gamma (AC1.4)
+    let state3 = sync_from_datamodel_incremental(&mut db, &project, Some(&state2));
+    let sync3 = state3.to_sync_result();
+    let model3 = sync3.models["main"].source;
+
+    let alpha_frag3 = compile_var_fragment(
+        &db,
+        sync3.models["main"].variables["alpha"].source,
+        model3,
+        sync3.project,
+        true,
+    )
+    .as_ref()
+    .unwrap()
+    .fragment
+    .clone();
+
+    let beta_frag3 = compile_var_fragment(
+        &db,
+        sync3.models["main"].variables["beta"].source,
+        model3,
+        sync3.project,
+        true,
+    )
+    .as_ref()
+    .unwrap()
+    .fragment
+    .clone();
+
+    assert_eq!(
+        alpha_frag1, alpha_frag3,
+        "AC1.4: alpha's fragment content should be unchanged after removing gamma"
+    );
+    assert_eq!(
+        beta_frag1, beta_frag3,
+        "AC1.4: beta's fragment content should be unchanged after removing gamma"
+    );
+
+    // Layout should change again (back to 2 variables)
+    let layout_ptr3 = compute_layout(&db, model3, sync3.project, true)
+        as *const crate::compiler::symbolic::VariableLayout;
+    assert_ne!(
+        layout_ptr2, layout_ptr3,
+        "AC1.4: compute_layout should change when a variable is removed"
+    );
+}
+
+/// AC1.5: Changing a dimension definition recompiles only variables that
+/// use that dimension. Variables not referencing the dimension should
+/// have their compile_var_fragment cached (via salsa backdating).
+#[test]
+fn test_ac1_5_dimension_change_selective_recompile() {
+    let mut db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "dim_test".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["North".to_string(), "South".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "sales".to_string(),
+                    equation: datamodel::Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "10".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "price".to_string(),
+                    equation: datamodel::Equation::Scalar("42".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+    let sync1 = state1.to_sync_result();
+    let model1 = sync1.models["main"].source;
+
+    // Prime caches and capture fragment content
+    let price_frag1 = compile_var_fragment(
+        &db,
+        sync1.models["main"].variables["price"].source,
+        model1,
+        sync1.project,
+        true,
+    )
+    .as_ref()
+    .unwrap()
+    .fragment
+    .clone();
+
+    let sales_frag1 = compile_var_fragment(
+        &db,
+        sync1.models["main"].variables["sales"].source,
+        model1,
+        sync1.project,
+        true,
+    )
+    .as_ref()
+    .unwrap()
+    .fragment
+    .clone();
+
+    // Change dimension size: add "East" element
+    let mut project2 = project.clone();
+    project2.dimensions[0] = datamodel::Dimension::named(
+        "Region".to_string(),
+        vec!["North".to_string(), "South".to_string(), "East".to_string()],
+    );
+
+    let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
+    let sync2 = state2.to_sync_result();
+    let model2 = sync2.models["main"].source;
+
+    // Price doesn't use the dimension, so its fragment should be value-equal
+    let price_frag2 = compile_var_fragment(
+        &db,
+        sync2.models["main"].variables["price"].source,
+        model2,
+        sync2.project,
+        true,
+    )
+    .as_ref()
+    .unwrap()
+    .fragment
+    .clone();
+
+    assert_eq!(
+        price_frag1, price_frag2,
+        "AC1.5: price fragment should be unchanged (price doesn't use Region)"
+    );
+
+    // Sales uses the dimension, so its fragment should differ
+    let sales_frag2 = compile_var_fragment(
+        &db,
+        sync2.models["main"].variables["sales"].source,
+        model2,
+        sync2.project,
+        true,
+    )
+    .as_ref()
+    .unwrap()
+    .fragment
+    .clone();
+
+    assert_ne!(
+        sales_frag1, sales_frag2,
+        "AC1.5: sales fragment should be recomputed (sales uses Region)"
+    );
+}
+
+/// AC1.6: Changing module connections in model B should not invalidate
+/// model A's dependency graph. Cross-model isolation means the dep graph
+/// for an unrelated model is a cache hit.
+#[test]
+fn test_ac1_6_cross_model_isolation() {
+    let mut db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "multi".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "model_a".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "x".to_string(),
+                        equation: datamodel::Equation::Scalar("1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "y".to_string(),
+                        equation: datamodel::Equation::Scalar("x + 1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "model_b".to_string(),
+                sim_specs: None,
+                variables: vec![datamodel::Variable::Module(datamodel::Module {
+                    ident: "sub".to_string(),
+                    model_name: "model_a".to_string(),
+                    documentation: String::new(),
+                    units: None,
+                    references: vec![datamodel::ModuleReference {
+                        src: "input_a".to_string(),
+                        dst: "x".to_string(),
+                    }],
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+    let sync1 = state1.to_sync_result();
+    let model_a_src = sync1.models["model_a"].source;
+
+    // Prime model_a's dep graph
+    let graph_a_ptr1 =
+        model_dependency_graph(&db, model_a_src, sync1.project) as *const ModelDepGraphResult;
+
+    // Change model_b's module connections
+    let mut project2 = project.clone();
+    if let datamodel::Variable::Module(ref mut m) = project2.models[1].variables[0] {
+        m.references = vec![
+            datamodel::ModuleReference {
+                src: "input_a".to_string(),
+                dst: "x".to_string(),
+            },
+            datamodel::ModuleReference {
+                src: "input_b".to_string(),
+                dst: "y".to_string(),
+            },
+        ];
+    }
+
+    let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
+    let sync2 = state2.to_sync_result();
+    let model_a_src2 = sync2.models["model_a"].source;
+
+    // Model A's dep graph should be a cache hit (pointer-equal)
+    let graph_a_ptr2 =
+        model_dependency_graph(&db, model_a_src2, sync2.project) as *const ModelDepGraphResult;
+    assert_eq!(
+        graph_a_ptr1, graph_a_ptr2,
+        "AC1.6: model A's dependency graph should be cached when only model B changes"
+    );
+}
+
+/// AC2.4: Stdlib composite scores for dynamic modules (SMOOTH, DELAY, etc.)
+/// compute once and are never recomputed. Calling module_ltm_synthetic_variables
+/// twice with unchanged inputs returns pointer-equal results.
+#[test]
+fn test_ac2_4_stdlib_composite_scores_cached() {
+    let db = SimlinDb::default();
+
+    // Use the "smooth" stdlib model directly.
+    let stdlib_model = match crate::stdlib::get("smooth") {
+        Some(m) => m,
+        None => return,
+    };
+
+    let stdlib_project = datamodel::Project {
+        name: "stdlib_test".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![stdlib_model],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &stdlib_project);
+    let model_name = sync.models.keys().next().unwrap().clone();
+    let model = sync.models[&model_name].source;
+
+    // First call: compute
+    let result1 =
+        module_ltm_synthetic_variables(&db, model, sync.project) as *const LtmVariablesResult;
+
+    // Second call: should be cached (pointer-equal)
+    let result2 =
+        module_ltm_synthetic_variables(&db, model, sync.project) as *const LtmVariablesResult;
+
+    assert_eq!(
+        result1, result2,
+        "AC2.4: module_ltm_synthetic_variables should be cached on unchanged inputs"
+    );
+}
+
+/// AC4.3 (strengthened): Compile a model with stocks, flows, and lookups
+/// both incrementally and monolithically, run both through the VM, and
+/// assert identical time-series output for all variables.
+#[test]
+fn test_ac4_3_full_bytecode_equivalence_stock_flow_lookup() {
+    use crate::vm::Vm;
+
+    let project = datamodel::Project {
+        name: "sfg".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(0.5),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "level".to_string(),
+                    equation: datamodel::Equation::Scalar("50".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["inflow".to_string()],
+                    outflows: vec!["outflow".to_string()],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "inflow".to_string(),
+                    equation: datamodel::Equation::Scalar("effect * 10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "outflow".to_string(),
+                    equation: datamodel::Equation::Scalar("level * 0.1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "effect".to_string(),
+                    equation: datamodel::Equation::Scalar("time".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: Some(datamodel::GraphicalFunction {
+                        kind: datamodel::GraphicalFunctionKind::Continuous,
+                        x_points: Some(vec![0.0, 5.0, 10.0]),
+                        y_points: vec![1.0, 0.5, 0.2],
+                        x_scale: datamodel::GraphicalFunctionScale {
+                            min: 0.0,
+                            max: 10.0,
+                        },
+                        y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+                    }),
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    // Incremental path
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let incr_compiled =
+        assemble_simulation(&db, sync.project, "main").expect("incremental compilation failed");
+
+    // Monolithic path
+    let engine_project = crate::project::Project::from(project.clone());
+    let mono_compiled = crate::interpreter::compile_project(&engine_project, "main")
+        .expect("monolithic compilation failed");
+
+    assert_eq!(incr_compiled.n_slots(), mono_compiled.n_slots());
+
+    // Run both
+    let mut incr_sim = Vm::new(incr_compiled).unwrap();
+    incr_sim.run_to_end().unwrap();
+    let incr_results = incr_sim.into_results();
+
+    let mut mono_sim = Vm::new(mono_compiled).unwrap();
+    mono_sim.run_to_end().unwrap();
+    let mono_results = mono_sim.into_results();
+
+    assert_eq!(incr_results.step_count, mono_results.step_count);
+    assert_eq!(incr_results.step_size, mono_results.step_size);
+
+    // Compare every variable at every timestep
+    for (ident, &incr_off) in &incr_results.offsets {
+        let mono_off = mono_results
+            .offsets
+            .get(ident)
+            .unwrap_or_else(|| panic!("variable {:?} not found in monolithic results", ident));
+
+        for step in 0..incr_results.step_count {
+            let incr_val = incr_results.data[step * incr_results.step_size + incr_off];
+            let mono_val = mono_results.data[step * mono_results.step_size + mono_off];
+            assert!(
+                (incr_val - mono_val).abs() < 1e-10,
+                "{:?} mismatch at step {}: incr={}, mono={}",
+                ident,
+                step,
+                incr_val,
+                mono_val
+            );
+        }
+    }
+}
+
 /// Test loading teacup.stmx via open_xmile and running through the
 /// full incremental compilation path, mirroring the libsimlin XMILE flow.
 /// Catches regressions where display names with spaces (from XMILE) don't

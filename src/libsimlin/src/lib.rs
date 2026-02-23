@@ -3108,4 +3108,5 @@ mod tests {
     // NUL rejection, SVG rendering, simulation overrides, reset, and more.
 
     include!("tests_remaining.rs");
+    include!("tests_incremental.rs");
 }
