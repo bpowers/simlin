@@ -1059,9 +1059,15 @@ impl ContextResourceCounts {
             counts.graphical_functions += frag.graphical_functions.len() as u16;
             counts.modules += frag.module_decls.len() as u16;
             counts.views += frag.static_views.len() as u16;
-            for (id, _) in &frag.temp_sizes {
-                counts.temps = counts.temps.max(*id + 1);
-            }
+            // Each fragment's temps start at 0, so the total is the sum of
+            // each fragment's (max_id + 1), not the global max.
+            let frag_temp_count = frag
+                .temp_sizes
+                .iter()
+                .map(|(id, _)| *id + 1)
+                .max()
+                .unwrap_or(0);
+            counts.temps += frag_temp_count;
             counts.dim_lists += frag.dim_lists.len() as u16;
         }
         counts
@@ -1101,7 +1107,13 @@ pub(crate) fn concatenate_fragments(
         merged_literals.extend_from_slice(&frag.symbolic.literals);
         merged_gf.extend_from_slice(&frag.graphical_functions);
         merged_modules.extend_from_slice(&frag.module_decls);
-        merged_views.extend_from_slice(&frag.static_views);
+        merged_views.extend(frag.static_views.iter().map(|sv| {
+            let base = match &sv.base {
+                SymStaticViewBase::Temp(id) => SymStaticViewBase::Temp(*id + temp_offset),
+                other => other.clone(),
+            };
+            SymbolicStaticView { base, ..sv.clone() }
+        }));
         merged_dim_lists.extend(frag.dim_lists.iter().map(|dl| {
             let n = dl.len().min(4) as u8;
             let mut arr = [0u16; 4];
@@ -1164,6 +1176,18 @@ pub(crate) fn concatenate_fragments(
     })
 }
 
+fn checked_add_u8(base: u8, off: u8, label: &str) -> Result<u8, String> {
+    base.checked_add(off).ok_or_else(|| {
+        format!(
+            "{} overflow: {} + {} exceeds u8::MAX ({})",
+            label,
+            base,
+            off,
+            u8::MAX
+        )
+    })
+}
+
 /// Renumber resource IDs within a single opcode.
 ///
 /// Returns `Err` if any offset arithmetic would overflow the target ID type
@@ -1204,7 +1228,7 @@ pub(crate) fn renumber_opcode(
             table_count,
             mode,
         } => SymbolicOpcode::Lookup {
-            base_gf: *base_gf + gf_off_u8,
+            base_gf: checked_add_u8(*base_gf, gf_off_u8, "GF ID")?,
             table_count: *table_count,
             mode: *mode,
         },
@@ -1219,7 +1243,7 @@ pub(crate) fn renumber_opcode(
             temp_id,
             dim_list_id,
         } => SymbolicOpcode::PushTempView {
-            temp_id: *temp_id + temp_off_u8,
+            temp_id: checked_add_u8(*temp_id, temp_off_u8, "TempId")?,
             dim_list_id: *dim_list_id + dl_off,
         },
         SymbolicOpcode::PushVarView { var, dim_list_id } => SymbolicOpcode::PushVarView {
@@ -1233,28 +1257,28 @@ pub(crate) fn renumber_opcode(
             }
         }
         SymbolicOpcode::LoadTempConst { temp_id, index } => SymbolicOpcode::LoadTempConst {
-            temp_id: *temp_id + temp_off_u8,
+            temp_id: checked_add_u8(*temp_id, temp_off_u8, "TempId")?,
             index: *index,
         },
         SymbolicOpcode::LoadTempDynamic { temp_id } => SymbolicOpcode::LoadTempDynamic {
-            temp_id: *temp_id + temp_off_u8,
+            temp_id: checked_add_u8(*temp_id, temp_off_u8, "TempId")?,
         },
         SymbolicOpcode::BeginIter {
             write_temp_id,
             has_write_temp,
         } => SymbolicOpcode::BeginIter {
-            write_temp_id: *write_temp_id + temp_off_u8,
+            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
             has_write_temp: *has_write_temp,
         },
         SymbolicOpcode::LoadIterTempElement { temp_id } => SymbolicOpcode::LoadIterTempElement {
-            temp_id: *temp_id + temp_off_u8,
+            temp_id: checked_add_u8(*temp_id, temp_off_u8, "TempId")?,
         },
         SymbolicOpcode::BeginBroadcastIter {
             n_sources,
             dest_temp_id,
         } => SymbolicOpcode::BeginBroadcastIter {
             n_sources: *n_sources,
-            dest_temp_id: *dest_temp_id + temp_off_u8,
+            dest_temp_id: checked_add_u8(*dest_temp_id, temp_off_u8, "TempId")?,
         },
         // All other opcodes have no resource IDs to renumber
         other => other.clone(),
@@ -2490,5 +2514,113 @@ mod tests {
         assert_eq!(counts.views, 0);
         assert_eq!(counts.temps, 2);
         assert_eq!(counts.dim_lists, 1);
+    }
+
+    #[test]
+    fn test_resource_counts_sums_temps_across_fragments() {
+        // Each fragment starts temps at 0; the total should be the sum,
+        // not the max. Two fragments with temp_sizes [(0, 4)] each should
+        // produce temps=2 (one slot per fragment), not temps=1 (max(0+1, 0+1)).
+        let frag_a = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![SymbolicOpcode::Ret],
+            },
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![(0, 4)],
+            dim_lists: vec![],
+        };
+        let frag_b = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![SymbolicOpcode::Ret],
+            },
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![(0, 4)],
+            dim_lists: vec![],
+        };
+
+        let counts = ContextResourceCounts::from_fragments(&[&frag_a, &frag_b]);
+        assert_eq!(
+            counts.temps, 2,
+            "temps should be sum of per-fragment counts, not max"
+        );
+    }
+
+    #[test]
+    fn test_concatenate_renumbers_static_view_temp_base() {
+        // When a fragment has a static view with Temp(0) base, concatenation
+        // should offset the temp ID by the accumulated temp_offset.
+        let frag_a = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![SymbolicOpcode::Ret],
+            },
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![(0, 4)],
+            dim_lists: vec![],
+        };
+        let frag_b = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![SymbolicOpcode::Ret],
+            },
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![SymbolicStaticView {
+                base: SymStaticViewBase::Temp(0),
+                dims: SmallVec::new(),
+                strides: SmallVec::new(),
+                offset: 0,
+                sparse: SmallVec::new(),
+                dim_ids: SmallVec::new(),
+            }],
+            temp_sizes: vec![(0, 8)],
+            dim_lists: vec![],
+        };
+
+        let no_base = ContextResourceCounts::default();
+        let merged = concatenate_fragments(&[&frag_a, &frag_b], &no_base).unwrap();
+
+        // frag_a contributes 1 temp slot (id 0), so frag_b's Temp(0) should
+        // become Temp(1) after renumbering.
+        assert_eq!(merged.static_views.len(), 1);
+        match &merged.static_views[0].base {
+            SymStaticViewBase::Temp(id) => {
+                assert_eq!(*id, 1, "Temp base should be renumbered by temp_offset")
+            }
+            other => panic!("expected Temp base, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_renumber_opcode_u8_addition_overflow() {
+        // temp_off=200 fits in u8, but base temp_id=100 + 200 = 300 overflows u8
+        let op = SymbolicOpcode::LoadTempDynamic { temp_id: 100 };
+        let err = renumber_opcode(&op, 0, 0, 0, 0, 200, 0).unwrap_err();
+        assert!(
+            err.contains("overflow"),
+            "expected overflow error, got: {}",
+            err
+        );
+
+        // Similarly for GF: gf_off=200, base_gf=100 -> 300 overflows u8
+        let op = SymbolicOpcode::Lookup {
+            base_gf: 100,
+            table_count: 1,
+            mode: LookupMode::Interpolate,
+        };
+        let err = renumber_opcode(&op, 0, 200, 0, 0, 0, 0).unwrap_err();
+        assert!(
+            err.contains("overflow"),
+            "expected overflow error, got: {}",
+            err
+        );
     }
 }

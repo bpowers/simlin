@@ -2074,7 +2074,8 @@ pub fn sync_from_datamodel<'db>(
         }
 
         // variable_names must use canonical names to match source_var_map keys
-        let variable_names: Vec<String> = source_var_map.keys().cloned().collect();
+        let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
+        variable_names.sort();
 
         let model_sim_specs = dm_model.sim_specs.as_ref().map(SourceSimSpecs::from);
         let source_model = SourceModel::new(
@@ -2399,7 +2400,8 @@ pub fn sync_from_datamodel_incremental(
             }
 
             // variable_names must use canonical names to match source_var_map keys
-            let variable_names: Vec<String> = source_var_map.keys().cloned().collect();
+            let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
+            variable_names.sort();
 
             // Update model's variable lists if they changed
             if *source_model.variable_names(&*db) != variable_names {
@@ -2440,7 +2442,8 @@ pub fn sync_from_datamodel_incremental(
             }
 
             // variable_names must use canonical names to match source_var_map keys
-            let variable_names: Vec<String> = source_var_map.keys().cloned().collect();
+            let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
+            variable_names.sort();
 
             let model_sim_specs = dm_model.sim_specs.as_ref().map(SourceSimSpecs::from);
             let source_model = SourceModel::new(
@@ -3223,9 +3226,13 @@ pub fn assemble_module(
         init_gf_off += bc.graphical_functions.len() as u16;
         init_mod_off += bc.module_decls.len() as u16;
         init_view_off += bc.static_views.len() as u16;
-        for (id, _) in &bc.temp_sizes {
-            init_temp_off = init_temp_off.max(*id + 1);
-        }
+        let frag_temp_count = bc
+            .temp_sizes
+            .iter()
+            .map(|(id, _)| *id + 1)
+            .max()
+            .unwrap_or(0);
+        init_temp_off += frag_temp_count;
         init_dl_off += bc.dim_lists.len() as u16;
     }
 
