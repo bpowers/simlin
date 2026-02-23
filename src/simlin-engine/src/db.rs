@@ -914,8 +914,32 @@ pub fn model_dependency_graph(
                 .collect())
         };
 
-    let dt_dependencies = compute_transitive(false).unwrap_or_default();
-    let initial_dependencies = compute_transitive(true).unwrap_or_default();
+    let dt_dependencies = compute_transitive(false).unwrap_or_else(|var_name| {
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(var_name),
+            error: DiagnosticError::Model(crate::common::Error {
+                kind: crate::common::ErrorKind::Model,
+                code: crate::common::ErrorCode::CircularDependency,
+                details: None,
+            }),
+        })
+        .accumulate(db);
+        HashMap::new()
+    });
+    let initial_dependencies = compute_transitive(true).unwrap_or_else(|var_name| {
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(var_name),
+            error: DiagnosticError::Model(crate::common::Error {
+                kind: crate::common::ErrorKind::Model,
+                code: crate::common::ErrorCode::CircularDependency,
+                details: None,
+            }),
+        })
+        .accumulate(db);
+        HashMap::new()
+    });
 
     // Build runlists via topological sort
     let var_names: Vec<String> = {
@@ -3493,6 +3517,75 @@ mod tests {
         assert!(
             graph.initial_dependencies["population"].is_empty(),
             "stock with constant equation should have empty initial deps"
+        );
+    }
+
+    #[test]
+    fn test_model_dependency_graph_circular_emits_diagnostic() {
+        let db = SimlinDb::default();
+        let project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "a".to_string(),
+                        equation: datamodel::Equation::Scalar("b".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "b".to_string(),
+                        equation: datamodel::Equation::Scalar("a".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let result = sync_from_datamodel(&db, &project);
+        let _graph = model_dependency_graph(&db, result.models["main"].source, result.project);
+
+        // Collect diagnostics emitted by model_dependency_graph
+        let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(
+            &db,
+            result.models["main"].source,
+            result.project,
+        );
+        let has_circular = diags.iter().any(|d| {
+            matches!(
+                d.0.error,
+                DiagnosticError::Model(crate::common::Error {
+                    code: crate::common::ErrorCode::CircularDependency,
+                    ..
+                })
+            )
+        });
+        assert!(
+            has_circular,
+            "circular dependency between a and b should emit a diagnostic"
         );
     }
 
