@@ -18,7 +18,7 @@ use crate::eqn_err;
 /// All complex view calculations (strides, offsets, etc.) are deferred
 /// to the compiler phase where we have more context.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, salsa::Update)]
 pub enum ArrayBounds {
     /// Array bounds for a named variable (from the model)
     Named {
@@ -70,7 +70,7 @@ impl ArrayBounds {
 /// IndexExpr represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, salsa::Update)]
 pub enum IndexExpr2 {
     Wildcard(Loc),
     // *:dimension_name
@@ -134,7 +134,7 @@ impl IndexExpr2 {
 /// builtin functions have been checked/resolved.
 #[allow(dead_code)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, salsa::Update)]
 pub enum Expr2 {
     Const(String, f64, Loc),
     Var(Ident<Canonical>, Option<ArrayBounds>, Loc),

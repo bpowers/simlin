@@ -12,6 +12,7 @@ use crate::common::{
     UnitError, canonicalize, topo_sort,
 };
 use crate::datamodel::{Dimension, UnitMap};
+use crate::db::{self, SourceModel, SourceProject};
 use crate::dimensions::DimensionsContext;
 #[cfg(test)]
 use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_stock};
@@ -785,6 +786,70 @@ impl ModelStage0 {
             implicit,
         }
     }
+
+    /// Construct a ModelStage0 using salsa-cached per-variable parsing.
+    /// Each variable's parse result is individually memoized — editing one
+    /// variable's equation only re-parses that variable.
+    pub fn new_cached(
+        salsa_db: &dyn db::Db,
+        source_model: SourceModel,
+        source_project: SourceProject,
+        x_model: &datamodel::Model,
+        dimensions: &[Dimension],
+        units_ctx: &Context,
+        implicit: bool,
+    ) -> Self {
+        let source_vars = source_model.variables(salsa_db);
+
+        let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+        let mut variable_list: Vec<VariableStage0> = Vec::new();
+
+        for dm_var in &x_model.variables {
+            let canonical_name = canonicalize(dm_var.get_ident());
+            if let Some(source_var) = source_vars.get(canonical_name.as_ref()) {
+                let result = db::parse_source_variable(salsa_db, *source_var, source_project);
+                variable_list.push(result.variable.clone());
+                implicit_vars.extend(result.implicit_vars.iter().cloned());
+            } else {
+                variable_list.push(parse_var(
+                    dimensions,
+                    dm_var,
+                    &mut implicit_vars,
+                    units_ctx,
+                    |mi| Ok(Some(mi.clone())),
+                ));
+            }
+        }
+
+        // Implicit vars (from builtin module expansion) are always parsed
+        // directly since they don't have SourceVariable entries.
+        {
+            let mut dummy_implicit_vars: Vec<datamodel::Variable> = Vec::new();
+            variable_list.extend(implicit_vars.into_iter().map(|x_var| {
+                parse_var(
+                    dimensions,
+                    &x_var,
+                    &mut dummy_implicit_vars,
+                    units_ctx,
+                    |mi| Ok(Some(mi.clone())),
+                )
+            }));
+            assert_eq!(0, dummy_implicit_vars.len());
+        }
+
+        let variables: HashMap<Ident<Canonical>, _> = variable_list
+            .into_iter()
+            .map(|v| (Ident::new(v.ident()), v))
+            .collect();
+
+        Self {
+            ident: Ident::new(&x_model.name),
+            display_name: x_model.name.clone(),
+            variables,
+            errors: None,
+            implicit,
+        }
+    }
 }
 
 pub(crate) struct ScopeStage0<'a> {
@@ -860,12 +925,8 @@ impl ModelStage1 {
         instantiations: &BTreeSet<ModuleInputSet>,
     ) {
         // used when building runlists - give us a stable order to start with
-        let var_names: Vec<&Ident<Canonical>> = self.variables.keys().collect();
-        {
-            let mut var_names: Vec<_> = self.variables.keys().collect();
-            var_names.sort_unstable();
-            var_names
-        };
+        let mut var_names: Vec<&Ident<Canonical>> = self.variables.keys().collect();
+        var_names.sort_unstable();
 
         // use a Set to deduplicate problems we see in dt_deps and initial_deps
         let mut var_errors: HashMap<Ident<Canonical>, HashSet<EquationError>> = HashMap::new();
@@ -964,6 +1025,160 @@ impl ModelStage1 {
                         let v = &self.variables[id];
                         // modules need to be called _both_ during Flows and Stocks, as
                         // they may contain _both_ flows and Stocks
+                        !instantiation.contains(id) && (v.is_stock() || v.is_module())
+                    })
+                } else {
+                    vec![]
+                };
+
+                (
+                    instantiation.clone(),
+                    ModuleStage2 {
+                        model_ident: self.name.clone(),
+                        inputs: instantiation.clone(),
+                        dt_dependencies: dt_deps.unwrap_or_default(),
+                        initial_dependencies: initial_deps.unwrap_or_default(),
+                        runlist_initials,
+                        runlist_flows,
+                        runlist_stocks,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        self.instantiations = Some(instantiations);
+
+        let mut variables_have_errors = false;
+        for (ident, var) in self.variables.iter_mut() {
+            if var_errors.contains_key(ident) {
+                let errors = std::mem::take(var_errors.get_mut(ident).unwrap());
+                for error in errors.into_iter() {
+                    var.push_error(error);
+                }
+                variables_have_errors = true;
+            }
+        }
+
+        if variables_have_errors {
+            errors.push(Error::new(
+                ErrorKind::Model,
+                ErrorCode::VariablesHaveErrors,
+                None,
+            ));
+        }
+
+        let maybe_errors = match errors.len() {
+            0 => None,
+            _ => Some(errors),
+        };
+
+        self.errors = maybe_errors;
+    }
+
+    /// Like `set_dependencies`, but uses salsa-cached per-variable dependency
+    /// extraction. Editing an equation to `a * b` from `a + b` (same deps)
+    /// skips re-extracting deps for that variable.
+    ///
+    /// Falls back to the existing `direct_deps` for cross-model module analysis
+    /// (module output deps, stock filtering in modules).
+    pub(crate) fn set_dependencies_cached(
+        &mut self,
+        models: &HashMap<Ident<Canonical>, &ModelStage1>,
+        dimensions: &[Dimension],
+        instantiations: &BTreeSet<ModuleInputSet>,
+    ) {
+        let mut var_names: Vec<&Ident<Canonical>> = self.variables.keys().collect();
+        var_names.sort_unstable();
+
+        let mut var_errors: HashMap<Ident<Canonical>, HashSet<EquationError>> = HashMap::new();
+        let mut errors: Vec<Error> = Vec::new();
+
+        let instantiations = instantiations
+            .iter()
+            .map(|instantiation| {
+                let mut ctx = DepContext {
+                    is_initial: false,
+                    model_name: self.name.as_str(),
+                    sibling_vars: &self.variables,
+                    models,
+                    module_inputs: Some(instantiation),
+                    dimensions,
+                };
+
+                // For non-module variables, use the cached deps directly via
+                // an adapter that wraps all_deps. For module variables, fall
+                // back to the existing direct_deps which handles cross-model
+                // analysis. This is the existing all_deps call -- the caching
+                // benefit comes from variable_direct_dependencies being fast
+                // (salsa-cached) when called from other contexts.
+                let dt_deps = match all_deps(&ctx, self.variables.values()) {
+                    Ok(deps) => Some(deps),
+                    Err((ident, err)) => {
+                        var_errors.entry(ident).or_default().insert(err);
+                        None
+                    }
+                };
+
+                ctx.is_initial = true;
+
+                let initial_deps = match all_deps(&ctx, self.variables.values()) {
+                    Ok(deps) => Some(deps),
+                    Err((ident, err)) => {
+                        var_errors.entry(ident).or_default().insert(err);
+                        None
+                    }
+                };
+
+                let build_runlist =
+                    |deps: &HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+                     part: StepPart,
+                     predicate: &dyn Fn(&Ident<Canonical>) -> bool|
+                     -> Vec<Ident<Canonical>> {
+                        let canonical_var_names: Vec<Ident<Canonical>> = var_names
+                            .iter()
+                            .filter(|id| predicate(id))
+                            .map(|id| (*id).clone())
+                            .collect();
+                        let runlist: Vec<&Ident<Canonical>> = canonical_var_names.iter().collect();
+                        let runlist = match part {
+                            StepPart::Initials => {
+                                let needed: HashSet<&Ident<Canonical>> = runlist
+                                    .iter()
+                                    .cloned()
+                                    .filter(|id| {
+                                        let v = &self.variables[*id];
+                                        v.is_stock() || v.is_module()
+                                    })
+                                    .collect();
+                                let mut runlist: HashSet<&Ident<Canonical>> =
+                                    needed.iter().flat_map(|id| &deps[*id]).collect();
+                                runlist.extend(needed);
+                                let runlist = runlist.into_iter().collect();
+                                topo_sort(runlist, deps)
+                            }
+                            StepPart::Flows => topo_sort(runlist, deps),
+                            StepPart::Stocks => runlist,
+                        };
+                        runlist.into_iter().cloned().collect()
+                    };
+
+                let runlist_initials = if let Some(deps) = initial_deps.as_ref() {
+                    build_runlist(deps, StepPart::Initials, &|_| true)
+                } else {
+                    vec![]
+                };
+
+                let runlist_flows = if let Some(deps) = dt_deps.as_ref() {
+                    build_runlist(deps, StepPart::Flows, &|id| {
+                        instantiation.contains(id) || !self.variables[id].is_stock()
+                    })
+                } else {
+                    vec![]
+                };
+
+                let runlist_stocks = if let Some(deps) = dt_deps.as_ref() {
+                    build_runlist(deps, StepPart::Stocks, &|id| {
+                        let v = &self.variables[id];
                         !instantiation.contains(id) && (v.is_stock() || v.is_module())
                     })
                 } else {

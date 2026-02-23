@@ -12,7 +12,6 @@ use crate::common::{
     Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize,
 };
 use crate::dimensions::{Dimension, DimensionsContext};
-use crate::float::SimFloat;
 use crate::variable::Variable;
 use crate::{Error, sim_err};
 
@@ -644,13 +643,13 @@ impl Context<'_> {
 
     /// Entry point for lowering Expr2 to compiler's Expr representation.
     /// Applies pass 0 -> Expr3 -> pass 1 -> lower_from_expr3.
-    /// Returns a Vec<Expr<F>> where the first elements are temp assignments
+    /// Returns a Vec<Expr> where the first elements are temp assignments
     /// and the last element is the main expression.
     ///
     /// When A2A context is available (active_dimension and active_subscript set),
     /// pass 1 can resolve Dimension and DimPosition references to concrete indices,
     /// enabling decomposition of expressions that would otherwise be deferred.
-    pub(super) fn lower<F: SimFloat>(&self, expr: &ast::Expr2) -> Result<Vec<Expr<F>>> {
+    pub(super) fn lower(&self, expr: &ast::Expr2) -> Result<Vec<Expr>> {
         // Pass 0: normalize bare arrays, subscripts
         let normalized = self.lower_pass0(expr);
 
@@ -671,7 +670,7 @@ impl Context<'_> {
         let assignments = pass1_ctx.take_assignments();
 
         // Lower the assignments
-        let mut result: Vec<Expr<F>> = assignments
+        let mut result: Vec<Expr> = assignments
             .iter()
             .map(|a| self.lower_from_expr3(a))
             .collect::<Result<Vec<_>>>()?;
@@ -683,15 +682,12 @@ impl Context<'_> {
         Ok(result)
     }
 
-    pub(super) fn fold_flows<F: SimFloat>(
-        &self,
-        flows: &[Ident<Canonical>],
-    ) -> Result<Option<Expr<F>>> {
+    pub(super) fn fold_flows(&self, flows: &[Ident<Canonical>]) -> Result<Option<Expr>> {
         if flows.is_empty() {
             return Ok(None);
         }
 
-        let loads: Result<Vec<Expr<F>>> = flows
+        let loads: Result<Vec<Expr>> = flows
             .iter()
             .map(|flow| {
                 self.get_offset(flow)
@@ -707,12 +703,12 @@ impl Context<'_> {
     }
 
     /// Apply dimension reordering to an expression
-    fn apply_dimension_reordering<F: SimFloat>(
+    fn apply_dimension_reordering(
         &self,
-        expr: Expr<F>,
+        expr: Expr,
         reordering: Vec<usize>,
         loc: Loc,
-    ) -> Result<Expr<F>> {
+    ) -> Result<Expr> {
         // The reordering vector contains 0-based indices indicating the new position of each dimension
         // For example, [1, 0] means swap dimensions (transpose for 2D)
         // [1, 2, 0] means the first output dim is the second input dim, etc.
@@ -782,21 +778,17 @@ impl Context<'_> {
         sim_err!(DoesNotExist, "Variable not found by offset".to_string())
     }
 
-    pub(super) fn build_stock_update_expr<F: SimFloat>(
-        &self,
-        stock_off: usize,
-        var: &Variable,
-    ) -> Result<Expr<F>> {
+    pub(super) fn build_stock_update_expr(&self, stock_off: usize, var: &Variable) -> Result<Expr> {
         if let Variable::Stock {
             inflows, outflows, ..
         } = var
         {
             let inflows = self
                 .fold_flows(inflows)?
-                .unwrap_or(Expr::Const(F::zero(), Loc::default()));
+                .unwrap_or(Expr::Const(0.0, Loc::default()));
             let outflows = self
                 .fold_flows(outflows)?
-                .unwrap_or(Expr::Const(F::zero(), Loc::default()));
+                .unwrap_or(Expr::Const(0.0, Loc::default()));
 
             let dt_update = Expr::Op2(
                 BinaryOp::Mul,
@@ -845,11 +837,11 @@ impl Expr3LowerContext for Context<'_> {
 /// Contains the transformed expression and any temp assignments that must be
 /// evaluated before the main expression.
 #[allow(dead_code)]
-pub struct Pass1Result<F: SimFloat> {
+pub struct Pass1Result {
     /// Temp assignments in order of dependency (first should be evaluated first)
-    pub assignments: Vec<Expr<F>>,
+    pub assignments: Vec<Expr>,
     /// The main expression (references temps via TempArray)
-    pub expr: Expr<F>,
+    pub expr: Expr,
 }
 
 impl Context<'_> {
@@ -885,7 +877,7 @@ impl Context<'_> {
     /// Lower an Expr3 to compiler's Expr representation.
     /// Handles all Expr3 variants directly, including pass-1 specific variants
     /// (TempArray, AssignTemp, etc.) and common expression types.
-    pub(super) fn lower_from_expr3<F: SimFloat>(&self, expr: &Expr3) -> Result<Expr<F>> {
+    pub(super) fn lower_from_expr3(&self, expr: &Expr3) -> Result<Expr> {
         match expr {
             // Handle Expr3-specific variants directly
             Expr3::StaticSubscript(id, view, _, loc) => {
@@ -905,7 +897,7 @@ impl Context<'_> {
             }
 
             // Handle common variants directly (no longer converting to Expr2)
-            Expr3::Const(_, n, loc) => Ok(Expr::Const(F::from_f64(*n), *loc)),
+            Expr3::Const(_, n, loc) => Ok(Expr::Const(*n, *loc)),
 
             Expr3::Var(id, _, loc) => {
                 // Check if this identifier is a dimension name
@@ -923,7 +915,7 @@ impl Context<'_> {
                             {
                                 if id.as_str() == &*canonicalize(dim.name()) {
                                     let index = Self::subscript_to_index(dim, subscript);
-                                    return Ok(Expr::Const(F::from_f64(index), *loc));
+                                    return Ok(Expr::Const(index, *loc));
                                 }
                             }
                         }
@@ -1519,7 +1511,7 @@ impl Context<'_> {
                         let result = match op {
                             ast::UnaryOp::Negative => Expr::Op2(
                                 BinaryOp::Sub,
-                                Box::new(Expr::Const(F::zero(), *loc)),
+                                Box::new(Expr::Const(0.0, *loc)),
                                 Box::new(lowered),
                                 *loc,
                             ),
@@ -1621,12 +1613,12 @@ impl Context<'_> {
         }
     }
 
-    /// Lower a BuiltinFn<Expr3> to BuiltinFn<F> (i.e., BuiltinFn<Expr<F>>).
+    /// Lower a BuiltinFn<Expr3> to BuiltinFn (i.e., BuiltinFn<Expr>).
     /// Handles array builtins that need preserve_wildcards_for_iteration.
-    fn lower_builtin_expr3<F: SimFloat>(
+    fn lower_builtin_expr3(
         &self,
         builtin: &crate::builtins::BuiltinFn<Expr3>,
-    ) -> Result<BuiltinFn<F>> {
+    ) -> Result<BuiltinFn> {
         use crate::builtins::BuiltinFn as BFn;
         Ok(match builtin {
             BFn::Lookup(table_expr, index_expr, loc) => BuiltinFn::Lookup(
@@ -1673,7 +1665,7 @@ impl Context<'_> {
                 let args = args
                     .iter()
                     .map(|arg| ctx.lower_from_expr3(arg))
-                    .collect::<Result<Vec<Expr<F>>>>();
+                    .collect::<Result<Vec<Expr>>>();
                 BuiltinFn::Mean(args?)
             }
             BFn::Min(a, b) => {
@@ -1758,7 +1750,7 @@ impl Context<'_> {
     /// Returns SubscriptIndex::Single for single-element access or
     /// SubscriptIndex::Range for range access.
     #[allow(clippy::too_many_arguments)]
-    fn lower_index_expr3<F: SimFloat>(
+    fn lower_index_expr3(
         &self,
         idx: &IndexExpr3,
         id: &Ident<Canonical>,
@@ -1766,7 +1758,7 @@ impl Context<'_> {
         dims: &[Dimension],
         _orig_dims: &[usize],
         _loc: Loc,
-    ) -> Result<SubscriptIndex<F>> {
+    ) -> Result<SubscriptIndex> {
         match idx {
             IndexExpr3::StarRange(subdim_name, star_loc) => {
                 // StarRange in dynamic context - need to resolve the current element
@@ -1792,14 +1784,14 @@ impl Context<'_> {
                                 && let Some(subscript_off) = dim.get_offset(active_subscript)
                             {
                                 return Ok(SubscriptIndex::Single(Expr::Const(
-                                    F::from_usize(subscript_off + 1),
+                                    (subscript_off + 1) as f64,
                                     *star_loc,
                                 )));
                             } else if let Dimension::Indexed(_, _) = dim
                                 && let Ok(idx_val) = active_subscript.as_str().parse::<usize>()
                             {
                                 return Ok(SubscriptIndex::Single(Expr::Const(
-                                    F::from_usize(idx_val),
+                                    idx_val as f64,
                                     *star_loc,
                                 )));
                             }
@@ -1815,8 +1807,8 @@ impl Context<'_> {
             // but handle here as a fallback by creating a Range with constants
             IndexExpr3::StaticRange(start_0based, end_0based, loc) => {
                 // Convert back to 1-based for the Expr (XMILE uses 1-based indices)
-                let start_expr = Expr::Const(F::from_usize(*start_0based + 1), *loc);
-                let end_expr = Expr::Const(F::from_usize(*end_0based), *loc);
+                let start_expr = Expr::Const((*start_0based + 1) as f64, *loc);
+                let end_expr = Expr::Const(*end_0based as f64, *loc);
                 Ok(SubscriptIndex::Range(start_expr, end_expr))
             }
 
@@ -1846,12 +1838,12 @@ impl Context<'_> {
 
                 if let Some(offset) = dim.get_offset(subscript) {
                     Ok(SubscriptIndex::Single(Expr::Const(
-                        F::from_usize(offset + 1),
+                        (offset + 1) as f64,
                         *dim_loc,
                     )))
                 } else if let Ok(idx_val) = subscript.as_str().parse::<usize>() {
                     Ok(SubscriptIndex::Single(Expr::Const(
-                        F::from_usize(idx_val),
+                        idx_val as f64,
                         *dim_loc,
                     )))
                 } else {
@@ -1869,7 +1861,7 @@ impl Context<'_> {
                         &crate::common::CanonicalElementName::from_raw(ident.as_str()),
                     ) {
                         return Ok(SubscriptIndex::Single(Expr::Const(
-                            F::from_usize(offset + 1),
+                            (offset + 1) as f64,
                             *var_loc,
                         )));
                     }
@@ -1885,8 +1877,7 @@ impl Context<'_> {
                             let size_usize = *size as usize;
                             if idx >= 1 && idx <= size_usize {
                                 return Ok(SubscriptIndex::Single(Expr::Const(
-                                    F::from_usize(idx),
-                                    *var_loc,
+                                    idx as f64, *var_loc,
                                 )));
                             }
                         }
@@ -1914,14 +1905,14 @@ impl Context<'_> {
                             if &*canonicalize(active_dim.name()) == ident.as_str() {
                                 if let Some(offset) = dim.get_offset(active_subscript) {
                                     return Ok(SubscriptIndex::Single(Expr::Const(
-                                        F::from_usize(offset + 1),
+                                        (offset + 1) as f64,
                                         *var_loc,
                                     )));
                                 } else if let Ok(idx_val) =
                                     active_subscript.as_str().parse::<usize>()
                                 {
                                     return Ok(SubscriptIndex::Single(Expr::Const(
-                                        F::from_usize(idx_val),
+                                        idx_val as f64,
                                         *var_loc,
                                     )));
                                 }
@@ -1944,7 +1935,7 @@ impl Context<'_> {
                     &crate::common::CanonicalElementName::from_raw(name.as_str()),
                 ) {
                     return Ok(SubscriptIndex::Single(Expr::Const(
-                        F::from_usize(offset + 1),
+                        (offset + 1) as f64,
                         *dim_loc,
                     )));
                 }
@@ -1965,12 +1956,12 @@ impl Context<'_> {
                         // Found the matching dimension
                         if let Some(offset) = dim.get_offset(active_subscript) {
                             return Ok(SubscriptIndex::Single(Expr::Const(
-                                F::from_usize(offset + 1),
+                                (offset + 1) as f64,
                                 *dim_loc,
                             )));
                         } else if let Ok(idx_val) = active_subscript.as_str().parse::<usize>() {
                             return Ok(SubscriptIndex::Single(Expr::Const(
-                                F::from_usize(idx_val),
+                                idx_val as f64,
                                 *dim_loc,
                             )));
                         }
@@ -2079,7 +2070,7 @@ fn test_lower() {
         Loc::default(),
     );
 
-    let output = context.lower::<f64>(&input);
+    let output = context.lower(&input);
     assert!(output.is_ok());
     let mut output_exprs = output.unwrap();
     // The last element is the main expression
@@ -2178,7 +2169,7 @@ fn test_lower() {
         Loc::default(),
     );
 
-    let output = context.lower::<f64>(&input);
+    let output = context.lower(&input);
     assert!(output.is_ok());
     let mut output_exprs = output.unwrap();
     // The last element is the main expression

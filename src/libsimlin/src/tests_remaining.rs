@@ -2,6 +2,182 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// ── format_diagnostic tests ─────────────────────────────────────────────
+
+#[test]
+fn test_format_diagnostic_equation_error() {
+    use crate::errors::{FormattedErrorKind, format_diagnostic};
+    use engine::common::{EquationError, ErrorCode};
+    use engine::db::{Diagnostic, DiagnosticError};
+
+    let diag = Diagnostic {
+        model: "test_model".to_string(),
+        variable: Some("bad_var".to_string()),
+        error: DiagnosticError::Equation(EquationError {
+            start: 4,
+            end: 9,
+            code: ErrorCode::UnknownDependency,
+        }),
+    };
+
+    let formatted = format_diagnostic(&diag);
+    assert_eq!(formatted.code, ErrorCode::UnknownDependency);
+    assert_eq!(formatted.kind, FormattedErrorKind::Variable);
+    assert_eq!(formatted.model_name, Some("test_model".to_string()));
+    assert_eq!(formatted.variable_name, Some("bad_var".to_string()));
+    assert_eq!(formatted.start_offset, 4);
+    assert_eq!(formatted.end_offset, 9);
+    assert!(formatted.unit_error_kind.is_none());
+    let msg = formatted.message.expect("should have message");
+    assert!(msg.contains("test_model"), "message should include model: {msg}");
+    assert!(msg.contains("bad_var"), "message should include var: {msg}");
+    assert!(
+        msg.contains("unknown_dependency"),
+        "message should include error code: {msg}"
+    );
+}
+
+#[test]
+fn test_format_diagnostic_equation_error_no_variable() {
+    use crate::errors::{FormattedErrorKind, format_diagnostic};
+    use engine::common::{EquationError, ErrorCode};
+    use engine::db::{Diagnostic, DiagnosticError};
+
+    let diag = Diagnostic {
+        model: "m".to_string(),
+        variable: None,
+        error: DiagnosticError::Equation(EquationError {
+            start: 0,
+            end: 5,
+            code: ErrorCode::EmptyEquation,
+        }),
+    };
+
+    let formatted = format_diagnostic(&diag);
+    assert_eq!(formatted.kind, FormattedErrorKind::Variable);
+    assert_eq!(formatted.variable_name, None);
+    let msg = formatted.message.expect("should have message");
+    assert!(
+        msg.contains("<unknown>"),
+        "missing variable should show <unknown>: {msg}"
+    );
+}
+
+#[test]
+fn test_format_diagnostic_model_error_non_unit() {
+    use crate::errors::{FormattedErrorKind, format_diagnostic};
+    use engine::common::{Error, ErrorCode, ErrorKind};
+    use engine::db::{Diagnostic, DiagnosticError};
+
+    let diag = Diagnostic {
+        model: "broken_model".to_string(),
+        variable: None,
+        error: DiagnosticError::Model(Error {
+            kind: ErrorKind::Model,
+            code: ErrorCode::CircularDependency,
+            details: Some("a -> b -> a".to_string()),
+        }),
+    };
+
+    let formatted = format_diagnostic(&diag);
+    assert_eq!(formatted.code, ErrorCode::CircularDependency);
+    assert_eq!(formatted.kind, FormattedErrorKind::Model);
+    assert!(formatted.unit_error_kind.is_none());
+    assert_eq!(formatted.model_name, Some("broken_model".to_string()));
+    assert_eq!(formatted.start_offset, 0);
+    assert_eq!(formatted.end_offset, 0);
+}
+
+#[test]
+fn test_format_diagnostic_model_error_unit_mismatch() {
+    use crate::errors::{FormattedErrorKind, UnitErrorKind, format_diagnostic};
+    use engine::common::{Error, ErrorCode, ErrorKind};
+    use engine::db::{Diagnostic, DiagnosticError};
+
+    let diag = Diagnostic {
+        model: "unit_model".to_string(),
+        variable: Some("x".to_string()),
+        error: DiagnosticError::Model(Error {
+            kind: ErrorKind::Model,
+            code: ErrorCode::UnitMismatch,
+            details: None,
+        }),
+    };
+
+    let formatted = format_diagnostic(&diag);
+    assert_eq!(formatted.code, ErrorCode::UnitMismatch);
+    assert_eq!(formatted.kind, FormattedErrorKind::Units);
+    assert!(
+        matches!(formatted.unit_error_kind, Some(UnitErrorKind::Inference)),
+        "expected Inference unit error kind"
+    );
+    assert_eq!(formatted.variable_name, Some("x".to_string()));
+}
+
+#[test]
+fn test_format_diagnostic_unit_error() {
+    use crate::errors::{FormattedErrorKind, UnitErrorKind, format_diagnostic};
+    use engine::common::{ErrorCode, UnitError};
+    use engine::db::{Diagnostic, DiagnosticError};
+
+    let diag = Diagnostic {
+        model: "unit_model".to_string(),
+        variable: Some("measured".to_string()),
+        error: DiagnosticError::Unit(UnitError::ConsistencyError(
+            ErrorCode::UnitMismatch,
+            engine::builtins::Loc::new(2, 8),
+            Some("kg vs m".to_string()),
+        )),
+    };
+
+    let formatted = format_diagnostic(&diag);
+    assert_eq!(formatted.code, ErrorCode::UnitMismatch);
+    assert_eq!(formatted.kind, FormattedErrorKind::Units);
+    assert!(
+        matches!(formatted.unit_error_kind, Some(UnitErrorKind::Consistency)),
+        "expected Consistency unit error kind"
+    );
+    assert_eq!(formatted.start_offset, 2);
+    assert_eq!(formatted.end_offset, 8);
+    assert_eq!(formatted.model_name, Some("unit_model".to_string()));
+    assert_eq!(formatted.variable_name, Some("measured".to_string()));
+    let msg = formatted.message.expect("should have message");
+    assert!(msg.contains("kg vs m"), "should contain details: {msg}");
+}
+
+#[test]
+fn test_format_diagnostic_unit_definition_error() {
+    use crate::errors::{FormattedErrorKind, UnitErrorKind, format_diagnostic};
+    use engine::common::{EquationError, ErrorCode, UnitError};
+    use engine::db::{Diagnostic, DiagnosticError};
+
+    let diag = Diagnostic {
+        model: "unit_def_model".to_string(),
+        variable: Some("y".to_string()),
+        error: DiagnosticError::Unit(UnitError::DefinitionError(
+            EquationError {
+                start: 0,
+                end: 3,
+                code: ErrorCode::UnitDefinitionErrors,
+            },
+            Some("parse error".to_string()),
+        )),
+    };
+
+    let formatted = format_diagnostic(&diag);
+    assert_eq!(formatted.code, ErrorCode::UnitDefinitionErrors);
+    assert_eq!(formatted.kind, FormattedErrorKind::Units);
+    assert!(
+        matches!(formatted.unit_error_kind, Some(UnitErrorKind::Definition)),
+        "expected Definition unit error kind"
+    );
+    let msg = formatted.message.expect("should have message");
+    assert!(
+        msg.contains("parse error"),
+        "should contain details: {msg}"
+    );
+}
+
 #[test]
 fn test_project_json_roundtrip_sdai() {
     let original_datamodel = TestProject::new("sdai_roundtrip")
@@ -5392,6 +5568,353 @@ fn test_sim_get_var_count_and_names() {
                 names,
             );
         }
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+// ── Phase 7: Incremental compilation integration tests ─────────────────
+
+#[test]
+fn test_patch_then_sim_uses_incremental_compilation() {
+    let datamodel = TestProject::new("incr_compile")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * birth_rate", None)
+        .flow("deaths", "population * 0.01", None)
+        .aux("birth_rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // Apply a patch that modifies birth_rate
+        let patch_json = r#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "upsertAux",
+                            "payload": { "aux": { "name": "birth_rate", "equation": "0.03" } }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected_errors: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected_errors,
+            &mut out_error,
+        );
+        assert!(out_error.is_null(), "patch should succeed");
+        if !collected_errors.is_null() {
+            simlin_error_free(collected_errors);
+        }
+
+        // Create simulation via incremental compilation
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+        assert!(out_error.is_null());
+
+        let sim = simlin_sim_new(model, false, &mut out_error);
+        assert!(!sim.is_null());
+        assert!(out_error.is_null());
+
+        // Run simulation and verify results reflect the patched value
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+
+        // birth_rate should be 0.03 (patched value), so population should grow
+        // faster than with 0.02
+        let c_name = CString::new("population").unwrap();
+        let mut step_count: usize = 0;
+        simlin_sim_get_stepcount(sim, &mut step_count, &mut out_error);
+        assert!(out_error.is_null());
+        assert!(step_count > 0);
+
+        let mut series = vec![0.0f64; step_count];
+        let mut written: usize = 0;
+        simlin_sim_get_series(
+            sim,
+            c_name.as_ptr(),
+            series.as_mut_ptr(),
+            step_count,
+            &mut written,
+            &mut out_error,
+        );
+        assert!(out_error.is_null());
+        assert_eq!(written, step_count);
+        assert!((series[0] - 100.0).abs() < 1e-9);
+        assert!(*series.last().unwrap() > 100.0, "population should grow");
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_dry_run_patch_does_not_affect_project() {
+    let datamodel = TestProject::new("dry_run_incr")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * 0.02", None)
+        .flow("deaths", "population * 0.01", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // Apply a dry-run patch
+        let patch_json = r#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "upsertAux",
+                            "payload": { "aux": { "name": "growth_rate", "equation": "0.05" } }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected_errors: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            true, // dry_run
+            true,
+            &mut collected_errors,
+            &mut out_error,
+        );
+        if !collected_errors.is_null() {
+            simlin_error_free(collected_errors);
+        }
+
+        // Simulation should still work with original model (dry-run
+        // should not have modified the project or its salsa DB state)
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, false, &mut out_error);
+        assert!(!sim.is_null());
+        assert!(out_error.is_null());
+
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_multiple_patches_then_sim() {
+    let datamodel = TestProject::new("multi_patch")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * birth_rate", None)
+        .flow("deaths", "population * 0.01", None)
+        .aux("birth_rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        // First patch: change birth_rate to 0.03
+        let patch1 = r#"{
+            "models": [{ "name": "main", "ops": [
+                { "type": "upsertAux", "payload": { "aux": { "name": "birth_rate", "equation": "0.03" } } }
+            ]}]
+        }"#;
+        let patch1_bytes = patch1.as_bytes();
+        let mut collected1: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch1_bytes.as_ptr(),
+            patch1_bytes.len(),
+            false,
+            true,
+            &mut collected1,
+            &mut out_error,
+        );
+        assert!(out_error.is_null());
+        if !collected1.is_null() {
+            simlin_error_free(collected1);
+        }
+
+        // Second patch: change birth_rate to 0.05
+        let patch2 = r#"{
+            "models": [{ "name": "main", "ops": [
+                { "type": "upsertAux", "payload": { "aux": { "name": "birth_rate", "equation": "0.05" } } }
+            ]}]
+        }"#;
+        let patch2_bytes = patch2.as_bytes();
+        let mut collected2: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch2_bytes.as_ptr(),
+            patch2_bytes.len(),
+            false,
+            true,
+            &mut collected2,
+            &mut out_error,
+        );
+        assert!(out_error.is_null());
+        if !collected2.is_null() {
+            simlin_error_free(collected2);
+        }
+
+        // sim_new should compile with the latest DB state (birth_rate=0.05)
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, false, &mut out_error);
+        assert!(!sim.is_null());
+        assert!(out_error.is_null());
+
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+
+        // With birth_rate=0.05 and death_rate=0.01, net growth is 4%/period,
+        // so after 10 periods: 100 * (1.04)^10 ~ 148. Verify it's above 140.
+        let c_name = CString::new("population").unwrap();
+        let mut step_count: usize = 0;
+        simlin_sim_get_stepcount(sim, &mut step_count, &mut out_error);
+        assert!(out_error.is_null());
+
+        let mut series = vec![0.0f64; step_count];
+        let mut written: usize = 0;
+        simlin_sim_get_series(
+            sim,
+            c_name.as_ptr(),
+            series.as_mut_ptr(),
+            step_count,
+            &mut written,
+            &mut out_error,
+        );
+        assert!(out_error.is_null());
+        let final_pop = *series.last().unwrap();
+        assert!(
+            final_pop > 140.0,
+            "population with 5% net growth should exceed 140 after 10 periods, got {final_pop}"
+        );
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_sim_without_prior_patch_compiles_normally() {
+    let datamodel = TestProject::new("no_patch_sim")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * 0.02", None)
+        .flow("deaths", "population * 0.01", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+
+        // sim_new should compile via incremental path from fresh DB
+        let sim = simlin_sim_new(model, false, &mut out_error);
+        assert!(!sim.is_null());
+        assert!(out_error.is_null());
+
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+
+        let c_name = CString::new("population").unwrap();
+        let mut step_count: usize = 0;
+        simlin_sim_get_stepcount(sim, &mut step_count, &mut out_error);
+        assert!(out_error.is_null());
+        assert!(step_count > 0);
+
+        let mut series = vec![0.0f64; step_count];
+        let mut written: usize = 0;
+        simlin_sim_get_series(
+            sim,
+            c_name.as_ptr(),
+            series.as_mut_ptr(),
+            step_count,
+            &mut written,
+            &mut out_error,
+        );
+        assert!(out_error.is_null());
+        assert!((series[0] - 100.0).abs() < 1e-9);
+        assert!(*series.last().unwrap() > 100.0);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_patch_then_ltm_sim_compiles_normally() {
+    let datamodel = TestProject::new("ltm_incr_bypass")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * birth_rate", None)
+        .flow("deaths", "population * 0.01", None)
+        .aux("birth_rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        // Apply a patch
+        let patch_json = r#"{
+            "models": [{ "name": "main", "ops": [
+                { "type": "upsertAux", "payload": { "aux": { "name": "birth_rate", "equation": "0.03" } } }
+            ]}]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut out_error,
+        );
+        assert!(out_error.is_null());
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        // Create LTM simulation -- uses monolithic pipeline, not incremental
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, true, &mut out_error);
+        assert!(!sim.is_null());
+        assert!(out_error.is_null());
+
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
 
         simlin_sim_unref(sim);
         simlin_model_unref(model);

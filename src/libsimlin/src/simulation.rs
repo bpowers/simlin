@@ -51,34 +51,67 @@ pub unsafe extern "C" fn simlin_sim_new(
     let project_ptr = model_ref.project;
     let project_ref = &*project_ptr;
 
-    let cloned_project = {
-        let project_locked = project_ref.project.lock().unwrap();
-        project_locked.clone()
-    };
+    let (compiled, vm, vm_error) = if !enable_ltm {
+        // Try salsa-based incremental compilation first. The DB is kept
+        // in sync by apply_patch and project constructors, so this is
+        // typically a cache hit when nothing changed since the last patch.
+        // Falls back to the monolithic path when the incremental path
+        // does not yet support this model (e.g. certain module patterns).
+        let incremental_result = {
+            let db = project_ref.db.lock().unwrap();
+            let sync_state = project_ref.sync_state.lock().unwrap();
+            if let Some(ref state) = *sync_state {
+                let sync = state.to_sync_result();
+                engine::db::compile_project_incremental(&db, sync.project, &model_ref.model_name)
+                    .ok()
+            } else {
+                None
+            }
+        };
 
-    let project_variant = if enable_ltm {
-        match cloned_project.with_ltm() {
+        if let Some(compiled) = incremental_result {
+            match Vm::new(compiled.clone()) {
+                Ok(vm) => (Some(compiled), Some(vm), None),
+                Err(err) => (Some(compiled), None, Some(err)),
+            }
+        } else {
+            let cloned_project = {
+                let project_locked = project_ref.project.lock().unwrap();
+                project_locked.clone()
+            };
+            match compile_simulation(&cloned_project, &model_ref.model_name) {
+                Ok(compiled) => match Vm::new(compiled.clone()) {
+                    Ok(vm) => (Some(compiled), Some(vm), None),
+                    Err(err) => (Some(compiled), None, Some(err)),
+                },
+                Err(err) => (None, None, Some(err)),
+            }
+        }
+    } else {
+        // LTM path: must go through the monolithic pipeline
+        let cloned_project = {
+            let project_locked = project_ref.project.lock().unwrap();
+            project_locked.clone()
+        };
+
+        let project_variant = match cloned_project.with_ltm() {
             Ok(proj) => proj,
             Err(err) => {
                 store_ffi_error(out_error, ffi_error_from_engine(&err));
                 return ptr::null_mut();
             }
+        };
+
+        match compile_simulation(&project_variant, &model_ref.model_name) {
+            Ok(compiled) => match Vm::new(compiled.clone()) {
+                Ok(vm) => (Some(compiled), Some(vm), None),
+                Err(err) => (Some(compiled), None, Some(err)),
+            },
+            Err(err) => (None, None, Some(err)),
         }
-    } else {
-        cloned_project
     };
 
     crate::model_ref(model);
-
-    // Compile the simulation and cache the CompiledSimulation for reset reuse.
-    let (compiled, vm, vm_error) = match compile_simulation(&project_variant, &model_ref.model_name)
-    {
-        Ok(compiled) => match Vm::new(compiled.clone()) {
-            Ok(vm) => (Some(compiled), Some(vm), None),
-            Err(err) => (Some(compiled), None, Some(err)),
-        },
-        Err(err) => (None, None, Some(err)),
-    };
     let sim = Box::new(SimlinSim {
         model: model_ref as *const _,
         enable_ltm,

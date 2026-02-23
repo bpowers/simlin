@@ -160,3 +160,19 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Count**: 44 in simlin-engine, 6 in libsimlin (as of 2026-02-15)
 - **Owner**: unassigned
 - **Last reviewed**: 2026-02-15
+
+### 17. Remove Legacy Error Fields from Variable/ModelStage Types
+
+- **Component**: simlin-engine
+- **Severity**: low
+- **Description**: The `errors` and `unit_errors` fields on `Variable`, and the `errors` field on `ModelStage0`/`ModelStage1`, are now redundant with the salsa incremental compilation pipeline. Diagnostics are collected via `collect_all_diagnostics` / `collect_model_diagnostics` from tracked functions, making the embedded error fields dead weight carried through the monolithic compilation path. Removing them would simplify the data model and reduce confusion about the source of truth for errors. This cleanup was identified as Step 13 in the incremental compilation design (`doc/design/incremental-compilation.md`) but is not required by any acceptance criterion.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-02-22
+
+### 18. Dimension-Granularity Incremental Invalidation
+
+- **Component**: simlin-engine (src/simlin-engine/src/db.rs)
+- **Severity**: low
+- **Description**: When project dimensions change, all variables are currently re-parsed because `parse_source_variable` depends on the full dimension list via `SourceProject::dimensions`. A `variable_relevant_dimensions` tracked function could narrow invalidation to only variables whose equations reference changed dimensions, avoiding unnecessary re-parsing for unaffected variables. AC1.5 (dimension changes propagate correctly) is already satisfied by salsa's backdating -- this is a pure performance optimization. For current model sizes the overhead is negligible; this would matter for projects with many dimensions and thousands of variables.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-02-22

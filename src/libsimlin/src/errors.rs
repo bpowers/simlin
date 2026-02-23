@@ -317,6 +317,56 @@ fn format_unit_error(
     }
 }
 
+/// Convert a salsa accumulator diagnostic into a `FormattedError`.
+///
+/// This produces the same structure as the struct-field path formatters
+/// (`format_equation_error`, `format_unit_error`, `format_model_error`)
+/// but reads from a `Diagnostic` instead of walking model/variable fields.
+/// No datamodel variable is available, so snippets are omitted.
+pub fn format_diagnostic(diag: &engine::db::Diagnostic) -> FormattedError {
+    use engine::db::DiagnosticError;
+    match &diag.error {
+        DiagnosticError::Equation(err) => {
+            let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
+            let summary = format!(
+                "error in model '{}' variable '{}': {}",
+                diag.model, var_name, err.code
+            );
+            FormattedError {
+                code: err.code,
+                message: Some(summary),
+                model_name: Some(diag.model.clone()),
+                variable_name: diag.variable.clone(),
+                start_offset: err.start,
+                end_offset: err.end,
+                kind: FormattedErrorKind::Variable,
+                unit_error_kind: None,
+            }
+        }
+        DiagnosticError::Model(err) => {
+            let (kind, unit_error_kind) = if err.code == ErrorCode::UnitMismatch {
+                (FormattedErrorKind::Units, Some(UnitErrorKind::Inference))
+            } else {
+                (FormattedErrorKind::Model, None)
+            };
+            FormattedError {
+                code: err.code,
+                message: Some(format!("error in model '{}': {}", diag.model, err)),
+                model_name: Some(diag.model.clone()),
+                variable_name: diag.variable.clone(),
+                start_offset: 0,
+                end_offset: 0,
+                kind,
+                unit_error_kind,
+            }
+        }
+        DiagnosticError::Unit(err) => {
+            let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
+            format_unit_error(&diag.model, var_name, None, err)
+        }
+    }
+}
+
 fn variable_equation_text(var: &Variable) -> Option<String> {
     match var.get_equation() {
         Some(Equation::Scalar(eqn)) => Some(eqn.clone()),

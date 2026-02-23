@@ -24,30 +24,30 @@ pub type ElementName = String;
 ///
 /// A raw, non-canonicalized identifier as it appears in source.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub struct RawIdent(String);
 
 /// A canonicalized dimension name
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
 pub struct CanonicalDimensionName(String);
 
 /// A raw dimension name as it appears in source
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub struct RawDimensionName(String);
 
 /// A canonicalized element name (dimension element)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
 pub struct CanonicalElementName(String);
 
 /// A raw element name as it appears in source
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub struct RawElementName(String);
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub enum ErrorCode {
     NoError,      // will never be produced
     DoesNotExist, // the named entity doesn't exist
@@ -165,7 +165,7 @@ impl fmt::Display for ErrorCode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub struct EquationError {
     pub start: u16,
     pub end: u16,
@@ -188,7 +188,7 @@ impl From<Error> for EquationError {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
     Import,
     Model,
@@ -196,7 +196,7 @@ pub enum ErrorKind {
     Variable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Error {
     pub kind: ErrorKind,
     pub code: ErrorCode,
@@ -1037,7 +1037,7 @@ pub struct Canonical;
 pub struct Raw;
 
 /// An owned identifier with state tracking (canonical or raw)
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
 pub struct Ident<State = Canonical> {
     inner: String,
     _phantom: PhantomData<State>,
@@ -1553,7 +1553,7 @@ mod identifier_part_iterator_tests {
 
 // ===== Engine-specific additions =====
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub enum UnitError {
     DefinitionError(EquationError, Option<String>),
     ConsistencyError(ErrorCode, Loc, Option<String>),

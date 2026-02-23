@@ -110,7 +110,7 @@ impl SearchGraph {
     /// `$⁚ltm⁚link_score⁚{from}→{to}`, reads values at the given step,
     /// and builds the adjacency list.
     fn from_results(
-        results: &Results<f64>,
+        results: &Results,
         step: usize,
         link_offsets: &[LinkOffset],
         stocks: &[Ident<Canonical>],
@@ -258,7 +258,7 @@ impl SearchGraph {
 /// Parse link score variable names from results offsets.
 ///
 /// Returns a vector of ((from, to), offset) tuples for all link score variables.
-fn parse_link_offsets(results: &Results<f64>) -> Vec<LinkOffset> {
+fn parse_link_offsets(results: &Results) -> Vec<LinkOffset> {
     let mut link_offsets = Vec::new();
 
     for (var_name, &offset) in &results.offsets {
@@ -316,7 +316,7 @@ fn get_stock_variables(project: &Project) -> Vec<Ident<Canonical>> {
 ///
 /// The project must have been augmented with `with_ltm_all_links()` before
 /// simulation so that link score variables exist for all causal links.
-pub fn discover_loops(results: &Results<f64>, project: &Project) -> Result<Vec<FoundLoop>> {
+pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundLoop>> {
     let link_offsets = parse_link_offsets(results);
     if link_offsets.is_empty() {
         return Ok(Vec::new());

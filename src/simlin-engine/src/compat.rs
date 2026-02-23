@@ -22,11 +22,8 @@ use std::result::Result as StdResult;
 use crate::common::{Canonical, Ident};
 #[cfg(feature = "file_io")]
 use crate::results::Method;
-// compat always loads f64 data from external files
 #[cfg(feature = "file_io")]
-type Results = crate::results::Results<f64>;
-#[cfg(feature = "file_io")]
-type Specs = crate::results::Specs<f64>;
+use crate::results::{Results, Specs};
 
 use crate::mdl;
 use crate::xmile;

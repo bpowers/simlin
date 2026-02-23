@@ -20,10 +20,10 @@ use std::sync::Mutex;
 use crate::ffi;
 use crate::ffi_error::{FfiError, SimlinError};
 use crate::ffi_try;
-use crate::patch::gather_error_details;
+use crate::patch::gather_error_details_with_db;
 use crate::{
-    build_simlin_error, clear_out_error, compile_simulation, drop_c_string, require_project,
-    store_anyhow_error, store_error, SimlinErrorCode, SimlinModel, SimlinProject,
+    build_simlin_error, clear_out_error, compile_simulation, drop_c_string, new_synced_db,
+    require_project, store_anyhow_error, store_error, SimlinErrorCode, SimlinModel, SimlinProject,
 };
 
 /// Open a project from binary protobuf data
@@ -60,8 +60,11 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
         })?;
 
         let project: engine::Project = engine_serde::deserialize(pb_project).into();
+        let (db, sync_state) = new_synced_db(&project);
         Ok(Box::into_raw(Box::new(SimlinProject {
             project: Mutex::new(project),
+            db: Mutex::new(db),
+            sync_state: Mutex::new(Some(sync_state)),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -138,8 +141,11 @@ pub unsafe extern "C" fn simlin_project_open_json(
         };
 
         let project: engine::Project = datamodel_project.into();
+        let (db, sync_state) = new_synced_db(&project);
         Ok(Box::into_raw(Box::new(SimlinProject {
             project: Mutex::new(project),
+            db: Mutex::new(db),
+            sync_state: Mutex::new(Some(sync_state)),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -350,6 +356,19 @@ pub unsafe extern "C" fn simlin_project_add_model(
 
     // Rebuild the project's internal structures
     *project_locked = engine::Project::from(project_locked.datamodel.clone());
+
+    // Re-sync the persistent salsa DB incrementally
+    let mut db = proj.db.lock().unwrap();
+    let prev_state = proj.sync_state.lock().unwrap().take();
+    let new_state = engine::db::sync_from_datamodel_incremental(
+        &mut db,
+        &project_locked.datamodel,
+        prev_state.as_ref(),
+    );
+    drop(db);
+    *proj.sync_state.lock().unwrap() = Some(new_state);
+
+    drop(project_locked);
 }
 
 /// Gets a model from a project by name
@@ -462,8 +481,11 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
     match simlin_engine::open_xmile(&mut reader) {
         Ok(datamodel_project) => {
             let project: engine::Project = datamodel_project.into();
+            let (db, sync_state) = new_synced_db(&project);
             let boxed = Box::new(SimlinProject {
                 project: Mutex::new(project),
+                db: Mutex::new(db),
+                sync_state: Mutex::new(Some(sync_state)),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -520,8 +542,11 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
     match simlin_engine::open_vensim(contents) {
         Ok(datamodel_project) => {
             let project: engine::Project = datamodel_project.into();
+            let (db, sync_state) = new_synced_db(&project);
             let boxed = Box::new(SimlinProject {
                 project: Mutex::new(project),
+                db: Mutex::new(db),
+                sync_state: Mutex::new(Some(sync_state)),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -605,7 +630,18 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     };
 
     let project_locked = proj.project.lock().unwrap();
-    let (all_errors, _) = gather_error_details(&project_locked);
+    let db_locked = proj.db.lock().unwrap();
+    let sync_state = proj.sync_state.lock().unwrap();
+    let db_sync = sync_state.as_ref().map(|state| {
+        let sync = state.to_sync_result();
+        (&*db_locked, sync)
+    });
+    // Borrow the SyncResult for the gather call; if no sync state is
+    // available, fall back to collecting errors without the salsa DB.
+    let (all_errors, _, _) = match &db_sync {
+        Some((db, sync)) => gather_error_details_with_db(&project_locked, Some((db, sync))),
+        None => gather_error_details_with_db(&project_locked, None),
+    };
 
     if all_errors.is_empty() {
         return ptr::null_mut();

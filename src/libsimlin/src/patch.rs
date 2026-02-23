@@ -282,18 +282,61 @@ fn collect_project_errors(project: &engine::Project) -> Vec<ErrorDetailData> {
         .collect()
 }
 
-pub(crate) fn gather_error_details(
+/// Collects all static analysis errors and attempts compilation to find
+/// simulation-time errors. When a synced salsa database is provided,
+/// uses incremental compilation and merges accumulator diagnostics
+/// (deduplicated by model+variable+code triple).
+pub(crate) fn gather_error_details_with_db(
     project: &engine::Project,
-) -> (Vec<ErrorDetailData>, Option<engine::Error>) {
+    db_sync: Option<(&engine::db::SimlinDb, &engine::db::SyncResult<'_>)>,
+) -> (
+    Vec<ErrorDetailData>,
+    Option<engine::Error>,
+    Option<engine::CompiledSimulation>,
+) {
     let mut all_errors = collect_project_errors(project);
-    let sim_error = compile_simulation(project, "main").and_then(Vm::new).err();
 
-    if let Some(error) = sim_error.clone() {
-        let formatted = errors::format_simulation_error("main", &error);
+    // If a synced database is available, also collect from the accumulator
+    // and merge (deduplicated by model+variable+code).
+    if let Some((db, sync)) = db_sync {
+        use std::collections::HashSet;
+
+        let mut seen_keys: HashSet<(Option<String>, Option<String>, SimlinErrorCode)> = all_errors
+            .iter()
+            .map(|e| (e.model_name.clone(), e.variable_name.clone(), e.code))
+            .collect();
+
+        let diags = engine::db::collect_all_diagnostics(db, sync);
+        for diag in &diags {
+            let formatted = errors::format_diagnostic(diag);
+            let key = (
+                formatted.model_name.clone(),
+                formatted.variable_name.clone(),
+                SimlinErrorCode::from(formatted.code),
+            );
+            if seen_keys.insert(key) {
+                all_errors.push(ErrorDetailBuilder::from_formatted(formatted));
+            }
+        }
+    }
+
+    // Use the monolithic compilation path for simulatability checks.
+    // The incremental path is used in simlin_sim_new where it matters
+    // for avoiding double-compilation; here we only need to detect errors.
+    let (compiled, sim_error) = match compile_simulation(project, "main") {
+        Ok(compiled) => match Vm::new(compiled.clone()) {
+            Ok(_vm) => (Some(compiled), None),
+            Err(err) => (Some(compiled), Some(err)),
+        },
+        Err(err) => (None, Some(err)),
+    };
+
+    if let Some(ref error) = sim_error {
+        let formatted = errors::format_simulation_error("main", error);
         all_errors.push(ErrorDetailBuilder::from_formatted(formatted));
     }
 
-    (all_errors, sim_error)
+    (all_errors, sim_error, compiled)
 }
 
 fn first_error_code(
@@ -374,9 +417,13 @@ pub(crate) unsafe fn apply_project_patch_internal(
         collect_models_with_unit_warnings(&project_locked)
     };
 
-    let mut staged_datamodel = {
+    // Save the original datamodel before patching so we can restore the
+    // db on reject/dry_run without re-acquiring the project lock (which
+    // would violate the project -> db -> sync_state lock ordering).
+    let (mut staged_datamodel, original_datamodel) = {
         let project_locked = project_ref.project.lock().unwrap();
-        project_locked.datamodel.clone()
+        let dm = project_locked.datamodel.clone();
+        (dm.clone(), dm)
     };
 
     if let Err(err) = engine::apply_patch(&mut staged_datamodel, patch) {
@@ -390,7 +437,21 @@ pub(crate) unsafe fn apply_project_patch_internal(
 
     let staged_project = engine::Project::from(staged_datamodel);
 
-    let (all_errors, sim_error) = gather_error_details(&staged_project);
+    // Hold the db lock for the entire sync-evaluate-decide cycle so that
+    // concurrent readers (simlin_sim_new, simlin_project_get_errors) never
+    // observe staged state for patches that are ultimately rejected or
+    // are dry runs.
+    let mut db = project_ref.db.lock().unwrap();
+    let prev_state = project_ref.sync_state.lock().unwrap().clone();
+    let staged_sync_state = engine::db::sync_from_datamodel_incremental(
+        &mut db,
+        &staged_project.datamodel,
+        prev_state.as_ref(),
+    );
+
+    let staged_sync = staged_sync_state.to_sync_result();
+    let (all_errors, sim_error, _compiled) =
+        gather_error_details_with_db(&staged_project, Some((&db, &staged_sync)));
 
     // Check for blocking errors (not including unit warnings, which are handled separately)
     let maybe_first_code = if !allow_errors {
@@ -429,21 +490,39 @@ pub(crate) unsafe fn apply_project_patch_internal(
         *out_collected_errors = aggregate.into_raw();
     }
 
+    let rejected = maybe_first_code.is_some() || new_unit_warning.is_some();
+
     if let Some(code) = maybe_first_code {
         let error = build_simlin_error(code, &all_errors);
         store_error(out_error, error);
-        return;
     }
 
     if let Some((code, message)) = new_unit_warning {
         store_error(out_error, SimlinError::new(code).with_message(message));
+    }
+
+    if rejected || dry_run {
+        // Restore the db and sync_state atomically (while still holding
+        // the db lock) so no concurrent reader can observe staged state.
+        let restored = engine::db::sync_from_datamodel_incremental(
+            &mut db,
+            &original_datamodel,
+            prev_state.as_ref(),
+        );
+        *project_ref.sync_state.lock().unwrap() = Some(restored);
+        drop(db);
         return;
     }
 
-    if !dry_run {
-        let mut project_locked = project_ref.project.lock().unwrap();
-        *project_locked = staged_project;
-    }
+    // Commit: update sync_state while still holding db lock so the
+    // incremental path (db + sync_state) is atomically consistent for
+    // concurrent readers. Then release db before updating project
+    // to maintain lock ordering (project -> db -> sync_state).
+    *project_ref.sync_state.lock().unwrap() = Some(staged_sync_state);
+    drop(db);
+
+    let mut project_locked = project_ref.project.lock().unwrap();
+    *project_locked = staged_project;
 }
 
 // ── FFI entry point ────────────────────────────────────────────────────

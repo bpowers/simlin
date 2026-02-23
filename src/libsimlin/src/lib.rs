@@ -84,7 +84,7 @@ pub use ffi_error::{ErrorDetail as ErrorDetailData, FfiError, SimlinError};
 
 /// Error codes for the C API
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimlinErrorCode {
     /// Success - no error
     NoError = 0,
@@ -275,6 +275,9 @@ pub struct SimlinErrorDetail {
 /// Opaque project structure
 pub struct SimlinProject {
     pub(crate) project: Mutex<engine::Project>,
+    pub(crate) db: Mutex<engine::db::SimlinDb>,
+    /// Salsa input handles from the last sync, enabling incremental updates.
+    pub(crate) sync_state: Mutex<Option<engine::db::PersistentSyncState>>,
     pub(crate) ref_count: AtomicUsize,
 }
 
@@ -308,6 +311,14 @@ pub struct SimlinSim {
 }
 
 // ── shared helpers (pub(crate)) ────────────────────────────────────────
+
+pub(crate) fn new_synced_db(
+    project: &engine::Project,
+) -> (engine::db::SimlinDb, engine::db::PersistentSyncState) {
+    let mut db = engine::db::SimlinDb::default();
+    let state = engine::db::sync_from_datamodel_incremental(&mut db, &project.datamodel, None);
+    (db, state)
+}
 
 pub(crate) fn clear_out_error(out_error: *mut *mut SimlinError) {
     if out_error.is_null() {
@@ -1387,6 +1398,82 @@ mod tests {
             assert!(all_errors.is_null());
 
             // Clean up
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_get_errors_repeated_calls_reuse_sync_state() {
+        // Verifies that calling simlin_project_get_errors multiple times
+        // reuses the persistent sync state rather than creating fresh
+        // salsa inputs on every call (which would cause unbounded DB growth).
+        let project = engine::project_io::Project {
+            name: "repeated_errors".to_string(),
+            sim_specs: Some(engine::project_io::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: Some(engine::project_io::Dt {
+                    value: 1.0,
+                    is_reciprocal: false,
+                }),
+                save_step: None,
+                sim_method: engine::project_io::SimMethod::Euler as i32,
+                time_units: None,
+            }),
+            models: vec![engine::project_io::Model {
+                name: "main".to_string(),
+                variables: vec![engine::project_io::Variable {
+                    v: Some(engine::project_io::variable::V::Aux(
+                        engine::project_io::variable::Aux {
+                            ident: "x".to_string(),
+                            equation: Some(engine::project_io::variable::Equation {
+                                equation: Some(
+                                    engine::project_io::variable::equation::Equation::Scalar(
+                                        engine::project_io::variable::ScalarEquation {
+                                            equation: "unknown_ref".to_string(),
+                                            initial_equation: None,
+                                        },
+                                    ),
+                                ),
+                            }),
+                            documentation: String::new(),
+                            units: String::new(),
+                            gf: None,
+                            can_be_module_input: false,
+                            visibility: engine::project_io::variable::Visibility::Private as i32,
+                            uid: 0,
+                            compat: None,
+                        },
+                    )),
+                }],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            dimensions: vec![],
+            units: vec![],
+            source: None,
+        };
+
+        let mut buf = Vec::new();
+        use prost::Message;
+        project.encode(&mut buf).unwrap();
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+
+            // Call get_errors multiple times -- each should return the
+            // same result and not grow the DB.
+            for _ in 0..5 {
+                err = ptr::null_mut();
+                let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+                assert!(err.is_null());
+                assert!(!all_errors.is_null(), "should have errors for unknown_ref");
+                simlin_error_free(all_errors);
+            }
+
             simlin_project_unref(proj);
         }
     }
@@ -3021,4 +3108,5 @@ mod tests {
     // NUL rejection, SVG rendering, simulation overrides, reset, and more.
 
     include!("tests_remaining.rs");
+    include!("tests_incremental.rs");
 }

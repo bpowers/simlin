@@ -24,11 +24,11 @@ use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
 
 // Type alias for clarity
-type SyntheticVariables = Vec<(Ident<Canonical>, datamodel::Variable)>;
+pub(crate) type SyntheticVariables = Vec<(Ident<Canonical>, datamodel::Variable)>;
 
 /// Map from module model name to the set of input ports that have composite
 /// link score variables (i.e., ports with causal pathways to the output).
-type CompositePortMap = HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>>;
+pub(crate) type CompositePortMap = HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>>;
 
 /// Recursively walk an Expr0 tree, wrapping variable references that appear in
 /// `deps` with `PREVIOUS(...)`.  Function names in App nodes are never touched,
@@ -145,7 +145,7 @@ pub fn generate_ltm_variables_all_links(
 
 /// Pre-compute which input ports on each dynamic stdlib module have causal
 /// pathways to the output. Only these ports get composite link score variables.
-fn compute_composite_ports(project: &Project) -> CompositePortMap {
+pub(crate) fn compute_composite_ports(project: &Project) -> CompositePortMap {
     let mut result = HashMap::new();
     for (model_name, model) in &project.models {
         if !model.implicit {
@@ -257,7 +257,7 @@ fn generate_ltm_variables_inner(
 }
 
 /// Generate link score variables for all links
-fn generate_link_score_variables(
+pub(crate) fn generate_link_score_variables(
     links: &HashSet<Link>,
     variables: &HashMap<Ident<Canonical>, Variable>,
     composite_ports: &CompositePortMap,
@@ -342,6 +342,24 @@ fn quote_ident(ident: &str) -> String {
     }
 }
 
+/// Generate module-to-module link score equation (black box treatment).
+/// Exposed for use by per-link tracked functions in `db.rs`.
+pub(crate) fn generate_module_link_score_eq(
+    from: &Ident<Canonical>,
+    to: &Ident<Canonical>,
+) -> String {
+    generate_module_link_score_equation(from, to, &HashMap::new())
+}
+
+/// Generate composite link score equation for input_src -> module links.
+/// Exposed for use by per-link tracked functions in `db.rs`.
+pub(crate) fn generate_module_input_link_score_eq(
+    module_ident: &Ident<Canonical>,
+    input_port: &Ident<Canonical>,
+) -> String {
+    generate_module_input_link_score_equation(module_ident, input_port)
+}
+
 /// Generate link score equation for links involving modules (black box treatment)
 fn generate_module_link_score_equation(
     from: &Ident<Canonical>,
@@ -372,7 +390,7 @@ fn generate_module_link_score_equation(
 /// Relative loop scores use partition-scoped denominators: each loop's
 /// relative score equation only references loops in the same partition.
 /// Loops with no stocks form their own unpartitioned group.
-fn generate_loop_score_variables(
+pub(crate) fn generate_loop_score_variables(
     loops: &[Loop],
     partitions: &CyclePartitions,
 ) -> HashMap<Ident<Canonical>, datamodel::Variable> {
@@ -413,6 +431,18 @@ fn generate_loop_score_variables(
     }
 
     loop_vars
+}
+
+/// Generate the equation for a link score variable.
+/// Exposed as `generate_link_score_equation_for_link` for use by tracked
+/// functions in `db.rs`.
+pub(crate) fn generate_link_score_equation_for_link(
+    from: &Ident<Canonical>,
+    to: &Ident<Canonical>,
+    to_var: &Variable,
+    all_vars: &HashMap<Ident<Canonical>, Variable>,
+) -> String {
+    generate_link_score_equation(from, to, to_var, all_vars)
 }
 
 /// Generate the equation for a link score variable
@@ -667,7 +697,7 @@ fn generate_relative_loop_score_equation(loop_id: &str, same_group_ids: &[&str])
 
 /// Generate internal link score, pathway, and composite variables for a
 /// dynamic stdlib module. Returns variables to add to the stdlib model.
-fn generate_module_internal_ltm_variables(
+pub(crate) fn generate_module_internal_ltm_variables(
     _model_name: &Ident<Canonical>,
     module_model: &crate::model::ModelStage1,
     project: &Project,
