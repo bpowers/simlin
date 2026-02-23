@@ -356,7 +356,7 @@ impl ReverseOffsetMap {
     }
 
     /// Look up a variable offset.
-    fn lookup(&self, off: u16) -> Result<SymVarRef, String> {
+    fn lookup(&self, off: u32) -> Result<SymVarRef, String> {
         let idx = off as usize;
         if idx >= self.entries.len() {
             return Err(format!(
@@ -413,41 +413,41 @@ fn symbolize_opcode(op: &Opcode, rmap: &ReverseOffsetMap) -> Result<SymbolicOpco
     match op {
         // Opcodes with variable offsets that need symbolization
         Opcode::LoadVar { off } => Ok(SymbolicOpcode::LoadVar {
-            var: rmap.lookup(*off)?,
+            var: rmap.lookup(u32::from(*off))?,
         }),
         Opcode::LoadSubscript { off } => Ok(SymbolicOpcode::LoadSubscript {
-            var: rmap.lookup(*off)?,
+            var: rmap.lookup(u32::from(*off))?,
         }),
         Opcode::AssignCurr { off } => Ok(SymbolicOpcode::AssignCurr {
-            var: rmap.lookup(*off)?,
+            var: rmap.lookup(u32::from(*off))?,
         }),
         Opcode::AssignNext { off } => Ok(SymbolicOpcode::AssignNext {
-            var: rmap.lookup(*off)?,
+            var: rmap.lookup(u32::from(*off))?,
         }),
         Opcode::AssignConstCurr { off, literal_id } => Ok(SymbolicOpcode::AssignConstCurr {
-            var: rmap.lookup(*off)?,
+            var: rmap.lookup(u32::from(*off))?,
             literal_id: *literal_id,
         }),
         Opcode::BinOpAssignCurr { op, off } => Ok(SymbolicOpcode::BinOpAssignCurr {
             op: *op,
-            var: rmap.lookup(*off)?,
+            var: rmap.lookup(u32::from(*off))?,
         }),
         Opcode::BinOpAssignNext { op, off } => Ok(SymbolicOpcode::BinOpAssignNext {
             op: *op,
-            var: rmap.lookup(*off)?,
+            var: rmap.lookup(u32::from(*off))?,
         }),
         Opcode::PushVarView {
             base_off,
             dim_list_id,
         } => Ok(SymbolicOpcode::PushVarView {
-            var: rmap.lookup(*base_off)?,
+            var: rmap.lookup(u32::from(*base_off))?,
             dim_list_id: *dim_list_id,
         }),
         Opcode::PushVarViewDirect {
             base_off,
             dim_list_id,
         } => Ok(SymbolicOpcode::PushVarViewDirect {
-            var: rmap.lookup(*base_off)?,
+            var: rmap.lookup(u32::from(*base_off))?,
             dim_list_id: *dim_list_id,
         }),
 
@@ -573,7 +573,7 @@ fn symbolize_static_view(
     let base = if view.is_temp {
         SymStaticViewBase::Temp(view.base_off)
     } else {
-        SymStaticViewBase::Var(rmap.lookup(view.base_off as u16)?)
+        SymStaticViewBase::Var(rmap.lookup(view.base_off)?)
     };
 
     Ok(SymbolicStaticView {
@@ -593,7 +593,7 @@ fn symbolize_module_decl(
     Ok(SymbolicModuleDecl {
         model_name: decl.model_name.clone(),
         input_set: decl.input_set.clone(),
-        var: rmap.lookup(decl.off as u16)?,
+        var: rmap.lookup(decl.off as u32)?,
     })
 }
 
@@ -1407,7 +1407,7 @@ mod tests {
     // Integration tests: compile real models and roundtrip through symbolic
     // ====================================================================
 
-    use crate::testutils::{x_aux, x_flow, x_model, x_project, x_stock};
+    use crate::testutils::{x_aux, x_flow, x_model, x_module, x_project, x_stock};
 
     fn default_sim_specs() -> crate::datamodel::SimSpecs {
         crate::datamodel::SimSpecs {
@@ -1671,5 +1671,355 @@ mod tests {
             resolved.n_slots, sym.n_slots,
             "resolved n_slots should differ from symbolic n_slots when layout changed"
         );
+    }
+
+    // ====================================================================
+    // u16 truncation boundary tests (issue #291)
+    // ====================================================================
+
+    #[test]
+    fn test_large_offset_static_view() {
+        let large_off: usize = 70_000;
+        let mut entries = HashMap::new();
+        entries.insert(
+            "big_var".to_string(),
+            LayoutEntry {
+                offset: large_off,
+                size: 3,
+            },
+        );
+        let layout = VariableLayout::new(entries, large_off + 3);
+        let rmap = ReverseOffsetMap::from_layout(&layout);
+
+        let view = StaticArrayView {
+            base_off: large_off as u32,
+            is_temp: false,
+            dims: SmallVec::from_slice(&[3]),
+            strides: SmallVec::from_slice(&[1]),
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: SmallVec::from_slice(&[0]),
+        };
+
+        let sym = symbolize_static_view(&view, &rmap).unwrap();
+        match &sym.base {
+            SymStaticViewBase::Var(var_ref) => {
+                assert_eq!(var_ref.name, "big_var");
+                assert_eq!(var_ref.element_offset, 0);
+            }
+            SymStaticViewBase::Temp(_) => panic!("expected Var, got Temp"),
+        }
+
+        let resolved = resolve_static_view(&sym, &layout).unwrap();
+        assert_eq!(resolved.base_off, large_off as u32);
+        assert!(!resolved.is_temp);
+    }
+
+    #[test]
+    fn test_large_offset_module_decl() {
+        let large_off: usize = 70_000;
+        let mut entries = HashMap::new();
+        entries.insert(
+            "big_module".to_string(),
+            LayoutEntry {
+                offset: large_off,
+                size: 5,
+            },
+        );
+        let layout = VariableLayout::new(entries, large_off + 5);
+        let rmap = ReverseOffsetMap::from_layout(&layout);
+
+        let decl = ModuleDeclaration {
+            model_name: Ident::new("sub"),
+            input_set: BTreeSet::new(),
+            off: large_off,
+        };
+
+        let sym = symbolize_module_decl(&decl, &rmap).unwrap();
+        assert_eq!(sym.var.name, "big_module");
+
+        let resolved = resolve_module_decl(&sym, &layout).unwrap();
+        assert_eq!(resolved.off, large_off);
+    }
+
+    #[test]
+    fn test_unmapped_offset() {
+        let mut entries = HashMap::new();
+        entries.insert("a".to_string(), LayoutEntry { offset: 0, size: 1 });
+        // Offset 1 is allocated but not mapped to any variable
+        let layout = VariableLayout::new(entries, 3);
+        let rmap = ReverseOffsetMap::from_layout(&layout);
+
+        assert!(rmap.lookup(0).is_ok());
+        let err = rmap.lookup(1).unwrap_err();
+        assert!(err.contains("no variable mapped at offset"));
+    }
+
+    // ====================================================================
+    // Opcode roundtrip coverage: passthrough opcodes
+    // ====================================================================
+
+    #[test]
+    fn test_roundtrip_control_flow_and_builtin_opcodes() {
+        let layout = simple_layout();
+        let rmap = ReverseOffsetMap::from_layout(&layout);
+
+        let opcodes = vec![
+            Opcode::Not {},
+            Opcode::SetCond {},
+            Opcode::If {},
+            Opcode::LoadModuleInput { input: 3 },
+            Opcode::EvalModule { id: 0, n_inputs: 2 },
+            Opcode::Apply {
+                func: BuiltinId::Abs,
+            },
+            Opcode::Lookup {
+                base_gf: 0,
+                table_count: 4,
+                mode: LookupMode::Interpolate,
+            },
+            Opcode::Lookup {
+                base_gf: 1,
+                table_count: 1,
+                mode: LookupMode::Forward,
+            },
+            Opcode::Ret,
+        ];
+
+        for op in &opcodes {
+            let sym = symbolize_opcode(op, &rmap).unwrap();
+            let resolved = resolve_opcode(&sym, &layout).unwrap();
+            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_view_stack_opcodes() {
+        let layout = simple_layout();
+        let rmap = ReverseOffsetMap::from_layout(&layout);
+
+        let opcodes = vec![
+            Opcode::PushVarView {
+                base_off: 4,
+                dim_list_id: 0,
+            },
+            Opcode::PushTempView {
+                temp_id: 1,
+                dim_list_id: 2,
+            },
+            Opcode::PushStaticView { view_id: 3 },
+            Opcode::PushVarViewDirect {
+                base_off: 5,
+                dim_list_id: 1,
+            },
+            Opcode::ViewSubscriptConst {
+                dim_idx: 0,
+                index: 2,
+            },
+            Opcode::ViewSubscriptDynamic { dim_idx: 1 },
+            Opcode::ViewRange {
+                dim_idx: 0,
+                start: 1,
+                end: 5,
+            },
+            Opcode::ViewRangeDynamic { dim_idx: 2 },
+            Opcode::ViewStarRange {
+                dim_idx: 0,
+                subdim_relation_id: 7,
+            },
+            Opcode::ViewWildcard { dim_idx: 1 },
+            Opcode::ViewTranspose {},
+            Opcode::PopView {},
+            Opcode::DupView {},
+        ];
+
+        for op in &opcodes {
+            let sym = symbolize_opcode(op, &rmap).unwrap();
+            let resolved = resolve_opcode(&sym, &layout).unwrap();
+            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_temp_and_subscript_opcodes() {
+        let layout = simple_layout();
+        let rmap = ReverseOffsetMap::from_layout(&layout);
+
+        let opcodes = vec![
+            Opcode::LoadTempConst {
+                temp_id: 0,
+                index: 3,
+            },
+            Opcode::LoadTempDynamic { temp_id: 2 },
+            Opcode::PushSubscriptIndex { bounds: 4 },
+            Opcode::LoadSubscript { off: 5 },
+            Opcode::AssignNext { off: 4 },
+        ];
+
+        for op in &opcodes {
+            let sym = symbolize_opcode(op, &rmap).unwrap();
+            let resolved = resolve_opcode(&sym, &layout).unwrap();
+            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_iteration_opcodes() {
+        let layout = simple_layout();
+        let rmap = ReverseOffsetMap::from_layout(&layout);
+
+        let opcodes = vec![
+            Opcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: true,
+            },
+            Opcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: false,
+            },
+            Opcode::LoadIterElement {},
+            Opcode::LoadIterTempElement { temp_id: 1 },
+            Opcode::LoadIterViewTop {},
+            Opcode::LoadIterViewAt { offset: 2 },
+            Opcode::StoreIterElement {},
+            Opcode::NextIterOrJump { jump_back: -5 },
+            Opcode::EndIter {},
+        ];
+
+        for op in &opcodes {
+            let sym = symbolize_opcode(op, &rmap).unwrap();
+            let resolved = resolve_opcode(&sym, &layout).unwrap();
+            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_broadcast_and_reduction_opcodes() {
+        let layout = simple_layout();
+        let rmap = ReverseOffsetMap::from_layout(&layout);
+
+        let opcodes = vec![
+            Opcode::ArraySum {},
+            Opcode::ArrayMax {},
+            Opcode::ArrayMin {},
+            Opcode::ArrayMean {},
+            Opcode::ArrayStddev {},
+            Opcode::ArraySize {},
+            Opcode::BeginBroadcastIter {
+                n_sources: 2,
+                dest_temp_id: 0,
+            },
+            Opcode::LoadBroadcastElement { source_idx: 0 },
+            Opcode::LoadBroadcastElement { source_idx: 1 },
+            Opcode::StoreBroadcastElement {},
+            Opcode::NextBroadcastOrJump { jump_back: -4 },
+            Opcode::EndBroadcastIter {},
+        ];
+
+        for op in &opcodes {
+            let sym = symbolize_opcode(op, &rmap).unwrap();
+            let resolved = resolve_opcode(&sym, &layout).unwrap();
+            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+        }
+    }
+
+    // ====================================================================
+    // Error path coverage
+    // ====================================================================
+
+    #[test]
+    fn test_symbolize_opcode_out_of_range_offset() {
+        let mut entries = HashMap::new();
+        entries.insert("a".to_string(), LayoutEntry { offset: 0, size: 1 });
+        let layout = VariableLayout::new(entries, 1);
+        let rmap = ReverseOffsetMap::from_layout(&layout);
+
+        let op = Opcode::LoadVar { off: 50 };
+        let err = symbolize_opcode(&op, &rmap).unwrap_err();
+        assert!(err.contains("out of range"));
+    }
+
+    #[test]
+    fn test_resolve_static_view_missing_variable() {
+        let layout = simple_layout();
+        let sym_view = SymbolicStaticView {
+            base: SymStaticViewBase::Var(SymVarRef {
+                name: "nonexistent".to_string(),
+                element_offset: 0,
+            }),
+            dims: SmallVec::from_slice(&[3]),
+            strides: SmallVec::from_slice(&[1]),
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: SmallVec::from_slice(&[0]),
+        };
+
+        let err = resolve_static_view(&sym_view, &layout).unwrap_err();
+        assert!(err.contains("not found in layout"));
+    }
+
+    #[test]
+    fn test_resolve_module_decl_missing_variable() {
+        let layout = simple_layout();
+        let sym_decl = SymbolicModuleDecl {
+            model_name: Ident::new("sub"),
+            input_set: BTreeSet::new(),
+            var: SymVarRef {
+                name: "nonexistent".to_string(),
+                element_offset: 0,
+            },
+        };
+
+        let err = resolve_module_decl(&sym_decl, &layout).unwrap_err();
+        assert!(err.contains("not found in layout"));
+    }
+
+    // ====================================================================
+    // Integration: module with submodules
+    // ====================================================================
+
+    #[test]
+    fn test_roundtrip_module_with_submodel() {
+        let dm_project = x_project(
+            default_sim_specs(),
+            &[
+                x_model(
+                    "main",
+                    vec![
+                        x_aux("input_val", "42", None),
+                        x_module("inner", &[("input_val", "x")], None),
+                    ],
+                ),
+                x_model(
+                    "inner",
+                    vec![x_aux("x", "0", None), x_aux("y", "x * 2", None)],
+                ),
+            ],
+        );
+        compile_and_roundtrip(&dm_project, "main");
+    }
+
+    // ====================================================================
+    // VariableLayout::from_offset_map coverage
+    // ====================================================================
+
+    #[test]
+    fn test_layout_from_offset_map() {
+        let mut offsets: HashMap<Ident<Canonical>, (usize, usize)> = HashMap::new();
+        offsets.insert(Ident::new("alpha"), (0, 1));
+        offsets.insert(Ident::new("beta"), (1, 3));
+
+        let layout = VariableLayout::from_offset_map(&offsets, 4);
+        assert_eq!(layout.n_slots, 4);
+
+        let alpha = layout.get("alpha").unwrap();
+        assert_eq!(alpha.offset, 0);
+        assert_eq!(alpha.size, 1);
+
+        let beta = layout.get("beta").unwrap();
+        assert_eq!(beta.offset, 1);
+        assert_eq!(beta.size, 3);
+
+        assert!(layout.get("gamma").is_none());
     }
 }

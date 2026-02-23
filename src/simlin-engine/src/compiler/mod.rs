@@ -130,6 +130,357 @@ fn test_fold_flows() {
     assert!(result.is_err(), "Expected error for non-existent flow");
 }
 
+#[test]
+fn test_build_stock_update_expr_inflows_only() {
+    let inputs = &BTreeSet::new();
+    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
+        HashMap::new();
+    let stock_var = Variable::Stock {
+        ident: Ident::new("stock"),
+        init_ast: None,
+        eqn: None,
+        units: None,
+        inflows: vec![Ident::new("inflow")],
+        outflows: vec![],
+        non_negative: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let dummy_var = Variable::Var {
+        ident: Ident::new(""),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    metadata.insert(
+        Ident::new("stock"),
+        VariableMetadata {
+            offset: 0,
+            size: 1,
+            var: &dummy_var,
+        },
+    );
+    metadata.insert(
+        Ident::new("inflow"),
+        VariableMetadata {
+            offset: 1,
+            size: 1,
+            var: &dummy_var,
+        },
+    );
+    let mut metadata2 = HashMap::new();
+    let main_ident = Ident::new("main");
+    let test_ident = Ident::new("test");
+    metadata2.insert(main_ident.clone(), metadata);
+    let dims_ctx = DimensionsContext::default();
+    let ctx = Context::new(
+        ContextCore {
+            dimensions: &[],
+            dimensions_ctx: &dims_ctx,
+            model_name: &main_ident,
+            metadata: &metadata2,
+            module_models: &module_models,
+            inputs,
+        },
+        &test_ident,
+        false,
+    );
+
+    let result = ctx.build_stock_update_expr(0, &stock_var).unwrap();
+
+    // stock + (inflow - 0.0) * dt
+    // outflows should be Const(0.0) since there are none
+    if let Expr::Op2(crate::ast::BinaryOp::Add, stock_box, dt_update_box, _) = &result {
+        assert!(matches!(stock_box.as_ref(), Expr::Var(0, _)));
+        if let Expr::Op2(crate::ast::BinaryOp::Mul, sub_box, dt_box, _) = dt_update_box.as_ref() {
+            assert!(matches!(dt_box.as_ref(), Expr::Dt(_)));
+            if let Expr::Op2(crate::ast::BinaryOp::Sub, in_box, out_box, _) = sub_box.as_ref() {
+                assert!(matches!(in_box.as_ref(), Expr::Var(1, _)));
+                assert!(
+                    matches!(out_box.as_ref(), Expr::Const(v, _) if *v == 0.0),
+                    "outflows should be Const(0.0) when empty"
+                );
+            } else {
+                panic!("Expected Sub expression in stock update");
+            }
+        } else {
+            panic!("Expected Mul expression in stock update");
+        }
+    } else {
+        panic!("Expected Add expression for stock update");
+    }
+}
+
+#[test]
+fn test_build_stock_update_expr_outflows_only() {
+    let inputs = &BTreeSet::new();
+    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
+        HashMap::new();
+    let stock_var = Variable::Stock {
+        ident: Ident::new("stock"),
+        init_ast: None,
+        eqn: None,
+        units: None,
+        inflows: vec![],
+        outflows: vec![Ident::new("outflow")],
+        non_negative: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let dummy_var = Variable::Var {
+        ident: Ident::new(""),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    metadata.insert(
+        Ident::new("stock"),
+        VariableMetadata {
+            offset: 0,
+            size: 1,
+            var: &dummy_var,
+        },
+    );
+    metadata.insert(
+        Ident::new("outflow"),
+        VariableMetadata {
+            offset: 1,
+            size: 1,
+            var: &dummy_var,
+        },
+    );
+    let mut metadata2 = HashMap::new();
+    let main_ident = Ident::new("main");
+    let test_ident = Ident::new("test");
+    metadata2.insert(main_ident.clone(), metadata);
+    let dims_ctx = DimensionsContext::default();
+    let ctx = Context::new(
+        ContextCore {
+            dimensions: &[],
+            dimensions_ctx: &dims_ctx,
+            model_name: &main_ident,
+            metadata: &metadata2,
+            module_models: &module_models,
+            inputs,
+        },
+        &test_ident,
+        false,
+    );
+
+    let result = ctx.build_stock_update_expr(0, &stock_var).unwrap();
+
+    // stock + (0.0 - outflow) * dt
+    // inflows should be Const(0.0) since there are none
+    if let Expr::Op2(crate::ast::BinaryOp::Add, stock_box, dt_update_box, _) = &result {
+        assert!(matches!(stock_box.as_ref(), Expr::Var(0, _)));
+        if let Expr::Op2(crate::ast::BinaryOp::Mul, sub_box, _, _) = dt_update_box.as_ref() {
+            if let Expr::Op2(crate::ast::BinaryOp::Sub, in_box, out_box, _) = sub_box.as_ref() {
+                assert!(
+                    matches!(in_box.as_ref(), Expr::Const(v, _) if *v == 0.0),
+                    "inflows should be Const(0.0) when empty"
+                );
+                assert!(matches!(out_box.as_ref(), Expr::Var(1, _)));
+            } else {
+                panic!("Expected Sub expression in stock update");
+            }
+        } else {
+            panic!("Expected Mul expression in stock update");
+        }
+    } else {
+        panic!("Expected Add expression for stock update");
+    }
+}
+
+#[test]
+fn test_build_stock_update_expr_no_flows() {
+    let inputs = &BTreeSet::new();
+    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
+        HashMap::new();
+    let stock_var = Variable::Stock {
+        ident: Ident::new("stock"),
+        init_ast: None,
+        eqn: None,
+        units: None,
+        inflows: vec![],
+        outflows: vec![],
+        non_negative: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let dummy_var = Variable::Var {
+        ident: Ident::new(""),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    metadata.insert(
+        Ident::new("stock"),
+        VariableMetadata {
+            offset: 0,
+            size: 1,
+            var: &dummy_var,
+        },
+    );
+    let mut metadata2 = HashMap::new();
+    let main_ident = Ident::new("main");
+    let test_ident = Ident::new("test");
+    metadata2.insert(main_ident.clone(), metadata);
+    let dims_ctx = DimensionsContext::default();
+    let ctx = Context::new(
+        ContextCore {
+            dimensions: &[],
+            dimensions_ctx: &dims_ctx,
+            model_name: &main_ident,
+            metadata: &metadata2,
+            module_models: &module_models,
+            inputs,
+        },
+        &test_ident,
+        false,
+    );
+
+    let result = ctx.build_stock_update_expr(0, &stock_var).unwrap();
+
+    // stock + (0.0 - 0.0) * dt
+    if let Expr::Op2(crate::ast::BinaryOp::Add, _, dt_update_box, _) = &result {
+        if let Expr::Op2(crate::ast::BinaryOp::Mul, sub_box, _, _) = dt_update_box.as_ref() {
+            if let Expr::Op2(crate::ast::BinaryOp::Sub, in_box, out_box, _) = sub_box.as_ref() {
+                assert!(
+                    matches!(in_box.as_ref(), Expr::Const(v, _) if *v == 0.0),
+                    "inflows should be Const(0.0)"
+                );
+                assert!(
+                    matches!(out_box.as_ref(), Expr::Const(v, _) if *v == 0.0),
+                    "outflows should be Const(0.0)"
+                );
+            } else {
+                panic!("Expected Sub expression");
+            }
+        } else {
+            panic!("Expected Mul expression");
+        }
+    } else {
+        panic!("Expected Add expression");
+    }
+}
+
+#[test]
+fn test_build_stock_update_expr_multiple_flows() {
+    let inputs = &BTreeSet::new();
+    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
+        HashMap::new();
+    let stock_var = Variable::Stock {
+        ident: Ident::new("stock"),
+        init_ast: None,
+        eqn: None,
+        units: None,
+        inflows: vec![Ident::new("in1"), Ident::new("in2")],
+        outflows: vec![Ident::new("out1"), Ident::new("out2")],
+        non_negative: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let dummy_var = Variable::Var {
+        ident: Ident::new(""),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    for (name, off) in [
+        ("stock", 0),
+        ("in1", 1),
+        ("in2", 2),
+        ("out1", 3),
+        ("out2", 4),
+    ] {
+        metadata.insert(
+            Ident::new(name),
+            VariableMetadata {
+                offset: off,
+                size: 1,
+                var: &dummy_var,
+            },
+        );
+    }
+    let mut metadata2 = HashMap::new();
+    let main_ident = Ident::new("main");
+    let test_ident = Ident::new("test");
+    metadata2.insert(main_ident.clone(), metadata);
+    let dims_ctx = DimensionsContext::default();
+    let ctx = Context::new(
+        ContextCore {
+            dimensions: &[],
+            dimensions_ctx: &dims_ctx,
+            model_name: &main_ident,
+            metadata: &metadata2,
+            module_models: &module_models,
+            inputs,
+        },
+        &test_ident,
+        false,
+    );
+
+    let result = ctx.build_stock_update_expr(0, &stock_var).unwrap();
+
+    // stock + ((in1 + in2) - (out1 + out2)) * dt
+    if let Expr::Op2(crate::ast::BinaryOp::Add, stock_box, dt_update_box, _) = &result {
+        assert!(matches!(stock_box.as_ref(), Expr::Var(0, _)));
+        if let Expr::Op2(crate::ast::BinaryOp::Mul, sub_box, dt_box, _) = dt_update_box.as_ref() {
+            assert!(matches!(dt_box.as_ref(), Expr::Dt(_)));
+            if let Expr::Op2(crate::ast::BinaryOp::Sub, in_sum, out_sum, _) = sub_box.as_ref() {
+                // in1 + in2
+                assert!(matches!(
+                    in_sum.as_ref(),
+                    Expr::Op2(crate::ast::BinaryOp::Add, _, _, _)
+                ));
+                // out1 + out2
+                assert!(matches!(
+                    out_sum.as_ref(),
+                    Expr::Op2(crate::ast::BinaryOp::Add, _, _, _)
+                ));
+            } else {
+                panic!("Expected Sub expression");
+            }
+        } else {
+            panic!("Expected Mul expression");
+        }
+    } else {
+        panic!("Expected Add expression");
+    }
+}
+
 impl Var {
     pub(crate) fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         // if this variable is overriden by a module input, our expression is easy

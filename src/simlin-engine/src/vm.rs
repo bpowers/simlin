@@ -2495,6 +2495,61 @@ mod is_truthy_and_eval_op2_tests {
         assert_eq!(1.0, eval_op2(Op2::Or, 0.0, 1.0));
         assert_eq!(0.0, eval_op2(Op2::Or, 0.0, 0.0));
     }
+
+    #[test]
+    fn is_truthy_negative_zero_is_false() {
+        assert!(!is_truthy(-0.0));
+    }
+
+    #[test]
+    fn is_truthy_epsilon_is_falsy() {
+        // f64::EPSILON is within ULP tolerance of 0.0
+        assert!(!is_truthy(f64::EPSILON));
+    }
+
+    #[test]
+    fn is_truthy_small_but_not_zero() {
+        assert!(is_truthy(0.001));
+        assert!(is_truthy(-0.001));
+    }
+
+    #[test]
+    fn is_truthy_infinity() {
+        assert!(is_truthy(f64::INFINITY));
+        assert!(is_truthy(f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn eval_op2_mod_negative() {
+        // rem_euclid always returns a non-negative result
+        assert_eq!(2.0, eval_op2(Op2::Mod, -7.0, 3.0));
+        assert_eq!(1.0, eval_op2(Op2::Mod, -2.0, 3.0));
+    }
+
+    #[test]
+    fn eval_op2_eq_approx() {
+        // Values very close together should be considered equal by approx_eq
+        assert_eq!(1.0, eval_op2(Op2::Eq, 0.0, -0.0));
+        // Values sufficiently far apart should not be equal
+        assert_eq!(0.0, eval_op2(Op2::Eq, 1.0, 1.1));
+    }
+
+    #[test]
+    fn eval_op2_logical_with_nonunit_truthy() {
+        // Non-0/1 truthy values should still work correctly
+        assert_eq!(1.0, eval_op2(Op2::And, 5.0, -3.0));
+        assert_eq!(0.0, eval_op2(Op2::And, 5.0, 0.0));
+        assert_eq!(1.0, eval_op2(Op2::Or, 0.0, 42.0));
+        assert_eq!(0.0, eval_op2(Op2::Or, 0.0, -0.0));
+    }
+
+    #[test]
+    fn eval_op2_comparison_equal_values() {
+        assert_eq!(0.0, eval_op2(Op2::Gt, 3.0, 3.0));
+        assert_eq!(0.0, eval_op2(Op2::Lt, 3.0, 3.0));
+        assert_eq!(1.0, eval_op2(Op2::Gte, 3.0, 3.0));
+        assert_eq!(1.0, eval_op2(Op2::Lte, 3.0, 3.0));
+    }
 }
 
 #[cfg(test)]

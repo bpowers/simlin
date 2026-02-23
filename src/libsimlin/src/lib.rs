@@ -276,6 +276,8 @@ pub struct SimlinErrorDetail {
 pub struct SimlinProject {
     pub(crate) project: Mutex<engine::Project>,
     pub(crate) db: Mutex<engine::db::SimlinDb>,
+    /// Salsa input handles from the last sync, enabling incremental updates.
+    pub(crate) sync_state: Mutex<Option<engine::db::PersistentSyncState>>,
     /// Cached compilation from the last successful `apply_patch` validation.
     /// Consumed by `sim_new` to avoid recompiling when nothing has changed.
     pub(crate) cached_compilation: Mutex<Option<engine::CompiledSimulation>>,
@@ -313,10 +315,12 @@ pub struct SimlinSim {
 
 // ── shared helpers (pub(crate)) ────────────────────────────────────────
 
-pub(crate) fn new_synced_db(project: &engine::Project) -> engine::db::SimlinDb {
-    let db = engine::db::SimlinDb::default();
-    engine::db::sync_from_datamodel(&db, &project.datamodel);
-    db
+pub(crate) fn new_synced_db(
+    project: &engine::Project,
+) -> (engine::db::SimlinDb, engine::db::PersistentSyncState) {
+    let mut db = engine::db::SimlinDb::default();
+    let state = engine::db::sync_from_datamodel_incremental(&mut db, &project.datamodel, None);
+    (db, state)
 }
 
 pub(crate) fn clear_out_error(out_error: *mut *mut SimlinError) {

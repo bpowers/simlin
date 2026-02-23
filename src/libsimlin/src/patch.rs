@@ -493,10 +493,18 @@ pub(crate) unsafe fn apply_project_patch_internal(
         let mut project_locked = project_ref.project.lock().unwrap();
         *project_locked = staged_project;
 
-        // Resync the salsa database with updated project state
-        let db_locked = project_ref.db.lock().unwrap();
-        engine::db::sync_from_datamodel(&db_locked, &project_locked.datamodel);
-        drop(db_locked);
+        // Incrementally sync the persistent salsa DB, reusing existing
+        // input handles so that downstream tracked queries for unchanged
+        // variables stay cached.
+        let mut db = project_ref.db.lock().unwrap();
+        let prev_state = project_ref.sync_state.lock().unwrap().take();
+        let new_state = engine::db::sync_from_datamodel_incremental(
+            &mut db,
+            &project_locked.datamodel,
+            prev_state.as_ref(),
+        );
+        drop(db);
+        *project_ref.sync_state.lock().unwrap() = Some(new_state);
 
         // Cache successful compilation for reuse by sim_new
         *project_ref.cached_compilation.lock().unwrap() = compiled;

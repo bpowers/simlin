@@ -2,6 +2,182 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// ── format_diagnostic tests ─────────────────────────────────────────────
+
+#[test]
+fn test_format_diagnostic_equation_error() {
+    use crate::errors::{FormattedErrorKind, format_diagnostic};
+    use engine::common::{EquationError, ErrorCode};
+    use engine::db::{Diagnostic, DiagnosticError};
+
+    let diag = Diagnostic {
+        model: "test_model".to_string(),
+        variable: Some("bad_var".to_string()),
+        error: DiagnosticError::Equation(EquationError {
+            start: 4,
+            end: 9,
+            code: ErrorCode::UnknownDependency,
+        }),
+    };
+
+    let formatted = format_diagnostic(&diag);
+    assert_eq!(formatted.code, ErrorCode::UnknownDependency);
+    assert_eq!(formatted.kind, FormattedErrorKind::Variable);
+    assert_eq!(formatted.model_name, Some("test_model".to_string()));
+    assert_eq!(formatted.variable_name, Some("bad_var".to_string()));
+    assert_eq!(formatted.start_offset, 4);
+    assert_eq!(formatted.end_offset, 9);
+    assert!(formatted.unit_error_kind.is_none());
+    let msg = formatted.message.expect("should have message");
+    assert!(msg.contains("test_model"), "message should include model: {msg}");
+    assert!(msg.contains("bad_var"), "message should include var: {msg}");
+    assert!(
+        msg.contains("unknown_dependency"),
+        "message should include error code: {msg}"
+    );
+}
+
+#[test]
+fn test_format_diagnostic_equation_error_no_variable() {
+    use crate::errors::{FormattedErrorKind, format_diagnostic};
+    use engine::common::{EquationError, ErrorCode};
+    use engine::db::{Diagnostic, DiagnosticError};
+
+    let diag = Diagnostic {
+        model: "m".to_string(),
+        variable: None,
+        error: DiagnosticError::Equation(EquationError {
+            start: 0,
+            end: 5,
+            code: ErrorCode::EmptyEquation,
+        }),
+    };
+
+    let formatted = format_diagnostic(&diag);
+    assert_eq!(formatted.kind, FormattedErrorKind::Variable);
+    assert_eq!(formatted.variable_name, None);
+    let msg = formatted.message.expect("should have message");
+    assert!(
+        msg.contains("<unknown>"),
+        "missing variable should show <unknown>: {msg}"
+    );
+}
+
+#[test]
+fn test_format_diagnostic_model_error_non_unit() {
+    use crate::errors::{FormattedErrorKind, format_diagnostic};
+    use engine::common::{Error, ErrorCode, ErrorKind};
+    use engine::db::{Diagnostic, DiagnosticError};
+
+    let diag = Diagnostic {
+        model: "broken_model".to_string(),
+        variable: None,
+        error: DiagnosticError::Model(Error {
+            kind: ErrorKind::Model,
+            code: ErrorCode::CircularDependency,
+            details: Some("a -> b -> a".to_string()),
+        }),
+    };
+
+    let formatted = format_diagnostic(&diag);
+    assert_eq!(formatted.code, ErrorCode::CircularDependency);
+    assert_eq!(formatted.kind, FormattedErrorKind::Model);
+    assert!(formatted.unit_error_kind.is_none());
+    assert_eq!(formatted.model_name, Some("broken_model".to_string()));
+    assert_eq!(formatted.start_offset, 0);
+    assert_eq!(formatted.end_offset, 0);
+}
+
+#[test]
+fn test_format_diagnostic_model_error_unit_mismatch() {
+    use crate::errors::{FormattedErrorKind, UnitErrorKind, format_diagnostic};
+    use engine::common::{Error, ErrorCode, ErrorKind};
+    use engine::db::{Diagnostic, DiagnosticError};
+
+    let diag = Diagnostic {
+        model: "unit_model".to_string(),
+        variable: Some("x".to_string()),
+        error: DiagnosticError::Model(Error {
+            kind: ErrorKind::Model,
+            code: ErrorCode::UnitMismatch,
+            details: None,
+        }),
+    };
+
+    let formatted = format_diagnostic(&diag);
+    assert_eq!(formatted.code, ErrorCode::UnitMismatch);
+    assert_eq!(formatted.kind, FormattedErrorKind::Units);
+    assert!(
+        matches!(formatted.unit_error_kind, Some(UnitErrorKind::Inference)),
+        "expected Inference unit error kind"
+    );
+    assert_eq!(formatted.variable_name, Some("x".to_string()));
+}
+
+#[test]
+fn test_format_diagnostic_unit_error() {
+    use crate::errors::{FormattedErrorKind, UnitErrorKind, format_diagnostic};
+    use engine::common::{ErrorCode, UnitError};
+    use engine::db::{Diagnostic, DiagnosticError};
+
+    let diag = Diagnostic {
+        model: "unit_model".to_string(),
+        variable: Some("measured".to_string()),
+        error: DiagnosticError::Unit(UnitError::ConsistencyError(
+            ErrorCode::UnitMismatch,
+            engine::builtins::Loc::new(2, 8),
+            Some("kg vs m".to_string()),
+        )),
+    };
+
+    let formatted = format_diagnostic(&diag);
+    assert_eq!(formatted.code, ErrorCode::UnitMismatch);
+    assert_eq!(formatted.kind, FormattedErrorKind::Units);
+    assert!(
+        matches!(formatted.unit_error_kind, Some(UnitErrorKind::Consistency)),
+        "expected Consistency unit error kind"
+    );
+    assert_eq!(formatted.start_offset, 2);
+    assert_eq!(formatted.end_offset, 8);
+    assert_eq!(formatted.model_name, Some("unit_model".to_string()));
+    assert_eq!(formatted.variable_name, Some("measured".to_string()));
+    let msg = formatted.message.expect("should have message");
+    assert!(msg.contains("kg vs m"), "should contain details: {msg}");
+}
+
+#[test]
+fn test_format_diagnostic_unit_definition_error() {
+    use crate::errors::{FormattedErrorKind, UnitErrorKind, format_diagnostic};
+    use engine::common::{EquationError, ErrorCode, UnitError};
+    use engine::db::{Diagnostic, DiagnosticError};
+
+    let diag = Diagnostic {
+        model: "unit_def_model".to_string(),
+        variable: Some("y".to_string()),
+        error: DiagnosticError::Unit(UnitError::DefinitionError(
+            EquationError {
+                start: 0,
+                end: 3,
+                code: ErrorCode::UnitDefinitionErrors,
+            },
+            Some("parse error".to_string()),
+        )),
+    };
+
+    let formatted = format_diagnostic(&diag);
+    assert_eq!(formatted.code, ErrorCode::UnitDefinitionErrors);
+    assert_eq!(formatted.kind, FormattedErrorKind::Units);
+    assert!(
+        matches!(formatted.unit_error_kind, Some(UnitErrorKind::Definition)),
+        "expected Definition unit error kind"
+    );
+    let msg = formatted.message.expect("should have message");
+    assert!(
+        msg.contains("parse error"),
+        "should contain details: {msg}"
+    );
+}
+
 #[test]
 fn test_project_json_roundtrip_sdai() {
     let original_datamodel = TestProject::new("sdai_roundtrip")

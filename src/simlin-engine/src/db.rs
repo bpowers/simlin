@@ -5,6 +5,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use salsa::Accumulator;
+use salsa::plumbing::AsId;
 
 use crate::canonicalize;
 use crate::common::{EquationError, Error, UnitError};
@@ -1751,6 +1752,67 @@ pub struct SyncedVariable<'db> {
     pub source: SourceVariable,
 }
 
+// ── Persistent sync state ──────────────────────────────────────────────
+//
+// Lifetime-erased versions of SyncResult handles, safe to store across
+// salsa revisions within the same database instance.
+
+/// Stores salsa input handles between sync calls so that
+/// `sync_from_datamodel_incremental` can reuse them instead of
+/// creating fresh inputs (which would invalidate all cached queries).
+pub struct PersistentSyncState {
+    pub project: SourceProject,
+    pub models: HashMap<String, PersistentModelState>,
+}
+
+pub struct PersistentModelState {
+    /// Lifetime-erased `ModelId<'db>` (interned, carries `'db`)
+    pub model_interned_id: salsa::Id,
+    pub source_model: SourceModel,
+    pub variables: HashMap<String, PersistentVariableState>,
+}
+
+pub struct PersistentVariableState {
+    /// Lifetime-erased `VariableId<'db>` (interned, carries `'db`)
+    pub var_interned_id: salsa::Id,
+    pub source_var: SourceVariable,
+}
+
+impl PersistentSyncState {
+    fn from_sync_result(sync: &SyncResult<'_>) -> Self {
+        PersistentSyncState {
+            project: sync.project,
+            models: sync
+                .models
+                .iter()
+                .map(|(name, sm)| {
+                    let variables = sm
+                        .variables
+                        .iter()
+                        .map(|(vname, sv)| {
+                            (
+                                vname.clone(),
+                                PersistentVariableState {
+                                    var_interned_id: sv.id.as_id(),
+                                    source_var: sv.source,
+                                },
+                            )
+                        })
+                        .collect();
+                    (
+                        name.clone(),
+                        PersistentModelState {
+                            model_interned_id: sm.id.as_id(),
+                            source_model: sm.source,
+                            variables,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 // ── Sync function ──────────────────────────────────────────────────────
 
 /// Populate salsa inputs from a `datamodel::Project`.
@@ -1894,6 +1956,271 @@ fn source_variable_from_datamodel(db: &SimlinDb, var: &datamodel::Variable) -> S
         can_be_module_input,
         compat,
     )
+}
+
+// ── Incremental sync ───────────────────────────────────────────────────
+
+/// Update a single `SourceVariable`'s fields via salsa setters, only
+/// touching fields whose values actually changed.
+fn update_source_variable(
+    db: &mut SimlinDb,
+    source_var: SourceVariable,
+    dm_var: &datamodel::Variable,
+) {
+    use salsa::Setter;
+
+    let new_equation = dm_var
+        .get_equation()
+        .map(SourceEquation::from)
+        .unwrap_or_else(|| SourceEquation::Scalar(String::new()));
+    if *source_var.equation(&*db) != new_equation {
+        source_var.set_equation(db).to(new_equation);
+    }
+
+    let new_kind = SourceVariableKind::from_datamodel_variable(dm_var);
+    if source_var.kind(&*db) != new_kind {
+        source_var.set_kind(db).to(new_kind);
+    }
+
+    let new_units = dm_var.get_units().cloned();
+    if *source_var.units(&*db) != new_units {
+        source_var.set_units(db).to(new_units);
+    }
+
+    let new_gf = match dm_var {
+        datamodel::Variable::Flow(f) => f.gf.as_ref().map(SourceGraphicalFunction::from),
+        datamodel::Variable::Aux(a) => a.gf.as_ref().map(SourceGraphicalFunction::from),
+        _ => None,
+    };
+    if *source_var.gf(&*db) != new_gf {
+        source_var.set_gf(db).to(new_gf);
+    }
+
+    let new_inflows = match dm_var {
+        datamodel::Variable::Stock(s) => s.inflows.clone(),
+        _ => Vec::new(),
+    };
+    if *source_var.inflows(&*db) != new_inflows {
+        source_var.set_inflows(db).to(new_inflows);
+    }
+
+    let new_outflows = match dm_var {
+        datamodel::Variable::Stock(s) => s.outflows.clone(),
+        _ => Vec::new(),
+    };
+    if *source_var.outflows(&*db) != new_outflows {
+        source_var.set_outflows(db).to(new_outflows);
+    }
+
+    let (new_module_refs, new_model_name) = match dm_var {
+        datamodel::Variable::Module(m) => (
+            m.references
+                .iter()
+                .map(SourceModuleReference::from)
+                .collect(),
+            m.model_name.clone(),
+        ),
+        _ => (Vec::new(), String::new()),
+    };
+    if *source_var.module_refs(&*db) != new_module_refs {
+        source_var.set_module_refs(db).to(new_module_refs);
+    }
+    if *source_var.model_name(&*db) != new_model_name {
+        source_var.set_model_name(db).to(new_model_name);
+    }
+
+    let new_non_negative = match dm_var {
+        datamodel::Variable::Stock(s) => s.non_negative,
+        datamodel::Variable::Flow(f) => f.non_negative,
+        _ => false,
+    };
+    if source_var.non_negative(&*db) != new_non_negative {
+        source_var.set_non_negative(db).to(new_non_negative);
+    }
+
+    let new_can_be_module_input = dm_var.can_be_module_input();
+    if source_var.can_be_module_input(&*db) != new_can_be_module_input {
+        source_var
+            .set_can_be_module_input(db)
+            .to(new_can_be_module_input);
+    }
+
+    let new_compat = match dm_var {
+        datamodel::Variable::Stock(s) => s.compat.clone(),
+        datamodel::Variable::Flow(f) => f.compat.clone(),
+        datamodel::Variable::Aux(a) => a.compat.clone(),
+        datamodel::Variable::Module(_) => datamodel::Compat::default(),
+    };
+    if *source_var.compat(&*db) != new_compat {
+        source_var.set_compat(db).to(new_compat);
+    }
+}
+
+/// Incrementally sync a `datamodel::Project` into an existing salsa
+/// database, reusing previous input handles to preserve cached queries.
+///
+/// When `prev_state` is `None`, behaves like a fresh sync (creating all
+/// inputs from scratch). When `Some`, reconstitutes existing handles
+/// and uses salsa setters to update only changed fields, so that
+/// downstream tracked functions for unchanged variables stay cached.
+pub fn sync_from_datamodel_incremental(
+    db: &mut SimlinDb,
+    project: &datamodel::Project,
+    prev_state: Option<&PersistentSyncState>,
+) -> PersistentSyncState {
+    use salsa::Setter;
+
+    let prev = match prev_state {
+        None => {
+            let sync = sync_from_datamodel(db, project);
+            return PersistentSyncState::from_sync_result(&sync);
+        }
+        Some(prev) => prev,
+    };
+
+    let source_project = prev.project;
+
+    // Update SourceProject fields
+    let new_name = project.name.clone();
+    if *source_project.name(&*db) != new_name {
+        source_project.set_name(db).to(new_name);
+    }
+
+    let new_sim_specs = SourceSimSpecs::from(&project.sim_specs);
+    if *source_project.sim_specs(&*db) != new_sim_specs {
+        source_project.set_sim_specs(db).to(new_sim_specs);
+    }
+
+    let new_dims: Vec<SourceDimension> = project
+        .dimensions
+        .iter()
+        .map(SourceDimension::from)
+        .collect();
+    if *source_project.dimensions(&*db) != new_dims {
+        source_project.set_dimensions(db).to(new_dims);
+    }
+
+    let new_units: Vec<SourceUnit> = project.units.iter().map(SourceUnit::from).collect();
+    if *source_project.units(&*db) != new_units {
+        source_project.set_units(db).to(new_units);
+    }
+
+    let new_model_names: Vec<String> = project.models.iter().map(|m| m.name.clone()).collect();
+    if *source_project.model_names(&*db) != new_model_names {
+        source_project.set_model_names(db).to(new_model_names);
+    }
+
+    // Process models
+    let mut new_models = HashMap::new();
+
+    for dm_model in &project.models {
+        let canonical_model_name = canonicalize(&dm_model.name).into_owned();
+
+        let variable_names: Vec<String> = dm_model
+            .variables
+            .iter()
+            .map(|v| v.get_ident().to_string())
+            .collect();
+
+        if let Some(prev_model) = prev.models.get(&canonical_model_name) {
+            // Existing model: update via setters
+            let source_model = prev_model.source_model;
+
+            if *source_model.name(&*db) != dm_model.name {
+                source_model.set_name(db).to(dm_model.name.clone());
+            }
+
+            // Process variables
+            let mut new_vars = HashMap::new();
+            let mut source_var_map = HashMap::new();
+
+            for dm_var in &dm_model.variables {
+                let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
+
+                if let Some(prev_var) = prev_model.variables.get(&canonical_var_name) {
+                    let source_var = prev_var.source_var;
+                    update_source_variable(db, source_var, dm_var);
+                    source_var_map.insert(canonical_var_name.clone(), source_var);
+
+                    new_vars.insert(
+                        canonical_var_name,
+                        PersistentVariableState {
+                            var_interned_id: prev_var.var_interned_id,
+                            source_var,
+                        },
+                    );
+                } else {
+                    // New variable
+                    let var_id = VariableId::new(&*db, canonical_var_name.clone());
+                    let source_var = source_variable_from_datamodel(&*db, dm_var);
+                    source_var_map.insert(canonical_var_name.clone(), source_var);
+
+                    new_vars.insert(
+                        canonical_var_name,
+                        PersistentVariableState {
+                            var_interned_id: var_id.as_id(),
+                            source_var,
+                        },
+                    );
+                }
+            }
+
+            // Update model's variable lists if they changed
+            if *source_model.variable_names(&*db) != variable_names {
+                source_model.set_variable_names(db).to(variable_names);
+            }
+            if *source_model.variables(&*db) != source_var_map {
+                source_model.set_variables(db).to(source_var_map);
+            }
+
+            new_models.insert(
+                canonical_model_name,
+                PersistentModelState {
+                    model_interned_id: prev_model.model_interned_id,
+                    source_model,
+                    variables: new_vars,
+                },
+            );
+        } else {
+            // New model: create fresh
+            let model_id = ModelId::new(&*db, canonical_model_name.clone());
+
+            let mut new_vars = HashMap::new();
+            let mut source_var_map = HashMap::new();
+
+            for dm_var in &dm_model.variables {
+                let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
+                let var_id = VariableId::new(&*db, canonical_var_name.clone());
+                let source_var = source_variable_from_datamodel(&*db, dm_var);
+                source_var_map.insert(canonical_var_name.clone(), source_var);
+
+                new_vars.insert(
+                    canonical_var_name,
+                    PersistentVariableState {
+                        var_interned_id: var_id.as_id(),
+                        source_var,
+                    },
+                );
+            }
+
+            let source_model =
+                SourceModel::new(&*db, dm_model.name.clone(), variable_names, source_var_map);
+
+            new_models.insert(
+                canonical_model_name,
+                PersistentModelState {
+                    model_interned_id: model_id.as_id(),
+                    source_model,
+                    variables: new_vars,
+                },
+            );
+        }
+    }
+
+    PersistentSyncState {
+        project: source_project,
+        models: new_models,
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -3743,5 +4070,278 @@ mod tests {
             diags2.is_empty(),
             "after fixing alpha, no diagnostics expected"
         );
+    }
+
+    // ── Incremental sync tests ────────────────────────────────────────
+
+    #[test]
+    fn test_incremental_sync_fresh_matches_regular_sync() {
+        let db1 = SimlinDb::default();
+        let mut db2 = SimlinDb::default();
+        let project = simple_project();
+
+        let regular = sync_from_datamodel(&db1, &project);
+        let state = sync_from_datamodel_incremental(&mut db2, &project, None);
+
+        assert_eq!(regular.project.name(&db1), state.project.name(&db2));
+        assert_eq!(regular.models.len(), state.models.len());
+        for (name, regular_model) in &regular.models {
+            let persistent_model = &state.models[name];
+            assert_eq!(
+                regular_model.source.name(&db1),
+                persistent_model.source_model.name(&db2)
+            );
+            assert_eq!(
+                regular_model.variables.len(),
+                persistent_model.variables.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_incremental_sync_preserves_cache_for_unchanged_variable() {
+        let mut db = SimlinDb::default();
+        let project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "alpha".to_string(),
+                        equation: datamodel::Equation::Scalar("10".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "beta".to_string(),
+                        equation: datamodel::Equation::Scalar("20".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        // Initial sync
+        let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+
+        // Prime the cache by parsing both variables
+        let alpha_src = state1.models["main"].variables["alpha"].source_var;
+        let beta_src = state1.models["main"].variables["beta"].source_var;
+        let beta_ptr_before = {
+            let _alpha_result = parse_source_variable(&db, alpha_src, state1.project);
+            let beta_result = parse_source_variable(&db, beta_src, state1.project);
+            beta_result as *const ParsedVariableResult
+        };
+
+        // Modify only alpha's equation
+        let mut project2 = project.clone();
+        project2.models[0].variables[0].set_scalar_equation("42");
+
+        // Incremental sync with previous state
+        let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
+
+        // Same SourceProject handle should be reused
+        assert_eq!(
+            state1.project.as_id(),
+            state2.project.as_id(),
+            "SourceProject handle should be stable across incremental syncs"
+        );
+
+        // Beta's SourceVariable handle should be the same
+        let beta_src2 = state2.models["main"].variables["beta"].source_var;
+        assert_eq!(
+            beta_src.as_id(),
+            beta_src2.as_id(),
+            "unchanged variable's handle should be stable"
+        );
+
+        // Beta's parse result should be pointer-equal (cached)
+        let beta_result_after = parse_source_variable(&db, beta_src2, state2.project);
+        let beta_ptr_after = beta_result_after as *const ParsedVariableResult;
+        assert_eq!(
+            beta_ptr_before, beta_ptr_after,
+            "beta's parse result should be cached since it was not modified"
+        );
+
+        // Alpha's parse result should reflect the new equation
+        let alpha_src2 = state2.models["main"].variables["alpha"].source_var;
+        let alpha_result = parse_source_variable(&db, alpha_src2, state2.project);
+        if let Some(crate::ast::Ast::Scalar(crate::ast::Expr0::Const(_, val, _))) =
+            alpha_result.variable.ast()
+        {
+            assert_eq!(*val, 42.0);
+        } else {
+            panic!(
+                "Expected alpha to parse as Const(42.0), got {:?}",
+                alpha_result.variable.ast()
+            );
+        }
+    }
+
+    #[test]
+    fn test_incremental_sync_add_variable() {
+        let mut db = SimlinDb::default();
+        let project = simple_project();
+
+        let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+        assert_eq!(state1.models["main"].variables.len(), 1);
+
+        // Add a new variable
+        let mut project2 = project.clone();
+        project2.models[0]
+            .variables
+            .push(datamodel::Variable::Aux(datamodel::Aux {
+                ident: "growth".to_string(),
+                equation: datamodel::Equation::Scalar("0.1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }));
+
+        let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
+        assert_eq!(state2.models["main"].variables.len(), 2);
+        assert!(state2.models["main"].variables.contains_key("growth"));
+
+        // Original variable's handle should be preserved
+        let pop1 = &state1.models["main"].variables["population"];
+        let pop2 = &state2.models["main"].variables["population"];
+        assert_eq!(
+            pop1.source_var.as_id(),
+            pop2.source_var.as_id(),
+            "existing variable handle should be preserved when adding new variables"
+        );
+    }
+
+    #[test]
+    fn test_incremental_sync_remove_variable() {
+        let mut db = SimlinDb::default();
+        let mut project = simple_project();
+        project.models[0]
+            .variables
+            .push(datamodel::Variable::Aux(datamodel::Aux {
+                ident: "extra".to_string(),
+                equation: datamodel::Equation::Scalar("99".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }));
+
+        let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+        assert_eq!(state1.models["main"].variables.len(), 2);
+
+        // Remove the "extra" variable
+        project.models[0].variables.pop();
+        let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
+        assert_eq!(state2.models["main"].variables.len(), 1);
+        assert!(!state2.models["main"].variables.contains_key("extra"));
+        assert!(state2.models["main"].variables.contains_key("population"));
+    }
+
+    #[test]
+    fn test_incremental_sync_persistent_state_roundtrip() {
+        let mut db = SimlinDb::default();
+        let project = simple_project();
+
+        // Create initial state
+        let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+
+        // Sync again with no changes -- should preserve all handles
+        let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
+
+        assert_eq!(
+            state1.project.as_id(),
+            state2.project.as_id(),
+            "project handle should be stable"
+        );
+        assert_eq!(
+            state1.models["main"].source_model.as_id(),
+            state2.models["main"].source_model.as_id(),
+            "model handle should be stable"
+        );
+        assert_eq!(
+            state1.models["main"].variables["population"]
+                .source_var
+                .as_id(),
+            state2.models["main"].variables["population"]
+                .source_var
+                .as_id(),
+            "variable handle should be stable"
+        );
+    }
+
+    #[test]
+    fn test_incremental_sync_successive_patches() {
+        let mut db = SimlinDb::default();
+        let mut project = simple_project();
+
+        let state0 = sync_from_datamodel_incremental(&mut db, &project, None);
+
+        // Prime parse cache
+        let pop_src = state0.models["main"].variables["population"].source_var;
+        let _ = parse_source_variable(&db, pop_src, state0.project);
+
+        // Patch 1: change project name (shouldn't affect variable cache)
+        project.name = "renamed".to_string();
+        let state1 = sync_from_datamodel_incremental(&mut db, &project, Some(&state0));
+
+        let pop_src1 = state1.models["main"].variables["population"].source_var;
+        assert_eq!(
+            pop_src.as_id(),
+            pop_src1.as_id(),
+            "variable handle should survive project name change"
+        );
+
+        // Patch 2: change the variable's equation
+        project.models[0].variables[0].set_scalar_equation("999");
+        let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
+
+        let pop_src2 = state2.models["main"].variables["population"].source_var;
+        assert_eq!(
+            pop_src.as_id(),
+            pop_src2.as_id(),
+            "handle should be stable even when equation changes"
+        );
+
+        // Parse should reflect the new equation
+        let result = parse_source_variable(&db, pop_src2, state2.project);
+        if let Some(crate::ast::Ast::Scalar(crate::ast::Expr0::Const(_, val, _))) =
+            result.variable.ast()
+        {
+            assert_eq!(*val, 999.0);
+        } else {
+            panic!("Expected Const(999.0), got {:?}", result.variable.ast());
+        }
     }
 }

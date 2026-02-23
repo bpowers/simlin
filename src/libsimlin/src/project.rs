@@ -60,10 +60,11 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
         })?;
 
         let project: engine::Project = engine_serde::deserialize(pb_project).into();
-        let db = new_synced_db(&project);
+        let (db, sync_state) = new_synced_db(&project);
         Ok(Box::into_raw(Box::new(SimlinProject {
             project: Mutex::new(project),
             db: Mutex::new(db),
+            sync_state: Mutex::new(Some(sync_state)),
             cached_compilation: Mutex::new(None),
             ref_count: AtomicUsize::new(1),
         })))
@@ -141,10 +142,11 @@ pub unsafe extern "C" fn simlin_project_open_json(
         };
 
         let project: engine::Project = datamodel_project.into();
-        let db = new_synced_db(&project);
+        let (db, sync_state) = new_synced_db(&project);
         Ok(Box::into_raw(Box::new(SimlinProject {
             project: Mutex::new(project),
             db: Mutex::new(db),
+            sync_state: Mutex::new(Some(sync_state)),
             cached_compilation: Mutex::new(None),
             ref_count: AtomicUsize::new(1),
         })))
@@ -356,6 +358,18 @@ pub unsafe extern "C" fn simlin_project_add_model(
 
     // Rebuild the project's internal structures
     *project_locked = engine::Project::from(project_locked.datamodel.clone());
+
+    // Re-sync the persistent salsa DB incrementally
+    let mut db = proj.db.lock().unwrap();
+    let prev_state = proj.sync_state.lock().unwrap().take();
+    let new_state = engine::db::sync_from_datamodel_incremental(
+        &mut db,
+        &project_locked.datamodel,
+        prev_state.as_ref(),
+    );
+    drop(db);
+    *proj.sync_state.lock().unwrap() = Some(new_state);
+
     drop(project_locked);
 
     // Invalidate the cached compilation since the project changed outside
@@ -473,10 +487,11 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
     match simlin_engine::open_xmile(&mut reader) {
         Ok(datamodel_project) => {
             let project: engine::Project = datamodel_project.into();
-            let db = new_synced_db(&project);
+            let (db, sync_state) = new_synced_db(&project);
             let boxed = Box::new(SimlinProject {
                 project: Mutex::new(project),
                 db: Mutex::new(db),
+                sync_state: Mutex::new(Some(sync_state)),
                 cached_compilation: Mutex::new(None),
                 ref_count: AtomicUsize::new(1),
             });
@@ -534,10 +549,11 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
     match simlin_engine::open_vensim(contents) {
         Ok(datamodel_project) => {
             let project: engine::Project = datamodel_project.into();
-            let db = new_synced_db(&project);
+            let (db, sync_state) = new_synced_db(&project);
             let boxed = Box::new(SimlinProject {
                 project: Mutex::new(project),
                 db: Mutex::new(db),
+                sync_state: Mutex::new(Some(sync_state)),
                 cached_compilation: Mutex::new(None),
                 ref_count: AtomicUsize::new(1),
             });
