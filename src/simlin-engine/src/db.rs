@@ -2659,8 +2659,14 @@ pub(crate) struct VarFragmentResult {
 /// - variable_dimensions(Y) -- each referenced var's dimensions
 /// - variable_size(Y) -- each referenced var's size
 /// - project.dimensions -- for array compilation
+/// - model.variables -- to look up source vars for dependencies
+/// - model_dependency_graph -- to determine runlist membership
 ///
-/// Does NOT depend on model.variable_names or any model-wide data.
+/// Although this reads model-wide data (variable set, dep graph),
+/// salsa's backdating ensures fragments are only invalidated when the
+/// values they actually read change. Adding an unrelated variable
+/// changes model.variables but the dep graph result for this variable
+/// is unchanged, so salsa backdates and this fragment stays cached.
 #[salsa::tracked(returns(ref))]
 pub fn compile_var_fragment(
     db: &dyn Db,
