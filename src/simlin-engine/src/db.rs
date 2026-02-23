@@ -2032,6 +2032,11 @@ fn update_source_variable(
 ) {
     use salsa::Setter;
 
+    let new_ident = dm_var.get_ident().to_string();
+    if *source_var.ident(&*db) != new_ident {
+        source_var.set_ident(db).to(new_ident);
+    }
+
     let new_equation = dm_var
         .get_equation()
         .map(SourceEquation::from)

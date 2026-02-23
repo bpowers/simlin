@@ -386,8 +386,13 @@ impl ReverseOffsetMap {
 pub(crate) fn layout_from_metadata(
     metadata: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, super::VariableMetadata<'_>>>,
     model_name: &Ident<Canonical>,
-) -> VariableLayout {
-    let model_metadata = &metadata[model_name];
+) -> Result<VariableLayout, String> {
+    let model_metadata = metadata.get(model_name).ok_or_else(|| {
+        format!(
+            "model '{}' not found in metadata during layout construction",
+            model_name.as_str()
+        )
+    })?;
     let mut entries = HashMap::with_capacity(model_metadata.len());
     let mut n_slots = 0;
 
@@ -402,7 +407,7 @@ pub(crate) fn layout_from_metadata(
         n_slots = n_slots.max(meta.offset + meta.size);
     }
 
-    VariableLayout::new(entries, n_slots)
+    Ok(VariableLayout::new(entries, n_slots))
 }
 
 // ============================================================================
@@ -676,6 +681,12 @@ fn resolve_var_ref(var: &SymVarRef, layout: &VariableLayout) -> Result<VariableO
             var.name
         )
     })?;
+    if var.element_offset >= entry.size {
+        return Err(format!(
+            "element_offset {} out of bounds for variable '{}' (size {})",
+            var.element_offset, var.name, entry.size
+        ));
+    }
     let off = entry.offset + var.element_offset;
     Ok(off as VariableOffset)
 }
@@ -1113,6 +1124,36 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_var_ref_element_offset_out_of_bounds() {
+        let mut entries = HashMap::new();
+        entries.insert("arr".to_string(), LayoutEntry { offset: 4, size: 3 });
+        let layout = VariableLayout::new(entries, 7);
+
+        // element_offset == size (out of bounds)
+        let var = SymVarRef {
+            name: "arr".to_string(),
+            element_offset: 3,
+        };
+        assert!(
+            resolve_var_ref(&var, &layout).is_err(),
+            "element_offset >= size should fail"
+        );
+
+        // element_offset well beyond size
+        let var = SymVarRef {
+            name: "arr".to_string(),
+            element_offset: 100,
+        };
+        assert!(resolve_var_ref(&var, &layout).is_err());
+
+        // element_offset at max valid index should succeed
+        let var = SymVarRef {
+            name: "arr".to_string(),
+            element_offset: 2,
+        };
+        assert_eq!(resolve_var_ref(&var, &layout).unwrap(), 6);
+    }
+
     fn test_resolve_missing_variable() {
         let layout = simple_layout();
         let var = SymVarRef {
