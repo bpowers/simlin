@@ -100,8 +100,14 @@ fn test_sync_simple_project() {
     let result = sync_from_datamodel(&db, &project);
 
     assert_eq!(result.project.name(&db), "test");
-    assert_eq!(result.project.model_names(&db).len(), 1);
-    assert_eq!(result.project.model_names(&db)[0], "main");
+    assert!(
+        result
+            .project
+            .model_names(&db)
+            .contains(&"main".to_string())
+    );
+    // 1 user model + 7 stdlib models
+    assert_eq!(result.project.model_names(&db).len(), 8);
 
     let sim_specs = result.project.sim_specs(&db);
     assert_eq!(sim_specs.start, 0.0);
@@ -2634,7 +2640,7 @@ fn test_incremental_bytecode_equivalence() {
     let model = sync.models["main"].source;
 
     // Incremental: assemble via tracked functions
-    let incremental_result = assemble_module(&db, model, sync.project, true);
+    let incremental_result = assemble_module(&db, model, sync.project, true, &BTreeSet::new());
 
     // Monolithic: compile via Project::from + compile_project
     let engine_project = crate::project::Project::from(project);

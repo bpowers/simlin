@@ -777,7 +777,6 @@ static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
 /// compiles every test model that the monolithic path handles.
 #[cfg(feature = "file_io")]
 #[test]
-#[ignore] // 16 models still fail; un-ignore after fixing all incremental gaps
 fn incremental_compilation_covers_all_models() {
     use simlin_engine::db;
 

@@ -579,7 +579,10 @@ impl Var {
                             }
                         }
                     } else {
-                        match ast.as_ref().unwrap() {
+                        let Some(ast) = ast.as_ref() else {
+                            return sim_err!(EmptyEquation, var.ident().to_string());
+                        };
+                        match ast {
                             Ast::Scalar(_) => vec![Expr::AssignNext(
                                 off,
                                 Box::new(ctx.build_stock_update_expr(off, var)?),

@@ -604,6 +604,8 @@ pub fn parse_source_variable(
 pub struct ImplicitVarDeps {
     pub name: String,
     pub is_stock: bool,
+    pub is_module: bool,
+    pub model_name: Option<String>,
     pub dt_deps: BTreeSet<String>,
     pub initial_deps: BTreeSet<String>,
 }
@@ -720,6 +722,30 @@ fn extract_implicit_var_deps(
         .iter()
         .map(|implicit_var| {
             let implicit_name = canonicalize(implicit_var.get_ident()).into_owned();
+            let is_module = matches!(implicit_var, datamodel::Variable::Module(_));
+            let model_name = match implicit_var {
+                datamodel::Variable::Module(m) => Some(m.model_name.clone()),
+                _ => None,
+            };
+
+            // Module-type implicit vars have no AST -- extract deps from
+            // their module reference src fields instead.
+            if let datamodel::Variable::Module(m) = implicit_var {
+                let refs: BTreeSet<String> = m
+                    .references
+                    .iter()
+                    .map(|mr| canonicalize(&mr.src).into_owned())
+                    .collect();
+                return ImplicitVarDeps {
+                    name: implicit_name,
+                    is_stock: false,
+                    is_module: true,
+                    model_name: Some(m.model_name.clone()),
+                    dt_deps: refs.clone(),
+                    initial_deps: refs,
+                };
+            }
+
             let mut dummy_implicits = Vec::new();
             let parsed_implicit = crate::variable::parse_var(
                 dims,
@@ -755,6 +781,8 @@ fn extract_implicit_var_deps(
             ImplicitVarDeps {
                 name: implicit_name,
                 is_stock: parsed_implicit.is_stock(),
+                is_module,
+                model_name,
                 dt_deps: dt,
                 initial_deps: initial,
             }
@@ -768,6 +796,8 @@ pub struct ImplicitVarMeta {
     pub parent_source_var: SourceVariable,
     pub index_in_parent: usize,
     pub is_stock: bool,
+    pub is_module: bool,
+    pub model_name: Option<String>,
     pub size: usize,
 }
 
@@ -797,12 +827,19 @@ pub fn model_implicit_var_info(
         for (index, implicit_var) in parsed.implicit_vars.iter().enumerate() {
             let name = canonicalize(implicit_var.get_ident()).into_owned();
             let is_stock = matches!(implicit_var, datamodel::Variable::Stock(_));
+            let is_module = matches!(implicit_var, datamodel::Variable::Module(_));
+            let model_name = match implicit_var {
+                datamodel::Variable::Module(m) => Some(m.model_name.clone()),
+                _ => None,
+            };
             result.insert(
                 name,
                 ImplicitVarMeta {
                     parent_source_var: *source_var,
                     index_in_parent: index,
                     is_stock,
+                    is_module,
+                    model_name,
                     size: 1,
                 },
             );
@@ -845,6 +882,25 @@ pub fn model_module_map(
 
             // Recurse into sub-model
             let sub_canonical = canonicalize(sub_model_name_str);
+            if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
+                let sub_map = model_module_map(db, *sub_model, project);
+                all_models.extend(sub_map.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+    }
+
+    // Include implicit MODULE variables (created by builtin expansion for
+    // SMOOTH, DELAY, etc.) in the module map.
+    let implicit_vars = model_implicit_var_info(db, model, project);
+    for (name, meta) in implicit_vars.iter() {
+        if meta.is_module
+            && let Some(sub_model_name) = &meta.model_name
+        {
+            let sub_model_ident: Ident<Canonical> = Ident::new(sub_model_name);
+            let var_ident: Ident<Canonical> = Ident::new(name);
+            current_mapping.insert(var_ident, sub_model_ident.clone());
+
+            let sub_canonical = canonicalize(sub_model_name);
             if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
                 let sub_map = model_module_map(db, *sub_model, project);
                 all_models.extend(sub_map.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -895,6 +951,21 @@ pub fn model_dependency_graph(
 
     let mut var_info: HashMap<String, VarInfo> = HashMap::new();
 
+    // Normalize dep names: composite module output references (e.g.
+    // "hares\u{00B7}hare_density") become the module variable name ("hares"),
+    // and leading middle-dot (XMILE parent model refs) is stripped.
+    let normalize_dep = |dep: &str| -> String {
+        let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
+        if let Some(dot_pos) = effective.find('\u{00B7}') {
+            effective[..dot_pos].to_string()
+        } else {
+            effective.to_string()
+        }
+    };
+    let normalize_deps = |deps: &BTreeSet<String>| -> BTreeSet<String> {
+        deps.iter().map(|d| normalize_dep(d)).collect()
+    };
+
     for (name, source_var) in source_vars.iter() {
         let deps = variable_direct_dependencies(db, *source_var, project);
         // Use SourceVariableKind from the salsa input directly -- this avoids
@@ -907,8 +978,8 @@ pub fn model_dependency_graph(
             VarInfo {
                 is_stock: kind == SourceVariableKind::Stock,
                 is_module: kind == SourceVariableKind::Module,
-                dt_deps: deps.dt_deps.clone(),
-                initial_deps: deps.initial_deps.clone(),
+                dt_deps: normalize_deps(&deps.dt_deps),
+                initial_deps: normalize_deps(&deps.initial_deps),
             },
         );
 
@@ -921,9 +992,9 @@ pub fn model_dependency_graph(
                 implicit.name.clone(),
                 VarInfo {
                     is_stock: implicit.is_stock,
-                    is_module: false,
-                    dt_deps: implicit.dt_deps.clone(),
-                    initial_deps: implicit.initial_deps.clone(),
+                    is_module: implicit.is_module,
+                    dt_deps: normalize_deps(&implicit.dt_deps),
+                    initial_deps: normalize_deps(&implicit.initial_deps),
                 },
             );
         }
@@ -1118,14 +1189,15 @@ pub fn model_dependency_graph(
         topo_sort_str(init_list, &initial_dependencies)
     };
 
-    // Flows runlist: non-stock variables
+    // Flows runlist: non-stock, non-module variables (modules are evaluated
+    // in the stocks phase, matching the monolithic compiler behavior)
     let runlist_flows = {
         let flow_names: Vec<&String> = var_names
             .iter()
             .filter(|n| {
                 var_info
                     .get(n.as_str())
-                    .map(|i| !i.is_stock)
+                    .map(|i| !i.is_stock && !i.is_module)
                     .unwrap_or(false)
             })
             .collect();
@@ -2200,6 +2272,35 @@ pub fn sync_from_datamodel<'db>(
         );
     }
 
+    // Add stdlib models so incremental compilation can find them
+    // when resolving implicit module references (DELAY, SMOOTH, etc.).
+    let mut model_names = model_names;
+    for stdlib_name in crate::stdlib::MODEL_NAMES {
+        let full_name = format!("stdlib\u{205A}{stdlib_name}");
+        let canonical = canonicalize(&full_name).into_owned();
+        if source_model_map.contains_key(&canonical) {
+            continue;
+        }
+        let dm_model = crate::stdlib::get(stdlib_name).unwrap();
+        let mut source_var_map = HashMap::new();
+        for dm_var in &dm_model.variables {
+            let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
+            let source_var = source_variable_from_datamodel(db, dm_var);
+            source_var_map.insert(canonical_var_name, source_var);
+        }
+        let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
+        variable_names.sort();
+        let source_model = SourceModel::new(
+            db,
+            full_name.clone(),
+            variable_names,
+            source_var_map,
+            dm_model.sim_specs.as_ref().map(SourceSimSpecs::from),
+        );
+        source_model_map.insert(canonical, source_model);
+        model_names.push(full_name);
+    }
+
     let source_project = SourceProject::new(
         db,
         project.name.clone(),
@@ -2442,10 +2543,7 @@ pub fn sync_from_datamodel_incremental(
         source_project.set_units(db).to(new_units);
     }
 
-    let new_model_names: Vec<String> = project.models.iter().map(|m| m.name.clone()).collect();
-    if *source_project.model_names(&*db) != new_model_names {
-        source_project.set_model_names(db).to(new_model_names);
-    }
+    // model_names updated below after stdlib models are added
 
     // Process models
     let mut new_models = HashMap::new();
@@ -2567,6 +2665,67 @@ pub fn sync_from_datamodel_incremental(
         }
     }
 
+    // Add stdlib models, reusing prev_state handles when available so
+    // salsa recognizes unchanged stdlib inputs.
+    for stdlib_name in crate::stdlib::MODEL_NAMES {
+        let full_name = format!("stdlib\u{205A}{stdlib_name}");
+        let canonical = canonicalize(&full_name).into_owned();
+        if new_models.contains_key(&canonical) {
+            continue;
+        }
+        if let Some(prev_model) = prev.models.get(&canonical) {
+            new_models.insert(canonical, prev_model.clone());
+        } else {
+            let dm_model = crate::stdlib::get(stdlib_name).unwrap();
+            let model_id = ModelId::new(&*db, canonical.clone());
+            let mut new_vars = HashMap::new();
+            let mut source_var_map = HashMap::new();
+            for dm_var in &dm_model.variables {
+                let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
+                let var_id = VariableId::new(&*db, canonical_var_name.clone());
+                let source_var = source_variable_from_datamodel(&*db, dm_var);
+                source_var_map.insert(canonical_var_name.clone(), source_var);
+                new_vars.insert(
+                    canonical_var_name,
+                    PersistentVariableState {
+                        var_interned_id: var_id.as_id(),
+                        source_var,
+                    },
+                );
+            }
+            let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
+            variable_names.sort();
+            let source_model = SourceModel::new(
+                &*db,
+                full_name.clone(),
+                variable_names,
+                source_var_map,
+                dm_model.sim_specs.as_ref().map(SourceSimSpecs::from),
+            );
+            new_models.insert(
+                canonical,
+                PersistentModelState {
+                    model_interned_id: model_id.as_id(),
+                    source_model,
+                    variables: new_vars,
+                },
+            );
+        }
+    }
+
+    // Update model_names to include stdlib
+    let mut new_model_names: Vec<String> = project.models.iter().map(|m| m.name.clone()).collect();
+    for stdlib_name in crate::stdlib::MODEL_NAMES {
+        let full_name = format!("stdlib\u{205A}{stdlib_name}");
+        let canonical = canonicalize(&full_name).into_owned();
+        if new_models.contains_key(&canonical) {
+            new_model_names.push(full_name);
+        }
+    }
+    if *source_project.model_names(&*db) != new_model_names {
+        source_project.set_model_names(db).to(new_model_names);
+    }
+
     // Update the project's models map
     let new_source_model_map: HashMap<String, SourceModel> = new_models
         .iter()
@@ -2685,17 +2844,66 @@ pub fn compute_layout(
     implicit_names.sort_unstable();
     for name in implicit_names {
         let info = &implicit_info[name];
-        entries.insert(
-            name.clone(),
-            LayoutEntry {
-                offset,
-                size: info.size,
-            },
-        );
-        offset += info.size;
+        let size = if info.is_module {
+            if let Some(sub_model_name) = &info.model_name {
+                let sub_canonical = canonicalize(sub_model_name);
+                project_models
+                    .get(sub_canonical.as_ref())
+                    .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                    .unwrap_or(info.size)
+            } else {
+                info.size
+            }
+        } else {
+            info.size
+        };
+        entries.insert(name.clone(), LayoutEntry { offset, size });
+        offset += size;
     }
 
     VariableLayout::new(entries, offset)
+}
+
+/// Extract compiler::Table data directly from a SourceVariable's graphical
+/// function fields. Used to populate the mini-Module's tables map for
+/// dependency variables that define lookup tables.
+fn extract_tables_from_source_var(
+    db: &dyn Db,
+    source_var: &SourceVariable,
+) -> Vec<crate::compiler::Table> {
+    let ident = source_var.ident(db);
+    let eq = source_var.equation(db);
+
+    // For arrayed equations with per-element graphical functions, build one
+    // table per element (matching variable.rs build_tables).
+    if let SourceEquation::Arrayed(_, elements) = eq {
+        let has_element_gfs = elements.iter().any(|e| e.gf.is_some());
+        if has_element_gfs {
+            return elements
+                .iter()
+                .filter_map(|e| {
+                    let dm_gf = e.gf.as_ref().map(source_gf_to_datamodel)?;
+                    let var_table = crate::variable::parse_table(&Some(dm_gf)).ok()??;
+                    crate::compiler::Table::new(ident, &var_table).ok()
+                })
+                .collect();
+        }
+    }
+
+    // Scalar or apply-to-all: use the variable-level graphical function.
+    let gf = source_var.gf(db);
+    match gf {
+        Some(sgf) => {
+            let dm_gf = source_gf_to_datamodel(sgf);
+            crate::variable::parse_table(&Some(dm_gf))
+                .ok()
+                .flatten()
+                .and_then(|vt| crate::compiler::Table::new(ident, &vt).ok())
+                .into_iter()
+                .collect()
+        }
+        None => vec![],
+    }
 }
 
 /// Build a dimension-only stub Variable for use in a minimal compilation
@@ -2876,14 +3084,94 @@ pub fn compile_var_fragment(
         .map(crate::dimensions::Dimension::from)
         .collect();
 
-    // Lower the variable for compilation
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: &dim_context,
-        model_name: "",
+    let project_models = project.models(db);
+
+    // Lower the variable for compilation. Module-type variables need
+    // direct construction because lower_variable's resolve_module_input
+    // requires a populated models map.
+    let lowered = if var.kind(db) == SourceVariableKind::Module {
+        let var_name_canonical = canonicalize(&var_ident);
+        let input_prefix = format!("{var_name_canonical}\u{00B7}");
+        let module_inputs: Vec<crate::variable::ModuleInput> = var
+            .module_refs(db)
+            .iter()
+            .filter_map(|mr| {
+                let src = canonicalize(&mr.src);
+                let dst = canonicalize(&mr.dst);
+                if src.starts_with(&input_prefix) {
+                    return None;
+                }
+                let dst_stripped = dst.strip_prefix(&input_prefix)?;
+                let src_str = if model.name(db) == "main" && src.starts_with('\u{00B7}') {
+                    &src['\u{00B7}'.len_utf8()..]
+                } else {
+                    &src
+                };
+                Some(crate::variable::ModuleInput {
+                    src: Ident::new(src_str),
+                    dst: Ident::new(dst_stripped),
+                })
+            })
+            .collect();
+        crate::variable::Variable::Module {
+            ident: Ident::new(&var_ident),
+            model_name: Ident::new(var.model_name(db)),
+            units: None,
+            inputs: module_inputs,
+            errors: vec![],
+            unit_errors: vec![],
+        }
+    } else {
+        // Build a minimal ModelStage0 so that ArrayContext::get_dimensions
+        // can resolve dependency dimensions during Expr2 lowering. Without
+        // this, SUM(arr[*] + 1) fails because the Op2's ArrayBounds are
+        // never computed (get_dimensions returns None for dependencies).
+        let model_name_str = model.name(db);
+        let source_vars = model.variables(db);
+        let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> =
+            HashMap::new();
+
+        // Add the current variable
+        stage0_vars.insert(Ident::new(&var_ident), parsed.variable.clone());
+
+        // Add dependency variables so get_dimensions can resolve them
+        let dep_names: BTreeSet<&String> = deps
+            .dt_deps
+            .iter()
+            .chain(deps.initial_deps.iter())
+            .collect();
+        for dep_name in &dep_names {
+            let effective = dep_name
+                .as_str()
+                .strip_prefix('\u{00B7}')
+                .unwrap_or(dep_name.as_str());
+            if effective.contains('\u{00B7}') {
+                continue;
+            }
+            if let Some(dep_sv) = source_vars.get(effective) {
+                let dep_parsed = parse_source_variable(db, *dep_sv, project);
+                stage0_vars.insert(Ident::new(effective), dep_parsed.variable.clone());
+            }
+        }
+
+        let mini_model = crate::model::ModelStage0 {
+            ident: Ident::new(model_name_str),
+            display_name: model_name_str.to_string(),
+            variables: stage0_vars,
+            errors: None,
+            implicit: false,
+        };
+
+        let mut models: HashMap<Ident<Canonical>, &crate::model::ModelStage0> = HashMap::new();
+        models.insert(Ident::new(model_name_str), &mini_model);
+
+        let scope = crate::model::ScopeStage0 {
+            models: &models,
+            dimensions: &dim_context,
+            model_name: model_name_str,
+        };
+        crate::model::lower_variable(&scope, &parsed.variable)
     };
-    let lowered = crate::model::lower_variable(&scope, &parsed.variable);
 
     // Build minimal metadata: only {self} + deps
     let model_name_ident = Ident::new(model.name(db));
@@ -3032,6 +3320,11 @@ pub fn compile_var_fragment(
         .chain(extra_dep_names.iter())
         .collect();
 
+    // Track module deps that need module_refs and sub-model metadata
+    let mut extra_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
+    let mut extra_submodels: Vec<(String, SourceModel)> = Vec::new();
+    let implicit_var_info = model_implicit_var_info(db, model, project);
+
     for dep_name in &all_names {
         // Skip self and implicit vars
         if dep_name.as_str() == var_ident.as_str()
@@ -3043,12 +3336,89 @@ pub fn compile_var_fragment(
             continue;
         }
 
-        let dep_ident = Ident::new(dep_name.as_str());
+        // Handle leading middle-dot (parent model reference in XMILE)
+        let effective_name = dep_name
+            .as_str()
+            .strip_prefix('\u{00B7}')
+            .unwrap_or(dep_name.as_str());
+
+        // Check for composite module output reference (contains middle dot)
+        if let Some(dot_pos) = effective_name.find('\u{00B7}') {
+            let module_var_name = &effective_name[..dot_pos];
+            let module_ident: Ident<Canonical> = Ident::new(module_var_name);
+
+            if mini_metadata.contains_key(&module_ident) {
+                continue;
+            }
+
+            // Look up the module variable in source_vars or implicit vars
+            if let Some(mod_source_var) = source_vars.get(module_var_name) {
+                if mod_source_var.kind(db) == SourceVariableKind::Module {
+                    let mod_model_name = mod_source_var.model_name(db);
+                    let sub_canonical = canonicalize(mod_model_name);
+                    let sub_size = project_models
+                        .get(sub_canonical.as_ref())
+                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                        .unwrap_or(1);
+
+                    // Build Module variable with resolved inputs
+                    let mod_input_prefix = format!("{module_var_name}\u{00B7}");
+                    let module_inputs: Vec<crate::variable::ModuleInput> = mod_source_var
+                        .module_refs(db)
+                        .iter()
+                        .filter_map(|mr| {
+                            let src = canonicalize(&mr.src);
+                            let dst = canonicalize(&mr.dst);
+                            if src.starts_with(&mod_input_prefix) {
+                                return None;
+                            }
+                            let dst_stripped = dst.strip_prefix(&mod_input_prefix)?;
+                            let src_str = if model.name(db) == "main" && src.starts_with('\u{00B7}')
+                            {
+                                &src['\u{00B7}'.len_utf8()..]
+                            } else {
+                                &src
+                            };
+                            Some(crate::variable::ModuleInput {
+                                src: Ident::new(src_str),
+                                dst: Ident::new(dst_stripped),
+                            })
+                        })
+                        .collect();
+
+                    let mod_var = crate::variable::Variable::Module {
+                        ident: module_ident.clone(),
+                        model_name: Ident::new(mod_model_name),
+                        units: None,
+                        inputs: module_inputs.clone(),
+                        errors: vec![],
+                        unit_errors: vec![],
+                    };
+                    dep_variables.push((module_ident.clone(), mod_var, sub_size));
+
+                    // Build module_refs entry
+                    let input_set: BTreeSet<Ident<Canonical>> =
+                        module_inputs.iter().map(|mi| mi.dst.clone()).collect();
+                    extra_module_refs.insert(module_ident, (Ident::new(mod_model_name), input_set));
+
+                    if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
+                        extra_submodels.push((mod_model_name.to_string(), *sub_model));
+                    }
+                }
+            } else if let Some(meta) = implicit_var_info.get(module_var_name)
+                && meta.is_module
+            {
+                // Implicit module already handled in the implicit_module_vars section below
+            }
+            continue;
+        }
+
+        let dep_ident = Ident::new(effective_name);
         if mini_metadata.contains_key(&dep_ident) {
             continue;
         }
 
-        if let Some(dep_source_var) = source_vars.get(dep_name.as_str()) {
+        if let Some(dep_source_var) = source_vars.get(effective_name) {
             let dep_dims = variable_dimensions(db, *dep_source_var, project);
             let dep_size = variable_size(db, *dep_source_var, project);
 
@@ -3073,12 +3443,84 @@ pub fn compile_var_fragment(
         }
     }
 
+    // Add implicit module variables that this variable's AST references.
+    // E.g., INIT(x) creates implicit module $⁚x⁚0⁚init and the variable's
+    // AST references $⁚x⁚0⁚init·output -- the compiler needs the implicit
+    // module in mini_metadata to resolve the sub-model offset.
+    let mut implicit_module_vars: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> =
+        Vec::new();
+    let mut implicit_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
+    let mut implicit_submodels: Vec<(String, SourceModel)> = Vec::new();
+
+    for implicit_dm_var in &parsed.implicit_vars {
+        if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
+            let im_name = canonicalize(dm_module.ident.as_str()).into_owned();
+            let im_ident: Ident<Canonical> = Ident::new(&im_name);
+            if mini_metadata.contains_key(&im_ident) {
+                continue;
+            }
+
+            let sub_canonical = canonicalize(&dm_module.model_name);
+            let sub_size = project_models
+                .get(sub_canonical.as_ref())
+                .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                .unwrap_or(1);
+
+            let im_var = crate::variable::Variable::Module {
+                ident: im_ident.clone(),
+                model_name: Ident::new(&dm_module.model_name),
+                units: None,
+                inputs: vec![],
+                errors: vec![],
+                unit_errors: vec![],
+            };
+            implicit_module_vars.push((im_ident.clone(), im_var, sub_size));
+
+            // Build module_refs entry for the implicit module, stripping
+            // the module ident prefix from dst (same as resolve_module_input)
+            let im_input_prefix = format!("{im_name}\u{00B7}");
+            let input_set: BTreeSet<Ident<Canonical>> = dm_module
+                .references
+                .iter()
+                .filter_map(|mr| {
+                    let dst_canonical = canonicalize(&mr.dst);
+                    let bare = dst_canonical.strip_prefix(&im_input_prefix)?;
+                    Some(Ident::new(bare))
+                })
+                .collect();
+            implicit_module_refs.insert(im_ident, (Ident::new(&dm_module.model_name), input_set));
+
+            if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
+                implicit_submodels.push((dm_module.model_name.clone(), *sub_model));
+            }
+        }
+    }
+
+    for (im_ident, im_var, im_size) in &implicit_module_vars {
+        if !mini_metadata.contains_key(im_ident) {
+            mini_metadata.insert(
+                im_ident.clone(),
+                crate::compiler::VariableMetadata {
+                    offset: mini_offset,
+                    size: *im_size,
+                    var: im_var,
+                },
+            );
+            mini_offset += im_size;
+        }
+    }
+
     // Build the all_metadata map (model_name -> var_name -> metadata)
     let mut all_metadata: HashMap<
         Ident<Canonical>,
         HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
     > = HashMap::new();
     all_metadata.insert(model_name_ident.clone(), mini_metadata);
+
+    // Populate sub-model metadata for implicit and explicit module sub-models
+    for (_sub_name, sub_model) in implicit_submodels.iter().chain(extra_submodels.iter()) {
+        build_submodel_metadata(db, *sub_model, project, &mut all_metadata);
+    }
 
     // Build the mini VariableLayout for symbolization
     let mini_layout =
@@ -3107,6 +3549,30 @@ pub fn compile_var_fragment(
         }
     }
 
+    // Also collect tables from dependency variables that have graphical
+    // functions. When a variable uses LOOKUP(dep, x), the dep's table
+    // data must be in the mini-Module's tables map so the bytecode
+    // compiler can emit the correct Lookup opcodes.
+    for dep_name in &all_names {
+        let effective = dep_name
+            .as_str()
+            .strip_prefix('\u{00B7}')
+            .unwrap_or(dep_name.as_str());
+        if effective.contains('\u{00B7}') {
+            continue;
+        }
+        let dep_canonical: Ident<Canonical> = Ident::new(effective);
+        if tables.contains_key(&dep_canonical) {
+            continue;
+        }
+        if let Some(dep_sv) = source_vars.get(effective) {
+            let dep_tables = extract_tables_from_source_var(db, dep_sv);
+            if !dep_tables.is_empty() {
+                tables.insert(dep_canonical, dep_tables);
+            }
+        }
+    }
+
     // Build the minimal Module
     let inputs = BTreeSet::new();
     let module_models = model_module_map(db, model, project).clone();
@@ -3116,12 +3582,17 @@ pub fn compile_var_fragment(
     let is_stock = var.kind(db) == SourceVariableKind::Stock;
     let is_module = var.kind(db) == SourceVariableKind::Module;
 
-    // We need module_refs for module variables
-    let module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = if is_module {
+    // We need module_refs for module variables (explicit or implicit)
+    let mut module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = if is_module {
+        let ref_prefix = format!("{var_ident}\u{00B7}");
         let input_set: BTreeSet<Ident<Canonical>> = var
             .module_refs(db)
             .iter()
-            .map(|mr| Ident::new(canonicalize(&mr.dst).as_ref()))
+            .filter_map(|mr| {
+                let dst_canonical = canonicalize(&mr.dst);
+                let bare = dst_canonical.strip_prefix(&ref_prefix)?;
+                Some(Ident::new(bare))
+            })
             .collect();
         let mut refs = HashMap::new();
         refs.insert(
@@ -3132,13 +3603,14 @@ pub fn compile_var_fragment(
     } else {
         HashMap::new()
     };
+    module_refs.extend(implicit_module_refs);
+    module_refs.extend(extra_module_refs);
 
     // For module variables, populate sub-model metadata so the compiler
     // can generate correct CallModule bytecodes.
     if is_module {
         let sub_model_name = var.model_name(db);
         let sub_canonical = canonicalize(sub_model_name);
-        let project_models = project.models(db);
         if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
             build_submodel_metadata(db, *sub_model, project, &mut all_metadata);
         }
@@ -3283,15 +3755,16 @@ pub fn compile_var_fragment(
         None
     };
 
-    // Stock phase: stocks get compiled with is_initial=false for updates
-    let stock_bytecodes = if is_stock && dep_graph.runlist_stocks.contains(&var_ident_str) {
-        match build_var(false) {
-            Ok(var_result) => compile_phase(&var_result.ast),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
+    // Stock phase: stocks and modules get compiled with is_initial=false
+    let stock_bytecodes =
+        if (is_stock || is_module) && dep_graph.runlist_stocks.contains(&var_ident_str) {
+            match build_var(false) {
+                Ok(var_result) => compile_phase(&var_result.ast),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
 
     Some(VarFragmentResult {
         fragment: CompiledVarFragment {
@@ -3350,13 +3823,52 @@ fn compile_implicit_var_fragment(
         return None;
     }
 
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: &dim_context,
-        model_name: "",
+    // Module-type implicit vars need direct Module construction (lower_variable
+    // with empty models map causes resolve_module_input to fail).
+    let lowered = if meta.is_module {
+        if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
+            let module_inputs: Vec<crate::variable::ModuleInput> = dm_module
+                .references
+                .iter()
+                .filter_map(|mr| {
+                    let ident_prefix = format!("{}·", canonicalize(&implicit_name));
+                    let src = canonicalize(&mr.src);
+                    let dst = canonicalize(&mr.dst);
+                    if src.starts_with(&ident_prefix) {
+                        return None;
+                    }
+                    let dst_stripped = dst.strip_prefix(&ident_prefix)?;
+                    let src_str = if model.name(db) == "main" && src.starts_with('·') {
+                        &src['·'.len_utf8()..]
+                    } else {
+                        &src
+                    };
+                    Some(crate::variable::ModuleInput {
+                        src: Ident::new(src_str),
+                        dst: Ident::new(dst_stripped),
+                    })
+                })
+                .collect();
+            crate::variable::Variable::Module {
+                ident: Ident::new(&implicit_name),
+                model_name: Ident::new(&dm_module.model_name),
+                units: None,
+                inputs: module_inputs,
+                errors: vec![],
+                unit_errors: vec![],
+            }
+        } else {
+            return None;
+        }
+    } else {
+        let models = HashMap::new();
+        let scope = crate::model::ScopeStage0 {
+            models: &models,
+            dimensions: &dim_context,
+            model_name: "",
+        };
+        crate::model::lower_variable(&scope, &parsed_implicit)
     };
-    let lowered = crate::model::lower_variable(&scope, &parsed_implicit);
 
     let model_name_ident = Ident::new(model.name(db));
     let var_ident_canonical: Ident<Canonical> = Ident::new(&implicit_name);
@@ -3461,15 +3973,29 @@ fn compile_implicit_var_fragment(
         );
     }
 
+    let project_models = project.models(db);
+    let self_size = if meta.is_module {
+        if let Some(sub_model_name) = &meta.model_name {
+            let sub_canonical = canonicalize(sub_model_name);
+            project_models
+                .get(sub_canonical.as_ref())
+                .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                .unwrap_or(1)
+        } else {
+            1
+        }
+    } else {
+        1
+    };
     mini_metadata.insert(
         var_ident_canonical.clone(),
         crate::compiler::VariableMetadata {
             offset: mini_offset,
-            size: 1,
+            size: self_size,
             var: &lowered,
         },
     );
-    mini_offset += 1;
+    mini_offset += self_size;
 
     // Implicit vars' deps are always explicit vars in the same model (or other implicit vars)
     let deps = variable_direct_dependencies(db, meta.parent_source_var, project);
@@ -3605,9 +4131,33 @@ fn compile_implicit_var_fragment(
     }
 
     let inputs = BTreeSet::new();
-    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
-    let module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
+    let (module_models, module_refs) = if meta.is_module {
+        let mm = model_module_map(db, model, project).clone();
+
+        // Build module_refs from the implicit var's datamodel::Module references
+        let mut refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
+        if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
+            let input_set: BTreeSet<Ident<Canonical>> = dm_module
+                .references
+                .iter()
+                .map(|mr| Ident::new(canonicalize(&mr.dst).as_ref()))
+                .collect();
+            refs.insert(
+                var_ident_canonical.clone(),
+                (Ident::new(&dm_module.model_name), input_set),
+            );
+
+            // Populate sub-model metadata
+            let sub_canonical = canonicalize(&dm_module.model_name);
+            if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
+                build_submodel_metadata(db, *sub_model, project, &mut all_metadata);
+            }
+        }
+
+        (mm, refs)
+    } else {
+        (HashMap::new(), HashMap::new())
+    };
 
     let core = crate::compiler::ContextCore {
         dimensions: &converted_dims,
@@ -3739,14 +4289,15 @@ fn compile_implicit_var_fragment(
         None
     };
 
-    let stock_bytecodes = if meta.is_stock && dep_graph.runlist_stocks.contains(&var_ident_str) {
-        match build_var(false) {
-            Ok(var_result) => compile_phase(&var_result.ast),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
+    let stock_bytecodes =
+        if (meta.is_stock || meta.is_module) && dep_graph.runlist_stocks.contains(&var_ident_str) {
+            match build_var(false) {
+                Ok(var_result) => compile_phase(&var_result.ast),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
 
     Some(VarFragmentResult {
         fragment: CompiledVarFragment {
@@ -3768,6 +4319,7 @@ pub fn assemble_module(
     model: SourceModel,
     project: SourceProject,
     is_root: bool,
+    module_inputs: &BTreeSet<Ident<Canonical>>,
 ) -> Result<crate::bytecode::CompiledModule, String> {
     use crate::compiler::symbolic::{
         ContextResourceCounts, SymbolicCompiledInitial, SymbolicCompiledModule,
@@ -3803,6 +4355,12 @@ pub fn assemble_module(
         }
     }
 
+    // Module input variables are provided by the parent model, so they
+    // must be excluded from runlists (matching the monolithic path which
+    // filters with `!instantiation.contains(id)`).
+    let is_module_input =
+        |var_name: &str| -> bool { module_inputs.contains(&*canonicalize(var_name)) };
+
     // Collect fragments for each phase, tracking missing variables
     let mut initial_frags: Vec<(String, &crate::compiler::symbolic::PerVarBytecodes)> = Vec::new();
     let mut flow_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = Vec::new();
@@ -3810,6 +4368,9 @@ pub fn assemble_module(
     let mut missing_vars: Vec<String> = Vec::new();
 
     for var_name in &dep_graph.runlist_initials {
+        if is_module_input(var_name) {
+            continue;
+        }
         if let Some(result) = all_fragments.get(var_name)
             && let Some(ref bc) = result.fragment.initial_bytecodes
         {
@@ -3820,6 +4381,9 @@ pub fn assemble_module(
     }
 
     for var_name in &dep_graph.runlist_flows {
+        if is_module_input(var_name) {
+            continue;
+        }
         if let Some(result) = all_fragments.get(var_name)
             && let Some(ref bc) = result.fragment.flow_bytecodes
         {
@@ -3830,6 +4394,9 @@ pub fn assemble_module(
     }
 
     for var_name in &dep_graph.runlist_stocks {
+        if is_module_input(var_name) {
+            continue;
+        }
         if let Some(result) = all_fragments.get(var_name)
             && let Some(ref bc) = result.fragment.stock_bytecodes
         {
@@ -4041,7 +4608,7 @@ pub fn assemble_simulation(
             })?;
 
             let is_root = canonicalize(name.as_str()) == main_model_canonical;
-            let compiled = assemble_module(db, *source_model, project, is_root)?;
+            let compiled = assemble_module(db, *source_model, project, is_root, inputs)?;
             let module_key: crate::vm::ModuleKey = ((*name).clone(), inputs.clone());
             compiled_modules.insert(module_key, compiled);
         }
@@ -4113,7 +4680,7 @@ fn enumerate_module_instances_inner(
         .ok_or_else(|| format!("model '{}' not found", model_name))?;
 
     let source_vars = source_model.variables(db);
-    for (_var_name, source_var) in source_vars.iter() {
+    for (var_name, source_var) in source_vars.iter() {
         if source_var.kind(db) != SourceVariableKind::Module {
             continue;
         }
@@ -4128,11 +4695,67 @@ fn enumerate_module_instances_inner(
             ));
         }
 
+        // Strip module ident prefix from dst to get bare sub-model variable
+        // names, matching how resolve_module_input works in the monolithic path
+        let input_prefix = format!("{var_name}\u{00B7}");
         let inputs: BTreeSet<Ident<Canonical>> = source_var
             .module_refs(db)
             .iter()
-            .map(|mr| Ident::new(canonicalize(&mr.dst).as_ref()))
+            .filter_map(|mr| {
+                let dst_canonical = canonicalize(&mr.dst);
+                let bare = dst_canonical.strip_prefix(&input_prefix)?;
+                Some(Ident::new(bare))
+            })
             .collect();
+
+        let key = Ident::<Canonical>::new(sub_model_name);
+        let is_new = !modules.contains_key(&key);
+
+        modules.entry(key).or_default().insert(inputs);
+
+        if is_new {
+            enumerate_module_instances_inner(db, project, sub_model_name, modules)?;
+        }
+    }
+
+    // Include implicit MODULE variables (e.g. from SMOOTH, DELAY builtins)
+    let implicit_info = model_implicit_var_info(db, *source_model, project);
+    for (name, meta) in implicit_info.iter() {
+        if !meta.is_module {
+            continue;
+        }
+        let sub_model_name = match &meta.model_name {
+            Some(n) => n,
+            None => continue,
+        };
+        let sub_canonical = canonicalize(sub_model_name);
+        if !project_models.contains_key(sub_canonical.as_ref()) {
+            return Err(format!(
+                "implicit module '{}' references model '{}' which was not found",
+                name, sub_model_name,
+            ));
+        }
+
+        // Extract inputs from the parsed implicit var's module references,
+        // stripping the module ident prefix from dst (same as resolve_module_input)
+        let parsed = parse_source_variable(db, meta.parent_source_var, project);
+        let input_prefix = format!("{name}\u{00B7}");
+        let inputs: BTreeSet<Ident<Canonical>> =
+            if let Some(datamodel::Variable::Module(dm_module)) =
+                parsed.implicit_vars.get(meta.index_in_parent)
+            {
+                dm_module
+                    .references
+                    .iter()
+                    .filter_map(|mr| {
+                        let dst_canonical = canonicalize(&mr.dst);
+                        let bare = dst_canonical.strip_prefix(&input_prefix)?;
+                        Some(Ident::new(bare))
+                    })
+                    .collect()
+            } else {
+                BTreeSet::new()
+            };
 
         let key = Ident::<Canonical>::new(sub_model_name);
         let is_new = !modules.contains_key(&key);
