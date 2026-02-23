@@ -2911,17 +2911,23 @@ pub fn compile_var_fragment(
             .unwrap_or_else(|_| VariableLayout::new(HashMap::new(), 0));
     let rmap = ReverseOffsetMap::from_layout(&mini_layout);
 
-    // Build tables for compilation
+    // Build tables for compilation -- propagate errors rather than
+    // silently dropping them, which would shift table indices and cause
+    // lookups to read the wrong table at runtime.
     let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
     {
         let gf_tables = lowered.tables();
         if !gf_tables.is_empty() {
-            let table_results: Vec<crate::compiler::Table> = gf_tables
+            let table_results: crate::Result<Vec<crate::compiler::Table>> = gf_tables
                 .iter()
-                .filter_map(|t| crate::compiler::Table::new(&var_ident, t).ok())
+                .map(|t| crate::compiler::Table::new(&var_ident, t))
                 .collect();
-            if !table_results.is_empty() {
-                tables.insert(var_ident_canonical.clone(), table_results);
+            match table_results {
+                Ok(ts) if !ts.is_empty() => {
+                    tables.insert(var_ident_canonical.clone(), ts);
+                }
+                Err(_) => return None,
+                _ => {}
             }
         }
     }

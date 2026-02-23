@@ -3906,3 +3906,66 @@ fn test_circular_dependency_blocks_incremental_compilation() {
         err
     );
 }
+
+#[test]
+fn test_malformed_graphical_function_fails_fragment() {
+    // A variable with a graphical function where x_points and y_points
+    // have different lengths should fail compile_var_fragment (returning
+    // None) rather than silently dropping the table and producing bytecode
+    // that references a missing lookup.
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "lookup_var".to_string(),
+                equation: datamodel::Equation::Scalar("time".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: Some(datamodel::GraphicalFunction {
+                    kind: datamodel::GraphicalFunctionKind::Continuous,
+                    x_points: Some(vec![0.0, 1.0, 2.0]),
+                    y_points: vec![10.0, 20.0], // mismatched length
+                    x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+                    y_scale: datamodel::GraphicalFunctionScale {
+                        min: 0.0,
+                        max: 20.0,
+                    },
+                }),
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+
+    let model = sync.models["main"].source;
+    let var = sync.models["main"].variables["lookup_var"].source;
+
+    let result = compile_var_fragment(&db, var, model, sync.project, true);
+    assert!(
+        result.is_none(),
+        "compile_var_fragment should return None for malformed graphical function"
+    );
+}
