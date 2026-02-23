@@ -639,9 +639,17 @@ pub unsafe extern "C" fn simlin_project_get_errors(
 
     let project_locked = proj.project.lock().unwrap();
     let db_locked = proj.db.lock().unwrap();
-    let sync = engine::db::sync_from_datamodel(&db_locked, &project_locked.datamodel);
-    let (all_errors, _, _) =
-        gather_error_details_with_db(&project_locked, Some((&db_locked, &sync)));
+    let sync_state = proj.sync_state.lock().unwrap();
+    let db_sync = sync_state.as_ref().map(|state| {
+        let sync = state.to_sync_result();
+        (&*db_locked, sync)
+    });
+    // Borrow the SyncResult for the gather call; if no sync state is
+    // available, fall back to collecting errors without the salsa DB.
+    let (all_errors, _, _) = match &db_sync {
+        Some((db, sync)) => gather_error_details_with_db(&project_locked, Some((db, sync))),
+        None => gather_error_details_with_db(&project_locked, None),
+    };
 
     if all_errors.is_empty() {
         return ptr::null_mut();

@@ -1779,6 +1779,45 @@ pub struct PersistentVariableState {
 }
 
 impl PersistentSyncState {
+    /// Reconstitute a `SyncResult` from the stored handles.
+    ///
+    /// The returned `SyncResult` borrows the interned `ModelId`/`VariableId`
+    /// handles from the database, so the `'db` lifetime is tied to the
+    /// database reference used when interning.
+    pub fn to_sync_result(&self) -> SyncResult<'_> {
+        use salsa::plumbing::FromId;
+        SyncResult {
+            project: self.project,
+            models: self
+                .models
+                .iter()
+                .map(|(name, pm)| {
+                    let variables = pm
+                        .variables
+                        .iter()
+                        .map(|(vname, pv)| {
+                            (
+                                vname.clone(),
+                                SyncedVariable {
+                                    id: VariableId::from_id(pv.var_interned_id),
+                                    source: pv.source_var,
+                                },
+                            )
+                        })
+                        .collect();
+                    (
+                        name.clone(),
+                        SyncedModel {
+                            id: ModelId::from_id(pm.model_interned_id),
+                            source: pm.source_model,
+                            variables,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
     fn from_sync_result(sync: &SyncResult<'_>) -> Self {
         PersistentSyncState {
             project: sync.project,
@@ -4298,6 +4337,38 @@ mod tests {
                 .source_var
                 .as_id(),
             "variable handle should be stable"
+        );
+    }
+
+    #[test]
+    fn test_persistent_state_to_sync_result() {
+        let mut db = SimlinDb::default();
+        let project = simple_project();
+
+        let state = sync_from_datamodel_incremental(&mut db, &project, None);
+        let sync = state.to_sync_result();
+
+        assert_eq!(sync.project.name(&db), state.project.name(&db));
+        assert_eq!(sync.models.len(), state.models.len());
+
+        let main_model = &sync.models["main"];
+        let persistent_main = &state.models["main"];
+        assert_eq!(
+            main_model.source.as_id(),
+            persistent_main.source_model.as_id()
+        );
+
+        for (name, sv) in &main_model.variables {
+            let pv = &persistent_main.variables[name];
+            assert_eq!(sv.source.as_id(), pv.source_var.as_id());
+            assert_eq!(sv.id.as_id(), pv.var_interned_id);
+        }
+
+        // Verify the reconstituted SyncResult works for diagnostic collection
+        let diags = collect_all_diagnostics(&db, &sync);
+        assert!(
+            diags.is_empty(),
+            "simple project should have no diagnostics"
         );
     }
 
