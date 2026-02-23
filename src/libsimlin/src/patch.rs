@@ -437,8 +437,9 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // accumulator diagnostics are available for error collection and
     // the DB is ready for simlin_sim_new on commit. If the patch is
     // rejected or this is a dry run, we restore the previous state.
+    // Clone (not take) so concurrent readers still see valid state.
     let mut db = project_ref.db.lock().unwrap();
-    let prev_state = project_ref.sync_state.lock().unwrap().take();
+    let prev_state = project_ref.sync_state.lock().unwrap().clone();
     let staged_sync_state = engine::db::sync_from_datamodel_incremental(
         &mut db,
         &staged_project.datamodel,
@@ -501,24 +502,20 @@ pub(crate) unsafe fn apply_project_patch_internal(
     if rejected || dry_run {
         // Revert the DB to the previous sync state since we are not
         // committing these changes.
-        if let Some(prev) = prev_state {
-            // Clone the datamodel before acquiring the db lock to maintain
-            // consistent lock ordering: project -> db -> sync_state
-            let original_datamodel = {
-                let project_locked = project_ref.project.lock().unwrap();
-                project_locked.datamodel.clone()
-            };
-            let mut db = project_ref.db.lock().unwrap();
-            let restored = engine::db::sync_from_datamodel_incremental(
-                &mut db,
-                &original_datamodel,
-                Some(&prev),
-            );
-            drop(db);
-            *project_ref.sync_state.lock().unwrap() = Some(restored);
-        } else {
-            *project_ref.sync_state.lock().unwrap() = None;
-        }
+        // Clone the datamodel before acquiring the db lock to maintain
+        // consistent lock ordering: project -> db -> sync_state
+        let original_datamodel = {
+            let project_locked = project_ref.project.lock().unwrap();
+            project_locked.datamodel.clone()
+        };
+        let mut db = project_ref.db.lock().unwrap();
+        let restored = engine::db::sync_from_datamodel_incremental(
+            &mut db,
+            &original_datamodel,
+            prev_state.as_ref(),
+        );
+        drop(db);
+        *project_ref.sync_state.lock().unwrap() = Some(restored);
         return;
     }
 

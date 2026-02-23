@@ -1948,11 +1948,13 @@ pub struct SyncedVariable<'db> {
 /// Stores salsa input handles between sync calls so that
 /// `sync_from_datamodel_incremental` can reuse them instead of
 /// creating fresh inputs (which would invalidate all cached queries).
+#[derive(Clone)]
 pub struct PersistentSyncState {
     pub project: SourceProject,
     pub models: HashMap<String, PersistentModelState>,
 }
 
+#[derive(Clone)]
 pub struct PersistentModelState {
     /// Lifetime-erased `ModelId<'db>` (interned, carries `'db`)
     pub model_interned_id: salsa::Id,
@@ -1960,6 +1962,7 @@ pub struct PersistentModelState {
     pub variables: HashMap<String, PersistentVariableState>,
 }
 
+#[derive(Clone)]
 pub struct PersistentVariableState {
     /// Lifetime-erased `VariableId<'db>` (interned, carries `'db`)
     pub var_interned_id: salsa::Id,
