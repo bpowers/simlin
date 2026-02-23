@@ -4139,13 +4139,20 @@ fn compile_implicit_var_fragment(
     let (module_models, module_refs) = if meta.is_module {
         let mm = model_module_map(db, model, project).clone();
 
-        // Build module_refs from the implicit var's datamodel::Module references
+        // Build module_refs from the implicit var's datamodel::Module references,
+        // stripping the module ident prefix from dst (matching compile_var_fragment
+        // and enumerate_module_instances_inner).
         let mut refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
         if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
+            let input_prefix = format!("{implicit_name}\u{00B7}");
             let input_set: BTreeSet<Ident<Canonical>> = dm_module
                 .references
                 .iter()
-                .map(|mr| Ident::new(canonicalize(&mr.dst).as_ref()))
+                .filter_map(|mr| {
+                    let dst_canonical = canonicalize(&mr.dst);
+                    let bare = dst_canonical.strip_prefix(&input_prefix)?;
+                    Some(Ident::new(bare))
+                })
                 .collect();
             refs.insert(
                 var_ident_canonical.clone(),
