@@ -784,3 +784,381 @@ and field5 meaning changes based on section position.
 6. **How do we map names/elements to OT indices for large files?** Slot table
    extent is now decoded reliably, but the full deterministic
    name/element-to-OT mapping is still unresolved for large models.
+
+
+## 16. Additional hypotheses ruled out (2026-02-23)
+
+Exploratory `debug_*` tests were used and then removed to keep
+`src/simlin-engine/src/vdf.rs` focused. Their dead-end results are:
+
+1. **Section-1 slot blobs are not the missing OT map.**
+   Scanning full variable-length slot blobs (not only the first 16 bytes)
+   shows near-zero signal for direct OT index or OT-range-start mapping.
+
+2. **Section-6 leading `count+refs` stream is not a hidden full mapping.**
+   Non-slotted refs are sparse in WRLD3 and effectively absent in zambaqui;
+   overlap with record grouping metadata is weak.
+
+3. **Record fields `f[3]..f[7]` are not direct name->OT pointers.**
+   Interpreting these as name offsets/indices does not produce useful mapping
+   precision on medium/large files (beyond trivial Time baseline matches).
+
+4. **Simple ordering heuristics are insufficient.**
+   Pairing names to OT slots by record/file/sort-key order remains close to
+   random on WRLD3 and not robust on econ.
+
+Implication: the unresolved name/element->OT mapping likely lives in the
+remaining undecoded metadata, not in any simple reinterpretation of the
+already-decoded slot/record fields.
+
+
+## 17. Section 7 pre-OT region: graph/display data (2026-02-23)
+
+The region between section 7's data start and the offset table start was
+analyzed as a potential mapping structure. **Result: this region contains
+only graph axis values and lookup table data points (packed f32 arrays),
+not mapping metadata.**
+
+Evidence:
+- All values in the pre-OT region decode as plausible f32 graph data
+  (axis tick values, lookup x/y pairs)
+- The region ends with 4-5 zero u32s padding before the offset table
+- Section 7 header field1 * 4 = pre_OT_bytes + 28 consistently, suggesting
+  field1 counts the number of f32 graph data values (plus a 7-word header)
+
+The pre-OT region is confirmed to be graph/display settings, not mapping
+metadata. This was a dead end.
+
+
+## 18. Slot blob analysis: static data (2026-02-23)
+
+Cross-file comparison of slot blob data revealed that **slot blobs are
+largely STATIC** and do NOT carry variable-specific mapping information:
+
+- Comparing two VDF files from the same model (water/Current.vdf vs
+  water/base.vdf): slot blobs at the SAME section-1 offset are mostly
+  identical, with minor differences in a few words.
+- Comparing DIFFERENT models (water vs pop): slot blobs at the same
+  section-1 offsets are also mostly identical (e.g., slot offset 108
+  has identical data [100, 0, 6291456, 96] in both water and pop).
+- No slot blob word contains the corresponding variable's OT index
+  (checked systematically for water, pop, and WRLD3).
+
+The slot blob data appears to be a structural layout artifact of section 1,
+not variable metadata. The slot table maps names to positions in this static
+structure, but the data at those positions is the same regardless of which
+variable occupies the slot.
+
+
+## 19. Compilation-order hypothesis: confirmed (2026-02-23)
+
+Extensive empirical analysis using simulation-based OT mapping (290/297
+entries matched for WRLD3) established the following:
+
+### Small models: alphabetical ordering works
+
+For bact, water, and pop, the OT ordering is consistent with:
+**stocks first (alphabetically), then non-stocks (alphabetically)**,
+with system variable OT entries interspersed at specific positions.
+This is exactly what `build_deterministic_ot_map()` computes.
+
+### Large models: compilation order, NOT alphabetical
+
+For WRLD3 (297 OT entries, 404 names, 317 records):
+
+1. **Global alphabetical ordering fails**: only 78% of matched names
+   are in alphabetical order when sorted by OT index. The remaining
+   22% have significant inversions.
+
+2. **Per-view (f[12]-group) alphabetical ordering fails**: only 6/18
+   f[12] groups with 2+ named variables pass a strict alphabetical
+   check within the group.
+
+3. **Name-table ordering fails**: only 55% of matched name-table entries
+   have increasing OT indices (expected ~100% if name-table order = OT
+   order).
+
+4. **Internal module expansion variables are interspersed**: SMOOTH3,
+   DELAY3, and DELAY internal stocks/flows get OT entries interspersed
+   with user-visible variables. These entries follow Vensim's internal
+   compilation order, not any name-based sorting.
+
+### Conclusion: no explicit mapping in the VDF
+
+The VDF format does **not** store an explicit name-to-OT mapping table.
+The mapping is implicitly determined by Vensim's compilation pipeline,
+which depends on:
+
+- Model structure (views/sectors and their ordering)
+- Variable types (stocks, flows, auxiliaries, constants)
+- Module expansion (SMOOTH, DELAY, DELAY3 create internal variables)
+- Dependency ordering with alphabetical tie-breaking within each view
+
+This explains why:
+- No open-source VDF parser exists (all tools use the Vensim DLL)
+- PySD, EMAworkbench, and SDEverywhere require the Vensim DLL for VDF
+  reading
+- The `GET VDF DATA` Vensim function operates within a context where
+  the model is already loaded
+
+### Section 4: view/group metadata structure
+
+Section 4 decodes as a structured list of entries with format:
+
+```
+  u16 n_primary;
+  u16 n_secondary;
+  u32 refs[n_primary + n_secondary];   // section-1 offsets
+  u32 index;                           // monotonically increasing
+```
+
+The refs are section-1 offsets (likely pointing to view/group slots),
+and the indices increase monotonically (8, 11, 14, 19, 23, ... for
+WRLD3). This appears to encode view/sector structure, not the name→OT
+mapping itself.
+
+
+## 20. Practical strategies for VDF reading
+
+Given that the VDF does not store an explicit mapping:
+
+| Scenario | Strategy | Status |
+|----------|----------|--------|
+| Small models (no SMOOTH/DELAY) | f[10] deterministic mapping | **Working** |
+| Large models + reference sim | Time-series correlation | **Working** |
+| Large models + .mdl file | Compute compilation order from model | **Planned** |
+| Standalone VDF (no model, no sim) | Relaxed f[10] heuristic + user assistance | **Future** |
+
+The priority path for reading WRLD3 golden output:
+1. Parse the .mdl file to get model structure
+2. Simulate the model to get reference results
+3. Use `build_empirical_ot_map()` to match VDF entries to simulation variables
+4. Validate matches against the VDF data
+
+For eventual standalone VDF reading, implementing Vensim's compilation
+ordering from the .mdl model structure is the most promising approach.
+
+
+## 21. Inversion analysis: OT ordering breakdown (2026-02-23)
+
+When the 252 empirically matched WRLD3 variable names are sorted by OT
+index and checked for alphabetical ordering, 210 are in order and 50
+show inversions. These 50 inversions classify as:
+
+| Category | Count | Description |
+|----------|-------|-------------|
+| View boundary resets | 23 | Next view starts at lower alphabetical value |
+| Table displacement | 15 | Lookup tables grouped with parent variable |
+| Suffix swaps (`_2`/`_1`/base) | 9 | Vensim orders `_2` before `_1` before base |
+| Other (minor) | 3 | Near-alphabetical pairs |
+
+**Key implications for the .mdl-based mapping algorithm**:
+
+1. **Per-view ordering eliminates 23 inversions** (46%). Processing
+   variables view-by-view with alphabetical sorting within each view
+   would immediately improve from 83% to ~92%.
+
+2. **Suffix ordering** (`_2` before `_1` before base) reflects dependency
+   order: the base variable `X = IF THEN ELSE(cond, X_2, X_1)` depends
+   on both `X_1` and `X_2`, so they compute first. This is fixable by
+   sorting with a custom comparator that reverses the `_1`/`_2` suffix.
+
+3. **Table displacement** can be handled by grouping lookup table names
+   with their parent variable (stripping the ` table` suffix to find
+   the parent).
+
+4. **Reordering the .mdl does NOT change the VDF** because the ordering
+   is based on the dependency graph and view structure (from the sketch),
+   not the declaration order of variable definitions.
+
+### Algorithm outline for .mdl-based mapping
+
+```
+for each view (in .mdl sketch order):
+    variables = model variables in this view (primary, non-ghost)
+    sort variables by:
+      1. dependency order (topological sort)
+      2. alphabetical tie-breaking (with _2 before _1 before base)
+    for each sorted variable:
+      assign next available OT index
+      if variable uses SMOOTH/DELAY:
+        assign OT indices for internal expansion stocks/flows
+```
+
+This algorithm requires:
+- Parsing the .mdl sketch to determine view membership
+- Building the dependency graph from equations
+- Topological sort with specific tie-breaking
+- SMOOTH/DELAY expansion analysis to count internal variables
+
+Our engine already has all these capabilities in the MDL parser and
+compiler pipeline. The implementation effort is connecting them to
+the VDF mapping problem.
+
+
+## 22. .mdl-guided ordering experiments (historical, 2026-02-24)
+
+Temporary debug tests were used to score candidate `.mdl`-derived OT orderings
+against empirical WRLD3 matches. Those hypothesis-only tests have since been
+removed, but the core findings remain:
+
+1. **Runlist order is not OT order** (roughly coin-flip monotonicity).
+2. **Section-6 stream order is not a direct mapping table**.
+3. **Model offset order carries useful signal but is incomplete**.
+4. **Mismatches cluster around view boundaries and internal expansion vars**.
+
+These experiments narrowed the problem: we need a deterministic model-guided
+allocator using VDF anchors, then progressively add compilation-order rules.
+
+
+## 23. Reproducibility and deterministic fixes (2026-02-24)
+
+The earlier drift in percentage metrics was caused by hash-map iteration order
+inside the empirical/oracle matching path.
+
+Implemented fixes:
+- `build_empirical_ot_map()` now iterates model variables in stable order
+  (sorted by model offset, then canonical name).
+- `build_vdf_results()` now uses the same stable ordering.
+- regression tests were added to assert both paths are deterministic across
+  different `HashMap` insertion histories.
+
+Implication:
+- empirical matching is now reproducible run-to-run and can be used as a
+  stable oracle while non-correlation mapping is improved.
+
+
+## 24. Section 5 sets match model subscript cardinalities (2026-02-24)
+
+Array-heavy zambaqui files expose a strong structural signal in section 5.
+Section-5 entries decode as:
+
+```
+u32 n;
+u32 0;
+u32 refs[n+1];
+```
+
+For `zambaqui/baserun.vdf`, the observed `n+1` sizes are:
+
+- 67, 83, 5, 6 (x15), 82, 36, 4, 7, 3
+
+Converted `ZamMod1.mdl` dimension sizes include:
+
+- 66, 82, 4, 5 (x15), 81, 35, 3, 6, 2
+
+I.e. section-5 sizes are a multiset subset of `dimension_size + 1` values
+from the model, with matching multiplicities for shared families
+(notably 15 dimensions of size 5). For `baserun.vdf`, one model family
+(`46`) is not present in section 5.
+
+The same pattern appears across old-run zambaqui files:
+- `Pop-1.vdf`: subset of the same family (no 66/6/2 sets)
+- `land-1.vdf`: full family
+- `Current.vdf`: only one set (`83`, i.e. `82+1`)
+
+Implication: section 5 is not random metadata; it likely carries subscript
+set/dimension descriptors that are directly useful for array OT decoding.
+
+
+## 25. Record OT ranges in array files show dimension-scale blocks (2026-02-24)
+
+`record_ot_ranges()` gives a deterministic partition of OT indices. For
+zambaqui, the largest ranges are:
+
+- 328, 164, 164, 82, 82 (plus smaller blocks)
+
+These are dimension-scale values:
+- 82 (full age-like axis)
+- 164 (= 2 * 82)
+- 328 (= 4 * 82)
+
+The starts of these large ranges are anchored by records whose `f[12]`
+slot reference points to the dominant array-axis slot (`adult age` in
+baserun). This is a strong clue that record starts + section-5 set sizes can
+be combined to recover array block structure without time-series correlation.
+
+Implication:
+- for arrayed models, the likely path is:
+  1. decode section-5 sets (dimension cardinalities),
+  2. decode record-derived OT spans,
+  3. map variable elements to spans using model-side dimension structure.
+
+
+## 26. Section 6 remains weak as a direct mapping source (2026-02-24)
+
+Section-6 stream parsing is stable and useful for structural diagnostics
+(`entries`, slotted ref counts), but still shows weak direct name->OT signal:
+
+- WRLD3 stream-order-vs-empirical remains around ~50-55% monotonic.
+- zambaqui section-6 entries are mostly low-arity refs and do not expose a
+  direct element index map comparable to the section-5 cardinality signal.
+
+Section 6 should currently be treated as contextual metadata, not the primary
+name/element -> OT mapping source.
+
+
+## 27. Section-5 parsing implementation status (2026-02-24)
+
+Section-5 parsing now preserves the explicit count field as:
+
+```
+u32 n;
+u32 0;
+u32 refs[n+1];
+```
+
+via `VdfSection5SetEntry { n, refs, ... }`, with helpers:
+- `set_size() == refs.len()`
+- `dimension_size() == set_size() - 1`
+
+`simlin-cli vdf-dump` now prints `n`, `size`, and `dimension_size` for each
+section-5 set entry, making dimension-signal debugging straightforward.
+
+Validation status:
+- zambaqui `baserun.vdf` section-5 set sizes are asserted to equal model
+  dimension sizes + 1 from `ZamMod1.mdl`.
+
+
+## 28. Non-correlation model-guided OT baseline (2026-02-24)
+
+`VdfFile::build_model_guided_ot_map(reference)` is now implemented as a
+deterministic structural allocator that does **not** use time-series
+correlation:
+
+1. order scalar identifiers by model offset,
+2. group array elements by base variable,
+3. derive name anchors from slotted names + record slot references (`f[12]`),
+4. derive candidate OT starts from record OT starts (`f[11]`),
+5. place each variable group with deterministic first-fit OT allocation.
+
+This is a baseline allocator, not full Vensim compilation-order replication.
+It is intended to be improved incrementally with explicit ordering rules.
+
+
+## 29. Array-model parser/compiler unblocks (2026-02-24)
+
+To improve `.mdl` availability for array VDF decoding, two parser/compiler
+gaps were closed:
+
+- parser now accepts `dim.*` subscript syntax as `*:dim`,
+- builtin visitor now rewrites:
+  - `DELAYN(..., order, ...)` -> `DELAY1`/`DELAY3` (orders 1/3),
+  - `SMTHN(..., order, ...)` -> `SMTH1`/`SMTH3` (orders 1/3).
+
+Unsupported/non-constant orders remain explicit compile errors.
+
+
+## 30. Current gaps and likely payoff path (2026-02-24)
+
+Still open:
+1. full WRLD3-quality mapping requires explicit compilation-order rules
+   (per-view dependency ordering, suffix/table/internal-variable placement),
+2. array-heavy models remain partially blocked by unrelated builtin coverage
+   gaps (e.g. `SHIFT_IF_TRUE`).
+
+Highest-payoff next steps:
+1. strengthen model-guided allocator with compiler-order tie-break rules,
+2. add array block assignment using section-5 dimension sizes + record OT spans,
+3. use empirical matching only as a deterministic oracle in tests, not at
+   runtime.

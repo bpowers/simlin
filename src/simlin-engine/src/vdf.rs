@@ -153,6 +153,81 @@ impl VdfRecord {
     }
 }
 
+/// Variable-length list entry used by section-5/section-6 decoded streams.
+///
+/// `refs` are section-1-relative byte offsets. Many (but not all) references
+/// correspond to values present in the slot table.
+#[cfg(feature = "file_io")]
+#[derive(Debug, Clone)]
+pub struct VdfRefListEntry {
+    /// Absolute file offset where this entry begins.
+    pub file_offset: usize,
+    /// Referenced section-1 offsets carried by this entry.
+    pub refs: Vec<u32>,
+    /// Number of refs that are present in the slot table.
+    pub slotted_ref_count: usize,
+}
+
+/// Parsed section-5 set entry (`u32 n; u32 0; u32 refs[n+1]`).
+///
+/// In array-heavy files, `n` is one less than the associated subscript-set
+/// cardinality. This structure preserves `n` explicitly rather than inferring
+/// only from `refs.len()`.
+#[cfg(feature = "file_io")]
+#[derive(Debug, Clone)]
+pub struct VdfSection5SetEntry {
+    /// Absolute file offset where this entry begins.
+    pub file_offset: usize,
+    /// Header count field (`n`), where the entry stores `n+1` refs.
+    pub n: usize,
+    /// Referenced section-1 offsets carried by this entry.
+    pub refs: Vec<u32>,
+    /// Number of refs that are present in the slot table.
+    pub slotted_ref_count: usize,
+}
+
+#[cfg(feature = "file_io")]
+impl VdfSection5SetEntry {
+    /// Number of section-1 refs in the entry (`n+1` in observed files).
+    pub fn set_size(&self) -> usize {
+        self.refs.len()
+    }
+
+    /// Candidate dimension size implied by this set (`set_size - 1`).
+    pub fn dimension_size(&self) -> usize {
+        self.set_size().saturating_sub(1)
+    }
+}
+
+/// A contiguous OT index range implied by record start indices (field[11]).
+///
+/// Each range starts at a unique in-range `f11` value and ends at the next
+/// start (or `offset_table_count` for the last range). Range length > 1
+/// indicates a multi-entry block (commonly array/lookups/table data).
+#[cfg(feature = "file_io")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VdfOtRange {
+    /// Inclusive start OT index.
+    pub start: usize,
+    /// Exclusive end OT index.
+    pub end: usize,
+    /// Number of records whose `f11` equals `start`.
+    pub record_count: usize,
+}
+
+#[cfg(feature = "file_io")]
+impl VdfOtRange {
+    /// Number of OT entries in this range.
+    pub fn len(&self) -> usize {
+        self.end.saturating_sub(self.start)
+    }
+
+    /// Whether this range contains no OT entries.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Fully parsed VDF file holding all structural metadata.
 ///
 /// Created via [`VdfFile::parse`], this struct provides access to all
@@ -217,23 +292,10 @@ impl VdfFile {
         // by position rather than field4.
         let sec1_data_size = sections.get(1).map(|s| s.region_data_size()).unwrap_or(0);
 
-        // The name table section's field1 determines how many names have
-        // corresponding slot table entries.  Parse names up to that
-        // boundary using the same validation as the full name parse,
-        // capped at the total name count.
-        let slot_name_count = name_section_idx
-            .map(|ns_idx| {
-                let ns = &sections[ns_idx];
-                let boundary = ns.data_offset() + ns.field1 as usize;
-                parse_name_table_extended(&data, ns, boundary).len()
-            })
-            .unwrap_or(0)
-            .min(names.len());
-
         let (slot_table_offset, slot_table) = name_section_idx
             .map(|ns_idx| {
                 let ns = &sections[ns_idx];
-                find_slot_table(&data, ns, slot_name_count, sec1_data_size)
+                find_slot_table(&data, ns, names.len(), sec1_data_size)
             })
             .unwrap_or((0, Vec::new()));
 
@@ -338,6 +400,358 @@ impl VdfFile {
     /// Its field4 value varies across VDF versions (2, 42, etc.).
     pub fn slot_section(&self) -> Option<&Section> {
         self.sections.get(1)
+    }
+
+    fn section_ref_stream_with_skip(
+        &self,
+        section_idx: usize,
+        skip_words: usize,
+        max_refs_per_entry: usize,
+    ) -> (Vec<VdfRefListEntry>, usize) {
+        let Some(sec) = self.sections.get(section_idx) else {
+            return (Vec::new(), 0);
+        };
+        let start = sec.data_offset() + skip_words * 4;
+        let end = sec.region_end.min(self.data.len());
+        if start >= end {
+            return (Vec::new(), start);
+        }
+
+        let sec1_data_size = self
+            .sections
+            .get(1)
+            .map(|s| s.region_data_size())
+            .unwrap_or(0);
+        let slot_set: HashSet<u32> = self.slot_table.iter().copied().collect();
+
+        let mut entries = Vec::new();
+        let mut pos = start;
+        while pos + 4 <= end {
+            let n_refs = read_u32(&self.data, pos) as usize;
+            if n_refs == 0 || n_refs > max_refs_per_entry {
+                break;
+            }
+            let refs_start = pos + 4;
+            let refs_end = refs_start + n_refs * 4;
+            if refs_end > end {
+                break;
+            }
+            let refs: Vec<u32> = (0..n_refs)
+                .map(|i| read_u32(&self.data, refs_start + i * 4))
+                .collect();
+            if !refs
+                .iter()
+                .all(|&r| r > 0 && r % 4 == 0 && (r as usize) < sec1_data_size)
+            {
+                break;
+            }
+            let slotted_ref_count = refs.iter().filter(|r| slot_set.contains(r)).count();
+            entries.push(VdfRefListEntry {
+                file_offset: pos,
+                refs,
+                slotted_ref_count,
+            });
+            pos = refs_end;
+        }
+        (entries, pos)
+    }
+
+    fn section5_set_stream_with_skip(
+        &self,
+        skip_words: usize,
+        max_n: usize,
+    ) -> (Vec<VdfSection5SetEntry>, usize) {
+        let Some(sec) = self.sections.get(5) else {
+            return (Vec::new(), 0);
+        };
+        let start = sec.data_offset() + skip_words * 4;
+        let end = sec.region_end.min(self.data.len());
+        if start >= end {
+            return (Vec::new(), start);
+        }
+
+        let sec1_data_size = self
+            .sections
+            .get(1)
+            .map(|s| s.region_data_size())
+            .unwrap_or(0);
+        let slot_set: HashSet<u32> = self.slot_table.iter().copied().collect();
+
+        let mut entries = Vec::new();
+        let mut pos = start;
+        while pos + 8 <= end {
+            let n = read_u32(&self.data, pos) as usize;
+            let marker = read_u32(&self.data, pos + 4);
+            if n == 0 || n > max_n || marker != 0 {
+                break;
+            }
+            let refs_len = n + 1;
+            let refs_start = pos + 8;
+            let refs_end = refs_start + refs_len * 4;
+            if refs_end > end {
+                break;
+            }
+            let refs: Vec<u32> = (0..refs_len)
+                .map(|i| read_u32(&self.data, refs_start + i * 4))
+                .collect();
+            if !refs
+                .iter()
+                .all(|&r| r > 0 && r % 4 == 0 && (r as usize) < sec1_data_size)
+            {
+                break;
+            }
+            let slotted_ref_count = refs.iter().filter(|r| slot_set.contains(r)).count();
+            entries.push(VdfSection5SetEntry {
+                file_offset: pos,
+                n,
+                refs,
+                slotted_ref_count,
+            });
+            pos = refs_end;
+        }
+        (entries, pos)
+    }
+
+    /// Parse the leading section-6 stream as variable-length entries:
+    ///
+    /// `u32 n_refs; u32 refs[n_refs]`
+    ///
+    /// Returns `(skip_words, entries, stop_offset)`, where `skip_words` is the
+    /// chosen 4-byte prefix skip (0..=8) and `stop_offset` is the absolute file
+    /// offset where stream parsing stopped.
+    pub fn parse_section6_ref_stream(&self) -> Option<(usize, Vec<VdfRefListEntry>, usize)> {
+        if self.sections.len() <= 6 {
+            return None;
+        }
+        let mut best_skip = 0usize;
+        let mut best_entries = Vec::new();
+        let mut best_stop = 0usize;
+        for skip in 0..=8usize {
+            let (entries, stop) = self.section_ref_stream_with_skip(6, skip, 512);
+            if entries.len() > best_entries.len()
+                || (entries.len() == best_entries.len() && stop > best_stop)
+            {
+                best_skip = skip;
+                best_entries = entries;
+                best_stop = stop;
+            }
+        }
+        Some((best_skip, best_entries, best_stop))
+    }
+
+    /// Parse section-5 set-like entries seen in array-heavy files:
+    ///
+    /// `u32 n; u32 0; u32 refs[n+1]`
+    ///
+    /// Returns `(skip_words, entries, stop_offset)` for the best alignment.
+    pub fn parse_section5_set_stream(&self) -> Option<(usize, Vec<VdfSection5SetEntry>, usize)> {
+        if self.sections.len() <= 5 {
+            return None;
+        }
+        let mut best_skip = 0usize;
+        let mut best_entries = Vec::new();
+        let mut best_stop = 0usize;
+        for skip in 0..=8usize {
+            let (entries, stop) = self.section5_set_stream_with_skip(skip, 4096);
+            if entries.len() > best_entries.len()
+                || (entries.len() == best_entries.len() && stop > best_stop)
+            {
+                best_skip = skip;
+                best_entries = entries;
+                best_stop = stop;
+            }
+        }
+        Some((best_skip, best_entries, best_stop))
+    }
+
+    /// Build a name->OT mapping using model ordering + VDF structural anchors.
+    ///
+    /// This path does not use time-series correlation. It uses:
+    /// 1. model scalar ordering (`reference.offsets`, sorted by offset),
+    /// 2. per-variable element counts from the model,
+    /// 3. VDF record/name anchors (`f12` slot -> name, record `f11` start OT),
+    /// 4. deterministic first-fit placement over OT indices.
+    ///
+    /// The output is deterministic for a given `(VDF, model)` pair and is meant
+    /// as a structural allocator baseline while deeper compilation-order rules are
+    /// still being decoded.
+    pub fn build_model_guided_ot_map(
+        &self,
+        reference: &Results,
+    ) -> StdResult<HashMap<Ident<Canonical>, usize>, Box<dyn Error>> {
+        if self.offset_table_count == 0 {
+            return Err("empty offset table".into());
+        }
+
+        let time_ident = Ident::<Canonical>::from_str_unchecked("time");
+        let mut ordered: Vec<(Ident<Canonical>, usize)> = reference
+            .offsets
+            .iter()
+            .filter(|(id, _)| **id != time_ident)
+            .map(|(id, &off)| (id.clone(), off))
+            .collect();
+        ordered.sort_by(|(a_id, a_off), (b_id, b_off)| {
+            a_off
+                .cmp(b_off)
+                .then_with(|| a_id.as_str().cmp(b_id.as_str()))
+        });
+
+        // Group scalar identifiers by their base variable (`x[a,b]` -> `x`),
+        // preserving model offset order.
+        let mut groups: Vec<(String, Vec<Ident<Canonical>>)> = Vec::new();
+        let mut group_index_by_name: HashMap<String, usize> = HashMap::new();
+        for (ident, _off) in ordered {
+            let base = ident
+                .as_str()
+                .split_once('[')
+                .map(|(b, _)| b)
+                .unwrap_or(ident.as_str())
+                .to_string();
+            if let Some(&idx) = group_index_by_name.get(&base) {
+                groups[idx].1.push(ident);
+            } else {
+                let idx = groups.len();
+                group_index_by_name.insert(base.clone(), idx);
+                groups.push((base, vec![ident]));
+            }
+        }
+
+        let system_names: HashSet<&str> = SYSTEM_NAMES.into_iter().collect();
+
+        // Build slot_ref -> canonical model-name candidates from the slotted
+        // prefix of the name table.
+        let mut slot_name: HashMap<u32, String> = HashMap::new();
+        for (i, &slot) in self.slot_table.iter().enumerate() {
+            let Some(name) = self.names.get(i) else {
+                continue;
+            };
+            if name.is_empty()
+                || name.starts_with('.')
+                || name.starts_with('-')
+                || system_names.contains(name.as_str())
+                || VENSIM_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name))
+            {
+                continue;
+            }
+            slot_name.entry(slot).or_insert_with(|| {
+                crate::common::canonicalize(name.as_str())
+                    .into_owned()
+                    .to_string()
+            });
+        }
+
+        // Collect earliest record OT per anchored base name.
+        let mut anchor_ot: HashMap<String, usize> = HashMap::new();
+        for rec in &self.records {
+            let ot = rec.fields[11] as usize;
+            if rec.fields[0] == 0
+                || rec.fields[1] == RECORD_F1_SYSTEM
+                || rec.fields[1] == RECORD_F1_INITIAL_TIME_CONST
+                || rec.fields[10] == 0
+                || ot == 0
+                || ot >= self.offset_table_count
+            {
+                continue;
+            }
+            let Some(name) = slot_name.get(&rec.fields[12]) else {
+                continue;
+            };
+            if group_index_by_name.contains_key(name.as_str()) {
+                anchor_ot
+                    .entry(name.clone())
+                    .and_modify(|v| *v = (*v).min(ot))
+                    .or_insert(ot);
+            }
+        }
+
+        let mut claimed = vec![false; self.offset_table_count];
+        claimed[0] = true;
+
+        let mut mapping: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        mapping.insert(time_ident, 0);
+
+        let find_run = |claimed: &[bool], start: usize, width: usize| -> Option<usize> {
+            if width == 0 || claimed.len() <= width {
+                return None;
+            }
+            for cand in start..=(claimed.len() - width) {
+                if cand == 0 {
+                    continue;
+                }
+                if claimed[cand..cand + width].iter().all(|v| !*v) {
+                    return Some(cand);
+                }
+            }
+            None
+        };
+
+        let mut next_search = 1usize;
+        for (base, members) in groups {
+            let width = members.len();
+            if width == 0 || width >= self.offset_table_count {
+                continue;
+            }
+
+            let desired = anchor_ot.get(&base).copied().unwrap_or(next_search).max(1);
+            let start = find_run(&claimed, desired, width)
+                .or_else(|| find_run(&claimed, 1, width))
+                .ok_or_else(|| format!("no OT run available for {base} (width={width})"))?;
+
+            for (i, ident) in members.into_iter().enumerate() {
+                let ot = start + i;
+                claimed[ot] = true;
+                mapping.insert(ident, ot);
+            }
+            next_search = start + width;
+        }
+
+        Ok(mapping)
+    }
+
+    /// Build contiguous OT ranges from in-range record start indices (field[11]).
+    ///
+    /// This uses only structural metadata:
+    /// 1. Collect unique starts where `0 < f11 < offset_table_count`
+    /// 2. Sort starts ascending
+    /// 3. Form ranges `[start_i, start_{i+1})`, last range to `offset_table_count`
+    ///
+    /// The returned ranges are deterministic for a given VDF and are useful
+    /// for partitioning OT entries before resolving variable/element names.
+    pub fn record_ot_ranges(&self) -> Vec<VdfOtRange> {
+        if self.offset_table_count <= 1 {
+            return Vec::new();
+        }
+
+        let mut starts = Vec::new();
+        let mut start_counts: HashMap<usize, usize> = HashMap::new();
+        for rec in &self.records {
+            let start = rec.fields[11] as usize;
+            if start == 0 || start >= self.offset_table_count {
+                continue;
+            }
+            if !start_counts.contains_key(&start) {
+                starts.push(start);
+            }
+            *start_counts.entry(start).or_default() += 1;
+        }
+        starts.sort_unstable();
+
+        let mut out = Vec::new();
+        for (i, &start) in starts.iter().enumerate() {
+            let end = starts
+                .get(i + 1)
+                .copied()
+                .unwrap_or(self.offset_table_count);
+            if end <= start {
+                continue;
+            }
+            out.push(VdfOtRange {
+                start,
+                end,
+                record_count: *start_counts.get(&start).unwrap_or(&0),
+            });
+        }
+        out
     }
 
     /// Build a `Results` struct by matching VDF data entries against a reference
@@ -479,6 +893,10 @@ impl VdfFile {
 
         Ok(mapping)
     }
+
+    // NOTE: `build_model_guided_ot_map` is currently a deterministic
+    // structural allocator baseline. It uses model ordering + VDF anchors,
+    // but does not yet fully replicate Vensim's internal compilation order.
 }
 
 // ---- Parsing functions ----
@@ -617,57 +1035,56 @@ pub fn find_name_table_section_idx(data: &[u8], sections: &[Section]) -> Option<
     None
 }
 
-/// Find the slot lookup table. This is an array of N u32 values (one per name)
-/// located just before the name table section. The values are byte offsets into
-/// section 1 data. For small models they have uniform stride (e.g., 16); for
+/// Find the slot lookup table. This is an array of u32 values (typically one per
+/// name) located just before the name table section. The values are byte offsets
+/// into section 1 data. For small models they have uniform stride (e.g., 16); for
 /// larger models the stride may vary (variable-length slot metadata).
 ///
 /// Returns (file_offset_of_table, values).
 pub fn find_slot_table(
     data: &[u8],
     name_table_section: &Section,
-    name_count: usize,
+    max_name_count: usize,
     section1_data_size: usize,
 ) -> (usize, Vec<u32>) {
-    if name_count == 0 {
+    if max_name_count == 0 {
         return (0, Vec::new());
     }
     let end = name_table_section.file_offset;
-    let table_size_bytes = name_count * 4;
 
     for gap in 0..20 {
-        if end < gap + table_size_bytes {
-            continue;
-        }
-        let table_start = end - gap - table_size_bytes;
+        // Prefer the largest structurally valid table for this gap.
+        for name_count in (1..=max_name_count).rev() {
+            let table_size_bytes = name_count * 4;
+            if end < gap + table_size_bytes {
+                continue;
+            }
+            let table_start = end - gap - table_size_bytes;
 
-        let values: Vec<u32> = (0..name_count)
-            .map(|i| read_u32(data, table_start + i * 4))
-            .collect();
+            let values: Vec<u32> = (0..name_count)
+                .map(|i| read_u32(data, table_start + i * 4))
+                .collect();
 
-        let mut sorted = values.clone();
-        sorted.sort();
-        sorted.dedup();
+            let mut sorted = values.clone();
+            sorted.sort();
+            sorted.dedup();
 
-        if sorted.len() != name_count {
-            continue;
-        }
+            if sorted.len() != name_count {
+                continue;
+            }
 
-        let all_valid = sorted
-            .iter()
-            .all(|&v| v % 4 == 0 && (v as usize) < section1_data_size);
-        if !all_valid {
-            continue;
-        }
+            let all_valid = sorted
+                .iter()
+                .all(|&v| v % 4 == 0 && v > 0 && (v as usize) < section1_data_size);
+            if !all_valid {
+                continue;
+            }
 
-        if sorted[0] == 0 {
-            continue;
-        }
-
-        let strides: Vec<u32> = sorted.windows(2).map(|pair| pair[1] - pair[0]).collect();
-        let min_stride = strides.iter().copied().min().unwrap_or(0);
-        if min_stride >= 4 {
-            return (table_start, values);
+            let strides: Vec<u32> = sorted.windows(2).map(|pair| pair[1] - pair[0]).collect();
+            let min_stride = strides.iter().copied().min().unwrap_or(0);
+            if min_stride >= 4 {
+                return (table_start, values);
+            }
         }
     }
 
@@ -888,12 +1305,9 @@ pub fn build_vdf_results(vdf: &VdfData, reference: &Results) -> StdResult<Result
 
     let sample_indices = build_sample_indices(step_count);
     const MATCH_THRESHOLD: f64 = 0.01;
+    let ordered_reference = sorted_reference_offsets(reference, &time_ident);
 
-    for (ident, &ref_off) in &reference.offsets {
-        if *ident == time_ident {
-            continue;
-        }
-
+    for (ident, ref_off) in ordered_reference {
         let ref_series: Vec<f64> = (0..step_count)
             .map(|step| {
                 let row =
@@ -922,7 +1336,7 @@ pub fn build_vdf_results(vdf: &VdfData, reference: &Results) -> StdResult<Result
         {
             let col = next_col;
             next_col += 1;
-            offsets.insert(ident.clone(), col);
+            offsets.insert(ident, col);
             claimed[ei] = true;
             for step in 0..step_count {
                 step_data[step * step_size + col] = vdf.entries[ei][step];
@@ -983,12 +1397,9 @@ pub fn build_empirical_ot_map(
 
     let mut ot_map = HashMap::new();
     ot_map.insert(time_ident.clone(), 0usize);
+    let ordered_reference = sorted_reference_offsets(reference, &time_ident);
 
-    for (ident, &ref_off) in &reference.offsets {
-        if *ident == time_ident {
-            continue;
-        }
-
+    for (ident, ref_off) in ordered_reference {
         let ref_series: Vec<f64> = (0..step_count)
             .map(|step| {
                 let row =
@@ -1015,11 +1426,30 @@ pub fn build_empirical_ot_map(
             && best_error < MATCH_THRESHOLD
         {
             claimed[ei] = true;
-            ot_map.insert(ident.clone(), ei);
+            ot_map.insert(ident, ei);
         }
     }
 
     Ok(ot_map)
+}
+
+#[cfg(feature = "file_io")]
+fn sorted_reference_offsets(
+    reference: &Results,
+    time_ident: &Ident<Canonical>,
+) -> Vec<(Ident<Canonical>, usize)> {
+    let mut ordered: Vec<(Ident<Canonical>, usize)> = reference
+        .offsets
+        .iter()
+        .filter(|(id, _)| **id != *time_ident)
+        .map(|(id, &off)| (id.clone(), off))
+        .collect();
+    ordered.sort_by(|(a_id, a_off), (b_id, b_off)| {
+        a_off
+            .cmp(b_off)
+            .then_with(|| a_id.as_str().cmp(b_id.as_str()))
+    });
+    ordered
 }
 
 /// Build sample indices for time series correlation. Picks first, last,
@@ -1390,17 +1820,693 @@ mod tests {
                 .unwrap_or_else(|e| panic!("failed to parse VDF file {}: {}", path, e))
         }
 
+        /// Parse name entries with raw byte offsets (relative to section 2 data start).
+        fn parse_name_entries_with_offsets(vdf: &VdfFile) -> Vec<(usize, usize, String)> {
+            let Some(ns_idx) = vdf.name_section_idx else {
+                return Vec::new();
+            };
+            let ns = &vdf.sections[ns_idx];
+            let data_start = ns.data_offset();
+            let parse_end = ns.region_end.min(vdf.data.len());
+            let mut out = Vec::new();
+
+            let first_len = (ns.field5 >> 16) as usize;
+            if first_len == 0 || data_start + first_len > vdf.data.len() {
+                return out;
+            }
+
+            let first_name: String = vdf.data[data_start..data_start + first_len]
+                .iter()
+                .take_while(|&&b| b != 0)
+                .map(|&b| b as char)
+                .collect();
+            out.push((0, 0, first_name));
+
+            let mut pos = data_start + first_len;
+            while pos + 2 <= parse_end {
+                let len = read_u16(&vdf.data, pos) as usize;
+                let prefix_rel = pos - data_start;
+                pos += 2;
+                if len == 0 {
+                    continue;
+                }
+                if pos + len > parse_end {
+                    break;
+                }
+                if len > 256 {
+                    break;
+                }
+                let s: String = vdf.data[pos..pos + len]
+                    .iter()
+                    .take_while(|&&b| b != 0)
+                    .map(|&b| b as char)
+                    .collect();
+                if s.is_empty() || !s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+                    break;
+                }
+                out.push((prefix_rel, pos - data_start, s));
+                pos += len;
+            }
+
+            out
+        }
+
+        fn parse_name_entry_spans(vdf: &VdfFile) -> Vec<(usize, usize, String)> {
+            let Some(ns_idx) = vdf.name_section_idx else {
+                return Vec::new();
+            };
+            let ns = &vdf.sections[ns_idx];
+            let data_start = ns.data_offset();
+            let parse_end = ns.region_end.min(vdf.data.len());
+            let mut out = Vec::new();
+
+            let first_len = (ns.field5 >> 16) as usize;
+            if first_len == 0 || data_start + first_len > vdf.data.len() {
+                return out;
+            }
+            let first_name: String = vdf.data[data_start..data_start + first_len]
+                .iter()
+                .take_while(|&&b| b != 0)
+                .map(|&b| b as char)
+                .collect();
+            out.push((0, first_len, first_name));
+
+            let mut pos = data_start + first_len;
+            while pos + 2 <= parse_end {
+                let len = read_u16(&vdf.data, pos) as usize;
+                pos += 2;
+                if len == 0 {
+                    continue;
+                }
+                if pos + len > parse_end || len > 256 {
+                    break;
+                }
+                let s: String = vdf.data[pos..pos + len]
+                    .iter()
+                    .take_while(|&&b| b != 0)
+                    .map(|&b| b as char)
+                    .collect();
+                if s.is_empty() || !s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+                    break;
+                }
+                out.push((pos - data_start, pos - data_start + len, s));
+                pos += len;
+            }
+
+            out
+        }
+
+        /// For each possible trailing gap size, find the largest table length
+        /// that passes slot-table structural validation.
+        fn best_slot_candidate_count(vdf: &VdfFile, gap: usize) -> usize {
+            let Some(ns_idx) = vdf.name_section_idx else {
+                return 0;
+            };
+            let sec1_data_size = vdf
+                .sections
+                .get(1)
+                .map(|s| s.region_data_size())
+                .unwrap_or(0);
+            let end = vdf.sections[ns_idx].file_offset;
+            let mut best = 0;
+
+            for n in 1..=vdf.names.len() {
+                let table_size_bytes = n * 4;
+                if end < gap + table_size_bytes {
+                    break;
+                }
+                let table_start = end - gap - table_size_bytes;
+                let values: Vec<u32> = (0..n)
+                    .map(|i| read_u32(&vdf.data, table_start + i * 4))
+                    .collect();
+
+                let mut sorted = values.clone();
+                sorted.sort();
+                sorted.dedup();
+                if sorted.len() != n {
+                    continue;
+                }
+
+                let all_valid = sorted
+                    .iter()
+                    .all(|&v| v % 4 == 0 && v > 0 && (v as usize) < sec1_data_size);
+                if !all_valid {
+                    continue;
+                }
+
+                let min_stride = sorted
+                    .windows(2)
+                    .map(|pair| pair[1] - pair[0])
+                    .min()
+                    .unwrap_or(0);
+                if min_stride >= 4 {
+                    best = n;
+                }
+            }
+
+            best
+        }
+
+        #[test]
+        fn test_slot_candidate_counts_by_gap() {
+            let water = vdf_file("../../test/bobby/vdf/water/Current.vdf");
+            let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
+            let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
+            let pop6 = vdf_file(
+                "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_6/Current.vdf",
+            );
+
+            // Small files: known count is exact at gap=4 (marker 0x00430000).
+            assert_eq!(best_slot_candidate_count(&water, 4), water.slot_table.len());
+            assert_eq!(best_slot_candidate_count(&pop6, 4), pop6.slot_table.len());
+
+            // Medium/large files now parse the largest valid slot table.
+            assert_eq!(best_slot_candidate_count(&econ, 4), econ.slot_table.len());
+            assert_eq!(best_slot_candidate_count(&wrld3, 4), wrld3.slot_table.len());
+            assert!(
+                econ.slot_table.len() > 42,
+                "econ should parse more than the old 42-slot truncation"
+            );
+            assert_eq!(wrld3.slot_table.len(), 404);
+        }
+
+        #[test]
+        fn test_section6_ref_stream_counts() {
+            let water = vdf_file("../../test/bobby/vdf/water/Current.vdf");
+            let pop = vdf_file("../../test/bobby/vdf/pop/Current.vdf");
+            let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
+            let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
+            let zambaqui = vdf_file("../../third_party/uib_sd/zambaqui/baserun.vdf");
+
+            let (skip_w, entries_w, _) = water.parse_section6_ref_stream().unwrap();
+            let (skip_p, entries_p, _) = pop.parse_section6_ref_stream().unwrap();
+            let (skip_e, entries_e, _) = econ.parse_section6_ref_stream().unwrap();
+            let (skip_r, entries_r, _) = wrld3.parse_section6_ref_stream().unwrap();
+            let (skip_z, entries_z, _) = zambaqui.parse_section6_ref_stream().unwrap();
+
+            assert_eq!(skip_w, 0);
+            assert_eq!(entries_w.len(), 7);
+            assert_eq!(skip_p, 0);
+            assert_eq!(entries_p.len(), 8);
+            assert_eq!(skip_e, 1);
+            assert_eq!(entries_e.len(), 79);
+            assert_eq!(skip_r, 1);
+            assert_eq!(entries_r.len(), 342);
+            assert_eq!(skip_z, 0);
+            assert_eq!(entries_z.len(), 335);
+        }
+
+        #[test]
+        fn test_section5_set_stream_counts() {
+            let water = vdf_file("../../test/bobby/vdf/water/Current.vdf");
+            let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
+            let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
+            let zambaqui = vdf_file("../../third_party/uib_sd/zambaqui/baserun.vdf");
+
+            let (_, sets_w, _) = water.parse_section5_set_stream().unwrap();
+            let (_, sets_e, _) = econ.parse_section5_set_stream().unwrap();
+            let (_, sets_r, _) = wrld3.parse_section5_set_stream().unwrap();
+            let (skip_z, sets_z, _) = zambaqui.parse_section5_set_stream().unwrap();
+
+            assert!(sets_w.is_empty());
+            assert!(sets_e.is_empty());
+            assert!(sets_r.is_empty());
+            assert_eq!(skip_z, 0);
+            assert_eq!(sets_z.len(), 23);
+        }
+
+        #[test]
+        fn test_section5_dimension_sizes_match_zambaqui_model_dims() {
+            let vdf = vdf_file("../../third_party/uib_sd/zambaqui/baserun.vdf");
+            let (_, sets, _) = vdf.parse_section5_set_stream().unwrap();
+            assert!(!sets.is_empty(), "expected section-5 sets for zambaqui");
+
+            let mut vdf_counts: std::collections::BTreeMap<usize, usize> =
+                std::collections::BTreeMap::new();
+            for size in sets.iter().map(VdfSection5SetEntry::set_size) {
+                *vdf_counts.entry(size).or_insert(0) += 1;
+            }
+
+            let mdl_contents =
+                std::fs::read_to_string("../../third_party/uib_sd/zambaqui/ZamMod1.mdl").unwrap();
+            let dm_project = crate::compat::open_vensim(&mdl_contents).unwrap();
+            let mut mdl_counts: std::collections::BTreeMap<usize, usize> =
+                std::collections::BTreeMap::new();
+            for size in dm_project.dimensions.iter().map(|d| d.len() + 1) {
+                *mdl_counts.entry(size).or_insert(0) += 1;
+            }
+
+            // Every section-5 set family seen in the VDF must exist in the model
+            // dimensions with at least the same multiplicity.
+            for (&size, &vdf_count) in &vdf_counts {
+                let mdl_count = *mdl_counts.get(&size).unwrap_or(&0);
+                assert!(
+                    mdl_count >= vdf_count,
+                    "section-5 size {size} appears {vdf_count} times in VDF but only {mdl_count} times in model"
+                );
+            }
+
+            // For zambaqui baserun we currently observe one model dimension family
+            // (size 46) that is not represented in section-5.
+            let mut missing_from_vdf = Vec::new();
+            for (&size, &mdl_count) in &mdl_counts {
+                let vdf_count = *vdf_counts.get(&size).unwrap_or(&0);
+                if mdl_count > vdf_count {
+                    missing_from_vdf.push((size, mdl_count - vdf_count));
+                }
+            }
+            assert_eq!(missing_from_vdf, vec![(46, 1)]);
+        }
+
+        #[test]
+        fn test_record_ot_ranges_partition_selected_files() {
+            let water = vdf_file("../../test/bobby/vdf/water/Current.vdf");
+            let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
+            let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
+            let zambaqui = vdf_file("../../third_party/uib_sd/zambaqui/baserun.vdf");
+
+            for (label, vdf, expected_ranges) in [
+                ("water", &water, 8usize),
+                ("econ", &econ, 61usize),
+                ("wrld3", &wrld3, 234usize),
+                ("zambaqui", &zambaqui, 306usize),
+            ] {
+                let ranges = vdf.record_ot_ranges();
+                assert_eq!(
+                    ranges.len(),
+                    expected_ranges,
+                    "{label}: unexpected range count"
+                );
+                assert!(
+                    !ranges.is_empty(),
+                    "{label}: expected at least one OT range from records"
+                );
+                assert_eq!(
+                    ranges.first().unwrap().start,
+                    1,
+                    "{label}: first OT range should start at 1"
+                );
+                assert_eq!(
+                    ranges.last().unwrap().end,
+                    vdf.offset_table_count,
+                    "{label}: last OT range should end at ot_count"
+                );
+
+                let covered: usize = ranges.iter().map(|r| r.len()).sum();
+                assert_eq!(
+                    covered,
+                    vdf.offset_table_count.saturating_sub(1),
+                    "{label}: OT ranges should partition 1..ot_count"
+                );
+                assert!(
+                    ranges
+                        .windows(2)
+                        .all(|w| w[0].end == w[1].start && w[0].start < w[0].end)
+                );
+            }
+
+            // Array-heavy zambaqui model should expose at least one large
+            // multi-entry range (e.g., age/sex blocks).
+            let z_ranges = zambaqui.record_ot_ranges();
+            assert!(
+                z_ranges.iter().any(|r| r.len() >= 82),
+                "zambaqui: expected large OT ranges from record starts"
+            );
+            assert!(
+                z_ranges.iter().any(|r| r.len() >= 328),
+                "zambaqui: expected very large OT ranges (>= 328)"
+            );
+        }
+
+        #[test]
+        #[ignore]
+        fn test_record_filter_counts() {
+            let water = vdf_file("../../test/bobby/vdf/water/Current.vdf");
+            let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
+            let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
+
+            for (_label, vdf) in [("water", &water), ("econ", &econ), ("wrld3", &wrld3)] {
+                let ot_count = vdf.offset_table_count;
+                let c_basic = vdf
+                    .records
+                    .iter()
+                    .filter(|r| {
+                        r.fields[0] != 0
+                            && r.fields[1] != RECORD_F1_SYSTEM
+                            && r.fields[11] > 0
+                            && (r.fields[11] as usize) < ot_count
+                    })
+                    .count();
+                let c_any_ot = vdf
+                    .records
+                    .iter()
+                    .filter(|r| {
+                        r.fields[1] != RECORD_F1_SYSTEM
+                            && r.fields[11] > 0
+                            && (r.fields[11] as usize) < ot_count
+                    })
+                    .count();
+                let c_f10 = vdf
+                    .records
+                    .iter()
+                    .filter(|r| {
+                        r.fields[0] != 0
+                            && r.fields[1] != RECORD_F1_SYSTEM
+                            && r.fields[11] > 0
+                            && (r.fields[11] as usize) < ot_count
+                            && r.fields[10] > 0
+                    })
+                    .count();
+                let c_not_init = vdf
+                    .records
+                    .iter()
+                    .filter(|r| {
+                        r.fields[0] != 0
+                            && r.fields[1] != RECORD_F1_SYSTEM
+                            && r.fields[1] != RECORD_F1_INITIAL_TIME_CONST
+                            && r.fields[11] > 0
+                            && (r.fields[11] as usize) < ot_count
+                    })
+                    .count();
+                assert!(vdf.records.len() >= c_any_ot);
+                assert!(c_any_ot >= c_basic);
+                assert!(c_basic >= c_f10.min(c_not_init));
+            }
+        }
+
+        #[test]
+        #[ignore]
+        fn test_ot_reference_coverage() {
+            let water = vdf_file("../../test/bobby/vdf/water/Current.vdf");
+            let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
+            let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
+
+            for (_label, vdf) in [("water", &water), ("econ", &econ), ("wrld3", &wrld3)] {
+                let mut referenced = vec![false; vdf.offset_table_count];
+                for rec in &vdf.records {
+                    let idx = rec.fields[11] as usize;
+                    if idx < vdf.offset_table_count {
+                        referenced[idx] = true;
+                    }
+                }
+
+                let mut ref_count = 0usize;
+                let mut missing_blocks = 0usize;
+                let mut missing_consts = 0usize;
+                for (idx, seen) in referenced.iter().enumerate() {
+                    if *seen {
+                        ref_count += 1;
+                        continue;
+                    }
+                    if idx == 0 {
+                        continue;
+                    }
+                    if let Some(raw) = vdf.offset_table_entry(idx) {
+                        if vdf.is_data_block_offset(raw) {
+                            missing_blocks += 1;
+                        } else {
+                            missing_consts += 1;
+                        }
+                    }
+                }
+                assert_eq!(
+                    ref_count + missing_blocks + missing_consts + usize::from(!referenced[0]),
+                    vdf.offset_table_count
+                );
+            }
+        }
+
+        fn build_f2_order_ot_map(
+            vdf: &VdfFile,
+        ) -> StdResult<HashMap<String, usize>, Box<dyn Error>> {
+            let ot_count = vdf.offset_table_count;
+
+            let mut records: Vec<&VdfRecord> = vdf
+                .records
+                .iter()
+                .filter(|r| {
+                    r.fields[1] != RECORD_F1_SYSTEM
+                        && r.fields[11] > 0
+                        && (r.fields[11] as usize) < ot_count
+                })
+                .collect();
+            records.sort_by_key(|r| (r.fields[2], r.fields[11]));
+
+            let system_names: HashSet<&str> = SYSTEM_NAMES.into_iter().collect();
+            let vensim_builtins: HashSet<&str> = VENSIM_BUILTINS.into_iter().collect();
+
+            let mut names: Vec<String> = vdf.names[..vdf.slot_table.len()]
+                .iter()
+                .filter(|name| {
+                    !name.is_empty()
+                        && !name.starts_with('.')
+                        && !name.starts_with('-')
+                        && !name.starts_with('#')
+                        && !system_names.contains(name.as_str())
+                        && !vensim_builtins.contains(name.to_lowercase().as_str())
+                        && (name.len() != 1
+                            || name.chars().next().is_none_or(|c| c.is_alphanumeric()))
+                })
+                .cloned()
+                .collect();
+
+            if names.len() < records.len() {
+                return Err(format!(
+                    "f2-order map: candidate names {} < records {}",
+                    names.len(),
+                    records.len()
+                )
+                .into());
+            }
+            names.truncate(records.len());
+
+            let mut out = HashMap::new();
+            out.insert("Time".to_string(), 0);
+            for (name, rec) in names.into_iter().zip(records.into_iter()) {
+                out.insert(name, rec.fields[11] as usize);
+            }
+            Ok(out)
+        }
+
+        fn score_map_against_empirical(
+            name_to_ot: &HashMap<String, usize>,
+            empirical: &HashMap<Ident<Canonical>, usize>,
+        ) -> (usize, usize) {
+            let mut compared = 0usize;
+            let mut matches = 0usize;
+            for (name, &ot) in name_to_ot {
+                let canonical = crate::common::canonicalize(name);
+                if let Some(&emp_ot) = empirical.get(canonical.as_ref()) {
+                    compared += 1;
+                    if ot == emp_ot {
+                        matches += 1;
+                    }
+                }
+            }
+            (compared, matches)
+        }
+
+        #[test]
+        #[ignore]
+        fn test_f2_order_mapping_vs_empirical_water_econ() {
+            let cases = [
+                (
+                    "water",
+                    "../../test/bobby/vdf/water/water.mdl",
+                    "../../test/bobby/vdf/water/Current.vdf",
+                ),
+                (
+                    "econ",
+                    "../../test/bobby/vdf/econ/mark2.mdl",
+                    "../../test/bobby/vdf/econ/base.vdf",
+                ),
+            ];
+
+            for (label, mdl_path, vdf_path) in cases {
+                let vdf = vdf_file(vdf_path);
+                let vdf_data = vdf.extract_data().unwrap();
+                let ref_results = simulate_mdl(mdl_path);
+                let emp_map = build_empirical_ot_map(&vdf_data, &ref_results).unwrap();
+                let f2_map = build_f2_order_ot_map(&vdf).unwrap();
+
+                let mut matches = 0usize;
+                let mut compared = 0usize;
+                for (name, &ot) in &f2_map {
+                    let canonical = crate::common::canonicalize(name);
+                    if let Some(&emp_ot) = emp_map.get(canonical.as_ref()) {
+                        compared += 1;
+                        if ot == emp_ot {
+                            matches += 1;
+                        }
+                    }
+                }
+                eprintln!("{label}: f2-order compared={compared} matches={matches}");
+
+                // Exploratory signal only.
+                assert!(compared > 0, "{label}: expected some comparable names");
+            }
+        }
+
+        #[test]
+        #[ignore]
+        fn test_record_f3_matches_name_entry_offsets() {
+            let pop6 = vdf_file(
+                "../../third_party/uib_sd/fall_2008/sd202/assignments/assignment_6/Current.vdf",
+            );
+            let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
+            let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
+
+            for (label, vdf) in [("pop6", &pop6), ("econ", &econ), ("wrld3", &wrld3)] {
+                let entries = parse_name_entries_with_offsets(vdf);
+                assert!(
+                    !entries.is_empty(),
+                    "{label}: expected parsed name entries with raw offsets"
+                );
+
+                let prefix_offsets: std::collections::HashSet<u32> =
+                    entries.iter().map(|(p, _, _)| *p as u32).collect();
+                let string_offsets: std::collections::HashSet<u32> =
+                    entries.iter().map(|(_, s, _)| *s as u32).collect();
+
+                let model_records: Vec<&VdfRecord> = vdf
+                    .records
+                    .iter()
+                    .filter(|r| {
+                        r.fields[0] != 0
+                            && r.fields[1] != RECORD_F1_SYSTEM
+                            && r.fields[1] != RECORD_F1_INITIAL_TIME_CONST
+                            && r.fields[10] > 0
+                            && r.fields[11] > 0
+                            && (r.fields[11] as usize) < vdf.offset_table_count
+                    })
+                    .collect();
+                assert!(!model_records.is_empty(), "{label}: expected model records");
+
+                let prefix_matches = model_records
+                    .iter()
+                    .filter(|r| prefix_offsets.contains(&r.fields[3]))
+                    .count();
+                let string_matches = model_records
+                    .iter()
+                    .filter(|r| string_offsets.contains(&r.fields[3]))
+                    .count();
+
+                // This pins down whether f[3] is a direct name-table pointer.
+                assert!(
+                    prefix_matches > 0 || string_matches > 0,
+                    "{label}: expected at least one f[3] match to name entry offsets; got prefix={prefix_matches} string={string_matches}"
+                );
+            }
+        }
+
+        #[test]
+        #[ignore]
+        fn test_record_f3_within_name_spans() {
+            let water = vdf_file("../../test/bobby/vdf/water/Current.vdf");
+            let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
+            let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
+
+            for (label, vdf) in [("water", &water), ("econ", &econ), ("wrld3", &wrld3)] {
+                let spans = parse_name_entry_spans(vdf);
+                let model_records: Vec<&VdfRecord> = vdf
+                    .records
+                    .iter()
+                    .filter(|r| {
+                        r.fields[1] != RECORD_F1_SYSTEM
+                            && r.fields[11] > 0
+                            && (r.fields[11] as usize) < vdf.offset_table_count
+                    })
+                    .collect();
+
+                let mut in_span = 0usize;
+                for rec in &model_records {
+                    let hits = spans
+                        .iter()
+                        .filter(|(start, end, _)| {
+                            let off = rec.fields[3] as usize;
+                            off >= *start && off < *end
+                        })
+                        .count();
+                    if hits > 0 {
+                        in_span += 1;
+                    }
+                }
+                assert!(
+                    in_span > 0,
+                    "{label}: expected some records with f3 in name spans"
+                );
+            }
+        }
+
+        #[test]
+        #[ignore]
+        fn test_f3_span_mapping_vs_empirical() {
+            let cases = [
+                (
+                    "water",
+                    "../../test/bobby/vdf/water/water.mdl",
+                    "../../test/bobby/vdf/water/Current.vdf",
+                ),
+                (
+                    "econ",
+                    "../../test/bobby/vdf/econ/mark2.mdl",
+                    "../../test/bobby/vdf/econ/base.vdf",
+                ),
+                (
+                    "wrld3",
+                    "../../test/metasd/WRLD3-03/wrld3-03.mdl",
+                    "../../test/metasd/WRLD3-03/SCEN01.VDF",
+                ),
+            ];
+
+            for (label, mdl_path, vdf_path) in cases {
+                let vdf = vdf_file(vdf_path);
+                let spans = parse_name_entry_spans(&vdf);
+                let mut span_map: HashMap<String, usize> = HashMap::new();
+                span_map.insert("Time".to_string(), 0);
+
+                for rec in &vdf.records {
+                    if rec.fields[1] == RECORD_F1_SYSTEM {
+                        continue;
+                    }
+                    let ot = rec.fields[11] as usize;
+                    if ot == 0 || ot >= vdf.offset_table_count {
+                        continue;
+                    }
+
+                    let off = rec.fields[3] as usize;
+                    let mut hit_name: Option<&str> = None;
+                    for (start, end, name) in &spans {
+                        if off >= *start && off < *end {
+                            if hit_name.is_some() {
+                                hit_name = None;
+                                break;
+                            }
+                            hit_name = Some(name.as_str());
+                        }
+                    }
+                    if let Some(name) = hit_name {
+                        span_map.entry(name.to_string()).or_insert(ot);
+                    }
+                }
+
+                let vdf_data = vdf.extract_data().unwrap();
+                let ref_results = simulate_mdl(mdl_path);
+                let emp_map = build_empirical_ot_map(&vdf_data, &ref_results).unwrap();
+
+                let (_compared, matches) = score_map_against_empirical(&span_map, &emp_map);
+                assert!(matches > 0, "{label}: expected at least one f3-span match");
+            }
+        }
+
         #[test]
         fn test_econ_base_names_and_slots() {
             let vdf = vdf_file("../../test/bobby/vdf/econ/base.vdf");
 
-            // 42 names have slot table entries
-            assert_eq!(vdf.slot_table.len(), 42);
+            // After widening slot detection, 94 names have slot table entries.
+            assert_eq!(vdf.slot_table.len(), 94);
             assert_eq!(vdf.names[0], "Time");
-            assert_eq!(
-                vdf.names[41],
-                "effect of hud policies on risk taking behavior"
-            );
+            assert_eq!(vdf.names[93], "ST");
 
             // Names past the slot table don't have slot table entries
             let unslotted = &vdf.names[vdf.slot_table.len()..];
@@ -1410,52 +2516,17 @@ mod tests {
             );
             assert_eq!(
                 unslotted[0],
-                "effect of negative inflation rate on risk taking behavior"
+                "#DELAY1(insolvencyrisk,averagetimebeforedefault)#"
             );
-            assert_eq!(unslotted[1], "max risk");
-            assert_eq!(unslotted[2], "hud policy");
+            assert_eq!(
+                unslotted[1],
+                "#LV1<DELAY1(insolvencyrisk,averagetimebeforedefault)#"
+            );
+            assert_eq!(unslotted[2], "#SMOOTH(realinflationrate,3)#");
 
-            assert!(
-                unslotted.len() >= 50,
-                "expected at least 50 unslotted names, got {}",
-                unslotted.len()
-            );
+            assert_eq!(unslotted.len(), 6);
 
             assert!(vdf.names.len() >= 92);
-        }
-
-        #[test]
-        #[ignore]
-        fn test_zambaqui_baserun_names_and_slots() {
-            let vdf = vdf_file("../../third_party/uib_sd/zambaqui/baserun.vdf");
-
-            assert_eq!(vdf.slot_table.len(), 178);
-            assert_eq!(vdf.names[0], "Time");
-
-            let unslotted = &vdf.names[vdf.slot_table.len()..];
-            assert!(
-                !unslotted.is_empty(),
-                "expected unslotted names for zambaqui model"
-            );
-
-            assert!(
-                unslotted.contains(&"births".to_string()),
-                "expected 'births' in unslotted names"
-            );
-            assert!(
-                unslotted.contains(&"capital".to_string()),
-                "expected 'capital' in unslotted names"
-            );
-            assert!(
-                unslotted.contains(&"total population".to_string()),
-                "expected 'total population' in unslotted names"
-            );
-
-            assert!(
-                unslotted.len() >= 250,
-                "expected at least 250 unslotted names, got {}",
-                unslotted.len()
-            );
         }
 
         #[test]
@@ -1635,6 +2706,91 @@ mod tests {
                 .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"))
         }
 
+        fn make_synthetic_reference(var_insert_order: &[&str]) -> crate::Results {
+            let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+            offsets.insert(Ident::new("time"), 0);
+            offsets.insert(Ident::new("a"), 1);
+            offsets.insert(Ident::new("b"), 2);
+            offsets.insert(Ident::new("c"), 3);
+
+            // Reinsert variable keys in caller-specified order to vary HashMap
+            // insertion history without changing logical offsets.
+            let mut reordered: HashMap<Ident<Canonical>, usize> = HashMap::new();
+            reordered.insert(Ident::new("time"), 0);
+            for &name in var_insert_order {
+                let id = Ident::new(name);
+                reordered.insert(id.clone(), *offsets.get(&id).unwrap());
+            }
+
+            // time, a, b, c columns
+            let rows: [[f64; 4]; 4] = [
+                [0.0, 100.0, 10.0, 5.0],
+                [1.0, 101.0, 20.0, 6.0],
+                [2.0, 102.0, 40.0, 9.0],
+                [3.0, 103.0, 80.0, 14.0],
+            ];
+            let mut data = Vec::new();
+            for row in rows {
+                data.extend_from_slice(&row);
+            }
+
+            crate::Results {
+                offsets: reordered,
+                data: data.into_boxed_slice(),
+                step_size: 4,
+                step_count: 4,
+                specs: crate::results::Specs {
+                    start: 0.0,
+                    stop: 3.0,
+                    dt: 1.0,
+                    save_step: 1.0,
+                    method: crate::results::Method::Euler,
+                    n_chunks: 4,
+                },
+                is_vensim: true,
+            }
+        }
+
+        fn make_synthetic_vdf() -> VdfData {
+            // OT entries: 0=time, 1=b, 2=c, 3=a
+            VdfData {
+                time_values: vec![0.0, 1.0, 2.0, 3.0],
+                entries: vec![
+                    vec![0.0, 1.0, 2.0, 3.0],
+                    vec![10.0, 20.0, 40.0, 80.0],
+                    vec![5.0, 6.0, 9.0, 14.0],
+                    vec![100.0, 101.0, 102.0, 103.0],
+                ],
+            }
+        }
+
+        #[test]
+        fn test_empirical_map_is_deterministic_across_offset_insertion_order() {
+            let vdf = make_synthetic_vdf();
+            let reference_a = make_synthetic_reference(&["a", "b", "c"]);
+            let reference_b = make_synthetic_reference(&["c", "b", "a"]);
+
+            let map_a = build_empirical_ot_map(&vdf, &reference_a).unwrap();
+            let map_b = build_empirical_ot_map(&vdf, &reference_b).unwrap();
+            assert_eq!(map_a, map_b);
+            assert_eq!(map_a.get(&Ident::new("a")), Some(&3usize));
+            assert_eq!(map_a.get(&Ident::new("b")), Some(&1usize));
+            assert_eq!(map_a.get(&Ident::new("c")), Some(&2usize));
+        }
+
+        #[test]
+        fn test_build_vdf_results_is_deterministic_across_offset_insertion_order() {
+            let vdf = make_synthetic_vdf();
+            let reference_a = make_synthetic_reference(&["a", "b", "c"]);
+            let reference_b = make_synthetic_reference(&["c", "b", "a"]);
+
+            let res_a = build_vdf_results(&vdf, &reference_a).unwrap();
+            let res_b = build_vdf_results(&vdf, &reference_b).unwrap();
+            assert_eq!(res_a.offsets, res_b.offsets);
+            assert_eq!(res_a.step_count, res_b.step_count);
+            assert_eq!(res_a.step_size, res_b.step_size);
+        }
+
         /// Compare deterministic map against empirical ground truth for a
         /// given MDL/VDF pair. Returns (matches, mismatches).
         fn compare_det_vs_emp(
@@ -1671,6 +2827,64 @@ mod tests {
             }
 
             (matches, mismatches)
+        }
+
+        fn assert_model_guided_map_well_formed(mdl_path: &str, vdf_path: &str) {
+            let ref_results = simulate_mdl(mdl_path);
+            let vdf = vdf_file(vdf_path);
+            let map_a = vdf
+                .build_model_guided_ot_map(&ref_results)
+                .unwrap_or_else(|e| panic!("model-guided map failed for {vdf_path}: {e}"));
+            let map_b = vdf
+                .build_model_guided_ot_map(&ref_results)
+                .unwrap_or_else(|e| panic!("model-guided map failed for {vdf_path}: {e}"));
+            assert_eq!(map_a, map_b);
+
+            let time_ident = Ident::<Canonical>::from_str_unchecked("time");
+            assert_eq!(map_a.get(&time_ident), Some(&0usize));
+            assert_eq!(
+                map_a.len(),
+                ref_results.offsets.len(),
+                "expected model-guided map coverage to match reference offsets"
+            );
+
+            let mut seen_ots = HashSet::new();
+            for (id, &ot) in &map_a {
+                assert!(
+                    ot < vdf.offset_table_count,
+                    "{id} mapped out of OT range: {ot}"
+                );
+                assert!(seen_ots.insert(ot), "duplicate OT assignment: {ot}");
+                if *id != time_ident {
+                    assert!(ot > 0, "non-time variable {id} mapped to OT zero");
+                }
+            }
+        }
+
+        #[test]
+        #[ignore]
+        fn test_model_guided_map_deterministic_for_wrld3() {
+            let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
+            let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
+            let ref_results = simulate_mdl(mdl_path);
+            let vdf = vdf_file(vdf_path);
+
+            let map_a = vdf.build_model_guided_ot_map(&ref_results).unwrap();
+            let map_b = vdf.build_model_guided_ot_map(&ref_results).unwrap();
+            assert_eq!(map_a, map_b);
+        }
+
+        #[test]
+        fn test_model_guided_small_models_well_formed() {
+            assert_model_guided_map_well_formed(
+                "../../test/bobby/vdf/water/water.mdl",
+                "../../test/bobby/vdf/water/Current.vdf",
+            );
+
+            assert_model_guided_map_well_formed(
+                "../../test/bobby/vdf/pop/pop.mdl",
+                "../../test/bobby/vdf/pop/Current.vdf",
+            );
         }
 
         /// The bact VDF was generated from a different version of the model

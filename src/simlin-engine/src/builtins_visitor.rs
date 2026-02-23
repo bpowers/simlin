@@ -34,7 +34,9 @@ fn contains_stdlib_call(expr: &Expr0) -> bool {
         Const(_, _, _) => false,
         Var(_, _) => false,
         App(UntypedBuiltinFn(func, args), _) => {
-            if crate::stdlib::MODEL_NAMES.contains(&func.as_str()) {
+            if crate::stdlib::MODEL_NAMES.contains(&func.as_str())
+                || matches!(func.as_str(), "delayn" | "smthn")
+            {
                 return true;
             }
             args.iter().any(contains_stdlib_call)
@@ -49,6 +51,52 @@ fn contains_stdlib_call(expr: &Expr0) -> bool {
             contains_stdlib_call(cond) || contains_stdlib_call(t) || contains_stdlib_call(f)
         }
     }
+}
+
+fn parse_module_order_arg(expr: &Expr0) -> Option<u32> {
+    if let Expr0::Const(_, n, _) = expr {
+        let rounded = n.round();
+        if (*n - rounded).abs() < 1e-9 && rounded >= 0.0 {
+            return Some(rounded as u32);
+        }
+    }
+    None
+}
+
+fn rewrite_alias_module_call(
+    func: String,
+    args: Vec<Expr0>,
+    loc: crate::builtins::Loc,
+) -> Result<(String, Vec<Expr0>), EquationError> {
+    if !matches!(func.as_str(), "delayn" | "smthn") {
+        return Ok((func, args));
+    }
+    if args.len() < 3 || args.len() > 4 {
+        return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+    }
+
+    let mut it = args.into_iter();
+    let input = it.next().unwrap();
+    let delay_time = it.next().unwrap();
+    let order_expr = it.next().unwrap();
+    let init = it.next();
+
+    let Some(order) = parse_module_order_arg(&order_expr) else {
+        return eqn_err!(UnknownBuiltin, loc.start, loc.end);
+    };
+    let rewritten_name = match (func.as_str(), order) {
+        ("delayn", 1) => "delay1",
+        ("delayn", 3) => "delay3",
+        ("smthn", 1) => "smth1",
+        ("smthn", 3) => "smth3",
+        _ => return eqn_err!(UnknownBuiltin, loc.start, loc.end),
+    };
+
+    let init_expr = init.unwrap_or_else(|| input.clone());
+    Ok((
+        rewritten_name.to_string(),
+        vec![input, delay_time, init_expr],
+    ))
 }
 
 /// Get dimension names from a slice of Dimensions
@@ -254,6 +302,7 @@ impl<'a> BuiltinVisitor<'a> {
                     args.into_iter().map(|e| self.walk(e)).collect();
                 self.self_allowed = orig_self_allowed;
                 let args = args?;
+                let (func, args) = rewrite_alias_module_call(func, args, loc)?;
                 if is_builtin_fn(&func) {
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
@@ -555,6 +604,34 @@ mod tests {
         project.assert_sim_builds();
     }
 
+    /// Test that DELAYN with order=1 is rewritten to DELAY1 and works in A2A.
+    #[test]
+    fn test_arrayed_delayn_order1() {
+        let project = TestProject::new("arrayed_delayn1")
+            .named_dimension("DimA", &["A1", "A2"])
+            .array_const("input_a[DimA]", 10.0)
+            .aux("delay_time", "1", None)
+            .aux("init", "0", None)
+            .array_aux("d[DimA]", "DELAYN(input_a[DimA], delay_time, 1, init)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+    }
+
+    /// Test that DELAYN with order=3 is rewritten to DELAY3.
+    #[test]
+    fn test_arrayed_delayn_order3() {
+        let project = TestProject::new("arrayed_delayn3")
+            .named_dimension("DimA", &["A1", "A2"])
+            .array_const("input_a[DimA]", 10.0)
+            .aux("delay_time", "1", None)
+            .aux("init", "0", None)
+            .array_aux("d[DimA]", "DELAYN(input_a[DimA], delay_time, 3, init)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+    }
+
     /// Test arrayed SMOOTH1/SMTH1
     #[test]
     fn test_arrayed_smooth1() {
@@ -566,6 +643,33 @@ mod tests {
 
         project.assert_compiles();
         project.assert_sim_builds();
+    }
+
+    /// Test that SMTHN with order=1 is rewritten to SMTH1.
+    #[test]
+    fn test_arrayed_smthn_order1() {
+        let project = TestProject::new("arrayed_smthn1")
+            .named_dimension("DimA", &["A1", "A2"])
+            .array_const("input_a[DimA]", 10.0)
+            .aux("smooth_time", "1", None)
+            .aux("init", "0", None)
+            .array_aux("s[DimA]", "SMTHN(input_a[DimA], smooth_time, 1, init)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+    }
+
+    /// Test that unsupported DELAYN order is rejected.
+    #[test]
+    fn test_arrayed_delayn_unsupported_order() {
+        let project = TestProject::new("arrayed_delayn_bad_order")
+            .named_dimension("DimA", &["A1", "A2"])
+            .array_const("input_a[DimA]", 10.0)
+            .aux("delay_time", "1", None)
+            .aux("init", "0", None)
+            .array_aux("d[DimA]", "DELAYN(input_a[DimA], delay_time, 2, init)");
+
+        project.assert_compile_error(crate::ErrorCode::UnknownBuiltin);
     }
 
     /// Test with indexed dimensions (numeric 1,2,3...)

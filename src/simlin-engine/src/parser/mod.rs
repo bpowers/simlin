@@ -641,6 +641,22 @@ impl<'input> Parser<'input> {
 
             // Regular expression or range
             _ => {
+                // Vensim sometimes emits subrange wildcard syntax as `dim.*`.
+                // Accept that form as equivalent to `*:dim`.
+                if self.peek_kind() == Some(TokenKind::Ident)
+                    && self.pos + 1 < self.tokens.len()
+                    && TokenKind::from(&self.tokens[self.pos + 1].1) == TokenKind::Mul
+                    && let Token::Ident(s) = self.tokens[self.pos].1
+                    && let Some(dim_name) = s.strip_suffix('.')
+                {
+                    let (lpos, _, _) = *self.advance().unwrap();
+                    let (_, _, star_end) = *self.advance().unwrap(); // consume '*'
+                    return Ok(IndexExpr0::StarRange(
+                        RawIdent::new_from_str(dim_name),
+                        Loc::new(lpos, star_end),
+                    ));
+                }
+
                 let left = self.parse_expr()?;
 
                 // Check for range: expr:expr

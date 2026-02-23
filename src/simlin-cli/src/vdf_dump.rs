@@ -35,6 +35,8 @@ pub fn dump_vdf(path: &str) -> Result<(), Box<dyn Error>> {
     print_names(&vdf);
     print_slots(&vdf);
     print_records(&vdf);
+    print_record_ot_ranges(&vdf);
+    print_ref_streams(&vdf);
     print_offset_table(&vdf);
     print_data_blocks(&vdf);
     print_gaps(&vdf, file_size);
@@ -341,6 +343,138 @@ fn print_records(vdf: &VdfFile) {
             print!("{}", fmt_field(val));
         }
         println!("  {}", class);
+    }
+    println!();
+}
+
+fn print_record_ot_ranges(vdf: &VdfFile) {
+    println!("=== Record-Derived OT Ranges ===");
+    let ranges = vdf.record_ot_ranges();
+    if ranges.is_empty() {
+        println!("  (none)");
+        println!();
+        return;
+    }
+
+    let covered: usize = ranges.iter().map(|r| r.len()).sum();
+    let multi = ranges.iter().filter(|r| r.len() > 1).count();
+    println!(
+        "  ranges={} covered={} of {} (excluding OT[0]) multi_entry_ranges={}",
+        ranges.len(),
+        covered,
+        vdf.offset_table_count.saturating_sub(1),
+        multi
+    );
+    for (i, r) in ranges.iter().take(20).enumerate() {
+        println!(
+            "  {:>3}  [{}..{}) len={} records@start={}",
+            i,
+            r.start,
+            r.end,
+            r.len(),
+            r.record_count
+        );
+    }
+    if ranges.len() > 20 {
+        println!("  ... ({} more ranges)", ranges.len() - 20);
+    }
+    println!();
+}
+
+fn print_ref_streams(vdf: &VdfFile) {
+    let mut slot_to_name: std::collections::HashMap<u32, &str> = std::collections::HashMap::new();
+    for (i, &slot) in vdf.slot_table.iter().enumerate() {
+        if let Some(name) = vdf.names.get(i) {
+            slot_to_name.insert(slot, name.as_str());
+        }
+    }
+
+    println!("=== Section 6 Ref Stream ===");
+    match vdf.parse_section6_ref_stream() {
+        Some((skip, entries, stop)) if !entries.is_empty() => {
+            let all_slotted = entries
+                .iter()
+                .filter(|e| e.slotted_ref_count == e.refs.len())
+                .count();
+            let mixed = entries
+                .iter()
+                .filter(|e| e.slotted_ref_count > 0 && e.slotted_ref_count < e.refs.len())
+                .count();
+            let none = entries.iter().filter(|e| e.slotted_ref_count == 0).count();
+            println!(
+                "  skip_words={} entries={} stop=0x{:08x} slotted(all/mixed/none)={}/{}/{}",
+                skip,
+                entries.len(),
+                stop,
+                all_slotted,
+                mixed,
+                none
+            );
+            for (i, e) in entries.iter().take(12).enumerate() {
+                let refs: Vec<String> = e
+                    .refs
+                    .iter()
+                    .map(|r| {
+                        slot_to_name
+                            .get(r)
+                            .map(|n| format!("{r}:{n}"))
+                            .unwrap_or_else(|| format!("{r}:<sec1>"))
+                    })
+                    .collect();
+                println!(
+                    "  {:>3} @0x{:08x} n={} slot_hits={} refs={:?}",
+                    i,
+                    e.file_offset,
+                    e.refs.len(),
+                    e.slotted_ref_count,
+                    refs
+                );
+            }
+            if entries.len() > 12 {
+                println!("  ... ({} more entries)", entries.len() - 12);
+            }
+        }
+        _ => println!("  (none)"),
+    }
+    println!();
+
+    println!("=== Section 5 Set Stream ===");
+    match vdf.parse_section5_set_stream() {
+        Some((skip, entries, stop)) if !entries.is_empty() => {
+            println!(
+                "  skip_words={} sets={} stop=0x{:08x}",
+                skip,
+                entries.len(),
+                stop
+            );
+            for (i, e) in entries.iter().take(8).enumerate() {
+                let refs: Vec<String> = e
+                    .refs
+                    .iter()
+                    .take(8)
+                    .map(|r| {
+                        slot_to_name
+                            .get(r)
+                            .map(|n| format!("{r}:{n}"))
+                            .unwrap_or_else(|| format!("{r}:<sec1>"))
+                    })
+                    .collect();
+                println!(
+                    "  {:>3} @0x{:08x} n={} size={} dim={} slot_hits={} refs(head)={:?}",
+                    i,
+                    e.file_offset,
+                    e.n,
+                    e.refs.len(),
+                    e.dimension_size(),
+                    e.slotted_ref_count,
+                    refs
+                );
+            }
+            if entries.len() > 8 {
+                println!("  ... ({} more sets)", entries.len() - 8);
+            }
+        }
+        _ => println!("  (none)"),
     }
     println!();
 }

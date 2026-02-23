@@ -155,6 +155,20 @@ fn test_parse_subscript_star_range() {
 }
 
 #[test]
+fn test_parse_subscript_dot_star_range() {
+    let ast = parse_eq("a[*, adult_age.*]").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Subscript(
+        RawIdent::new_from_str("a"),
+        vec![
+            IndexExpr0::Wildcard(Loc::default()),
+            IndexExpr0::StarRange(RawIdent::new_from_str("adult_age"), Loc::default()),
+        ],
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+#[test]
 fn test_parse_subscript_range() {
     let ast = parse_eq("a[1:2]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
