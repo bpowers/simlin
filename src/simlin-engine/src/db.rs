@@ -772,6 +772,7 @@ pub struct ModelDepGraphResult {
     pub runlist_initials: Vec<String>,
     pub runlist_flows: Vec<String>,
     pub runlist_stocks: Vec<String>,
+    pub has_cycle: bool,
 }
 
 /// Per-model tracked function for dependency graph computation. Salsa traces
@@ -930,7 +931,9 @@ pub fn model_dependency_graph(
                 .collect())
         };
 
+    let mut has_cycle = false;
     let dt_dependencies = compute_transitive(false).unwrap_or_else(|var_name| {
+        has_cycle = true;
         CompilationDiagnostic(Diagnostic {
             model: model.name(db).clone(),
             variable: Some(var_name),
@@ -944,6 +947,7 @@ pub fn model_dependency_graph(
         HashMap::new()
     });
     let initial_dependencies = compute_transitive(true).unwrap_or_else(|var_name| {
+        has_cycle = true;
         CompilationDiagnostic(Diagnostic {
             model: model.name(db).clone(),
             variable: Some(var_name),
@@ -1052,6 +1056,7 @@ pub fn model_dependency_graph(
         runlist_initials,
         runlist_flows,
         runlist_stocks,
+        has_cycle,
     }
 }
 
@@ -3117,6 +3122,12 @@ pub fn assemble_module(
     };
 
     let dep_graph = model_dependency_graph(db, model, project);
+    if dep_graph.has_cycle {
+        return Err(format!(
+            "model '{}' has circular dependencies",
+            model.name(db)
+        ));
+    }
     let layout = compute_layout(db, model, project, is_root);
     let source_vars = model.variables(db);
     let model_name = model.name(db).clone();

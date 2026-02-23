@@ -3836,3 +3836,73 @@ fn test_model_sim_specs_defaults_to_project() {
         specs.stop
     );
 }
+
+#[test]
+fn test_circular_dependency_blocks_incremental_compilation() {
+    let project = datamodel::Project {
+        name: "circular".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        source: None,
+        ai_information: None,
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "a".to_string(),
+                    equation: datamodel::Equation::Scalar("b".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "b".to_string(),
+                    equation: datamodel::Equation::Scalar("a".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+        }],
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+
+    let dep_graph = model_dependency_graph(&db, sync.models["main"].source, sync.project);
+    assert!(dep_graph.has_cycle, "should detect circular dependency");
+
+    let result = assemble_simulation(&db, sync.project, "main");
+    assert!(
+        result.is_err(),
+        "incremental compilation should fail for circular dependencies"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("circular"),
+        "error should mention circular dependencies, got: {}",
+        err
+    );
+}
