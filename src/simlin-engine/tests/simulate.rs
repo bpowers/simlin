@@ -746,3 +746,98 @@ fn simulates_wrld3_03() {
     // and VDF stores f32 values (~7 significant digits).
     ensure_vdf_results(&vdf_results, &results1);
 }
+
+/// All test models that the monolithic compiler can handle.
+/// The incremental path must also handle these.
+static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
+    "../../test/alias1/alias1.stmx",
+    "../../test/builtin_init/builtin_init.stmx",
+    "../../test/arrays1/arrays.stmx",
+    "../../test/array_sum_simple/array_sum_simple.xmile",
+    "../../test/array_sum_expr/array_sum_expr.xmile",
+    "../../test/array_multi_source/array_multi_source.xmile",
+    "../../test/array_broadcast/array_broadcast.xmile",
+    "../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx",
+    "../../test/modules2/modules2.xmile",
+    "../../test/circular-dep-1/model.stmx",
+    "../../test/previous/model.stmx",
+    "../../test/modules_with_complex_idents/modules_with_complex_idents.stmx",
+    "../../test/step_into_smth1/model.stmx",
+    "../../test/subscript_index_name_values/model.stmx",
+    "../../test/sdeverywhere/models/active_initial/active_initial.xmile",
+    "../../test/sdeverywhere/models/lookup/lookup.xmile",
+    "../../test/sdeverywhere/models/sum/sum.xmile",
+    "../../test/sdeverywhere/models/delay/delay.xmile",
+    "../../test/sdeverywhere/models/smooth3/smooth3.xmile",
+    "../../test/sdeverywhere/models/smooth/smooth.xmile",
+    "../../test/lookup_arrayed/lookup_arrayed.xmile",
+];
+
+/// Verify that the salsa-based incremental compilation path successfully
+/// compiles every test model that the monolithic path handles.
+#[cfg(feature = "file_io")]
+#[test]
+#[ignore] // 16 models still fail; un-ignore after fixing all incremental gaps
+fn incremental_compilation_covers_all_models() {
+    use simlin_engine::db;
+
+    let mut failures: Vec<(String, String)> = Vec::new();
+
+    for model_path in ALL_INCREMENTALLY_COMPILABLE_MODELS
+        .iter()
+        .chain(TEST_MODELS.iter())
+    {
+        let f = match File::open(model_path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let mut f = BufReader::new(f);
+
+        let datamodel_project = if model_path.ends_with(".stmx") || model_path.ends_with(".xmile") {
+            match xmile::project_from_reader(&mut f) {
+                Ok(p) => p,
+                Err(_) => continue,
+            }
+        } else {
+            continue;
+        };
+
+        let model_path_owned = model_path.to_string();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut salsa_db = db::SimlinDb::default();
+            let sync_state =
+                db::sync_from_datamodel_incremental(&mut salsa_db, &datamodel_project, None);
+            let sync = sync_state.to_sync_result();
+            db::compile_project_incremental(&salsa_db, sync.project, "main")
+        }));
+
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                failures.push((model_path_owned, format!("{e}")));
+            }
+            Err(panic) => {
+                let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "unknown panic".to_string()
+                };
+                failures.push((model_path_owned, format!("PANIC: {msg}")));
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        eprintln!("\nIncremental compilation failures:");
+        for (model, err) in &failures {
+            eprintln!("  {model}: {err}");
+        }
+        panic!(
+            "{} of {} models failed incremental compilation",
+            failures.len(),
+            ALL_INCREMENTALLY_COMPILABLE_MODELS.len() + TEST_MODELS.len(),
+        );
+    }
+}
