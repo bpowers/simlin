@@ -682,6 +682,11 @@ impl Var {
     }
 }
 
+/// Crate-visible wrapper for extract_temp_sizes.
+pub(crate) fn extract_temp_sizes_pub(expr: &Expr, temp_sizes_map: &mut HashMap<u32, usize>) {
+    extract_temp_sizes(expr, temp_sizes_map);
+}
+
 /// Recursively extract temporary array sizes from an expression.
 /// Populates the temp_sizes_map with (temp_id, max_size) entries.
 /// Since temp IDs restart at 0 for each lower() call, the same ID may be

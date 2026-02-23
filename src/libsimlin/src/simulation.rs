@@ -66,22 +66,54 @@ pub unsafe extern "C" fn simlin_sim_new(
             Ok(vm) => (Some(compiled), Some(vm), None),
             Err(err) => (Some(compiled), None, Some(err)),
         }
+    } else if !enable_ltm {
+        // Try salsa-based incremental compilation first.
+        // Falls back to monolithic if the incremental path doesn't support
+        // this model configuration (e.g., multi-model with modules).
+        let incremental_result = {
+            let db = project_ref.db.lock().unwrap();
+            let sync_state = project_ref.sync_state.lock().unwrap();
+            if let Some(ref state) = *sync_state {
+                let sync = state.to_sync_result();
+                engine::db::compile_project_incremental(&db, sync.project, &model_ref.model_name)
+                    .ok()
+            } else {
+                None
+            }
+        };
+
+        if let Some(compiled) = incremental_result {
+            match Vm::new(compiled.clone()) {
+                Ok(vm) => (Some(compiled), Some(vm), None),
+                Err(err) => (Some(compiled), None, Some(err)),
+            }
+        } else {
+            // Fall back to monolithic compilation
+            let cloned_project = {
+                let project_locked = project_ref.project.lock().unwrap();
+                project_locked.clone()
+            };
+            match compile_simulation(&cloned_project, &model_ref.model_name) {
+                Ok(compiled) => match Vm::new(compiled.clone()) {
+                    Ok(vm) => (Some(compiled), Some(vm), None),
+                    Err(err) => (Some(compiled), None, Some(err)),
+                },
+                Err(err) => (None, None, Some(err)),
+            }
+        }
     } else {
+        // LTM path: must go through the monolithic pipeline
         let cloned_project = {
             let project_locked = project_ref.project.lock().unwrap();
             project_locked.clone()
         };
 
-        let project_variant = if enable_ltm {
-            match cloned_project.with_ltm() {
-                Ok(proj) => proj,
-                Err(err) => {
-                    store_ffi_error(out_error, ffi_error_from_engine(&err));
-                    return ptr::null_mut();
-                }
+        let project_variant = match cloned_project.with_ltm() {
+            Ok(proj) => proj,
+            Err(err) => {
+                store_ffi_error(out_error, ffi_error_from_engine(&err));
+                return ptr::null_mut();
             }
-        } else {
-            cloned_project
         };
 
         match compile_simulation(&project_variant, &model_ref.model_name) {

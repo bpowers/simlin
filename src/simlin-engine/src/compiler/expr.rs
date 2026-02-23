@@ -17,7 +17,7 @@ pub struct Table {
 }
 
 impl Table {
-    pub(super) fn new(ident: &str, t: &crate::variable::Table) -> Result<Self> {
+    pub(crate) fn new(ident: &str, t: &crate::variable::Table) -> Result<Self> {
         if t.x.len() != t.y.len() {
             return sim_err!(BadTable, ident.to_string());
         }

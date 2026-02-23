@@ -12,9 +12,7 @@
 //!
 //! The pipeline is: concrete bytecodes -> symbolize -> SymbolicByteCode -> resolve -> concrete bytecodes.
 
-// These types and functions are exercised by tests now and will be used by later
-// phases of the incremental compilation pipeline.
-#![allow(dead_code)]
+// These types and functions are used by the incremental compilation pipeline.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -280,6 +278,39 @@ pub(crate) struct SymbolicCompiledModule {
 }
 
 // ============================================================================
+// Per-Variable Compiled Fragments
+// ============================================================================
+
+/// Compiled output for a single variable, with symbolic (layout-independent)
+/// bytecodes. Produced by `compile_var_fragment`, consumed by `assemble_module`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CompiledVarFragment {
+    pub ident: String,
+    /// Symbolic bytecodes for the initial-value phase (None if var not in initials runlist)
+    pub initial_bytecodes: Option<PerVarBytecodes>,
+    /// Symbolic bytecodes for the flow/dt phase
+    pub flow_bytecodes: Option<PerVarBytecodes>,
+    /// Symbolic bytecodes for the stock-update phase
+    pub stock_bytecodes: Option<PerVarBytecodes>,
+}
+
+/// Bytecodes plus side-channel data for one variable in one phase.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PerVarBytecodes {
+    pub symbolic: SymbolicByteCode,
+    /// Graphical functions (lookup tables) referenced by this variable's code
+    pub graphical_functions: Vec<Vec<(f64, f64)>>,
+    /// Module declarations for module variables
+    pub module_decls: Vec<SymbolicModuleDecl>,
+    /// Static array views referenced
+    pub static_views: Vec<SymbolicStaticView>,
+    /// Temp array sizes: (temp_id, size)
+    pub temp_sizes: Vec<(u32, usize)>,
+    /// Dimension list entries
+    pub dim_lists: Vec<Vec<u16>>,
+}
+
+// ============================================================================
 // Variable Layout
 // ============================================================================
 
@@ -305,6 +336,7 @@ impl VariableLayout {
     }
 
     /// Build from a Module's offset map for a specific model.
+    #[allow(dead_code)]
     pub fn from_offset_map(
         offsets: &HashMap<crate::common::Ident<crate::common::Canonical>, (usize, usize)>,
         n_slots: usize,
@@ -335,14 +367,14 @@ impl VariableLayout {
 
 /// Maps absolute variable offsets back to (variable_name, element_within_variable).
 /// Used during symbolization to convert integer offsets to symbolic references.
-struct ReverseOffsetMap {
+pub(crate) struct ReverseOffsetMap {
     /// Indexed by offset. `entries[off] = Some((name, element_offset))`.
     entries: Vec<Option<(String, usize)>>,
 }
 
 impl ReverseOffsetMap {
     /// Build from a VariableLayout.
-    fn from_layout(layout: &VariableLayout) -> Self {
+    pub(crate) fn from_layout(layout: &VariableLayout) -> Self {
         let mut entries: Vec<Option<(String, usize)>> = vec![None; layout.n_slots];
         for (name, entry) in &layout.entries {
             for elem in 0..entry.size {
@@ -414,7 +446,10 @@ pub(crate) fn layout_from_metadata(
 // Symbolize: Concrete -> Symbolic
 // ============================================================================
 
-fn symbolize_opcode(op: &Opcode, rmap: &ReverseOffsetMap) -> Result<SymbolicOpcode, String> {
+pub(crate) fn symbolize_opcode(
+    op: &Opcode,
+    rmap: &ReverseOffsetMap,
+) -> Result<SymbolicOpcode, String> {
     match op {
         // Opcodes with variable offsets that need symbolization
         Opcode::LoadVar { off } => Ok(SymbolicOpcode::LoadVar {
@@ -571,7 +606,7 @@ fn symbolize_opcode(op: &Opcode, rmap: &ReverseOffsetMap) -> Result<SymbolicOpco
     }
 }
 
-fn symbolize_static_view(
+pub(crate) fn symbolize_static_view(
     view: &StaticArrayView,
     rmap: &ReverseOffsetMap,
 ) -> Result<SymbolicStaticView, String> {
@@ -591,7 +626,7 @@ fn symbolize_static_view(
     })
 }
 
-fn symbolize_module_decl(
+pub(crate) fn symbolize_module_decl(
     decl: &ModuleDeclaration,
     rmap: &ReverseOffsetMap,
 ) -> Result<SymbolicModuleDecl, String> {
@@ -602,7 +637,10 @@ fn symbolize_module_decl(
     })
 }
 
-fn symbolize_bytecode(bc: &ByteCode, rmap: &ReverseOffsetMap) -> Result<SymbolicByteCode, String> {
+pub(crate) fn symbolize_bytecode(
+    bc: &ByteCode,
+    rmap: &ReverseOffsetMap,
+) -> Result<SymbolicByteCode, String> {
     let code = bc
         .code
         .iter()
@@ -617,6 +655,7 @@ fn symbolize_bytecode(bc: &ByteCode, rmap: &ReverseOffsetMap) -> Result<Symbolic
 
 /// Convert a `CompiledModule` to its symbolic representation.
 /// All variable offsets are replaced with symbolic references using the layout.
+#[allow(dead_code)]
 pub(crate) fn symbolize_module(
     module: &CompiledModule,
     layout: &VariableLayout,
@@ -674,7 +713,10 @@ pub(crate) fn symbolize_module(
 // Resolve: Symbolic -> Concrete (Assembly)
 // ============================================================================
 
-fn resolve_var_ref(var: &SymVarRef, layout: &VariableLayout) -> Result<VariableOffset, String> {
+pub(crate) fn resolve_var_ref(
+    var: &SymVarRef,
+    layout: &VariableLayout,
+) -> Result<VariableOffset, String> {
     let entry = layout.get(&var.name).ok_or_else(|| {
         format!(
             "variable '{}' not found in layout during resolution",
@@ -691,7 +733,10 @@ fn resolve_var_ref(var: &SymVarRef, layout: &VariableLayout) -> Result<VariableO
     Ok(off as VariableOffset)
 }
 
-fn resolve_opcode(op: &SymbolicOpcode, layout: &VariableLayout) -> Result<Opcode, String> {
+pub(crate) fn resolve_opcode(
+    op: &SymbolicOpcode,
+    layout: &VariableLayout,
+) -> Result<Opcode, String> {
     match op {
         // Opcodes with symbolic variable references
         SymbolicOpcode::LoadVar { var } => Ok(Opcode::LoadVar {
@@ -842,7 +887,10 @@ fn resolve_opcode(op: &SymbolicOpcode, layout: &VariableLayout) -> Result<Opcode
     }
 }
 
-fn resolve_bytecode(sbc: &SymbolicByteCode, layout: &VariableLayout) -> Result<ByteCode, String> {
+pub(crate) fn resolve_bytecode(
+    sbc: &SymbolicByteCode,
+    layout: &VariableLayout,
+) -> Result<ByteCode, String> {
     let code = sbc
         .code
         .iter()
@@ -855,7 +903,7 @@ fn resolve_bytecode(sbc: &SymbolicByteCode, layout: &VariableLayout) -> Result<B
     })
 }
 
-fn resolve_static_view(
+pub(crate) fn resolve_static_view(
     sv: &SymbolicStaticView,
     layout: &VariableLayout,
 ) -> Result<StaticArrayView, String> {
@@ -883,7 +931,7 @@ fn resolve_static_view(
     })
 }
 
-fn resolve_module_decl(
+pub(crate) fn resolve_module_decl(
     sd: &SymbolicModuleDecl,
     layout: &VariableLayout,
 ) -> Result<ModuleDeclaration, String> {
@@ -959,7 +1007,7 @@ pub(crate) fn resolve_module(
 }
 
 /// Extract sorted, deduplicated AssignCurr target offsets from a ByteCode.
-fn extract_assign_curr_offsets(bc: &ByteCode) -> Vec<usize> {
+pub(crate) fn extract_assign_curr_offsets(bc: &ByteCode) -> Vec<usize> {
     let mut offsets: Vec<usize> = bc
         .code
         .iter()
@@ -972,6 +1020,177 @@ fn extract_assign_curr_offsets(bc: &ByteCode) -> Vec<usize> {
     offsets.sort_unstable();
     offsets.dedup();
     offsets
+}
+
+// ============================================================================
+// Fragment Concatenation
+// ============================================================================
+
+/// Merged result of concatenating per-variable symbolic bytecodes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ConcatenatedBytecodes {
+    pub bytecode: SymbolicByteCode,
+    pub graphical_functions: Vec<Vec<(f64, f64)>>,
+    pub module_decls: Vec<SymbolicModuleDecl>,
+    pub static_views: Vec<SymbolicStaticView>,
+    pub temp_offsets: Vec<usize>,
+    pub temp_total_size: usize,
+    pub dim_lists: Vec<(u8, [u16; 4])>,
+}
+
+/// Merge multiple `PerVarBytecodes` into a single stream, renumbering
+/// `LiteralId`, `GraphicalFunctionId`, `ModuleId`, `ViewId`, `TempId`,
+/// and `DimListId` to avoid collisions across fragments.
+pub(crate) fn concatenate_fragments(fragments: &[&PerVarBytecodes]) -> ConcatenatedBytecodes {
+    let mut merged_literals: Vec<f64> = Vec::new();
+    let mut merged_code: Vec<SymbolicOpcode> = Vec::new();
+    let mut merged_gf: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut merged_modules: Vec<SymbolicModuleDecl> = Vec::new();
+    let mut merged_views: Vec<SymbolicStaticView> = Vec::new();
+    let mut merged_temp_sizes: Vec<usize> = Vec::new();
+    let mut merged_dim_lists: Vec<(u8, [u16; 4])> = Vec::new();
+
+    for frag in fragments {
+        let lit_offset = merged_literals.len() as u16;
+        let gf_offset = merged_gf.len() as u16;
+        let mod_offset = merged_modules.len() as u16;
+        let view_offset = merged_views.len() as u16;
+        let temp_offset = merged_temp_sizes.len() as u32;
+        let dl_offset = merged_dim_lists.len() as u16;
+
+        merged_literals.extend_from_slice(&frag.symbolic.literals);
+        merged_gf.extend_from_slice(&frag.graphical_functions);
+        merged_modules.extend_from_slice(&frag.module_decls);
+        merged_views.extend_from_slice(&frag.static_views);
+        merged_dim_lists.extend(frag.dim_lists.iter().map(|dl| {
+            let n = dl.len().min(4) as u8;
+            let mut arr = [0u16; 4];
+            for (i, &v) in dl.iter().take(4).enumerate() {
+                arr[i] = v;
+            }
+            (n, arr)
+        }));
+
+        for (id, size) in &frag.temp_sizes {
+            let new_id = *id + temp_offset;
+            if new_id as usize >= merged_temp_sizes.len() {
+                merged_temp_sizes.resize(new_id as usize + 1, 0);
+            }
+            merged_temp_sizes[new_id as usize] = merged_temp_sizes[new_id as usize].max(*size);
+        }
+
+        for op in &frag.symbolic.code {
+            merged_code.push(renumber_opcode(
+                op,
+                lit_offset,
+                gf_offset,
+                mod_offset,
+                view_offset,
+                temp_offset,
+                dl_offset,
+            ));
+        }
+    }
+
+    let mut temp_offsets = Vec::with_capacity(merged_temp_sizes.len());
+    let mut offset = 0usize;
+    for &size in &merged_temp_sizes {
+        temp_offsets.push(offset);
+        offset += size;
+    }
+
+    ConcatenatedBytecodes {
+        bytecode: SymbolicByteCode {
+            literals: merged_literals,
+            code: merged_code,
+        },
+        graphical_functions: merged_gf,
+        module_decls: merged_modules,
+        static_views: merged_views,
+        temp_offsets,
+        temp_total_size: offset,
+        dim_lists: merged_dim_lists,
+    }
+}
+
+/// Renumber resource IDs within a single opcode.
+fn renumber_opcode(
+    op: &SymbolicOpcode,
+    lit_off: u16,
+    gf_off: u16,
+    mod_off: u16,
+    view_off: u16,
+    temp_off: u32,
+    dl_off: u16,
+) -> SymbolicOpcode {
+    let temp_off_u8 = temp_off as u8;
+    let gf_off_u8 = gf_off as u8;
+    match op {
+        SymbolicOpcode::LoadConstant { id } => SymbolicOpcode::LoadConstant { id: *id + lit_off },
+        SymbolicOpcode::AssignConstCurr { var, literal_id } => SymbolicOpcode::AssignConstCurr {
+            var: var.clone(),
+            literal_id: *literal_id + lit_off,
+        },
+        SymbolicOpcode::Lookup {
+            base_gf,
+            table_count,
+            mode,
+        } => SymbolicOpcode::Lookup {
+            base_gf: *base_gf + gf_off_u8,
+            table_count: *table_count,
+            mode: *mode,
+        },
+        SymbolicOpcode::EvalModule { id, n_inputs } => SymbolicOpcode::EvalModule {
+            id: *id + mod_off,
+            n_inputs: *n_inputs,
+        },
+        SymbolicOpcode::PushStaticView { view_id } => SymbolicOpcode::PushStaticView {
+            view_id: *view_id + view_off,
+        },
+        SymbolicOpcode::PushTempView {
+            temp_id,
+            dim_list_id,
+        } => SymbolicOpcode::PushTempView {
+            temp_id: *temp_id + temp_off_u8,
+            dim_list_id: *dim_list_id + dl_off,
+        },
+        SymbolicOpcode::PushVarView { var, dim_list_id } => SymbolicOpcode::PushVarView {
+            var: var.clone(),
+            dim_list_id: *dim_list_id + dl_off,
+        },
+        SymbolicOpcode::PushVarViewDirect { var, dim_list_id } => {
+            SymbolicOpcode::PushVarViewDirect {
+                var: var.clone(),
+                dim_list_id: *dim_list_id + dl_off,
+            }
+        }
+        SymbolicOpcode::LoadTempConst { temp_id, index } => SymbolicOpcode::LoadTempConst {
+            temp_id: *temp_id + temp_off_u8,
+            index: *index,
+        },
+        SymbolicOpcode::LoadTempDynamic { temp_id } => SymbolicOpcode::LoadTempDynamic {
+            temp_id: *temp_id + temp_off_u8,
+        },
+        SymbolicOpcode::BeginIter {
+            write_temp_id,
+            has_write_temp,
+        } => SymbolicOpcode::BeginIter {
+            write_temp_id: *write_temp_id + temp_off_u8,
+            has_write_temp: *has_write_temp,
+        },
+        SymbolicOpcode::LoadIterTempElement { temp_id } => SymbolicOpcode::LoadIterTempElement {
+            temp_id: *temp_id + temp_off_u8,
+        },
+        SymbolicOpcode::BeginBroadcastIter {
+            n_sources,
+            dest_temp_id,
+        } => SymbolicOpcode::BeginBroadcastIter {
+            n_sources: *n_sources,
+            dest_temp_id: *dest_temp_id + temp_off_u8,
+        },
+        // All other opcodes have no resource IDs to renumber
+        other => other.clone(),
+    }
 }
 
 // ============================================================================
@@ -1154,6 +1373,7 @@ mod tests {
         assert_eq!(resolve_var_ref(&var, &layout).unwrap(), 6);
     }
 
+    #[test]
     fn test_resolve_missing_variable() {
         let layout = simple_layout();
         let var = SymVarRef {
