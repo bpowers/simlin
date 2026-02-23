@@ -64,6 +64,17 @@ pub struct ModelId<'db> {
     pub text: String,
 }
 
+/// Interned identity for a causal link between two variables.
+/// Used as a key for per-link tracked functions so that equation edits
+/// only invalidate link score computation for affected links.
+#[salsa::interned(debug)]
+pub struct LtmLinkId<'db> {
+    #[returns(ref)]
+    pub link_from: String,
+    #[returns(ref)]
+    pub link_to: String,
+}
+
 // ── Variable kind ──────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
@@ -1363,6 +1374,191 @@ fn reconstruct_model_variables(
     variables
 }
 
+/// Reconstruct a single `Variable` by name from a model's parse results.
+///
+/// Checks explicit source variables first, then searches implicit variables
+/// (from SMOOTH/DELAY module expansion) if the name isn't found.
+/// Returns None if the name doesn't match any variable in the model.
+fn reconstruct_single_variable(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    var_name: &str,
+) -> Option<crate::variable::Variable> {
+    use crate::common::{Canonical, Ident};
+
+    let source_vars = model.variables(db);
+    let dims = source_dims_to_datamodel(project.dimensions(db));
+    let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
+    let models = HashMap::new();
+    let scope = crate::model::ScopeStage0 {
+        models: &models,
+        dimensions: &dim_context,
+        model_name: "",
+    };
+
+    // Check explicit variables first
+    if let Some(source_var) = source_vars.get(var_name) {
+        let parsed = parse_source_variable(db, *source_var, project);
+        let lowered = crate::model::lower_variable(&scope, &parsed.variable);
+        return Some(lowered);
+    }
+
+    // Search implicit variables from all source variables
+    let canonical_target: Ident<Canonical> = Ident::new(var_name);
+    let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap_or_default();
+
+    for (_name, source_var) in source_vars.iter() {
+        let parsed = parse_source_variable(db, *source_var, project);
+        for implicit_dm_var in &parsed.implicit_vars {
+            let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+            if Ident::<Canonical>::new(&imp_name) == canonical_target {
+                let mut dummy_implicits = Vec::new();
+                let parsed_imp = crate::variable::parse_var(
+                    &dims,
+                    implicit_dm_var,
+                    &mut dummy_implicits,
+                    &units_ctx,
+                    |mi| Ok(Some(mi.clone())),
+                );
+                let lowered_imp = crate::model::lower_variable(&scope, &parsed_imp);
+                return Some(lowered_imp);
+            }
+        }
+    }
+
+    None
+}
+
+/// Compute the link score equation text for a single causal link.
+///
+/// This is the per-link granularity that enables incremental recomputation:
+/// when a variable's equation changes, salsa only re-evaluates link score
+/// equations for links whose endpoints are affected. Links involving
+/// unmodified variables return their cached equation text.
+#[salsa::tracked(returns(ref))]
+pub fn link_score_equation_text<'db>(
+    db: &'db dyn Db,
+    link_id: LtmLinkId<'db>,
+    model: SourceModel,
+    project: SourceProject,
+) -> Option<LtmSyntheticVar> {
+    use crate::common::{Canonical, Ident};
+
+    let from_name = link_id.link_from(db);
+    let to_name = link_id.link_to(db);
+    let from_ident = Ident::<Canonical>::new(from_name);
+    let to_ident = Ident::<Canonical>::new(to_name);
+
+    let from_var = reconstruct_single_variable(db, model, project, from_name);
+    let to_var = reconstruct_single_variable(db, model, project, to_name)?;
+
+    let var_name = format!(
+        "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
+        from_name, to_name
+    );
+
+    let from_is_module = from_var.as_ref().is_some_and(|v| v.is_module());
+    let to_is_module = to_var.is_module();
+
+    let equation = if !from_is_module && to_is_module {
+        // input_src -> module: use composite reference if available
+        if let crate::variable::Variable::Module {
+            model_name, inputs, ..
+        } = &to_var
+        {
+            let composite_ports = get_stdlib_composite_ports();
+            let port = inputs.iter().find(|i| i.src == from_ident).map(|i| &i.dst);
+            let has_composite = port.is_some()
+                && composite_ports
+                    .get(model_name)
+                    .is_some_and(|ports| ports.contains(port.unwrap()));
+
+            if let (true, Some(port)) = (has_composite, port) {
+                crate::ltm_augment::generate_module_input_link_score_eq(&to_ident, port)
+            } else {
+                crate::ltm_augment::generate_module_link_score_eq(&from_ident, &to_ident)
+            }
+        } else {
+            crate::ltm_augment::generate_module_link_score_eq(&from_ident, &to_ident)
+        }
+    } else if from_is_module && !to_is_module {
+        // module -> downstream: standard ceteris-paribus formula
+        let mut all_vars = HashMap::new();
+        if let Some(ref fv) = from_var {
+            all_vars.insert(from_ident.clone(), fv.clone());
+        }
+        all_vars.insert(to_ident.clone(), to_var.clone());
+        crate::ltm_augment::generate_link_score_equation_for_link(
+            &from_ident,
+            &to_ident,
+            &to_var,
+            &all_vars,
+        )
+    } else if from_is_module && to_is_module {
+        // module -> module: no downstream equation to analyze
+        crate::ltm_augment::generate_module_link_score_eq(&from_ident, &to_ident)
+    } else {
+        // Non-module link: standard ceteris-paribus formula
+        let mut all_vars = HashMap::new();
+        if let Some(ref fv) = from_var {
+            all_vars.insert(from_ident.clone(), fv.clone());
+        }
+        all_vars.insert(to_ident.clone(), to_var.clone());
+        crate::ltm_augment::generate_link_score_equation_for_link(
+            &from_ident,
+            &to_ident,
+            &to_var,
+            &all_vars,
+        )
+    };
+
+    Some(LtmSyntheticVar {
+        name: var_name,
+        equation,
+    })
+}
+
+/// Compute the internal link score equation text for a single causal link
+/// inside a stdlib dynamic module (e.g. SMOOTH, DELAY).
+///
+/// Uses `$⁚ltm⁚ilink⁚` prefix instead of `$⁚ltm⁚link_score⁚`.
+#[salsa::tracked(returns(ref))]
+pub fn module_ilink_equation_text<'db>(
+    db: &'db dyn Db,
+    link_id: LtmLinkId<'db>,
+    model: SourceModel,
+    project: SourceProject,
+) -> Option<LtmSyntheticVar> {
+    use crate::common::{Canonical, Ident};
+
+    let from_name = link_id.link_from(db);
+    let to_name = link_id.link_to(db);
+    let from_ident = Ident::<Canonical>::new(from_name);
+    let to_ident = Ident::<Canonical>::new(to_name);
+
+    let variables = reconstruct_model_variables(db, model, project);
+
+    let to_var = variables.get(&to_ident)?;
+
+    let var_name = format!(
+        "$\u{205A}ltm\u{205A}ilink\u{205A}{}\u{2192}{}",
+        from_name, to_name
+    );
+
+    let equation = crate::ltm_augment::generate_link_score_equation_for_link(
+        &from_ident,
+        &to_ident,
+        to_var,
+        &variables,
+    );
+
+    Some(LtmSyntheticVar {
+        name: var_name,
+        equation,
+    })
+}
+
 /// Compute stdlib composite ports (cached in a process-wide OnceLock).
 /// These are static properties of stdlib models and never change.
 ///
@@ -1423,8 +1619,9 @@ fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap
 /// Generate LTM synthetic variables for a user model (exhaustive mode).
 ///
 /// Reads cached loop circuits and cycle partitions (graph algorithms
-/// skipped when deps unchanged), then generates link score, loop score,
-/// and relative loop score equations.
+/// skipped when deps unchanged), then delegates per-link score generation
+/// to `link_score_equation_text` so that equation edits only regenerate
+/// scores for affected links.
 #[salsa::tracked(returns(ref))]
 pub fn model_ltm_synthetic_variables(
     db: &dyn Db,
@@ -1432,7 +1629,7 @@ pub fn model_ltm_synthetic_variables(
     project: SourceProject,
 ) -> LtmVariablesResult {
     use crate::common::{Canonical, Ident};
-    use crate::ltm::{CyclePartitions, Link, Loop, assign_loop_ids};
+    use crate::ltm::{CyclePartitions, Loop, assign_loop_ids};
     use std::collections::HashSet;
 
     let circuits_result = model_loop_circuits(db, model, project);
@@ -1443,7 +1640,7 @@ pub fn model_ltm_synthetic_variables(
     let partitions_result = model_cycle_partitions(db, model, project);
     let edges_result = model_causal_edges(db, model, project);
 
-    // Reconstruct Variable objects for polarity analysis + equation generation
+    // Reconstruct Variable objects for polarity analysis
     let variables = reconstruct_model_variables(db, model, project);
 
     // Build CausalGraph with variables for polarity analysis
@@ -1488,11 +1685,19 @@ pub fn model_ltm_synthetic_variables(
 
     assign_loop_ids(&mut loops);
 
-    // Collect all links from loops
-    let mut loop_links: HashSet<Link> = HashSet::new();
+    // Collect unique link endpoints from loops, then compute per-link equations
+    let mut seen_links: HashSet<(String, String)> = HashSet::new();
+    let mut vars = Vec::new();
+
     for loop_item in &loops {
         for link in &loop_item.links {
-            loop_links.insert(link.clone());
+            let key = (link.from.to_string(), link.to.to_string());
+            if seen_links.insert(key) {
+                let link_id = LtmLinkId::new(db, link.from.to_string(), link.to.to_string());
+                if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
+                    vars.push(lsv.clone());
+                }
+            }
         }
     }
 
@@ -1510,13 +1715,11 @@ pub fn model_ltm_synthetic_variables(
             .collect(),
     };
 
-    let composite_ports = get_stdlib_composite_ports();
-    let link_vars =
-        crate::ltm_augment::generate_link_score_variables(&loop_links, &variables, composite_ports);
+    // Loop scores and relative loop scores are pure functions of link
+    // score variable names (not equations), so they don't benefit from
+    // per-link caching and are generated in bulk.
     let loop_vars = crate::ltm_augment::generate_loop_score_variables(&loops, &partitions);
-
-    let mut vars = Vec::new();
-    for (name, var) in link_vars.into_iter().chain(loop_vars.into_iter()) {
+    for (name, var) in loop_vars {
         let equation = match var.get_equation() {
             Some(datamodel::Equation::Scalar(eq)) => eq.clone(),
             _ => String::new(),
@@ -1538,59 +1741,25 @@ pub fn model_ltm_synthetic_variables(
 /// Unlike `model_ltm_synthetic_variables` which only generates variables
 /// for links in detected loops, this generates link scores for every
 /// causal edge. No loop or relative loop scores are generated.
+/// Delegates per-link computation to `link_score_equation_text`.
 #[salsa::tracked(returns(ref))]
 pub fn model_ltm_all_link_synthetic_variables(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
 ) -> LtmVariablesResult {
-    use crate::common::{Canonical, Ident};
-    use crate::ltm::Link;
-    use std::collections::HashSet;
-
     let edges_result = model_causal_edges(db, model, project);
-    let variables = reconstruct_model_variables(db, model, project);
 
-    // Build CausalGraph for polarity analysis
-    let graph_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
-        .edges
-        .iter()
-        .map(|(from, tos)| {
-            (
-                Ident::new(from),
-                tos.iter().map(|t| Ident::new(t)).collect(),
-            )
-        })
-        .collect();
-    let stocks: HashSet<Ident<Canonical>> =
-        edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
-
-    let graph = crate::ltm::CausalGraph {
-        edges: graph_edges,
-        stocks,
-        variables: variables.clone(),
-        module_graphs: HashMap::new(),
-    };
-
-    let all_links: HashSet<Link> = graph.all_links().into_iter().collect();
-
-    let composite_ports = get_stdlib_composite_ports();
-    let link_vars =
-        crate::ltm_augment::generate_link_score_variables(&all_links, &variables, composite_ports);
-
-    let mut vars: Vec<LtmSyntheticVar> = link_vars
-        .into_iter()
-        .map(|(name, var)| {
-            let equation = match var.get_equation() {
-                Some(datamodel::Equation::Scalar(eq)) => eq.clone(),
-                _ => String::new(),
-            };
-            LtmSyntheticVar {
-                name: name.to_string(),
-                equation,
+    // Iterate all causal edges and compute per-link equations
+    let mut vars = Vec::new();
+    for (from, tos) in &edges_result.edges {
+        for to in tos {
+            let link_id = LtmLinkId::new(db, from.clone(), to.clone());
+            if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
+                vars.push(lsv.clone());
             }
-        })
-        .collect();
+        }
+    }
 
     vars.sort_by(|a, b| a.name.cmp(&b.name));
     LtmVariablesResult { vars }
@@ -1599,6 +1768,7 @@ pub fn model_ltm_all_link_synthetic_variables(
 /// Generate internal LTM variables for a stdlib dynamic module.
 ///
 /// Since stdlib models are static, this computes once and caches forever.
+/// Delegates per-link ilink computation to `module_ilink_equation_text`.
 #[salsa::tracked(returns(ref))]
 pub fn module_ltm_synthetic_variables(
     db: &dyn Db,
@@ -1607,19 +1777,13 @@ pub fn module_ltm_synthetic_variables(
 ) -> LtmVariablesResult {
     use crate::common::{Canonical, Ident};
 
-    // Reconstruct the module's variables
-    let variables = reconstruct_model_variables(db, model, project);
-
-    // Check if this is a dynamic module (has stocks)
-    let has_stocks = variables
-        .values()
-        .any(|v| matches!(v, crate::variable::Variable::Stock { .. }));
-    if !has_stocks {
+    // Check if this is a dynamic module (has stocks) via the edge result
+    let edges_result = model_causal_edges(db, model, project);
+    if edges_result.stocks.is_empty() {
         return LtmVariablesResult { vars: vec![] };
     }
 
-    // Build a ModelStage1-like structure for the module
-    let edges_result = model_causal_edges(db, model, project);
+    // Build CausalGraph for pathway enumeration
     let graph_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
         .edges
         .iter()
@@ -1633,32 +1797,22 @@ pub fn module_ltm_synthetic_variables(
     let stocks: std::collections::HashSet<Ident<Canonical>> =
         edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
 
+    let variables = reconstruct_model_variables(db, model, project);
     let graph = crate::ltm::CausalGraph {
         edges: graph_edges,
         stocks,
-        variables: variables.clone(),
+        variables,
         module_graphs: HashMap::new(),
     };
 
-    // Generate internal link scores for all causal links in the module
+    // Generate internal link scores via per-link tracked function
     let mut vars = Vec::new();
-    let links: std::collections::HashSet<crate::ltm::Link> =
-        graph.all_links().into_iter().collect();
-
-    for link in &links {
-        let var_name = format!(
-            "$\u{205A}ltm\u{205A}ilink\u{205A}{}\u{2192}{}",
-            link.from.as_str(),
-            link.to.as_str()
-        );
-        if let Some(to_var) = variables.get(&link.to) {
-            let equation = crate::ltm_augment::generate_link_score_equation_for_link(
-                &link.from, &link.to, to_var, &variables,
-            );
-            vars.push(LtmSyntheticVar {
-                name: var_name,
-                equation,
-            });
+    for (from, tos) in &edges_result.edges {
+        for to in tos {
+            let link_id = LtmLinkId::new(db, from.clone(), to.clone());
+            if let Some(lsv) = module_ilink_equation_text(db, link_id, model, project) {
+                vars.push(lsv.clone());
+            }
         }
     }
 

@@ -1593,6 +1593,231 @@ fn test_ltm_caching_dep_change_recomputes_circuits() {
     );
 }
 
+/// Two-stock model with independent feedback loops for testing per-link caching.
+///
+///   stock_a --[births_a]--> stock_a  (loop 1: stock_a <-> births_a)
+///   stock_b --[births_b]--> stock_b  (loop 2: stock_b <-> births_b)
+///
+/// Changing births_a's equation should NOT invalidate link scores in loop 2.
+fn two_loop_project() -> datamodel::Project {
+    datamodel::Project {
+        name: "two_loop".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "stock_a".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["births_a".to_string()],
+                    outflows: vec![],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "births_a".to_string(),
+                    equation: datamodel::Equation::Scalar("stock_a * rate_a".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "rate_a".to_string(),
+                    equation: datamodel::Equation::Scalar("0.1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "stock_b".to_string(),
+                    equation: datamodel::Equation::Scalar("200".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["births_b".to_string()],
+                    outflows: vec![],
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "births_b".to_string(),
+                    equation: datamodel::Equation::Scalar("stock_b * rate_b".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "rate_b".to_string(),
+                    equation: datamodel::Equation::Scalar("0.05".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: datamodel::Visibility::Private,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+#[test]
+fn test_ltm_per_link_caching() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = two_loop_project();
+    let (source_project, births_a_src, source_model) = {
+        let result = sync_from_datamodel(&db, &project);
+        (
+            result.project,
+            result.models["main"].variables["births_a"].source,
+            result.models["main"].source,
+        )
+    };
+
+    // Prime the cache and capture pointer addresses in a scoped block
+    // so that the immutable borrow on db is released before the mutation.
+    let (link_b_ptr_before, link_a_ptr_before) = {
+        let link_b_id = LtmLinkId::new(&db, "stock_b".to_string(), "births_b".to_string());
+        let link_b_before = link_score_equation_text(&db, link_b_id, source_model, source_project);
+        assert!(link_b_before.is_some(), "link B score should exist");
+
+        let link_a_id = LtmLinkId::new(&db, "stock_a".to_string(), "births_a".to_string());
+        let link_a_before = link_score_equation_text(&db, link_a_id, source_model, source_project);
+        assert!(link_a_before.is_some(), "link A score should exist");
+
+        (
+            link_b_before as *const Option<LtmSyntheticVar>,
+            link_a_before as *const Option<LtmSyntheticVar>,
+        )
+    };
+
+    // Change births_a equation (affects loop A, should NOT affect loop B)
+    births_a_src
+        .set_equation(&mut db)
+        .to(SourceEquation::Scalar("stock_a * rate_a * 2".to_string()));
+
+    // Re-intern the link IDs (interning is idempotent, returns same ID)
+    let link_b_id = LtmLinkId::new(&db, "stock_b".to_string(), "births_b".to_string());
+    let link_a_id = LtmLinkId::new(&db, "stock_a".to_string(), "births_a".to_string());
+
+    // Link B should be pointer-equal (cached) since births_b is unaffected
+    let link_b_after = link_score_equation_text(&db, link_b_id, source_model, source_project);
+    let link_b_ptr_after = link_b_after as *const Option<LtmSyntheticVar>;
+    assert_eq!(
+        link_b_ptr_before, link_b_ptr_after,
+        "link score for unaffected loop B should be cached (pointer-equal)"
+    );
+
+    // Link A should be recomputed (equation changed for births_a)
+    let link_a_after = link_score_equation_text(&db, link_a_id, source_model, source_project);
+    let link_a_ptr_after = link_a_after as *const Option<LtmSyntheticVar>;
+    assert_ne!(
+        link_a_ptr_before, link_a_ptr_after,
+        "link score for affected loop A should be recomputed"
+    );
+}
+
+#[test]
+fn test_ltm_per_link_caching_model_level() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = two_loop_project();
+    let (source_project, births_a_src, source_model) = {
+        let result = sync_from_datamodel(&db, &project);
+        (
+            result.project,
+            result.models["main"].variables["births_a"].source,
+            result.models["main"].source,
+        )
+    };
+
+    // Prime the model-level LTM function
+    let ltm_before = model_ltm_synthetic_variables(&db, source_model, source_project);
+    assert!(!ltm_before.vars.is_empty(), "should generate LTM variables");
+
+    // Verify both loops have link scores
+    let has_link_a = ltm_before
+        .vars
+        .iter()
+        .any(|v| v.name.contains("stock_a") && v.name.contains("births_a"));
+    let has_link_b = ltm_before
+        .vars
+        .iter()
+        .any(|v| v.name.contains("stock_b") && v.name.contains("births_b"));
+    assert!(has_link_a, "should have link score for loop A");
+    assert!(has_link_b, "should have link score for loop B");
+
+    // Change births_a equation
+    births_a_src
+        .set_equation(&mut db)
+        .to(SourceEquation::Scalar("stock_a * rate_a * 2".to_string()));
+
+    // Model-level result should still produce valid results
+    let ltm_after = model_ltm_synthetic_variables(&db, source_model, source_project);
+    assert!(
+        !ltm_after.vars.is_empty(),
+        "should still generate LTM variables"
+    );
+
+    // Both loops should still have link scores
+    let has_link_a_after = ltm_after
+        .vars
+        .iter()
+        .any(|v| v.name.contains("stock_a") && v.name.contains("births_a"));
+    let has_link_b_after = ltm_after
+        .vars
+        .iter()
+        .any(|v| v.name.contains("stock_b") && v.name.contains("births_b"));
+    assert!(has_link_a_after, "should still have link score for loop A");
+    assert!(has_link_b_after, "should still have link score for loop B");
+}
+
 // ── Accumulator parity tests ──────────────────────────────────────
 
 #[test]

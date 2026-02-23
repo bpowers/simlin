@@ -342,6 +342,24 @@ fn quote_ident(ident: &str) -> String {
     }
 }
 
+/// Generate module-to-module link score equation (black box treatment).
+/// Exposed for use by per-link tracked functions in `db.rs`.
+pub(crate) fn generate_module_link_score_eq(
+    from: &Ident<Canonical>,
+    to: &Ident<Canonical>,
+) -> String {
+    generate_module_link_score_equation(from, to, &HashMap::new())
+}
+
+/// Generate composite link score equation for input_src -> module links.
+/// Exposed for use by per-link tracked functions in `db.rs`.
+pub(crate) fn generate_module_input_link_score_eq(
+    module_ident: &Ident<Canonical>,
+    input_port: &Ident<Canonical>,
+) -> String {
+    generate_module_input_link_score_equation(module_ident, input_port)
+}
+
 /// Generate link score equation for links involving modules (black box treatment)
 fn generate_module_link_score_equation(
     from: &Ident<Canonical>,
