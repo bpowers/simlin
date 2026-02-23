@@ -310,7 +310,7 @@ pub(crate) fn gather_error_details_with_db(
     if let Some((db, sync)) = db_sync {
         use std::collections::HashSet;
 
-        let existing_keys: HashSet<(Option<String>, Option<String>, SimlinErrorCode)> = all_errors
+        let mut seen_keys: HashSet<(Option<String>, Option<String>, SimlinErrorCode)> = all_errors
             .iter()
             .map(|e| (e.model_name.clone(), e.variable_name.clone(), e.code))
             .collect();
@@ -323,7 +323,7 @@ pub(crate) fn gather_error_details_with_db(
                 formatted.variable_name.clone(),
                 SimlinErrorCode::from(formatted.code),
             );
-            if !existing_keys.contains(&key) {
+            if seen_keys.insert(key) {
                 all_errors.push(ErrorDetailBuilder::from_formatted(formatted));
             }
         }
