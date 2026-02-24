@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Tool trait, registry, and helper macro for defining MCP tools.
+//! Tool trait, registry, and helpers for defining MCP tools.
 //!
 //! Each tool declares its name, description, and JSON Schema for its
 //! input (derived automatically from Rust types via `schemars`).  The
@@ -92,73 +92,6 @@ pub fn input_schema_for<T: JsonSchema>() -> Value {
         }
     }
     Value::Object(out)
-}
-
-// ── define_tool! macro ───────────────────────────────────────────────
-
-/// Define an MCP tool with automatic JSON Schema generation from the
-/// input type.
-///
-/// # Example
-///
-/// ```ignore
-/// use schemars::JsonSchema;
-/// use serde::Deserialize;
-///
-/// #[derive(Deserialize, JsonSchema)]
-/// struct MyInput {
-///     /// The name of the thing
-///     name: String,
-/// }
-///
-/// define_tool! {
-///     name: "my_tool",
-///     description: "does something useful",
-///     input: MyInput,
-///     handler: |input: MyInput| {
-///         Ok(serde_json::json!({ "result": input.name }))
-///     },
-/// }
-/// ```
-///
-/// This generates a struct (named by CamelCase-ing the tool name) that
-/// implements `Tool`.  The input type must implement `Deserialize` and
-/// `JsonSchema`.  The handler closure receives the deserialized input
-/// and returns `anyhow::Result<serde_json::Value>`.
-#[macro_export]
-macro_rules! define_tool {
-    (
-        name: $name:expr,
-        description: $desc:expr,
-        input: $input_ty:ty,
-        handler: $handler:expr $(,)?
-    ) => {
-        // Use paste-style name mangling via concat_idents isn't stable,
-        // so we use a nested module to avoid name collisions.
-        mod _tool_impl {
-            use super::*;
-            use $crate::tool::{Tool, input_schema_for};
-
-            pub struct Instance;
-
-            impl Tool for Instance {
-                fn name(&self) -> &str {
-                    $name
-                }
-                fn description(&self) -> &str {
-                    $desc
-                }
-                fn input_schema(&self) -> serde_json::Value {
-                    input_schema_for::<$input_ty>()
-                }
-                fn call(&self, input: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-                    let parsed: $input_ty = serde_json::from_value(input)?;
-                    let handler: fn($input_ty) -> anyhow::Result<serde_json::Value> = $handler;
-                    handler(parsed)
-                }
-            }
-        }
-    };
 }
 
 /// Helper to create a boxed tool from a typed handler function.

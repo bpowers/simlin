@@ -131,6 +131,7 @@ const childResult = await new Promise((resolve) => {
 });
 
 if (childResult.type === "signal") {
+  ["SIGINT", "SIGTERM", "SIGHUP"].forEach((sig) => process.removeAllListeners(sig));
   process.kill(process.pid, childResult.signal);
 } else {
   process.exit(childResult.exitCode);

@@ -107,7 +107,9 @@ fn run_ltm_pipeline(
     let project_clone = project.clone();
     let actual_name_clone = actual_name.clone();
 
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+    // The LTM pipeline may panic on certain malformed models; catch_unwind
+    // provides graceful degradation instead of crashing the server.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let compiled = crate::project::Project::from(project_clone);
 
         let ltm_project = compiled.with_ltm_all_links().ok()?;
@@ -133,13 +135,20 @@ fn run_ltm_pipeline(
 
         let loop_dominance: Vec<LoopSummary> = found_loops
             .iter()
-            .map(|fl| to_loop_summary(fl, &uid_to_loop_name, &ltm_project_rc))
+            .map(|fl| to_loop_summary(fl, &uid_to_loop_name, &actual_name_clone, &ltm_project_rc))
             .collect();
 
         Some((time, loop_dominance, dominant_loops_by_period))
-    }))
-    .ok()
-    .flatten()
+    }));
+    if let Err(ref panic) = result {
+        let msg = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string());
+        eprintln!("simlin-engine: LTM pipeline panicked: {msg}");
+    }
+    result.ok().flatten()
 }
 
 /// Build a mapping from variable-UID sets to loop names using the model's
@@ -209,6 +218,7 @@ fn loop_variables(fl: &crate::ltm_finding::FoundLoop) -> Vec<String> {
 fn to_loop_summary(
     fl: &crate::ltm_finding::FoundLoop,
     uid_to_loop_name: &[(Vec<i32>, String)],
+    model_name: &str,
     project: &crate::project::Project,
 ) -> LoopSummary {
     let polarity = match fl.loop_info.polarity {
@@ -226,7 +236,7 @@ fn to_loop_summary(
         .map(|(_, s)| if s.is_finite() { s.abs() } else { 0.0 })
         .collect();
 
-    let name = resolve_loop_name(fl, uid_to_loop_name, project);
+    let name = resolve_loop_name(fl, uid_to_loop_name, model_name, project);
 
     LoopSummary {
         loop_id: fl.loop_info.id.clone(),
@@ -238,16 +248,21 @@ fn to_loop_summary(
 }
 
 /// Try to match loop variables to a persisted loop name via UID sets.
+///
+/// UID lookup is scoped to `model_name` so that variables with the same
+/// identifier in different models don't produce false matches.
 fn resolve_loop_name(
     fl: &crate::ltm_finding::FoundLoop,
     uid_to_loop_name: &[(Vec<i32>, String)],
+    model_name: &str,
     project: &crate::project::Project,
 ) -> Option<String> {
     if uid_to_loop_name.is_empty() {
         return None;
     }
 
-    // Collect UIDs for variables in the loop from the compiled project.
+    // Collect UIDs for variables in the loop from the compiled project,
+    // restricted to the model being analyzed.
     let loop_var_idents: std::collections::HashSet<String> = fl
         .loop_info
         .links
@@ -259,6 +274,9 @@ fn resolve_loop_name(
         .datamodel
         .models
         .iter()
+        .filter(|m| {
+            crate::canonicalize(&m.name).as_ref() == crate::canonicalize(model_name).as_ref()
+        })
         .flat_map(|m| &m.variables)
         .filter_map(|var| {
             let ident = crate::canonicalize(match var {

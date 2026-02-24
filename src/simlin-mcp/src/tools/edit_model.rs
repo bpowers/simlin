@@ -167,6 +167,10 @@ pub struct EditModelInput {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EditModelOutput {
+    /// Path where the model was written (or the input path on dry-run).
+    /// For non-JSON source files (.stmx, .xmile, .mdl) this will differ from
+    /// the input path, pointing to the generated `.simlin.json` file instead.
+    project_path: String,
     model: ejson::Model,
     time: Vec<f64>,
     loop_dominance: Vec<LoopDominanceSummary>,
@@ -199,19 +203,20 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     simlin_engine::apply_patch(&mut project, patch)
         .map_err(|e| anyhow::anyhow!("patch application failed: {e:?}"))?;
 
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let write_path = if matches!(ext.as_str(), "stmx" | "xmile" | "xml" | "mdl") {
+        path.with_extension("simlin.json")
+    } else {
+        path.to_path_buf()
+    };
+
     if !dry_run {
         let json_project = ejson::Project::from(project.clone());
         let json_str = serde_json::to_string_pretty(&json_project)?;
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let write_path = if matches!(ext.as_str(), "stmx" | "xmile" | "xml" | "mdl") {
-            path.with_extension("simlin.json")
-        } else {
-            path.to_path_buf()
-        };
         std::fs::write(&write_path, &json_str)
             .with_context(|| format!("failed to write model to {}", write_path.display()))?;
     }
@@ -222,26 +227,17 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     let loop_dominance: Vec<LoopDominanceSummary> = analysis
         .loop_dominance
         .into_iter()
-        .map(|ls| LoopDominanceSummary {
-            loop_id: ls.loop_id,
-            name: ls.name,
-            polarity: ls.polarity,
-            variables: ls.variables,
-            importance: ls.importance,
-        })
+        .map(Into::into)
         .collect();
 
     let dominant_loops_by_period: Vec<DominantPeriodOutput> = analysis
         .dominant_loops_by_period
         .into_iter()
-        .map(|dp| DominantPeriodOutput {
-            dominant_loops: dp.dominant_loops,
-            start_time: dp.start,
-            end_time: dp.end,
-        })
+        .map(Into::into)
         .collect();
 
     let output = EditModelOutput {
+        project_path: write_path.display().to_string(),
         model: analysis.model,
         time: analysis.time,
         loop_dominance,
@@ -621,6 +617,10 @@ mod tests {
         }))
         .unwrap();
 
+        assert!(
+            result["projectPath"].is_string(),
+            "projectPath must be present"
+        );
         assert!(result["model"].is_object(), "model must be present");
         assert!(result["time"].is_array(), "time must be present");
         assert!(
@@ -632,6 +632,77 @@ mod tests {
             "dominantLoopsByPeriod must be present"
         );
         assert!(result["dryRun"].is_boolean(), "dryRun flag must be present");
+    }
+
+    // ---- projectPath in output ----
+
+    #[test]
+    fn project_path_in_output_for_json_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": []
+        }))
+        .unwrap();
+
+        assert_eq!(result["projectPath"], path.to_str().unwrap());
+    }
+
+    #[test]
+    fn project_path_in_output_redirects_for_stmx_file() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("logistic_growth.stmx");
+        std::fs::copy(stmx_path, &dest).unwrap();
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": []
+        }))
+        .unwrap();
+
+        let expected_json_path = dir.path().join("logistic_growth.simlin.json");
+        assert_eq!(
+            result["projectPath"],
+            expected_json_path.to_str().unwrap(),
+            "editing a .stmx file must report the .simlin.json write path"
+        );
+        assert!(
+            expected_json_path.exists(),
+            ".simlin.json must be written to disk"
+        );
+    }
+
+    #[test]
+    fn project_path_in_output_is_input_path_on_dry_run() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": stmx_path,
+            "dryRun": true,
+            "operations": []
+        }))
+        .unwrap();
+
+        let expected_json_path = std::path::Path::new(stmx_path).with_extension("simlin.json");
+        assert_eq!(
+            result["projectPath"],
+            expected_json_path.to_str().unwrap(),
+            "dry-run on a .stmx file must still report the .simlin.json path"
+        );
+        assert!(
+            !expected_json_path.exists(),
+            ".simlin.json must NOT be written to disk on dry-run"
+        );
     }
 
     // ---- AC3.9: dry-run does not write to disk ----

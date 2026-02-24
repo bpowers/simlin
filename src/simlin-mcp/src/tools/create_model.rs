@@ -146,9 +146,8 @@ mod tests {
     #[test]
     fn test_create_model_success_default_specs() {
         let t = tool();
-        let dir = std::env::temp_dir().join("simlin-mcp-test-create");
-        let _ = std::fs::remove_dir_all(&dir);
-        let project_path = dir.join("my-model.simlin.json");
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().join("my-model.simlin.json");
 
         let result = t
             .call(serde_json::json!({
@@ -177,16 +176,13 @@ mod tests {
         assert_eq!(project.sim_specs.start_time, 0.0);
         assert_eq!(project.sim_specs.end_time, 100.0);
         assert_eq!(project.sim_specs.dt, "1");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_create_model_custom_sim_specs() {
         let t = tool();
-        let dir = std::env::temp_dir().join("simlin-mcp-test-create-custom");
-        let _ = std::fs::remove_dir_all(&dir);
-        let project_path = dir.join("custom.simlin.json");
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().join("custom.simlin.json");
 
         let result = t
             .call(serde_json::json!({
@@ -214,24 +210,18 @@ mod tests {
         assert_eq!(project.sim_specs.start_time, 10.0);
         assert_eq!(project.sim_specs.end_time, 200.0);
         assert_eq!(project.sim_specs.dt, "0.5");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_create_model_already_exists() {
         let t = tool();
-        let dir = std::env::temp_dir().join("simlin-mcp-test-exists");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let project_path = dir.join("existing.simlin.json");
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().join("existing.simlin.json");
         std::fs::write(&project_path, "{}").unwrap();
 
         let result = t.call(serde_json::json!({
             "projectPath": project_path.to_str().unwrap(),
         }));
         assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

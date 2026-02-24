@@ -143,9 +143,9 @@ pub struct ServerConfig {
 /// Serve MCP requests, reading newline-delimited JSON-RPC from `input`
 /// and writing responses to `output`.
 ///
-/// Kept for use in the synchronous test suite; production code uses
-/// `serve_async` with a `Transport` implementation.
-#[allow(dead_code)]
+/// Used by the synchronous test suite; production code uses `serve_async`
+/// with a `Transport` implementation.
+#[cfg(test)]
 pub fn serve(
     config: &ServerConfig,
     registry: &Registry,
@@ -352,7 +352,7 @@ fn handle_call_tool(registry: &Registry, id: Value, params: Option<Value>) -> Re
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn write_response(output: &mut dyn std::io::Write, resp: &Response) -> std::io::Result<()> {
     serde_json::to_writer(&mut *output, resp)?;
     output.write_all(b"\n")?;

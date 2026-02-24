@@ -60,23 +60,13 @@ fn handle_read_model(input: ReadModelInput) -> anyhow::Result<serde_json::Value>
     let loop_dominance: Vec<LoopDominanceSummary> = analysis
         .loop_dominance
         .into_iter()
-        .map(|ls| LoopDominanceSummary {
-            loop_id: ls.loop_id,
-            name: ls.name,
-            polarity: ls.polarity,
-            variables: ls.variables,
-            importance: ls.importance,
-        })
+        .map(Into::into)
         .collect();
 
     let dominant_loops_by_period: Vec<DominantPeriodOutput> = analysis
         .dominant_loops_by_period
         .into_iter()
-        .map(|dp| DominantPeriodOutput {
-            dominant_loops: dp.dominant_loops,
-            start_time: dp.start,
-            end_time: dp.end,
-        })
+        .map(Into::into)
         .collect();
 
     let output = ReadModelOutput {
