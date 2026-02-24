@@ -218,6 +218,9 @@ fn stock_strategy() -> BoxedStrategy<Stock> {
                         documentation: doc,
                         arrayed_equation: None,
                         compat,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        is_public: false,
                     }
                 }
             ),
@@ -256,6 +259,9 @@ fn stock_strategy() -> BoxedStrategy<Stock> {
                         documentation: doc,
                         arrayed_equation: Some(arr_eq),
                         compat,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        is_public: false,
                     }
                 }
             ),
@@ -298,6 +304,9 @@ fn flow_strategy() -> BoxedStrategy<Flow> {
                         documentation: doc,
                         arrayed_equation: None,
                         compat,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        is_public: false,
                     }
                 }
             ),
@@ -334,6 +343,9 @@ fn flow_strategy() -> BoxedStrategy<Flow> {
                         documentation: doc,
                         arrayed_equation: Some(arr_eq),
                         compat,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        is_public: false,
                     }
                 }
             ),
@@ -379,6 +391,8 @@ fn auxiliary_strategy() -> BoxedStrategy<Auxiliary> {
                         documentation: doc,
                         arrayed_equation: None,
                         compat,
+                        can_be_module_input: false,
+                        is_public: false,
                     }
                 }
             ),
@@ -412,6 +426,8 @@ fn auxiliary_strategy() -> BoxedStrategy<Auxiliary> {
                     documentation: doc,
                     arrayed_equation: Some(arr_eq),
                     compat,
+                    can_be_module_input: false,
+                    is_public: false,
                 }
             }),
     ]
@@ -452,6 +468,8 @@ fn module_strategy() -> impl Strategy<Value = Module> {
                     documentation: doc,
                     references: refs,
                     compat,
+                    can_be_module_input: false,
+                    is_public: false,
                 }
             },
         )
@@ -1153,6 +1171,9 @@ mod protobuf_roundtrip_tests {
                         is_public: true,
                         ..Default::default()
                     }),
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
                 }],
                 flows: vec![
                     Flow {
@@ -1167,6 +1188,9 @@ mod protobuf_roundtrip_tests {
                             non_negative: true,
                             ..Default::default()
                         }),
+                        non_negative: false,
+                        can_be_module_input: false,
+                        is_public: false,
                     },
                     Flow {
                         uid: 3,
@@ -1180,6 +1204,9 @@ mod protobuf_roundtrip_tests {
                             non_negative: true,
                             ..Default::default()
                         }),
+                        non_negative: false,
+                        can_be_module_input: false,
+                        is_public: false,
                     },
                 ],
                 auxiliaries: vec![
@@ -1195,6 +1222,8 @@ mod protobuf_roundtrip_tests {
                             can_be_module_input: true,
                             ..Default::default()
                         }),
+                        can_be_module_input: false,
+                        is_public: false,
                     },
                     Auxiliary {
                         uid: 5,
@@ -1208,6 +1237,8 @@ mod protobuf_roundtrip_tests {
                             can_be_module_input: true,
                             ..Default::default()
                         }),
+                        can_be_module_input: false,
+                        is_public: false,
                     },
                 ],
                 modules: vec![],
@@ -1316,6 +1347,9 @@ mod protobuf_roundtrip_tests {
                         elements: None,
                     }),
                     compat: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
                 }],
                 flows: vec![],
                 auxiliaries: vec![Auxiliary {
@@ -1348,6 +1382,8 @@ mod protobuf_roundtrip_tests {
                         ]),
                     }),
                     compat: None,
+                    can_be_module_input: false,
+                    is_public: false,
                 }],
                 modules: vec![],
                 sim_specs: None,
@@ -1429,6 +1465,8 @@ mod protobuf_roundtrip_tests {
                     documentation: String::new(),
                     arrayed_equation: None,
                     compat: None,
+                    can_be_module_input: false,
+                    is_public: false,
                 }],
                 modules: vec![],
                 sim_specs: None,
@@ -1558,6 +1596,129 @@ mod protobuf_roundtrip_tests {
         let parsed: Project = serde_json::from_str(&json_str1).unwrap();
         assert_eq!(parsed.dimensions[0].size, 10);
         assert!(parsed.dimensions[0].elements.is_empty());
+    }
+
+    /// Legacy JSON with top-level compat fields (pre-migration format) deserializes correctly
+    #[test]
+    fn test_legacy_json_stock_compat_fields() {
+        let json = r#"{
+            "name": "pop",
+            "initialEquation": "100",
+            "inflows": [],
+            "outflows": [],
+            "nonNegative": true,
+            "canBeModuleInput": true,
+            "isPublic": true
+        }"#;
+        let stock: Stock = serde_json::from_str(json).unwrap();
+        let dm: datamodel::Stock = stock.into();
+        assert!(dm.compat.non_negative);
+        assert!(dm.compat.can_be_module_input);
+        assert_eq!(dm.compat.visibility, datamodel::Visibility::Public);
+    }
+
+    /// When both legacy and compat fields are present, compat takes precedence
+    #[test]
+    fn test_compat_fields_take_precedence_over_legacy() {
+        let json = r#"{
+            "name": "pop",
+            "initialEquation": "100",
+            "inflows": [],
+            "outflows": [],
+            "nonNegative": false,
+            "canBeModuleInput": false,
+            "isPublic": false,
+            "compat": {
+                "nonNegative": true,
+                "canBeModuleInput": true,
+                "isPublic": true
+            }
+        }"#;
+        let stock: Stock = serde_json::from_str(json).unwrap();
+        let dm: datamodel::Stock = stock.into();
+        assert!(dm.compat.non_negative);
+        assert!(dm.compat.can_be_module_input);
+        assert_eq!(dm.compat.visibility, datamodel::Visibility::Public);
+    }
+
+    /// Legacy JSON flow with top-level compat fields
+    #[test]
+    fn test_legacy_json_flow_compat_fields() {
+        let json = r#"{
+            "name": "inflow",
+            "nonNegative": true,
+            "canBeModuleInput": true,
+            "isPublic": true
+        }"#;
+        let flow: Flow = serde_json::from_str(json).unwrap();
+        let dm: datamodel::Flow = flow.into();
+        assert!(dm.compat.non_negative);
+        assert!(dm.compat.can_be_module_input);
+        assert_eq!(dm.compat.visibility, datamodel::Visibility::Public);
+    }
+
+    /// Legacy JSON aux with top-level compat fields
+    #[test]
+    fn test_legacy_json_aux_compat_fields() {
+        let json = r#"{
+            "name": "rate",
+            "canBeModuleInput": true,
+            "isPublic": true
+        }"#;
+        let aux: Auxiliary = serde_json::from_str(json).unwrap();
+        let dm: datamodel::Aux = aux.into();
+        assert!(dm.compat.can_be_module_input);
+        assert_eq!(dm.compat.visibility, datamodel::Visibility::Public);
+    }
+
+    /// Legacy JSON module with top-level compat fields
+    #[test]
+    fn test_legacy_json_module_compat_fields() {
+        let json = r#"{
+            "name": "sub",
+            "modelName": "submodel",
+            "canBeModuleInput": true,
+            "isPublic": true
+        }"#;
+        let module: Module = serde_json::from_str(json).unwrap();
+        let dm: datamodel::Module = module.into();
+        assert!(dm.compat.can_be_module_input);
+        assert_eq!(dm.compat.visibility, datamodel::Visibility::Public);
+    }
+
+    /// New-format JSON output does not include legacy top-level compat fields
+    #[test]
+    fn test_new_format_omits_legacy_fields() {
+        let stock = Stock {
+            uid: 0,
+            name: "pop".to_string(),
+            initial_equation: "100".to_string(),
+            units: String::new(),
+            inflows: vec![],
+            outflows: vec![],
+            documentation: String::new(),
+            arrayed_equation: None,
+            compat: Some(Compat {
+                non_negative: true,
+                can_be_module_input: true,
+                is_public: true,
+                ..Default::default()
+            }),
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
+        };
+        let json = serde_json::to_string(&stock).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Legacy fields should not appear at top level
+        assert!(v.get("nonNegative").is_none());
+        assert!(v.get("canBeModuleInput").is_none());
+        assert!(v.get("isPublic").is_none());
+        // But should appear inside compat
+        let compat = v.get("compat").unwrap();
+        assert_eq!(compat.get("nonNegative").unwrap(), true);
+        assert_eq!(compat.get("canBeModuleInput").unwrap(), true);
+        assert_eq!(compat.get("isPublic").unwrap(), true);
     }
 }
 

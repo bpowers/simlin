@@ -450,9 +450,9 @@ impl From<Stock> for project_io::variable::Stock {
             units: stock.units.unwrap_or_default(),
             inflows: stock.inflows,
             outflows: stock.outflows,
-            non_negative: false,
-            can_be_module_input: false,
-            visibility: 0,
+            non_negative: stock.compat.non_negative,
+            can_be_module_input: stock.compat.can_be_module_input,
+            visibility: project_io::variable::Visibility::from(stock.compat.visibility) as i32,
             uid: stock.uid.unwrap_or_default(),
             compat,
         }
@@ -554,6 +554,61 @@ fn test_stock_roundtrip() {
     }
 }
 
+#[test]
+fn test_stock_proto_legacy_fields_populated() {
+    let stock = Stock {
+        ident: "pop".to_string(),
+        equation: Equation::Scalar("100".to_string()),
+        documentation: String::new(),
+        units: None,
+        inflows: vec![],
+        outflows: vec![],
+        compat: Compat {
+            non_negative: true,
+            can_be_module_input: true,
+            visibility: Visibility::Public,
+            ..Compat::default()
+        },
+        ai_state: None,
+        uid: None,
+    };
+    let proto = project_io::variable::Stock::from(stock);
+    assert!(proto.non_negative);
+    assert!(proto.can_be_module_input);
+    assert_eq!(
+        proto.visibility,
+        project_io::variable::Visibility::Public as i32
+    );
+}
+
+#[test]
+fn test_stock_proto_legacy_only_deserialization() {
+    let proto = project_io::variable::Stock {
+        ident: "pop".to_string(),
+        equation: Some(project_io::variable::Equation {
+            equation: Some(project_io::variable::equation::Equation::Scalar(
+                project_io::variable::ScalarEquation {
+                    equation: "100".to_string(),
+                    initial_equation: None,
+                },
+            )),
+        }),
+        documentation: String::new(),
+        units: String::new(),
+        inflows: vec![],
+        outflows: vec![],
+        non_negative: true,
+        can_be_module_input: true,
+        visibility: project_io::variable::Visibility::Public as i32,
+        uid: 0,
+        compat: None,
+    };
+    let stock = Stock::from(proto);
+    assert!(stock.compat.non_negative);
+    assert!(stock.compat.can_be_module_input);
+    assert_eq!(stock.compat.visibility, Visibility::Public);
+}
+
 impl From<Flow> for project_io::variable::Flow {
     fn from(flow: Flow) -> Self {
         let compat = if flow.compat.is_empty() {
@@ -574,9 +629,9 @@ impl From<Flow> for project_io::variable::Flow {
             documentation: flow.documentation,
             units: flow.units.unwrap_or_default(),
             gf: flow.gf.map(project_io::GraphicalFunction::from),
-            non_negative: false,
-            can_be_module_input: false,
-            visibility: 0,
+            non_negative: flow.compat.non_negative,
+            can_be_module_input: flow.compat.can_be_module_input,
+            visibility: project_io::variable::Visibility::from(flow.compat.visibility) as i32,
             uid: flow.uid.unwrap_or_default(),
             compat,
         }
@@ -705,8 +760,8 @@ impl From<Aux> for project_io::variable::Aux {
             documentation: aux.documentation,
             units: aux.units.unwrap_or_default(),
             gf: aux.gf.map(project_io::GraphicalFunction::from),
-            can_be_module_input: false,
-            visibility: 0,
+            can_be_module_input: aux.compat.can_be_module_input,
+            visibility: project_io::variable::Visibility::from(aux.compat.visibility) as i32,
             uid: aux.uid.unwrap_or_default(),
             compat,
         }
@@ -870,8 +925,8 @@ impl From<Module> for project_io::variable::Module {
                 .into_iter()
                 .map(project_io::variable::module::Reference::from)
                 .collect(),
-            can_be_module_input: false,
-            visibility: 0,
+            can_be_module_input: module.compat.can_be_module_input,
+            visibility: project_io::variable::Visibility::from(module.compat.visibility) as i32,
             uid: module.uid.unwrap_or_default(),
             compat,
         }

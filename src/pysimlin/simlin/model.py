@@ -132,6 +132,7 @@ def _stock_from_dict(d: dict[str, Any]) -> Stock:
     dimensions: tuple[str, ...] = ()
     if arrayed:
         dimensions = tuple(arrayed.get("dimensions", []))
+    compat = d.get("compat") or {}
     return Stock(
         name=d["name"],
         initial_equation=initial_eq,
@@ -140,7 +141,7 @@ def _stock_from_dict(d: dict[str, Any]) -> Stock:
         units=d.get("units") or None,
         documentation=d.get("documentation") or None,
         dimensions=dimensions,
-        non_negative=d.get("nonNegative", False),
+        non_negative=compat.get("nonNegative", d.get("nonNegative", False)),
     )
 
 
@@ -157,13 +158,14 @@ def _flow_from_dict(d: dict[str, Any]) -> Flow:
     gf_dict = d.get("graphicalFunction")
     if gf_dict:
         gf = _parse_graphical_function_dict(gf_dict)
+    compat = d.get("compat") or {}
     return Flow(
         name=d["name"],
         equation=equation,
         units=d.get("units") or None,
         documentation=d.get("documentation") or None,
         dimensions=dimensions,
-        non_negative=d.get("nonNegative", False),
+        non_negative=compat.get("nonNegative", d.get("nonNegative", False)),
         graphical_function=gf,
     )
 

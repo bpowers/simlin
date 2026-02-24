@@ -124,8 +124,14 @@ def _make_omit_default_hook(
             if val == default:
                 continue
 
-            # Include all other values
-            result[json_name] = conv.unstructure(val)
+            unstructured = conv.unstructure(val)
+
+            # Optional fields whose value unstructures to an empty dict are
+            # semantically equivalent to None (e.g. Compat with all defaults).
+            if default is None and unstructured == {}:
+                continue
+
+            result[json_name] = unstructured
 
         return result
 
@@ -458,7 +464,12 @@ def _create_converter() -> cattrs.Converter:
 
     # Compat: structure from camelCase JSON
     def structure_compat(d: dict[str, Any], _: type) -> Compat:
-        return Compat(active_initial=d.get("activeInitial"))
+        return Compat(
+            active_initial=d.get("activeInitial"),
+            non_negative=d.get("nonNegative", False),
+            can_be_module_input=d.get("canBeModuleInput", False),
+            is_public=d.get("isPublic", False),
+        )
 
     conv.register_structure_hook(Compat, structure_compat)
 
@@ -548,7 +559,14 @@ def _create_converter() -> cattrs.Converter:
         compat = None
         compat_dict = d.get("compat")
         if compat_dict:
-            compat = Compat(active_initial=compat_dict.get("activeInitial"))
+            compat = conv.structure(compat_dict, Compat)
+        # Fall back to legacy top-level fields if compat is absent
+        if compat is None:
+            nn = d.get("nonNegative", False)
+            cbmi = d.get("canBeModuleInput", False)
+            is_pub = d.get("isPublic", False)
+            if nn or cbmi or is_pub:
+                compat = Compat(non_negative=nn, can_be_module_input=cbmi, is_public=is_pub)
         return Stock(
             name=d["name"],
             inflows=d.get("inflows", []),
@@ -556,10 +574,7 @@ def _create_converter() -> cattrs.Converter:
             uid=d.get("uid", 0),
             initial_equation=d.get("initialEquation", ""),
             units=d.get("units", ""),
-            non_negative=d.get("nonNegative", False),
             documentation=d.get("documentation", ""),
-            can_be_module_input=d.get("canBeModuleInput", False),
-            is_public=d.get("isPublic", False),
             arrayed_equation=arrayed_equation,
             compat=compat,
         )
@@ -577,17 +592,20 @@ def _create_converter() -> cattrs.Converter:
         compat = None
         compat_dict = d.get("compat")
         if compat_dict:
-            compat = Compat(active_initial=compat_dict.get("activeInitial"))
+            compat = conv.structure(compat_dict, Compat)
+        if compat is None:
+            nn = d.get("nonNegative", False)
+            cbmi = d.get("canBeModuleInput", False)
+            is_pub = d.get("isPublic", False)
+            if nn or cbmi or is_pub:
+                compat = Compat(non_negative=nn, can_be_module_input=cbmi, is_public=is_pub)
         return Flow(
             name=d["name"],
             uid=d.get("uid", 0),
             equation=d.get("equation", ""),
             units=d.get("units", ""),
-            non_negative=d.get("nonNegative", False),
             graphical_function=gf,
             documentation=d.get("documentation", ""),
-            can_be_module_input=d.get("canBeModuleInput", False),
-            is_public=d.get("isPublic", False),
             arrayed_equation=arrayed_equation,
             compat=compat,
         )
@@ -605,7 +623,12 @@ def _create_converter() -> cattrs.Converter:
         compat = None
         compat_dict = d.get("compat")
         if compat_dict:
-            compat = Compat(active_initial=compat_dict.get("activeInitial"))
+            compat = conv.structure(compat_dict, Compat)
+        if compat is None:
+            cbmi = d.get("canBeModuleInput", False)
+            is_pub = d.get("isPublic", False)
+            if cbmi or is_pub:
+                compat = Compat(can_be_module_input=cbmi, is_public=is_pub)
         return Auxiliary(
             name=d["name"],
             uid=d.get("uid", 0),
@@ -613,8 +636,6 @@ def _create_converter() -> cattrs.Converter:
             units=d.get("units", ""),
             graphical_function=gf,
             documentation=d.get("documentation", ""),
-            can_be_module_input=d.get("canBeModuleInput", False),
-            is_public=d.get("isPublic", False),
             arrayed_equation=arrayed_equation,
             compat=compat,
         )
@@ -624,6 +645,15 @@ def _create_converter() -> cattrs.Converter:
     # Module: handle references list
     def structure_module(d: dict[str, Any], _: type) -> Module:
         references = [conv.structure(ref, ModuleReference) for ref in d.get("references", [])]
+        compat = None
+        compat_dict = d.get("compat")
+        if compat_dict:
+            compat = conv.structure(compat_dict, Compat)
+        if compat is None:
+            cbmi = d.get("canBeModuleInput", False)
+            is_pub = d.get("isPublic", False)
+            if cbmi or is_pub:
+                compat = Compat(can_be_module_input=cbmi, is_public=is_pub)
         return Module(
             name=d["name"],
             model_name=d["modelName"],
@@ -631,8 +661,7 @@ def _create_converter() -> cattrs.Converter:
             units=d.get("units", ""),
             documentation=d.get("documentation", ""),
             references=references,
-            can_be_module_input=d.get("canBeModuleInput", False),
-            is_public=d.get("isPublic", False),
+            compat=compat,
         )
 
     conv.register_structure_hook(Module, structure_module)

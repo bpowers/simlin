@@ -86,6 +86,15 @@ pub struct Compat {
     pub is_public: bool,
 }
 
+impl Compat {
+    pub fn is_empty(&self) -> bool {
+        self.active_initial.is_none()
+            && !self.non_negative
+            && !self.can_be_module_input
+            && !self.is_public
+    }
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
@@ -146,6 +155,13 @@ pub struct Stock {
     pub arrayed_equation: Option<ArrayedEquation>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub compat: Option<Compat>,
+    // Legacy fields: read from old JSON but never written
+    #[serde(skip_serializing, default)]
+    pub non_negative: bool,
+    #[serde(skip_serializing, default)]
+    pub can_be_module_input: bool,
+    #[serde(skip_serializing, default)]
+    pub is_public: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -168,6 +184,13 @@ pub struct Flow {
     pub arrayed_equation: Option<ArrayedEquation>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub compat: Option<Compat>,
+    // Legacy fields: read from old JSON but never written
+    #[serde(skip_serializing, default)]
+    pub non_negative: bool,
+    #[serde(skip_serializing, default)]
+    pub can_be_module_input: bool,
+    #[serde(skip_serializing, default)]
+    pub is_public: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -190,6 +213,11 @@ pub struct Auxiliary {
     pub arrayed_equation: Option<ArrayedEquation>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub compat: Option<Compat>,
+    // Legacy fields: read from old JSON but never written
+    #[serde(skip_serializing, default)]
+    pub can_be_module_input: bool,
+    #[serde(skip_serializing, default)]
+    pub is_public: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -218,6 +246,11 @@ pub struct Module {
     pub references: Vec<ModuleReference>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub compat: Option<Compat>,
+    // Legacy fields: read from old JSON but never written
+    #[serde(skip_serializing, default)]
+    pub can_be_module_input: bool,
+    #[serde(skip_serializing, default)]
+    pub is_public: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -636,9 +669,11 @@ impl From<Stock> for datamodel::Stock {
             active_initial: c
                 .and_then(|c| c.active_initial.clone())
                 .filter(|s| !s.is_empty()),
-            non_negative: c.map(|c| c.non_negative).unwrap_or(false),
-            can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false),
-            visibility: if c.map(|c| c.is_public).unwrap_or(false) {
+            non_negative: c.map(|c| c.non_negative).unwrap_or(stock.non_negative),
+            can_be_module_input: c
+                .map(|c| c.can_be_module_input)
+                .unwrap_or(stock.can_be_module_input),
+            visibility: if c.map(|c| c.is_public).unwrap_or(stock.is_public) {
                 datamodel::Visibility::Public
             } else {
                 datamodel::Visibility::Private
@@ -708,9 +743,11 @@ impl From<Flow> for datamodel::Flow {
                         .and_then(|a| a.compat.as_ref())
                         .and_then(|c| c.active_initial.clone())
                 }),
-            non_negative: c.map(|c| c.non_negative).unwrap_or(false),
-            can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false),
-            visibility: if c.map(|c| c.is_public).unwrap_or(false) {
+            non_negative: c.map(|c| c.non_negative).unwrap_or(flow.non_negative),
+            can_be_module_input: c
+                .map(|c| c.can_be_module_input)
+                .unwrap_or(flow.can_be_module_input),
+            visibility: if c.map(|c| c.is_public).unwrap_or(flow.is_public) {
                 datamodel::Visibility::Public
             } else {
                 datamodel::Visibility::Private
@@ -776,8 +813,10 @@ impl From<Auxiliary> for datamodel::Aux {
                         .and_then(|c| c.active_initial.clone())
                 }),
             non_negative: false,
-            can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false),
-            visibility: if c.map(|c| c.is_public).unwrap_or(false) {
+            can_be_module_input: c
+                .map(|c| c.can_be_module_input)
+                .unwrap_or(aux.can_be_module_input),
+            visibility: if c.map(|c| c.is_public).unwrap_or(aux.is_public) {
                 datamodel::Visibility::Public
             } else {
                 datamodel::Visibility::Private
@@ -860,8 +899,10 @@ impl From<Module> for datamodel::Module {
             compat: datamodel::Compat {
                 active_initial: None,
                 non_negative: false,
-                can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false),
-                visibility: if c.map(|c| c.is_public).unwrap_or(false) {
+                can_be_module_input: c
+                    .map(|c| c.can_be_module_input)
+                    .unwrap_or(module.can_be_module_input),
+                visibility: if c.map(|c| c.is_public).unwrap_or(module.is_public) {
                     datamodel::Visibility::Public
                 } else {
                     datamodel::Visibility::Private
@@ -1230,16 +1271,6 @@ impl From<datamodel::GraphicalFunction> for GraphicalFunction {
 
 impl From<datamodel::Stock> for Stock {
     fn from(stock: datamodel::Stock) -> Self {
-        let compat_json = if stock.compat.is_empty() {
-            None
-        } else {
-            Some(Compat {
-                active_initial: stock.compat.active_initial,
-                non_negative: stock.compat.non_negative,
-                can_be_module_input: stock.compat.can_be_module_input,
-                is_public: matches!(stock.compat.visibility, datamodel::Visibility::Public),
-            })
-        };
         let (initial_equation, arrayed_equation) = match stock.equation {
             datamodel::Equation::Scalar(eq) => (eq, None),
             datamodel::Equation::ApplyToAll(dims, eq) => (
@@ -1278,18 +1309,11 @@ impl From<datamodel::Stock> for Stock {
             }
         };
 
-        let mut compat_json = compat_json.unwrap_or_default();
-        compat_json.non_negative = stock.compat.non_negative;
-        compat_json.can_be_module_input = stock.compat.can_be_module_input;
-        compat_json.is_public = matches!(stock.compat.visibility, datamodel::Visibility::Public);
-        let compat_json = if compat_json.active_initial.is_none()
-            && !compat_json.non_negative
-            && !compat_json.can_be_module_input
-            && !compat_json.is_public
-        {
-            None
-        } else {
-            Some(compat_json)
+        let compat = Compat {
+            active_initial: stock.compat.active_initial,
+            non_negative: stock.compat.non_negative,
+            can_be_module_input: stock.compat.can_be_module_input,
+            is_public: matches!(stock.compat.visibility, datamodel::Visibility::Public),
         };
 
         Stock {
@@ -1301,23 +1325,20 @@ impl From<datamodel::Stock> for Stock {
             outflows: stock.outflows,
             documentation: stock.documentation,
             arrayed_equation,
-            compat: compat_json,
+            compat: if compat.is_empty() {
+                None
+            } else {
+                Some(compat)
+            },
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
         }
     }
 }
 
 impl From<datamodel::Flow> for Flow {
     fn from(flow: datamodel::Flow) -> Self {
-        let compat_json = if flow.compat.is_empty() {
-            None
-        } else {
-            Some(Compat {
-                active_initial: flow.compat.active_initial,
-                non_negative: flow.compat.non_negative,
-                can_be_module_input: flow.compat.can_be_module_input,
-                is_public: matches!(flow.compat.visibility, datamodel::Visibility::Public),
-            })
-        };
         let (equation, arrayed_equation) = match flow.equation {
             datamodel::Equation::Scalar(eq) => (eq, None),
             datamodel::Equation::ApplyToAll(dims, eq) => (
@@ -1356,18 +1377,11 @@ impl From<datamodel::Flow> for Flow {
             }
         };
 
-        let mut compat_json = compat_json.unwrap_or_default();
-        compat_json.non_negative = flow.compat.non_negative;
-        compat_json.can_be_module_input = flow.compat.can_be_module_input;
-        compat_json.is_public = matches!(flow.compat.visibility, datamodel::Visibility::Public);
-        let compat_json = if compat_json.active_initial.is_none()
-            && !compat_json.non_negative
-            && !compat_json.can_be_module_input
-            && !compat_json.is_public
-        {
-            None
-        } else {
-            Some(compat_json)
+        let compat = Compat {
+            active_initial: flow.compat.active_initial,
+            non_negative: flow.compat.non_negative,
+            can_be_module_input: flow.compat.can_be_module_input,
+            is_public: matches!(flow.compat.visibility, datamodel::Visibility::Public),
         };
 
         Flow {
@@ -1378,23 +1392,20 @@ impl From<datamodel::Flow> for Flow {
             graphical_function: flow.gf.map(|gf| gf.into()),
             documentation: flow.documentation,
             arrayed_equation,
-            compat: compat_json,
+            compat: if compat.is_empty() {
+                None
+            } else {
+                Some(compat)
+            },
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
         }
     }
 }
 
 impl From<datamodel::Aux> for Auxiliary {
     fn from(aux: datamodel::Aux) -> Self {
-        let compat_json = if aux.compat.is_empty() {
-            None
-        } else {
-            Some(Compat {
-                active_initial: aux.compat.active_initial,
-                non_negative: aux.compat.non_negative,
-                can_be_module_input: aux.compat.can_be_module_input,
-                is_public: matches!(aux.compat.visibility, datamodel::Visibility::Public),
-            })
-        };
         let (equation, arrayed_equation) = match aux.equation {
             datamodel::Equation::Scalar(eq) => (eq, None),
             datamodel::Equation::ApplyToAll(dims, eq) => (
@@ -1433,17 +1444,11 @@ impl From<datamodel::Aux> for Auxiliary {
             }
         };
 
-        let mut compat_json = compat_json.unwrap_or_default();
-        compat_json.can_be_module_input = aux.compat.can_be_module_input;
-        compat_json.is_public = matches!(aux.compat.visibility, datamodel::Visibility::Public);
-        let compat_json = if compat_json.active_initial.is_none()
-            && !compat_json.non_negative
-            && !compat_json.can_be_module_input
-            && !compat_json.is_public
-        {
-            None
-        } else {
-            Some(compat_json)
+        let compat = Compat {
+            active_initial: aux.compat.active_initial,
+            non_negative: aux.compat.non_negative,
+            can_be_module_input: aux.compat.can_be_module_input,
+            is_public: matches!(aux.compat.visibility, datamodel::Visibility::Public),
         };
 
         Auxiliary {
@@ -1454,7 +1459,13 @@ impl From<datamodel::Aux> for Auxiliary {
             graphical_function: aux.gf.map(|gf| gf.into()),
             documentation: aux.documentation,
             arrayed_equation,
-            compat: compat_json,
+            compat: if compat.is_empty() {
+                None
+            } else {
+                Some(compat)
+            },
+            can_be_module_input: false,
+            is_public: false,
         }
     }
 }
@@ -1470,16 +1481,10 @@ impl From<datamodel::ModuleReference> for ModuleReference {
 
 impl From<datamodel::Module> for Module {
     fn from(module: datamodel::Module) -> Self {
-        let cbmi = module.compat.can_be_module_input;
-        let is_public = matches!(module.compat.visibility, datamodel::Visibility::Public);
-        let compat = if !cbmi && !is_public {
-            None
-        } else {
-            Some(Compat {
-                can_be_module_input: cbmi,
-                is_public,
-                ..Default::default()
-            })
+        let compat = Compat {
+            can_be_module_input: module.compat.can_be_module_input,
+            is_public: matches!(module.compat.visibility, datamodel::Visibility::Public),
+            ..Default::default()
         };
         Module {
             uid: module.uid.unwrap_or(0),
@@ -1488,7 +1493,13 @@ impl From<datamodel::Module> for Module {
             units: module.units.unwrap_or_default(),
             documentation: module.documentation,
             references: module.references.into_iter().map(|r| r.into()).collect(),
-            compat,
+            compat: if compat.is_empty() {
+                None
+            } else {
+                Some(compat)
+            },
+            can_be_module_input: false,
+            is_public: false,
         }
     }
 }
@@ -1913,6 +1924,9 @@ mod tests {
                         is_public: true,
                         ..Default::default()
                     }),
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
                 },
             ),
             (
@@ -1935,6 +1949,9 @@ mod tests {
                         can_be_module_input: true,
                         ..Default::default()
                     }),
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
                 },
             ),
             (
@@ -1973,6 +1990,9 @@ mod tests {
                         can_be_module_input: true,
                         ..Default::default()
                     }),
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
                 },
             ),
         ];
@@ -2038,6 +2058,9 @@ mod tests {
                         is_public: true,
                         ..Default::default()
                     }),
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
                 },
             ),
             (
@@ -2060,6 +2083,9 @@ mod tests {
                         can_be_module_input: true,
                         ..Default::default()
                     }),
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
                 },
             ),
             (
@@ -2097,6 +2123,9 @@ mod tests {
                         can_be_module_input: true,
                         ..Default::default()
                     }),
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
                 },
             ),
         ];
@@ -2145,6 +2174,8 @@ mod tests {
                     graphical_function: None,
                     documentation: "Annual birth rate".to_string(),
                     arrayed_equation: None,
+                    can_be_module_input: false,
+                    is_public: false,
                 },
             ),
             (
@@ -2167,6 +2198,8 @@ mod tests {
                         is_public: true,
                         ..Default::default()
                     }),
+                    can_be_module_input: false,
+                    is_public: false,
                 },
             ),
             (
@@ -2204,6 +2237,8 @@ mod tests {
                         is_public: true,
                         ..Default::default()
                     }),
+                    can_be_module_input: false,
+                    is_public: false,
                 },
             ),
         ];
@@ -2251,6 +2286,8 @@ mod tests {
                 is_public: true,
                 ..Default::default()
             }),
+            can_be_module_input: false,
+            is_public: false,
         };
 
         // Roundtrip
@@ -2450,6 +2487,9 @@ mod tests {
                 documentation: String::new(),
                 arrayed_equation: None,
                 compat: None,
+                non_negative: false,
+                can_be_module_input: false,
+                is_public: false,
             }],
             flows: vec![Flow {
                 uid: 2,
@@ -2460,6 +2500,9 @@ mod tests {
                 documentation: String::new(),
                 arrayed_equation: None,
                 compat: None,
+                non_negative: false,
+                can_be_module_input: false,
+                is_public: false,
             }],
             auxiliaries: vec![Auxiliary {
                 uid: 3,
@@ -2470,6 +2513,8 @@ mod tests {
                 documentation: String::new(),
                 arrayed_equation: None,
                 compat: None,
+                can_be_module_input: false,
+                is_public: false,
             }],
             modules: vec![],
             sim_specs: Some(SimSpecs {
@@ -2945,6 +2990,9 @@ mod tests {
             documentation: String::new(),
             arrayed_equation: None,
             compat: None,
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
         };
 
         let tagged = TaggedVariable::Stock(stock.clone());
@@ -2977,6 +3025,9 @@ mod tests {
             documentation: String::new(),
             arrayed_equation: None,
             compat: None,
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
         };
 
         let tagged = TaggedVariable::Flow(flow);
@@ -3004,6 +3055,8 @@ mod tests {
             graphical_function: None,
             documentation: String::new(),
             arrayed_equation: None,
+            can_be_module_input: false,
+            is_public: false,
         };
 
         let tagged = TaggedVariable::Auxiliary(aux);
@@ -3031,6 +3084,8 @@ mod tests {
             documentation: String::new(),
             references: vec![],
             compat: None,
+            can_be_module_input: false,
+            is_public: false,
         };
 
         let tagged = TaggedVariable::Module(module);
@@ -3089,6 +3144,9 @@ mod tests {
                 documentation: String::new(),
                 arrayed_equation: None,
                 compat: None,
+                non_negative: false,
+                can_be_module_input: false,
+                is_public: false,
             }),
             TaggedVariable::Flow(Flow {
                 uid: 2,
@@ -3099,6 +3157,9 @@ mod tests {
                 documentation: String::new(),
                 arrayed_equation: None,
                 compat: None,
+                non_negative: false,
+                can_be_module_input: false,
+                is_public: false,
             }),
             TaggedVariable::Auxiliary(Auxiliary {
                 uid: 3,
@@ -3109,6 +3170,8 @@ mod tests {
                 graphical_function: None,
                 documentation: String::new(),
                 arrayed_equation: None,
+                can_be_module_input: false,
+                is_public: false,
             }),
         ];
 
@@ -3143,6 +3206,9 @@ mod tests {
                 active_initial: None,
                 ..Default::default()
             }),
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
         };
 
         let dm: datamodel::Flow = flow.into();
@@ -3171,6 +3237,8 @@ mod tests {
                 active_initial: None,
                 ..Default::default()
             }),
+            can_be_module_input: false,
+            is_public: false,
         };
 
         let dm: datamodel::Aux = aux.into();
@@ -3199,6 +3267,9 @@ mod tests {
                 active_initial: Some("correct".to_string()),
                 ..Default::default()
             }),
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
         };
 
         let dm: datamodel::Flow = flow.into();
@@ -3221,6 +3292,9 @@ mod tests {
                 active_initial: Some(String::new()),
                 ..Default::default()
             }),
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
         };
         let dm_stock: datamodel::Stock = stock.into();
         assert_eq!(dm_stock.compat.active_initial, None);
@@ -3248,6 +3322,9 @@ mod tests {
                 }]),
             }),
             compat: None,
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
         };
         let dm_flow: datamodel::Flow = flow.into();
         match &dm_flow.equation {

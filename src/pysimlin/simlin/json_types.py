@@ -36,6 +36,9 @@ class Compat:
     """Vensim compatibility options for a variable."""
 
     active_initial: str | None = None
+    non_negative: bool = False
+    can_be_module_input: bool = False
+    is_public: bool = False
 
 
 @dataclass
@@ -79,10 +82,7 @@ class Stock:
     uid: int = 0
     initial_equation: str = ""
     units: str = ""
-    non_negative: bool = False
     documentation: str = ""
-    can_be_module_input: bool = False
-    is_public: bool = False
     arrayed_equation: ArrayedEquation | None = None
     compat: Compat | None = None
 
@@ -95,11 +95,8 @@ class Flow:
     uid: int = 0
     equation: str = ""
     units: str = ""
-    non_negative: bool = False
     graphical_function: GraphicalFunction | None = None
     documentation: str = ""
-    can_be_module_input: bool = False
-    is_public: bool = False
     arrayed_equation: ArrayedEquation | None = None
     compat: Compat | None = None
 
@@ -114,8 +111,6 @@ class Auxiliary:
     units: str = ""
     graphical_function: GraphicalFunction | None = None
     documentation: str = ""
-    can_be_module_input: bool = False
-    is_public: bool = False
     arrayed_equation: ArrayedEquation | None = None
     compat: Compat | None = None
 
@@ -130,8 +125,7 @@ class Module:
     units: str = ""
     documentation: str = ""
     references: list[ModuleReference] = field(default_factory=list)
-    can_be_module_input: bool = False
-    is_public: bool = False
+    compat: Compat | None = None
 
 
 # View types

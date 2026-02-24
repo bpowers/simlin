@@ -131,6 +131,10 @@ def graphical_function_strategy(draw: Any) -> GraphicalFunction:
 @st.composite
 def stock_strategy(draw: Any) -> Stock:
     """Generate a stock variable."""
+    nn = draw(st.booleans())
+    cbmi = draw(st.booleans())
+    is_pub = draw(st.booleans())
+    compat = Compat(non_negative=nn, can_be_module_input=cbmi, is_public=is_pub) if (nn or cbmi or is_pub) else None
     return Stock(
         name=draw(ident_strategy()),
         inflows=draw(st.lists(ident_strategy(), min_size=0, max_size=3)),
@@ -138,11 +142,9 @@ def stock_strategy(draw: Any) -> Stock:
         uid=draw(st.integers(min_value=0, max_value=10000)),
         initial_equation=draw(equation_strategy()),
         units=draw(st.sampled_from(["", "widgets", "people", "dollars"])),
-        non_negative=draw(st.booleans()),
         documentation=draw(st.sampled_from(["", "A stock variable", "This accumulates over time"])),
-        can_be_module_input=draw(st.booleans()),
-        is_public=draw(st.booleans()),
         arrayed_equation=None,  # Keep simple for now
+        compat=compat,
     )
 
 
@@ -151,18 +153,20 @@ def flow_strategy(draw: Any) -> Flow:
     """Generate a flow variable."""
     has_gf = draw(st.booleans())
     gf = draw(graphical_function_strategy()) if has_gf else None
+    nn = draw(st.booleans())
+    cbmi = draw(st.booleans())
+    is_pub = draw(st.booleans())
+    compat = Compat(non_negative=nn, can_be_module_input=cbmi, is_public=is_pub) if (nn or cbmi or is_pub) else None
 
     return Flow(
         name=draw(ident_strategy()),
         uid=draw(st.integers(min_value=0, max_value=10000)),
         equation=draw(equation_strategy()),
         units=draw(st.sampled_from(["", "widgets/year", "people/month"])),
-        non_negative=draw(st.booleans()),
         graphical_function=gf,
         documentation=draw(st.sampled_from(["", "A flow variable"])),
-        can_be_module_input=draw(st.booleans()),
-        is_public=draw(st.booleans()),
         arrayed_equation=None,
+        compat=compat,
     )
 
 
@@ -171,6 +175,9 @@ def auxiliary_strategy(draw: Any) -> Auxiliary:
     """Generate an auxiliary variable."""
     has_gf = draw(st.booleans())
     gf = draw(graphical_function_strategy()) if has_gf else None
+    cbmi = draw(st.booleans())
+    is_pub = draw(st.booleans())
+    compat = Compat(can_be_module_input=cbmi, is_public=is_pub) if (cbmi or is_pub) else None
 
     return Auxiliary(
         name=draw(ident_strategy()),
@@ -179,9 +186,8 @@ def auxiliary_strategy(draw: Any) -> Auxiliary:
         units=draw(st.sampled_from(["", "dimensionless", "ratio"])),
         graphical_function=gf,
         documentation=draw(st.sampled_from(["", "An auxiliary variable"])),
-        can_be_module_input=draw(st.booleans()),
-        is_public=draw(st.booleans()),
         arrayed_equation=None,
+        compat=compat,
     )
 
 
@@ -193,6 +199,9 @@ def module_strategy(draw: Any) -> Module:
         ModuleReference(src=draw(ident_strategy()), dst=draw(ident_strategy()))
         for _ in range(num_refs)
     ]
+    cbmi = draw(st.booleans())
+    is_pub = draw(st.booleans())
+    compat = Compat(can_be_module_input=cbmi, is_public=is_pub) if (cbmi or is_pub) else None
 
     return Module(
         name=draw(ident_strategy()),
@@ -201,8 +210,7 @@ def module_strategy(draw: Any) -> Module:
         units=draw(st.sampled_from(["", "widgets"])),
         documentation=draw(st.sampled_from(["", "A module"])),
         references=refs,
-        can_be_module_input=draw(st.booleans()),
-        is_public=draw(st.booleans()),
+        compat=compat,
     )
 
 
@@ -467,17 +475,17 @@ class TestOptionalFieldSerialization:
 
     def test_optional_bool_false_vs_default(self) -> None:
         """False should only be omitted if it equals the default."""
-        # For Flow, non_negative defaults to False
-        flow_default = Flow(name="test", non_negative=False)
+        # Compat with all-default fields should be omitted
+        flow_default = Flow(name="test", compat=Compat())
         result_default = converter.unstructure(flow_default)
-        assert "nonNegative" not in result_default, (
-            "nonNegative=False should be omitted (equals default)"
+        assert "compat" not in result_default, (
+            "compat with all defaults should be omitted"
         )
 
-        # True should be included
-        flow_true = Flow(name="test", non_negative=True)
-        result_true = converter.unstructure(flow_true)
-        assert result_true.get("nonNegative") is True
+        # Compat with non-default should be included
+        flow_nn = Flow(name="test", compat=Compat(non_negative=True))
+        result_nn = converter.unstructure(flow_nn)
+        assert result_nn.get("compat", {}).get("nonNegative") is True
 
 
 class TestNullValueHandling:
