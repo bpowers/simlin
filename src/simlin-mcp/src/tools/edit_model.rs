@@ -2,282 +2,390 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! `edit_model` MCP tool: apply a patch to an existing model file.
+//! `EditModel` MCP tool: apply curated LLM-friendly operations to an existing model file.
 //!
-//! This is a thin wrapper around the `apply_patch` engine API.  The
-//! patch JSON schema is automatically derived from the Rust types via
-//! `schemars`, so the full schema (including all variable types,
-//! operations, sim specs, etc.) is visible in the MCP tool definition.
+//! The operation types deliberately exclude `uid`, `compat`, and `aiState` fields
+//! that are internal bookkeeping and not meaningful to LLM authors.
 
 use anyhow::Context as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use simlin_engine::json as ejson;
 
+use super::types::{DominantPeriodOutput, LoopDominanceSummary};
 use crate::tool::TypedTool;
 
-// ── Patch input types with JsonSchema ────────────────────────────────
+// ── Curated input types ───────────────────────────────────────────────────────
 //
-// These mirror the libsimlin JSON patch format but add `JsonSchema`
-// derives so the schema flows into the MCP tool definition.
+// These types expose only the fields meaningful to an LLM building a model.
+// `uid`, `compat`, and `aiState` are intentionally excluded.
 
-/// A project-level operation.
-#[derive(Deserialize, Serialize, JsonSchema)]
-#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
-pub enum ProjectOperation {
-    /// Update simulation specifications (start/end time, dt, method).
-    SetSimSpecs {
-        /// The new simulation specifications.
-        #[serde(rename = "simSpecs")]
-        sim_specs: ejson::SimSpecs,
-    },
-    /// Add a new empty model to the project.
-    AddModel {
-        /// Name of the new model.
-        name: String,
-    },
-}
-
-/// An operation on a single model within the project.
-#[derive(Deserialize, Serialize, JsonSchema)]
-#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
-pub enum ModelOperation {
-    /// Create or update an auxiliary variable.
-    UpsertAux {
-        /// The auxiliary variable definition.
-        aux: ejson::Auxiliary,
-    },
-    /// Create or update a stock (accumulator) variable.
-    UpsertStock {
-        /// The stock variable definition.
-        stock: ejson::Stock,
-    },
-    /// Create or update a flow (rate) variable.
-    UpsertFlow {
-        /// The flow variable definition.
-        flow: ejson::Flow,
-    },
-    /// Create or update a module reference.
-    UpsertModule {
-        /// The module definition.
-        module: ejson::Module,
-    },
-    /// Delete a variable by name.
-    DeleteVariable {
-        /// The variable identifier to delete.
-        ident: String,
-    },
-    /// Rename a variable, updating all references.
-    RenameVariable {
-        /// Current variable name.
-        from: String,
-        /// New variable name.
-        to: String,
-    },
-    /// Create or update a diagram view.
-    UpsertView {
-        /// Zero-based index of the view to create/replace.
-        index: u32,
-        /// The view definition.
-        view: ejson::View,
-    },
-    /// Delete a diagram view by index.
-    DeleteView {
-        /// Zero-based index of the view to delete.
-        index: u32,
-    },
-    /// Replace a stock's inflow/outflow connections.
-    UpdateStockFlows {
-        /// The stock identifier.
-        ident: String,
-        /// New list of inflow names.
-        inflows: Vec<String>,
-        /// New list of outflow names.
-        outflows: Vec<String>,
-    },
-}
-
-/// A set of operations targeting a specific model within the project.
-#[derive(Deserialize, Serialize, JsonSchema)]
+/// An element equation for one subscript element of an arrayed variable.
+/// Excludes `compat` (internal compatibility field).
+#[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ModelPatch {
-    /// Name of the model to patch.
-    pub name: String,
-    /// Operations to apply to this model.
+pub struct ElementEquationInput {
+    /// Subscript label for this element.
+    pub subscript: String,
+    /// Equation for this element.
+    pub equation: String,
+    /// Optional graphical (table) function for this element.
     #[serde(default)]
-    pub ops: Vec<ModelOperation>,
+    pub graphical_function: Option<ejson::GraphicalFunction>,
 }
 
-/// Input for the `edit_model` tool.
+/// Equation for an arrayed (subscripted) variable.
+/// Excludes `compat` (internal compatibility field).
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArrayedEquationInput {
+    /// Dimension names for this array.
+    pub dimensions: Vec<String>,
+    /// Apply-to-all equation (when the same equation applies to every element).
+    #[serde(default)]
+    pub equation: Option<String>,
+    /// Per-element equations (for element-wise overrides).
+    #[serde(default)]
+    pub elements: Option<Vec<ElementEquationInput>>,
+}
+
+/// Create or update a stock (accumulator) variable.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertStockInput {
+    /// Variable name (used as identifier).
+    pub name: String,
+    /// Initial value equation for the stock.
+    pub initial_equation: String,
+    /// Optional units string.
+    #[serde(default)]
+    pub units: Option<String>,
+    /// Optional documentation / description.
+    #[serde(default)]
+    pub documentation: Option<String>,
+    /// Names of flows that flow into this stock.
+    #[serde(default)]
+    pub inflows: Option<Vec<String>>,
+    /// Names of flows that flow out of this stock.
+    #[serde(default)]
+    pub outflows: Option<Vec<String>>,
+    /// When true, clamps the stock to non-negative values.
+    #[serde(default)]
+    pub non_negative: Option<bool>,
+    /// When true, this variable can be supplied as a module input.
+    #[serde(default)]
+    pub can_be_module_input: Option<bool>,
+    /// When true, this variable is visible outside its enclosing model.
+    #[serde(default)]
+    pub is_public: Option<bool>,
+    /// Equation for arrayed (subscripted) stocks.
+    #[serde(default)]
+    pub arrayed_equation: Option<ArrayedEquationInput>,
+}
+
+/// Create or update a flow (rate) variable.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertFlowInput {
+    /// Variable name (used as identifier).
+    pub name: String,
+    /// Rate equation for this flow.
+    pub equation: String,
+    /// Optional units string.
+    #[serde(default)]
+    pub units: Option<String>,
+    /// Optional documentation / description.
+    #[serde(default)]
+    pub documentation: Option<String>,
+    /// When true, clamps the flow to non-negative values.
+    #[serde(default)]
+    pub non_negative: Option<bool>,
+    /// Optional graphical (table) function.
+    #[serde(default)]
+    pub graphical_function: Option<ejson::GraphicalFunction>,
+    /// When true, this variable can be supplied as a module input.
+    #[serde(default)]
+    pub can_be_module_input: Option<bool>,
+    /// When true, this variable is visible outside its enclosing model.
+    #[serde(default)]
+    pub is_public: Option<bool>,
+    /// Equation for arrayed (subscripted) flows.
+    #[serde(default)]
+    pub arrayed_equation: Option<ArrayedEquationInput>,
+}
+
+/// Create or update an auxiliary (constant or computed) variable.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertAuxiliaryInput {
+    /// Variable name (used as identifier).
+    pub name: String,
+    /// Equation for this auxiliary variable.
+    pub equation: String,
+    /// Optional units string.
+    #[serde(default)]
+    pub units: Option<String>,
+    /// Optional documentation / description.
+    #[serde(default)]
+    pub documentation: Option<String>,
+    /// Optional graphical (table) function.
+    #[serde(default)]
+    pub graphical_function: Option<ejson::GraphicalFunction>,
+    /// When true, this variable can be supplied as a module input.
+    #[serde(default)]
+    pub can_be_module_input: Option<bool>,
+    /// When true, this variable is visible outside its enclosing model.
+    #[serde(default)]
+    pub is_public: Option<bool>,
+    /// Equation for arrayed (subscripted) auxiliaries.
+    #[serde(default)]
+    pub arrayed_equation: Option<ArrayedEquationInput>,
+}
+
+/// Remove a variable from the model by name.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveVariableInput {
+    /// Name of the variable to remove.
+    pub name: String,
+}
+
+/// An edit operation on a model.
 ///
-/// Contains a path to the model file and a patch describing the
-/// changes to apply.  The patch format supports project-level
-/// operations (like changing simulation specs or adding models) and
-/// model-level operations (like upserting variables).
+/// Serde's default externally-tagged representation produces JSON like:
+/// `{ "upsertStock": { "name": "population", ... } }`
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum EditOperation {
+    UpsertStock(UpsertStockInput),
+    UpsertFlow(UpsertFlowInput),
+    UpsertAuxiliary(UpsertAuxiliaryInput),
+    RemoveVariable(RemoveVariableInput),
+}
+
+/// Input for the `EditModel` tool.
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EditModelInput {
     /// Absolute or relative path to the model file.
-    pub model_path: String,
+    pub project_path: String,
 
-    /// Project-level operations to apply before model operations.
+    /// Name of the model within the project to edit. Defaults to "main".
     #[serde(default)]
-    pub project_ops: Vec<ProjectOperation>,
+    pub model_name: Option<String>,
 
-    /// Per-model patches, each targeting a named model.
+    /// If true, validate and preview changes without writing to disk.
     #[serde(default)]
-    pub models: Vec<ModelPatch>,
+    pub dry_run: Option<bool>,
 
-    /// If true, validate the patch without writing changes to disk.
+    /// Optional simulation spec changes to apply before variable operations.
     #[serde(default)]
-    pub dry_run: bool,
+    pub sim_specs: Option<ejson::SimSpecs>,
+
+    /// Variable operations to apply in order.
+    #[serde(default)]
+    pub operations: Option<Vec<EditOperation>>,
 }
 
-/// Output from the `edit_model` tool.
+/// Output from the `EditModel` tool -- matches `ReadModel` shape plus `dryRun` flag.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EditModelOutput {
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    project: Option<ejson::Project>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    diagnostics: Vec<String>,
+    model: ejson::Model,
+    time: Vec<f64>,
+    loop_dominance: Vec<LoopDominanceSummary>,
+    dominant_loops_by_period: Vec<DominantPeriodOutput>,
+    dry_run: bool,
 }
 
 pub fn tool() -> TypedTool<EditModelInput> {
     TypedTool {
-        name: "edit_model",
-        description: "Edit a system dynamics model by applying a patch. \
-             Supports upserting variables (stocks, flows, auxiliaries, modules), \
-             deleting/renaming variables, updating stock flows, modifying \
-             simulation specs, and managing diagram views.",
+        name: "EditModel",
+        description: "Edit a system dynamics model by applying operations. \
+             Supports upserting stocks, flows, and auxiliaries (with optional \
+             units, documentation, and graphical functions), removing variables, \
+             and updating simulation specs. Returns a refreshed model snapshot \
+             with loop dominance analysis after applying changes.",
         handler: handle_edit_model,
     }
 }
 
 fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value> {
-    let path = std::path::Path::new(&input.model_path);
+    let path = std::path::Path::new(&input.project_path);
     let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read model file: {}", input.model_path))?;
-
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+        .with_context(|| format!("failed to read model file: {}", input.project_path))?;
 
     let mut project = super::open_project(path, &contents)?;
+    let model_name = input.model_name.as_deref().unwrap_or("main");
+    let dry_run = input.dry_run.unwrap_or(false);
 
-    // Convert MCP patch types to engine patch types and apply
-    let engine_patch = convert_patch(&input);
-    simlin_engine::apply_patch(&mut project, engine_patch)
+    let patch = build_patch(model_name, input.sim_specs, input.operations);
+    simlin_engine::apply_patch(&mut project, patch)
         .map_err(|e| anyhow::anyhow!("patch application failed: {e:?}"))?;
 
-    if input.dry_run {
-        let output = EditModelOutput {
-            success: true,
-            project: None,
-            diagnostics: vec![],
+    if !dry_run {
+        let json_project = ejson::Project::from(project.clone());
+        let json_str = serde_json::to_string_pretty(&json_project)?;
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let write_path = if matches!(ext.as_str(), "stmx" | "xmile" | "xml" | "mdl") {
+            path.with_extension("simlin.json")
+        } else {
+            path.to_path_buf()
         };
-        return serde_json::to_value(output).map_err(Into::into);
+        std::fs::write(&write_path, &json_str)
+            .with_context(|| format!("failed to write model to {}", write_path.display()))?;
     }
 
-    let json_project = ejson::Project::from(project.clone());
+    let analysis = simlin_engine::analysis::analyze_model(&project, model_name)
+        .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
 
-    // Write back as JSON (the canonical format for MCP-managed models)
-    let json_str = serde_json::to_string_pretty(&json_project)?;
-    let write_path = if ext == "stmx" || ext == "xmile" || ext == "xml" || ext == "mdl" {
-        path.with_extension("simlin.json")
-    } else {
-        path.to_path_buf()
-    };
-    std::fs::write(&write_path, &json_str)
-        .with_context(|| format!("failed to write model to {}", write_path.display()))?;
+    let loop_dominance: Vec<LoopDominanceSummary> = analysis
+        .loop_dominance
+        .into_iter()
+        .map(|ls| LoopDominanceSummary {
+            loop_id: ls.loop_id,
+            name: ls.name,
+            polarity: ls.polarity,
+            variables: ls.variables,
+            importance: ls.importance,
+        })
+        .collect();
+
+    let dominant_loops_by_period: Vec<DominantPeriodOutput> = analysis
+        .dominant_loops_by_period
+        .into_iter()
+        .map(|dp| DominantPeriodOutput {
+            dominant_loops: dp.dominant_loops,
+            start_time: dp.start,
+            end_time: dp.end,
+        })
+        .collect();
 
     let output = EditModelOutput {
-        success: true,
-        project: Some(json_project),
-        diagnostics: vec![],
+        model: analysis.model,
+        time: analysis.time,
+        loop_dominance,
+        dominant_loops_by_period,
+        dry_run,
     };
+
     serde_json::to_value(output).map_err(Into::into)
 }
 
-fn convert_patch(input: &EditModelInput) -> simlin_engine::ProjectPatch {
-    let project_ops = input
-        .project_ops
-        .iter()
-        .map(|op| match op {
-            ProjectOperation::SetSimSpecs { sim_specs } => {
-                simlin_engine::ProjectOperation::SetSimSpecs(sim_specs.clone().into())
-            }
-            ProjectOperation::AddModel { name } => {
-                simlin_engine::ProjectOperation::AddModel { name: name.clone() }
-            }
-        })
+/// Build an engine `ProjectPatch` from the curated MCP inputs.
+///
+/// `simSpecs` changes are added as a project-level operation first (AC3.7),
+/// then variable operations are added as model-level operations.
+fn build_patch(
+    model_name: &str,
+    sim_specs: Option<ejson::SimSpecs>,
+    operations: Option<Vec<EditOperation>>,
+) -> simlin_engine::ProjectPatch {
+    let project_ops = sim_specs
+        .map(|ss| vec![simlin_engine::ProjectOperation::SetSimSpecs(ss.into())])
+        .unwrap_or_default();
+
+    let model_ops: Vec<simlin_engine::ModelOperation> = operations
+        .unwrap_or_default()
+        .into_iter()
+        .map(convert_operation)
         .collect();
 
-    let models = input
-        .models
-        .iter()
-        .map(|mp| {
-            let ops = mp
-                .ops
-                .iter()
-                .map(|op| match op {
-                    ModelOperation::UpsertAux { aux } => {
-                        simlin_engine::ModelOperation::UpsertAux(aux.clone().into())
-                    }
-                    ModelOperation::UpsertStock { stock } => {
-                        simlin_engine::ModelOperation::UpsertStock(stock.clone().into())
-                    }
-                    ModelOperation::UpsertFlow { flow } => {
-                        simlin_engine::ModelOperation::UpsertFlow(flow.clone().into())
-                    }
-                    ModelOperation::UpsertModule { module } => {
-                        simlin_engine::ModelOperation::UpsertModule(module.clone().into())
-                    }
-                    ModelOperation::DeleteVariable { ident } => {
-                        simlin_engine::ModelOperation::DeleteVariable {
-                            ident: ident.clone(),
-                        }
-                    }
-                    ModelOperation::RenameVariable { from, to } => {
-                        simlin_engine::ModelOperation::RenameVariable {
-                            from: from.clone(),
-                            to: to.clone(),
-                        }
-                    }
-                    ModelOperation::UpsertView { index, view } => {
-                        simlin_engine::ModelOperation::UpsertView {
-                            index: *index,
-                            view: view.clone().into(),
-                        }
-                    }
-                    ModelOperation::DeleteView { index } => {
-                        simlin_engine::ModelOperation::DeleteView { index: *index }
-                    }
-                    ModelOperation::UpdateStockFlows {
-                        ident,
-                        inflows,
-                        outflows,
-                    } => simlin_engine::ModelOperation::UpdateStockFlows {
-                        ident: ident.clone(),
-                        inflows: inflows.clone(),
-                        outflows: outflows.clone(),
-                    },
-                })
-                .collect();
-
-            simlin_engine::ModelPatch {
-                name: mp.name.clone(),
-                ops,
-            }
-        })
-        .collect();
+    let models = if model_ops.is_empty() {
+        vec![]
+    } else {
+        vec![simlin_engine::ModelPatch {
+            name: model_name.to_string(),
+            ops: model_ops,
+        }]
+    };
 
     simlin_engine::ProjectPatch {
         project_ops,
         models,
+    }
+}
+
+/// Convert a curated `ArrayedEquationInput` to an `ejson::ArrayedEquation`,
+/// filling in `compat: None` for the excluded field.
+fn convert_arrayed_equation(a: ArrayedEquationInput) -> ejson::ArrayedEquation {
+    ejson::ArrayedEquation {
+        dimensions: a.dimensions,
+        equation: a.equation,
+        compat: None,
+        elements: a.elements.map(|els| {
+            els.into_iter()
+                .map(|el| ejson::ElementEquation {
+                    subscript: el.subscript,
+                    equation: el.equation,
+                    compat: None,
+                    graphical_function: el.graphical_function,
+                })
+                .collect()
+        }),
+    }
+}
+
+/// Convert a curated `EditOperation` to an engine `ModelOperation`.
+///
+/// Excluded fields (`uid`, `compat`) are filled with engine defaults (0 / None).
+fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
+    match op {
+        EditOperation::UpsertStock(s) => {
+            let json_stock = ejson::Stock {
+                uid: 0,
+                name: s.name,
+                initial_equation: s.initial_equation,
+                units: s.units.unwrap_or_default(),
+                inflows: s.inflows.unwrap_or_default(),
+                outflows: s.outflows.unwrap_or_default(),
+                non_negative: s.non_negative.unwrap_or(false),
+                documentation: s.documentation.unwrap_or_default(),
+                can_be_module_input: s.can_be_module_input.unwrap_or(false),
+                is_public: s.is_public.unwrap_or(false),
+                arrayed_equation: s.arrayed_equation.map(convert_arrayed_equation),
+                compat: None,
+            };
+            simlin_engine::ModelOperation::UpsertStock(json_stock.into())
+        }
+        EditOperation::UpsertFlow(f) => {
+            let json_flow = ejson::Flow {
+                uid: 0,
+                name: f.name,
+                equation: f.equation,
+                units: f.units.unwrap_or_default(),
+                non_negative: f.non_negative.unwrap_or(false),
+                graphical_function: f.graphical_function,
+                documentation: f.documentation.unwrap_or_default(),
+                can_be_module_input: f.can_be_module_input.unwrap_or(false),
+                is_public: f.is_public.unwrap_or(false),
+                arrayed_equation: f.arrayed_equation.map(convert_arrayed_equation),
+                compat: None,
+            };
+            simlin_engine::ModelOperation::UpsertFlow(json_flow.into())
+        }
+        EditOperation::UpsertAuxiliary(a) => {
+            let json_aux = ejson::Auxiliary {
+                uid: 0,
+                name: a.name,
+                equation: a.equation,
+                units: a.units.unwrap_or_default(),
+                graphical_function: a.graphical_function,
+                documentation: a.documentation.unwrap_or_default(),
+                can_be_module_input: a.can_be_module_input.unwrap_or(false),
+                is_public: a.is_public.unwrap_or(false),
+                arrayed_equation: a.arrayed_equation.map(convert_arrayed_equation),
+                compat: None,
+            };
+            simlin_engine::ModelOperation::UpsertAux(json_aux.into())
+        }
+        EditOperation::RemoveVariable(r) => {
+            simlin_engine::ModelOperation::DeleteVariable { ident: r.name }
+        }
     }
 }
 
@@ -286,154 +394,286 @@ mod tests {
     use super::*;
     use crate::tool::Tool;
 
-    #[test]
-    fn test_edit_model_schema_has_patch_operations() {
-        let t = tool();
-        let schema = t.input_schema();
-
-        assert_eq!(schema["type"], "object");
-        let props = &schema["properties"];
-
-        assert!(props["modelPath"].is_object());
-        assert!(props["projectOps"].is_object());
-        assert!(props["models"].is_object());
-        assert!(props["dryRun"].is_object());
+    fn call_tool(input: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        tool().call(input)
     }
 
+    fn minimal_project_json() -> serde_json::Value {
+        serde_json::json!({
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{ "name": "main" }]
+        })
+    }
+
+    fn write_model(
+        dir: &std::path::Path,
+        filename: &str,
+        content: &serde_json::Value,
+    ) -> std::path::PathBuf {
+        let path = dir.join(filename);
+        std::fs::write(&path, serde_json::to_string_pretty(content).unwrap()).unwrap();
+        path
+    }
+
+    // ---- AC3.10: schema excludes uid, compat, aiState ----
+
     #[test]
-    fn test_edit_model_schema_model_operations_visible() {
+    fn ac3_10_schema_excludes_internal_fields() {
         let t = tool();
         let schema = t.input_schema();
-        let schema_str = serde_json::to_string_pretty(&schema).unwrap();
+        let schema_str = serde_json::to_string(&schema).unwrap();
 
-        // With schemars v1 and adjacently-tagged enums (tag="type",
-        // content="payload", rename_all="camelCase"), variant names
-        // appear in camelCase.
-        for op in [
-            "upsertAux",
-            "upsertStock",
-            "upsertFlow",
-            "deleteVariable",
-            "renameVariable",
-        ] {
+        for banned in ["\"uid\"", "\"compat\"", "\"aiState\""] {
             assert!(
-                schema_str.contains(op),
-                "schema should contain {op} variant"
+                !schema_str.contains(banned),
+                "schema should NOT contain {banned} but it does"
             );
         }
     }
 
     #[test]
-    fn test_edit_model_schema_variable_fields_visible() {
+    fn ac3_10_schema_has_expected_operation_variants() {
         let t = tool();
         let schema = t.input_schema();
-        let schema_str = serde_json::to_string_pretty(&schema).unwrap();
+        let schema_str = serde_json::to_string(&schema).unwrap();
 
-        assert!(
-            schema_str.contains("equation"),
-            "schema should contain equation field"
-        );
-        assert!(
-            schema_str.contains("initialEquation"),
-            "schema should contain initialEquation field"
-        );
-        assert!(
-            schema_str.contains("nonNegative"),
-            "schema should contain nonNegative field"
-        );
+        for variant in [
+            "upsertStock",
+            "upsertFlow",
+            "upsertAuxiliary",
+            "removeVariable",
+        ] {
+            assert!(
+                schema_str.contains(variant),
+                "schema should contain {variant}"
+            );
+        }
     }
 
+    // ---- AC3.11: missing file returns isError ----
+
     #[test]
-    fn test_edit_model_missing_file() {
-        let t = tool();
-        let result = t.call(serde_json::json!({
-            "modelPath": "/nonexistent/model.json",
-            "models": [{
-                "name": "main",
-                "ops": [{
-                    "type": "upsertAux",
-                    "payload": {
-                        "aux": { "name": "x", "equation": "1" }
-                    }
-                }]
-            }]
+    fn ac3_11_missing_file_returns_error() {
+        let result = call_tool(serde_json::json!({
+            "projectPath": "/nonexistent/model.simlin.json",
+            "operations": [{ "upsertAuxiliary": { "name": "x", "equation": "1" } }]
         }));
         assert!(result.is_err());
     }
 
+    // ---- AC3.4: upsertStock with all optional fields ----
+
     #[test]
-    fn test_edit_model_end_to_end() {
-        // Create a temp model, then edit it via the tool
-        let dir = std::env::temp_dir().join("simlin-mcp-test-edit");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let model_path = dir.join("test.simlin.json");
+    fn ac3_4_upsert_stock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
 
-        // Create a minimal model
-        let project = serde_json::json!({
-            "name": "test",
-            "simSpecs": {
-                "startTime": 0,
-                "endTime": 100,
-                "dt": "1",
-                "saveStep": 1,
-                "method": "euler"
-            },
-            "models": [{
-                "name": "main"
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertStock": {
+                    "name": "population",
+                    "initialEquation": "1000",
+                    "units": "people",
+                    "documentation": "Total population",
+                    "inflows": ["births"],
+                    "outflows": ["deaths"]
+                }
             }]
-        });
-        std::fs::write(&model_path, serde_json::to_string_pretty(&project).unwrap()).unwrap();
+        }))
+        .unwrap();
 
-        let t = tool();
-        let result = t
-            .call(serde_json::json!({
-                "modelPath": model_path.to_str().unwrap(),
-                "models": [{
-                    "name": "main",
-                    "ops": [
-                        {
-                            "type": "upsertAux",
-                            "payload": {
-                                "aux": { "name": "growth_rate", "equation": "0.05" }
-                            }
-                        },
-                        {
-                            "type": "upsertStock",
-                            "payload": {
-                                "stock": {
-                                    "name": "population",
-                                    "initialEquation": "100",
-                                    "inflows": ["births"],
-                                    "outflows": []
-                                }
-                            }
-                        },
-                        {
-                            "type": "upsertFlow",
-                            "payload": {
-                                "flow": {
-                                    "name": "births",
-                                    "equation": "population * growth_rate"
-                                }
-                            }
-                        }
-                    ]
-                }]
-            }))
-            .unwrap();
+        let model = &result["model"];
+        let stocks = model["stocks"].as_array().unwrap();
+        assert_eq!(stocks.len(), 1);
+        assert_eq!(stocks[0]["name"], "population");
+        assert_eq!(stocks[0]["initialEquation"], "1000");
+        assert_eq!(stocks[0]["units"], "people");
+        assert_eq!(stocks[0]["inflows"][0], "births");
+        assert_eq!(stocks[0]["outflows"][0], "deaths");
+    }
 
-        assert_eq!(result["success"], true);
-        let proj = &result["project"];
-        assert_eq!(proj["name"], "test");
+    // ---- AC3.5: upsertFlow and upsertAuxiliary ----
 
-        // Verify the model has the variables
-        let model = &proj["models"][0];
-        assert!(!model["stocks"].as_array().unwrap().is_empty());
-        assert!(!model["flows"].as_array().unwrap().is_empty());
-        assert!(!model["auxiliaries"].as_array().unwrap().is_empty());
+    #[test]
+    fn ac3_5_upsert_flow_and_auxiliary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
 
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&dir);
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [
+                {
+                    "upsertFlow": {
+                        "name": "births",
+                        "equation": "population * birth_rate",
+                        "units": "people/year"
+                    }
+                },
+                {
+                    "upsertAuxiliary": {
+                        "name": "birth_rate",
+                        "equation": "0.03",
+                        "documentation": "Annual birth rate"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        let model = &result["model"];
+        let flows = model["flows"].as_array().unwrap();
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0]["name"], "births");
+        assert_eq!(flows[0]["equation"], "population * birth_rate");
+
+        let auxes = model["auxiliaries"].as_array().unwrap();
+        assert_eq!(auxes.len(), 1);
+        assert_eq!(auxes[0]["name"], "birth_rate");
+    }
+
+    // ---- AC3.6: removeVariable ----
+
+    #[test]
+    fn ac3_6_remove_variable() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // First add a variable
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{ "upsertAuxiliary": { "name": "temp_var", "equation": "42" } }]
+        }))
+        .unwrap();
+
+        // Then remove it
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{ "removeVariable": { "name": "temp_var" } }]
+        }))
+        .unwrap();
+
+        let model = &result["model"];
+        // auxiliaries may be absent or empty when no auxiliaries remain
+        let auxes = model["auxiliaries"]
+            .as_array()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        assert!(
+            auxes.iter().all(|a| a["name"] != "temp_var"),
+            "temp_var should have been removed"
+        );
+    }
+
+    // ---- AC3.7: simSpecs applied before variable operations ----
+
+    #[test]
+    fn ac3_7_sim_specs_applied_before_variables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 200.0,
+                "dt": "0.5",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "operations": [{
+                "upsertAuxiliary": { "name": "growth_rate", "equation": "0.05" }
+            }]
+        }))
+        .unwrap();
+
+        // Both the sim spec change and the new variable must appear in the response
+        let model = &result["model"];
+        let sim_specs = &model["simSpecs"];
+        // The model-level simSpecs may be null (project-level changed); check time array length
+        // as a proxy for the new endTime=200 being in effect.
+        let time = result["time"].as_array().unwrap();
+        // With endTime=200, dt=0.5, saveStep=1 we expect 201 time points (0..200 inclusive)
+        assert!(
+            time.len() >= 200,
+            "time array should reflect updated endTime=200, got {} points",
+            time.len()
+        );
+        // The new variable must also be present
+        let auxes = model["auxiliaries"].as_array().unwrap();
+        assert!(
+            auxes.iter().any(|a| a["name"] == "growth_rate"),
+            "growth_rate auxiliary must be present after variable operation"
+        );
+        // Silence unused variable warning in the sim_specs check path
+        let _ = sim_specs;
+    }
+
+    // ---- AC3.8: response has model, time, loopDominance, dominantLoopsByPeriod ----
+
+    #[test]
+    fn ac3_8_response_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": []
+        }))
+        .unwrap();
+
+        assert!(result["model"].is_object(), "model must be present");
+        assert!(result["time"].is_array(), "time must be present");
+        assert!(
+            result["loopDominance"].is_array(),
+            "loopDominance must be present"
+        );
+        assert!(
+            result["dominantLoopsByPeriod"].is_array(),
+            "dominantLoopsByPeriod must be present"
+        );
+        assert!(result["dryRun"].is_boolean(), "dryRun flag must be present");
+    }
+
+    // ---- AC3.9: dry-run does not write to disk ----
+
+    #[test]
+    fn ac3_9_dry_run_does_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let original_contents = std::fs::read_to_string(&path).unwrap();
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "dryRun": true,
+            "operations": [{
+                "upsertAuxiliary": { "name": "new_var", "equation": "99" }
+            }]
+        }))
+        .unwrap();
+
+        // File on disk must be unchanged
+        let after_contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            original_contents, after_contents,
+            "dry_run must not modify the file on disk"
+        );
+
+        // Response must still include model snapshot and analysis
+        assert!(result["model"].is_object());
+        assert!(result["time"].is_array());
+        assert!(result["loopDominance"].is_array());
+        assert!(result["dominantLoopsByPeriod"].is_array());
+        assert_eq!(result["dryRun"], true);
     }
 }

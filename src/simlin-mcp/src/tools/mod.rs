@@ -61,7 +61,7 @@ mod tests {
         register_all(&mut registry);
 
         assert!(registry.get("ReadModel").is_some());
-        assert!(registry.get("edit_model").is_some());
+        assert!(registry.get("EditModel").is_some());
         assert!(registry.get("CreateModel").is_some());
 
         let defs = registry.definitions();
