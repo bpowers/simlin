@@ -182,10 +182,12 @@ pub fn tool() -> TypedTool<EditModelInput> {
     TypedTool {
         name: "EditModel",
         description: "Edit a system dynamics model by applying operations. \
-             Supports upserting stocks, flows, and auxiliaries (with optional \
-             units, documentation, and graphical functions), removing variables, \
+             Supports upserting stocks, flows, and auxiliaries, removing variables, \
              and updating simulation specs. Returns a refreshed model snapshot \
-             with loop dominance analysis after applying changes.",
+             with loop dominance analysis after applying changes. \
+             Upsert replaces the full variable definition; omitted optional fields \
+             default to empty. Use ReadModel first to get current state, then \
+             include all fields you want to preserve.",
         handler: handle_edit_model,
     }
 }
@@ -196,19 +198,11 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
         .with_context(|| format!("failed to read model file: {}", input.project_path))?;
 
     let mut project = super::open_project(path, &contents)?;
-    let model_name = input.model_name.as_deref().unwrap_or("main");
+    let requested_name = input.model_name.as_deref().unwrap_or("main");
+    let model_name = super::resolve_model_name(&project, requested_name).to_string();
     let dry_run = input.dry_run.unwrap_or(false);
 
-    // Merge each upsert operation against the existing variable before building
-    // the patch, so that omitted optional fields keep their existing values
-    // rather than being silently cleared.
-    let merged_operations = input.operations.map(|ops| {
-        ops.into_iter()
-            .map(|op| merge_with_existing(op, &project, model_name))
-            .collect()
-    });
-
-    let patch = build_patch(model_name, input.sim_specs, merged_operations);
+    let patch = build_patch(&model_name, input.sim_specs, input.operations);
     simlin_engine::apply_patch(&mut project, patch)
         .map_err(|e| anyhow::anyhow!("patch application failed: {e:?}"))?;
 
@@ -230,7 +224,7 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
             .with_context(|| format!("failed to write model to {}", write_path.display()))?;
     }
 
-    let analysis = simlin_engine::analysis::analyze_model(&project, model_name)
+    let analysis = simlin_engine::analysis::analyze_model(&project, &model_name)
         .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
 
     let loop_dominance: Vec<LoopDominanceSummary> = analysis
@@ -255,126 +249,6 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     };
 
     serde_json::to_value(output).map_err(Into::into)
-}
-
-/// Look up the existing variable in the project for an upsert operation and
-/// fill in any `None` optional fields from its current values.
-///
-/// This preserves fields the caller did not explicitly set -- without this,
-/// upserting with only `initialEquation` would silently clear inflows,
-/// outflows, units, documentation, etc.
-fn merge_with_existing(
-    op: EditOperation,
-    project: &simlin_engine::datamodel::Project,
-    model_name: &str,
-) -> EditOperation {
-    let find_var = |name: &str| -> Option<&simlin_engine::datamodel::Variable> {
-        let model = project.get_model(model_name)?;
-        model.get_variable(name)
-    };
-
-    match op {
-        EditOperation::UpsertStock(mut s) => {
-            if let Some(simlin_engine::datamodel::Variable::Stock(existing)) = find_var(&s.name) {
-                let existing_json = ejson::Stock::from(existing.clone());
-                if s.units.is_none() && !existing_json.units.is_empty() {
-                    s.units = Some(existing_json.units);
-                }
-                if s.documentation.is_none() && !existing_json.documentation.is_empty() {
-                    s.documentation = Some(existing_json.documentation);
-                }
-                if s.inflows.is_none() {
-                    s.inflows = Some(existing_json.inflows);
-                }
-                if s.outflows.is_none() {
-                    s.outflows = Some(existing_json.outflows);
-                }
-                if s.arrayed_equation.is_none()
-                    && let Some(ae) = existing_json.arrayed_equation
-                {
-                    s.arrayed_equation = Some(ArrayedEquationInput {
-                        dimensions: ae.dimensions,
-                        equation: ae.equation,
-                        elements: ae.elements.map(|els| {
-                            els.into_iter()
-                                .map(|el| ElementEquationInput {
-                                    subscript: el.subscript,
-                                    equation: el.equation,
-                                    graphical_function: el.graphical_function,
-                                })
-                                .collect()
-                        }),
-                    });
-                }
-            }
-            EditOperation::UpsertStock(s)
-        }
-        EditOperation::UpsertFlow(mut f) => {
-            if let Some(simlin_engine::datamodel::Variable::Flow(existing)) = find_var(&f.name) {
-                let existing_json = ejson::Flow::from(existing.clone());
-                if f.units.is_none() && !existing_json.units.is_empty() {
-                    f.units = Some(existing_json.units);
-                }
-                if f.documentation.is_none() && !existing_json.documentation.is_empty() {
-                    f.documentation = Some(existing_json.documentation);
-                }
-                if f.graphical_function.is_none() {
-                    f.graphical_function = existing_json.graphical_function;
-                }
-                if f.arrayed_equation.is_none()
-                    && let Some(ae) = existing_json.arrayed_equation
-                {
-                    f.arrayed_equation = Some(ArrayedEquationInput {
-                        dimensions: ae.dimensions,
-                        equation: ae.equation,
-                        elements: ae.elements.map(|els| {
-                            els.into_iter()
-                                .map(|el| ElementEquationInput {
-                                    subscript: el.subscript,
-                                    equation: el.equation,
-                                    graphical_function: el.graphical_function,
-                                })
-                                .collect()
-                        }),
-                    });
-                }
-            }
-            EditOperation::UpsertFlow(f)
-        }
-        EditOperation::UpsertAuxiliary(mut a) => {
-            if let Some(simlin_engine::datamodel::Variable::Aux(existing)) = find_var(&a.name) {
-                let existing_json = ejson::Auxiliary::from(existing.clone());
-                if a.units.is_none() && !existing_json.units.is_empty() {
-                    a.units = Some(existing_json.units);
-                }
-                if a.documentation.is_none() && !existing_json.documentation.is_empty() {
-                    a.documentation = Some(existing_json.documentation);
-                }
-                if a.graphical_function.is_none() {
-                    a.graphical_function = existing_json.graphical_function;
-                }
-                if a.arrayed_equation.is_none()
-                    && let Some(ae) = existing_json.arrayed_equation
-                {
-                    a.arrayed_equation = Some(ArrayedEquationInput {
-                        dimensions: ae.dimensions,
-                        equation: ae.equation,
-                        elements: ae.elements.map(|els| {
-                            els.into_iter()
-                                .map(|el| ElementEquationInput {
-                                    subscript: el.subscript,
-                                    equation: el.equation,
-                                    graphical_function: el.graphical_function,
-                                })
-                                .collect()
-                        }),
-                    });
-                }
-            }
-            EditOperation::UpsertAuxiliary(a)
-        }
-        EditOperation::RemoveVariable(_) => op,
-    }
 }
 
 /// Build an engine `ProjectPatch` from the curated MCP inputs.
@@ -867,10 +741,10 @@ mod tests {
         assert_eq!(result["dryRun"], true);
     }
 
-    // ---- upsert merges with existing variable fields ----
+    // ---- upsert is full replacement ----
 
     #[test]
-    fn upsert_stock_merges_with_existing() {
+    fn upsert_stock_is_full_replacement() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
 
@@ -890,7 +764,7 @@ mod tests {
         }))
         .unwrap();
 
-        // Now upsert the same stock with ONLY initialEquation changed.
+        // Upsert with only name and initialEquation -- all other fields must be cleared.
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
             "operations": [{
@@ -909,116 +783,59 @@ mod tests {
             pop["initialEquation"], "2000",
             "initialEquation must be updated"
         );
-        assert_eq!(
-            pop["units"], "people",
-            "units must be preserved from existing stock"
-        );
-        assert_eq!(
-            pop["documentation"], "pop count",
-            "documentation must be preserved"
-        );
-        assert_eq!(
-            pop["inflows"][0], "births",
-            "inflows must be preserved from existing stock"
-        );
-        assert_eq!(
-            pop["outflows"][0], "deaths",
-            "outflows must be preserved from existing stock"
-        );
-    }
-
-    #[test]
-    fn upsert_flow_merges_with_existing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
-
-        // Create a flow with units and documentation.
-        call_tool(serde_json::json!({
-            "projectPath": path.to_str().unwrap(),
-            "operations": [{
-                "upsertFlow": {
-                    "name": "births",
-                    "equation": "population * 0.03",
-                    "units": "people/year",
-                    "documentation": "birth flow"
-                }
-            }]
-        }))
-        .unwrap();
-
-        // Upsert with only a new equation; units/documentation must be preserved.
-        let result = call_tool(serde_json::json!({
-            "projectPath": path.to_str().unwrap(),
-            "operations": [{
-                "upsertFlow": {
-                    "name": "births",
-                    "equation": "population * 0.05"
-                }
-            }]
-        }))
-        .unwrap();
-
-        let flows = result["model"]["flows"].as_array().unwrap();
-        let births = flows.iter().find(|f| f["name"] == "births").unwrap();
-
-        assert_eq!(
-            births["equation"], "population * 0.05",
-            "equation must be updated"
-        );
-        assert_eq!(births["units"], "people/year", "units must be preserved");
-        assert_eq!(
-            births["documentation"], "birth flow",
-            "documentation must be preserved"
-        );
-    }
-
-    #[test]
-    fn upsert_auxiliary_merges_with_existing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
-
-        // Create an auxiliary with units, documentation, and a graphical function.
-        call_tool(serde_json::json!({
-            "projectPath": path.to_str().unwrap(),
-            "operations": [{
-                "upsertAuxiliary": {
-                    "name": "rate",
-                    "equation": "0.03",
-                    "units": "1/year",
-                    "documentation": "growth rate",
-                    "graphicalFunction": {
-                        "points": [[0.0, 0.01], [1.0, 0.05]],
-                        "kind": "continuous"
-                    }
-                }
-            }]
-        }))
-        .unwrap();
-
-        // Upsert with only a new equation; other fields must be preserved.
-        let result = call_tool(serde_json::json!({
-            "projectPath": path.to_str().unwrap(),
-            "operations": [{
-                "upsertAuxiliary": {
-                    "name": "rate",
-                    "equation": "0.05"
-                }
-            }]
-        }))
-        .unwrap();
-
-        let auxes = result["model"]["auxiliaries"].as_array().unwrap();
-        let rate = auxes.iter().find(|a| a["name"] == "rate").unwrap();
-
-        assert_eq!(rate["equation"], "0.05", "equation must be updated");
-        assert_eq!(rate["units"], "1/year", "units must be preserved");
-        assert_eq!(
-            rate["documentation"], "growth rate",
-            "documentation must be preserved"
-        );
+        let units = pop["units"].as_str().unwrap_or("");
         assert!(
-            rate["graphicalFunction"].is_object(),
-            "graphical function must be preserved"
+            units.is_empty(),
+            "units must be empty after full-replacement upsert"
+        );
+        let docs = pop["documentation"].as_str().unwrap_or("");
+        assert!(
+            docs.is_empty(),
+            "documentation must be empty after full-replacement upsert"
+        );
+        let inflows = pop["inflows"].as_array().map(|v| v.len()).unwrap_or(0);
+        assert_eq!(
+            inflows, 0,
+            "inflows must be empty after full-replacement upsert"
+        );
+        let outflows = pop["outflows"].as_array().map(|v| v.len()).unwrap_or(0);
+        assert_eq!(
+            outflows, 0,
+            "outflows must be empty after full-replacement upsert"
+        );
+    }
+
+    // ---- model name resolution falls back to first model when no "main" ----
+
+    #[test]
+    fn edit_model_defaults_to_first_model_when_no_main() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("logistic_growth.stmx");
+        std::fs::copy(stmx_path, &dest).unwrap();
+
+        // No modelName supplied -- default "main" should fall back to the first model.
+        let result = call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "extra_aux", "equation": "42" }
+            }]
+        }));
+
+        assert!(
+            result.is_ok(),
+            "EditModel with no modelName must succeed for a project with no model named 'main': {:?}",
+            result
+        );
+        let value = result.unwrap();
+        let auxes = value["model"]["auxiliaries"].as_array().unwrap();
+        assert!(
+            auxes.iter().any(|a| a["name"] == "extra_aux"),
+            "upserted auxiliary must appear in the response model"
         );
     }
 }

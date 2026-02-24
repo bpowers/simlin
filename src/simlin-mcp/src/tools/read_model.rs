@@ -52,7 +52,8 @@ fn handle_read_model(input: ReadModelInput) -> anyhow::Result<serde_json::Value>
         .with_context(|| format!("failed to read model file: {}", input.project_path))?;
 
     let project = super::open_project(path, &contents)?;
-    let model_name = input.model_name.as_deref().unwrap_or("main");
+    let requested_name = input.model_name.as_deref().unwrap_or("main");
+    let model_name = super::resolve_model_name(&project, requested_name);
 
     let analysis = simlin_engine::analysis::analyze_model(&project, model_name)
         .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;

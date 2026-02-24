@@ -27,6 +27,30 @@ pub fn register_all(registry: &mut Registry) {
     registry.register(Box::new(create_model::tool()));
 }
 
+/// Resolve the model name to use, falling back to the first model when the
+/// requested name is "main" and no model is literally named "main".
+///
+/// This allows tools to use "main" as a default that works for both
+/// projects with a model named "main" and single-model projects imported
+/// from XMILE or Vensim where the model may have a different name.
+pub(crate) fn resolve_model_name<'a>(
+    project: &'a simlin_engine::datamodel::Project,
+    requested: &'a str,
+) -> &'a str {
+    if let Some(m) = project.get_model(requested) {
+        // get_model handles the empty-name/"main" alias; return the actual
+        // stored name so downstream callers (patch application) can do an
+        // exact match.
+        return &m.name;
+    }
+    if requested == "main"
+        && let Some(first) = project.models.first()
+    {
+        return &first.name;
+    }
+    requested
+}
+
 /// Open a project from file contents, detecting format by extension.
 fn open_project(path: &Path, contents: &str) -> anyhow::Result<simlin_engine::datamodel::Project> {
     let ext = path
