@@ -560,8 +560,11 @@ def _create_converter() -> cattrs.Converter:
         compat_dict = d.get("compat")
         if compat_dict:
             compat = conv.structure(compat_dict, Compat)
-        # OR-merge legacy top-level fields with compat booleans so that
-        # old files with compat only for activeInitial don't lose flags.
+        # OR-merge legacy top-level fields with compat booleans.  Old code
+        # never writes compat booleans and new code never writes top-level
+        # booleans, so both cannot be meaningfully set at once; OR is safe
+        # and handles the transitional case where compat exists only for
+        # activeInitial alongside top-level boolean flags.
         nn = d.get("nonNegative", False) or (compat.non_negative if compat else False)
         cbmi = d.get("canBeModuleInput", False) or (compat.can_be_module_input if compat else False)
         is_pub = d.get("isPublic", False) or (compat.is_public if compat else False)

@@ -373,6 +373,8 @@ export function stockFromJson(json: JsonStock): Stock {
     units: json.units ?? '',
     inflows: json.inflows ?? [],
     outflows: json.outflows ?? [],
+    // OR-merge: old code never writes compat booleans and new code never
+    // writes top-level booleans, so both cannot be meaningfully set at once.
     nonNegative: json.compat?.nonNegative || json.nonNegative || false,
     data: undefined,
     errors: undefined,
@@ -421,6 +423,8 @@ export function flowFromJson(json: JsonFlow): Flow {
     documentation: json.documentation ?? '',
     units: json.units ?? '',
     gf: graphicalFunction,
+    // OR-merge: old code never writes compat booleans and new code never
+    // writes top-level booleans, so both cannot be meaningfully set at once.
     nonNegative: json.compat?.nonNegative || json.nonNegative || false,
     data: undefined,
     errors: undefined,

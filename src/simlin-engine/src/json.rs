@@ -665,6 +665,11 @@ impl From<GraphicalFunction> for datamodel::GraphicalFunction {
 impl From<Stock> for datamodel::Stock {
     fn from(stock: Stock) -> Self {
         let c = stock.compat.as_ref();
+        // OR-merge compat booleans with legacy top-level fields.  Old code
+        // never writes compat booleans and new code never writes top-level
+        // booleans (skip_serializing), so both cannot be meaningfully set
+        // at once; OR is safe and handles the transitional case where compat
+        // exists only for activeInitial alongside top-level boolean flags.
         let compat = datamodel::Compat {
             active_initial: c
                 .and_then(|c| c.active_initial.clone())
