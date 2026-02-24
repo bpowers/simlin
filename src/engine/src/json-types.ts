@@ -35,6 +35,9 @@ export interface JsonGraphicalFunction {
  */
 export interface JsonCompat {
   activeInitial?: string;
+  nonNegative?: boolean;
+  canBeModuleInput?: boolean;
+  isPublic?: boolean;
 }
 
 /**
@@ -77,12 +80,11 @@ export interface JsonStock {
   uid?: number;
   initialEquation?: string;
   units?: string;
-  nonNegative?: boolean;
   documentation?: string;
-  canBeModuleInput?: boolean;
-  isPublic?: boolean;
   arrayedEquation?: JsonArrayedEquation;
   compat?: JsonCompat;
+  /** @deprecated Legacy field; read from compat.nonNegative in new format. */
+  nonNegative?: boolean;
 }
 
 /**
@@ -93,13 +95,12 @@ export interface JsonFlow {
   uid?: number;
   equation?: string;
   units?: string;
-  nonNegative?: boolean;
   graphicalFunction?: JsonGraphicalFunction;
   documentation?: string;
-  canBeModuleInput?: boolean;
-  isPublic?: boolean;
   arrayedEquation?: JsonArrayedEquation;
   compat?: JsonCompat;
+  /** @deprecated Legacy field; read from compat.nonNegative in new format. */
+  nonNegative?: boolean;
 }
 
 /**
@@ -112,8 +113,6 @@ export interface JsonAuxiliary {
   units?: string;
   graphicalFunction?: JsonGraphicalFunction;
   documentation?: string;
-  canBeModuleInput?: boolean;
-  isPublic?: boolean;
   arrayedEquation?: JsonArrayedEquation;
   compat?: JsonCompat;
 }
@@ -128,8 +127,7 @@ export interface JsonModule {
   units?: string;
   documentation?: string;
   references?: JsonModuleReference[];
-  canBeModuleInput?: boolean;
-  isPublic?: boolean;
+  compat?: JsonCompat;
 }
 
 /**

@@ -44,6 +44,30 @@ fn gen_visibility(v: Visibility) -> &'static str {
     }
 }
 
+fn gen_compat(compat: &datamodel::Compat) -> String {
+    if compat.is_empty() {
+        "Compat::default()".to_string()
+    } else {
+        let mut fields = Vec::new();
+        if let Some(active_initial) = &compat.active_initial {
+            fields.push(format!(
+                "active_initial: Some(\"{}\".to_string())",
+                escape_string(active_initial)
+            ));
+        }
+        if compat.non_negative {
+            fields.push("non_negative: true".to_string());
+        }
+        if compat.can_be_module_input {
+            fields.push("can_be_module_input: true".to_string());
+        }
+        if compat.visibility != Visibility::Private {
+            fields.push(format!("visibility: {}", gen_visibility(compat.visibility)));
+        }
+        format!("Compat {{ {}, ..Compat::default() }}", fields.join(", "))
+    }
+}
+
 fn gen_graphical_function_kind(kind: GraphicalFunctionKind) -> &'static str {
     match kind {
         GraphicalFunctionKind::Continuous => "GraphicalFunctionKind::Continuous",
@@ -142,12 +166,9 @@ fn gen_stock(stock: &datamodel::Stock) -> String {
             units: {},
             inflows: {},
             outflows: {},
-            non_negative: {},
-            can_be_module_input: {},
-            visibility: {},
             ai_state: None,
             uid: {:?},
-            compat: Compat::default(),
+            compat: {},
         }})",
         escape_string(&stock.ident),
         gen_equation(&stock.equation),
@@ -155,10 +176,8 @@ fn gen_stock(stock: &datamodel::Stock) -> String {
         gen_option_string(&stock.units),
         gen_vec_string(&stock.inflows),
         gen_vec_string(&stock.outflows),
-        stock.non_negative,
-        stock.can_be_module_input,
-        gen_visibility(stock.visibility),
-        stock.uid
+        stock.uid,
+        gen_compat(&stock.compat)
     )
 }
 
@@ -170,22 +189,17 @@ fn gen_flow(flow: &datamodel::Flow) -> String {
             documentation: \"{}\".to_string(),
             units: {},
             gf: {},
-            non_negative: {},
-            can_be_module_input: {},
-            visibility: {},
             ai_state: None,
             uid: {:?},
-            compat: Compat::default(),
+            compat: {},
         }})",
         escape_string(&flow.ident),
         gen_equation(&flow.equation),
         escape_string(&flow.documentation),
         gen_option_string(&flow.units),
         gen_option_graphical_function(&flow.gf),
-        flow.non_negative,
-        flow.can_be_module_input,
-        gen_visibility(flow.visibility),
-        flow.uid
+        flow.uid,
+        gen_compat(&flow.compat)
     )
 }
 
@@ -197,20 +211,17 @@ fn gen_aux(aux: &datamodel::Aux) -> String {
             documentation: \"{}\".to_string(),
             units: {},
             gf: {},
-            can_be_module_input: {},
-            visibility: {},
             ai_state: None,
             uid: {:?},
-            compat: Compat::default(),
+            compat: {},
         }})",
         escape_string(&aux.ident),
         gen_equation(&aux.equation),
         escape_string(&aux.documentation),
         gen_option_string(&aux.units),
         gen_option_graphical_function(&aux.gf),
-        aux.can_be_module_input,
-        gen_visibility(aux.visibility),
-        aux.uid
+        aux.uid,
+        gen_compat(&aux.compat)
     )
 }
 
@@ -234,19 +245,17 @@ fn gen_module(module: &datamodel::Module) -> String {
             documentation: \"{}\".to_string(),
             units: {},
             references: vec![{}],
-            can_be_module_input: {},
-            visibility: {},
             ai_state: None,
             uid: {:?},
+            compat: {},
         }})",
         escape_string(&module.ident),
         escape_string(&module.model_name),
         escape_string(&module.documentation),
         gen_option_string(&module.units),
         refs.join(", "),
-        module.can_be_module_input,
-        gen_visibility(module.visibility),
-        module.uid
+        module.uid,
+        gen_compat(&module.compat)
     )
 }
 

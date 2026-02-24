@@ -9,7 +9,6 @@ use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, RawIdent,
 };
-use crate::datamodel::Visibility;
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
 use crate::{datamodel, eqn_err};
 
@@ -358,8 +357,6 @@ impl<'a> BuiltinVisitor<'a> {
                             documentation: "".to_string(),
                             units: None,
                             gf: None,
-                            can_be_module_input: false,
-                            visibility: datamodel::Visibility::Private,
                             ai_state: None,
                             uid: None,
                             compat: datamodel::Compat::default(),
@@ -383,8 +380,7 @@ impl<'a> BuiltinVisitor<'a> {
                     documentation: "".to_string(),
                     units: None,
                     references,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
+                    compat: datamodel::Compat::default(),
                     ai_state: None,
                     uid: None,
                 });

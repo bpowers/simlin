@@ -13,7 +13,7 @@ use simlin_engine::Simulation;
 use simlin_engine::Vm;
 use simlin_engine::datamodel::Project;
 use simlin_engine::datamodel::{
-    Aux, Compat, Dimension, Dt, Equation, SimMethod, SimSpecs, Variable, Visibility,
+    Aux, Compat, Dimension, Dt, Equation, SimMethod, SimSpecs, Variable,
 };
 use std::sync::Arc;
 
@@ -42,8 +42,7 @@ fn create_sum_project(array_size: u32) -> Project {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
+
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
@@ -54,8 +53,7 @@ fn create_sum_project(array_size: u32) -> Project {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
+
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
@@ -95,8 +93,7 @@ fn create_elementwise_add_project(array_size: u32) -> Project {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
+
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
@@ -107,8 +104,7 @@ fn create_elementwise_add_project(array_size: u32) -> Project {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
+
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
@@ -122,8 +118,7 @@ fn create_elementwise_add_project(array_size: u32) -> Project {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
+
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
@@ -170,8 +165,7 @@ fn create_same_array_multi_ref_project(array_size: u32, num_refs: usize) -> Proj
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
+
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
@@ -182,8 +176,7 @@ fn create_same_array_multi_ref_project(array_size: u32, num_refs: usize) -> Proj
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
+
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
@@ -226,8 +219,7 @@ fn create_broadcast_project(dim1_size: u32, dim2_size: u32) -> Project {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
+
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
@@ -239,8 +231,7 @@ fn create_broadcast_project(dim1_size: u32, dim2_size: u32) -> Project {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
+
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
@@ -255,8 +246,7 @@ fn create_broadcast_project(dim1_size: u32, dim2_size: u32) -> Project {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
+
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),

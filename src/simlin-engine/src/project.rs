@@ -535,8 +535,6 @@ mod tests {
             documentation: String::new(),
             units: None,
             gf: None,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
             compat: datamodel::Compat::default(),

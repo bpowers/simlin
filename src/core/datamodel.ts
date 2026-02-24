@@ -373,7 +373,9 @@ export function stockFromJson(json: JsonStock): Stock {
     units: json.units ?? '',
     inflows: json.inflows ?? [],
     outflows: json.outflows ?? [],
-    nonNegative: json.nonNegative ?? false,
+    // OR-merge: old code never writes compat booleans and new code never
+    // writes top-level booleans, so both cannot be meaningfully set at once.
+    nonNegative: json.compat?.nonNegative || json.nonNegative || false,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
@@ -401,7 +403,10 @@ export function stockToJson(stock: Stock): JsonStock {
     result.units = stock.units;
   }
   if (stock.nonNegative) {
-    result.nonNegative = stock.nonNegative;
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.nonNegative = stock.nonNegative;
   }
   if (stock.documentation) {
     result.documentation = stock.documentation;
@@ -418,7 +423,9 @@ export function flowFromJson(json: JsonFlow): Flow {
     documentation: json.documentation ?? '',
     units: json.units ?? '',
     gf: graphicalFunction,
-    nonNegative: json.nonNegative ?? false,
+    // OR-merge: old code never writes compat booleans and new code never
+    // writes top-level booleans, so both cannot be meaningfully set at once.
+    nonNegative: json.compat?.nonNegative || json.nonNegative || false,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
@@ -447,7 +454,10 @@ export function flowToJson(flow: Flow): JsonFlow {
     result.units = flow.units;
   }
   if (flow.nonNegative) {
-    result.nonNegative = flow.nonNegative;
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.nonNegative = flow.nonNegative;
   }
   if (flow.documentation) {
     result.documentation = flow.documentation;

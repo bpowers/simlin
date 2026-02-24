@@ -88,6 +88,12 @@ export interface GraphicalFunction {
 export interface Compat {
   /** Active initial equation (Vensim ACTIVE INITIAL) */
   readonly activeInitial?: string;
+  /** Whether this variable is constrained to be non-negative */
+  readonly nonNegative?: boolean;
+  /** Whether this variable can receive input from a parent model when used as a module */
+  readonly canBeModuleInput?: boolean;
+  /** Whether this variable is publicly accessible from parent models */
+  readonly isPublic?: boolean;
 }
 
 /**
@@ -146,14 +152,8 @@ export interface Stock {
   readonly inflows: readonly string[];
   /** Names of flows that decrease this stock */
   readonly outflows: readonly string[];
-  /** Whether this stock is constrained to be non-negative */
-  readonly nonNegative?: boolean;
   /** Documentation/comments */
   readonly documentation?: string;
-  /** Whether this variable can receive input from a parent model when used as a module */
-  readonly canBeModuleInput?: boolean;
-  /** Whether this variable is publicly accessible from parent models */
-  readonly isPublic?: boolean;
   /** Arrayed equation structure for subscripted variables */
   readonly arrayedEquation?: ArrayedEquation;
   /** Vensim compatibility options */
@@ -180,16 +180,10 @@ export interface Flow {
   readonly equation?: string;
   /** Units (if specified) */
   readonly units?: string;
-  /** Whether this flow is constrained to be non-negative */
-  readonly nonNegative?: boolean;
   /** Graphical/table function if this uses WITH LOOKUP */
   readonly graphicalFunction?: GraphicalFunction;
   /** Documentation/comments */
   readonly documentation?: string;
-  /** Whether this variable can receive input from a parent model when used as a module */
-  readonly canBeModuleInput?: boolean;
-  /** Whether this variable is publicly accessible from parent models */
-  readonly isPublic?: boolean;
   /** Arrayed equation structure for subscripted variables */
   readonly arrayedEquation?: ArrayedEquation;
   /** Vensim compatibility options */
@@ -223,10 +217,6 @@ export interface Aux {
   readonly graphicalFunction?: GraphicalFunction;
   /** Documentation/comments */
   readonly documentation?: string;
-  /** Whether this variable can receive input from a parent model when used as a module */
-  readonly canBeModuleInput?: boolean;
-  /** Whether this variable is publicly accessible from parent models */
-  readonly isPublic?: boolean;
   /** Arrayed equation structure for subscripted variables */
   readonly arrayedEquation?: ArrayedEquation;
   /** Vensim compatibility options */
@@ -265,10 +255,8 @@ export interface Module {
   readonly documentation?: string;
   /** References connecting parent variables to module inputs/outputs */
   readonly references?: readonly ModuleReference[];
-  /** Whether this variable can receive input from a parent model when used as a module */
-  readonly canBeModuleInput?: boolean;
-  /** Whether this variable is publicly accessible from parent models */
-  readonly isPublic?: boolean;
+  /** Vensim compatibility options */
+  readonly compat?: Compat;
 }
 
 /**

@@ -141,6 +141,7 @@ fn element_equation_strategy() -> impl Strategy<Value = ElementEquation> {
                 equation,
                 compat: active_initial.map(|ai| Compat {
                     active_initial: Some(ai),
+                    ..Default::default()
                 }),
                 graphical_function: gf,
             },
@@ -159,7 +160,8 @@ fn arrayed_equation_strategy() -> impl Strategy<Value = ArrayedEquation> {
                 dimensions: dims,
                 equation: Some(eq),
                 compat: init_eq.map(|ai| Compat {
-                    active_initial: Some(ai)
+                    active_initial: Some(ai),
+                    ..Default::default()
                 }),
                 elements: None,
             }),
@@ -196,6 +198,16 @@ fn stock_strategy() -> BoxedStrategy<Stock> {
         )
             .prop_map(
                 |(uid, name, eq, units, inflows, outflows, non_neg, doc, can_input, is_pub)| {
+                    let compat = if non_neg || can_input || is_pub {
+                        Some(Compat {
+                            non_negative: non_neg,
+                            can_be_module_input: can_input,
+                            is_public: is_pub,
+                            ..Default::default()
+                        })
+                    } else {
+                        None
+                    };
                     Stock {
                         uid,
                         name,
@@ -203,12 +215,12 @@ fn stock_strategy() -> BoxedStrategy<Stock> {
                         units,
                         inflows,
                         outflows,
-                        non_negative: non_neg,
                         documentation: doc,
-                        can_be_module_input: can_input,
-                        is_public: is_pub,
                         arrayed_equation: None,
-                        compat: None,
+                        compat,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        is_public: false,
                     }
                 }
             ),
@@ -227,6 +239,16 @@ fn stock_strategy() -> BoxedStrategy<Stock> {
         )
             .prop_map(
                 |(uid, name, arr_eq, units, inflows, outflows, non_neg, doc, can_input, is_pub)| {
+                    let compat = if non_neg || can_input || is_pub {
+                        Some(Compat {
+                            non_negative: non_neg,
+                            can_be_module_input: can_input,
+                            is_public: is_pub,
+                            ..Default::default()
+                        })
+                    } else {
+                        None
+                    };
                     Stock {
                         uid,
                         name,
@@ -234,12 +256,12 @@ fn stock_strategy() -> BoxedStrategy<Stock> {
                         units,
                         inflows,
                         outflows,
-                        non_negative: non_neg,
                         documentation: doc,
-                        can_be_module_input: can_input,
-                        is_public: is_pub,
                         arrayed_equation: Some(arr_eq),
-                        compat: None,
+                        compat,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        is_public: false,
                     }
                 }
             ),
@@ -263,18 +285,28 @@ fn flow_strategy() -> BoxedStrategy<Flow> {
         )
             .prop_map(
                 |(uid, name, eq, units, non_neg, gf, doc, can_input, is_pub)| {
+                    let compat = if non_neg || can_input || is_pub {
+                        Some(Compat {
+                            non_negative: non_neg,
+                            can_be_module_input: can_input,
+                            is_public: is_pub,
+                            ..Default::default()
+                        })
+                    } else {
+                        None
+                    };
                     Flow {
                         uid,
                         name,
                         equation: eq,
                         units,
-                        non_negative: non_neg,
                         graphical_function: gf,
                         documentation: doc,
-                        can_be_module_input: can_input,
-                        is_public: is_pub,
                         arrayed_equation: None,
-                        compat: None,
+                        compat,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        is_public: false,
                     }
                 }
             ),
@@ -292,18 +324,28 @@ fn flow_strategy() -> BoxedStrategy<Flow> {
         )
             .prop_map(
                 |(uid, name, arr_eq, units, non_neg, gf, doc, can_input, is_pub)| {
+                    let compat = if non_neg || can_input || is_pub {
+                        Some(Compat {
+                            non_negative: non_neg,
+                            can_be_module_input: can_input,
+                            is_public: is_pub,
+                            ..Default::default()
+                        })
+                    } else {
+                        None
+                    };
                     Flow {
                         uid,
                         name,
                         equation: String::new(),
                         units,
-                        non_negative: non_neg,
                         graphical_function: gf,
                         documentation: doc,
-                        can_be_module_input: can_input,
-                        is_public: is_pub,
                         arrayed_equation: Some(arr_eq),
-                        compat: None,
+                        compat,
+                        non_negative: false,
+                        can_be_module_input: false,
+                        is_public: false,
                     }
                 }
             ),
@@ -327,6 +369,19 @@ fn auxiliary_strategy() -> BoxedStrategy<Auxiliary> {
         )
             .prop_map(
                 |(uid, name, eq, init_eq, units, gf, doc, can_input, is_pub)| {
+                    let mut compat = init_eq.map(|ai| Compat {
+                        active_initial: Some(ai),
+                        can_be_module_input: can_input,
+                        is_public: is_pub,
+                        ..Default::default()
+                    });
+                    if compat.is_none() && (can_input || is_pub) {
+                        compat = Some(Compat {
+                            can_be_module_input: can_input,
+                            is_public: is_pub,
+                            ..Default::default()
+                        });
+                    }
                     Auxiliary {
                         uid,
                         name,
@@ -334,12 +389,10 @@ fn auxiliary_strategy() -> BoxedStrategy<Auxiliary> {
                         units,
                         graphical_function: gf,
                         documentation: doc,
-                        can_be_module_input: can_input,
-                        is_public: is_pub,
                         arrayed_equation: None,
-                        compat: init_eq.map(|ai| Compat {
-                            active_initial: Some(ai),
-                        }),
+                        compat,
+                        can_be_module_input: false,
+                        is_public: false,
                     }
                 }
             ),
@@ -355,6 +408,15 @@ fn auxiliary_strategy() -> BoxedStrategy<Auxiliary> {
             any::<bool>(),
         )
             .prop_map(|(uid, name, arr_eq, units, gf, doc, can_input, is_pub)| {
+                let compat = if can_input || is_pub {
+                    Some(Compat {
+                        can_be_module_input: can_input,
+                        is_public: is_pub,
+                        ..Default::default()
+                    })
+                } else {
+                    None
+                };
                 Auxiliary {
                     uid,
                     name,
@@ -362,10 +424,10 @@ fn auxiliary_strategy() -> BoxedStrategy<Auxiliary> {
                     units,
                     graphical_function: gf,
                     documentation: doc,
-                    can_be_module_input: can_input,
-                    is_public: is_pub,
                     arrayed_equation: Some(arr_eq),
-                    compat: None,
+                    compat,
+                    can_be_module_input: false,
+                    is_public: false,
                 }
             }),
     ]
@@ -388,15 +450,27 @@ fn module_strategy() -> impl Strategy<Value = Module> {
         any::<bool>(),
     )
         .prop_map(
-            |(uid, name, model_name, units, doc, refs, can_input, is_pub)| Module {
-                uid,
-                name,
-                model_name,
-                units,
-                documentation: doc,
-                references: refs,
-                can_be_module_input: can_input,
-                is_public: is_pub,
+            |(uid, name, model_name, units, doc, refs, can_input, is_pub)| {
+                let compat = if can_input || is_pub {
+                    Some(Compat {
+                        can_be_module_input: can_input,
+                        is_public: is_pub,
+                        ..Default::default()
+                    })
+                } else {
+                    None
+                };
+                Module {
+                    uid,
+                    name,
+                    model_name,
+                    units,
+                    documentation: doc,
+                    references: refs,
+                    compat,
+                    can_be_module_input: false,
+                    is_public: false,
+                }
             },
         )
 }
@@ -1090,12 +1164,16 @@ mod protobuf_roundtrip_tests {
                     units: "people".to_string(),
                     inflows: vec!["births".to_string()],
                     outflows: vec!["deaths".to_string()],
-                    non_negative: true,
                     documentation: "Total population".to_string(),
-                    can_be_module_input: false,
-                    is_public: true,
                     arrayed_equation: None,
-                    compat: None,
+                    compat: Some(Compat {
+                        non_negative: true,
+                        is_public: true,
+                        ..Default::default()
+                    }),
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
                 }],
                 flows: vec![
                     Flow {
@@ -1103,26 +1181,32 @@ mod protobuf_roundtrip_tests {
                         name: "births".to_string(),
                         equation: "population * birth_rate".to_string(),
                         units: "people/year".to_string(),
-                        non_negative: true,
                         graphical_function: None,
                         documentation: String::new(),
+                        arrayed_equation: None,
+                        compat: Some(Compat {
+                            non_negative: true,
+                            ..Default::default()
+                        }),
+                        non_negative: false,
                         can_be_module_input: false,
                         is_public: false,
-                        arrayed_equation: None,
-                        compat: None,
                     },
                     Flow {
                         uid: 3,
                         name: "deaths".to_string(),
                         equation: "population * death_rate".to_string(),
                         units: "people/year".to_string(),
-                        non_negative: true,
                         graphical_function: None,
                         documentation: String::new(),
+                        arrayed_equation: None,
+                        compat: Some(Compat {
+                            non_negative: true,
+                            ..Default::default()
+                        }),
+                        non_negative: false,
                         can_be_module_input: false,
                         is_public: false,
-                        arrayed_equation: None,
-                        compat: None,
                     },
                 ],
                 auxiliaries: vec![
@@ -1133,10 +1217,13 @@ mod protobuf_roundtrip_tests {
                         units: "1/year".to_string(),
                         graphical_function: None,
                         documentation: String::new(),
-                        can_be_module_input: true,
-                        is_public: false,
                         arrayed_equation: None,
-                        compat: None,
+                        compat: Some(Compat {
+                            can_be_module_input: true,
+                            ..Default::default()
+                        }),
+                        can_be_module_input: false,
+                        is_public: false,
                     },
                     Auxiliary {
                         uid: 5,
@@ -1145,10 +1232,13 @@ mod protobuf_roundtrip_tests {
                         units: "1/year".to_string(),
                         graphical_function: None,
                         documentation: String::new(),
-                        can_be_module_input: true,
-                        is_public: false,
                         arrayed_equation: None,
-                        compat: None,
+                        compat: Some(Compat {
+                            can_be_module_input: true,
+                            ..Default::default()
+                        }),
+                        can_be_module_input: false,
+                        is_public: false,
                     },
                 ],
                 modules: vec![],
@@ -1249,10 +1339,7 @@ mod protobuf_roundtrip_tests {
                     units: String::new(),
                     inflows: vec![],
                     outflows: vec![],
-                    non_negative: false,
                     documentation: String::new(),
-                    can_be_module_input: false,
-                    is_public: false,
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["warehouses".to_string()],
                         equation: Some("100".to_string()),
@@ -1260,6 +1347,9 @@ mod protobuf_roundtrip_tests {
                         elements: None,
                     }),
                     compat: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
                 }],
                 flows: vec![],
                 auxiliaries: vec![Auxiliary {
@@ -1269,8 +1359,6 @@ mod protobuf_roundtrip_tests {
                     units: String::new(),
                     graphical_function: None,
                     documentation: String::new(),
-                    can_be_module_input: false,
-                    is_public: false,
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["regions".to_string()],
                         equation: None,
@@ -1281,6 +1369,7 @@ mod protobuf_roundtrip_tests {
                                 equation: "50".to_string(),
                                 compat: Some(Compat {
                                     active_initial: Some("10".to_string()),
+                                    ..Default::default()
                                 }),
                                 graphical_function: None,
                             },
@@ -1293,6 +1382,8 @@ mod protobuf_roundtrip_tests {
                         ]),
                     }),
                     compat: None,
+                    can_be_module_input: false,
+                    is_public: false,
                 }],
                 modules: vec![],
                 sim_specs: None,
@@ -1372,10 +1463,10 @@ mod protobuf_roundtrip_tests {
                         y_scale: Some(GraphicalFunctionScale { min: 0.0, max: 1.0 }),
                     }),
                     documentation: String::new(),
-                    can_be_module_input: false,
-                    is_public: false,
                     arrayed_equation: None,
                     compat: None,
+                    can_be_module_input: false,
+                    is_public: false,
                 }],
                 modules: vec![],
                 sim_specs: None,
@@ -1505,6 +1596,129 @@ mod protobuf_roundtrip_tests {
         let parsed: Project = serde_json::from_str(&json_str1).unwrap();
         assert_eq!(parsed.dimensions[0].size, 10);
         assert!(parsed.dimensions[0].elements.is_empty());
+    }
+
+    /// Legacy JSON with top-level compat fields (pre-migration format) deserializes correctly
+    #[test]
+    fn test_legacy_json_stock_compat_fields() {
+        let json = r#"{
+            "name": "pop",
+            "initialEquation": "100",
+            "inflows": [],
+            "outflows": [],
+            "nonNegative": true,
+            "canBeModuleInput": true,
+            "isPublic": true
+        }"#;
+        let stock: Stock = serde_json::from_str(json).unwrap();
+        let dm: datamodel::Stock = stock.into();
+        assert!(dm.compat.non_negative);
+        assert!(dm.compat.can_be_module_input);
+        assert_eq!(dm.compat.visibility, datamodel::Visibility::Public);
+    }
+
+    /// When both legacy and compat fields are present, compat takes precedence
+    #[test]
+    fn test_compat_fields_take_precedence_over_legacy() {
+        let json = r#"{
+            "name": "pop",
+            "initialEquation": "100",
+            "inflows": [],
+            "outflows": [],
+            "nonNegative": false,
+            "canBeModuleInput": false,
+            "isPublic": false,
+            "compat": {
+                "nonNegative": true,
+                "canBeModuleInput": true,
+                "isPublic": true
+            }
+        }"#;
+        let stock: Stock = serde_json::from_str(json).unwrap();
+        let dm: datamodel::Stock = stock.into();
+        assert!(dm.compat.non_negative);
+        assert!(dm.compat.can_be_module_input);
+        assert_eq!(dm.compat.visibility, datamodel::Visibility::Public);
+    }
+
+    /// Legacy JSON flow with top-level compat fields
+    #[test]
+    fn test_legacy_json_flow_compat_fields() {
+        let json = r#"{
+            "name": "inflow",
+            "nonNegative": true,
+            "canBeModuleInput": true,
+            "isPublic": true
+        }"#;
+        let flow: Flow = serde_json::from_str(json).unwrap();
+        let dm: datamodel::Flow = flow.into();
+        assert!(dm.compat.non_negative);
+        assert!(dm.compat.can_be_module_input);
+        assert_eq!(dm.compat.visibility, datamodel::Visibility::Public);
+    }
+
+    /// Legacy JSON aux with top-level compat fields
+    #[test]
+    fn test_legacy_json_aux_compat_fields() {
+        let json = r#"{
+            "name": "rate",
+            "canBeModuleInput": true,
+            "isPublic": true
+        }"#;
+        let aux: Auxiliary = serde_json::from_str(json).unwrap();
+        let dm: datamodel::Aux = aux.into();
+        assert!(dm.compat.can_be_module_input);
+        assert_eq!(dm.compat.visibility, datamodel::Visibility::Public);
+    }
+
+    /// Legacy JSON module with top-level compat fields
+    #[test]
+    fn test_legacy_json_module_compat_fields() {
+        let json = r#"{
+            "name": "sub",
+            "modelName": "submodel",
+            "canBeModuleInput": true,
+            "isPublic": true
+        }"#;
+        let module: Module = serde_json::from_str(json).unwrap();
+        let dm: datamodel::Module = module.into();
+        assert!(dm.compat.can_be_module_input);
+        assert_eq!(dm.compat.visibility, datamodel::Visibility::Public);
+    }
+
+    /// New-format JSON output does not include legacy top-level compat fields
+    #[test]
+    fn test_new_format_omits_legacy_fields() {
+        let stock = Stock {
+            uid: 0,
+            name: "pop".to_string(),
+            initial_equation: "100".to_string(),
+            units: String::new(),
+            inflows: vec![],
+            outflows: vec![],
+            documentation: String::new(),
+            arrayed_equation: None,
+            compat: Some(Compat {
+                non_negative: true,
+                can_be_module_input: true,
+                is_public: true,
+                ..Default::default()
+            }),
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
+        };
+        let json = serde_json::to_string(&stock).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Legacy fields should not appear at top level
+        assert!(v.get("nonNegative").is_none());
+        assert!(v.get("canBeModuleInput").is_none());
+        assert!(v.get("isPublic").is_none());
+        // But should appear inside compat
+        let compat = v.get("compat").unwrap();
+        assert_eq!(compat.get("nonNegative").unwrap(), true);
+        assert_eq!(compat.get("canBeModuleInput").unwrap(), true);
+        assert_eq!(compat.get("isPublic").unwrap(), true);
     }
 }
 

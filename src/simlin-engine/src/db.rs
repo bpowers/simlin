@@ -486,7 +486,9 @@ pub fn reconstruct_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Vari
     let units = var.units(db).clone();
     let non_negative = var.non_negative(db);
     let can_be_module_input = var.can_be_module_input(db);
-    let compat = var.compat(db).clone();
+    let mut compat = var.compat(db).clone();
+    compat.non_negative = non_negative;
+    compat.can_be_module_input = can_be_module_input;
 
     match var.kind(db) {
         SourceVariableKind::Stock => datamodel::Variable::Stock(datamodel::Stock {
@@ -496,9 +498,6 @@ pub fn reconstruct_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Vari
             units,
             inflows: var.inflows(db).clone(),
             outflows: var.outflows(db).clone(),
-            non_negative,
-            can_be_module_input,
-            visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
             compat,
@@ -509,9 +508,6 @@ pub fn reconstruct_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Vari
             documentation: String::new(),
             units,
             gf: var.gf(db).as_ref().map(source_gf_to_datamodel),
-            non_negative,
-            can_be_module_input,
-            visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
             compat,
@@ -522,8 +518,6 @@ pub fn reconstruct_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Vari
             documentation: String::new(),
             units,
             gf: var.gf(db).as_ref().map(source_gf_to_datamodel),
-            can_be_module_input,
-            visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
             compat,
@@ -541,8 +535,7 @@ pub fn reconstruct_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Vari
                     dst: mr.dst.clone(),
                 })
                 .collect(),
-            can_be_module_input,
-            visibility: datamodel::Visibility::Private,
+            compat,
             ai_state: None,
             uid: None,
         }),
@@ -2396,8 +2389,8 @@ fn source_variable_from_datamodel(db: &SimlinDb, var: &datamodel::Variable) -> S
     };
 
     let non_negative = match var {
-        datamodel::Variable::Stock(s) => s.non_negative,
-        datamodel::Variable::Flow(f) => f.non_negative,
+        datamodel::Variable::Stock(s) => s.compat.non_negative,
+        datamodel::Variable::Flow(f) => f.compat.non_negative,
         _ => false,
     };
 
@@ -2504,8 +2497,8 @@ fn update_source_variable(
     }
 
     let new_non_negative = match dm_var {
-        datamodel::Variable::Stock(s) => s.non_negative,
-        datamodel::Variable::Flow(f) => f.non_negative,
+        datamodel::Variable::Stock(s) => s.compat.non_negative,
+        datamodel::Variable::Flow(f) => f.compat.non_negative,
         _ => false,
     };
     if source_var.non_negative(&*db) != new_non_negative {

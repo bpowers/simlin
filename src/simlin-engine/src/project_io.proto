@@ -63,6 +63,9 @@ message Variable {
 
   message Compat {
     optional string active_initial = 1;
+    optional bool non_negative = 2;
+    optional bool can_be_module_input = 3;
+    optional Visibility visibility = 4;
   };
 
   message Stock {
@@ -118,6 +121,7 @@ message Variable {
     bool can_be_module_input = 6;
     Visibility visibility = 7;
     int32 uid = 8;
+    optional Compat compat = 9;
   };
 
   oneof v {

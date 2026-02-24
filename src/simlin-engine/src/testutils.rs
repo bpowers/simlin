@@ -13,15 +13,13 @@ fn optional_vec(slice: &[&str]) -> Vec<String> {
 
 #[cfg(test)]
 pub(crate) fn x_aux(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::Variable {
-    use datamodel::{Aux, Equation, Variable, Visibility};
+    use datamodel::{Aux, Equation, Variable};
     Variable::Aux(Aux {
         ident: ident.to_string(),
         equation: Equation::Scalar(eqn.to_string()),
         documentation: "".to_string(),
         units: units.map(|s| s.to_owned()),
         gf: None,
-        can_be_module_input: false,
-        visibility: Visibility::Private,
         ai_state: None,
         uid: None,
         compat: datamodel::Compat::default(),
@@ -54,7 +52,7 @@ pub(crate) fn x_stock(
     outflows: &[&str],
     units: Option<&str>,
 ) -> datamodel::Variable {
-    use datamodel::{Equation, Stock, Variable, Visibility};
+    use datamodel::{Equation, Stock, Variable};
     Variable::Stock(Stock {
         ident: ident.to_string(),
         equation: Equation::Scalar(eqn.to_string()),
@@ -62,9 +60,6 @@ pub(crate) fn x_stock(
         units: units.map(|s| s.to_owned()),
         inflows: optional_vec(inflows),
         outflows: optional_vec(outflows),
-        non_negative: false,
-        can_be_module_input: false,
-        visibility: Visibility::Private,
         ai_state: None,
         uid: None,
         compat: datamodel::Compat::default(),
@@ -123,7 +118,7 @@ pub(crate) fn x_module(
     refs: &[(&str, &str)],
     units: Option<&str>,
 ) -> datamodel::Variable {
-    use datamodel::{Module, Variable, Visibility};
+    use datamodel::{Module, Variable};
     let references: Vec<ModuleReference> = refs
         .iter()
         .map(|(src, dst)| ModuleReference {
@@ -138,8 +133,7 @@ pub(crate) fn x_module(
         documentation: "".to_string(),
         units: units.map(|s| s.to_owned()),
         references,
-        can_be_module_input: false,
-        visibility: Visibility::Private,
+        compat: datamodel::Compat::default(),
         ai_state: None,
         uid: None,
     })
@@ -147,16 +141,13 @@ pub(crate) fn x_module(
 
 #[cfg(test)]
 pub(crate) fn x_flow(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::Variable {
-    use datamodel::{Equation, Flow, Variable, Visibility};
+    use datamodel::{Equation, Flow, Variable};
     Variable::Flow(Flow {
         ident: ident.to_string(),
         equation: Equation::Scalar(eqn.to_string()),
         documentation: "".to_string(),
         units: units.map(|s| s.to_owned()),
         gf: None,
-        non_negative: false,
-        can_be_module_input: false,
-        visibility: Visibility::Private,
         ai_state: None,
         uid: None,
         compat: datamodel::Compat::default(),

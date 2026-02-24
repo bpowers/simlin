@@ -485,7 +485,7 @@ where
                 units,
                 inflows: v.inflows.iter().map(|i| Ident::new(i)).collect(),
                 outflows: v.outflows.iter().map(|o| Ident::new(o)).collect(),
-                non_negative: v.non_negative,
+                non_negative: v.compat.non_negative,
                 errors,
                 unit_errors,
             }
@@ -523,7 +523,7 @@ where
                 tables,
                 is_flow: true,
                 is_table_only: false,
-                non_negative: v.non_negative,
+                non_negative: v.compat.non_negative,
                 errors,
                 unit_errors,
             }
@@ -809,8 +809,6 @@ fn test_tables() {
             x_points: None,
             y_points: vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0],
         }),
-        can_be_module_input: false,
-        visibility: datamodel::Visibility::Private,
         ai_state: None,
         uid: None,
         compat: datamodel::Compat::default(),

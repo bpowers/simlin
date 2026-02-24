@@ -204,11 +204,12 @@ mod tests {
             documentation: String::new(),
             units: None,
             gf: None,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Public,
             ai_state: None,
             uid: None,
-            compat: datamodel::Compat::default(),
+            compat: datamodel::Compat {
+                visibility: datamodel::Visibility::Public,
+                ..datamodel::Compat::default()
+            },
         })
     }
 
@@ -220,12 +221,12 @@ mod tests {
             units: None,
             inflows: vec![],
             outflows: vec![],
-            non_negative: false,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Public,
             ai_state: None,
             uid: None,
-            compat: datamodel::Compat::default(),
+            compat: datamodel::Compat {
+                visibility: datamodel::Visibility::Public,
+                ..datamodel::Compat::default()
+            },
         })
     }
 
@@ -236,12 +237,12 @@ mod tests {
             documentation: String::new(),
             units: None,
             gf: None,
-            non_negative: false,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Public,
             ai_state: None,
             uid: None,
-            compat: datamodel::Compat::default(),
+            compat: datamodel::Compat {
+                visibility: datamodel::Visibility::Public,
+                ..datamodel::Compat::default()
+            },
         })
     }
 

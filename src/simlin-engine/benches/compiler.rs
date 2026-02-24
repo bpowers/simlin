@@ -32,9 +32,7 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use simlin_engine::Project as CompiledProject;
-use simlin_engine::datamodel::{
-    self, Aux, Compat, Dt, Equation, SimMethod, SimSpecs, Variable, Visibility,
-};
+use simlin_engine::datamodel::{self, Aux, Compat, Dt, Equation, SimMethod, SimSpecs, Variable};
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::{Simulation, compile_project, open_vensim};
 
@@ -224,8 +222,6 @@ fn build_chain_model(n: usize) -> datamodel::Project {
             documentation: String::new(),
             units: None,
             gf: None,
-            can_be_module_input: false,
-            visibility: Visibility::Private,
             ai_state: None,
             uid: None,
             compat: Compat::default(),

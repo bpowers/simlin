@@ -131,7 +131,7 @@ describe('Stock', () => {
     expect(json.initialEquation).toBe('100');
     expect(json.inflows).toEqual(['births']);
     expect(json.outflows).toEqual(['deaths']);
-    expect(json.nonNegative).toBe(true);
+    expect(json.compat?.nonNegative).toBe(true);
     expect(json.uid).toBe(1);
 
     const restored = stockFromJson(json);
@@ -142,6 +142,30 @@ describe('Stock', () => {
     expect(restored.outflows).toEqual(['deaths']);
     expect(restored.nonNegative).toBe(true);
     expect(restored.uid).toBe(1);
+  });
+
+  it('should preserve legacy top-level nonNegative', () => {
+    // Simulates old JSON with nonNegative at top level and compat only for activeInitial
+    const legacyJson = {
+      name: 'pop',
+      inflows: [],
+      outflows: [],
+      nonNegative: true,
+      compat: { activeInitial: '50' },
+    };
+    const stock = stockFromJson(legacyJson);
+    expect(stock.nonNegative).toBe(true);
+  });
+
+  it('should read nonNegative from compat in new format', () => {
+    const newJson = {
+      name: 'pop',
+      inflows: [],
+      outflows: [],
+      compat: { nonNegative: true },
+    };
+    const stock = stockFromJson(newJson);
+    expect(stock.nonNegative).toBe(true);
   });
 });
 
@@ -168,6 +192,16 @@ describe('Flow', () => {
     const restored = flowFromJson(json);
     expect(restored.ident).toBe('births');
     expect((restored.equation as ScalarEquation).equation).toBe('population * birth_rate');
+  });
+
+  it('should preserve legacy top-level nonNegative', () => {
+    const legacyJson = {
+      name: 'rate',
+      nonNegative: true,
+      compat: { activeInitial: '5' },
+    };
+    const flow = flowFromJson(legacyJson);
+    expect(flow.nonNegative).toBe(true);
   });
 });
 

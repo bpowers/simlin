@@ -2598,10 +2598,10 @@ mod tests {
                     units: None,
                     inflows: vec!["births".to_string()],
                     outflows: vec!["deaths".to_string()],
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(1),
                 }),
@@ -2611,10 +2611,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(2),
                 }),
@@ -2624,10 +2624,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(3),
                 }),
@@ -2637,9 +2637,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(4),
                 }),
@@ -2649,9 +2650,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(5),
                 }),
@@ -2984,9 +2986,10 @@ mod tests {
             documentation: String::new(),
             units: None,
             gf: None,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Public,
-            compat: datamodel::Compat::default(),
+            compat: datamodel::Compat {
+                visibility: datamodel::Visibility::Public,
+                ..datamodel::Compat::default()
+            },
             ai_state: None,
             uid: None,
         })
@@ -3042,10 +3045,10 @@ mod tests {
             units: None,
             inflows: vec![],
             outflows: vec![],
-            non_negative: false,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Public,
-            compat: datamodel::Compat::default(),
+            compat: datamodel::Compat {
+                visibility: datamodel::Visibility::Public,
+                ..datamodel::Compat::default()
+            },
             ai_state: None,
             uid: None,
         });
@@ -3068,9 +3071,10 @@ mod tests {
             documentation: String::new(),
             units: None,
             gf: None,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Public,
-            compat: datamodel::Compat::default(),
+            compat: datamodel::Compat {
+                visibility: datamodel::Visibility::Public,
+                ..datamodel::Compat::default()
+            },
             ai_state: None,
             uid: None,
         });
@@ -3191,9 +3195,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(1),
                 }),
@@ -3203,9 +3208,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(2),
                 }),
@@ -3237,9 +3243,10 @@ mod tests {
                 documentation: String::new(),
                 units: None,
                 gf: None,
-                can_be_module_input: false,
-                visibility: datamodel::Visibility::Public,
-                compat: datamodel::Compat::default(),
+                compat: datamodel::Compat {
+                    visibility: datamodel::Visibility::Public,
+                    ..datamodel::Compat::default()
+                },
                 ai_state: None,
                 uid: Some(1),
             })],
@@ -3265,10 +3272,10 @@ mod tests {
                     units: None,
                     inflows: vec![],
                     outflows: vec![],
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(1),
                 }),
@@ -3279,10 +3286,10 @@ mod tests {
                     units: None,
                     inflows: vec![],
                     outflows: vec![],
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(2),
                 }),
@@ -3314,10 +3321,10 @@ mod tests {
                     units: None,
                     inflows: vec![],
                     outflows: vec![],
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(1),
                 }),
@@ -3328,10 +3335,10 @@ mod tests {
                     units: None,
                     inflows: vec![],
                     outflows: vec![],
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(2),
                 }),
@@ -3342,10 +3349,10 @@ mod tests {
                     units: None,
                     inflows: vec![],
                     outflows: vec![],
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(3),
                 }),
@@ -3356,10 +3363,10 @@ mod tests {
                     units: None,
                     inflows: vec![],
                     outflows: vec![],
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(4),
                 }),
@@ -3476,10 +3483,10 @@ mod tests {
                     units: None,
                     inflows: vec![],
                     outflows: vec!["connected_flow".to_string()],
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(1),
                 }),
@@ -3489,10 +3496,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(2),
                 }),
@@ -3502,10 +3509,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(3),
                 }),
@@ -3540,10 +3547,10 @@ mod tests {
                     units: None,
                     inflows: vec![],
                     outflows: vec!["connected_flow".to_string()],
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(1),
                 }),
@@ -3553,10 +3560,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(2),
                 }),
@@ -3566,10 +3573,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(3),
                 }),
@@ -3601,9 +3608,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(1),
                 }),
@@ -3613,10 +3621,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     references: Vec::new(),
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(2),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "y".to_string(),
@@ -3624,9 +3634,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(3),
                 }),
@@ -3728,9 +3739,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(1),
                 }),
@@ -3740,9 +3752,10 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                     ai_state: None,
                     uid: Some(2),
                 }),
@@ -3865,11 +3878,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(1),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "output".to_string(),
@@ -3877,11 +3891,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(2),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
             ],
             views: Vec::new(),
@@ -3913,11 +3928,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(1),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "birthday".to_string(),
@@ -3925,11 +3941,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(2),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "output".to_string(),
@@ -3937,11 +3954,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(3),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
             ],
             views: Vec::new(),
@@ -3976,11 +3994,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(1),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
                 datamodel::Variable::Module(datamodel::Module {
                     ident: "m".to_string(),
@@ -3988,10 +4007,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     references: Vec::new(),
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(2),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "y".to_string(),
@@ -3999,11 +4020,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(3),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
             ],
             views: Vec::new(),
@@ -4032,11 +4054,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(1),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "y".to_string(),
@@ -4044,11 +4067,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(2),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
             ],
             views: Vec::new(),
@@ -4091,12 +4115,12 @@ mod tests {
                     units: None,
                     inflows: vec!["births".to_string()],
                     outflows: vec![],
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(1),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
                 datamodel::Variable::Flow(datamodel::Flow {
                     ident: "births".to_string(),
@@ -4106,12 +4130,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(2),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
             ],
             views: Vec::new(),
@@ -4158,11 +4182,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(1),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "y".to_string(),
@@ -4170,11 +4195,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: datamodel::Visibility::Public,
                     ai_state: None,
                     uid: Some(2),
-                    compat: Default::default(),
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..Default::default()
+                    },
                 }),
             ],
             views: Vec::new(),
