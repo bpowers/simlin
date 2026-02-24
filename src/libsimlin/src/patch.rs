@@ -22,6 +22,50 @@ use crate::{
     SimlinUnitErrorKind,
 };
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PatchHookPoint {
+    SnapshotWhileProjectLocked,
+    StagedSyncWhileDbLocked,
+}
+
+#[cfg(test)]
+type PatchTestHook = std::sync::Arc<dyn Fn(PatchHookPoint, &SimlinProject) + Send + Sync + 'static>;
+
+#[cfg(test)]
+static PATCH_TEST_HOOK_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+#[cfg(test)]
+static PATCH_TEST_HOOK: std::sync::LazyLock<std::sync::Mutex<Option<PatchTestHook>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+pub(crate) struct PatchTestHookGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for PatchTestHookGuard {
+    fn drop(&mut self) {
+        *PATCH_TEST_HOOK.lock().unwrap() = None;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_patch_test_hook(hook: PatchTestHook) -> PatchTestHookGuard {
+    let lock = PATCH_TEST_HOOK_LOCK.lock().unwrap();
+    *PATCH_TEST_HOOK.lock().unwrap() = Some(hook);
+    PatchTestHookGuard { _lock: lock }
+}
+
+#[cfg(test)]
+fn invoke_patch_test_hook(point: PatchHookPoint, project_ref: &SimlinProject) {
+    let hook = PATCH_TEST_HOOK.lock().unwrap().clone();
+    if let Some(hook) = hook {
+        hook(point, project_ref);
+    }
+}
+
 // ── JSON serde types ───────────────────────────────────────────────────
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -417,6 +461,8 @@ pub(crate) unsafe fn apply_project_patch_internal(
         let project_locked = project_ref.project.lock().unwrap();
         let warnings = collect_models_with_unit_warnings(&project_locked);
         let dm = project_locked.datamodel.clone();
+        #[cfg(test)]
+        invoke_patch_test_hook(PatchHookPoint::SnapshotWhileProjectLocked, project_ref);
         (warnings, dm.clone(), dm)
     };
 
@@ -442,6 +488,8 @@ pub(crate) unsafe fn apply_project_patch_internal(
         &staged_project.datamodel,
         prev_state.as_ref(),
     );
+    #[cfg(test)]
+    invoke_patch_test_hook(PatchHookPoint::StagedSyncWhileDbLocked, project_ref);
 
     let staged_sync = staged_sync_state.to_sync_result();
     let (all_errors, sim_error, _compiled) =
