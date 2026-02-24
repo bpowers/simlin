@@ -185,7 +185,7 @@ fn test_sync_multi_model() {
     };
 
     let result = sync_from_datamodel(&db, &project);
-    assert_eq!(result.models.len(), 2);
+    assert_eq!(result.models.len(), 2 + crate::stdlib::MODEL_NAMES.len(),);
     assert!(result.models.contains_key("main"));
     assert!(result.models.contains_key("submodel"));
 
@@ -4298,4 +4298,27 @@ fn test_incremental_stdlib_restored_after_user_override_removed() {
         expected_vars, actual_vars,
         "restored stdlib model should have exactly the real stdlib variables"
     );
+}
+
+/// After a fresh sync (prev_state=None), stdlib models in the resulting
+/// PersistentSyncState should be marked is_stdlib=true so that subsequent
+/// incremental syncs can reuse their salsa inputs without rebuilding.
+#[test]
+fn test_initial_sync_marks_stdlib_models() {
+    let mut db = SimlinDb::default();
+    let project = simple_project();
+
+    let state = sync_from_datamodel_incremental(&mut db, &project, None);
+
+    for stdlib_name in crate::stdlib::MODEL_NAMES {
+        let canonical = canonicalize(&format!("stdlib\u{205A}{stdlib_name}")).into_owned();
+        let pm = state
+            .models
+            .get(&canonical)
+            .unwrap_or_else(|| panic!("stdlib model {stdlib_name} missing from sync state"));
+        assert!(
+            pm.is_stdlib,
+            "stdlib model {stdlib_name} should have is_stdlib=true after initial sync"
+        );
+    }
 }
