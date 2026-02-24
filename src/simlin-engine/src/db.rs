@@ -2126,6 +2126,8 @@ pub struct PersistentModelState {
     pub model_interned_id: salsa::Id,
     pub source_model: SourceModel,
     pub variables: HashMap<String, PersistentVariableState>,
+    /// True when this entry came from the stdlib, false for user-defined models.
+    pub is_stdlib: bool,
 }
 
 #[derive(Clone)]
@@ -2201,6 +2203,7 @@ impl PersistentSyncState {
                             model_interned_id: sm.id.as_id(),
                             source_model: sm.source,
                             variables,
+                            is_stdlib: false,
                         },
                     )
                 })
@@ -2617,6 +2620,7 @@ pub fn sync_from_datamodel_incremental(
                     model_interned_id: prev_model.model_interned_id,
                     source_model,
                     variables: new_vars,
+                    is_stdlib: false,
                 },
             );
         } else {
@@ -2660,6 +2664,7 @@ pub fn sync_from_datamodel_incremental(
                     model_interned_id: model_id.as_id(),
                     source_model,
                     variables: new_vars,
+                    is_stdlib: false,
                 },
             );
         }
@@ -2673,7 +2678,7 @@ pub fn sync_from_datamodel_incremental(
         if new_models.contains_key(&canonical) {
             continue;
         }
-        if let Some(prev_model) = prev.models.get(&canonical) {
+        if let Some(prev_model) = prev.models.get(&canonical).filter(|pm| pm.is_stdlib) {
             new_models.insert(canonical, prev_model.clone());
         } else {
             let dm_model = crate::stdlib::get(stdlib_name).unwrap();
@@ -2708,6 +2713,7 @@ pub fn sync_from_datamodel_incremental(
                     model_interned_id: model_id.as_id(),
                     source_model,
                     variables: new_vars,
+                    is_stdlib: true,
                 },
             );
         }

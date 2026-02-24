@@ -4224,3 +4224,78 @@ fn test_implicit_module_offsets_in_flattened_map() {
         );
     }
 }
+
+/// When a user model shadows a stdlib model (same canonical name) and is
+/// later removed, the stdlib definition must be rebuilt from scratch rather
+/// than reusing the stale user override from `PersistentSyncState`.
+#[test]
+fn test_incremental_stdlib_restored_after_user_override_removed() {
+    let mut db = SimlinDb::default();
+
+    // Build a project with a user model that shadows stdlib delay1.
+    let shadow_model = datamodel::Model {
+        name: "stdlib\u{205A}delay1".to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "custom_var".to_string(),
+            equation: datamodel::Equation::Scalar("999".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+    };
+
+    let mut project = simple_project();
+    project.models.push(shadow_model);
+
+    // Sync twice so the override lands in PersistentSyncState.
+    let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+    let canonical = canonicalize("stdlib\u{205A}delay1").into_owned();
+    let pm1 = &state1.models[&canonical];
+    assert!(
+        !pm1.is_stdlib,
+        "user override should be marked is_stdlib=false"
+    );
+    assert!(
+        pm1.variables.contains_key("custom_var"),
+        "override should contain the user-defined variable"
+    );
+
+    let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
+    assert!(!state2.models[&canonical].is_stdlib);
+
+    // Now remove the shadowing model and sync again.
+    project.models.retain(|m| m.name != "stdlib\u{205A}delay1");
+    let state3 = sync_from_datamodel_incremental(&mut db, &project, Some(&state2));
+
+    let pm3 = &state3.models[&canonical];
+    assert!(
+        pm3.is_stdlib,
+        "restored entry should be marked is_stdlib=true"
+    );
+    assert!(
+        !pm3.variables.contains_key("custom_var"),
+        "user variable should not be present in restored stdlib model"
+    );
+
+    // The real stdlib delay1 has variables like "delay_time", "output", etc.
+    let real_stdlib = crate::stdlib::get("delay1").unwrap();
+    let expected_vars: std::collections::HashSet<String> = real_stdlib
+        .variables
+        .iter()
+        .map(|v| canonicalize(v.get_ident()).into_owned())
+        .collect();
+    let actual_vars: std::collections::HashSet<String> = pm3.variables.keys().cloned().collect();
+    assert_eq!(
+        expected_vars, actual_vars,
+        "restored stdlib model should have exactly the real stdlib variables"
+    );
+}
