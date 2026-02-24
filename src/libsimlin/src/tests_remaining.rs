@@ -5921,3 +5921,4 @@ fn test_patch_then_ltm_sim_compiles_normally() {
         simlin_project_unref(proj);
     }
 }
+

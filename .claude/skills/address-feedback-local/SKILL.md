@@ -32,7 +32,7 @@ git push --force-with-lease
 
 Run with a 30-minute timeout:
 ```bash
-codex --model 'gpt-5.3-codex-xhigh' review --base origin/main 2>/dev/null
+codex -c 'model="gpt-5.3-codex"' -c 'model_reasoning_effort="xhigh"' exec review --json --base origin/main | tee /tmp/codex.stdout | jq -r 'select(.type=="item.completed" and .item.type=="agent_message") | .item.text'
 ```
 
 Parse the output. If the output is empty or explicitly states something like "no problems detected", proceed to Step 2.
@@ -50,36 +50,10 @@ If codex provides ANY suggestions or identifies ANY issues:
 
 ### Step 2: Claude Review
 
-Run a Claude code review by launching a sub-agent that invokes the `/review` skill.  Use the Task tool with `subagent_type: "general-purpose"` and a prompt like:
+Run a Claude code review by launching a sub-agent that invokes the `/review` skill.  Use the Task tool with `subagent_type: "general-purpose"` and the prompt (with the only change being the filled-in template vars) from .github/workflows/claude-code-review.yml.
 
-> Use the Skill tool to invoke the "review" skill with argument "<PR_NUMBER>" to review PR #<PR_NUMBER>.
 
-Wait for the sub-agent to complete and use its returned review output.
-
-Think CRITICALLY about the output. Claude's response will include:
-- Positive observations about the code
-- Potential concerns that it may talk itself out of
-- Suggestions marked as optional or nice-to-have
-- Stream-of-consciousness reasoning
-
-Your job is to extract feedback that would GENUINELY IMPROVE the work. Implement feedback that:
-- Improves correctness, robustness, or edge case handling
-- Improves test coverage or test quality
-- Improves code clarity or maintainability
-- Fixes actual bugs or issues
-
-Ignore suggestions that:
-- Are based on misunderstanding the code or requirements
-- Would add unnecessary complexity
-- Claude convinced itself weren't actually problems
-
-If ANY feedback would genuinely improve the code:
-- Follow the same TDD approach as Step 1
-- Create ONE commit for all feedback from this claude review cycle
-- Push to remote
-- **Go back to Step 0** (codex must re-verify after changes)
-
-Only if there is ZERO actionable feedback should you proceed to Step 3.
+Only if there is ZERO actionable feedback from the codex + claude reviews should you proceed to Step 3.
 
 ### Step 3: Complete
 

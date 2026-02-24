@@ -410,20 +410,14 @@ pub(crate) unsafe fn apply_project_patch_internal(
     out_collected_errors: *mut *mut SimlinError,
     out_error: *mut *mut SimlinError,
 ) {
-    // Collect models that already have unit warnings before applying the patch.
-    // We only reject patches that introduce warnings in models that were previously clean.
-    let models_with_existing_warnings = {
+    // Atomically snapshot warning baseline + datamodel under a single lock
+    // acquisition, so a concurrent patch cannot change the warning set
+    // between the two reads.
+    let (models_with_existing_warnings, mut staged_datamodel, original_datamodel) = {
         let project_locked = project_ref.project.lock().unwrap();
-        collect_models_with_unit_warnings(&project_locked)
-    };
-
-    // Save the original datamodel before patching so we can restore the
-    // db on reject/dry_run without re-acquiring the project lock (which
-    // would violate the project -> db -> sync_state lock ordering).
-    let (mut staged_datamodel, original_datamodel) = {
-        let project_locked = project_ref.project.lock().unwrap();
+        let warnings = collect_models_with_unit_warnings(&project_locked);
         let dm = project_locked.datamodel.clone();
-        (dm.clone(), dm)
+        (warnings, dm.clone(), dm)
     };
 
     if let Err(err) = engine::apply_patch(&mut staged_datamodel, patch) {
@@ -514,14 +508,27 @@ pub(crate) unsafe fn apply_project_patch_internal(
         return;
     }
 
-    // Commit: update sync_state while still holding db lock so the
-    // incremental path (db + sync_state) is atomically consistent for
-    // concurrent readers. Then release db before updating project
-    // to maintain lock ordering (project -> db -> sync_state).
-    *project_ref.sync_state.lock().unwrap() = Some(staged_sync_state);
+    // Commit: restore db to original state before releasing the db lock
+    // so no concurrent reader sees staged state during the gap.
+    let restored = engine::db::sync_from_datamodel_incremental(
+        &mut db,
+        &original_datamodel,
+        prev_state.as_ref(),
+    );
+    *project_ref.sync_state.lock().unwrap() = Some(restored.clone());
     drop(db);
 
+    // Re-acquire all three locks in documented order (project -> db ->
+    // sync_state) for an atomic commit. The extra sync call is cheap
+    // because salsa caching makes re-applying the same inputs free.
     let mut project_locked = project_ref.project.lock().unwrap();
+    let mut db = project_ref.db.lock().unwrap();
+    let final_sync = engine::db::sync_from_datamodel_incremental(
+        &mut db,
+        &staged_project.datamodel,
+        Some(&restored),
+    );
+    *project_ref.sync_state.lock().unwrap() = Some(final_sync);
     *project_locked = staged_project;
 }
 

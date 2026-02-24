@@ -538,3 +538,85 @@ fn test_ac3_4_snapshot_isolation() {
         simlin_project_unref(proj);
     }
 }
+
+/// When incremental compilation fails (e.g., model references an undefined
+/// variable), the actual error must be preserved and surfaced when the
+/// caller tries to run the simulation.  Previously the error was dropped,
+/// resulting in a generic "not initialised" message.
+#[test]
+fn test_incremental_compile_error_preserved_in_sim() {
+    use engine::datamodel;
+
+    let project = datamodel::Project {
+        name: "bad_model".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "x".to_string(),
+                equation: datamodel::Equation::Scalar("undefined_var + 1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let proj = open_project_from_datamodel(&project);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(!model.is_null());
+
+        err = ptr::null_mut();
+        let sim = simlin_sim_new(model, false, &mut err);
+        // Sim creation returns a handle even on compile failure
+        assert!(!sim.is_null());
+
+        // Attempting to run should surface the compile error, not a generic message
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(
+            !err.is_null(),
+            "run_to_end should fail for a model with undefined reference"
+        );
+
+        let msg_ptr = simlin_error_get_message(err);
+        let msg = if !msg_ptr.is_null() {
+            CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
+        } else {
+            ""
+        };
+        // The error should NOT be the generic "not initialised" message
+        assert!(
+            !msg.contains("not been initialised"),
+            "error should be the actual compile failure, not generic 'not initialised': {msg}"
+        );
+        simlin_error_free(err);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

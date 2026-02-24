@@ -261,7 +261,9 @@ impl<MI, E> Variable<MI, E> {
 }
 
 #[allow(clippy::unnecessary_wraps)]
-fn parse_table(gf: &Option<datamodel::GraphicalFunction>) -> EquationResult<Option<Table>> {
+pub(crate) fn parse_table(
+    gf: &Option<datamodel::GraphicalFunction>,
+) -> EquationResult<Option<Table>> {
     if gf.is_none() {
         return Ok(None);
     }

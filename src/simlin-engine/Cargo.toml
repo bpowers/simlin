@@ -38,6 +38,7 @@ csv = { version = "1", optional = true }
 resvg = { version = "0.47", optional = true }
 xmutil = { version = "1", path = "../xmutil", optional = true }
 
+bumpalo = "3"
 salsa = "0.26"
 
 rand = { version = "0.9", default-features = false, features = ["std_rng"] }
