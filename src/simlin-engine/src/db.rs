@@ -2099,6 +2099,7 @@ pub struct SyncedModel<'db> {
     pub id: ModelId<'db>,
     pub source: SourceModel,
     pub variables: HashMap<String, SyncedVariable<'db>>,
+    pub is_stdlib: bool,
 }
 
 pub struct SyncedVariable<'db> {
@@ -2126,6 +2127,8 @@ pub struct PersistentModelState {
     pub model_interned_id: salsa::Id,
     pub source_model: SourceModel,
     pub variables: HashMap<String, PersistentVariableState>,
+    /// True when this entry came from the stdlib, false for user-defined models.
+    pub is_stdlib: bool,
 }
 
 #[derive(Clone)]
@@ -2168,6 +2171,7 @@ impl PersistentSyncState {
                             id: ModelId::from_id(pm.model_interned_id),
                             source: pm.source_model,
                             variables,
+                            is_stdlib: pm.is_stdlib,
                         },
                     )
                 })
@@ -2201,6 +2205,7 @@ impl PersistentSyncState {
                             model_interned_id: sm.id.as_id(),
                             source_model: sm.source,
                             variables,
+                            is_stdlib: sm.is_stdlib,
                         },
                     )
                 })
@@ -2268,6 +2273,7 @@ pub fn sync_from_datamodel<'db>(
                 id: model_id,
                 source: source_model,
                 variables,
+                is_stdlib: false,
             },
         );
     }
@@ -2282,11 +2288,21 @@ pub fn sync_from_datamodel<'db>(
             continue;
         }
         let dm_model = crate::stdlib::get(stdlib_name).unwrap();
+        let model_id = ModelId::new(db, canonical.clone());
+        let mut variables = HashMap::new();
         let mut source_var_map = HashMap::new();
         for dm_var in &dm_model.variables {
             let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
+            let var_id = VariableId::new(db, canonical_var_name.clone());
             let source_var = source_variable_from_datamodel(db, dm_var);
-            source_var_map.insert(canonical_var_name, source_var);
+            source_var_map.insert(canonical_var_name.clone(), source_var);
+            variables.insert(
+                canonical_var_name,
+                SyncedVariable {
+                    id: var_id,
+                    source: source_var,
+                },
+            );
         }
         let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
         variable_names.sort();
@@ -2297,7 +2313,16 @@ pub fn sync_from_datamodel<'db>(
             source_var_map,
             dm_model.sim_specs.as_ref().map(SourceSimSpecs::from),
         );
-        source_model_map.insert(canonical, source_model);
+        source_model_map.insert(canonical.clone(), source_model);
+        models.insert(
+            canonical,
+            SyncedModel {
+                id: model_id,
+                source: source_model,
+                variables,
+                is_stdlib: true,
+            },
+        );
         model_names.push(full_name);
     }
 
@@ -2617,6 +2642,7 @@ pub fn sync_from_datamodel_incremental(
                     model_interned_id: prev_model.model_interned_id,
                     source_model,
                     variables: new_vars,
+                    is_stdlib: false,
                 },
             );
         } else {
@@ -2660,6 +2686,7 @@ pub fn sync_from_datamodel_incremental(
                     model_interned_id: model_id.as_id(),
                     source_model,
                     variables: new_vars,
+                    is_stdlib: false,
                 },
             );
         }
@@ -2673,7 +2700,7 @@ pub fn sync_from_datamodel_incremental(
         if new_models.contains_key(&canonical) {
             continue;
         }
-        if let Some(prev_model) = prev.models.get(&canonical) {
+        if let Some(prev_model) = prev.models.get(&canonical).filter(|pm| pm.is_stdlib) {
             new_models.insert(canonical, prev_model.clone());
         } else {
             let dm_model = crate::stdlib::get(stdlib_name).unwrap();
@@ -2708,6 +2735,7 @@ pub fn sync_from_datamodel_incremental(
                     model_interned_id: model_id.as_id(),
                     source_model,
                     variables: new_vars,
+                    is_stdlib: true,
                 },
             );
         }
