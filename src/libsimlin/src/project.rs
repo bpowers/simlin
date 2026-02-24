@@ -357,16 +357,18 @@ pub unsafe extern "C" fn simlin_project_add_model(
     // Rebuild the project's internal structures
     *project_locked = engine::Project::from(project_locked.datamodel.clone());
 
-    // Re-sync the persistent salsa DB incrementally
+    // Re-sync the persistent salsa DB incrementally.
+    // Hold the db lock until sync_state is restored so concurrent readers
+    // (simlin_sim_new) never observe sync_state = None.
     let mut db = proj.db.lock().unwrap();
-    let prev_state = proj.sync_state.lock().unwrap().take();
+    let prev_state = proj.sync_state.lock().unwrap().clone();
     let new_state = engine::db::sync_from_datamodel_incremental(
         &mut db,
         &project_locked.datamodel,
         prev_state.as_ref(),
     );
-    drop(db);
     *proj.sync_state.lock().unwrap() = Some(new_state);
+    drop(db);
 
     drop(project_locked);
 }

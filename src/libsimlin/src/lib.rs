@@ -3109,4 +3109,5 @@ mod tests {
 
     include!("tests_remaining.rs");
     include!("tests_incremental.rs");
+    include!("tests_concurrency.rs");
 }
