@@ -94,3 +94,7 @@ __pycache__/
 
 # Review loop state (per-working-copy)
 .review-timestamp
+
+# simlin-mcp npm packaging artifacts
+/src/simlin-mcp/vendor
+/src/simlin-mcp/npm

@@ -3,6 +3,7 @@
     "simlin-engine": ["xmutil"],
     "simlin": ["simlin-engine"],
     "simlin-cli": ["simlin-engine", "simlin"],
+    "simlin-mcp": ["simlin-engine"],
     "xmutil": []
   },
   "typescript": {

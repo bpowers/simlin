@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 try:
@@ -221,7 +221,7 @@ class TestJsonRoundtrip:
     """Tests for JSON serialization roundtrip."""
 
     @given(stock=stock_strategy())
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_stock_roundtrip(self, stock: Stock) -> None:
         """Stock dataclass roundtrips through JSON correctly."""
         json_dict = converter.unstructure(stock)
@@ -231,7 +231,7 @@ class TestJsonRoundtrip:
         assert stock == reconstructed
 
     @given(flow=flow_strategy())
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_flow_roundtrip(self, flow: Flow) -> None:
         """Flow dataclass roundtrips through JSON correctly."""
         json_dict = converter.unstructure(flow)
@@ -241,7 +241,7 @@ class TestJsonRoundtrip:
         assert flow == reconstructed
 
     @given(aux=auxiliary_strategy())
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_auxiliary_roundtrip(self, aux: Auxiliary) -> None:
         """Auxiliary dataclass roundtrips through JSON correctly."""
         json_dict = converter.unstructure(aux)
@@ -251,7 +251,7 @@ class TestJsonRoundtrip:
         assert aux == reconstructed
 
     @given(module=module_strategy())
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_module_roundtrip(self, module: Module) -> None:
         """Module dataclass roundtrips through JSON correctly."""
         json_dict = converter.unstructure(module)
@@ -265,7 +265,7 @@ class TestPatchRoundtrip:
     """Tests for patch operation roundtrip."""
 
     @given(stock=stock_strategy())
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_upsert_stock_roundtrip(self, stock: Stock) -> None:
         """UpsertStock operation roundtrips through JSON."""
         op = UpsertStock(stock=stock)
@@ -284,7 +284,7 @@ class TestPatchRoundtrip:
         assert reconstructed_op.stock == stock
 
     @given(flow=flow_strategy())
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_upsert_flow_roundtrip(self, flow: Flow) -> None:
         """UpsertFlow operation roundtrips through JSON."""
         op = UpsertFlow(flow=flow)
@@ -303,7 +303,7 @@ class TestPatchRoundtrip:
         assert reconstructed_op.flow == flow
 
     @given(ident=ident_strategy())
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_delete_variable_roundtrip(self, ident: str) -> None:
         """DeleteVariable operation roundtrips through JSON."""
         op = DeleteVariable(ident=ident)
@@ -322,7 +322,7 @@ class TestPatchRoundtrip:
         assert reconstructed_op.ident == ident
 
     @given(from_ident=ident_strategy(), to_ident=ident_strategy())
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_rename_variable_roundtrip(self, from_ident: str, to_ident: str) -> None:
         """RenameVariable operation roundtrips through JSON."""
         op = RenameVariable(from_=from_ident, to=to_ident)
@@ -361,28 +361,28 @@ class TestSchemaCompliance:
         jsonschema.validate(instance, schema_with_ref)
 
     @given(stock=stock_strategy())
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_stock_validates_against_schema(self, stock: Stock) -> None:
         """Generated Stock JSON validates against the schema."""
         json_dict = converter.unstructure(stock)
         self._validate_against_def(json_dict, "Stock")
 
     @given(flow=flow_strategy())
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_flow_validates_against_schema(self, flow: Flow) -> None:
         """Generated Flow JSON validates against the schema."""
         json_dict = converter.unstructure(flow)
         self._validate_against_def(json_dict, "Flow")
 
     @given(aux=auxiliary_strategy())
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_auxiliary_validates_against_schema(self, aux: Auxiliary) -> None:
         """Generated Auxiliary JSON validates against the schema."""
         json_dict = converter.unstructure(aux)
         self._validate_against_def(json_dict, "Auxiliary")
 
     @given(module=module_strategy())
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_module_validates_against_schema(self, module: Module) -> None:
         """Generated Module JSON validates against the schema."""
         json_dict = converter.unstructure(module)

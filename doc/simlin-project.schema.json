@@ -187,6 +187,18 @@
               "type": "null"
             }
           ]
+        },
+        "nonNegative": {
+          "type": "boolean",
+          "writeOnly": true
+        },
+        "canBeModuleInput": {
+          "type": "boolean",
+          "writeOnly": true
+        },
+        "isPublic": {
+          "type": "boolean",
+          "writeOnly": true
         }
       },
       "required": [
@@ -401,6 +413,18 @@
               "type": "null"
             }
           ]
+        },
+        "nonNegative": {
+          "type": "boolean",
+          "writeOnly": true
+        },
+        "canBeModuleInput": {
+          "type": "boolean",
+          "writeOnly": true
+        },
+        "isPublic": {
+          "type": "boolean",
+          "writeOnly": true
         }
       },
       "required": [
@@ -455,6 +479,14 @@
               "type": "null"
             }
           ]
+        },
+        "canBeModuleInput": {
+          "type": "boolean",
+          "writeOnly": true
+        },
+        "isPublic": {
+          "type": "boolean",
+          "writeOnly": true
         }
       },
       "required": [
@@ -495,6 +527,14 @@
               "type": "null"
             }
           ]
+        },
+        "canBeModuleInput": {
+          "type": "boolean",
+          "writeOnly": true
+        },
+        "isPublic": {
+          "type": "boolean",
+          "writeOnly": true
         }
       },
       "required": [
