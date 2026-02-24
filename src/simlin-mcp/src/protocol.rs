@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::tool::Registry;
+use crate::transport::Transport;
 
 // ── JSON-RPC error codes ─────────────────────────────────────────────
 
@@ -141,6 +142,10 @@ pub struct ServerConfig {
 
 /// Serve MCP requests, reading newline-delimited JSON-RPC from `input`
 /// and writing responses to `output`.
+///
+/// Kept for use in the synchronous test suite; production code uses
+/// `serve_async` with a `Transport` implementation.
+#[allow(dead_code)]
 pub fn serve(
     config: &ServerConfig,
     registry: &Registry,
@@ -198,6 +203,59 @@ pub fn serve(
         let resp = dispatch(config, registry, id.clone(), method, req.params);
         write_response(output, &resp)?;
     }
+}
+
+/// Serve MCP requests asynchronously, reading from and writing to `transport`.
+///
+/// Returns `Ok(())` when the transport signals EOF (recv returns None).
+/// Each received line is parsed as JSON-RPC and dispatched synchronously;
+/// the response is sent back through the transport.
+pub async fn serve_async(
+    transport: &mut impl Transport,
+    config: &ServerConfig,
+    registry: &Registry,
+) -> anyhow::Result<()> {
+    while let Some(line) = transport.recv().await {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let req: Request = match serde_json::from_str(trimmed) {
+            Ok(r) => r,
+            Err(e) => {
+                let resp = error_response(
+                    Value::Null,
+                    ERR_PARSE,
+                    "parse error",
+                    Some(Value::String(e.to_string())),
+                );
+                transport.send(serde_json::to_string(&resp)?).await?;
+                continue;
+            }
+        };
+
+        let valid_jsonrpc = req.jsonrpc.as_deref().is_some_and(|v| v == "2.0");
+        let has_method = req.method.as_ref().is_some_and(|m| !m.is_empty());
+
+        if !valid_jsonrpc || !has_method {
+            let id = req.id.unwrap_or(Value::Null);
+            let resp = error_response(id, ERR_INVALID_REQUEST, "invalid request", None);
+            transport.send(serde_json::to_string(&resp)?).await?;
+            continue;
+        }
+
+        // Notifications (no id) are fire-and-forget
+        if req.id.is_none() {
+            continue;
+        }
+
+        let id = req.id.unwrap_or(Value::Null);
+        let method = req.method.as_deref().unwrap_or("");
+        let resp = dispatch(config, registry, id, method, req.params);
+        transport.send(serde_json::to_string(&resp)?).await?;
+    }
+    Ok(())
 }
 
 fn dispatch(
@@ -294,6 +352,7 @@ fn handle_call_tool(registry: &Registry, id: Value, params: Option<Value>) -> Re
     }
 }
 
+#[allow(dead_code)]
 fn write_response(output: &mut dyn std::io::Write, resp: &Response) -> std::io::Result<()> {
     serde_json::to_writer(&mut *output, resp)?;
     output.write_all(b"\n")?;
@@ -304,6 +363,9 @@ fn write_response(output: &mut dyn std::io::Write, resp: &Response) -> std::io::
 mod tests {
     use super::*;
     use crate::tool::{Registry, Tool};
+    use crate::transport::Transport;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
 
     struct EchoTool;
 
@@ -523,5 +585,114 @@ mod tests {
         let r4: Value = serde_json::from_str(lines[3]).unwrap();
         assert_eq!(r4["id"], 4);
         assert_eq!(r4["result"]["isError"], false);
+    }
+
+    // ── async tests ──────────────────────────────────────────────────────
+
+    /// In-memory transport for testing serve_async without real stdio.
+    struct MockTransport {
+        incoming: VecDeque<String>,
+        outgoing: RefCell<Vec<String>>,
+    }
+
+    impl MockTransport {
+        fn new(messages: impl IntoIterator<Item = &'static str>) -> Self {
+            Self {
+                incoming: messages.into_iter().map(str::to_string).collect(),
+                outgoing: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn responses(&self) -> Vec<Value> {
+            self.outgoing
+                .borrow()
+                .iter()
+                .map(|s| serde_json::from_str(s).unwrap())
+                .collect()
+        }
+    }
+
+    impl Transport for MockTransport {
+        async fn recv(&mut self) -> Option<String> {
+            self.incoming.pop_front()
+        }
+
+        async fn send(&self, message: String) -> anyhow::Result<()> {
+            self.outgoing.borrow_mut().push(message);
+            Ok(())
+        }
+    }
+
+    fn async_roundtrip(
+        registry: &Registry,
+        config: &ServerConfig,
+        requests: &[&'static str],
+    ) -> Vec<Value> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut transport = MockTransport::new(requests.iter().copied());
+        rt.block_on(serve_async(&mut transport, config, registry))
+            .unwrap();
+        transport.responses()
+    }
+
+    // simlin-mcp.AC1.1: initialize handshake followed by ping
+    #[test]
+    fn test_async_initialize_and_ping() {
+        let registry = Registry::new();
+        let config = test_config();
+
+        let responses = async_roundtrip(
+            &registry,
+            &config,
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"test","version":"1.0"},"capabilities":{}}}"#,
+                r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#,
+            ],
+        );
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["result"]["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(responses[1]["id"], 2);
+        assert_eq!(responses[1]["result"], serde_json::json!({}));
+    }
+
+    // simlin-mcp.AC1.2: three or more sequential requests all succeed
+    #[test]
+    fn test_async_sequential_requests() {
+        let mut registry = Registry::new();
+        registry.register(Box::new(EchoTool));
+        let config = test_config();
+
+        let responses = async_roundtrip(
+            &registry,
+            &config,
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"test","version":"1.0"},"capabilities":{}}}"#,
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+                r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#,
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"msg":"world"}}}"#,
+            ],
+        );
+
+        // notification produces no response, so 4 responses for 5 inputs
+        assert_eq!(responses.len(), 4);
+        assert_eq!(responses[0]["id"], 1);
+        assert!(responses[1]["result"]["tools"].is_array());
+        assert_eq!(responses[2]["result"], serde_json::json!({}));
+        assert_eq!(responses[3]["result"]["isError"], false);
+    }
+
+    // simlin-mcp.AC1.3: EOF (None from recv) causes clean shutdown
+    #[test]
+    fn test_async_eof_clean_shutdown() {
+        let registry = Registry::new();
+        let config = test_config();
+
+        // Empty input -- transport immediately returns None
+        let responses = async_roundtrip(&registry, &config, &[]);
+
+        assert!(responses.is_empty());
     }
 }

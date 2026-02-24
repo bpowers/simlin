@@ -18,10 +18,12 @@
 mod protocol;
 mod tool;
 mod tools;
+mod transport;
 
-use std::io::{self, BufReader};
+use transport::StdioTransport;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // Handle --version
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
@@ -43,11 +45,9 @@ fn main() {
     let mut registry = tool::Registry::new();
     tools::register_all(&mut registry);
 
-    let stdin = io::stdin();
-    let mut reader = BufReader::new(stdin.lock());
-    let mut stdout = io::stdout().lock();
+    let mut transport = StdioTransport::new();
 
-    if let Err(e) = protocol::serve(&config, &registry, &mut reader, &mut stdout) {
+    if let Err(e) = protocol::serve_async(&mut transport, &config, &registry).await {
         eprintln!("simlin-mcp: fatal error: {e}");
         std::process::exit(1);
     }

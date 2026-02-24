@@ -17,7 +17,7 @@ use crate::protocol::ToolDefinition;
 // ── Tool trait ───────────────────────────────────────────────────────
 
 /// A single MCP tool that can be listed and called.
-pub trait Tool {
+pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
 
