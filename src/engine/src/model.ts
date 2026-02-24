@@ -171,8 +171,6 @@ function jsonVarToVariable(v: JsonVarWithType): Variable {
       if (v.graphicalFunction) {
         gf = parseJsonGraphicalFunction(v.graphicalFunction);
       }
-      const activeInitial = v.compat?.activeInitial || v.arrayedEquation?.compat?.activeInitial;
-      const compat = activeInitial ? { activeInitial } : undefined;
       const a: Aux = {
         type: 'aux',
         name: v.name,
@@ -181,7 +179,7 @@ function jsonVarToVariable(v: JsonVarWithType): Variable {
         documentation: v.documentation || undefined,
         graphicalFunction: gf,
         arrayedEquation: v.arrayedEquation,
-        compat,
+        compat: v.compat || undefined,
       };
       return a;
     }
