@@ -204,20 +204,27 @@ pub enum Equation {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default, salsa::Update)]
+#[derive(Clone, PartialEq, Eq, Default, salsa::Update)]
 pub struct Compat {
     pub active_initial: Option<String>,
+    pub non_negative: bool,
+    pub can_be_module_input: bool,
+    pub visibility: Visibility,
 }
 
 impl Compat {
     pub fn is_empty(&self) -> bool {
         self.active_initial.is_none()
+            && !self.non_negative
+            && !self.can_be_module_input
+            && self.visibility == Visibility::Private
     }
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, salsa::Update)]
 pub enum Visibility {
+    #[default]
     Private,
     Public,
 }
@@ -244,9 +251,6 @@ pub struct Stock {
     pub units: Option<String>,
     pub inflows: Vec<String>,
     pub outflows: Vec<String>,
-    pub non_negative: bool,
-    pub can_be_module_input: bool,
-    pub visibility: Visibility,
     pub ai_state: Option<AiState>,
     pub uid: Option<i32>,
     pub compat: Compat,
@@ -260,9 +264,6 @@ pub struct Flow {
     pub documentation: String,
     pub units: Option<String>,
     pub gf: Option<GraphicalFunction>,
-    pub non_negative: bool,
-    pub can_be_module_input: bool,
-    pub visibility: Visibility,
     pub ai_state: Option<AiState>,
     pub uid: Option<i32>,
     pub compat: Compat,
@@ -276,8 +277,6 @@ pub struct Aux {
     pub documentation: String,
     pub units: Option<String>,
     pub gf: Option<GraphicalFunction>,
-    pub can_be_module_input: bool,
-    pub visibility: Visibility,
     pub ai_state: Option<AiState>,
     pub uid: Option<i32>,
     pub compat: Compat,
@@ -297,10 +296,9 @@ pub struct Module {
     pub documentation: String,
     pub units: Option<String>,
     pub references: Vec<ModuleReference>,
-    pub can_be_module_input: bool,
-    pub visibility: Visibility,
     pub ai_state: Option<AiState>,
     pub uid: Option<i32>,
+    pub compat: Compat,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -401,19 +399,19 @@ impl Variable {
 
     pub fn get_visibility(&self) -> Visibility {
         match self {
-            Variable::Stock(stock) => stock.visibility,
-            Variable::Flow(flow) => flow.visibility,
-            Variable::Aux(aux) => aux.visibility,
-            Variable::Module(module) => module.visibility,
+            Variable::Stock(stock) => stock.compat.visibility,
+            Variable::Flow(flow) => flow.compat.visibility,
+            Variable::Aux(aux) => aux.compat.visibility,
+            Variable::Module(module) => module.compat.visibility,
         }
     }
 
     pub fn can_be_module_input(&self) -> bool {
         match self {
-            Variable::Stock(stock) => stock.can_be_module_input,
-            Variable::Flow(flow) => flow.can_be_module_input,
-            Variable::Aux(aux) => aux.can_be_module_input,
-            Variable::Module(module) => module.can_be_module_input,
+            Variable::Stock(stock) => stock.compat.can_be_module_input,
+            Variable::Flow(flow) => flow.compat.can_be_module_input,
+            Variable::Aux(aux) => aux.compat.can_be_module_input,
+            Variable::Module(module) => module.compat.can_be_module_input,
         }
     }
 }

@@ -2824,8 +2824,6 @@ fn test_project_json_open() {
                 "outflows": [],
                 "units": "people",
                 "documentation": "",
-                "can_be_module_input": false,
-                "is_public": false,
                 "dimensions": []
             }],
             "flows": [],
@@ -2835,8 +2833,6 @@ fn test_project_json_open() {
                 "equation": "0.1",
                 "units": "",
                 "documentation": "",
-                "can_be_module_input": false,
-                "is_public": false,
                 "dimensions": []
             }],
             "modules": [],
@@ -3890,7 +3886,7 @@ fn test_model_get_latex_equation_invalid_utf8() {
 fn test_model_get_latex_equation_module_var_no_ast() {
     // Module variables exist in the model but have no AST (they reference other models)
     // This tests the path where var.ast() returns None
-    use engine::datamodel::{self, Compat, Dt, Equation, Project, SimMethod, SimSpecs, Visibility};
+    use engine::datamodel::{self, Compat, Dt, Equation, Project, SimMethod, SimSpecs};
 
     // Create a project with two models: a child model and main model with a module
     let project = Project {
@@ -3916,8 +3912,6 @@ fn test_model_get_latex_equation_module_var_no_ast() {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
@@ -3936,10 +3930,9 @@ fn test_model_get_latex_equation_module_var_no_ast() {
                     documentation: String::new(),
                     units: None,
                     references: vec![],
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
+                    compat: Compat::default(),
                 })],
                 views: vec![],
                 loop_metadata: vec![],

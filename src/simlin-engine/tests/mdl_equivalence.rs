@@ -926,8 +926,8 @@ fn collect_variable_field_diffs(diffs: &mut Vec<Diff>, xv: &Variable, nv: &Varia
                 diffs,
                 path,
                 "non_negative",
-                &xs.non_negative,
-                &ns.non_negative,
+                &xs.compat.non_negative,
+                &ns.compat.non_negative,
             );
         }
         (Variable::Flow(xf), Variable::Flow(nf)) => {
@@ -945,8 +945,8 @@ fn collect_variable_field_diffs(diffs: &mut Vec<Diff>, xv: &Variable, nv: &Varia
                 diffs,
                 path,
                 "non_negative",
-                &xf.non_negative,
-                &nf.non_negative,
+                &xf.compat.non_negative,
+                &nf.compat.non_negative,
             );
         }
         (Variable::Aux(xa), Variable::Aux(na)) => {

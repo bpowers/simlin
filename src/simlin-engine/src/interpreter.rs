@@ -1919,8 +1919,6 @@ fn test_arrays() {
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: Compat::default(),
@@ -1931,8 +1929,6 @@ fn test_arrays() {
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: Compat::default(),
@@ -1946,8 +1942,6 @@ fn test_arrays() {
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: Compat::default(),
@@ -1958,8 +1952,6 @@ fn test_arrays() {
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: Compat::default(),
@@ -2187,9 +2179,7 @@ fn nan_is_approx_eq() {
 
 #[test]
 fn simulation_uses_model_sim_specs_when_present() {
-    use crate::datamodel::{
-        self, Aux, Compat, Equation, SimSpecs as DmSimSpecs, Variable, Visibility,
-    };
+    use crate::datamodel::{self, Aux, Compat, Equation, SimSpecs as DmSimSpecs, Variable};
 
     let project_specs = DmSimSpecs {
         start: 0.0,
@@ -2218,8 +2208,6 @@ fn simulation_uses_model_sim_specs_when_present() {
             documentation: String::new(),
             units: None,
             gf: None,
-            can_be_module_input: false,
-            visibility: Visibility::Private,
             ai_state: None,
             uid: None,
             compat: Compat::default(),
@@ -2250,9 +2238,7 @@ fn simulation_uses_model_sim_specs_when_present() {
 
 #[test]
 fn simulation_defaults_to_project_sim_specs_without_model_override() {
-    use crate::datamodel::{
-        self, Aux, Compat, Equation, SimSpecs as DmSimSpecs, Variable, Visibility,
-    };
+    use crate::datamodel::{self, Aux, Compat, Equation, SimSpecs as DmSimSpecs, Variable};
 
     let project_specs = DmSimSpecs {
         start: 1.0,
@@ -2272,8 +2258,6 @@ fn simulation_defaults_to_project_sim_specs_without_model_override() {
             documentation: String::new(),
             units: None,
             gf: None,
-            can_be_module_input: false,
-            visibility: Visibility::Private,
             ai_state: None,
             uid: None,
             compat: Compat::default(),

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::datamodel::{
     self, Compat, DimensionElements, Equation, GraphicalFunction, GraphicalFunctionKind,
-    GraphicalFunctionScale, Model, ModelGroup, Project, Variable, View, Visibility,
+    GraphicalFunctionScale, Model, ModelGroup, Project, Variable, View,
 };
 
 use crate::mdl::view;
@@ -68,9 +68,6 @@ impl<'input> ConversionContext<'input> {
                 documentation: String::new(),
                 units: None,
                 gf: None,
-                non_negative: false,
-                can_be_module_input: false,
-                visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
@@ -444,9 +441,6 @@ impl<'input> ConversionContext<'input> {
                 units,
                 inflows: info.inflows.clone(),
                 outflows: info.outflows.clone(),
-                non_negative: false,
-                can_be_module_input: false,
-                visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
@@ -457,9 +451,6 @@ impl<'input> ConversionContext<'input> {
                 documentation,
                 units,
                 gf: None,
-                non_negative: false,
-                can_be_module_input: false,
-                visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
@@ -470,8 +461,6 @@ impl<'input> ConversionContext<'input> {
                 documentation,
                 units,
                 gf: None,
-                can_be_module_input: false,
-                visibility: Visibility::Private,
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
@@ -654,9 +643,6 @@ impl<'input> ConversionContext<'input> {
                     units,
                     inflows: info.inflows.clone(),
                     outflows: info.outflows.clone(),
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
                     compat,
@@ -670,9 +656,6 @@ impl<'input> ConversionContext<'input> {
                     documentation,
                     units,
                     gf,
-                    non_negative: false,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
                     compat,
@@ -686,8 +669,6 @@ impl<'input> ConversionContext<'input> {
                     documentation,
                     units,
                     gf,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
                     compat,
@@ -794,6 +775,7 @@ impl<'input> ConversionContext<'input> {
     ) -> (Equation, Compat) {
         let compat = Compat {
             active_initial: initial_str,
+            ..Compat::default()
         };
         if lhs.subscripts.is_empty() {
             (Equation::Scalar(eq_str.to_string()), compat)

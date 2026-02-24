@@ -812,11 +812,12 @@ fn create_aux_variable(name: &str, equation: &str) -> crate::datamodel::Variable
         documentation: "LTM".to_string(),
         units: None, // LTM scores are dimensionless by design, no need to declare
         gf: None,
-        can_be_module_input: false,
-        visibility: datamodel::Visibility::Public,
         ai_state: None,
         uid: None,
-        compat: datamodel::Compat::default(),
+        compat: datamodel::Compat {
+            visibility: datamodel::Visibility::Public,
+            ..datamodel::Compat::default()
+        },
     })
 }
 

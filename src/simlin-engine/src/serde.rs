@@ -436,6 +436,11 @@ impl From<Stock> for project_io::variable::Stock {
         } else {
             Some(project_io::variable::Compat {
                 active_initial: stock.compat.active_initial,
+                non_negative: Some(stock.compat.non_negative),
+                can_be_module_input: Some(stock.compat.can_be_module_input),
+                visibility: Some(
+                    project_io::variable::Visibility::from(stock.compat.visibility) as i32,
+                ),
             })
         };
         project_io::variable::Stock {
@@ -445,9 +450,9 @@ impl From<Stock> for project_io::variable::Stock {
             units: stock.units.unwrap_or_default(),
             inflows: stock.inflows,
             outflows: stock.outflows,
-            non_negative: stock.non_negative,
-            can_be_module_input: stock.can_be_module_input,
-            visibility: project_io::variable::Visibility::from(stock.visibility) as i32,
+            non_negative: false,
+            can_be_module_input: false,
+            visibility: 0,
             uid: stock.uid.unwrap_or_default(),
             compat,
         }
@@ -460,7 +465,31 @@ impl From<project_io::variable::Stock> for Stock {
             .equation
             .as_ref()
             .and_then(extract_legacy_initial_equation);
-        let compat_ai = stock.compat.and_then(|c| c.active_initial).or(legacy_ai);
+        let (compat_ai, compat_nn, compat_cbmi, compat_vis) = match stock.compat {
+            Some(c) => (
+                c.active_initial.or(legacy_ai),
+                c.non_negative.unwrap_or(stock.non_negative),
+                c.can_be_module_input.unwrap_or(stock.can_be_module_input),
+                c.visibility
+                    .and_then(|v| project_io::variable::Visibility::try_from(v).ok())
+                    .map(Visibility::from)
+                    .unwrap_or_else(|| {
+                        Visibility::from(
+                            project_io::variable::Visibility::try_from(stock.visibility)
+                                .unwrap_or_default(),
+                        )
+                    }),
+            ),
+            None => (
+                legacy_ai,
+                stock.non_negative,
+                stock.can_be_module_input,
+                Visibility::from(
+                    project_io::variable::Visibility::try_from(stock.visibility)
+                        .unwrap_or_default(),
+                ),
+            ),
+        };
         Stock {
             ident: stock.ident,
             equation: stock.equation.unwrap().into(),
@@ -472,13 +501,11 @@ impl From<project_io::variable::Stock> for Stock {
             },
             inflows: stock.inflows,
             outflows: stock.outflows,
-            non_negative: stock.non_negative,
-            can_be_module_input: stock.can_be_module_input,
-            visibility: Visibility::from(
-                project_io::variable::Visibility::try_from(stock.visibility).unwrap_or_default(),
-            ),
             compat: Compat {
                 active_initial: compat_ai,
+                non_negative: compat_nn,
+                can_be_module_input: compat_cbmi,
+                visibility: compat_vis,
             },
             ai_state: None,
             uid: if stock.uid == 0 {
@@ -500,10 +527,11 @@ fn test_stock_roundtrip() {
             units: None,
             inflows: vec!["inflow".to_string()],
             outflows: vec![],
-            non_negative: false,
-            can_be_module_input: true,
-            visibility: Visibility::Public,
-            compat: Compat::default(),
+            compat: Compat {
+                can_be_module_input: true,
+                visibility: Visibility::Public,
+                ..Compat::default()
+            },
             ai_state: None,
             uid: Some(42),
         },
@@ -514,9 +542,6 @@ fn test_stock_roundtrip() {
             units: Some("flarbles".to_string()),
             inflows: vec!["inflow".to_string()],
             outflows: vec![],
-            non_negative: false,
-            can_be_module_input: false,
-            visibility: Visibility::Private,
             compat: Compat::default(),
             ai_state: None,
             uid: None,
@@ -536,6 +561,11 @@ impl From<Flow> for project_io::variable::Flow {
         } else {
             Some(project_io::variable::Compat {
                 active_initial: flow.compat.active_initial,
+                non_negative: Some(flow.compat.non_negative),
+                can_be_module_input: Some(flow.compat.can_be_module_input),
+                visibility: Some(
+                    project_io::variable::Visibility::from(flow.compat.visibility) as i32,
+                ),
             })
         };
         project_io::variable::Flow {
@@ -544,9 +574,9 @@ impl From<Flow> for project_io::variable::Flow {
             documentation: flow.documentation,
             units: flow.units.unwrap_or_default(),
             gf: flow.gf.map(project_io::GraphicalFunction::from),
-            non_negative: flow.non_negative,
-            can_be_module_input: flow.can_be_module_input,
-            visibility: project_io::variable::Visibility::from(flow.visibility) as i32,
+            non_negative: false,
+            can_be_module_input: false,
+            visibility: 0,
             uid: flow.uid.unwrap_or_default(),
             compat,
         }
@@ -559,7 +589,30 @@ impl From<project_io::variable::Flow> for Flow {
             .equation
             .as_ref()
             .and_then(extract_legacy_initial_equation);
-        let compat_ai = flow.compat.and_then(|c| c.active_initial).or(legacy_ai);
+        let (compat_ai, compat_nn, compat_cbmi, compat_vis) = match flow.compat {
+            Some(c) => (
+                c.active_initial.or(legacy_ai),
+                c.non_negative.unwrap_or(flow.non_negative),
+                c.can_be_module_input.unwrap_or(flow.can_be_module_input),
+                c.visibility
+                    .and_then(|v| project_io::variable::Visibility::try_from(v).ok())
+                    .map(Visibility::from)
+                    .unwrap_or_else(|| {
+                        Visibility::from(
+                            project_io::variable::Visibility::try_from(flow.visibility)
+                                .unwrap_or_default(),
+                        )
+                    }),
+            ),
+            None => (
+                legacy_ai,
+                flow.non_negative,
+                flow.can_be_module_input,
+                Visibility::from(
+                    project_io::variable::Visibility::try_from(flow.visibility).unwrap_or_default(),
+                ),
+            ),
+        };
         Flow {
             ident: flow.ident,
             equation: flow.equation.unwrap().into(),
@@ -570,13 +623,11 @@ impl From<project_io::variable::Flow> for Flow {
                 Some(flow.units)
             },
             gf: flow.gf.map(GraphicalFunction::from),
-            non_negative: flow.non_negative,
-            can_be_module_input: flow.can_be_module_input,
-            visibility: Visibility::from(
-                project_io::variable::Visibility::try_from(flow.visibility).unwrap_or_default(),
-            ),
             compat: Compat {
                 active_initial: compat_ai,
+                non_negative: compat_nn,
+                can_be_module_input: compat_cbmi,
+                visibility: compat_vis,
             },
             ai_state: None,
             uid: if flow.uid == 0 { None } else { Some(flow.uid) },
@@ -593,10 +644,10 @@ fn test_flow_roundtrip() {
             documentation: "this is deep stuff".to_string(),
             units: None,
             gf: None,
-            non_negative: false,
-            can_be_module_input: true,
-            visibility: Visibility::Private,
-            compat: Compat::default(),
+            compat: Compat {
+                can_be_module_input: true,
+                ..Compat::default()
+            },
             ai_state: None,
             uid: Some(100),
         },
@@ -618,11 +669,10 @@ fn test_flow_roundtrip() {
                     max: 8.01,
                 },
             }),
-            non_negative: false,
-            can_be_module_input: false,
-            visibility: Visibility::Public,
             compat: Compat {
                 active_initial: Some("66".to_string()),
+                visibility: Visibility::Public,
+                ..Compat::default()
             },
             ai_state: None,
             uid: None,
@@ -642,6 +692,11 @@ impl From<Aux> for project_io::variable::Aux {
         } else {
             Some(project_io::variable::Compat {
                 active_initial: aux.compat.active_initial,
+                non_negative: None,
+                can_be_module_input: Some(aux.compat.can_be_module_input),
+                visibility: Some(
+                    project_io::variable::Visibility::from(aux.compat.visibility) as i32,
+                ),
             })
         };
         project_io::variable::Aux {
@@ -650,8 +705,8 @@ impl From<Aux> for project_io::variable::Aux {
             documentation: aux.documentation,
             units: aux.units.unwrap_or_default(),
             gf: aux.gf.map(project_io::GraphicalFunction::from),
-            can_be_module_input: aux.can_be_module_input,
-            visibility: project_io::variable::Visibility::from(aux.visibility).into(),
+            can_be_module_input: false,
+            visibility: 0,
             uid: aux.uid.unwrap_or_default(),
             compat,
         }
@@ -664,7 +719,28 @@ impl From<project_io::variable::Aux> for Aux {
             .equation
             .as_ref()
             .and_then(extract_legacy_initial_equation);
-        let compat_ai = aux.compat.and_then(|c| c.active_initial).or(legacy_ai);
+        let (compat_ai, compat_cbmi, compat_vis) = match aux.compat {
+            Some(c) => (
+                c.active_initial.or(legacy_ai),
+                c.can_be_module_input.unwrap_or(aux.can_be_module_input),
+                c.visibility
+                    .and_then(|v| project_io::variable::Visibility::try_from(v).ok())
+                    .map(Visibility::from)
+                    .unwrap_or_else(|| {
+                        Visibility::from(
+                            project_io::variable::Visibility::try_from(aux.visibility)
+                                .unwrap_or_default(),
+                        )
+                    }),
+            ),
+            None => (
+                legacy_ai,
+                aux.can_be_module_input,
+                Visibility::from(
+                    project_io::variable::Visibility::try_from(aux.visibility).unwrap_or_default(),
+                ),
+            ),
+        };
         Aux {
             ident: aux.ident,
             equation: aux.equation.unwrap().into(),
@@ -675,12 +751,11 @@ impl From<project_io::variable::Aux> for Aux {
                 Some(aux.units)
             },
             gf: aux.gf.map(GraphicalFunction::from),
-            can_be_module_input: aux.can_be_module_input,
-            visibility: Visibility::from(
-                project_io::variable::Visibility::try_from(aux.visibility).unwrap_or_default(),
-            ),
             compat: Compat {
                 active_initial: compat_ai,
+                non_negative: false,
+                can_be_module_input: compat_cbmi,
+                visibility: compat_vis,
             },
             ai_state: None,
             uid: if aux.uid == 0 { None } else { Some(aux.uid) },
@@ -697,10 +772,10 @@ fn test_aux_roundtrip() {
             documentation: "this is deep stuff".to_string(),
             units: None,
             gf: None,
-            can_be_module_input: false,
-            visibility: Visibility::Public,
             compat: Compat {
                 active_initial: Some("11".to_string()),
+                visibility: Visibility::Public,
+                ..Compat::default()
             },
             ai_state: None,
             uid: Some(200),
@@ -723,9 +798,10 @@ fn test_aux_roundtrip() {
                     max: 8.01,
                 },
             }),
-            can_be_module_input: true,
-            visibility: Visibility::Private,
-            compat: Compat::default(),
+            compat: Compat {
+                can_be_module_input: true,
+                ..Compat::default()
+            },
             ai_state: None,
             uid: None,
         },
@@ -772,6 +848,18 @@ fn test_module_reference_roundtrip() {
 
 impl From<Module> for project_io::variable::Module {
     fn from(module: Module) -> Self {
+        let compat = if module.compat.is_empty() {
+            None
+        } else {
+            Some(project_io::variable::Compat {
+                active_initial: None,
+                non_negative: None,
+                can_be_module_input: Some(module.compat.can_be_module_input),
+                visibility: Some(
+                    project_io::variable::Visibility::from(module.compat.visibility) as i32,
+                ),
+            })
+        };
         project_io::variable::Module {
             ident: module.ident,
             model_name: module.model_name,
@@ -782,15 +870,37 @@ impl From<Module> for project_io::variable::Module {
                 .into_iter()
                 .map(project_io::variable::module::Reference::from)
                 .collect(),
-            can_be_module_input: module.can_be_module_input,
-            visibility: project_io::variable::Visibility::from(module.visibility) as i32,
+            can_be_module_input: false,
+            visibility: 0,
             uid: module.uid.unwrap_or_default(),
+            compat,
         }
     }
 }
 
 impl From<project_io::variable::Module> for Module {
     fn from(module: project_io::variable::Module) -> Self {
+        let (cbmi, vis) = match module.compat {
+            Some(c) => (
+                c.can_be_module_input.unwrap_or(module.can_be_module_input),
+                c.visibility
+                    .and_then(|v| project_io::variable::Visibility::try_from(v).ok())
+                    .map(Visibility::from)
+                    .unwrap_or_else(|| {
+                        Visibility::from(
+                            project_io::variable::Visibility::try_from(module.visibility)
+                                .unwrap_or_default(),
+                        )
+                    }),
+            ),
+            None => (
+                module.can_be_module_input,
+                Visibility::from(
+                    project_io::variable::Visibility::try_from(module.visibility)
+                        .unwrap_or_default(),
+                ),
+            ),
+        };
         Module {
             ident: module.ident,
             model_name: module.model_name,
@@ -805,15 +915,17 @@ impl From<project_io::variable::Module> for Module {
                 .into_iter()
                 .map(ModuleReference::from)
                 .collect(),
-            can_be_module_input: module.can_be_module_input,
-            visibility: Visibility::from(
-                project_io::variable::Visibility::try_from(module.visibility).unwrap_or_default(),
-            ),
             ai_state: None,
             uid: if module.uid == 0 {
                 None
             } else {
                 Some(module.uid)
+            },
+            compat: Compat {
+                active_initial: None,
+                non_negative: false,
+                can_be_module_input: cbmi,
+                visibility: vis,
             },
         }
     }
@@ -831,10 +943,9 @@ fn test_module_roundtrip() {
                 src: "foo".to_string(),
                 dst: "self.bar".to_string(),
             }],
-            can_be_module_input: false,
-            visibility: Visibility::Private,
             ai_state: None,
             uid: Some(300),
+            compat: Compat::default(),
         },
         Module {
             ident: "blerg2".to_string(),
@@ -842,10 +953,13 @@ fn test_module_roundtrip() {
             documentation: "this is deeper stuff".to_string(),
             units: Some("flarbles".to_string()),
             references: vec![],
-            can_be_module_input: true,
-            visibility: Visibility::Public,
             ai_state: None,
             uid: None,
+            compat: Compat {
+                can_be_module_input: true,
+                visibility: Visibility::Public,
+                ..Compat::default()
+            },
         },
     ];
     for expected in cases {
@@ -895,9 +1009,10 @@ fn test_variable_roundtrip() {
             documentation: "this is deep stuff".to_string(),
             units: None,
             gf: None,
-            can_be_module_input: false,
-            visibility: Visibility::Public,
-            compat: Compat::default(),
+            compat: Compat {
+                visibility: Visibility::Public,
+                ..Compat::default()
+            },
             ai_state: None,
             uid: None,
         }),
@@ -907,8 +1022,10 @@ fn test_variable_roundtrip() {
             documentation: "this is deeper stuff".to_string(),
             units: Some("flarbles".to_string()),
             references: vec![],
-            can_be_module_input: true,
-            visibility: Visibility::Private,
+            compat: Compat {
+                can_be_module_input: true,
+                ..Compat::default()
+            },
             ai_state: None,
             uid: None,
         }),
@@ -1748,9 +1865,6 @@ fn test_model_with_loop_metadata_roundtrip() {
             units: None,
             inflows: vec![],
             outflows: vec![],
-            non_negative: false,
-            can_be_module_input: false,
-            visibility: Visibility::Private,
             compat: Compat::default(),
             ai_state: None,
             uid: Some(1),
@@ -1791,9 +1905,6 @@ fn test_model_with_groups_roundtrip() {
             units: None,
             inflows: vec![],
             outflows: vec![],
-            non_negative: false,
-            can_be_module_input: false,
-            visibility: Visibility::Private,
             compat: Compat::default(),
             ai_state: None,
             uid: Some(1),

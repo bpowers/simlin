@@ -146,9 +146,14 @@ macro_rules! convert_equation(
 );
 
 macro_rules! extract_compat(
-    ($var:expr) => {{
+    ($var:expr, $access:expr) => {{
         let active_initial = $var.initial_eqn.filter(|s| !s.is_empty());
-        datamodel::Compat { active_initial }
+        datamodel::Compat {
+            active_initial,
+            non_negative: false,
+            can_be_module_input: can_be_module_input(&$access),
+            visibility: visibility(&$access),
+        }
     }}
 );
 
@@ -190,10 +195,12 @@ impl From<Stock> for datamodel::Stock {
             units: stock.units,
             inflows,
             outflows,
-            non_negative: stock.non_negative.is_some(),
-            can_be_module_input: can_be_module_input(&stock.access),
-            visibility: visibility(&stock.access),
-            compat: datamodel::Compat::default(),
+            compat: datamodel::Compat {
+                non_negative: stock.non_negative.is_some(),
+                can_be_module_input: can_be_module_input(&stock.access),
+                visibility: visibility(&stock.access),
+                ..datamodel::Compat::default()
+            },
             ai_state: ai_state_from(stock.ai_state),
             uid: None,
         }
@@ -237,7 +244,7 @@ impl From<datamodel::Stock> for Stock {
             } else {
                 Some(stock.outflows)
             },
-            non_negative: if stock.non_negative {
+            non_negative: if stock.compat.non_negative {
                 Some(NonNegative {})
             } else {
                 None
@@ -274,7 +281,7 @@ impl From<datamodel::Stock> for Stock {
                         .collect(),
                 ),
             },
-            access: access_from(stock.visibility, stock.can_be_module_input),
+            access: access_from(stock.compat.visibility, stock.compat.can_be_module_input),
             ai_state: None, // TODO
         }
     }
@@ -357,16 +364,14 @@ impl ToXml<XmlWriter> for Flow {
 
 impl From<Flow> for datamodel::Flow {
     fn from(flow: Flow) -> Self {
-        let compat = extract_compat!(flow);
+        let mut compat = extract_compat!(flow, flow.access);
+        compat.non_negative = flow.non_negative.is_some();
         datamodel::Flow {
             ident: flow.name.clone(),
             equation: convert_equation!(flow),
             documentation: flow.doc.unwrap_or_default(),
             units: flow.units,
             gf: flow.gf.map(datamodel::GraphicalFunction::from),
-            non_negative: flow.non_negative.is_some(),
-            can_be_module_input: can_be_module_input(&flow.access),
-            visibility: visibility(&flow.access),
             compat,
             ai_state: ai_state_from(flow.ai_state),
             uid: None,
@@ -403,7 +408,7 @@ impl From<datamodel::Flow> for Flow {
             },
             units: flow.units,
             gf: flow.gf.map(Gf::from),
-            non_negative: if flow.non_negative {
+            non_negative: if flow.compat.non_negative {
                 Some(NonNegative {})
             } else {
                 None
@@ -440,7 +445,7 @@ impl From<datamodel::Flow> for Flow {
                         .collect(),
                 ),
             },
-            access: access_from(flow.visibility, flow.can_be_module_input),
+            access: access_from(flow.compat.visibility, flow.compat.can_be_module_input),
             ai_state: None, // TODO
         }
     }
@@ -519,15 +524,13 @@ impl ToXml<XmlWriter> for Aux {
 
 impl From<Aux> for datamodel::Aux {
     fn from(aux: Aux) -> Self {
-        let compat = extract_compat!(aux);
+        let compat = extract_compat!(aux, aux.access);
         datamodel::Aux {
             ident: aux.name.clone(),
             equation: convert_equation!(aux),
             documentation: aux.doc.unwrap_or_default(),
             units: aux.units,
             gf: aux.gf.map(datamodel::GraphicalFunction::from),
-            can_be_module_input: can_be_module_input(&aux.access),
-            visibility: visibility(&aux.access),
             compat,
             ai_state: ai_state_from(aux.ai_state),
             uid: None,
@@ -596,7 +599,7 @@ impl From<datamodel::Aux> for Aux {
                         .collect(),
                 ),
             },
-            access: access_from(aux.visibility, aux.can_be_module_input),
+            access: access_from(aux.compat.visibility, aux.compat.can_be_module_input),
             ai_state: None, // TODO
         }
     }
@@ -688,9 +691,6 @@ fn test_canonicalize_stock_inflows() {
         units: Some("people".to_string()),
         inflows: vec!["solar_radiation".to_string()],
         outflows: vec!["succumbing".to_string(), "succumbing_2".to_string()],
-        non_negative: false,
-        can_be_module_input: false,
-        visibility: datamodel::Visibility::Private,
         compat: datamodel::Compat::default(),
         ai_state: None,
         uid: None,

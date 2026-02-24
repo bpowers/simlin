@@ -72,12 +72,18 @@ pub struct ElementEquation {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Compat {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub active_initial: Option<String>,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub non_negative: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub can_be_module_input: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub is_public: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -134,14 +140,8 @@ pub struct Stock {
     pub units: String,
     pub inflows: Vec<Ident>,
     pub outflows: Vec<Ident>,
-    #[serde(skip_serializing_if = "is_false", default)]
-    pub non_negative: bool,
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub documentation: String,
-    #[serde(skip_serializing_if = "is_false", default)]
-    pub can_be_module_input: bool,
-    #[serde(skip_serializing_if = "is_false", default)]
-    pub is_public: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub arrayed_equation: Option<ArrayedEquation>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -160,16 +160,10 @@ pub struct Flow {
     pub equation: String,
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub units: String,
-    #[serde(skip_serializing_if = "is_false", default)]
-    pub non_negative: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub graphical_function: Option<GraphicalFunction>,
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub documentation: String,
-    #[serde(skip_serializing_if = "is_false", default)]
-    pub can_be_module_input: bool,
-    #[serde(skip_serializing_if = "is_false", default)]
-    pub is_public: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub arrayed_equation: Option<ArrayedEquation>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -192,10 +186,6 @@ pub struct Auxiliary {
     pub graphical_function: Option<GraphicalFunction>,
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub documentation: String,
-    #[serde(skip_serializing_if = "is_false", default)]
-    pub can_be_module_input: bool,
-    #[serde(skip_serializing_if = "is_false", default)]
-    pub is_public: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub arrayed_equation: Option<ArrayedEquation>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -226,10 +216,8 @@ pub struct Module {
     pub documentation: String,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub references: Vec<ModuleReference>,
-    #[serde(skip_serializing_if = "is_false", default)]
-    pub can_be_module_input: bool,
-    #[serde(skip_serializing_if = "is_false", default)]
-    pub is_public: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compat: Option<Compat>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -643,13 +631,18 @@ impl From<GraphicalFunction> for datamodel::GraphicalFunction {
 
 impl From<Stock> for datamodel::Stock {
     fn from(stock: Stock) -> Self {
-        // Stocks don't use active_initial (their equation IS the initial value),
-        // so no arrayed_equation.compat fallback is needed here unlike Flow/Aux.
+        let c = stock.compat.as_ref();
         let compat = datamodel::Compat {
-            active_initial: stock
-                .compat
-                .and_then(|c| c.active_initial)
+            active_initial: c
+                .and_then(|c| c.active_initial.clone())
                 .filter(|s| !s.is_empty()),
+            non_negative: c.map(|c| c.non_negative).unwrap_or(false),
+            can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false),
+            visibility: if c.map(|c| c.is_public).unwrap_or(false) {
+                datamodel::Visibility::Public
+            } else {
+                datamodel::Visibility::Private
+            },
         };
         let equation = match stock.arrayed_equation {
             Some(arrayed) => {
@@ -691,13 +684,6 @@ impl From<Stock> for datamodel::Stock {
             },
             inflows: stock.inflows,
             outflows: stock.outflows,
-            non_negative: stock.non_negative,
-            can_be_module_input: stock.can_be_module_input,
-            visibility: if stock.is_public {
-                datamodel::Visibility::Public
-            } else {
-                datamodel::Visibility::Private
-            },
             ai_state: None,
             uid: if stock.uid == 0 {
                 None
@@ -711,10 +697,10 @@ impl From<Stock> for datamodel::Stock {
 
 impl From<Flow> for datamodel::Flow {
     fn from(flow: Flow) -> Self {
+        let c = flow.compat.as_ref();
         let compat = datamodel::Compat {
-            active_initial: flow
-                .compat
-                .and_then(|c| c.active_initial)
+            active_initial: c
+                .and_then(|c| c.active_initial.clone())
                 .filter(|s| !s.is_empty())
                 .or_else(|| {
                     flow.arrayed_equation
@@ -722,6 +708,13 @@ impl From<Flow> for datamodel::Flow {
                         .and_then(|a| a.compat.as_ref())
                         .and_then(|c| c.active_initial.clone())
                 }),
+            non_negative: c.map(|c| c.non_negative).unwrap_or(false),
+            can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false),
+            visibility: if c.map(|c| c.is_public).unwrap_or(false) {
+                datamodel::Visibility::Public
+            } else {
+                datamodel::Visibility::Private
+            },
         };
         let equation = match flow.arrayed_equation {
             Some(arrayed) => {
@@ -762,13 +755,6 @@ impl From<Flow> for datamodel::Flow {
                 Some(flow.units)
             },
             gf: flow.graphical_function.map(|gf| gf.into()),
-            non_negative: flow.non_negative,
-            can_be_module_input: flow.can_be_module_input,
-            visibility: if flow.is_public {
-                datamodel::Visibility::Public
-            } else {
-                datamodel::Visibility::Private
-            },
             ai_state: None,
             uid: if flow.uid == 0 { None } else { Some(flow.uid) },
             compat,
@@ -778,10 +764,10 @@ impl From<Flow> for datamodel::Flow {
 
 impl From<Auxiliary> for datamodel::Aux {
     fn from(aux: Auxiliary) -> Self {
+        let c = aux.compat.as_ref();
         let compat = datamodel::Compat {
-            active_initial: aux
-                .compat
-                .and_then(|c| c.active_initial)
+            active_initial: c
+                .and_then(|c| c.active_initial.clone())
                 .filter(|s| !s.is_empty())
                 .or_else(|| {
                     aux.arrayed_equation
@@ -789,6 +775,13 @@ impl From<Auxiliary> for datamodel::Aux {
                         .and_then(|a| a.compat.as_ref())
                         .and_then(|c| c.active_initial.clone())
                 }),
+            non_negative: false,
+            can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false),
+            visibility: if c.map(|c| c.is_public).unwrap_or(false) {
+                datamodel::Visibility::Public
+            } else {
+                datamodel::Visibility::Private
+            },
         };
         let equation = match aux.arrayed_equation {
             Some(arrayed) => {
@@ -829,12 +822,6 @@ impl From<Auxiliary> for datamodel::Aux {
                 Some(aux.units)
             },
             gf: aux.graphical_function.map(|gf| gf.into()),
-            can_be_module_input: aux.can_be_module_input,
-            visibility: if aux.is_public {
-                datamodel::Visibility::Public
-            } else {
-                datamodel::Visibility::Private
-            },
             ai_state: None,
             uid: if aux.uid == 0 { None } else { Some(aux.uid) },
             compat,
@@ -853,6 +840,7 @@ impl From<ModuleReference> for datamodel::ModuleReference {
 
 impl From<Module> for datamodel::Module {
     fn from(module: Module) -> Self {
+        let c = module.compat.as_ref();
         datamodel::Module {
             ident: module.name,
             model_name: module.model_name,
@@ -863,17 +851,21 @@ impl From<Module> for datamodel::Module {
                 Some(module.units)
             },
             references: module.references.into_iter().map(|r| r.into()).collect(),
-            can_be_module_input: module.can_be_module_input,
-            visibility: if module.is_public {
-                datamodel::Visibility::Public
-            } else {
-                datamodel::Visibility::Private
-            },
             ai_state: None,
             uid: if module.uid == 0 {
                 None
             } else {
                 Some(module.uid)
+            },
+            compat: datamodel::Compat {
+                active_initial: None,
+                non_negative: false,
+                can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false),
+                visibility: if c.map(|c| c.is_public).unwrap_or(false) {
+                    datamodel::Visibility::Public
+                } else {
+                    datamodel::Visibility::Private
+                },
             },
         }
     }
@@ -1243,6 +1235,9 @@ impl From<datamodel::Stock> for Stock {
         } else {
             Some(Compat {
                 active_initial: stock.compat.active_initial,
+                non_negative: stock.compat.non_negative,
+                can_be_module_input: stock.compat.can_be_module_input,
+                is_public: matches!(stock.compat.visibility, datamodel::Visibility::Public),
             })
         };
         let (initial_equation, arrayed_equation) = match stock.equation {
@@ -1265,6 +1260,7 @@ impl From<datamodel::Stock> for Stock {
                             equation,
                             compat: active_initial.map(|ai| Compat {
                                 active_initial: Some(ai),
+                                ..Default::default()
                             }),
                             graphical_function: gf.map(|g| g.into()),
                         },
@@ -1282,6 +1278,20 @@ impl From<datamodel::Stock> for Stock {
             }
         };
 
+        let mut compat_json = compat_json.unwrap_or_default();
+        compat_json.non_negative = stock.compat.non_negative;
+        compat_json.can_be_module_input = stock.compat.can_be_module_input;
+        compat_json.is_public = matches!(stock.compat.visibility, datamodel::Visibility::Public);
+        let compat_json = if compat_json.active_initial.is_none()
+            && !compat_json.non_negative
+            && !compat_json.can_be_module_input
+            && !compat_json.is_public
+        {
+            None
+        } else {
+            Some(compat_json)
+        };
+
         Stock {
             uid: stock.uid.unwrap_or(0),
             name: stock.ident,
@@ -1289,10 +1299,7 @@ impl From<datamodel::Stock> for Stock {
             units: stock.units.unwrap_or_default(),
             inflows: stock.inflows,
             outflows: stock.outflows,
-            non_negative: stock.non_negative,
             documentation: stock.documentation,
-            can_be_module_input: stock.can_be_module_input,
-            is_public: matches!(stock.visibility, datamodel::Visibility::Public),
             arrayed_equation,
             compat: compat_json,
         }
@@ -1306,6 +1313,9 @@ impl From<datamodel::Flow> for Flow {
         } else {
             Some(Compat {
                 active_initial: flow.compat.active_initial,
+                non_negative: flow.compat.non_negative,
+                can_be_module_input: flow.compat.can_be_module_input,
+                is_public: matches!(flow.compat.visibility, datamodel::Visibility::Public),
             })
         };
         let (equation, arrayed_equation) = match flow.equation {
@@ -1328,6 +1338,7 @@ impl From<datamodel::Flow> for Flow {
                             equation,
                             compat: active_initial.map(|ai| Compat {
                                 active_initial: Some(ai),
+                                ..Default::default()
                             }),
                             graphical_function: gf.map(|g| g.into()),
                         },
@@ -1345,16 +1356,27 @@ impl From<datamodel::Flow> for Flow {
             }
         };
 
+        let mut compat_json = compat_json.unwrap_or_default();
+        compat_json.non_negative = flow.compat.non_negative;
+        compat_json.can_be_module_input = flow.compat.can_be_module_input;
+        compat_json.is_public = matches!(flow.compat.visibility, datamodel::Visibility::Public);
+        let compat_json = if compat_json.active_initial.is_none()
+            && !compat_json.non_negative
+            && !compat_json.can_be_module_input
+            && !compat_json.is_public
+        {
+            None
+        } else {
+            Some(compat_json)
+        };
+
         Flow {
             uid: flow.uid.unwrap_or(0),
             name: flow.ident,
             equation,
             units: flow.units.unwrap_or_default(),
-            non_negative: flow.non_negative,
             graphical_function: flow.gf.map(|gf| gf.into()),
             documentation: flow.documentation,
-            can_be_module_input: flow.can_be_module_input,
-            is_public: matches!(flow.visibility, datamodel::Visibility::Public),
             arrayed_equation,
             compat: compat_json,
         }
@@ -1368,6 +1390,9 @@ impl From<datamodel::Aux> for Auxiliary {
         } else {
             Some(Compat {
                 active_initial: aux.compat.active_initial,
+                non_negative: aux.compat.non_negative,
+                can_be_module_input: aux.compat.can_be_module_input,
+                is_public: matches!(aux.compat.visibility, datamodel::Visibility::Public),
             })
         };
         let (equation, arrayed_equation) = match aux.equation {
@@ -1390,6 +1415,7 @@ impl From<datamodel::Aux> for Auxiliary {
                             equation,
                             compat: active_initial.map(|ai| Compat {
                                 active_initial: Some(ai),
+                                ..Default::default()
                             }),
                             graphical_function: gf.map(|g| g.into()),
                         },
@@ -1407,6 +1433,19 @@ impl From<datamodel::Aux> for Auxiliary {
             }
         };
 
+        let mut compat_json = compat_json.unwrap_or_default();
+        compat_json.can_be_module_input = aux.compat.can_be_module_input;
+        compat_json.is_public = matches!(aux.compat.visibility, datamodel::Visibility::Public);
+        let compat_json = if compat_json.active_initial.is_none()
+            && !compat_json.non_negative
+            && !compat_json.can_be_module_input
+            && !compat_json.is_public
+        {
+            None
+        } else {
+            Some(compat_json)
+        };
+
         Auxiliary {
             uid: aux.uid.unwrap_or(0),
             name: aux.ident,
@@ -1414,8 +1453,6 @@ impl From<datamodel::Aux> for Auxiliary {
             units: aux.units.unwrap_or_default(),
             graphical_function: aux.gf.map(|gf| gf.into()),
             documentation: aux.documentation,
-            can_be_module_input: aux.can_be_module_input,
-            is_public: matches!(aux.visibility, datamodel::Visibility::Public),
             arrayed_equation,
             compat: compat_json,
         }
@@ -1433,6 +1470,17 @@ impl From<datamodel::ModuleReference> for ModuleReference {
 
 impl From<datamodel::Module> for Module {
     fn from(module: datamodel::Module) -> Self {
+        let cbmi = module.compat.can_be_module_input;
+        let is_public = matches!(module.compat.visibility, datamodel::Visibility::Public);
+        let compat = if !cbmi && !is_public {
+            None
+        } else {
+            Some(Compat {
+                can_be_module_input: cbmi,
+                is_public,
+                ..Default::default()
+            })
+        };
         Module {
             uid: module.uid.unwrap_or(0),
             name: module.ident,
@@ -1440,8 +1488,7 @@ impl From<datamodel::Module> for Module {
             units: module.units.unwrap_or_default(),
             documentation: module.documentation,
             references: module.references.into_iter().map(|r| r.into()).collect(),
-            can_be_module_input: module.can_be_module_input,
-            is_public: matches!(module.visibility, datamodel::Visibility::Public),
+            compat,
         }
     }
 }
@@ -1859,12 +1906,13 @@ mod tests {
                     units: "people".to_string(),
                     inflows: vec!["births".to_string()],
                     outflows: vec!["deaths".to_string()],
-                    non_negative: true,
                     documentation: "Total population".to_string(),
-                    can_be_module_input: false,
-                    is_public: true,
                     arrayed_equation: None,
-                    compat: None,
+                    compat: Some(Compat {
+                        non_negative: true,
+                        is_public: true,
+                        ..Default::default()
+                    }),
                 },
             ),
             (
@@ -1876,17 +1924,17 @@ mod tests {
                     units: String::new(),
                     inflows: vec!["production".to_string()],
                     outflows: vec!["sales".to_string()],
-                    non_negative: false,
                     documentation: String::new(),
-                    can_be_module_input: true,
-                    is_public: false,
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["warehouses".to_string()],
                         equation: Some("50".to_string()),
                         compat: None,
                         elements: None,
                     }),
-                    compat: None,
+                    compat: Some(Compat {
+                        can_be_module_input: true,
+                        ..Default::default()
+                    }),
                 },
             ),
             (
@@ -1898,10 +1946,7 @@ mod tests {
                     units: String::new(),
                     inflows: vec![],
                     outflows: vec![],
-                    non_negative: false,
                     documentation: String::new(),
-                    can_be_module_input: true,
-                    is_public: false,
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["cities".to_string()],
                         equation: None,
@@ -1912,6 +1957,7 @@ mod tests {
                                 equation: "50".to_string(),
                                 compat: Some(Compat {
                                     active_initial: Some("10".to_string()),
+                                    ..Default::default()
                                 }),
                                 graphical_function: None,
                             },
@@ -1923,7 +1969,10 @@ mod tests {
                             },
                         ]),
                     }),
-                    compat: None,
+                    compat: Some(Compat {
+                        can_be_module_input: true,
+                        ..Default::default()
+                    }),
                 },
             ),
         ];
@@ -1958,16 +2007,6 @@ mod tests {
                 name
             );
             assert_eq!(
-                json_stock.is_public, json_stock3.is_public,
-                "Failed for: {}",
-                name
-            );
-            assert_eq!(
-                json_stock.can_be_module_input, json_stock3.can_be_module_input,
-                "Failed for: {}",
-                name
-            );
-            assert_eq!(
                 json_stock.arrayed_equation, json_stock3.arrayed_equation,
                 "Failed for: {}",
                 name
@@ -1985,7 +2024,6 @@ mod tests {
                     name: "births".to_string(),
                     equation: "population * birth_rate".to_string(),
                     units: "people/year".to_string(),
-                    non_negative: true,
                     graphical_function: Some(GraphicalFunction {
                         points: vec![[0.0, 0.0], [1.0, 1.0]],
                         y_points: vec![],
@@ -1994,10 +2032,12 @@ mod tests {
                         y_scale: Some(GraphicalFunctionScale { min: 0.0, max: 1.0 }),
                     }),
                     documentation: "Birth flow".to_string(),
-                    can_be_module_input: false,
-                    is_public: true,
                     arrayed_equation: None,
-                    compat: None,
+                    compat: Some(Compat {
+                        non_negative: true,
+                        is_public: true,
+                        ..Default::default()
+                    }),
                 },
             ),
             (
@@ -2007,11 +2047,8 @@ mod tests {
                     name: "production".to_string(),
                     equation: String::new(),
                     units: String::new(),
-                    non_negative: false,
                     graphical_function: None,
                     documentation: String::new(),
-                    can_be_module_input: true,
-                    is_public: false,
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["factories".to_string()],
                         equation: Some("orders / lead_time".to_string()),
@@ -2020,6 +2057,8 @@ mod tests {
                     }),
                     compat: Some(Compat {
                         active_initial: Some("initial_orders".to_string()),
+                        can_be_module_input: true,
+                        ..Default::default()
                     }),
                 },
             ),
@@ -2030,11 +2069,8 @@ mod tests {
                     name: "shipments".to_string(),
                     equation: String::new(),
                     units: String::new(),
-                    non_negative: false,
                     graphical_function: None,
                     documentation: String::new(),
-                    can_be_module_input: true,
-                    is_public: false,
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["routes".to_string()],
                         equation: None,
@@ -2045,6 +2081,7 @@ mod tests {
                                 equation: "supply_east".to_string(),
                                 compat: Some(Compat {
                                     active_initial: Some("init_supply_east".to_string()),
+                                    ..Default::default()
                                 }),
                                 graphical_function: None,
                             },
@@ -2056,7 +2093,10 @@ mod tests {
                             },
                         ]),
                     }),
-                    compat: None,
+                    compat: Some(Compat {
+                        can_be_module_input: true,
+                        ..Default::default()
+                    }),
                 },
             ),
         ];
@@ -2080,21 +2120,6 @@ mod tests {
                 name
             );
             assert_eq!(
-                json_flow.non_negative, json_flow3.non_negative,
-                "Failed for: {}",
-                name
-            );
-            assert_eq!(
-                json_flow.can_be_module_input, json_flow3.can_be_module_input,
-                "Failed for: {}",
-                name
-            );
-            assert_eq!(
-                json_flow.is_public, json_flow3.is_public,
-                "Failed for: {}",
-                name
-            );
-            assert_eq!(
                 json_flow.arrayed_equation, json_flow3.arrayed_equation,
                 "Failed for: {}",
                 name
@@ -2113,12 +2138,12 @@ mod tests {
                     equation: "0.02".to_string(),
                     compat: Some(Compat {
                         active_initial: Some("0.015".to_string()),
+                        can_be_module_input: true,
+                        ..Default::default()
                     }),
                     units: "1/year".to_string(),
                     graphical_function: None,
                     documentation: "Annual birth rate".to_string(),
-                    can_be_module_input: true,
-                    is_public: false,
                     arrayed_equation: None,
                 },
             ),
@@ -2131,8 +2156,6 @@ mod tests {
                     units: String::new(),
                     graphical_function: None,
                     documentation: String::new(),
-                    can_be_module_input: false,
-                    is_public: true,
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["plants".to_string()],
                         equation: Some("base_capacity".to_string()),
@@ -2141,6 +2164,8 @@ mod tests {
                     }),
                     compat: Some(Compat {
                         active_initial: Some("initial_capacity".to_string()),
+                        is_public: true,
+                        ..Default::default()
                     }),
                 },
             ),
@@ -2153,8 +2178,6 @@ mod tests {
                     units: String::new(),
                     graphical_function: None,
                     documentation: String::new(),
-                    can_be_module_input: false,
-                    is_public: true,
                     arrayed_equation: Some(ArrayedEquation {
                         dimensions: vec!["regions".to_string()],
                         equation: None,
@@ -2165,6 +2188,7 @@ mod tests {
                                 equation: "north_demand".to_string(),
                                 compat: Some(Compat {
                                     active_initial: Some("north_demand_init".to_string()),
+                                    ..Default::default()
                                 }),
                                 graphical_function: None,
                             },
@@ -2176,7 +2200,10 @@ mod tests {
                             },
                         ]),
                     }),
-                    compat: None,
+                    compat: Some(Compat {
+                        is_public: true,
+                        ..Default::default()
+                    }),
                 },
             ),
         ];
@@ -2201,16 +2228,6 @@ mod tests {
                 name
             );
             assert_eq!(
-                json_aux.can_be_module_input, json_aux3.can_be_module_input,
-                "Failed for: {}",
-                name
-            );
-            assert_eq!(
-                json_aux.is_public, json_aux3.is_public,
-                "Failed for: {}",
-                name
-            );
-            assert_eq!(
                 json_aux.arrayed_equation, json_aux3.arrayed_equation,
                 "Failed for: {}",
                 name
@@ -2230,8 +2247,10 @@ mod tests {
                 src: "input".to_string(),
                 dst: "self.param".to_string(),
             }],
-            can_be_module_input: false,
-            is_public: true,
+            compat: Some(Compat {
+                is_public: true,
+                ..Default::default()
+            }),
         };
 
         // Roundtrip
@@ -2428,10 +2447,7 @@ mod tests {
                 units: String::new(),
                 inflows: vec!["flow1".to_string()],
                 outflows: vec![],
-                non_negative: false,
                 documentation: String::new(),
-                can_be_module_input: false,
-                is_public: false,
                 arrayed_equation: None,
                 compat: None,
             }],
@@ -2440,11 +2456,8 @@ mod tests {
                 name: "flow1".to_string(),
                 equation: "10".to_string(),
                 units: String::new(),
-                non_negative: false,
                 graphical_function: None,
                 documentation: String::new(),
-                can_be_module_input: false,
-                is_public: false,
                 arrayed_equation: None,
                 compat: None,
             }],
@@ -2455,8 +2468,6 @@ mod tests {
                 units: String::new(),
                 graphical_function: None,
                 documentation: String::new(),
-                can_be_module_input: false,
-                is_public: false,
                 arrayed_equation: None,
                 compat: None,
             }],
@@ -2931,10 +2942,7 @@ mod tests {
             units: "people".to_string(),
             inflows: vec!["births".to_string()],
             outflows: vec!["deaths".to_string()],
-            non_negative: false,
             documentation: String::new(),
-            can_be_module_input: false,
-            is_public: false,
             arrayed_equation: None,
             compat: None,
         };
@@ -2965,11 +2973,8 @@ mod tests {
             name: "births".to_string(),
             equation: "population * birth_rate".to_string(),
             units: "people/year".to_string(),
-            non_negative: false,
             graphical_function: None,
             documentation: String::new(),
-            can_be_module_input: false,
-            is_public: false,
             arrayed_equation: None,
             compat: None,
         };
@@ -2998,8 +3003,6 @@ mod tests {
             units: "1/year".to_string(),
             graphical_function: None,
             documentation: String::new(),
-            can_be_module_input: false,
-            is_public: false,
             arrayed_equation: None,
         };
 
@@ -3027,8 +3030,7 @@ mod tests {
             units: String::new(),
             documentation: String::new(),
             references: vec![],
-            can_be_module_input: false,
-            is_public: false,
+            compat: None,
         };
 
         let tagged = TaggedVariable::Module(module);
@@ -3054,9 +3056,6 @@ mod tests {
             units: None,
             inflows: vec!["production".to_string()],
             outflows: vec!["sales".to_string()],
-            non_negative: false,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: Some(10),
             compat: datamodel::Compat::default(),
@@ -3087,10 +3086,7 @@ mod tests {
                 units: String::new(),
                 inflows: vec![],
                 outflows: vec![],
-                non_negative: false,
                 documentation: String::new(),
-                can_be_module_input: false,
-                is_public: false,
                 arrayed_equation: None,
                 compat: None,
             }),
@@ -3099,11 +3095,8 @@ mod tests {
                 name: "rate".to_string(),
                 equation: "10".to_string(),
                 units: String::new(),
-                non_negative: false,
                 graphical_function: None,
                 documentation: String::new(),
-                can_be_module_input: false,
-                is_public: false,
                 arrayed_equation: None,
                 compat: None,
             }),
@@ -3115,8 +3108,6 @@ mod tests {
                 units: String::new(),
                 graphical_function: None,
                 documentation: String::new(),
-                can_be_module_input: false,
-                is_public: false,
                 arrayed_equation: None,
             }),
         ];
@@ -3137,21 +3128,20 @@ mod tests {
             name: "rate".to_string(),
             equation: String::new(),
             units: String::new(),
-            non_negative: false,
             graphical_function: None,
             documentation: String::new(),
-            can_be_module_input: false,
-            is_public: false,
             arrayed_equation: Some(ArrayedEquation {
                 dimensions: vec!["Region".to_string()],
                 equation: Some("base * 2".to_string()),
                 compat: Some(Compat {
                     active_initial: Some("base * 3".to_string()),
+                    ..Default::default()
                 }),
                 elements: None,
             }),
             compat: Some(Compat {
                 active_initial: None,
+                ..Default::default()
             }),
         };
 
@@ -3168,18 +3158,18 @@ mod tests {
             units: String::new(),
             graphical_function: None,
             documentation: String::new(),
-            can_be_module_input: false,
-            is_public: false,
             arrayed_equation: Some(ArrayedEquation {
                 dimensions: vec!["Region".to_string()],
                 equation: Some("x + 1".to_string()),
                 compat: Some(Compat {
                     active_initial: Some("x + 2".to_string()),
+                    ..Default::default()
                 }),
                 elements: None,
             }),
             compat: Some(Compat {
                 active_initial: None,
+                ..Default::default()
             }),
         };
 
@@ -3194,21 +3184,20 @@ mod tests {
             name: "rate".to_string(),
             equation: String::new(),
             units: String::new(),
-            non_negative: false,
             graphical_function: None,
             documentation: String::new(),
-            can_be_module_input: false,
-            is_public: false,
             arrayed_equation: Some(ArrayedEquation {
                 dimensions: vec!["Region".to_string()],
                 equation: Some("base * 2".to_string()),
                 compat: Some(Compat {
                     active_initial: Some("stale".to_string()),
+                    ..Default::default()
                 }),
                 elements: None,
             }),
             compat: Some(Compat {
                 active_initial: Some("correct".to_string()),
+                ..Default::default()
             }),
         };
 
@@ -3226,13 +3215,11 @@ mod tests {
             units: String::new(),
             inflows: vec![],
             outflows: vec![],
-            non_negative: false,
             documentation: String::new(),
-            can_be_module_input: false,
-            is_public: false,
             arrayed_equation: None,
             compat: Some(Compat {
                 active_initial: Some(String::new()),
+                ..Default::default()
             }),
         };
         let dm_stock: datamodel::Stock = stock.into();
@@ -3244,11 +3231,8 @@ mod tests {
             name: "rate".to_string(),
             equation: String::new(),
             units: String::new(),
-            non_negative: false,
             graphical_function: None,
             documentation: String::new(),
-            can_be_module_input: false,
-            is_public: false,
             arrayed_equation: Some(ArrayedEquation {
                 dimensions: vec!["Region".to_string()],
                 equation: None,
@@ -3258,6 +3242,7 @@ mod tests {
                     equation: "10".to_string(),
                     compat: Some(Compat {
                         active_initial: Some(String::new()),
+                        ..Default::default()
                     }),
                     graphical_function: None,
                 }]),

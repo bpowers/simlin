@@ -967,8 +967,6 @@ mod tests {
             documentation: String::new(),
             units: None,
             gf: None,
-            can_be_module_input: false,
-            visibility: Visibility::Private,
             ai_state: None,
             uid: None,
             compat: datamodel::Compat::default(),
@@ -1002,12 +1000,14 @@ mod tests {
             units: Some("people".to_string()),
             inflows: vec!["flow".to_string()],
             outflows: vec![],
-            non_negative: true,
-            can_be_module_input: true,
-            visibility: Visibility::Public,
             ai_state: None,
             uid: Some(10),
-            compat: datamodel::Compat::default(),
+            compat: datamodel::Compat {
+                non_negative: true,
+                can_be_module_input: true,
+                visibility: Visibility::Public,
+                ..datamodel::Compat::default()
+            },
         };
         let patch = ProjectPatch {
             project_ops: vec![],
@@ -1024,8 +1024,8 @@ mod tests {
             Variable::Stock(actual) => {
                 assert_eq!(actual.equation, stock.equation);
                 assert_eq!(actual.inflows, stock.inflows);
-                assert_eq!(actual.non_negative, stock.non_negative);
-                assert_eq!(actual.visibility, stock.visibility);
+                assert_eq!(actual.compat.non_negative, stock.compat.non_negative);
+                assert_eq!(actual.compat.visibility, stock.compat.visibility);
             }
             _ => panic!("expected stock"),
         }
@@ -1258,8 +1258,7 @@ mod tests {
                     src: "input".to_string(),
                     dst: "self.target".to_string(),
                 }],
-                can_be_module_input: false,
-                visibility: datamodel::Visibility::Private,
+                compat: datamodel::Compat::default(),
                 ai_state: None,
                 uid: None,
             }));
@@ -1273,8 +1272,6 @@ mod tests {
                 documentation: String::new(),
                 units: None,
                 gf: None,
-                can_be_module_input: false,
-                visibility: datamodel::Visibility::Private,
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
@@ -1345,8 +1342,7 @@ mod tests {
                     src: "bar".to_string(),
                     dst: "child·foo".to_string(),
                 }],
-                can_be_module_input: false,
-                visibility: datamodel::Visibility::Private,
+                compat: datamodel::Compat::default(),
                 ai_state: None,
                 uid: None,
             }));
@@ -1360,8 +1356,6 @@ mod tests {
                 documentation: String::new(),
                 units: None,
                 gf: None,
-                can_be_module_input: false,
-                visibility: datamodel::Visibility::Private,
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
@@ -1458,8 +1452,6 @@ mod tests {
                         documentation: String::new(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: datamodel::Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: datamodel::Compat::default(),
@@ -1486,8 +1478,6 @@ mod tests {
                         documentation: String::new(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: datamodel::Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: datamodel::Compat::default(),
@@ -1550,8 +1540,6 @@ mod tests {
                         documentation: String::new(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: datamodel::Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: datamodel::Compat::default(),
@@ -1565,8 +1553,6 @@ mod tests {
                         documentation: String::new(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: datamodel::Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: datamodel::Compat::default(),
@@ -1577,8 +1563,6 @@ mod tests {
                         documentation: String::new(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: datamodel::Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: datamodel::Compat::default(),
@@ -1676,9 +1660,6 @@ mod tests {
             units: None,
             inflows: vec![],
             outflows: vec![],
-            non_negative: false,
-            can_be_module_input: false,
-            visibility: Visibility::Private,
             ai_state: None,
             uid: None,
             compat: datamodel::Compat::default(),
@@ -1784,9 +1765,9 @@ mod tests {
                 assert_eq!(stock.equation, Equation::Scalar("1000".to_string()));
                 assert_eq!(stock.documentation, "Total population");
                 assert_eq!(stock.units, Some("people".to_string()));
-                assert!(stock.non_negative);
-                assert!(stock.can_be_module_input);
-                assert_eq!(stock.visibility, Visibility::Public);
+                assert!(stock.compat.non_negative);
+                assert!(stock.compat.can_be_module_input);
+                assert_eq!(stock.compat.visibility, Visibility::Public);
                 assert_eq!(stock.uid, Some(42));
             }
             _ => panic!("expected stock"),
@@ -1940,11 +1921,12 @@ mod tests {
                 documentation: String::new(),
                 units: None,
                 gf: None,
-                can_be_module_input: false,
-                visibility: Visibility::Public,
                 ai_state: None,
                 uid: None,
-                compat: datamodel::Compat::default(),
+                compat: datamodel::Compat {
+                    visibility: Visibility::Public,
+                    ..datamodel::Compat::default()
+                },
             })],
             views: vec![],
             loop_metadata: vec![],
@@ -1957,8 +1939,7 @@ mod tests {
             documentation: "A test module".to_string(),
             units: None,
             references: vec![],
-            can_be_module_input: false,
-            visibility: Visibility::Private,
+            compat: datamodel::Compat::default(),
             ai_state: None,
             uid: Some(100),
         };
@@ -1998,11 +1979,13 @@ mod tests {
                 documentation: String::new(),
                 units: None,
                 gf: None,
-                can_be_module_input: true,
-                visibility: Visibility::Public,
                 ai_state: None,
                 uid: None,
-                compat: datamodel::Compat::default(),
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    visibility: Visibility::Public,
+                    ..datamodel::Compat::default()
+                },
             })],
             views: vec![],
             loop_metadata: vec![],
@@ -2018,8 +2001,7 @@ mod tests {
                 src: "local_input".to_string(),
                 dst: "input_var".to_string(),
             }],
-            can_be_module_input: false,
-            visibility: Visibility::Private,
+            compat: datamodel::Compat::default(),
             ai_state: None,
             uid: None,
         };
@@ -2063,8 +2045,7 @@ mod tests {
             documentation: "initial".to_string(),
             units: None,
             references: vec![],
-            can_be_module_input: false,
-            visibility: Visibility::Private,
+            compat: datamodel::Compat::default(),
             ai_state: None,
             uid: Some(1),
         };
@@ -2084,8 +2065,11 @@ mod tests {
             documentation: "updated".to_string(),
             units: Some("widgets".to_string()),
             references: vec![],
-            can_be_module_input: true,
-            visibility: Visibility::Public,
+            compat: datamodel::Compat {
+                can_be_module_input: true,
+                visibility: Visibility::Public,
+                ..datamodel::Compat::default()
+            },
             ai_state: None,
             uid: Some(1),
         };
@@ -2103,8 +2087,8 @@ mod tests {
             Variable::Module(m) => {
                 assert_eq!(m.documentation, "updated");
                 assert_eq!(m.units, Some("widgets".to_string()));
-                assert!(m.can_be_module_input);
-                assert_eq!(m.visibility, Visibility::Public);
+                assert!(m.compat.can_be_module_input);
+                assert_eq!(m.compat.visibility, Visibility::Public);
             }
             _ => panic!("expected module"),
         }
@@ -2128,8 +2112,7 @@ mod tests {
             documentation: String::new(),
             units: None,
             references: vec![],
-            can_be_module_input: false,
-            visibility: Visibility::Private,
+            compat: datamodel::Compat::default(),
             ai_state: None,
             uid: None,
         };
@@ -2183,8 +2166,7 @@ mod tests {
                 src: "driver".to_string(),
                 dst: "input".to_string(),
             }],
-            can_be_module_input: false,
-            visibility: Visibility::Private,
+            compat: datamodel::Compat::default(),
             ai_state: None,
             uid: None,
         };
@@ -2203,11 +2185,13 @@ mod tests {
                         documentation: String::new(),
                         units: None,
                         gf: None,
-                        can_be_module_input: true,
-                        visibility: Visibility::Public,
                         ai_state: None,
                         uid: None,
-                        compat: datamodel::Compat::default(),
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            visibility: Visibility::Public,
+                            ..datamodel::Compat::default()
+                        },
                     })],
                 },
                 // Add the module reference to main
@@ -2250,11 +2234,13 @@ mod tests {
                 documentation: String::new(),
                 units: None,
                 gf: None,
-                can_be_module_input: true,
-                visibility: Visibility::Public,
                 ai_state: None,
                 uid: None,
-                compat: datamodel::Compat::default(),
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    visibility: Visibility::Public,
+                    ..datamodel::Compat::default()
+                },
             })],
             views: vec![],
             loop_metadata: vec![],
@@ -2271,8 +2257,7 @@ mod tests {
                 src: "old_name".to_string(),
                 dst: "self.sub_input".to_string(),
             }],
-            can_be_module_input: false,
-            visibility: Visibility::Private,
+            compat: datamodel::Compat::default(),
             ai_state: None,
             uid: None,
         };
@@ -2328,8 +2313,6 @@ mod tests {
                         documentation: String::new(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: datamodel::Compat::default(),
@@ -2391,8 +2374,6 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Private,
                     ai_state: None,
                     uid: None,
                     compat: datamodel::Compat::default(),
@@ -2422,8 +2403,6 @@ mod tests {
                         documentation: String::new(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: datamodel::Compat::default(),
@@ -2434,12 +2413,11 @@ mod tests {
                         documentation: String::new(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: datamodel::Compat {
                             active_initial: Some("base_rate * 3".to_string()),
+                            ..datamodel::Compat::default()
                         },
                     }),
                 ],
@@ -2497,8 +2475,6 @@ mod tests {
                         documentation: String::new(),
                         units: None,
                         gf: None,
-                        can_be_module_input: false,
-                        visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: datamodel::Compat::default(),
@@ -2509,13 +2485,11 @@ mod tests {
                         documentation: String::new(),
                         units: None,
                         gf: None,
-                        non_negative: false,
-                        can_be_module_input: false,
-                        visibility: Visibility::Private,
                         ai_state: None,
                         uid: None,
                         compat: datamodel::Compat {
                             active_initial: Some("capacity / 5".to_string()),
+                            ..datamodel::Compat::default()
                         },
                     }),
                 ],

@@ -131,7 +131,7 @@ describe('Stock', () => {
     expect(json.initialEquation).toBe('100');
     expect(json.inflows).toEqual(['births']);
     expect(json.outflows).toEqual(['deaths']);
-    expect(json.nonNegative).toBe(true);
+    expect(json.compat?.nonNegative).toBe(true);
     expect(json.uid).toBe(1);
 
     const restored = stockFromJson(json);

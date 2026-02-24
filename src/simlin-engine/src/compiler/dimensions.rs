@@ -547,11 +547,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Public,
                     ai_state: None,
                     uid: None,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                 })],
                 views: vec![],
                 loop_metadata: vec![],
@@ -666,11 +667,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Public,
                     ai_state: None,
                     uid: None,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                 })],
                 views: vec![],
                 loop_metadata: vec![],
@@ -760,11 +762,12 @@ mod tests {
                     documentation: String::new(),
                     units: None,
                     gf: None,
-                    can_be_module_input: false,
-                    visibility: Visibility::Public,
                     ai_state: None,
                     uid: None,
-                    compat: datamodel::Compat::default(),
+                    compat: datamodel::Compat {
+                        visibility: Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
                 })],
                 views: vec![],
                 loop_metadata: vec![],

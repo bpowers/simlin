@@ -165,17 +165,8 @@
             "type": "string"
           }
         },
-        "nonNegative": {
-          "type": "boolean"
-        },
         "documentation": {
           "type": "string"
-        },
-        "canBeModuleInput": {
-          "type": "boolean"
-        },
-        "isPublic": {
-          "type": "boolean"
         },
         "arrayedEquation": {
           "anyOf": [
@@ -251,6 +242,15 @@
             "string",
             "null"
           ]
+        },
+        "nonNegative": {
+          "type": "boolean"
+        },
+        "canBeModuleInput": {
+          "type": "boolean"
+        },
+        "isPublic": {
+          "type": "boolean"
         }
       }
     },
@@ -369,9 +369,6 @@
         "units": {
           "type": "string"
         },
-        "nonNegative": {
-          "type": "boolean"
-        },
         "graphicalFunction": {
           "anyOf": [
             {
@@ -384,12 +381,6 @@
         },
         "documentation": {
           "type": "string"
-        },
-        "canBeModuleInput": {
-          "type": "boolean"
-        },
-        "isPublic": {
-          "type": "boolean"
         },
         "arrayedEquation": {
           "anyOf": [
@@ -445,12 +436,6 @@
         "documentation": {
           "type": "string"
         },
-        "canBeModuleInput": {
-          "type": "boolean"
-        },
-        "isPublic": {
-          "type": "boolean"
-        },
         "arrayedEquation": {
           "anyOf": [
             {
@@ -501,11 +486,15 @@
             "$ref": "#/$defs/ModuleReference"
           }
         },
-        "canBeModuleInput": {
-          "type": "boolean"
-        },
-        "isPublic": {
-          "type": "boolean"
+        "compat": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Compat"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

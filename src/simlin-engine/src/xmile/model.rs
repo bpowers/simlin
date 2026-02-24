@@ -368,8 +368,11 @@ impl From<Module> for datamodel::Module {
             documentation: module.doc.unwrap_or_default(),
             units: module.units,
             references,
-            can_be_module_input: can_be_module_input(&module.access),
-            visibility: visibility(&module.access),
+            compat: datamodel::Compat {
+                can_be_module_input: can_be_module_input(&module.access),
+                visibility: visibility(&module.access),
+                ..datamodel::Compat::default()
+            },
             ai_state: ai_state_from(module.ai_state),
             uid: None,
         }
@@ -398,7 +401,7 @@ impl From<datamodel::Module> for Module {
             },
             units: module.units,
             refs,
-            access: access_from(module.visibility, module.can_be_module_input),
+            access: access_from(module.compat.visibility, module.compat.can_be_module_input),
             ai_state: None, // TODO
         }
     }
@@ -467,8 +470,6 @@ fn test_semantic_group_roundtrip() {
             documentation: String::new(),
             units: None,
             gf: None,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Private,
             ai_state: None,
             uid: None,
             compat: datamodel::Compat::default(),
