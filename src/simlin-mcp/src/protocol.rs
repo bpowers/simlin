@@ -695,4 +695,99 @@ mod tests {
 
         assert!(responses.is_empty());
     }
+
+    struct FailTool;
+
+    impl Tool for FailTool {
+        fn name(&self) -> &str {
+            "fail"
+        }
+        fn description(&self) -> &str {
+            "always fails"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        fn call(&self, _input: Value) -> anyhow::Result<Value> {
+            Err(anyhow::anyhow!("deliberate failure"))
+        }
+    }
+
+    // simlin-mcp.AC4.1: tool execution error returns isError:true with error text in content
+    #[tokio::test]
+    async fn test_async_tool_error_returns_is_error_true() {
+        let mut registry = Registry::new();
+        registry.register(Box::new(FailTool));
+        let config = test_config();
+
+        let mut transport = MockTransport::new([
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fail"}}"#,
+        ]);
+        serve_async(&mut transport, &config, &registry)
+            .await
+            .unwrap();
+        let responses = transport.responses();
+
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["result"]["isError"], true);
+        let content_text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            content_text.contains("deliberate failure"),
+            "expected 'deliberate failure' in content text, got: {content_text}"
+        );
+    }
+
+    // simlin-mcp.AC4.2: malformed JSON returns -32700 parse error
+    #[tokio::test]
+    async fn test_async_malformed_json_returns_parse_error() {
+        let registry = Registry::new();
+        let config = test_config();
+
+        let mut transport = MockTransport::new(["not valid json {"]);
+        serve_async(&mut transport, &config, &registry)
+            .await
+            .unwrap();
+        let responses = transport.responses();
+
+        assert_eq!(responses.len(), 1);
+        assert!(responses[0]["error"].is_object());
+        assert_eq!(responses[0]["error"]["code"], ERR_PARSE);
+    }
+
+    // simlin-mcp.AC4.2: request missing jsonrpc field returns -32600 invalid request
+    #[tokio::test]
+    async fn test_async_missing_jsonrpc_returns_invalid_request() {
+        let registry = Registry::new();
+        let config = test_config();
+
+        let mut transport = MockTransport::new([r#"{"id":1,"method":"ping"}"#]);
+        serve_async(&mut transport, &config, &registry)
+            .await
+            .unwrap();
+        let responses = transport.responses();
+
+        assert_eq!(responses.len(), 1);
+        assert!(responses[0]["error"].is_object());
+        assert_eq!(responses[0]["error"]["code"], ERR_INVALID_REQUEST);
+    }
+
+    // simlin-mcp.AC4.3: unknown method returns -32601 method not found
+    #[tokio::test]
+    async fn test_async_unknown_method_returns_method_not_found() {
+        let registry = Registry::new();
+        let config = test_config();
+
+        let mut transport =
+            MockTransport::new([r#"{"jsonrpc":"2.0","id":1,"method":"nonexistent"}"#]);
+        serve_async(&mut transport, &config, &registry)
+            .await
+            .unwrap();
+        let responses = transport.responses();
+
+        assert_eq!(responses.len(), 1);
+        assert!(responses[0]["error"].is_object());
+        assert_eq!(responses[0]["error"]["code"], ERR_METHOD_NOT_FOUND);
+    }
 }
