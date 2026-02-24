@@ -6,9 +6,9 @@
 //!
 //! Three tools are exposed:
 //!
-//! - `read_model`: Read a model file and return its JSON representation.
-//! - `edit_model`: Apply a patch to an existing model file.
-//! - `create_model`: Create a new empty model file.
+//! - `ReadModel`: Read a model file and return its JSON representation.
+//! - `EditModel`: Apply a patch to an existing model file.
+//! - `CreateModel`: Create a new empty model file.
 
 mod create_model;
 mod edit_model;
@@ -61,7 +61,7 @@ mod tests {
 
         assert!(registry.get("read_model").is_some());
         assert!(registry.get("edit_model").is_some());
-        assert!(registry.get("create_model").is_some());
+        assert!(registry.get("CreateModel").is_some());
 
         let defs = registry.definitions();
         assert_eq!(defs.len(), 3);
