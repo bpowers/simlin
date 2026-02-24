@@ -69,15 +69,6 @@ pub struct UpsertStockInput {
     /// Names of flows that flow out of this stock.
     #[serde(default)]
     pub outflows: Option<Vec<String>>,
-    /// When true, clamps the stock to non-negative values.
-    #[serde(default)]
-    pub non_negative: Option<bool>,
-    /// When true, this variable can be supplied as a module input.
-    #[serde(default)]
-    pub can_be_module_input: Option<bool>,
-    /// When true, this variable is visible outside its enclosing model.
-    #[serde(default)]
-    pub is_public: Option<bool>,
     /// Equation for arrayed (subscripted) stocks.
     #[serde(default)]
     pub arrayed_equation: Option<ArrayedEquationInput>,
@@ -97,18 +88,9 @@ pub struct UpsertFlowInput {
     /// Optional documentation / description.
     #[serde(default)]
     pub documentation: Option<String>,
-    /// When true, clamps the flow to non-negative values.
-    #[serde(default)]
-    pub non_negative: Option<bool>,
     /// Optional graphical (table) function.
     #[serde(default)]
     pub graphical_function: Option<ejson::GraphicalFunction>,
-    /// When true, this variable can be supplied as a module input.
-    #[serde(default)]
-    pub can_be_module_input: Option<bool>,
-    /// When true, this variable is visible outside its enclosing model.
-    #[serde(default)]
-    pub is_public: Option<bool>,
     /// Equation for arrayed (subscripted) flows.
     #[serde(default)]
     pub arrayed_equation: Option<ArrayedEquationInput>,
@@ -131,12 +113,6 @@ pub struct UpsertAuxiliaryInput {
     /// Optional graphical (table) function.
     #[serde(default)]
     pub graphical_function: Option<ejson::GraphicalFunction>,
-    /// When true, this variable can be supplied as a module input.
-    #[serde(default)]
-    pub can_be_module_input: Option<bool>,
-    /// When true, this variable is visible outside its enclosing model.
-    #[serde(default)]
-    pub is_public: Option<bool>,
     /// Equation for arrayed (subscripted) auxiliaries.
     #[serde(default)]
     pub arrayed_equation: Option<ArrayedEquationInput>,
@@ -343,12 +319,12 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
                 units: s.units.unwrap_or_default(),
                 inflows: s.inflows.unwrap_or_default(),
                 outflows: s.outflows.unwrap_or_default(),
-                non_negative: s.non_negative.unwrap_or(false),
                 documentation: s.documentation.unwrap_or_default(),
-                can_be_module_input: s.can_be_module_input.unwrap_or(false),
-                is_public: s.is_public.unwrap_or(false),
                 arrayed_equation: s.arrayed_equation.map(convert_arrayed_equation),
                 compat: None,
+                non_negative: false,
+                can_be_module_input: false,
+                is_public: false,
             };
             simlin_engine::ModelOperation::UpsertStock(json_stock.into())
         }
@@ -358,13 +334,13 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
                 name: f.name,
                 equation: f.equation,
                 units: f.units.unwrap_or_default(),
-                non_negative: f.non_negative.unwrap_or(false),
                 graphical_function: f.graphical_function,
                 documentation: f.documentation.unwrap_or_default(),
-                can_be_module_input: f.can_be_module_input.unwrap_or(false),
-                is_public: f.is_public.unwrap_or(false),
                 arrayed_equation: f.arrayed_equation.map(convert_arrayed_equation),
                 compat: None,
+                non_negative: false,
+                can_be_module_input: false,
+                is_public: false,
             };
             simlin_engine::ModelOperation::UpsertFlow(json_flow.into())
         }
@@ -376,10 +352,10 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
                 units: a.units.unwrap_or_default(),
                 graphical_function: a.graphical_function,
                 documentation: a.documentation.unwrap_or_default(),
-                can_be_module_input: a.can_be_module_input.unwrap_or(false),
-                is_public: a.is_public.unwrap_or(false),
                 arrayed_equation: a.arrayed_equation.map(convert_arrayed_equation),
                 compat: None,
+                can_be_module_input: false,
+                is_public: false,
             };
             simlin_engine::ModelOperation::UpsertAux(json_aux.into())
         }
