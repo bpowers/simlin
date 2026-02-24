@@ -2967,13 +2967,14 @@ fn build_stub_variable(
 /// Populate sub-model metadata in `all_metadata` for module variable compilation.
 /// Mirrors the monolithic `build_metadata` but works with salsa SourceModel/SourceVariable.
 /// Recursively populates metadata for nested modules.
-fn build_submodel_metadata<'a>(
-    db: &'a dyn Db,
+fn build_submodel_metadata<'arena>(
+    arena: &'arena bumpalo::Bump,
+    db: &dyn Db,
     sub_model: SourceModel,
     project: SourceProject,
     all_metadata: &mut HashMap<
         Ident<Canonical>,
-        HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'a>>,
+        HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'arena>>,
     >,
 ) {
     let sub_model_name: Ident<Canonical> = Ident::new(sub_model.name(db));
@@ -2986,10 +2987,7 @@ fn build_submodel_metadata<'a>(
     let source_vars = sub_model.variables(db);
     let project_models = project.models(db);
 
-    // We need to store parsed/lowered variables so their references live
-    // long enough. Use a leaked Box to make them 'static (acceptable since
-    // these are cached by salsa and only created once per variable).
-    let mut sub_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'a>> =
+    let mut sub_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'arena>> =
         HashMap::new();
 
     let mut sorted_names: Vec<&String> = source_vars.keys().collect();
@@ -3004,7 +3002,7 @@ fn build_submodel_metadata<'a>(
         // Build a stub variable with correct dimensions for the sub-model context
         let dims = variable_dimensions(db, *svar, project);
         let stub = build_stub_variable(db, svar, &var_ident, dims);
-        let stub: &'a crate::variable::Variable = Box::leak(Box::new(stub));
+        let stub: &'arena crate::variable::Variable = arena.alloc(stub);
 
         sub_metadata.insert(
             var_ident.clone(),
@@ -3020,7 +3018,7 @@ fn build_submodel_metadata<'a>(
             let nested_model_name = svar.model_name(db);
             let nested_canonical = canonicalize(nested_model_name);
             if let Some(nested_model) = project_models.get(nested_canonical.as_ref()) {
-                build_submodel_metadata(db, *nested_model, project, all_metadata);
+                build_submodel_metadata(arena, db, *nested_model, project, all_metadata);
             }
         }
     }
@@ -3182,6 +3180,9 @@ pub fn compile_var_fragment(
     let model_name_ident = Ident::new(model.name(db));
     let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
     let var_size = variable_size(db, var, project);
+
+    // Arena for sub-model stub variables allocated by build_submodel_metadata
+    let arena = bumpalo::Bump::new();
 
     // Assign sequential offsets for the minimal context
     let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
@@ -3524,7 +3525,7 @@ pub fn compile_var_fragment(
 
     // Populate sub-model metadata for implicit and explicit module sub-models
     for (_sub_name, sub_model) in implicit_submodels.iter().chain(extra_submodels.iter()) {
-        build_submodel_metadata(db, *sub_model, project, &mut all_metadata);
+        build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
     }
 
     // Build the mini VariableLayout for symbolization
@@ -3617,7 +3618,7 @@ pub fn compile_var_fragment(
         let sub_model_name = var.model_name(db);
         let sub_canonical = canonicalize(sub_model_name);
         if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-            build_submodel_metadata(db, *sub_model, project, &mut all_metadata);
+            build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
         }
     }
 
@@ -3877,6 +3878,9 @@ fn compile_implicit_var_fragment(
 
     let model_name_ident = Ident::new(model.name(db));
     let var_ident_canonical: Ident<Canonical> = Ident::new(&implicit_name);
+
+    // Arena for sub-model stub variables allocated by build_submodel_metadata
+    let arena = bumpalo::Bump::new();
 
     let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
         HashMap::new();
@@ -4162,7 +4166,7 @@ fn compile_implicit_var_fragment(
             // Populate sub-model metadata
             let sub_canonical = canonicalize(&dm_module.model_name);
             if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                build_submodel_metadata(db, *sub_model, project, &mut all_metadata);
+                build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
             }
         }
 
