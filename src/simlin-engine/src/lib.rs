@@ -14,6 +14,7 @@ pub use prost;
 
 #[cfg(feature = "ai_info")]
 pub mod ai_info;
+pub mod analysis;
 #[cfg(test)]
 mod array_tests;
 mod ast;

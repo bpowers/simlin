@@ -59,6 +59,7 @@ Equation text flows through these stages in order:
 
 ## Special features
 
+- **`src/analysis.rs`** - High-level model analysis API: `analyze_model()` bundles compilation, LTM loop discovery, and dominant-period calculation into a single `ModelAnalysis` result. Returns gracefully on simulation failure (empty loop fields, model snapshot intact).
 - **`src/ltm.rs`** - Loops That Matter: feedback loop detection and dominance analysis
 - **`src/ltm_augment.rs`** - Synthetic variable generation for loop instrumentation
 - **`src/diagram/`** - Diagram/sketch rendering: `elements.rs`, `connector.rs`, `flow.rs`, `render.rs`, `common.rs`, `constants.rs`, `label.rs`, `arrowhead.rs`
