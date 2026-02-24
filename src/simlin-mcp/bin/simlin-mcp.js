@@ -87,7 +87,7 @@ if (!binaryPath) {
     );
     console.error(
       `Or for development, build with: cargo build -p simlin-mcp && ` +
-        `mkdir -p bin/../vendor/${platformInfo.triple} && ` +
+        `mkdir -p vendor/${platformInfo.triple} && ` +
         `cp target/debug/simlin-mcp vendor/${platformInfo.triple}/simlin-mcp`,
     );
     process.exit(1);
