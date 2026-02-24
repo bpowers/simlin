@@ -116,7 +116,7 @@ fn module_deps(
 
                 for var in model.variables.values() {
                     if let Variable::Stock { .. } = var
-                        && let Some(deps) = initial_deps.get(&*canonicalize(var.ident()))
+                        && let Some(deps) = initial_deps.get(var.ident())
                     {
                         stock_deps.extend(deps.iter().cloned());
                     }
@@ -191,13 +191,12 @@ fn module_output_deps<'a>(
         return model_err!(Generic, output_ident.to_owned());
     }
     let deps = deps.unwrap();
-    let canonical_output = canonicalize(output_ident);
-    if !deps.contains_key(&*canonical_output) {
+    if !deps.contains_key(output_ident) {
         return model_err!(UnknownDependency, output_ident.to_owned());
     }
 
-    let output_var = &model.variables[&*canonical_output];
-    let output_deps = &deps[&*canonical_output];
+    let output_var = &model.variables[output_ident];
+    let output_deps = &deps[output_ident];
 
     let mut final_deps: BTreeSet<&str> = BTreeSet::new();
 
@@ -272,8 +271,10 @@ where
     let mut processing: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     let mut all_vars: HashMap<&'a str, &'a Variable> =
         vars.iter().map(|v| (v.ident(), *v)).collect();
-    let mut all_var_deps: HashMap<Ident<Canonical>, Option<BTreeSet<Ident<Canonical>>>> =
-        vars.iter().map(|v| (Ident::new(v.ident()), None)).collect();
+    let mut all_var_deps: HashMap<Ident<Canonical>, Option<BTreeSet<Ident<Canonical>>>> = vars
+        .iter()
+        .map(|v| (Ident::from_str_unchecked(v.ident()), None))
+        .collect();
 
     fn all_deps_inner<'a>(
         ctx: &DepContext,
@@ -285,7 +286,7 @@ where
         let var = all_vars[id];
 
         // short circuit if we've already figured this out
-        let canonical_id = Ident::new(id);
+        let canonical_id = Ident::from_str_unchecked(id);
         if all_var_deps[&canonical_id].is_some() {
             return Ok(());
         }
@@ -313,7 +314,7 @@ where
                     .get_var_loc(dep.as_str())
                     .unwrap_or_default();
                 return var_eqn_err!(
-                    Ident::new(var.ident()),
+                    Ident::from_str_unchecked(var.ident()),
                     NoAbsoluteReferences,
                     loc.start,
                     loc.end
@@ -336,7 +337,7 @@ where
                         .get_var_loc(dep.as_str())
                         .unwrap_or_default();
                     return var_eqn_err!(
-                        Ident::new(var.ident()),
+                        Ident::from_str_unchecked(var.ident()),
                         UnknownDependency,
                         loc.start,
                         loc.end
@@ -351,9 +352,9 @@ where
                     //      and then special case modules below (end of this
                     //      for loop)
                     match module_output_deps(ctx, model_name, output_ident, inputs, module_ident) {
-                        Ok(deps) => deps.into_iter().map(Ident::new).collect(),
+                        Ok(deps) => deps.into_iter().map(Ident::from_str_unchecked).collect(),
                         Err(err) => {
-                            return Err((Ident::new(var.ident()), err.into()));
+                            return Err((Ident::from_str_unchecked(var.ident()), err.into()));
                         }
                     }
                 } else {
@@ -363,7 +364,7 @@ where
                         .get_var_loc(dep.as_str())
                         .unwrap_or_default();
                     return var_eqn_err!(
-                        Ident::new(var.ident()),
+                        Ident::from_str_unchecked(var.ident()),
                         ExpectedModule,
                         loc.start,
                         loc.end
@@ -381,7 +382,7 @@ where
                         .get_var_loc(dep.as_str())
                         .unwrap_or_default();
                     return var_eqn_err!(
-                        Ident::new(var.ident()),
+                        Ident::from_str_unchecked(var.ident()),
                         UnknownDependency,
                         loc.start,
                         loc.end
@@ -398,7 +399,7 @@ where
                             None => Default::default(),
                         };
                         return var_eqn_err!(
-                            Ident::new(var.ident()),
+                            Ident::from_str_unchecked(var.ident()),
                             CircularDependency,
                             loc.start,
                             loc.end
@@ -455,7 +456,7 @@ fn resolve_relative<'a>(
     } else {
         ident
     };
-    let model = models.get(&*canonicalize(model_name))?;
+    let model = models.get(model_name)?;
 
     let input_prefix = format!("{model_name}·");
     // TODO: this is weird to do here and not before we call into this fn
@@ -468,7 +469,7 @@ fn resolve_relative<'a>(
         let submodel_var = &ident[pos + '·'.len_utf8()..];
         resolve_relative(models, submodel_name, submodel_var)
     } else {
-        Some(model.variables.get(&*canonicalize(ident))?)
+        Some(model.variables.get(ident)?)
     }
 }
 
@@ -503,7 +504,7 @@ fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Var
         };
         resolve_relative2(&ctx, submodel_var)
     } else {
-        Some(ctx.sibling_vars.get(&*canonicalize(ident))?)
+        Some(ctx.sibling_vars.get(ident)?)
     }
 }
 
@@ -1271,8 +1272,8 @@ pub fn resolve_non_private_dependencies(
         let deps_to_add = if dep.as_str().contains('·') {
             // Module output reference: "module·output"
             // Dependencies are the module's input sources
-            let module_name = canonicalize(dep.as_str().split('·').next().unwrap());
-            match model.variables.get(&*module_name) {
+            let module_name = dep.as_str().split('·').next().unwrap();
+            match model.variables.get(module_name) {
                 Some(Variable::Module { inputs, .. }) => {
                     inputs.iter().map(|input| input.src.clone()).collect()
                 }

@@ -677,7 +677,7 @@ impl Model {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, salsa::Update)]
 pub enum SimMethod {
     Euler,
     RungeKutta2,
@@ -694,7 +694,7 @@ impl Default for SimMethod {
 /// Dt is a UI thing: it can be nice to specify exact
 /// fractions that don't display neatly in the UI, like 1/3
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub enum Dt {
     Dt(f64),
     Reciprocal(f64),
@@ -708,7 +708,7 @@ impl Default for Dt {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default, salsa::Update)]
 pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,
@@ -720,7 +720,7 @@ pub struct SimSpecs {
 
 /// The elements of a dimension: either indexed (numeric) or named.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub enum DimensionElements {
     /// Indexed dimension with size (e.g., `Periods(5)` has indices 1-5)
     Indexed(u32),
@@ -734,7 +734,7 @@ pub enum DimensionElements {
 /// which means elements of DimA correspond positionally to elements of DimB.
 /// This is used when a variable indexed by DimB references variables indexed by DimA.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub struct Dimension {
     pub name: String,
     pub elements: DimensionElements,

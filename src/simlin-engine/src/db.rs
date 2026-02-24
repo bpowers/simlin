@@ -568,6 +568,22 @@ impl std::fmt::Debug for ParsedVariableResult {
     }
 }
 
+/// Cached units context -- computed once per project, reused across all variables.
+/// Subsumes the per-variable source_units_to_datamodel + source_sim_specs_to_datamodel +
+/// Context::new_with_builtins calls.
+#[salsa::tracked(returns(ref))]
+pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::units::Context {
+    let dm_units = source_units_to_datamodel(project.units(db));
+    let dm_sim_specs = source_sim_specs_to_datamodel(project.sim_specs(db));
+    crate::units::Context::new_with_builtins(&dm_units, &dm_sim_specs).unwrap_or_default()
+}
+
+/// Cached datamodel dimensions -- computed once per project.
+#[salsa::tracked(returns(ref))]
+pub fn project_datamodel_dims(db: &dyn Db, project: SourceProject) -> Vec<datamodel::Dimension> {
+    source_dims_to_datamodel(project.dimensions(db))
+}
+
 /// Per-variable tracked function for parsing. Salsa memoizes the result
 /// and only re-executes when the specific SourceVariable fields that were
 /// read have changed. This means editing one variable's equation does NOT
@@ -578,20 +594,15 @@ pub fn parse_source_variable(
     var: SourceVariable,
     project: SourceProject,
 ) -> ParsedVariableResult {
-    let dims = source_dims_to_datamodel(project.dimensions(db));
-
-    let dm_units = source_units_to_datamodel(project.units(db));
-    let dm_sim_specs = source_sim_specs_to_datamodel(project.sim_specs(db));
-    let units_ctx =
-        crate::units::Context::new_with_builtins(&dm_units, &dm_sim_specs).unwrap_or_default();
+    let dims = project_datamodel_dims(db, project);
+    let units_ctx = project_units_context(db, project);
 
     let dm_var = reconstruct_variable(db, var);
 
     let mut implicit_vars = Vec::new();
-    let variable =
-        crate::variable::parse_var(&dims, &dm_var, &mut implicit_vars, &units_ctx, |mi| {
-            Ok(Some(mi.clone()))
-        });
+    let variable = crate::variable::parse_var(dims, &dm_var, &mut implicit_vars, units_ctx, |mi| {
+        Ok(Some(mi.clone()))
+    });
 
     ParsedVariableResult {
         variable,
@@ -3829,24 +3840,21 @@ fn compile_implicit_var_fragment(
     let implicit_dm_var = parsed.implicit_vars.get(meta.index_in_parent)?;
     let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
 
-    let dm_dims = source_dims_to_datamodel(project.dimensions(db));
+    let dm_dims = project_datamodel_dims(db, project);
     let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
     let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
         .iter()
         .map(crate::dimensions::Dimension::from)
         .collect();
 
-    let dm_units = source_units_to_datamodel(project.units(db));
-    let dm_sim_specs = source_sim_specs_to_datamodel(project.sim_specs(db));
-    let units_ctx =
-        crate::units::Context::new_with_builtins(&dm_units, &dm_sim_specs).unwrap_or_default();
+    let units_ctx = project_units_context(db, project);
 
     let mut dummy_implicits = Vec::new();
     let parsed_implicit = crate::variable::parse_var(
-        &dm_dims,
+        dm_dims,
         implicit_dm_var,
         &mut dummy_implicits,
-        &units_ctx,
+        units_ctx,
         |mi| Ok(Some(mi.clone())),
     );
 
