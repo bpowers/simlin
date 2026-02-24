@@ -161,6 +161,11 @@ mod tests {
         assert_eq!(result["modelName"], "main");
         assert!(project_path.exists());
 
+        // Verify simSpecs is present in the output JSON with default values
+        assert_eq!(result["simSpecs"]["startTime"], 0.0);
+        assert_eq!(result["simSpecs"]["endTime"], 100.0);
+        assert_eq!(result["simSpecs"]["dt"], "1");
+
         let contents = std::fs::read_to_string(&project_path).unwrap();
         let project: ejson::Project = serde_json::from_str(&contents).unwrap();
         // Project name derived from filename stem
@@ -198,6 +203,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["modelName"], "main");
+
+        // Verify simSpecs is present in the output JSON with the custom values
+        assert_eq!(result["simSpecs"]["startTime"], 10.0);
+        assert_eq!(result["simSpecs"]["endTime"], 200.0);
+        assert_eq!(result["simSpecs"]["dt"], "0.5");
 
         let contents = std::fs::read_to_string(&project_path).unwrap();
         let project: ejson::Project = serde_json::from_str(&contents).unwrap();
