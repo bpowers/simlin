@@ -926,7 +926,7 @@ Given that the VDF does not store an explicit mapping:
 |----------|----------|--------|
 | Small models (no SMOOTH/DELAY) | f[10] deterministic mapping | **Working** |
 | Large models + reference sim | Time-series correlation | **Working** |
-| Large models + .mdl file | Compute compilation order from model | **Planned** |
+| Large models + .mdl file | Model-guided structural allocator (`build_model_guided_ot_map` / `to_results_with_model`) | **Baseline implemented; ordering accuracy still open** |
 | Standalone VDF (no model, no sim) | Relaxed f[10] heuristic + user assistance | **Future** |
 
 The priority path for reading WRLD3 golden output:
@@ -1122,11 +1122,11 @@ Validation status:
 
 ## 28. Non-correlation model-guided OT baseline (2026-02-24)
 
-`VdfFile::build_model_guided_ot_map(reference)` is now implemented as a
+`VdfFile::build_model_guided_ot_map(project, main_model_name)` is now implemented as a
 deterministic structural allocator that does **not** use time-series
 correlation:
 
-1. order scalar identifiers by model offset,
+1. derive model identifiers from `.mdl` compiler artifacts (`calc_flattened_offsets`),
 2. group array elements by base variable,
 3. derive name anchors from slotted names + record slot references (`f[12]`),
 4. derive candidate OT starts from record OT starts (`f[11]`),
@@ -1134,6 +1134,16 @@ correlation:
 
 This is a baseline allocator, not full Vensim compilation-order replication.
 It is intended to be improved incrementally with explicit ordering rules.
+
+Current implementation detail:
+- it maps only model groups visible in the slotted VDF name prefix (plus `time`)
+  rather than forcing all flattened model internals into OT space.
+- unresolved groups are skipped instead of hard-failing the entire map.
+
+`VdfFile::to_results_with_model(project, main_model_name)` now materializes a
+`Results` value directly from that structural map (no simulation correlation),
+enabling deterministic VDF ingestion for scalar and arrayed files with a
+loaded `.mdl` project.
 
 
 ## 29. Array-model parser/compiler unblocks (2026-02-24)

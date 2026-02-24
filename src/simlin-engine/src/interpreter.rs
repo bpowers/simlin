@@ -1435,7 +1435,44 @@ impl Simulation {
     }
 
     pub fn runlist_order(&self) -> Vec<Ident<Canonical>> {
-        calc_flattened_order(self, &self.root)
+        self.calc_flattened_order(&self.root)
+    }
+
+    /// Returns the flattened variables in global topological order.
+    pub fn calc_flattened_order(&self, module_key: &ModuleKey) -> Vec<Ident<Canonical>> {
+        let (model_name, _) = module_key;
+        let is_root = model_name.as_str() == "main";
+
+        let module = &self.modules[module_key];
+
+        let mut offsets: Vec<Ident<Canonical>> = Vec::with_capacity(module.runlist_order.len() + 1);
+
+        if is_root {
+            offsets.push(Ident::new("time"));
+        }
+
+        for ident in module.runlist_order.iter() {
+            // Check if this ident is a module reference using the module_refs map.
+            if let Some((sub_model_name, sub_input_set)) = module.module_refs.get(ident) {
+                let sub_module_key = (sub_model_name.clone(), sub_input_set.clone());
+                if self.modules.contains_key(&sub_module_key) {
+                    let sub_var_names = self.calc_flattened_order(&sub_module_key);
+                    for sub_name in sub_var_names.iter() {
+                        offsets.push(Ident::<Canonical>::from_unchecked(format!(
+                            "{}.{}",
+                            ident.to_source_repr(),
+                            sub_name.to_source_repr()
+                        )));
+                    }
+                } else {
+                    offsets.push(Ident::<Canonical>::from_unchecked(ident.to_source_repr()));
+                }
+            } else {
+                offsets.push(Ident::<Canonical>::from_unchecked(ident.to_source_repr()));
+            }
+        }
+
+        offsets
     }
 
     pub fn debug_print_runlists(&self, _model_name: &str) {
@@ -1738,42 +1775,6 @@ pub fn calc_flattened_offsets(
             1
         };
         i += size;
-    }
-
-    offsets
-}
-
-fn calc_flattened_order(sim: &Simulation, module_key: &ModuleKey) -> Vec<Ident<Canonical>> {
-    let (model_name, _) = module_key;
-    let is_root = model_name.as_str() == "main";
-
-    let module = &sim.modules[module_key];
-
-    let mut offsets: Vec<Ident<Canonical>> = Vec::with_capacity(module.runlist_order.len() + 1);
-
-    if is_root {
-        offsets.push(Ident::new("time"));
-    }
-
-    for ident in module.runlist_order.iter() {
-        // Check if this ident is a module reference using the module_refs map
-        if let Some((sub_model_name, sub_input_set)) = module.module_refs.get(ident) {
-            let sub_module_key = (sub_model_name.clone(), sub_input_set.clone());
-            if sim.modules.contains_key(&sub_module_key) {
-                let sub_var_names = calc_flattened_order(sim, &sub_module_key);
-                for sub_name in sub_var_names.iter() {
-                    offsets.push(Ident::<Canonical>::from_unchecked(format!(
-                        "{}.{}",
-                        ident.to_source_repr(),
-                        sub_name.to_source_repr()
-                    )));
-                }
-            } else {
-                offsets.push(Ident::<Canonical>::from_unchecked(ident.to_source_repr()));
-            }
-        } else {
-            offsets.push(Ident::<Canonical>::from_unchecked(ident.to_source_repr()));
-        }
     }
 
     offsets
