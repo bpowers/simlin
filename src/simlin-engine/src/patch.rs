@@ -159,9 +159,32 @@ fn canonicalize_module(module: &mut datamodel::Module) {
     canonicalize_ident(&mut module.ident);
 }
 
-fn upsert_variable(model: &mut datamodel::Model, variable: Variable) {
+fn get_uid(var: &Variable) -> Option<i32> {
+    match var {
+        Variable::Stock(s) => s.uid,
+        Variable::Flow(f) => f.uid,
+        Variable::Aux(a) => a.uid,
+        Variable::Module(m) => m.uid,
+    }
+}
+
+fn set_uid(var: &mut Variable, uid: Option<i32>) {
+    match var {
+        Variable::Stock(s) => s.uid = uid,
+        Variable::Flow(f) => f.uid = uid,
+        Variable::Aux(a) => a.uid = uid,
+        Variable::Module(m) => m.uid = uid,
+    }
+}
+
+fn upsert_variable(model: &mut datamodel::Model, mut variable: Variable) {
     let ident = canonicalize(variable.get_ident());
     if let Some(existing) = model.get_variable_mut(&ident) {
+        // View elements reference variables by UID, so preserve the existing
+        // UID when the replacement doesn't specify one.
+        if get_uid(&variable).is_none() {
+            set_uid(&mut variable, get_uid(existing));
+        }
         *existing = variable;
     } else {
         model.variables.push(variable);
@@ -2560,6 +2583,86 @@ mod tests {
                 assert!(aux.compat.active_initial.is_none());
             }
             _ => panic!("expected auxiliary variable"),
+        }
+    }
+
+    #[test]
+    fn upsert_preserves_existing_uid_when_replacement_has_none() {
+        let mut project = TestProject::new("test")
+            .stock_with_options(
+                "population",
+                "100",
+                &[],
+                &[],
+                None,
+                "",
+                false,
+                false,
+                Visibility::Private,
+                Some(42),
+            )
+            .build_datamodel();
+
+        let replacement = datamodel::Stock {
+            ident: "population".to_string(),
+            equation: Equation::Scalar("200".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        };
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::UpsertStock(replacement)],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+        let model = project.get_model("main").unwrap();
+        match model.get_variable("population").unwrap() {
+            Variable::Stock(stock) => {
+                assert_eq!(stock.equation, Equation::Scalar("200".to_string()));
+                assert_eq!(stock.uid, Some(42));
+            }
+            _ => panic!("expected stock"),
+        }
+    }
+
+    #[test]
+    fn upsert_new_variable_keeps_uid_none() {
+        let mut project = TestProject::new("test").build_datamodel();
+
+        let stock = datamodel::Stock {
+            ident: "brand_new".to_string(),
+            equation: Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        };
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::UpsertStock(stock)],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+        let model = project.get_model("main").unwrap();
+        match model.get_variable("brand_new").unwrap() {
+            Variable::Stock(stock) => {
+                assert_eq!(stock.uid, None);
+            }
+            _ => panic!("expected stock"),
         }
     }
 }
