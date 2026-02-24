@@ -47,7 +47,12 @@ async fn main() {
 
     let mut transport = StdioTransport::new();
 
-    if let Err(e) = protocol::serve_async(&mut transport, &config, &registry).await {
+    let result = protocol::serve_async(&mut transport, &config, &registry).await;
+    // Wait for the stdout writer to drain all queued responses before exiting.
+    // Without this, a client that closes stdin immediately after sending a
+    // request may not receive the response.
+    transport.shutdown().await;
+    if let Err(e) = result {
         eprintln!("simlin-mcp: fatal error: {e}");
         std::process::exit(1);
     }

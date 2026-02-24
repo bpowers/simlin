@@ -217,15 +217,15 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
         path.to_path_buf()
     };
 
+    let analysis = simlin_engine::analysis::analyze_model(&project, &model_name)
+        .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
+
     if !dry_run {
-        let json_project = ejson::Project::from(project.clone());
+        let json_project = ejson::Project::from(project);
         let json_str = serde_json::to_string_pretty(&json_project)?;
         std::fs::write(&write_path, &json_str)
             .with_context(|| format!("failed to write model to {}", write_path.display()))?;
     }
-
-    let analysis = simlin_engine::analysis::analyze_model(&project, &model_name)
-        .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
 
     let loop_dominance: Vec<LoopDominanceSummary> = analysis
         .loop_dominance
@@ -802,6 +802,42 @@ mod tests {
         assert_eq!(
             outflows, 0,
             "outflows must be empty after full-replacement upsert"
+        );
+    }
+
+    // ---- analysis before write: failed analysis leaves file unchanged ----
+
+    #[test]
+    fn failed_analysis_does_not_mutate_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let original_contents = std::fs::read_to_string(&path).unwrap();
+
+        // Requesting a nonexistent model name will cause analyze_model to fail.
+        // The simSpecs change should NOT be persisted to disk.
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "modelName": "nonexistent",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 999.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            }
+        }));
+
+        assert!(
+            result.is_err(),
+            "EditModel with a nonexistent model name must return an error"
+        );
+
+        let after_contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            original_contents, after_contents,
+            "file must not be modified when analysis fails"
         );
     }
 

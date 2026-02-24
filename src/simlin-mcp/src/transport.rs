@@ -32,9 +32,13 @@ pub trait Transport {
 /// the receiver end of the stdin channel and the sender end of the stdout
 /// channel, so the protocol dispatcher can call `recv`/`send` without
 /// touching raw I/O directly.
+///
+/// The writer task's `JoinHandle` is stored so that `shutdown()` can wait
+/// for all queued responses to be flushed before the process exits.
 pub struct StdioTransport {
     stdin_rx: mpsc::Receiver<String>,
     stdout_tx: mpsc::UnboundedSender<String>,
+    writer_handle: tokio::task::JoinHandle<()>,
 }
 
 impl StdioTransport {
@@ -66,7 +70,8 @@ impl StdioTransport {
 
         // Stdout writer task: receives serialized responses and writes them
         // as newline-terminated lines to stdout, flushing after each write.
-        tokio::spawn(async move {
+        // The task exits when stdout_rx is closed (i.e., when stdout_tx is dropped).
+        let writer_handle = tokio::spawn(async move {
             let mut stdout = tokio::io::stdout();
             while let Some(msg) = stdout_rx.recv().await {
                 let line = format!("{msg}\n");
@@ -82,7 +87,18 @@ impl StdioTransport {
         Self {
             stdin_rx,
             stdout_tx,
+            writer_handle,
         }
+    }
+
+    /// Signal the writer task that no more messages are coming and wait for
+    /// it to finish flushing all queued responses.
+    ///
+    /// Must be called after `serve_async` returns to ensure that responses
+    /// queued just before EOF are written before the process exits.
+    pub async fn shutdown(self) {
+        drop(self.stdout_tx);
+        let _ = self.writer_handle.await;
     }
 }
 
