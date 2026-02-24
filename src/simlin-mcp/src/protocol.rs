@@ -684,16 +684,39 @@ mod tests {
         assert_eq!(responses[3]["result"]["isError"], false);
     }
 
-    // simlin-mcp.AC1.3: EOF (None from recv) causes clean shutdown
-    #[test]
-    fn test_async_eof_clean_shutdown() {
-        let registry = Registry::new();
+    // simlin-mcp.AC1.3: EOF (None from recv) causes clean shutdown after processing requests
+    #[tokio::test]
+    async fn test_async_eof_clean_shutdown() {
+        let mut registry = Registry::new();
+        registry.register(Box::new(EchoTool));
         let config = test_config();
 
-        // Empty input -- transport immediately returns None
-        let responses = async_roundtrip(&registry, &config, &[]);
+        let mut transport = MockTransport::new([
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"test","version":"1.0"},"capabilities":{}}}"#,
+        ]);
 
-        assert!(responses.is_empty());
+        // serve_async must return Ok when the transport signals EOF, even after
+        // processing one or more requests. Wrapping in a timeout catches hangs.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            serve_async(&mut transport, &config, &registry),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "serve_async hung instead of returning on EOF"
+        );
+        assert!(
+            result.unwrap().is_ok(),
+            "serve_async returned an error on clean EOF"
+        );
+
+        let responses = transport.responses();
+        // The initialize request should have received a response before EOF.
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["result"]["protocolVersion"], PROTOCOL_VERSION);
     }
 
     struct FailTool;

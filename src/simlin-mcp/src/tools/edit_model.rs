@@ -522,7 +522,11 @@ mod tests {
                     "upsertAuxiliary": {
                         "name": "birth_rate",
                         "equation": "0.03",
-                        "documentation": "Annual birth rate"
+                        "documentation": "Annual birth rate",
+                        "graphicalFunction": {
+                            "points": [[0.0, 0.01], [0.5, 0.03], [1.0, 0.05]],
+                            "kind": "continuous"
+                        }
                     }
                 }
             ]
@@ -538,6 +542,16 @@ mod tests {
         let auxes = model["auxiliaries"].as_array().unwrap();
         assert_eq!(auxes.len(), 1);
         assert_eq!(auxes[0]["name"], "birth_rate");
+
+        // The graphical function must appear on the returned auxiliary.
+        let gf = &auxes[0]["graphicalFunction"];
+        assert!(
+            gf.is_object(),
+            "graphicalFunction should be present on the auxiliary"
+        );
+        let points = gf["points"].as_array().unwrap();
+        assert_eq!(points.len(), 3, "expected 3 graphical function points");
+        assert_eq!(gf["kind"], "continuous");
     }
 
     // ---- AC3.6: removeVariable ----
