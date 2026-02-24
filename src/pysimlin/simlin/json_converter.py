@@ -560,13 +560,21 @@ def _create_converter() -> cattrs.Converter:
         compat_dict = d.get("compat")
         if compat_dict:
             compat = conv.structure(compat_dict, Compat)
-        # Fall back to legacy top-level fields if compat is absent
-        if compat is None:
-            nn = d.get("nonNegative", False)
-            cbmi = d.get("canBeModuleInput", False)
-            is_pub = d.get("isPublic", False)
-            if nn or cbmi or is_pub:
-                compat = Compat(non_negative=nn, can_be_module_input=cbmi, is_public=is_pub)
+        # OR-merge legacy top-level fields with compat booleans so that
+        # old files with compat only for activeInitial don't lose flags.
+        nn = d.get("nonNegative", False) or (compat.non_negative if compat else False)
+        cbmi = d.get("canBeModuleInput", False) or (compat.can_be_module_input if compat else False)
+        is_pub = d.get("isPublic", False) or (compat.is_public if compat else False)
+        ai = compat.active_initial if compat else None
+        if nn or cbmi or is_pub or ai is not None:
+            compat = Compat(
+                active_initial=ai,
+                non_negative=nn,
+                can_be_module_input=cbmi,
+                is_public=is_pub,
+            )
+        else:
+            compat = None
         return Stock(
             name=d["name"],
             inflows=d.get("inflows", []),
@@ -593,12 +601,19 @@ def _create_converter() -> cattrs.Converter:
         compat_dict = d.get("compat")
         if compat_dict:
             compat = conv.structure(compat_dict, Compat)
-        if compat is None:
-            nn = d.get("nonNegative", False)
-            cbmi = d.get("canBeModuleInput", False)
-            is_pub = d.get("isPublic", False)
-            if nn or cbmi or is_pub:
-                compat = Compat(non_negative=nn, can_be_module_input=cbmi, is_public=is_pub)
+        nn = d.get("nonNegative", False) or (compat.non_negative if compat else False)
+        cbmi = d.get("canBeModuleInput", False) or (compat.can_be_module_input if compat else False)
+        is_pub = d.get("isPublic", False) or (compat.is_public if compat else False)
+        ai = compat.active_initial if compat else None
+        if nn or cbmi or is_pub or ai is not None:
+            compat = Compat(
+                active_initial=ai,
+                non_negative=nn,
+                can_be_module_input=cbmi,
+                is_public=is_pub,
+            )
+        else:
+            compat = None
         return Flow(
             name=d["name"],
             uid=d.get("uid", 0),
@@ -624,11 +639,17 @@ def _create_converter() -> cattrs.Converter:
         compat_dict = d.get("compat")
         if compat_dict:
             compat = conv.structure(compat_dict, Compat)
-        if compat is None:
-            cbmi = d.get("canBeModuleInput", False)
-            is_pub = d.get("isPublic", False)
-            if cbmi or is_pub:
-                compat = Compat(can_be_module_input=cbmi, is_public=is_pub)
+        cbmi = d.get("canBeModuleInput", False) or (compat.can_be_module_input if compat else False)
+        is_pub = d.get("isPublic", False) or (compat.is_public if compat else False)
+        ai = compat.active_initial if compat else None
+        if cbmi or is_pub or ai is not None:
+            compat = Compat(
+                active_initial=ai,
+                can_be_module_input=cbmi,
+                is_public=is_pub,
+            )
+        else:
+            compat = None
         return Auxiliary(
             name=d["name"],
             uid=d.get("uid", 0),
@@ -649,11 +670,17 @@ def _create_converter() -> cattrs.Converter:
         compat_dict = d.get("compat")
         if compat_dict:
             compat = conv.structure(compat_dict, Compat)
-        if compat is None:
-            cbmi = d.get("canBeModuleInput", False)
-            is_pub = d.get("isPublic", False)
-            if cbmi or is_pub:
-                compat = Compat(can_be_module_input=cbmi, is_public=is_pub)
+        cbmi = d.get("canBeModuleInput", False) or (compat.can_be_module_input if compat else False)
+        is_pub = d.get("isPublic", False) or (compat.is_public if compat else False)
+        ai = compat.active_initial if compat else None
+        if cbmi or is_pub or ai is not None:
+            compat = Compat(
+                active_initial=ai,
+                can_be_module_input=cbmi,
+                is_public=is_pub,
+            )
+        else:
+            compat = None
         return Module(
             name=d["name"],
             model_name=d["modelName"],

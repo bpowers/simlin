@@ -669,11 +669,10 @@ impl From<Stock> for datamodel::Stock {
             active_initial: c
                 .and_then(|c| c.active_initial.clone())
                 .filter(|s| !s.is_empty()),
-            non_negative: c.map(|c| c.non_negative).unwrap_or(stock.non_negative),
-            can_be_module_input: c
-                .map(|c| c.can_be_module_input)
-                .unwrap_or(stock.can_be_module_input),
-            visibility: if c.map(|c| c.is_public).unwrap_or(stock.is_public) {
+            non_negative: c.map(|c| c.non_negative).unwrap_or(false) || stock.non_negative,
+            can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false)
+                || stock.can_be_module_input,
+            visibility: if c.map(|c| c.is_public).unwrap_or(false) || stock.is_public {
                 datamodel::Visibility::Public
             } else {
                 datamodel::Visibility::Private
@@ -743,11 +742,10 @@ impl From<Flow> for datamodel::Flow {
                         .and_then(|a| a.compat.as_ref())
                         .and_then(|c| c.active_initial.clone())
                 }),
-            non_negative: c.map(|c| c.non_negative).unwrap_or(flow.non_negative),
-            can_be_module_input: c
-                .map(|c| c.can_be_module_input)
-                .unwrap_or(flow.can_be_module_input),
-            visibility: if c.map(|c| c.is_public).unwrap_or(flow.is_public) {
+            non_negative: c.map(|c| c.non_negative).unwrap_or(false) || flow.non_negative,
+            can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false)
+                || flow.can_be_module_input,
+            visibility: if c.map(|c| c.is_public).unwrap_or(false) || flow.is_public {
                 datamodel::Visibility::Public
             } else {
                 datamodel::Visibility::Private
@@ -813,10 +811,9 @@ impl From<Auxiliary> for datamodel::Aux {
                         .and_then(|c| c.active_initial.clone())
                 }),
             non_negative: false,
-            can_be_module_input: c
-                .map(|c| c.can_be_module_input)
-                .unwrap_or(aux.can_be_module_input),
-            visibility: if c.map(|c| c.is_public).unwrap_or(aux.is_public) {
+            can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false)
+                || aux.can_be_module_input,
+            visibility: if c.map(|c| c.is_public).unwrap_or(false) || aux.is_public {
                 datamodel::Visibility::Public
             } else {
                 datamodel::Visibility::Private
@@ -899,10 +896,9 @@ impl From<Module> for datamodel::Module {
             compat: datamodel::Compat {
                 active_initial: None,
                 non_negative: false,
-                can_be_module_input: c
-                    .map(|c| c.can_be_module_input)
-                    .unwrap_or(module.can_be_module_input),
-                visibility: if c.map(|c| c.is_public).unwrap_or(module.is_public) {
+                can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false)
+                    || module.can_be_module_input,
+                visibility: if c.map(|c| c.is_public).unwrap_or(false) || module.is_public {
                     datamodel::Visibility::Public
                 } else {
                     datamodel::Visibility::Private
@@ -3333,5 +3329,88 @@ mod tests {
             }
             _ => panic!("expected Arrayed equation"),
         }
+    }
+
+    #[test]
+    fn legacy_booleans_merge_when_compat_present_for_active_initial() {
+        // Simulates a legacy file with compat only for activeInitial and
+        // boolean flags at top level. The top-level true values must survive
+        // even though compat's booleans default to false.
+        let stock = Stock {
+            uid: 0,
+            name: "pop".to_string(),
+            initial_equation: "100".to_string(),
+            units: String::new(),
+            inflows: vec![],
+            outflows: vec![],
+            documentation: String::new(),
+            arrayed_equation: None,
+            compat: Some(Compat {
+                active_initial: Some("50".to_string()),
+                ..Default::default()
+            }),
+            non_negative: true,
+            can_be_module_input: true,
+            is_public: true,
+        };
+        let dm: datamodel::Stock = stock.into();
+        assert!(dm.compat.non_negative, "legacy non_negative lost");
+        assert!(
+            dm.compat.can_be_module_input,
+            "legacy can_be_module_input lost"
+        );
+        assert_eq!(
+            dm.compat.visibility,
+            datamodel::Visibility::Public,
+            "legacy is_public lost"
+        );
+        assert_eq!(dm.compat.active_initial.as_deref(), Some("50"));
+    }
+
+    #[test]
+    fn legacy_booleans_merge_for_flow_and_aux() {
+        let flow = Flow {
+            uid: 0,
+            name: "rate".to_string(),
+            equation: "10".to_string(),
+            units: String::new(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: None,
+            compat: Some(Compat {
+                active_initial: Some("5".to_string()),
+                ..Default::default()
+            }),
+            non_negative: true,
+            can_be_module_input: false,
+            is_public: true,
+        };
+        let dm_flow: datamodel::Flow = flow.into();
+        assert!(
+            dm_flow.compat.non_negative,
+            "flow: legacy non_negative lost"
+        );
+        assert_eq!(dm_flow.compat.visibility, datamodel::Visibility::Public);
+
+        let aux = Auxiliary {
+            uid: 0,
+            name: "val".to_string(),
+            equation: "1".to_string(),
+            units: String::new(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: None,
+            compat: Some(Compat {
+                active_initial: Some("0".to_string()),
+                ..Default::default()
+            }),
+            can_be_module_input: true,
+            is_public: false,
+        };
+        let dm_aux: datamodel::Aux = aux.into();
+        assert!(
+            dm_aux.compat.can_be_module_input,
+            "aux: legacy can_be_module_input lost"
+        );
     }
 }

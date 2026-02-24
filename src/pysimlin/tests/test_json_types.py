@@ -488,6 +488,54 @@ class TestOptionalFieldSerialization:
         assert result_nn.get("compat", {}).get("nonNegative") is True
 
 
+class TestLegacyCompatMerge:
+    """Tests that legacy top-level booleans merge with compat."""
+
+    def test_legacy_booleans_preserved_when_compat_has_active_initial(self) -> None:
+        """Legacy nonNegative/canBeModuleInput/isPublic must not be dropped
+        when compat exists only for activeInitial."""
+        stock_json: dict[str, Any] = {
+            "name": "pop",
+            "initialEquation": "100",
+            "inflows": [],
+            "outflows": [],
+            "compat": {"activeInitial": "50"},
+            "nonNegative": True,
+            "canBeModuleInput": True,
+            "isPublic": True,
+        }
+        stock = converter.structure(stock_json, Stock)
+        assert stock.compat is not None
+        assert stock.compat.non_negative is True, "legacy nonNegative lost"
+        assert stock.compat.can_be_module_input is True, "legacy canBeModuleInput lost"
+        assert stock.compat.is_public is True, "legacy isPublic lost"
+        assert stock.compat.active_initial == "50"
+
+    def test_flow_legacy_merge(self) -> None:
+        flow_json: dict[str, Any] = {
+            "name": "rate",
+            "equation": "10",
+            "compat": {"activeInitial": "5"},
+            "nonNegative": True,
+            "isPublic": True,
+        }
+        flow = converter.structure(flow_json, Flow)
+        assert flow.compat is not None
+        assert flow.compat.non_negative is True
+        assert flow.compat.is_public is True
+
+    def test_aux_legacy_merge(self) -> None:
+        aux_json: dict[str, Any] = {
+            "name": "val",
+            "equation": "1",
+            "compat": {"activeInitial": "0"},
+            "canBeModuleInput": True,
+        }
+        aux = converter.structure(aux_json, Auxiliary)
+        assert aux.compat is not None
+        assert aux.compat.can_be_module_input is True
+
+
 class TestNullValueHandling:
     """Tests for correct handling of explicit null values in JSON."""
 
