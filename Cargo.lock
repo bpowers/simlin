@@ -2073,6 +2073,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "simlin-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "schemars",
+ "serde",
+ "serde_json",
+ "simlin-engine",
+]
+
+[[package]]
 name = "simplecss"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

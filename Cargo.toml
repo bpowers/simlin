@@ -5,6 +5,7 @@ members = [
     "src/libsimlin",
     "src/simlin-cli",
     "src/simlin-engine",
+    "src/simlin-mcp",
     "src/xmutil",
 ]
 

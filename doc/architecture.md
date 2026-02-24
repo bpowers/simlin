@@ -39,6 +39,9 @@ Express.js backend. Firebase Auth (`authn.ts`), Firestore persistence (`models/d
 ### `src/xmutil` (C++ and Rust)
 Rust wrapper around Bob Eberlein's xmutil C++ tool for converting Vensim models to XMILE. Only used for testing -- `src/simlin-engine/src/mdl` now fully implements this in Rust.
 
+### `src/simlin-mcp` (Rust)
+MCP (Model Context Protocol) server exposing the simulation engine as tools for AI assistants. Pure Rust, stdio JSON-RPC 2.0. Tools: `read_model`, `edit_model`, `create_model`. JSON schemas auto-derived via schemars.
+
 ### `src/simlin-cli` (Rust)
 CLI for simulating and converting models, mostly for testing/debugging.
 
@@ -59,9 +62,9 @@ xmutil (standalone)
   ^
   | (optional, feature-gated)
 simlin-engine
-  ^
-  |
-simlin (libsimlin)
+  ^       ^
+  |       |
+simlin    simlin-mcp
   ^
   |
 simlin-cli (also depends on simlin-engine directly)
@@ -69,6 +72,7 @@ simlin-cli (also depends on simlin-engine directly)
 
 - `simlin-engine` -> `xmutil` (optional, feature-gated via `dep:xmutil`)
 - `simlin` (libsimlin) -> `simlin-engine`
+- `simlin-mcp` -> `simlin-engine`
 - `simlin-cli` -> `simlin-engine`, `simlin`
 - `xmutil` -> (none)
 

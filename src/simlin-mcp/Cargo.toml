@@ -1,0 +1,20 @@
+[package]
+name = "simlin-mcp"
+version = "0.1.0"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2024"
+description = "MCP server exposing the Simlin simulation engine"
+
+[[bin]]
+name = "simlin-mcp"
+path = "src/main.rs"
+
+[dependencies]
+simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["schema"] }
+schemars = { version = "1", features = ["preserve_order"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[dev-dependencies]
