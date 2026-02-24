@@ -19,3 +19,4 @@ anyhow = "1"
 tokio = { version = "1", features = ["macros", "io-util", "io-std", "sync", "rt-multi-thread"] }
 
 [dev-dependencies]
+tempfile = "3"

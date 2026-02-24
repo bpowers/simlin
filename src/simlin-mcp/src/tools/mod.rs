@@ -13,6 +13,7 @@
 mod create_model;
 mod edit_model;
 mod read_model;
+pub mod types;
 
 use std::io::BufReader;
 use std::path::Path;
@@ -59,7 +60,7 @@ mod tests {
         let mut registry = Registry::new();
         register_all(&mut registry);
 
-        assert!(registry.get("read_model").is_some());
+        assert!(registry.get("ReadModel").is_some());
         assert!(registry.get("edit_model").is_some());
         assert!(registry.get("CreateModel").is_some());
 
