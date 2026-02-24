@@ -83,6 +83,8 @@ export interface JsonStock {
   documentation?: string;
   arrayedEquation?: JsonArrayedEquation;
   compat?: JsonCompat;
+  /** @deprecated Legacy field; read from compat.nonNegative in new format. */
+  nonNegative?: boolean;
 }
 
 /**
@@ -97,6 +99,8 @@ export interface JsonFlow {
   documentation?: string;
   arrayedEquation?: JsonArrayedEquation;
   compat?: JsonCompat;
+  /** @deprecated Legacy field; read from compat.nonNegative in new format. */
+  nonNegative?: boolean;
 }
 
 /**
