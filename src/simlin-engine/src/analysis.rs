@@ -32,23 +32,24 @@ pub struct ModelAnalysis {
 
 /// Build a `json::Model` from the named model in a `datamodel::Project`, with
 /// the `views` field cleared so the snapshot is diagram-free.
-fn model_snapshot(project: &datamodel::Project, model_name: &str) -> json::Model {
-    let model = project
-        .get_model(model_name)
-        .cloned()
-        .or_else(|| project.models.first().cloned())
-        .unwrap_or_else(|| datamodel::Model {
-            name: model_name.to_string(),
-            sim_specs: None,
-            variables: vec![],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-        });
+///
+/// Returns `None` when the requested model name is not found and is not the
+/// "main" convenience alias.
+fn model_snapshot(project: &datamodel::Project, model_name: &str) -> Option<json::Model> {
+    let model = if model_name == "main" {
+        // "main" is a convenience alias: fall back to first model when no model
+        // is explicitly named "main".
+        project
+            .get_model(model_name)
+            .cloned()
+            .or_else(|| project.models.first().cloned())
+    } else {
+        project.get_model(model_name).cloned()
+    }?;
 
     let mut json_model: json::Model = model.into();
     json_model.views.clear();
-    json_model
+    Some(json_model)
 }
 
 /// Analyse a system-dynamics model: run LTM discovery and return the
@@ -57,11 +58,16 @@ fn model_snapshot(project: &datamodel::Project, model_name: &str) -> json::Model
 /// On any failure in the LTM pipeline (malformed equations, arrays, etc.)
 /// `Ok` is returned with the model snapshot but empty loop fields, giving
 /// callers graceful degradation rather than a hard error.
+///
+/// Returns `Err` when `model_name` does not match any model in the project,
+/// unless `model_name` is `"main"` (which falls back to the first model for
+/// single-model project convenience).
 pub fn analyze_model(
     project: &datamodel::Project,
     model_name: &str,
 ) -> Result<ModelAnalysis, String> {
-    let json_model = model_snapshot(project, model_name);
+    let json_model = model_snapshot(project, model_name)
+        .ok_or_else(|| format!("model '{model_name}' not found in project"))?;
 
     let loop_result = run_ltm_pipeline(project, model_name);
 
@@ -448,6 +454,45 @@ mod tests {
         assert!(
             analysis.dominant_loops_by_period.is_empty(),
             "dominant_loops_by_period must be empty when simulation fails"
+        );
+    }
+
+    // ---- unknown model name returns Err ----
+
+    #[test]
+    fn unknown_model_name_returns_err() {
+        let project = crate::test_common::TestProject::new("main")
+            .stock("population", "1000", &["births"], &["deaths"], None)
+            .flow("births", "population * 0.03", None)
+            .flow("deaths", "population * 0.01", None)
+            .build_datamodel();
+
+        let result = analyze_model(&project, "nonexistent");
+        assert!(
+            result.is_err(),
+            "analyze_model with an unknown model name must return Err, got Ok"
+        );
+        let err = result.err().unwrap();
+        assert!(
+            err.contains("nonexistent"),
+            "error message should mention the missing model name, got: {err}"
+        );
+    }
+
+    // ---- "main" alias falls back to first model ----
+
+    #[test]
+    fn main_alias_falls_back_to_first_model() {
+        // Build a project whose single model is named "Main" (not "main").
+        // The "main" alias must still find it via get_model's special-case logic.
+        let project = crate::test_common::TestProject::new("Main")
+            .stock("population", "1000", &[], &[], None)
+            .build_datamodel();
+
+        let result = analyze_model(&project, "main");
+        assert!(
+            result.is_ok(),
+            "analyze_model with 'main' alias must succeed even when the model is named 'Main'"
         );
     }
 }
