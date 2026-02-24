@@ -487,6 +487,14 @@ class TestOptionalFieldSerialization:
         result_nn = converter.unstructure(flow_nn)
         assert result_nn.get("compat", {}).get("nonNegative") is True
 
+    def test_empty_graphical_function_not_dropped(self) -> None:
+        """An empty GraphicalFunction should not be elided like Compat."""
+        flow = Flow(name="test", graphical_function=GraphicalFunction())
+        result = converter.unstructure(flow)
+        assert "graphicalFunction" in result, (
+            "empty GraphicalFunction should not be dropped"
+        )
+
 
 class TestLegacyCompatMerge:
     """Tests that legacy top-level booleans merge with compat."""

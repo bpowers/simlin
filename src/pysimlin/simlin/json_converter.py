@@ -126,9 +126,11 @@ def _make_omit_default_hook(
 
             unstructured = conv.unstructure(val)
 
-            # Optional fields whose value unstructures to an empty dict are
-            # semantically equivalent to None (e.g. Compat with all defaults).
-            if default is None and unstructured == {}:
+            # A Compat with all-default fields unstructures to {} but is
+            # semantically equivalent to None.  Only apply this to the
+            # 'compat' field to avoid dropping other optional objects
+            # (e.g. GraphicalFunction) that may legitimately be empty.
+            if json_name == "compat" and default is None and unstructured == {}:
                 continue
 
             result[json_name] = unstructured
