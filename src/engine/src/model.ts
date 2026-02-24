@@ -144,7 +144,6 @@ function jsonVarToVariable(v: JsonVarWithType): Variable {
         outflows: v.outflows || [],
         units: v.units || undefined,
         documentation: v.documentation || undefined,
-        nonNegative: v.compat?.nonNegative || false,
         arrayedEquation: v.arrayedEquation,
         compat: v.compat || undefined,
       };
@@ -161,7 +160,6 @@ function jsonVarToVariable(v: JsonVarWithType): Variable {
         equation: extractEquation(v.equation, v.arrayedEquation),
         units: v.units || undefined,
         documentation: v.documentation || undefined,
-        nonNegative: v.compat?.nonNegative || false,
         graphicalFunction: gf,
         arrayedEquation: v.arrayedEquation,
         compat: v.compat || undefined,
@@ -192,6 +190,7 @@ function jsonVarToVariable(v: JsonVarWithType): Variable {
         type: 'module',
         name: v.name,
         modelName: v.modelName,
+        compat: v.compat || undefined,
       };
       return m;
     }
