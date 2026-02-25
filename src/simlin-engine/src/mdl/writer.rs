@@ -952,6 +952,7 @@ impl MdlWriter {
         let model = &project.models[0];
         self.write_equations_section(model, project);
         self.write_sketch_section(&model.views);
+        self.write_settings_section(project);
         Ok(self.buf)
     }
 
@@ -1130,6 +1131,77 @@ impl MdlWriter {
             }
         }
     }
+
+    /// Write the settings section of the MDL file.
+    ///
+    /// The settings section follows the sketch section and starts with the
+    /// `///---\\\` separator and `:L<%^E!@` marker. It contains type-coded
+    /// setting lines that Vensim reads to restore UI and simulation state.
+    fn write_settings_section(&mut self, project: &datamodel::Project) {
+        let sim_specs = project
+            .models
+            .first()
+            .and_then(|m| m.sim_specs.as_ref())
+            .unwrap_or(&project.sim_specs);
+
+        self.buf.push_str("///---\\\\\\\n");
+        self.buf.push_str(":L<%^E!@\n");
+
+        // Type 22: Unit equivalences
+        for unit in &project.units {
+            if unit.disabled {
+                continue;
+            }
+            self.buf.push_str("22:");
+            if let Some(eq) = &unit.equation {
+                write!(self.buf, "{},", eq).unwrap();
+            }
+            self.buf.push_str(&unit.name);
+            for alias in &unit.aliases {
+                write!(self.buf, ",{}", alias).unwrap();
+            }
+            self.buf.push('\n');
+        }
+
+        // Type 15: Integration method
+        let method_code = match sim_specs.sim_method {
+            datamodel::SimMethod::Euler => 0,
+            datamodel::SimMethod::RungeKutta4 => 1,
+            datamodel::SimMethod::RungeKutta2 => 3,
+        };
+        writeln!(self.buf, "15:0,0,0,{},0,0", method_code).unwrap();
+
+        // Type 19: Display settings (Vensim default)
+        self.buf.push_str("19:100,0\n");
+        // Type 27: Font size (Vensim default)
+        self.buf.push_str("27:0,\n");
+        // Type 34: Optimization settings (Vensim default)
+        self.buf.push_str("34:0,\n");
+        // Type 4: Time variable name
+        self.buf.push_str("4:Time\n");
+        // Type 35: Date format name
+        self.buf.push_str("35:Date\n");
+        // Type 36: Date format pattern
+        self.buf.push_str("36:YYYY-MM-DD\n");
+        // Type 37-39: Calendar date origin (2000-01-01)
+        self.buf.push_str("37:2000\n");
+        self.buf.push_str("38:1\n");
+        self.buf.push_str("39:1\n");
+        // Type 40: Calendar type
+        self.buf.push_str("40:2\n");
+        // Type 41-42: Calendar sub-settings
+        self.buf.push_str("41:0\n");
+        self.buf.push_str("42:0\n");
+
+        // Types 24/25/26: Time bounds (initial, final, time step)
+        writeln!(self.buf, "24:{}", format_f64(sim_specs.start)).unwrap();
+        writeln!(self.buf, "25:{}", format_f64(sim_specs.stop)).unwrap();
+        let dt_val = match &sim_specs.dt {
+            datamodel::Dt::Dt(v) => format_f64(*v),
+            datamodel::Dt::Reciprocal(v) => format!("1/{}", format_f64(*v)),
+        };
+        writeln!(self.buf, "26:{}", dt_val).unwrap();
+    }
 }
 
 /// Build a map from element UID to (x, y) position for link control point computation.
@@ -1185,7 +1257,7 @@ mod tests {
     use crate::ast::Expr0;
     use crate::datamodel::{
         Aux, Compat, DimensionElements, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
-        GraphicalFunctionScale, Stock, Variable,
+        GraphicalFunctionScale, SimMethod, Stock, Unit, Variable,
     };
     use crate::lexer::LexerType;
 
@@ -2560,5 +2632,269 @@ mod tests {
         let (_cx, cy) = compute_control_point(from, to, 45.0);
         // The control point should be above or below the line, not on it
         assert_ne!(cy, 100, "arc control point should be off the straight line");
+    }
+
+    // ---- Phase 6 Task 1: Settings section ----
+
+    #[test]
+    fn settings_section_starts_with_marker() {
+        let project = make_project(vec![make_model(vec![])]);
+        let mut writer = MdlWriter::new();
+        writer.write_settings_section(&project);
+        let output = writer.buf;
+        assert!(
+            output.starts_with("///---\\\\\\\n:L<%^E!@\n"),
+            "settings section should start with settings separator and marker, got: {:?}",
+            &output[..output.len().min(40)]
+        );
+    }
+
+    #[test]
+    fn settings_section_contains_type_15_euler() {
+        let project = make_project(vec![make_model(vec![])]);
+        let mut writer = MdlWriter::new();
+        writer.write_settings_section(&project);
+        let output = writer.buf;
+        assert!(
+            output.contains("15:0,0,0,0,0,0\n"),
+            "Euler method should emit method code 0, got: {:?}",
+            output
+        );
+    }
+
+    #[test]
+    fn settings_section_contains_type_15_rk4() {
+        let mut project = make_project(vec![make_model(vec![])]);
+        project.sim_specs.sim_method = SimMethod::RungeKutta4;
+        let mut writer = MdlWriter::new();
+        writer.write_settings_section(&project);
+        let output = writer.buf;
+        assert!(
+            output.contains("15:0,0,0,1,0,0\n"),
+            "RK4 method should emit method code 1, got: {:?}",
+            output
+        );
+    }
+
+    #[test]
+    fn settings_section_contains_type_15_rk2() {
+        let mut project = make_project(vec![make_model(vec![])]);
+        project.sim_specs.sim_method = SimMethod::RungeKutta2;
+        let mut writer = MdlWriter::new();
+        writer.write_settings_section(&project);
+        let output = writer.buf;
+        assert!(
+            output.contains("15:0,0,0,3,0,0\n"),
+            "RK2 method should emit method code 3, got: {:?}",
+            output
+        );
+    }
+
+    #[test]
+    fn settings_section_contains_type_22_units() {
+        let mut project = make_project(vec![make_model(vec![])]);
+        project.units = vec![
+            Unit {
+                name: "Dollar".to_owned(),
+                equation: Some("$".to_owned()),
+                disabled: false,
+                aliases: vec!["Dollars".to_owned(), "$s".to_owned()],
+            },
+            Unit {
+                name: "Hour".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec!["Hours".to_owned()],
+            },
+        ];
+        let mut writer = MdlWriter::new();
+        writer.write_settings_section(&project);
+        let output = writer.buf;
+        assert!(
+            output.contains("22:$,Dollar,Dollars,$s\n"),
+            "should contain Dollar unit equivalence, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("22:Hour,Hours\n"),
+            "should contain Hour unit equivalence, got: {:?}",
+            output
+        );
+    }
+
+    #[test]
+    fn settings_section_skips_disabled_units() {
+        let mut project = make_project(vec![make_model(vec![])]);
+        project.units = vec![Unit {
+            name: "Disabled".to_owned(),
+            equation: None,
+            disabled: true,
+            aliases: vec![],
+        }];
+        let mut writer = MdlWriter::new();
+        writer.write_settings_section(&project);
+        let output = writer.buf;
+        assert!(
+            !output.contains("22:Disabled"),
+            "disabled units should not appear in output"
+        );
+    }
+
+    #[test]
+    fn settings_section_contains_common_defaults() {
+        let project = make_project(vec![make_model(vec![])]);
+        let mut writer = MdlWriter::new();
+        writer.write_settings_section(&project);
+        let output = writer.buf;
+        // Type 4 (Time), Type 19 (display), Type 24/25/26 (time bounds)
+        assert!(output.contains("\n4:Time\n"), "should have Type 4 (Time)");
+        assert!(
+            output.contains("\n19:"),
+            "should have Type 19 (display settings)"
+        );
+        assert!(
+            output.contains("\n24:"),
+            "should have Type 24 (initial time)"
+        );
+        assert!(output.contains("\n25:"), "should have Type 25 (final time)");
+        assert!(output.contains("\n26:"), "should have Type 26 (time step)");
+    }
+
+    #[test]
+    fn settings_roundtrip_integration_method() {
+        // Write settings, then parse them back and check integration method
+        for method in [
+            SimMethod::Euler,
+            SimMethod::RungeKutta4,
+            SimMethod::RungeKutta2,
+        ] {
+            let mut project = make_project(vec![make_model(vec![])]);
+            project.sim_specs.sim_method = method;
+            let mut writer = MdlWriter::new();
+            writer.write_settings_section(&project);
+            let output = writer.buf;
+
+            let parser = crate::mdl::settings::PostEquationParser::new(&output);
+            let settings = parser.parse_settings();
+            assert_eq!(
+                settings.integration_method, method,
+                "integration method should roundtrip for {:?}",
+                method
+            );
+        }
+    }
+
+    #[test]
+    fn settings_roundtrip_unit_equivalences() {
+        let mut project = make_project(vec![make_model(vec![])]);
+        project.units = vec![
+            Unit {
+                name: "Dollar".to_owned(),
+                equation: Some("$".to_owned()),
+                disabled: false,
+                aliases: vec!["Dollars".to_owned()],
+            },
+            Unit {
+                name: "Hour".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec!["Hours".to_owned(), "Hr".to_owned()],
+            },
+        ];
+        let mut writer = MdlWriter::new();
+        writer.write_settings_section(&project);
+        let output = writer.buf;
+
+        let parser = crate::mdl::settings::PostEquationParser::new(&output);
+        let settings = parser.parse_settings();
+        assert_eq!(settings.unit_equivs.len(), 2);
+        assert_eq!(settings.unit_equivs[0].name, "Dollar");
+        assert_eq!(settings.unit_equivs[0].equation, Some("$".to_string()));
+        assert_eq!(settings.unit_equivs[0].aliases, vec!["Dollars"]);
+        assert_eq!(settings.unit_equivs[1].name, "Hour");
+        assert_eq!(settings.unit_equivs[1].equation, None);
+        assert_eq!(settings.unit_equivs[1].aliases, vec!["Hours", "Hr"]);
+    }
+
+    // ---- Phase 6 Task 2: Full file assembly ----
+
+    #[test]
+    fn full_assembly_has_all_three_sections() {
+        let var = make_aux("x", "5", Some("Units"), "A constant");
+        let elements = vec![ViewElement::Aux(view_element::Aux {
+            name: "x".to_string(),
+            uid: 1,
+            x: 100.0,
+            y: 100.0,
+            label_side: view_element::LabelSide::Bottom,
+        })];
+        let model = datamodel::Model {
+            name: "default".to_owned(),
+            sim_specs: None,
+            variables: vec![var],
+            views: vec![View::StockFlow(datamodel::StockFlow {
+                elements,
+                view_box: Default::default(),
+                zoom: 1.0,
+                use_lettered_polarity: false,
+            })],
+            loop_metadata: vec![],
+            groups: vec![],
+        };
+        let project = make_project(vec![model]);
+
+        let result = crate::mdl::project_to_mdl(&project);
+        assert!(
+            result.is_ok(),
+            "project_to_mdl should succeed: {:?}",
+            result
+        );
+        let mdl = result.unwrap();
+
+        // Section 1: Equations -- contains variable entry
+        assert!(mdl.contains("x="), "should contain equation for x");
+        // Equations terminator
+        assert!(
+            mdl.contains("\\\\\\---/// Sketch information"),
+            "should have equations terminator"
+        );
+
+        // Section 2: Sketch -- V300 header and elements
+        assert!(mdl.contains("V300"), "should have V300 sketch header");
+        assert!(mdl.contains("*View 1"), "should have view title");
+
+        // Section 3: Settings -- marker and type codes
+        assert!(mdl.contains(":L<%^E!@"), "should have settings marker");
+        assert!(mdl.contains("15:"), "should have Type 15 line");
+
+        // Sections should be in order: equations, sketch, settings
+        let eq_term = mdl.find("\\\\\\---/// Sketch").unwrap();
+        let v300 = mdl.find("V300").unwrap();
+        let sketch_term = mdl.find("///---\\\\\\").unwrap();
+        let settings_marker = mdl.find(":L<%^E!@").unwrap();
+        assert!(eq_term < v300, "equations should come before sketch");
+        assert!(
+            v300 < sketch_term,
+            "V300 should come before sketch terminator"
+        );
+        assert!(
+            sketch_term < settings_marker,
+            "sketch terminator should come before settings marker"
+        );
+    }
+
+    // ---- Phase 6 Task 3: compat wrapper ----
+
+    #[test]
+    fn compat_to_mdl_matches_project_to_mdl() {
+        let var = make_aux("x", "5", Some("Units"), "A constant");
+        let project = make_project(vec![make_model(vec![var])]);
+
+        let direct = crate::mdl::project_to_mdl(&project).unwrap();
+        let compat = crate::compat::to_mdl(&project).unwrap();
+        assert_eq!(
+            direct, compat,
+            "compat::to_mdl should produce same result as mdl::project_to_mdl"
+        );
     }
 }
