@@ -9,8 +9,12 @@
 //! converting canonical (underscored, lowercase) identifiers back to
 //! MDL-style spaced names and using MDL operator syntax.
 
+use std::fmt::Write;
+
 use crate::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp, Visitor};
 use crate::builtins::UntypedBuiltinFn;
+use crate::datamodel::{self, DimensionElements, Equation, GraphicalFunction};
+use crate::lexer::LexerType;
 
 /// Replace underscores with spaces -- the reverse of `space_to_underbar()`.
 fn underbar_to_space(name: &str) -> String {
@@ -497,10 +501,229 @@ pub fn expr0_to_mdl(expr: &Expr0) -> String {
     visitor.walk(expr)
 }
 
+/// Convert an XMILE equation string to MDL text via Expr0 round-trip.
+/// Falls back to the raw string (with underscores->spaces) on parse failure
+/// or empty input.
+fn equation_to_mdl(xmile_eqn: &str) -> String {
+    if xmile_eqn.is_empty() {
+        return String::new();
+    }
+    match Expr0::new(xmile_eqn, LexerType::Equation) {
+        Ok(Some(ast)) => expr0_to_mdl(&ast),
+        _ => underbar_to_space(xmile_eqn),
+    }
+}
+
+/// Data equations use `:=` instead of `=`.  Detect by checking if the
+/// raw XMILE equation string begins with one of Vensim's data-fetch
+/// function tokens (stored as `{GET_...}` after canonicalization).
+fn is_data_equation(xmile_eqn: &str) -> bool {
+    let s = xmile_eqn.trim_start_matches('{');
+    s.starts_with("GET_DIRECT")
+        || s.starts_with("GET_XLS")
+        || s.starts_with("GET_VDF")
+        || s.starts_with("GET_DATA")
+        || s.starts_with("GET_123")
+}
+
+/// Write a graphical-function (lookup table) body into `buf`.
+///
+/// Format: `([(xmin,ymin)-(xmax,ymax)],(x1,y1),(x2,y2),...)`
+fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
+    let xs: Vec<f64> = match &gf.x_points {
+        Some(pts) => pts.clone(),
+        None => {
+            let n = gf.y_points.len();
+            if n <= 1 {
+                vec![gf.x_scale.min]
+            } else {
+                let step = (gf.x_scale.max - gf.x_scale.min) / (n - 1) as f64;
+                (0..n).map(|i| gf.x_scale.min + step * i as f64).collect()
+            }
+        }
+    };
+
+    write!(
+        buf,
+        "([({},{})-({},{})]",
+        format_f64(gf.x_scale.min),
+        format_f64(gf.y_scale.min),
+        format_f64(gf.x_scale.max),
+        format_f64(gf.y_scale.max),
+    )
+    .unwrap();
+
+    for (x, y) in xs.iter().zip(gf.y_points.iter()) {
+        write!(buf, ",({},{})", format_f64(*x), format_f64(*y)).unwrap();
+    }
+    buf.push(')');
+}
+
+/// Format f64 for MDL output: omit trailing `.0` for whole numbers.
+fn format_f64(v: f64) -> String {
+    if v == v.trunc() && v.abs() < 1e15 {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
+}
+
+/// Write a single MDL variable entry.
+///
+/// The standard MDL format for a variable entry is:
+/// ```text
+/// Name=\n\tequation\n\t~\tunits\n\t~\tcomment\n\t|
+/// ```
+pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
+    let (ident, equation, units, doc, gf) = match var {
+        datamodel::Variable::Stock(s) => (&s.ident, &s.equation, &s.units, &s.documentation, None),
+        datamodel::Variable::Flow(f) => (
+            &f.ident,
+            &f.equation,
+            &f.units,
+            &f.documentation,
+            f.gf.as_ref(),
+        ),
+        datamodel::Variable::Aux(a) => (
+            &a.ident,
+            &a.equation,
+            &a.units,
+            &a.documentation,
+            a.gf.as_ref(),
+        ),
+        datamodel::Variable::Module(_) => return,
+    };
+
+    match equation {
+        Equation::Scalar(eqn) => {
+            write_single_entry(buf, ident, eqn, &[], units, doc, gf);
+        }
+        Equation::ApplyToAll(dims, eqn) => {
+            let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
+            write_single_entry(buf, ident, eqn, &dim_names, units, doc, gf);
+        }
+        Equation::Arrayed(dims, elements) => {
+            write_arrayed_entries(buf, ident, dims, elements, units, doc);
+        }
+    }
+}
+
+/// Write one MDL entry (scalar or apply-to-all).
+fn write_single_entry(
+    buf: &mut String,
+    ident: &str,
+    eqn: &str,
+    dims: &[&str],
+    units: &Option<String>,
+    doc: &str,
+    gf: Option<&GraphicalFunction>,
+) {
+    let name = underbar_to_space(ident);
+    let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+
+    if dims.is_empty() {
+        write!(buf, "{name}{assign_op}").unwrap();
+    } else {
+        let dim_strs: Vec<String> = dims.iter().map(|d| underbar_to_space(d)).collect();
+        write!(buf, "{name}[{}]{assign_op}", dim_strs.join(",")).unwrap();
+    }
+
+    if let Some(gf) = gf {
+        // Lookup table replaces the equation
+        buf.push_str("\n\t");
+        write_lookup(buf, gf);
+    } else {
+        let mdl_eqn = equation_to_mdl(eqn);
+        buf.push_str("\n\t");
+        buf.push_str(&mdl_eqn);
+    }
+
+    write_units_and_comment(buf, units, doc);
+}
+
+/// Write arrayed (per-element) entries.
+fn write_arrayed_entries(
+    buf: &mut String,
+    ident: &str,
+    _dims: &[String],
+    elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    units: &Option<String>,
+    doc: &str,
+) {
+    let name = underbar_to_space(ident);
+    let last_idx = elements.len().saturating_sub(1);
+
+    for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
+        let elem_display = underbar_to_space(elem_name);
+        let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+
+        write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
+
+        if let Some(gf) = elem_gf {
+            buf.push_str("\n\t");
+            write_lookup(buf, gf);
+        } else {
+            let mdl_eqn = equation_to_mdl(eqn);
+            buf.push_str("\n\t");
+            buf.push_str(&mdl_eqn);
+        }
+
+        if i < last_idx {
+            // Intermediate arrayed entries use the terse `~~|` separator
+            buf.push_str("\n\t~~|\n");
+        } else {
+            // Last element gets the full units/comment block
+            write_units_and_comment(buf, units, doc);
+        }
+    }
+}
+
+/// Append the `~\tunits\n\t~\tcomment\n\t|` trailer.
+fn write_units_and_comment(buf: &mut String, units: &Option<String>, doc: &str) {
+    buf.push_str("\n\t~\t");
+    if let Some(u) = units {
+        buf.push_str(u);
+    }
+    buf.push_str("\n\t~\t");
+    buf.push_str(doc);
+    buf.push_str("\n\t|");
+}
+
+/// Write a dimension definition in MDL format.
+///
+/// Named:   `DimName: Elem1, Elem2, Elem3 ~~|`
+/// Indexed: `DimName: (1-N) ~~|`
+/// Mapped:  `DimName: Elem1, Elem2 -> MappedDim ~~|`
+pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
+    let name = underbar_to_space(&dim.name);
+    write!(buf, "{name}:").unwrap();
+
+    match &dim.elements {
+        DimensionElements::Named(elems) => {
+            buf.push_str("\n\t");
+            let elem_strs: Vec<String> = elems.iter().map(|e| underbar_to_space(e)).collect();
+            buf.push_str(&elem_strs.join(", "));
+        }
+        DimensionElements::Indexed(size) => {
+            write!(buf, "\n\t(1-{size})").unwrap();
+        }
+    }
+
+    if let Some(maps_to) = &dim.maps_to {
+        write!(buf, " -> {}", underbar_to_space(maps_to)).unwrap();
+    }
+
+    buf.push_str("\n\t~~|\n");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ast::Expr0;
+    use crate::datamodel::{
+        Aux, Compat, DimensionElements, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
+        GraphicalFunctionScale, Stock, Variable,
+    };
     use crate::lexer::LexerType;
 
     /// Parse XMILE equation text to Expr0, then convert to MDL and assert.
@@ -767,5 +990,377 @@ mod tests {
     fn pattern_fallthrough_no_match() {
         // An If expression that doesn't match any pattern should use mechanical conversion
         assert_mdl("if a > b then c else d", "IF THEN ELSE(a > b, c, d)");
+    }
+
+    // ---- Task 1: Variable entry formatting (scalar) ----
+
+    fn make_aux(ident: &str, eqn: &str, units: Option<&str>, doc: &str) -> Variable {
+        Variable::Aux(Aux {
+            ident: ident.to_owned(),
+            equation: Equation::Scalar(eqn.to_owned()),
+            documentation: doc.to_owned(),
+            units: units.map(|u| u.to_owned()),
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        })
+    }
+
+    fn make_stock(ident: &str, eqn: &str, units: Option<&str>, doc: &str) -> Variable {
+        Variable::Stock(Stock {
+            ident: ident.to_owned(),
+            equation: Equation::Scalar(eqn.to_owned()),
+            documentation: doc.to_owned(),
+            units: units.map(|u| u.to_owned()),
+            inflows: vec![],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        })
+    }
+
+    fn make_gf() -> GraphicalFunction {
+        GraphicalFunction {
+            kind: GraphicalFunctionKind::Continuous,
+            x_points: Some(vec![0.0, 1.0, 2.0]),
+            y_points: vec![0.0, 0.5, 1.0],
+            x_scale: GraphicalFunctionScale { min: 0.0, max: 2.0 },
+            y_scale: GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        }
+    }
+
+    #[test]
+    fn scalar_aux_entry() {
+        let var = make_aux("characteristic_time", "10", Some("Minutes"), "How long");
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert_eq!(
+            buf,
+            "characteristic time=\n\t10\n\t~\tMinutes\n\t~\tHow long\n\t|"
+        );
+    }
+
+    #[test]
+    fn scalar_aux_no_units() {
+        let var = make_aux("rate", "a + b", None, "");
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert_eq!(buf, "rate=\n\ta + b\n\t~\t\n\t~\t\n\t|");
+    }
+
+    #[test]
+    fn scalar_stock_integ() {
+        let var = make_stock(
+            "teacup_temperature",
+            "integ(-heat_loss_to_room, 180)",
+            Some("Degrees Fahrenheit"),
+            "Temperature of tea",
+        );
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert_eq!(
+            buf,
+            "teacup temperature=\n\tINTEG(-heat loss to room, 180)\n\t~\tDegrees Fahrenheit\n\t~\tTemperature of tea\n\t|"
+        );
+    }
+
+    #[test]
+    fn scalar_aux_with_lookup() {
+        let gf = make_gf();
+        let var = Variable::Aux(Aux {
+            ident: "effect_of_x".to_owned(),
+            equation: Equation::Scalar("TIME".to_owned()),
+            documentation: "Lookup effect".to_owned(),
+            units: None,
+            gf: Some(gf),
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert_eq!(
+            buf,
+            "effect of x=\n\t([(0,0)-(2,1)],(0,0),(1,0.5),(2,1))\n\t~\t\n\t~\tLookup effect\n\t|"
+        );
+    }
+
+    #[test]
+    fn lookup_without_explicit_x_points() {
+        let gf = GraphicalFunction {
+            kind: GraphicalFunctionKind::Continuous,
+            x_points: None,
+            y_points: vec![0.0, 0.5, 1.0],
+            x_scale: GraphicalFunctionScale {
+                min: 0.0,
+                max: 10.0,
+            },
+            y_scale: GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        };
+        let var = Variable::Aux(Aux {
+            ident: "tbl".to_owned(),
+            equation: Equation::Scalar(String::new()),
+            documentation: String::new(),
+            units: None,
+            gf: Some(gf),
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        // x_points auto-generated: 0, 5, 10
+        assert_eq!(
+            buf,
+            "tbl=\n\t([(0,0)-(10,1)],(0,0),(5,0.5),(10,1))\n\t~\t\n\t~\t\n\t|"
+        );
+    }
+
+    // ---- Task 2: Subscripted equation formatting ----
+
+    #[test]
+    fn apply_to_all_entry() {
+        let var = Variable::Aux(Aux {
+            ident: "rate_a".to_owned(),
+            equation: Equation::ApplyToAll(
+                vec!["one_dimensional_subscript".to_owned()],
+                "100".to_owned(),
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert_eq!(
+            buf,
+            "rate a[one dimensional subscript]=\n\t100\n\t~\t\n\t~\t\n\t|"
+        );
+    }
+
+    #[test]
+    fn apply_to_all_multi_dim() {
+        let var = Variable::Aux(Aux {
+            ident: "matrix_a".to_owned(),
+            equation: Equation::ApplyToAll(
+                vec!["dim_a".to_owned(), "dim_b".to_owned()],
+                "0".to_owned(),
+            ),
+            documentation: String::new(),
+            units: Some("Dmnl".to_owned()),
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert_eq!(buf, "matrix a[dim a,dim b]=\n\t0\n\t~\tDmnl\n\t~\t\n\t|");
+    }
+
+    #[test]
+    fn arrayed_per_element() {
+        let var = Variable::Aux(Aux {
+            ident: "rate_a".to_owned(),
+            equation: Equation::Arrayed(
+                vec!["one_dimensional_subscript".to_owned()],
+                vec![
+                    ("entry_1".to_owned(), "0.01".to_owned(), None, None),
+                    ("entry_2".to_owned(), "0.2".to_owned(), None, None),
+                    ("entry_3".to_owned(), "0.3".to_owned(), None, None),
+                ],
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert_eq!(
+            buf,
+            "rate a[entry 1]=\n\t0.01\n\t~~|\nrate a[entry 2]=\n\t0.2\n\t~~|\nrate a[entry 3]=\n\t0.3\n\t~\t\n\t~\t\n\t|"
+        );
+    }
+
+    #[test]
+    fn arrayed_subscript_names_with_underscores() {
+        let var = Variable::Aux(Aux {
+            ident: "demand".to_owned(),
+            equation: Equation::Arrayed(
+                vec!["region".to_owned()],
+                vec![
+                    ("north_america".to_owned(), "100".to_owned(), None, None),
+                    ("south_america".to_owned(), "200".to_owned(), None, None),
+                ],
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        // Underscored element names should appear with spaces
+        assert!(buf.contains("[north america]"));
+        assert!(buf.contains("[south america]"));
+    }
+
+    #[test]
+    fn arrayed_with_per_element_lookup() {
+        let gf = make_gf();
+        let var = Variable::Aux(Aux {
+            ident: "tbl".to_owned(),
+            equation: Equation::Arrayed(
+                vec!["dim".to_owned()],
+                vec![
+                    ("a".to_owned(), String::new(), None, Some(gf.clone())),
+                    ("b".to_owned(), "5".to_owned(), None, None),
+                ],
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert!(buf.contains("tbl[a]=\n\t([(0,0)-(2,1)]"));
+        assert!(buf.contains("tbl[b]=\n\t5"));
+    }
+
+    // ---- Task 3: Dimension definitions ----
+
+    #[test]
+    fn dimension_def_named() {
+        let dim = datamodel::Dimension::named(
+            "dim_a".to_owned(),
+            vec!["a1".to_owned(), "a2".to_owned(), "a3".to_owned()],
+        );
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+        assert_eq!(buf, "dim a:\n\ta1, a2, a3\n\t~~|\n");
+    }
+
+    #[test]
+    fn dimension_def_indexed() {
+        let dim = datamodel::Dimension::indexed("dim_b".to_owned(), 5);
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+        assert_eq!(buf, "dim b:\n\t(1-5)\n\t~~|\n");
+    }
+
+    #[test]
+    fn dimension_def_with_mapping() {
+        let dim = datamodel::Dimension {
+            name: "dim_c".to_owned(),
+            elements: DimensionElements::Named(vec![
+                "dc1".to_owned(),
+                "dc2".to_owned(),
+                "dc3".to_owned(),
+            ]),
+            maps_to: Some("dim_b".to_owned()),
+        };
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+        assert_eq!(buf, "dim c:\n\tdc1, dc2, dc3 -> dim b\n\t~~|\n");
+    }
+
+    // ---- Task 3: Data equations ----
+
+    #[test]
+    fn data_equation_uses_data_equals() {
+        let var = make_aux(
+            "direct_data_down",
+            "{GET_DIRECT_DATA('data_down.csv',',','A','B2')}",
+            None,
+            "",
+        );
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        // Data equations use := instead of =
+        assert!(buf.contains("direct data down:="), "expected := in: {buf}");
+    }
+
+    #[test]
+    fn non_data_equation_uses_equals() {
+        let var = make_aux("x", "42", None, "");
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert!(buf.starts_with("x="), "expected = in: {buf}");
+    }
+
+    #[test]
+    fn is_data_equation_detection() {
+        assert!(is_data_equation("{GET_DIRECT_DATA('f',',','A','B')}"));
+        assert!(is_data_equation("{GET_XLS_DATA('f','s','A','B')}"));
+        assert!(is_data_equation("{GET_VDF_DATA('f','v')}"));
+        assert!(is_data_equation("{GET_DATA_AT_TIME('v', 5)}"));
+        assert!(is_data_equation("{GET_123_DATA('f','s','A','B')}"));
+        assert!(!is_data_equation("100"));
+        assert!(!is_data_equation("integ(a, b)"));
+        assert!(!is_data_equation(""));
+    }
+
+    #[test]
+    fn format_f64_whole_numbers() {
+        assert_eq!(format_f64(0.0), "0");
+        assert_eq!(format_f64(1.0), "1");
+        assert_eq!(format_f64(-5.0), "-5");
+        assert_eq!(format_f64(100.0), "100");
+    }
+
+    #[test]
+    fn format_f64_fractional() {
+        assert_eq!(format_f64(0.5), "0.5");
+        assert_eq!(format_f64(2.71), "2.71");
+    }
+
+    #[test]
+    fn flow_with_lookup() {
+        let gf = make_gf();
+        let var = Variable::Flow(Flow {
+            ident: "flow_rate".to_owned(),
+            equation: Equation::Scalar("TIME".to_owned()),
+            documentation: "A flow".to_owned(),
+            units: Some("widgets/year".to_owned()),
+            gf: Some(gf),
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert!(buf.contains("flow rate=\n\t([(0,0)-(2,1)]"));
+        assert!(buf.contains("~\twidgets/year"));
+        assert!(buf.contains("~\tA flow"));
+    }
+
+    #[test]
+    fn module_variable_produces_no_output() {
+        let var = Variable::Module(datamodel::Module {
+            ident: "mod1".to_owned(),
+            model_name: "model1".to_owned(),
+            documentation: String::new(),
+            units: None,
+            references: vec![],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert!(buf.is_empty());
     }
 }
