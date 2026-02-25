@@ -829,25 +829,37 @@ fn write_link_element(
         .unwrap_or((0, 0));
     let to_pos = elem_positions.get(&link.to_uid).copied().unwrap_or((0, 0));
 
-    let (ctrl_x, ctrl_y) = match &link.shape {
-        LinkShape::Straight => (0, 0),
-        LinkShape::Arc(canvas_angle) => compute_control_point(from_pos, to_pos, *canvas_angle),
+    match &link.shape {
+        LinkShape::Straight => {
+            write!(
+                buf,
+                "1,{},{},{},0,0,{},0,0,0,0,-1--1--1,,1|(0,0)|",
+                link.uid, link.from_uid, link.to_uid, polarity_val,
+            )
+            .unwrap();
+        }
+        LinkShape::Arc(canvas_angle) => {
+            let (ctrl_x, ctrl_y) = compute_control_point(from_pos, to_pos, *canvas_angle);
+            write!(
+                buf,
+                "1,{},{},{},0,0,{},0,0,0,0,-1--1--1,,1|({},{})|",
+                link.uid, link.from_uid, link.to_uid, polarity_val, ctrl_x, ctrl_y,
+            )
+            .unwrap();
+        }
         LinkShape::MultiPoint(points) => {
-            if let Some(pt) = points.first() {
-                (pt.x as i32, pt.y as i32)
-            } else {
-                (0, 0)
+            let npoints = points.len();
+            write!(
+                buf,
+                "1,{},{},{},0,0,{},0,0,0,0,-1--1--1,,{}|",
+                link.uid, link.from_uid, link.to_uid, polarity_val, npoints,
+            )
+            .unwrap();
+            for pt in points {
+                write!(buf, "({},{})|", pt.x as i32, pt.y as i32).unwrap();
             }
         }
-    };
-
-    let npoints = 1;
-    write!(
-        buf,
-        "1,{},{},{},0,0,{},0,0,0,0,-1--1--1,,{}|({},{})|",
-        link.uid, link.from_uid, link.to_uid, polarity_val, npoints, ctrl_x, ctrl_y,
-    )
-    .unwrap();
+    }
 }
 
 /// Reverse the `angle_from_points` computation: given two endpoint positions
@@ -1069,6 +1081,7 @@ impl MdlWriter {
 
     /// Write a single StockFlow view as sketch elements.
     fn write_stock_flow_view(&mut self, sf: &datamodel::StockFlow) {
+        // datamodel::StockFlow does not carry a view title; "View 1" matches Vensim's default.
         self.buf.push_str("*View 1\n");
         self.buf.push_str(
             "$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0\n",
@@ -1120,13 +1133,22 @@ impl MdlWriter {
 }
 
 /// Build a map from element UID to (x, y) position for link control point computation.
+///
+/// For flow elements, `write_flow_element` emits a synthetic valve at `flow.uid - 1`.
+/// We register that valve UID here so that any connector whose endpoint was originally
+/// the valve (before MDL->datamodel conversion) can still resolve a position.
 fn build_element_positions(elements: &[ViewElement]) -> HashMap<i32, (i32, i32)> {
     let mut positions = HashMap::new();
     for elem in elements {
         let (uid, x, y) = match elem {
             ViewElement::Aux(a) => (a.uid, a.x as i32, a.y as i32),
             ViewElement::Stock(s) => (s.uid, s.x as i32, s.y as i32),
-            ViewElement::Flow(f) => (f.uid, f.x as i32, f.y as i32),
+            ViewElement::Flow(f) => {
+                // Also register the synthetic valve UID so connectors that
+                // reference the valve position can resolve without falling back to (0,0).
+                positions.insert(f.uid - 1, (f.x as i32, f.y as i32));
+                (f.uid, f.x as i32, f.y as i32)
+            }
             ViewElement::Cloud(c) => (c.uid, c.x as i32, c.y as i32),
             ViewElement::Alias(a) => (a.uid, a.x as i32, a.y as i32),
             ViewElement::Module(m) => (m.uid, m.x as i32, m.y as i32),
@@ -2262,6 +2284,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sketch_link_multipoint_emits_all_points() {
+        let points = vec![
+            view_element::FlowPoint {
+                x: 150.0,
+                y: 120.0,
+                attached_to_uid: None,
+            },
+            view_element::FlowPoint {
+                x: 170.0,
+                y: 140.0,
+                attached_to_uid: None,
+            },
+            view_element::FlowPoint {
+                x: 190.0,
+                y: 160.0,
+                attached_to_uid: None,
+            },
+        ];
+        let link = view_element::Link {
+            uid: 4,
+            from_uid: 1,
+            to_uid: 2,
+            shape: LinkShape::MultiPoint(points),
+            polarity: None,
+        };
+        let mut positions = HashMap::new();
+        positions.insert(1, (100, 100));
+        positions.insert(2, (200, 200));
+        let mut buf = String::new();
+        write_link_element(&mut buf, &link, &positions, false);
+        assert!(
+            buf.contains("3|(150,120)|(170,140)|(190,160)|"),
+            "multipoint should emit all three points: {buf}"
+        );
+    }
+
     // ---- Phase 5 Task 3: Complete sketch section assembly ----
 
     #[test]
@@ -2416,8 +2475,8 @@ mod tests {
         // Count element types in output
         let lines: Vec<&str> = output.lines().collect();
         let type10_count = lines.iter().filter(|l| l.starts_with("10,")).count();
-        let _type11_count = lines.iter().filter(|l| l.starts_with("11,")).count();
-        let _type12_count = lines.iter().filter(|l| l.starts_with("12,")).count();
+        let type11_count = lines.iter().filter(|l| l.starts_with("11,")).count();
+        let type12_count = lines.iter().filter(|l| l.starts_with("12,")).count();
         let type1_count = lines.iter().filter(|l| l.starts_with("1,")).count();
 
         // Teacup has: 1 stock (Teacup_Temperature), 3 auxes (Heat_Loss_to_Room,
@@ -2428,6 +2487,14 @@ mod tests {
         assert!(
             type10_count >= 2,
             "should have at least 2 type-10 elements (variables/stocks), got {type10_count}"
+        );
+        assert!(
+            type11_count >= 1,
+            "should have at least 1 type-11 element (valve), got {type11_count}"
+        );
+        assert!(
+            type12_count >= 1,
+            "should have at least 1 type-12 element (cloud/comment), got {type12_count}"
         );
         assert!(
             type1_count >= 1,
