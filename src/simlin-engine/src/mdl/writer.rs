@@ -614,14 +614,23 @@ fn format_f64(v: f64) -> String {
 /// Name=\n\tequation\n\t~\tunits\n\t~\tcomment\n\t|
 /// ```
 pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
-    let (ident, equation, units, doc, gf) = match var {
-        datamodel::Variable::Stock(s) => (&s.ident, &s.equation, &s.units, &s.documentation, None),
+    match var {
+        datamodel::Variable::Stock(s) => {
+            write_stock_variable(buf, s);
+            return;
+        }
+        datamodel::Variable::Module(_) => return,
+        _ => {}
+    }
+
+    let (ident, equation, units, doc, gf, compat) = match var {
         datamodel::Variable::Flow(f) => (
             &f.ident,
             &f.equation,
             &f.units,
             &f.documentation,
             f.gf.as_ref(),
+            &f.compat,
         ),
         datamodel::Variable::Aux(a) => (
             &a.ident,
@@ -629,21 +638,78 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
             &a.units,
             &a.documentation,
             a.gf.as_ref(),
+            &a.compat,
         ),
-        datamodel::Variable::Module(_) => return,
+        _ => unreachable!(),
     };
 
     match equation {
         Equation::Scalar(eqn) => {
-            write_single_entry(buf, ident, eqn, &[], units, doc, gf);
+            let effective_eqn = wrap_active_initial(eqn, compat);
+            write_single_entry(buf, ident, &effective_eqn, &[], units, doc, gf);
         }
         Equation::ApplyToAll(dims, eqn) => {
             let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
-            write_single_entry(buf, ident, eqn, &dim_names, units, doc, gf);
+            let effective_eqn = wrap_active_initial(eqn, compat);
+            write_single_entry(buf, ident, &effective_eqn, &dim_names, units, doc, gf);
         }
         Equation::Arrayed(dims, elements) => {
             write_arrayed_entries(buf, ident, dims, elements, units, doc);
         }
+    }
+}
+
+/// Reconstruct a stock's INTEG equation from its decomposed fields.
+///
+/// The datamodel stores stocks with the initial value in `equation` and
+/// inflows/outflows as separate string vectors.  The MDL format requires
+/// `INTEG(net_flow, initial_value)`.
+fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
+    let mut net_flow = String::new();
+    for (i, inflow) in stock.inflows.iter().enumerate() {
+        if i > 0 {
+            net_flow.push('+');
+        }
+        net_flow.push_str(&underbar_to_space(inflow));
+    }
+    for outflow in &stock.outflows {
+        net_flow.push('-');
+        net_flow.push_str(&underbar_to_space(outflow));
+    }
+    if net_flow.is_empty() {
+        net_flow.push('0');
+    }
+
+    let initial = match &stock.equation {
+        Equation::Scalar(eqn) => equation_to_mdl(eqn),
+        _ => String::new(),
+    };
+
+    // Build the INTEG equation directly in MDL format (uppercase, spaced names)
+    // rather than going through equation_to_mdl, since net_flow is already
+    // assembled from spaced identifiers.
+    let mdl_integ = format!("INTEG({net_flow}, {initial})");
+
+    let name = underbar_to_space(&stock.ident);
+    write!(buf, "{name}=").unwrap();
+    buf.push_str("\n\t");
+    buf.push_str(&mdl_integ);
+    write_units_and_comment(buf, &stock.units, &stock.documentation);
+}
+
+/// If a variable has ACTIVE INITIAL metadata, wrap the equation.
+///
+/// The datamodel stores `ACTIVE INITIAL(expr, init)` as:
+/// - `equation` = expr (the runtime expression)
+/// - `compat.active_initial` = Some(init) (the initial value)
+fn wrap_active_initial(eqn: &str, compat: &datamodel::Compat) -> String {
+    match &compat.active_initial {
+        // Both eqn and init are in XMILE format (underscores).  Wrap with
+        // init(...) in XMILE form so the whole thing can be parsed by
+        // equation_to_mdl, which will map init -> ACTIVE INITIAL and
+        // convert all identifiers to spaced MDL form.
+        Some(init) => format!("init({eqn}, {init})"),
+        None => eqn.to_owned(),
     }
 }
 
@@ -1697,17 +1763,71 @@ mod tests {
 
     #[test]
     fn scalar_stock_integ() {
-        let var = make_stock(
-            "teacup_temperature",
-            "integ(-heat_loss_to_room, 180)",
-            Some("Degrees Fahrenheit"),
-            "Temperature of tea",
-        );
+        // Real stocks from the MDL reader store only the initial value in
+        // equation, with inflows/outflows in separate fields.  The writer
+        // must reconstruct the INTEG(...) expression.
+        let var = Variable::Stock(Stock {
+            ident: "teacup_temperature".to_owned(),
+            equation: Equation::Scalar("180".to_owned()),
+            documentation: "Temperature of tea".to_owned(),
+            units: Some("Degrees Fahrenheit".to_owned()),
+            inflows: vec![],
+            outflows: vec!["heat_loss_to_room".to_owned()],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var);
         assert_eq!(
             buf,
             "teacup temperature=\n\tINTEG(-heat loss to room, 180)\n\t~\tDegrees Fahrenheit\n\t~\tTemperature of tea\n\t|"
+        );
+    }
+
+    #[test]
+    fn stock_with_inflows_and_outflows() {
+        let var = Variable::Stock(Stock {
+            ident: "population".to_owned(),
+            equation: Equation::Scalar("1000".to_owned()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["births".to_owned()],
+            outflows: vec!["deaths".to_owned()],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert!(
+            buf.contains("INTEG(births-deaths, 1000)"),
+            "Expected INTEG with both inflow and outflow: {}",
+            buf
+        );
+    }
+
+    #[test]
+    fn active_initial_preserved_on_aux() {
+        let var = Variable::Aux(Aux {
+            ident: "x".to_owned(),
+            equation: Equation::Scalar("y * 2".to_owned()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat {
+                active_initial: Some("100".to_owned()),
+                ..Compat::default()
+            },
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert!(
+            buf.contains("ACTIVE INITIAL(y * 2, 100)"),
+            "Expected ACTIVE INITIAL wrapper: {}",
+            buf
         );
     }
 
