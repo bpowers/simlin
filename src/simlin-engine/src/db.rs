@@ -1312,13 +1312,16 @@ pub struct LtmVariablesResult {
     pub vars: Vec<LtmSyntheticVar>,
 }
 
-/// Strip interpunct (middot) module output qualifiers, e.g.
-/// `$⁚s⁚0⁚smth1·output` → `$⁚s⁚0⁚smth1`.
+/// Normalize a dependency/reference name by stripping a leading middot
+/// (XMILE parent-scope refs like `.area` canonicalize to `·area`) and then
+/// truncating at the first remaining middot to collapse `module·output`
+/// qualifiers down to the module variable name.
 fn normalize_module_ref_str(s: &str) -> String {
-    if let Some(pos) = s.find('\u{00B7}') {
-        s[..pos].to_string()
+    let effective = s.strip_prefix('\u{00B7}').unwrap_or(s);
+    if let Some(pos) = effective.find('\u{00B7}') {
+        effective[..pos].to_string()
     } else {
-        s.to_string()
+        effective.to_string()
     }
 }
 
@@ -2945,6 +2948,38 @@ fn extract_tables_from_source_var(
     }
 }
 
+/// Build module input mappings from raw (src, dst) reference pairs.
+///
+/// Filters out references where src is an internal module input (starts
+/// with the module's own prefix), strips the module prefix from dst,
+/// and strips leading middots from src in the "main" model (where parent
+/// scope refs are represented as `·var` after canonicalization).
+fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
+    model_name: &str,
+    module_var_prefix: &str,
+    refs: impl Iterator<Item = (S1, S2)>,
+) -> Vec<crate::variable::ModuleInput> {
+    refs.filter_map(|(src, dst)| {
+        let src = src.as_ref();
+        let dst = dst.as_ref();
+        // Skip internal module inputs (src within the module's own namespace)
+        if src.starts_with(module_var_prefix) {
+            return None;
+        }
+        let dst_stripped = dst.strip_prefix(module_var_prefix)?;
+        let src_str = if model_name == "main" && src.starts_with('\u{00B7}') {
+            &src['\u{00B7}'.len_utf8()..]
+        } else {
+            src
+        };
+        Some(crate::variable::ModuleInput {
+            src: Ident::new(src_str),
+            dst: Ident::new(dst_stripped),
+        })
+    })
+    .collect()
+}
+
 /// Build a dimension-only stub Variable for use in a minimal compilation
 /// context. Only get_dimensions() is called on these by Context.
 fn build_stub_variable(
@@ -3129,27 +3164,13 @@ pub fn compile_var_fragment(
     let lowered = if var.kind(db) == SourceVariableKind::Module {
         let var_name_canonical = canonicalize(&var_ident);
         let input_prefix = format!("{var_name_canonical}\u{00B7}");
-        let module_inputs: Vec<crate::variable::ModuleInput> = var
-            .module_refs(db)
-            .iter()
-            .filter_map(|mr| {
-                let src = canonicalize(&mr.src);
-                let dst = canonicalize(&mr.dst);
-                if src.starts_with(&input_prefix) {
-                    return None;
-                }
-                let dst_stripped = dst.strip_prefix(&input_prefix)?;
-                let src_str = if model.name(db) == "main" && src.starts_with('\u{00B7}') {
-                    &src['\u{00B7}'.len_utf8()..]
-                } else {
-                    &src
-                };
-                Some(crate::variable::ModuleInput {
-                    src: Ident::new(src_str),
-                    dst: Ident::new(dst_stripped),
-                })
-            })
-            .collect();
+        let module_inputs = build_module_inputs(
+            model.name(db),
+            &input_prefix,
+            var.module_refs(db)
+                .iter()
+                .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
+        );
         crate::variable::Variable::Module {
             ident: Ident::new(&var_ident),
             model_name: Ident::new(var.model_name(db)),
@@ -4074,7 +4095,7 @@ fn compile_implicit_var_fragment(
     let all_names: Vec<&String> = all_dep_names.iter().chain(extra_dep_names.iter()).collect();
     let mut dep_variables: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> = Vec::new();
     let mut extra_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
-    let mut extra_submodels: Vec<(String, SourceModel)> = Vec::new();
+    let mut extra_submodels: HashMap<String, SourceModel> = HashMap::new();
 
     for dep_name in &all_names {
         let effective_name = dep_name
@@ -4109,28 +4130,14 @@ fn compile_implicit_var_fragment(
                         .unwrap_or(1);
 
                     let mod_input_prefix = format!("{module_var_name}\u{00B7}");
-                    let module_inputs: Vec<crate::variable::ModuleInput> = mod_source_var
-                        .module_refs(db)
-                        .iter()
-                        .filter_map(|mr| {
-                            let src = canonicalize(&mr.src);
-                            let dst = canonicalize(&mr.dst);
-                            if src.starts_with(&mod_input_prefix) {
-                                return None;
-                            }
-                            let dst_stripped = dst.strip_prefix(&mod_input_prefix)?;
-                            let src_str = if model.name(db) == "main" && src.starts_with('\u{00B7}')
-                            {
-                                &src['\u{00B7}'.len_utf8()..]
-                            } else {
-                                &src
-                            };
-                            Some(crate::variable::ModuleInput {
-                                src: Ident::new(src_str),
-                                dst: Ident::new(dst_stripped),
-                            })
-                        })
-                        .collect();
+                    let module_inputs = build_module_inputs(
+                        model.name(db),
+                        &mod_input_prefix,
+                        mod_source_var
+                            .module_refs(db)
+                            .iter()
+                            .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
+                    );
 
                     let mod_var = crate::variable::Variable::Module {
                         ident: module_ident.clone(),
@@ -4147,7 +4154,7 @@ fn compile_implicit_var_fragment(
                     extra_module_refs.insert(module_ident, (Ident::new(mod_model_name), input_set));
 
                     if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                        extra_submodels.push((mod_model_name.to_string(), *sub_model));
+                        extra_submodels.insert(mod_model_name.to_string(), *sub_model);
                     }
                 }
             } else if let Some(im_meta) = implicit_info.get(module_var_name)
@@ -4168,30 +4175,14 @@ fn compile_implicit_var_fragment(
                         datamodel::Variable::Module(dm_module)
                             if canonicalize(dm_module.ident.as_str()) == module_var_name =>
                         {
-                            Some(
+                            Some(build_module_inputs(
+                                model.name(db),
+                                &input_prefix,
                                 dm_module
                                     .references
                                     .iter()
-                                    .filter_map(|mr| {
-                                        let src = canonicalize(&mr.src);
-                                        let dst = canonicalize(&mr.dst);
-                                        if src.starts_with(&input_prefix) {
-                                            return None;
-                                        }
-                                        let dst_stripped = dst.strip_prefix(&input_prefix)?;
-                                        let src_str =
-                                            if model.name(db) == "main" && src.starts_with('·') {
-                                                &src['·'.len_utf8()..]
-                                            } else {
-                                                &src
-                                            };
-                                        Some(crate::variable::ModuleInput {
-                                            src: Ident::new(src_str),
-                                            dst: Ident::new(dst_stripped),
-                                        })
-                                    })
-                                    .collect::<Vec<_>>(),
-                            )
+                                    .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
+                            ))
                         }
                         _ => None,
                     })
@@ -4212,7 +4203,7 @@ fn compile_implicit_var_fragment(
                 extra_module_refs.insert(module_ident, (Ident::new(im_model_name), input_set));
 
                 if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                    extra_submodels.push((im_model_name.to_string(), *sub_model));
+                    extra_submodels.insert(im_model_name.to_string(), *sub_model);
                 }
             }
             continue;
@@ -4282,7 +4273,7 @@ fn compile_implicit_var_fragment(
     > = HashMap::new();
     all_metadata.insert(model_name_ident.clone(), mini_metadata);
 
-    for (_sub_name, sub_model) in &extra_submodels {
+    for sub_model in extra_submodels.values() {
         build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
     }
 

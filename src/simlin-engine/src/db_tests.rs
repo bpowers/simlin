@@ -1498,6 +1498,144 @@ fn test_model_causal_edges_normalizes_inter_module_output_refs() {
 }
 
 #[test]
+fn test_model_causal_edges_normalizes_leading_middot_parent_refs() {
+    // A submodel's module instance can reference parent-scope variables via
+    // leading-dot syntax (e.g. ".area"), which canonicalizes to a leading
+    // middot ("·area").  normalize_module_ref_str must strip the leading
+    // middot before truncating at the module qualifier, otherwise "·area"
+    // yields an empty-string key.
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "parent_ref_edges".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "area".to_string(),
+                        equation: datamodel::Equation::Scalar("100".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "sub".to_string(),
+                        model_name: "submodel".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "area".to_string(),
+                            dst: "sub.area_input".to_string(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "submodel".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "area_input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "nested".to_string(),
+                        model_name: "nested_model".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        // Use leading-dot parent ref: ".area_input" canonicalizes
+                        // to "·area_input"
+                        references: vec![datamodel::ModuleReference {
+                            src: ".area_input".to_string(),
+                            dst: "nested.val".to_string(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "result".to_string(),
+                        equation: datamodel::Equation::Scalar("area_input * 2".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "nested_model".to_string(),
+                sim_specs: None,
+                variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "val".to_string(),
+                    equation: datamodel::Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        can_be_module_input: true,
+                        ..datamodel::Compat::default()
+                    },
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let result = sync_from_datamodel(&db, &project);
+    let sub_model = result.models["submodel"].source;
+    let edges = model_causal_edges(&db, sub_model, result.project);
+
+    // The "nested" module's src ".area_input" (canonicalized "·area_input")
+    // should normalize to "area_input", creating an edge area_input -> nested.
+    assert!(
+        edges
+            .edges
+            .get("area_input")
+            .is_some_and(|tos| tos.contains("nested")),
+        "leading-dot parent ref should normalize to bare variable name; edges: {:?}",
+        edges.edges
+    );
+    assert!(
+        !edges.edges.contains_key(""),
+        "empty-string key should not appear from leading-middot truncation"
+    );
+}
+
+#[test]
 fn test_model_loop_circuits_finds_feedback() {
     let db = SimlinDb::default();
     let project = feedback_loop_project();
