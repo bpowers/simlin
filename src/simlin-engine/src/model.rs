@@ -1104,13 +1104,34 @@ impl ModelStage1 {
             .keys()
             .map(|ident| ident.as_str().to_string())
             .collect();
+        let module_var_names: HashSet<String> = self
+            .variables
+            .iter()
+            .filter_map(|(ident, var)| {
+                if var.is_module() {
+                    Some(ident.as_str().to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-        let normalize_dep = |dep: &str| -> String {
+        let dep_requires_all_deps = |dep: &str| -> bool {
+            // Absolute references should keep using the legacy path so
+            // existing validation errors are preserved.
+            if dep.starts_with("\\\u{00B7}") {
+                return true;
+            }
+
             let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
             if let Some(dot_pos) = effective.find('\u{00B7}') {
-                effective[..dot_pos].to_string()
+                let base = &effective[..dot_pos];
+                if !known_var_names.contains(base) {
+                    return true;
+                }
+                !module_var_names.contains(base)
             } else {
-                effective.to_string()
+                !known_var_names.contains(effective)
             }
         };
 
@@ -1128,16 +1149,14 @@ impl ModelStage1 {
                 };
 
                 for dep in deps.dt_deps.iter().chain(deps.initial_deps.iter()) {
-                    let normalized = normalize_dep(dep);
-                    if !known_var_names.contains(&normalized) {
+                    if dep_requires_all_deps(dep) {
                         return true;
                     }
                 }
 
                 for implicit in &deps.implicit_vars {
                     for dep in implicit.dt_deps.iter().chain(implicit.initial_deps.iter()) {
-                        let normalized = normalize_dep(dep);
-                        if !known_var_names.contains(&normalized) {
+                        if dep_requires_all_deps(dep) {
                             return true;
                         }
                     }
@@ -1718,6 +1737,82 @@ fn test_cached_dependencies_preserve_unknown_dependency_errors() {
             code: ErrorCode::UnknownDependency
         },
         err
+    );
+}
+
+#[test]
+fn test_cached_dependencies_preserve_expected_module_errors() {
+    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let main_model = x_model(
+        "main",
+        vec![x_aux("foo", "1", None), x_aux("bad_ref", "foo.bar", None)],
+    );
+    let project_datamodel = datamodel::Project {
+        name: "cached_deps_expected_module".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![main_model.clone()],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let source_model = sync.models["main"].source;
+
+    let owned_models: HashMap<Ident<Canonical>, ModelStage0> =
+        vec![("main".to_string(), &main_model)]
+            .into_iter()
+            .map(|(name, m)| {
+                (
+                    Ident::new(&name),
+                    ModelStage0::new_cached(
+                        &db,
+                        source_model,
+                        sync.project,
+                        m,
+                        &[],
+                        &units_ctx,
+                        false,
+                    ),
+                )
+            })
+            .collect();
+    let models: HashMap<Ident<Canonical>, &ModelStage0> =
+        owned_models.iter().map(|(k, v)| (k.clone(), v)).collect();
+
+    let no_module_inputs: ModuleInputSet = BTreeSet::new();
+    let default_instantiation = [no_module_inputs].iter().cloned().collect();
+    let scope = ScopeStage0 {
+        models: &models,
+        dimensions: &Default::default(),
+        model_name: "main",
+    };
+    let mut model = ModelStage1::new(&scope, models[&*canonicalize("main")]);
+    model.set_dependencies_cached(
+        &db,
+        source_model,
+        sync.project,
+        &HashMap::new(),
+        &[],
+        &default_instantiation,
+    );
+
+    assert!(model.errors.is_some());
+    assert_eq!(
+        &Error::new(ErrorKind::Model, ErrorCode::VariablesHaveErrors, None),
+        &model.errors.as_ref().unwrap()[0]
+    );
+
+    let var_errors = model.get_variable_errors();
+    let bad_ref_key = Ident::new("bad_ref");
+    assert!(var_errors.contains_key(&bad_ref_key));
+    assert!(
+        var_errors[&bad_ref_key]
+            .iter()
+            .any(|err| err.code == ErrorCode::ExpectedModule),
+        "cached dependency path should preserve ExpectedModule errors"
     );
 }
 
