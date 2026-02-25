@@ -1390,8 +1390,15 @@ pub fn model_causal_edges(
                 }
             }
             SourceVariableKind::Module => {
+                let self_prefix = format!("{name}\u{00B7}");
                 for mr in source_var.module_refs(db).iter() {
                     let canonical_src = canonicalize(&mr.src).into_owned();
+                    // Skip output refs where src is within the module's own
+                    // namespace (Stella imports include these); normalizing
+                    // them would create false self-loops.
+                    if canonical_src.starts_with(&self_prefix) {
+                        continue;
+                    }
                     let normalized = normalize_module_ref_str(&canonical_src);
                     edges.entry(normalized).or_default().insert(name.clone());
                 }
@@ -1426,8 +1433,12 @@ pub fn model_causal_edges(
                     }
                 }
                 datamodel::Variable::Module(m) => {
+                    let self_prefix = format!("{imp_name}\u{00B7}");
                     for mr in &m.references {
                         let canonical_src = canonicalize(&mr.src).into_owned();
+                        if canonical_src.starts_with(&self_prefix) {
+                            continue;
+                        }
                         let normalized = normalize_module_ref_str(&canonical_src);
                         edges
                             .entry(normalized)

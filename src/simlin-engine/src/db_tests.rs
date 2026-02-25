@@ -1498,6 +1498,128 @@ fn test_model_causal_edges_normalizes_inter_module_output_refs() {
 }
 
 #[test]
+fn test_model_causal_edges_skips_internal_module_refs() {
+    // Stella-imported models can include output refs in the module references
+    // list where src starts with the module's own prefix (e.g. src="a.output").
+    // These internal/output refs should not create false self-loops like a -> a.
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "internal_refs".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "source".to_string(),
+                        equation: datamodel::Equation::Scalar("1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "a".to_string(),
+                        model_name: "producer".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![
+                            // Normal input ref
+                            datamodel::ModuleReference {
+                                src: "source".to_string(),
+                                dst: "a.input".to_string(),
+                            },
+                            // Internal/output ref (Stella-style): src starts
+                            // with the module prefix
+                            datamodel::ModuleReference {
+                                src: "a.output".to_string(),
+                                dst: "consumer_target".to_string(),
+                            },
+                        ],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "consumer_target".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "producer".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "output".to_string(),
+                        equation: datamodel::Equation::Scalar("input".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+    let edges = model_causal_edges(&db, model, result.project);
+
+    // Internal ref "a.output" should NOT create a self-loop edge a -> a
+    let has_self_loop = edges.edges.get("a").is_some_and(|tos| tos.contains("a"));
+    assert!(
+        !has_self_loop,
+        "internal module output ref should not create false self-loop; edges: {:?}",
+        edges.edges
+    );
+
+    // The normal input ref source -> a should still be present
+    assert!(
+        edges
+            .edges
+            .get("source")
+            .is_some_and(|tos| tos.contains("a")),
+        "normal input ref edge should still exist"
+    );
+}
+
+#[test]
 fn test_model_causal_edges_normalizes_leading_middot_parent_refs() {
     // A submodel's module instance can reference parent-scope variables via
     // leading-dot syntax (e.g. ".area"), which canonicalizes to a leading
