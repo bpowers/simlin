@@ -1345,6 +1345,18 @@ mod tests {
     }
 
     #[test]
+    fn logical_operators_and() {
+        // XMILE uses `and` keyword; MDL uses `:AND:` infix operator
+        assert_mdl("a and b", "a :AND: b");
+    }
+
+    #[test]
+    fn logical_operators_or() {
+        // XMILE uses `or` keyword; MDL uses `:OR:` infix operator
+        assert_mdl("a or b", "a :OR: b");
+    }
+
+    #[test]
     fn function_rename_smooth() {
         assert_mdl("smth1(x, 5)", "SMOOTH(x, 5)");
     }
@@ -1543,6 +1555,28 @@ mod tests {
     fn pattern_fallthrough_no_match() {
         // An If expression that doesn't match any pattern should use mechanical conversion
         assert_mdl("if a > b then c else d", "IF THEN ELSE(a > b, c, d)");
+    }
+
+    #[test]
+    fn pattern_allocate_by_priority() {
+        // XMILE expansion of ALLOCATE BY PRIORITY(demand[region], priority, ignore, width, supply):
+        // allocate(supply, region, demand[region.*], priority, width)
+        //
+        // The last subscript (region.*) is replaced with the dimension name, yielding demand[region].
+        // The arguments are reordered: demand first, then priority, then 0 (ignore), width, supply.
+        assert_mdl(
+            "allocate(supply, region, demand[region.*], priority, width)",
+            "ALLOCATE BY PRIORITY(demand[region], priority, 0, width, supply)",
+        );
+    }
+
+    #[test]
+    fn pattern_allocate_by_priority_no_subscript() {
+        // When the demand argument has no subscript (simple variable), it passes through as-is.
+        assert_mdl(
+            "allocate(supply, region, demand, priority, width)",
+            "ALLOCATE BY PRIORITY(demand, priority, 0, width, supply)",
+        );
     }
 
     // ---- Task 1: Variable entry formatting (scalar) ----
