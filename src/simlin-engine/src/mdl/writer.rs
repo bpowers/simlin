@@ -1002,6 +1002,28 @@ fn max_sketch_uid(elements: &[ViewElement], valve_uids: &HashMap<i32, i32>) -> i
     max_uid
 }
 
+/// MDL view titles are written on a single `*<title>` line.
+/// Collapse CR/LF runs so untrusted titles cannot break sketch structure.
+fn sanitize_view_title_for_mdl(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut prev_was_line_break = false;
+
+    for ch in title.chars() {
+        if matches!(ch, '\n' | '\r') {
+            if !prev_was_line_break {
+                out.push(' ');
+                prev_was_line_break = true;
+            }
+            continue;
+        }
+
+        out.push(ch);
+        prev_was_line_break = false;
+    }
+
+    out
+}
+
 /// Write a Flow element as type 11 (valve), type 10 (attached flow variable),
 /// and type 1 pipe connectors derived from flow endpoints.
 ///
@@ -1409,7 +1431,7 @@ impl MdlWriter {
 
     /// Write a single StockFlow view as sketch elements.
     fn write_stock_flow_view(&mut self, sf: &datamodel::StockFlow) {
-        let view_title = sf.name.as_deref().unwrap_or("View 1");
+        let view_title = sanitize_view_title_for_mdl(sf.name.as_deref().unwrap_or("View 1"));
         writeln!(self.buf, "*{}", view_title).unwrap();
         self.buf.push_str(
             "$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0\n",
@@ -3247,6 +3269,46 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
             mdl.contains("*Overview\n"),
             "Roundtrip should preserve original view title: {}",
             mdl
+        );
+    }
+
+    #[test]
+    fn sketch_roundtrip_sanitizes_multiline_view_title() {
+        let var = make_aux("x", "5", Some("Units"), "A constant");
+        let model = datamodel::Model {
+            name: "default".to_owned(),
+            sim_specs: None,
+            variables: vec![var],
+            views: vec![View::StockFlow(datamodel::StockFlow {
+                name: Some("Overview\r\nMain".to_owned()),
+                elements: vec![ViewElement::Aux(view_element::Aux {
+                    name: "x".to_owned(),
+                    uid: 1,
+                    x: 100.0,
+                    y: 100.0,
+                    label_side: view_element::LabelSide::Bottom,
+                })],
+                view_box: Default::default(),
+                zoom: 1.0,
+                use_lettered_polarity: false,
+            })],
+            loop_metadata: vec![],
+            groups: vec![],
+        };
+        let project = make_project(vec![model]);
+
+        let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
+        assert!(
+            mdl.contains("*Overview Main\n"),
+            "view title should be serialized as a single line: {mdl}",
+        );
+
+        let reparsed = crate::mdl::parse_mdl(&mdl).expect("written MDL should parse");
+        let View::StockFlow(sf) = &reparsed.models[0].views[0];
+        assert_eq!(
+            sf.name.as_deref(),
+            Some("Overview Main"),
+            "sanitized title should roundtrip through MDL",
         );
     }
 
