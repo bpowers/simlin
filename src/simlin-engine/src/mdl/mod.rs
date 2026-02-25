@@ -29,19 +29,34 @@ pub use reader::{EquationReader, ReaderError};
 pub use writer::expr0_to_mdl;
 
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
-use crate::datamodel::Project;
+use crate::datamodel::{Project, Variable};
 
 use convert::convert_mdl;
+use writer::MdlWriter;
 
 /// Convert a Project to Vensim MDL text.
-pub fn project_to_mdl(_project: &Project) -> Result<String> {
-    // ErrorKind has no Export variant; Import is the closest available option
-    // for format conversion errors until a dedicated Export kind is added.
-    Err(Error::new(
-        ErrorKind::Import,
-        ErrorCode::Generic,
-        Some("MDL writer not yet implemented".to_owned()),
-    ))
+pub fn project_to_mdl(project: &Project) -> Result<String> {
+    if project.models.len() != 1 {
+        return Err(Error::new(
+            ErrorKind::Import,
+            ErrorCode::Generic,
+            Some("MDL format supports only a single model".to_owned()),
+        ));
+    }
+
+    let model = &project.models[0];
+    for var in &model.variables {
+        if matches!(var, Variable::Module(_)) {
+            return Err(Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                Some("MDL format does not support Module variables".to_owned()),
+            ));
+        }
+    }
+
+    let writer = MdlWriter::new();
+    writer.write_project(project)
 }
 
 /// Parse a Vensim MDL file into a Project.

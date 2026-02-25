@@ -9,10 +9,12 @@
 //! converting canonical (underscored, lowercase) identifiers back to
 //! MDL-style spaced names and using MDL operator syntax.
 
+use std::collections::HashSet;
 use std::fmt::Write;
 
 use crate::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp, Visitor};
 use crate::builtins::UntypedBuiltinFn;
+use crate::common::Result;
 use crate::datamodel::{self, DimensionElements, Equation, GraphicalFunction};
 use crate::lexer::LexerType;
 
@@ -716,6 +718,138 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
     buf.push_str("\n\t~~|\n");
 }
 
+/// Stateful writer that accumulates the full MDL file text.
+pub struct MdlWriter {
+    buf: String,
+}
+
+impl Default for MdlWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MdlWriter {
+    pub fn new() -> Self {
+        MdlWriter { buf: String::new() }
+    }
+
+    /// Orchestrate the full MDL file assembly and return the result.
+    pub fn write_project(mut self, project: &datamodel::Project) -> Result<String> {
+        let model = &project.models[0];
+        self.write_equations_section(model, project);
+        Ok(self.buf)
+    }
+
+    /// Write sim spec control variables (INITIAL TIME, FINAL TIME, TIME STEP, SAVEPER).
+    fn write_sim_specs(&mut self, sim_specs: &datamodel::SimSpecs) {
+        let units = sim_specs.time_units.as_deref().unwrap_or("");
+
+        // INITIAL TIME
+        write!(
+            self.buf,
+            "\nINITIAL TIME  = \n\t{}\n\t~\t{}\n\t~\tThe initial time for the simulation.\n\t|\n",
+            format_f64(sim_specs.start),
+            units,
+        )
+        .unwrap();
+
+        // FINAL TIME
+        write!(
+            self.buf,
+            "\nFINAL TIME  = \n\t{}\n\t~\t{}\n\t~\tThe final time for the simulation.\n\t|\n",
+            format_f64(sim_specs.stop),
+            units,
+        )
+        .unwrap();
+
+        // TIME STEP
+        let dt_value = match &sim_specs.dt {
+            datamodel::Dt::Dt(v) => format_f64(*v),
+            datamodel::Dt::Reciprocal(v) => format!("1/{}", format_f64(*v)),
+        };
+        let units_with_range = if units.is_empty() {
+            "[0,?]".to_owned()
+        } else {
+            format!("{units} [0,?]")
+        };
+        write!(
+            self.buf,
+            "\nTIME STEP  = \n\t{}\n\t~\t{}\n\t~\tThe time step for the simulation.\n\t|\n",
+            dt_value, units_with_range,
+        )
+        .unwrap();
+
+        // SAVEPER
+        let saveper_value = match &sim_specs.save_step {
+            Some(datamodel::Dt::Dt(v)) => format_f64(*v),
+            Some(datamodel::Dt::Reciprocal(v)) => format!("1/{}", format_f64(*v)),
+            None => "TIME STEP".to_owned(),
+        };
+        write!(
+            self.buf,
+            "\nSAVEPER  = \n\t{}\n\t~\t{}\n\t~\tThe frequency with which output is stored.\n\t|\n",
+            saveper_value, units_with_range,
+        )
+        .unwrap();
+    }
+
+    /// Write the full equations section: dimensions, grouped variables, sim specs, terminator.
+    fn write_equations_section(&mut self, model: &datamodel::Model, project: &datamodel::Project) {
+        // 1. Dimension definitions
+        for dim in &project.dimensions {
+            write_dimension_def(&mut self.buf, dim);
+        }
+
+        // Build a set of variable idents that belong to any group
+        let mut grouped_idents: HashSet<&str> = HashSet::new();
+        for group in &model.groups {
+            for member in &group.members {
+                grouped_idents.insert(member.as_str());
+            }
+        }
+
+        // 2. Variables in group order
+        for group in &model.groups {
+            // Group marker
+            write!(
+                self.buf,
+                "\n********************************************************\n\t.{}\n********************************************************~\n\t\t{}\n\t|\n",
+                underbar_to_space(&group.name),
+                group.doc.as_deref().unwrap_or(""),
+            )
+            .unwrap();
+
+            for member_ident in &group.members {
+                if let Some(var) = model
+                    .variables
+                    .iter()
+                    .find(|v| v.get_ident() == member_ident)
+                {
+                    write_variable_entry(&mut self.buf, var);
+                    self.buf.push('\n');
+                }
+            }
+        }
+
+        // 3. Ungrouped variables
+        for var in &model.variables {
+            if !grouped_idents.contains(var.get_ident()) {
+                write_variable_entry(&mut self.buf, var);
+                self.buf.push('\n');
+            }
+        }
+
+        // 4. Sim spec variables
+        let sim_specs = model.sim_specs.as_ref().unwrap_or(&project.sim_specs);
+        self.write_sim_specs(sim_specs);
+
+        // 5. Section terminator
+        self.buf
+            .push_str("\\\\\\---/// Sketch information - do not modify anything except names\n");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1362,5 +1496,312 @@ mod tests {
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var);
         assert!(buf.is_empty());
+    }
+
+    // ---- Phase 4 Task 1: Validation ----
+
+    fn make_project(models: Vec<datamodel::Model>) -> datamodel::Project {
+        datamodel::Project {
+            name: "test".to_owned(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 100.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![],
+            units: vec![],
+            models,
+            source: None,
+            ai_information: None,
+        }
+    }
+
+    fn make_model(variables: Vec<Variable>) -> datamodel::Model {
+        datamodel::Model {
+            name: "default".to_owned(),
+            sim_specs: None,
+            variables,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }
+    }
+
+    #[test]
+    fn project_to_mdl_rejects_multiple_models() {
+        let project = make_project(vec![make_model(vec![]), make_model(vec![])]);
+        let result = crate::mdl::project_to_mdl(&project);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("single model"),
+            "error should mention single model, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn project_to_mdl_rejects_module_variable() {
+        let module_var = Variable::Module(datamodel::Module {
+            ident: "submodel".to_owned(),
+            model_name: "inner".to_owned(),
+            documentation: String::new(),
+            units: None,
+            references: vec![],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let project = make_project(vec![make_model(vec![module_var])]);
+        let result = crate::mdl::project_to_mdl(&project);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Module"),
+            "error should mention Module, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn project_to_mdl_succeeds_single_model() {
+        let var = make_aux("x", "5", Some("Units"), "A constant");
+        let project = make_project(vec![make_model(vec![var])]);
+        let result = crate::mdl::project_to_mdl(&project);
+        assert!(result.is_ok(), "should succeed: {:?}", result);
+        let mdl = result.unwrap();
+        assert!(mdl.contains("x="));
+        assert!(mdl.contains("\\\\\\---///"));
+    }
+
+    // ---- Phase 4 Task 2: Sim spec emission ----
+
+    #[test]
+    fn sim_specs_emission() {
+        let sim_specs = datamodel::SimSpecs {
+            start: 0.0,
+            stop: 100.0,
+            dt: datamodel::Dt::Dt(0.5),
+            save_step: Some(datamodel::Dt::Dt(1.0)),
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: Some("Month".to_owned()),
+        };
+        let mut writer = MdlWriter::new();
+        writer.write_sim_specs(&sim_specs);
+        let output = writer.buf;
+
+        assert!(
+            output.contains("INITIAL TIME  = \n\t0"),
+            "should have INITIAL TIME, got: {output}"
+        );
+        assert!(
+            output.contains("~\tMonth\n\t~\tThe initial time for the simulation."),
+            "INITIAL TIME should have Month units"
+        );
+        assert!(
+            output.contains("FINAL TIME  = \n\t100"),
+            "should have FINAL TIME, got: {output}"
+        );
+        assert!(
+            output.contains("TIME STEP  = \n\t0.5"),
+            "should have TIME STEP = 0.5, got: {output}"
+        );
+        assert!(
+            output.contains("Month [0,?]"),
+            "TIME STEP should have units with range, got: {output}"
+        );
+        assert!(
+            output.contains("SAVEPER  = \n\t1"),
+            "should have SAVEPER = 1, got: {output}"
+        );
+    }
+
+    #[test]
+    fn sim_specs_saveper_defaults_to_time_step() {
+        let sim_specs = datamodel::SimSpecs {
+            start: 0.0,
+            stop: 50.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        };
+        let mut writer = MdlWriter::new();
+        writer.write_sim_specs(&sim_specs);
+        let output = writer.buf;
+
+        assert!(
+            output.contains("SAVEPER  = \n\tTIME STEP"),
+            "SAVEPER should reference TIME STEP when save_step is None, got: {output}"
+        );
+    }
+
+    #[test]
+    fn sim_specs_reciprocal_dt() {
+        let sim_specs = datamodel::SimSpecs {
+            start: 0.0,
+            stop: 100.0,
+            dt: datamodel::Dt::Reciprocal(4.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: Some("Year".to_owned()),
+        };
+        let mut writer = MdlWriter::new();
+        writer.write_sim_specs(&sim_specs);
+        let output = writer.buf;
+
+        assert!(
+            output.contains("TIME STEP  = \n\t1/4"),
+            "reciprocal dt should emit 1/v, got: {output}"
+        );
+    }
+
+    // ---- Phase 4 Task 3: Equations section assembly ----
+
+    #[test]
+    fn equations_section_full_assembly() {
+        let var1 = make_aux("growth_rate", "0.05", Some("1/Year"), "Growth rate");
+        let var2 = make_stock(
+            "population",
+            "integ(growth_rate * population, 100)",
+            Some("People"),
+            "Total population",
+        );
+        let model = datamodel::Model {
+            name: "default".to_owned(),
+            sim_specs: None,
+            variables: vec![var1, var2],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        };
+        let project = datamodel::Project {
+            name: "test".to_owned(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 100.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: Some("Year".to_owned()),
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![model],
+            source: None,
+            ai_information: None,
+        };
+
+        let result = crate::mdl::project_to_mdl(&project);
+        assert!(result.is_ok(), "should succeed: {:?}", result);
+        let mdl = result.unwrap();
+
+        // Variable entries present
+        assert!(
+            mdl.contains("growth rate="),
+            "should contain growth rate variable"
+        );
+        assert!(
+            mdl.contains("population="),
+            "should contain population variable"
+        );
+
+        // Sim specs present
+        assert!(mdl.contains("INITIAL TIME"), "should contain INITIAL TIME");
+        assert!(mdl.contains("FINAL TIME"), "should contain FINAL TIME");
+        assert!(mdl.contains("TIME STEP"), "should contain TIME STEP");
+        assert!(mdl.contains("SAVEPER"), "should contain SAVEPER");
+
+        // Terminator present
+        assert!(
+            mdl.contains("\\\\\\---/// Sketch information - do not modify anything except names"),
+            "should contain section terminator"
+        );
+
+        // Ordering: variables before sim specs, sim specs before terminator
+        let var_pos = mdl.find("growth rate=").unwrap();
+        let initial_pos = mdl.find("INITIAL TIME").unwrap();
+        let terminator_pos = mdl.find("\\\\\\---///").unwrap();
+        assert!(
+            var_pos < initial_pos,
+            "variables should come before sim specs"
+        );
+        assert!(
+            initial_pos < terminator_pos,
+            "sim specs should come before terminator"
+        );
+    }
+
+    #[test]
+    fn equations_section_with_groups() {
+        let var1 = make_aux("rate_a", "10", None, "");
+        let var2 = make_aux("rate_b", "20", None, "");
+        let var3 = make_aux("ungrouped_var", "30", None, "");
+        let group = datamodel::ModelGroup {
+            name: "my_group".to_owned(),
+            doc: Some("Group docs".to_owned()),
+            parent: None,
+            members: vec!["rate_a".to_owned(), "rate_b".to_owned()],
+            run_enabled: false,
+        };
+        let model = datamodel::Model {
+            name: "default".to_owned(),
+            sim_specs: None,
+            variables: vec![var1, var2, var3],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![group],
+        };
+        let project = make_project(vec![model]);
+
+        let result = crate::mdl::project_to_mdl(&project);
+        assert!(result.is_ok(), "should succeed: {:?}", result);
+        let mdl = result.unwrap();
+
+        // Group marker present
+        assert!(
+            mdl.contains(".my group"),
+            "should contain group marker, got: {mdl}"
+        );
+        assert!(
+            mdl.contains("Group docs"),
+            "should contain group documentation"
+        );
+
+        // Grouped variables come before ungrouped
+        let rate_a_pos = mdl.find("rate a=").unwrap();
+        let ungrouped_pos = mdl.find("ungrouped var=").unwrap();
+        assert!(
+            rate_a_pos < ungrouped_pos,
+            "grouped variables should come before ungrouped"
+        );
+    }
+
+    #[test]
+    fn equations_section_with_dimensions() {
+        let dim = datamodel::Dimension::named(
+            "region".to_owned(),
+            vec!["north".to_owned(), "south".to_owned()],
+        );
+        let var = make_aux("x", "1", None, "");
+        let model = make_model(vec![var]);
+        let mut project = make_project(vec![model]);
+        project.dimensions.push(dim);
+
+        let result = crate::mdl::project_to_mdl(&project);
+        assert!(result.is_ok(), "should succeed: {:?}", result);
+        let mdl = result.unwrap();
+
+        // Dimension def at the start, before variables
+        assert!(
+            mdl.contains("region:\n\tnorth, south\n\t~~|"),
+            "should contain dimension def"
+        );
+        let dim_pos = mdl.find("region:").unwrap();
+        let var_pos = mdl.find("x=").unwrap();
+        assert!(dim_pos < var_pos, "dimensions should come before variables");
     }
 }
