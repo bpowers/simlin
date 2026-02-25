@@ -250,6 +250,7 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
     }
 
     let merged = View::StockFlow(datamodel::StockFlow {
+        name: None,
         elements: all_elements,
         view_box: Default::default(),
         zoom: 1.0,
@@ -346,6 +347,7 @@ fn convert_view(
     }
 
     Some(View::StockFlow(datamodel::StockFlow {
+        name: Some(view.title().to_string()),
         elements,
         view_box: Default::default(),
         zoom: 1.0,
@@ -834,6 +836,7 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         let View::StockFlow(sf) = &result[0];
+        assert_eq!(sf.name.as_deref(), Some("Test View"));
         assert!(!sf.elements.is_empty());
     }
 

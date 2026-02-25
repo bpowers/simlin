@@ -1146,6 +1146,7 @@ mod tests {
     fn upsert_view_and_delete() {
         let mut project = TestProject::new("test").build_datamodel();
         let view = datamodel::View::StockFlow(datamodel::StockFlow {
+            name: None,
             elements: vec![],
             view_box: datamodel::Rect::default(),
             zoom: 1.0,

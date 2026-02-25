@@ -121,6 +121,7 @@ mod tests {
                 sim_specs: None,
                 variables,
                 views: vec![View::StockFlow(StockFlow {
+                    name: None,
                     elements,
                     view_box: datamodel::Rect::default(),
                     zoom: 1.0,

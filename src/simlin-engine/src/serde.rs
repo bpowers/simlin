@@ -1746,6 +1746,7 @@ impl From<View> for project_io::View {
                 view_box: Some(view.view_box.into()),
                 zoom: view.zoom,
                 use_lettered_polarity: view.use_lettered_polarity,
+                name: view.name.unwrap_or_default(),
             },
         }
     }
@@ -1753,15 +1754,25 @@ impl From<View> for project_io::View {
 
 impl From<project_io::View> for View {
     fn from(view: project_io::View) -> Self {
+        let project_io::View {
+            elements,
+            view_box,
+            zoom,
+            use_lettered_polarity,
+            name,
+            ..
+        } = view;
+
         View::StockFlow(StockFlow {
-            elements: view.elements.into_iter().map(ViewElement::from).collect(),
-            view_box: view.view_box.map(Rect::from).unwrap_or_default(),
-            zoom: if approx_eq!(f64, view.zoom, 0.0) {
+            name: if name.is_empty() { None } else { Some(name) },
+            elements: elements.into_iter().map(ViewElement::from).collect(),
+            view_box: view_box.map(Rect::from).unwrap_or_default(),
+            zoom: if approx_eq!(f64, zoom, 0.0) {
                 1.0
             } else {
-                view.zoom
+                zoom
             },
-            use_lettered_polarity: view.use_lettered_polarity,
+            use_lettered_polarity,
         })
     }
 }

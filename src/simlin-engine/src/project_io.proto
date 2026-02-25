@@ -261,6 +261,7 @@ message View {
   Rect viewBox = 4;
   double zoom = 5;
   bool use_lettered_polarity = 6;
+  string name = 7;
 };
 
 message LoopMetadata {
