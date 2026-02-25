@@ -217,74 +217,52 @@ pub trait Visitor<T> {
     fn walk(&mut self, e: &Expr0) -> T;
 }
 
-macro_rules! child_needs_parens(
-    ($expr:tt, $parent:expr, $child:expr, $eqn:expr) => {{
-        match $parent {
-            // no children so doesn't matter
-            $expr::Const(_, _, _) | $expr::Var(_, _) => false,
-            // children are comma separated, so no ambiguity possible
-            $expr::App(_, _) | $expr::Subscript(_, _, _) => false,
-            $expr::Op1(_, _, _) => matches!($child, $expr::Op2(_, _, _, _)),
-            $expr::Op2(parent_op, _, _, _) => match $child {
-                $expr::Const(_, _, _)
-                | $expr::Var(_, _)
-                | $expr::App(_, _)
-                | $expr::Subscript(_, _, _)
-                | $expr::If(_, _, _, _)
-                | $expr::Op1(_, _, _) => false,
-                // 3 * 2 + 1
-                $expr::Op2(child_op, _, _, _) => {
-                    // if we have `3 * (2 + 3)`, the parent's precedence
-                    // is higher than the child and we need enclosing parens
-                    parent_op.precedence() > child_op.precedence()
-                }
-            },
-            $expr::If(_, _, _, _) => false,
-        }
-    }}
-);
-
-fn paren_if_necessary(parent: &Expr0, child: &Expr0, eqn: String) -> String {
-    if child_needs_parens!(Expr0, parent, child, eqn) {
-        format!("({eqn})")
-    } else {
-        eqn
+/// Determine if a child expression needs parentheses given the parent's
+/// precedence.  For right children of non-commutative operators (-, /, mod),
+/// parenthesize at equal precedence to preserve grouping:
+/// `a - (b - c)` must not become `a - b - c`.
+fn needs_parens_for_op(parent_op: &BinaryOp, child_op: &BinaryOp, is_right_child: bool) -> bool {
+    let parent_prec = parent_op.precedence();
+    let child_prec = child_op.precedence();
+    if parent_prec > child_prec {
+        return true;
     }
+    if is_right_child && parent_prec == child_prec {
+        return matches!(parent_op, BinaryOp::Sub | BinaryOp::Div | BinaryOp::Mod);
+    }
+    false
 }
 
-macro_rules! child_needs_parens2(
-    ($expr:tt, $parent:expr, $child:expr, $eqn:expr) => {{
-        match $parent {
-            // no children so doesn't matter
-            $expr::Const(_, _, _) | $expr::Var(_, _, _) => false,
-            // children are comma separated, so no ambiguity possible
-            $expr::App(_, _, _) | $expr::Subscript(_, _, _, _) => false,
-            $expr::Op1(_, _, _, _) => matches!($child, $expr::Op2(_, _, _, _, _)),
-            $expr::Op2(parent_op, _, _, _, _) => match $child {
-                $expr::Const(_, _, _)
-                | $expr::Var(_, _, _)
-                | $expr::App(_, _, _)
-                | $expr::Subscript(_, _, _, _)
-                | $expr::If(_, _, _, _, _)
-                | $expr::Op1(_, _, _, _) => false,
-                // 3 * 2 + 1
-                $expr::Op2(child_op, _, _, _, _) => {
-                    // if we have `3 * (2 + 3)`, the parent's precedence
-                    // is higher than the child and we need enclosing parens
-                    parent_op.precedence() > child_op.precedence()
-                }
-            },
-            $expr::If(_, _, _, _, _) => false,
-        }
-    }}
-);
+fn paren_if_necessary(parent: &Expr0, child: &Expr0, is_right_child: bool, eqn: String) -> String {
+    let needs = match parent {
+        Expr0::Const(_, _, _) | Expr0::Var(_, _) => false,
+        Expr0::App(_, _) | Expr0::Subscript(_, _, _) => false,
+        Expr0::Op1(_, _, _) => matches!(child, Expr0::Op2(_, _, _, _)),
+        Expr0::Op2(parent_op, _, _, _) => match child {
+            Expr0::Op2(child_op, _, _, _) => {
+                needs_parens_for_op(parent_op, child_op, is_right_child)
+            }
+            _ => false,
+        },
+        Expr0::If(_, _, _, _) => false,
+    };
+    if needs { format!("({eqn})") } else { eqn }
+}
 
-fn paren_if_necessary1(parent: &Expr2, child: &Expr2, eqn: String) -> String {
-    if child_needs_parens2!(Expr2, parent, child, eqn) {
-        format!("({eqn})")
-    } else {
-        eqn
-    }
+fn paren_if_necessary1(parent: &Expr2, child: &Expr2, is_right_child: bool, eqn: String) -> String {
+    let needs = match parent {
+        Expr2::Const(_, _, _) | Expr2::Var(_, _, _) => false,
+        Expr2::App(_, _, _) | Expr2::Subscript(_, _, _, _) => false,
+        Expr2::Op1(_, _, _, _) => matches!(child, Expr2::Op2(_, _, _, _, _)),
+        Expr2::Op2(parent_op, _, _, _, _) => match child {
+            Expr2::Op2(child_op, _, _, _, _) => {
+                needs_parens_for_op(parent_op, child_op, is_right_child)
+            }
+            _ => false,
+        },
+        Expr2::If(_, _, _, _, _) => false,
+    };
+    if needs { format!("({eqn})") } else { eqn }
 }
 
 /// Check whether a canonicalized identifier needs double-quoting to be
@@ -350,7 +328,7 @@ impl Visitor<String> for PrintVisitor {
                         format!("{l}'")
                     }
                     _ => {
-                        let l = paren_if_necessary(expr, l, self.walk(l));
+                        let l = paren_if_necessary(expr, l, false, self.walk(l));
                         let op: &str = match op {
                             UnaryOp::Positive => "+",
                             UnaryOp::Negative => "-",
@@ -362,8 +340,8 @@ impl Visitor<String> for PrintVisitor {
                 }
             }
             Expr0::Op2(op, l, r, _) => {
-                let l = paren_if_necessary(expr, l, self.walk(l));
-                let r = paren_if_necessary(expr, r, self.walk(r));
+                let l = paren_if_necessary(expr, l, false, self.walk(l));
+                let r = paren_if_necessary(expr, r, true, self.walk(r));
                 let op: &str = match op {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
@@ -562,7 +540,7 @@ impl LatexVisitor {
                         format!("{l}^T")
                     }
                     _ => {
-                        let l = paren_if_necessary1(expr, l, self.walk(l));
+                        let l = paren_if_necessary1(expr, l, false, self.walk(l));
                         let op: &str = match op {
                             UnaryOp::Positive => "+",
                             UnaryOp::Negative => "-",
@@ -574,8 +552,8 @@ impl LatexVisitor {
                 }
             }
             Expr2::Op2(op, l, r, _, _) => {
-                let l = paren_if_necessary1(expr, l, self.walk(l));
-                let r = paren_if_necessary1(expr, r, self.walk(r));
+                let l = paren_if_necessary1(expr, l, false, self.walk(l));
+                let r = paren_if_necessary1(expr, r, true, self.walk(r));
                 let op: &str = match op {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",

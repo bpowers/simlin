@@ -20,7 +20,7 @@ use simlin_engine::{
     Error, ErrorCode, Project, Result, Results, Simulation, Variable, Vm, datamodel, project_io,
     serde,
 };
-use simlin_engine::{load_csv, load_dat, open_vensim, open_xmile, to_xmile};
+use simlin_engine::{load_csv, load_dat, open_vensim, open_xmile, to_mdl, to_xmile};
 
 mod gen_stdlib;
 mod vdf_dump;
@@ -53,6 +53,7 @@ fn usage() -> ! {
             "    --vensim         model is a Vensim .mdl file\n",
             "    --pb-input       input is binary protobuf project\n",
             "    --to-xmile       output should be XMILE not protobuf\n",
+            "    --to-mdl         output should be Vensim MDL not protobuf\n",
             "    --model-only     for conversion, only output model instead of project\n",
             "    --output FILE    path to write output file\n",
             "    --reference FILE reference TSV for debug subcommand\n",
@@ -82,6 +83,7 @@ struct Args {
     is_vensim: bool,
     is_pb_input: bool,
     is_to_xmile: bool,
+    is_to_mdl: bool,
     is_convert: bool,
     is_model_only: bool,
     is_no_output: bool,
@@ -129,6 +131,7 @@ fn parse_args() -> StdResult<Args, Box<dyn std::error::Error>> {
     args.is_no_output = parsed.contains("--no-output");
     args.is_model_only = parsed.contains("--model-only");
     args.is_to_xmile = parsed.contains("--to-xmile");
+    args.is_to_mdl = parsed.contains("--to-mdl");
     args.is_vensim = parsed.contains("--vensim");
     args.is_pb_input = parsed.contains("--pb-input");
     args.is_ltm = parsed.contains("--ltm");
@@ -421,6 +424,15 @@ fn main() {
                 }
                 Err(err) => {
                     die!("error converting to XMILE: {}", err);
+                }
+            }
+        } else if args.is_to_mdl {
+            match to_mdl(&project) {
+                Ok(s) => {
+                    buf = s.into_bytes();
+                }
+                Err(err) => {
+                    die!("error converting to MDL: {}", err);
                 }
             }
         }
