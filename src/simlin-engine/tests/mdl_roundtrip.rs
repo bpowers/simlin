@@ -520,11 +520,16 @@ fn view_element_roundtrip() {
                     ));
                 }
 
-                let (_, _, _, links1, _, _) = count_view_elements(v1);
-                let (_, _, _, links2, _, _) = count_view_elements(v2);
-                if links1 != links2 {
+                let counts1 = count_view_elements(v1);
+                let counts2 = count_view_elements(v2);
+                if counts1 != counts2 {
+                    let (stocks1, flows1, auxes1, links1, clouds1, aliases1) = counts1;
+                    let (stocks2, flows2, auxes2, links2, clouds2, aliases2) = counts2;
                     failures.push(format!(
-                        "{path}: model[{i}].view[{j}] link count differs: {links1} vs {links2}"
+                        "{path}: model[{i}].view[{j}] element counts differ: \
+                         stocks={stocks1}vs{stocks2} flows={flows1}vs{flows2} \
+                         auxes={auxes1}vs{auxes2} links={links1}vs{links2} \
+                         clouds={clouds1}vs{clouds2} aliases={aliases1}vs{aliases2}"
                     ));
                 }
             }

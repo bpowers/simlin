@@ -30,7 +30,7 @@ fn underbar_to_space(name: &str) -> String {
 fn mdl_bare_keyword(xmile_name: &str) -> Option<&'static str> {
     match xmile_name {
         "time" => Some("Time"),
-        "dt" => Some("TIME STEP"),
+        "dt" | "time_step" => Some("TIME STEP"),
         "starttime" | "initial_time" => Some("INITIAL TIME"),
         "endtime" | "final_time" => Some("FINAL TIME"),
         _ => None,
