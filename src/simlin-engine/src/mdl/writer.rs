@@ -94,15 +94,36 @@ fn reorder_args(mdl_name: &str, mut args: Vec<String>) -> Vec<String> {
     }
 }
 
-/// Parenthesize `eqn` when the child's precedence is lower than the parent's,
-/// mirroring `paren_if_necessary()` in `ast/mod.rs`.
-fn mdl_paren_if_necessary(parent: &Expr0, child: &Expr0, eqn: String) -> String {
+/// Parenthesize `eqn` when the child's precedence requires it.
+///
+/// For left children: parenthesize only when the parent has strictly higher
+/// precedence (lower-precedence child needs grouping).
+///
+/// For right children of non-commutative operators (`-`, `/`, `MOD`):
+/// also parenthesize when the child has equal precedence, because these
+/// operators are not associative -- `a - (b - c)` != `(a - b) - c`.
+fn mdl_paren_if_necessary(
+    parent: &Expr0,
+    child: &Expr0,
+    is_right_child: bool,
+    eqn: String,
+) -> String {
     let needs = match parent {
         Expr0::Const(_, _, _) | Expr0::Var(_, _) => false,
         Expr0::App(_, _) | Expr0::Subscript(_, _, _) => false,
         Expr0::Op1(_, _, _) => matches!(child, Expr0::Op2(_, _, _, _)),
         Expr0::Op2(parent_op, _, _, _) => match child {
-            Expr0::Op2(child_op, _, _, _) => parent_op.precedence() > child_op.precedence(),
+            Expr0::Op2(child_op, _, _, _) => {
+                let parent_prec = parent_op.precedence();
+                let child_prec = child_op.precedence();
+                if parent_prec > child_prec {
+                    true
+                } else if is_right_child && parent_prec == child_prec {
+                    matches!(parent_op, BinaryOp::Sub | BinaryOp::Div | BinaryOp::Mod)
+                } else {
+                    false
+                }
+            }
             _ => false,
         },
         Expr0::If(_, _, _, _) => false,
@@ -476,7 +497,7 @@ impl Visitor<String> for MdlPrintVisitor {
                     format!("{l}'")
                 }
                 _ => {
-                    let l = mdl_paren_if_necessary(expr, l, self.walk(l));
+                    let l = mdl_paren_if_necessary(expr, l, false, self.walk(l));
                     match op {
                         UnaryOp::Positive => format!("+{l}"),
                         UnaryOp::Negative => format!("-{l}"),
@@ -487,8 +508,8 @@ impl Visitor<String> for MdlPrintVisitor {
                 }
             },
             Expr0::Op2(op, l, r, _) => {
-                let l = mdl_paren_if_necessary(expr, l, self.walk(l));
-                let r = mdl_paren_if_necessary(expr, r, self.walk(r));
+                let l = mdl_paren_if_necessary(expr, l, false, self.walk(l));
+                let r = mdl_paren_if_necessary(expr, r, true, self.walk(r));
                 let op_str = match op {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
@@ -1271,9 +1292,9 @@ impl MdlWriter {
 
     /// Write the settings section of the MDL file.
     ///
-    /// The settings section follows the sketch section and starts with the
-    /// `///---\\\` separator and `:L<%^E!@` marker. It contains type-coded
-    /// setting lines that Vensim reads to restore UI and simulation state.
+    /// The settings section follows the sketch terminator (`///---\\\`) and
+    /// starts with the `:L<%^E!@` marker. It contains type-coded setting
+    /// lines that Vensim reads to restore UI and simulation state.
     fn write_settings_section(&mut self, project: &datamodel::Project) {
         let sim_specs = project
             .models
@@ -1281,7 +1302,7 @@ impl MdlWriter {
             .and_then(|m| m.sim_specs.as_ref())
             .unwrap_or(&project.sim_specs);
 
-        self.buf.push_str("///---\\\\\\\n");
+        // The ///---\\\ separator is already emitted by write_sketch_section
         self.buf.push_str(":L<%^E!@\n");
 
         // Type 22: Unit equivalences
@@ -1448,6 +1469,26 @@ mod tests {
     #[test]
     fn precedence_no_extra_parens() {
         assert_mdl("a + b * c", "a + b * c");
+    }
+
+    #[test]
+    fn right_child_same_precedence_non_commutative() {
+        // a - (b - c) must preserve parens: subtraction is not associative
+        assert_mdl("a - (b - c)", "a - (b - c)");
+        // a / (b / c) must preserve parens: division is not associative
+        assert_mdl("a / (b / c)", "a / (b / c)");
+        // a - (b + c) must preserve parens: + has same precedence as -
+        assert_mdl("a - (b + c)", "a - (b + c)");
+    }
+
+    #[test]
+    fn left_child_same_precedence_no_extra_parens() {
+        // (a - b) - c should NOT get extra parens: left-to-right is natural
+        assert_mdl("a - b - c", "a - b - c");
+        // (a / b) / c should NOT get extra parens
+        assert_mdl("a / b / c", "a / b / c");
+        // (a + b) + c should NOT get extra parens: + is commutative anyway
+        assert_mdl("a + b + c", "a + b + c");
     }
 
     #[test]
@@ -2934,8 +2975,8 @@ mod tests {
         writer.write_settings_section(&project);
         let output = writer.buf;
         assert!(
-            output.starts_with("///---\\\\\\\n:L<%^E!@\n"),
-            "settings section should start with settings separator and marker, got: {:?}",
+            output.starts_with(":L<%^E!@\n"),
+            "settings section should start with marker (separator is in sketch section), got: {:?}",
             &output[..output.len().min(40)]
         );
     }
@@ -3063,7 +3104,8 @@ mod tests {
             project.sim_specs.sim_method = method;
             let mut writer = MdlWriter::new();
             writer.write_settings_section(&project);
-            let output = writer.buf;
+            // Prepend the separator that write_sketch_section normally emits
+            let output = format!("///---\\\\\\\n{}", writer.buf);
 
             let parser = crate::mdl::settings::PostEquationParser::new(&output);
             let settings = parser.parse_settings();
@@ -3094,7 +3136,8 @@ mod tests {
         ];
         let mut writer = MdlWriter::new();
         writer.write_settings_section(&project);
-        let output = writer.buf;
+        // Prepend the separator that write_sketch_section normally emits
+        let output = format!("///---\\\\\\\n{}", writer.buf);
 
         let parser = crate::mdl::settings::PostEquationParser::new(&output);
         let settings = parser.parse_settings();
