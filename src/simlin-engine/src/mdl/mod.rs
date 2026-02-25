@@ -19,17 +19,28 @@ mod parser;
 mod reader;
 mod settings;
 pub mod view;
+pub mod writer;
 mod xmile_compat;
 
 // Public re-exports
 pub use lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
 pub use normalizer::{NormalizerError, NormalizerErrorCode, Token, TokenNormalizer};
 pub use reader::{EquationReader, ReaderError};
+pub use writer::expr0_to_mdl;
 
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::Project;
 
 use convert::convert_mdl;
+
+/// Convert a Project to Vensim MDL text.
+pub fn project_to_mdl(_project: &Project) -> Result<String> {
+    Err(Error::new(
+        ErrorKind::Import,
+        ErrorCode::Generic,
+        Some("MDL writer not yet implemented".to_owned()),
+    ))
+}
 
 /// Parse a Vensim MDL file into a Project.
 ///
