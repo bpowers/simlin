@@ -25,6 +25,18 @@ fn underbar_to_space(name: &str) -> String {
     name.replace('_', " ")
 }
 
+/// Map zero-argument XMILE builtins that are bare keywords in MDL.
+/// In Vensim, these are written without parentheses (e.g. `Time` not `TIME()`).
+fn mdl_bare_keyword(xmile_name: &str) -> Option<&'static str> {
+    match xmile_name {
+        "time" => Some("Time"),
+        "dt" => Some("TIME STEP"),
+        "starttime" | "initial_time" => Some("INITIAL TIME"),
+        "endtime" | "final_time" => Some("FINAL TIME"),
+        _ => None,
+    }
+}
+
 /// Map XMILE canonical function names back to their Vensim MDL equivalents.
 /// This inverts the `format_function_name()` table in `xmile_compat.rs`.
 /// The input is expected to already be lowercase (as stored in `Expr0::App`).
@@ -443,6 +455,12 @@ impl Visitor<String> for MdlPrintVisitor {
             Expr0::Const(s, _, _) => s.clone(),
             Expr0::Var(id, _) => underbar_to_space(id.as_str()),
             Expr0::App(UntypedBuiltinFn(func, args), _) => {
+                // In MDL, TIME and DT are bare keywords (no parentheses).
+                if args.is_empty()
+                    && let Some(kw) = mdl_bare_keyword(func)
+                {
+                    return kw.to_owned();
+                }
                 let mdl_name = xmile_to_mdl_function_name(func);
                 let converted: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
                 let reordered = reorder_args(&mdl_name, converted);
@@ -1480,7 +1498,7 @@ mod tests {
         // Missing the Lt branch -- should fall through to mechanical conversion
         assert_mdl(
             "if time >= start then 1 else 0",
-            "IF THEN ELSE(TIME() >= start, 1, 0)",
+            "IF THEN ELSE(Time >= start, 1, 0)",
         );
     }
 
