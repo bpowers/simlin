@@ -1361,6 +1361,143 @@ fn test_model_causal_edges_feedback_loop() {
 }
 
 #[test]
+fn test_model_causal_edges_normalizes_inter_module_output_refs() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "inter_module_edges".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "source".to_string(),
+                        equation: datamodel::Equation::Scalar("1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "a".to_string(),
+                        model_name: "producer".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "source".to_string(),
+                            dst: "a.input".to_string(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "b".to_string(),
+                        model_name: "consumer".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "a.output".to_string(),
+                            dst: "b.input".to_string(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "producer".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "output".to_string(),
+                        equation: datamodel::Equation::Scalar("input".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "consumer".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "output".to_string(),
+                        equation: datamodel::Equation::Scalar("input".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+    let edges = model_causal_edges(&db, model, result.project);
+
+    assert!(
+        edges.edges.get("a").is_some_and(|tos| tos.contains("b")),
+        "inter-module edge should be normalized to module node 'a' -> 'b'"
+    );
+    assert!(
+        !edges.edges.contains_key("a\u{00B7}output"),
+        "phantom module output node should not appear in causal graph"
+    );
+}
+
+#[test]
 fn test_model_loop_circuits_finds_feedback() {
     let db = SimlinDb::default();
     let project = feedback_loop_project();
@@ -2339,6 +2476,130 @@ fn test_incremental_sync_successive_patches() {
     } else {
         panic!("Expected Const(999.0), got {:?}", result.variable.ast());
     }
+}
+
+#[test]
+fn test_sync_preserves_module_visibility_from_datamodel() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "visibility".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![datamodel::Variable::Module(datamodel::Module {
+                    ident: "sub".to_string(),
+                    model_name: "submodel".to_string(),
+                    documentation: String::new(),
+                    units: None,
+                    references: vec![],
+                    compat: datamodel::Compat {
+                        visibility: datamodel::Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
+                    ai_state: None,
+                    uid: None,
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "submodel".to_string(),
+                sim_specs: None,
+                variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "output".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let module_var = sync.models["main"].variables["sub"].source;
+    assert_eq!(
+        module_var.compat(&db).visibility,
+        datamodel::Visibility::Public,
+        "module visibility should be preserved in SourceVariable compat"
+    );
+}
+
+#[test]
+fn test_incremental_sync_updates_module_visibility() {
+    let mut db = SimlinDb::default();
+    let mut project = datamodel::Project {
+        name: "visibility_update".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![datamodel::Variable::Module(datamodel::Module {
+                    ident: "sub".to_string(),
+                    model_name: "submodel".to_string(),
+                    documentation: String::new(),
+                    units: None,
+                    references: vec![],
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: None,
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "submodel".to_string(),
+                sim_specs: None,
+                variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "output".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+    if let datamodel::Variable::Module(m) = &mut project.models[0].variables[0] {
+        m.compat.visibility = datamodel::Visibility::Public;
+    } else {
+        panic!("expected module variable in test fixture");
+    }
+
+    let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
+    let module_var = state2.models["main"].variables["sub"].source_var;
+    assert_eq!(
+        module_var.compat(&db).visibility,
+        datamodel::Visibility::Public,
+        "incremental sync should propagate module visibility changes"
+    );
 }
 
 // ── Incremental compilation tests ──────────────────────────────
@@ -3940,6 +4201,192 @@ fn test_sparse_per_element_gfs_preserve_table_indices() {
         "model with sparse per-element GFs should compile: {:?}",
         result.err()
     );
+}
+
+#[test]
+fn test_incremental_compile_smooth_over_module_output() {
+    use crate::vm::Vm;
+
+    let project = datamodel::Project {
+        name: "smooth_module_output".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "producer".to_string(),
+                        model_name: "producer".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "delay_time".to_string(),
+                        equation: datamodel::Equation::Scalar("2".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "smoothed".to_string(),
+                        equation: datamodel::Equation::Scalar(
+                            "SMTH1(producer.output, delay_time)".to_string(),
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "producer".to_string(),
+                sim_specs: None,
+                variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "output".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let incremental = compile_project_incremental(&db, sync.project, "main")
+        .expect("incremental compile should handle SMTH1(module.output, ...)");
+
+    let mut incr_vm = Vm::new(incremental).expect("incremental VM should build");
+    incr_vm
+        .run_to_end()
+        .expect("incremental simulation should run");
+    let smoothed = crate::common::Ident::new("smoothed");
+    let series = incr_vm
+        .get_series(&smoothed)
+        .expect("smoothed should exist in simulation output");
+    assert!(!series.is_empty(), "smoothed series should not be empty");
+}
+
+#[test]
+fn test_incremental_compile_implicit_lookup_dep_tables() {
+    use crate::vm::Vm;
+
+    let project = datamodel::Project {
+        name: "implicit_lookup_tables".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "table_var".to_string(),
+                    equation: datamodel::Equation::Scalar("time".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: Some(datamodel::GraphicalFunction {
+                        kind: datamodel::GraphicalFunctionKind::Continuous,
+                        x_points: Some(vec![0.0, 10.0]),
+                        y_points: vec![0.0, 100.0],
+                        x_scale: datamodel::GraphicalFunctionScale {
+                            min: 0.0,
+                            max: 10.0,
+                        },
+                        y_scale: datamodel::GraphicalFunctionScale {
+                            min: 0.0,
+                            max: 100.0,
+                        },
+                    }),
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "delay_time".to_string(),
+                    equation: datamodel::Equation::Scalar("2".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "smoothed".to_string(),
+                    equation: datamodel::Equation::Scalar(
+                        "SMTH1(LOOKUP(table_var, time), delay_time)".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let incremental = compile_project_incremental(&db, sync.project, "main")
+        .expect("incremental compile should include lookup tables from implicit deps");
+
+    let mut incr_vm = Vm::new(incremental).expect("incremental VM should build");
+    incr_vm
+        .run_to_end()
+        .expect("incremental simulation should run");
+
+    let smoothed = crate::common::Ident::new("smoothed");
+    let series = incr_vm
+        .get_series(&smoothed)
+        .expect("smoothed should exist in simulation output");
+    assert!(!series.is_empty(), "smoothed series should not be empty");
 }
 
 #[test]
