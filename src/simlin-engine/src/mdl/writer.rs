@@ -17,6 +17,63 @@ fn underbar_to_space(name: &str) -> String {
     name.replace('_', " ")
 }
 
+/// Map XMILE canonical function names back to their Vensim MDL equivalents.
+/// This inverts the `format_function_name()` table in `xmile_compat.rs`.
+/// The input is expected to already be lowercase (as stored in `Expr0::App`).
+fn xmile_to_mdl_function_name(xmile_name: &str) -> String {
+    match xmile_name {
+        "smth1" => "SMOOTH".to_owned(),
+        "smth3" => "SMOOTH3".to_owned(),
+        "delay" => "DELAY FIXED".to_owned(),
+        "delay1" => "DELAY1".to_owned(),
+        "delay3" => "DELAY3".to_owned(),
+        "delayn" => "DELAY N".to_owned(),
+        "smthn" => "SMOOTH N".to_owned(),
+        "init" => "ACTIVE INITIAL".to_owned(),
+        "int" => "INTEGER".to_owned(),
+        "lookupinv" => "LOOKUP INVERT".to_owned(),
+        "uniform" => "RANDOM UNIFORM".to_owned(),
+        "safediv" => "ZIDZ".to_owned(),
+        "forcst" => "FORECAST".to_owned(),
+        "normalpink" => "RANDOM PINK NOISE".to_owned(),
+        "normal" => "RANDOM NORMAL".to_owned(),
+        "lookup" => "LOOKUP".to_owned(),
+        "integ" => "INTEG".to_owned(),
+        _ => underbar_to_space(xmile_name).to_uppercase(),
+    }
+}
+
+/// Reorder arguments for functions whose XMILE and MDL arg orders differ.
+fn reorder_args(mdl_name: &str, mut args: Vec<String>) -> Vec<String> {
+    match mdl_name {
+        // XMILE: delayn(input, dt, n, init) -> MDL: DELAY N(input, dt, init, n)
+        // XMILE: smthn(input, dt, n, init) -> MDL: SMOOTH N(input, dt, init, n)
+        "DELAY N" | "SMOOTH N" => {
+            if args.len() >= 4 {
+                args.swap(2, 3);
+            }
+            args
+        }
+        // XMILE: normal(mean, sd, seed, min, max) -> MDL: RANDOM NORMAL(min, max, mean, sd, seed)
+        "RANDOM NORMAL" => {
+            if args.len() >= 5 {
+                let mean = args[0].clone();
+                let sd = args[1].clone();
+                let seed = args[2].clone();
+                let min = args[3].clone();
+                let max = args[4].clone();
+                args[0] = min;
+                args[1] = max;
+                args[2] = mean;
+                args[3] = sd;
+                args[4] = seed;
+            }
+            args
+        }
+        _ => args,
+    }
+}
+
 /// Parenthesize `eqn` when the child's precedence is lower than the parent's,
 /// mirroring `paren_if_necessary()` in `ast/mod.rs`.
 fn mdl_paren_if_necessary(parent: &Expr0, child: &Expr0, eqn: String) -> String {
@@ -53,8 +110,10 @@ impl Visitor<String> for MdlPrintVisitor {
             Expr0::Const(s, _, _) => s.clone(),
             Expr0::Var(id, _) => underbar_to_space(id.as_str()),
             Expr0::App(UntypedBuiltinFn(func, args), _) => {
-                let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
-                format!("{}({})", func.to_uppercase(), args.join(", "))
+                let mdl_name = xmile_to_mdl_function_name(func);
+                let converted: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
+                let reordered = reorder_args(&mdl_name, converted);
+                format!("{}({})", mdl_name, reordered.join(", "))
             }
             Expr0::Subscript(id, args, _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
@@ -182,5 +241,112 @@ mod tests {
         assert_mdl("+a", "+a");
         // XMILE uses `not` keyword; MDL uses `:NOT:` with a trailing space before the operand
         assert_mdl("not a", ":NOT: a");
+    }
+
+    #[test]
+    fn function_rename_smooth() {
+        assert_mdl("smth1(x, 5)", "SMOOTH(x, 5)");
+    }
+
+    #[test]
+    fn function_rename_smooth3() {
+        assert_mdl("smth3(x, 5)", "SMOOTH3(x, 5)");
+    }
+
+    #[test]
+    fn function_rename_safediv() {
+        assert_mdl("safediv(a, b)", "ZIDZ(a, b)");
+    }
+
+    #[test]
+    fn function_rename_init() {
+        assert_mdl("init(x, 10)", "ACTIVE INITIAL(x, 10)");
+    }
+
+    #[test]
+    fn function_rename_int() {
+        assert_mdl("int(x)", "INTEGER(x)");
+    }
+
+    #[test]
+    fn function_rename_uniform() {
+        assert_mdl("uniform(0, 1)", "RANDOM UNIFORM(0, 1)");
+    }
+
+    #[test]
+    fn function_rename_forcst() {
+        assert_mdl("forcst(x, 5, 0)", "FORECAST(x, 5, 0)");
+    }
+
+    #[test]
+    fn function_rename_delay() {
+        assert_mdl("delay(x, 5, 0)", "DELAY FIXED(x, 5, 0)");
+    }
+
+    #[test]
+    fn function_rename_delay1() {
+        assert_mdl("delay1(x, 5)", "DELAY1(x, 5)");
+    }
+
+    #[test]
+    fn function_rename_delay3() {
+        assert_mdl("delay3(x, 5)", "DELAY3(x, 5)");
+    }
+
+    #[test]
+    fn function_rename_integ() {
+        assert_mdl(
+            "integ(inflow - outflow, 100)",
+            "INTEG(inflow - outflow, 100)",
+        );
+    }
+
+    #[test]
+    fn function_rename_lookupinv() {
+        assert_mdl("lookupinv(tbl, 0.5)", "LOOKUP INVERT(tbl, 0.5)");
+    }
+
+    #[test]
+    fn function_rename_normalpink() {
+        assert_mdl("normalpink(x, 5)", "RANDOM PINK NOISE(x, 5)");
+    }
+
+    #[test]
+    fn function_rename_lookup() {
+        assert_mdl("lookup(tbl, x)", "LOOKUP(tbl, x)");
+    }
+
+    #[test]
+    fn function_unknown_uppercased() {
+        assert_mdl("abs(x)", "ABS(x)");
+        assert_mdl("ln(x)", "LN(x)");
+        assert_mdl("max(a, b)", "MAX(a, b)");
+    }
+
+    #[test]
+    fn arg_reorder_delay_n() {
+        // XMILE: delayn(input, delay_time, n, init) -> MDL: DELAY N(input, delay_time, init, n)
+        assert_mdl(
+            "delayn(input, delay_time, 3, init_val)",
+            "DELAY N(input, delay time, init val, 3)",
+        );
+    }
+
+    #[test]
+    fn arg_reorder_smooth_n() {
+        // XMILE: smthn(input, delay_time, n, init) -> MDL: SMOOTH N(input, delay_time, init, n)
+        assert_mdl(
+            "smthn(input, delay_time, 3, init_val)",
+            "SMOOTH N(input, delay time, init val, 3)",
+        );
+    }
+
+    #[test]
+    fn arg_reorder_random_normal() {
+        // XMILE: normal(mean, sd, seed, min, max) -> MDL: RANDOM NORMAL(min, max, mean, sd, seed)
+        assert_mdl(
+            "normal(mean, sd, seed, min_val, max_val)",
+            "RANDOM NORMAL(min val, max val, mean, sd, seed)",
+        );
     }
 }
