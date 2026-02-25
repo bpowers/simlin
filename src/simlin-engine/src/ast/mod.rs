@@ -416,6 +416,48 @@ fn test_print_eqn() {
         ))
     );
     assert_eq!(
+        "a - (b - c)",
+        print_eqn(&Expr0::Op2(
+            BinaryOp::Sub,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::new(1, 2))),
+            Box::new(Expr0::Op2(
+                BinaryOp::Sub,
+                Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+                Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+                Loc::default()
+            )),
+            Loc::new(0, 11),
+        ))
+    );
+    assert_eq!(
+        "a / (b / c)",
+        print_eqn(&Expr0::Op2(
+            BinaryOp::Div,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::new(1, 2))),
+            Box::new(Expr0::Op2(
+                BinaryOp::Div,
+                Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+                Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+                Loc::default()
+            )),
+            Loc::new(0, 11),
+        ))
+    );
+    assert_eq!(
+        "a mod (b mod c)",
+        print_eqn(&Expr0::Op2(
+            BinaryOp::Mod,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::new(1, 2))),
+            Box::new(Expr0::Op2(
+                BinaryOp::Mod,
+                Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+                Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+                Loc::default()
+            )),
+            Loc::new(0, 15),
+        ))
+    );
+    assert_eq!(
         "-a",
         print_eqn(&Expr0::Op1(
             UnaryOp::Negative,
