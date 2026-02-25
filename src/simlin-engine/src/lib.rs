@@ -84,7 +84,7 @@ pub use self::vm::{CompiledSimulation, Vm};
 pub use self::compat::open_vensim_xmutil;
 #[cfg(feature = "file_io")]
 pub use self::compat::{load_csv, load_dat};
-pub use self::compat::{open_vensim, open_xmile, to_xmile};
+pub use self::compat::{open_vensim, open_xmile, to_mdl, to_xmile};
 #[cfg(feature = "file_io")]
 pub use self::vdf::load_vdf;
 

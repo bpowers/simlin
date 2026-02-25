@@ -32,6 +32,10 @@ pub fn to_xmile(project: &Project) -> Result<String> {
     xmile::project_to_xmile(project)
 }
 
+pub fn to_mdl(project: &Project) -> Result<String> {
+    mdl::project_to_mdl(project)
+}
+
 #[cfg(feature = "xmutil")]
 pub fn open_vensim_xmutil(contents: &str) -> Result<Project> {
     use crate::common::{Error, ErrorCode, ErrorKind};

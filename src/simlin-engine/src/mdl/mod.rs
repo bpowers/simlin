@@ -19,17 +19,45 @@ mod parser;
 mod reader;
 mod settings;
 pub mod view;
+pub mod writer;
 mod xmile_compat;
 
 // Public re-exports
 pub use lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
 pub use normalizer::{NormalizerError, NormalizerErrorCode, Token, TokenNormalizer};
 pub use reader::{EquationReader, ReaderError};
+pub use writer::expr0_to_mdl;
 
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
-use crate::datamodel::Project;
+use crate::datamodel::{Project, Variable};
 
 use convert::convert_mdl;
+use writer::MdlWriter;
+
+/// Convert a Project to Vensim MDL text.
+pub fn project_to_mdl(project: &Project) -> Result<String> {
+    if project.models.len() != 1 {
+        return Err(Error::new(
+            ErrorKind::Import,
+            ErrorCode::Generic,
+            Some("MDL format supports only a single model".to_owned()),
+        ));
+    }
+
+    let model = &project.models[0];
+    for var in &model.variables {
+        if matches!(var, Variable::Module(_)) {
+            return Err(Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                Some("MDL format does not support Module variables".to_owned()),
+            ));
+        }
+    }
+
+    let writer = MdlWriter::new();
+    writer.write_project(project)
+}
 
 /// Parse a Vensim MDL file into a Project.
 ///
