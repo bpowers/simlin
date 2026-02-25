@@ -24,6 +24,10 @@ const PLATFORM_MAP = {
     package: "@simlin/mcp-darwin-x64",
     triple: "x86_64-apple-darwin",
   },
+  "linux-arm64": {
+    package: "@simlin/mcp-linux-arm64",
+    triple: "aarch64-unknown-linux-musl",
+  },
   "linux-x64": {
     package: "@simlin/mcp-linux-x64",
     triple: "x86_64-unknown-linux-musl",
@@ -42,7 +46,7 @@ if (!platformInfo) {
     `simlin-mcp: unsupported platform: ${process.platform} (${process.arch})`,
   );
   console.error(
-    "Supported platforms: darwin-arm64, darwin-x64, linux-x64, win32-x64",
+    "Supported platforms: darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64",
   );
   process.exit(1);
 }
