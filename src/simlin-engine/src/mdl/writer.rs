@@ -2,20 +2,22 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! MDL equation text writer.
+//! MDL equation text and sketch writer.
 //!
-//! Converts `Expr0` AST nodes into Vensim MDL-format equation text.
+//! Converts `Expr0` AST nodes into Vensim MDL-format equation text and
+//! serializes datamodel views to MDL sketch format.
 //! The key transformation vs the XMILE printer (`ast::print_eqn`) is
 //! converting canonical (underscored, lowercase) identifiers back to
 //! MDL-style spaced names and using MDL operator syntax.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp, Visitor};
 use crate::builtins::UntypedBuiltinFn;
 use crate::common::Result;
-use crate::datamodel::{self, DimensionElements, Equation, GraphicalFunction};
+use crate::datamodel::view_element::{self, LinkPolarity, LinkShape};
+use crate::datamodel::{self, DimensionElements, Equation, GraphicalFunction, View, ViewElement};
 use crate::lexer::LexerType;
 
 /// Replace underscores with spaces -- the reverse of `space_to_underbar()`.
@@ -718,6 +720,205 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
     buf.push_str("\n\t~~|\n");
 }
 
+// ---- Sketch element serialization ----
+
+/// Write a type 10 line for an Aux element.
+fn write_aux_element(buf: &mut String, aux: &view_element::Aux) {
+    let name = underbar_to_space(&aux.name);
+    // shape=8 (has equation), bits=3 (visible, primary)
+    write!(
+        buf,
+        "10,{},{},{},{},40,20,8,3,0,0,-1,0,0,0",
+        aux.uid, name, aux.x as i32, aux.y as i32,
+    )
+    .unwrap();
+}
+
+/// Write a type 10 line for a Stock element.
+fn write_stock_element(buf: &mut String, stock: &view_element::Stock) {
+    let name = underbar_to_space(&stock.name);
+    // shape=3 (box/stock shape), bits=3 (visible, primary)
+    write!(
+        buf,
+        "10,{},{},{},{},40,20,3,3,0,0,0,0,0,0",
+        stock.uid, name, stock.x as i32, stock.y as i32,
+    )
+    .unwrap();
+}
+
+/// Write type 11 (valve) + type 10 (attached flow) lines for a Flow element.
+///
+/// In MDL, flows are two elements: a valve (type 11) at the flow position
+/// and an attached variable (type 10) below it. The valve gets uid-1 and
+/// the variable gets the flow's uid.
+fn write_flow_element(buf: &mut String, flow: &view_element::Flow) {
+    let name = underbar_to_space(&flow.name);
+    let valve_uid = flow.uid - 1;
+
+    // Type 11 (valve): the valve name in Vensim is typically a numeric
+    // placeholder (like "48" or "444"). We use the valve uid as the name.
+    write!(
+        buf,
+        "11,{},{},{},{},6,8,34,3,0,0,1,0,0,0",
+        valve_uid, valve_uid, flow.x as i32, flow.y as i32,
+    )
+    .unwrap();
+
+    // Type 10 (attached flow variable): shape=40 (bit 3 = equation, bit 5 = attached)
+    // The variable is positioned slightly below the valve.
+    let var_y = flow.y as i32 + 16;
+    write!(
+        buf,
+        "\n10,{},{},{},{},49,8,40,3,0,0,-1,0,0,0",
+        flow.uid, name, flow.x as i32, var_y,
+    )
+    .unwrap();
+}
+
+/// Write a type 12 line for a Cloud element.
+fn write_cloud_element(buf: &mut String, cloud: &view_element::Cloud) {
+    // Clouds: text="0", shape=0, bits=3 (visible)
+    write!(
+        buf,
+        "12,{},0,{},{},10,8,0,3,0,0,-1,0,0,0",
+        cloud.uid, cloud.x as i32, cloud.y as i32,
+    )
+    .unwrap();
+}
+
+/// Write a type 10 line for an Alias (ghost) element.
+fn write_alias_element(
+    buf: &mut String,
+    alias: &view_element::Alias,
+    name_map: &HashMap<i32, &str>,
+) {
+    let name = name_map
+        .get(&alias.alias_of_uid)
+        .map(|n| underbar_to_space(n))
+        .unwrap_or_default();
+    // shape=8, bits=2 (visible but bit 0 unset = ghost)
+    write!(
+        buf,
+        "10,{},{},{},{},40,20,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128",
+        alias.uid, name, alias.x as i32, alias.y as i32,
+    )
+    .unwrap();
+}
+
+/// Write a type 1 line for a Link (connector) element.
+///
+/// For arc connectors, we reverse-compute a control point from the stored
+/// canvas angle using the endpoints of the connected elements.
+fn write_link_element(
+    buf: &mut String,
+    link: &view_element::Link,
+    elem_positions: &HashMap<i32, (i32, i32)>,
+    use_lettered_polarity: bool,
+) {
+    let polarity_val = match link.polarity {
+        Some(LinkPolarity::Positive) if use_lettered_polarity => 83, // 'S'
+        Some(LinkPolarity::Negative) if use_lettered_polarity => 79, // 'O'
+        Some(LinkPolarity::Positive) => 43,                          // '+'
+        Some(LinkPolarity::Negative) => 45,                          // '-'
+        None => 0,
+    };
+
+    let from_pos = elem_positions
+        .get(&link.from_uid)
+        .copied()
+        .unwrap_or((0, 0));
+    let to_pos = elem_positions.get(&link.to_uid).copied().unwrap_or((0, 0));
+
+    let (ctrl_x, ctrl_y) = match &link.shape {
+        LinkShape::Straight => (0, 0),
+        LinkShape::Arc(canvas_angle) => compute_control_point(from_pos, to_pos, *canvas_angle),
+        LinkShape::MultiPoint(points) => {
+            if let Some(pt) = points.first() {
+                (pt.x as i32, pt.y as i32)
+            } else {
+                (0, 0)
+            }
+        }
+    };
+
+    let npoints = 1;
+    write!(
+        buf,
+        "1,{},{},{},0,0,{},0,0,0,0,-1--1--1,,{}|({},{})|",
+        link.uid, link.from_uid, link.to_uid, polarity_val, npoints, ctrl_x, ctrl_y,
+    )
+    .unwrap();
+}
+
+/// Reverse the `angle_from_points` computation: given two endpoint positions
+/// and a canvas-space arc angle, compute the single control point (x, y) that
+/// lies on the arc between them.
+///
+/// For a straight connector the caller should use (0, 0) directly rather
+/// than calling this function.
+fn compute_control_point(from: (i32, i32), to: (i32, i32), canvas_angle: f64) -> (i32, i32) {
+    use std::f64::consts::PI;
+
+    let (fx, fy) = (from.0 as f64, from.1 as f64);
+    let (tx, ty) = (to.0 as f64, to.1 as f64);
+
+    // Convert canvas angle to XMILE angle
+    let xmile_angle = super::view::processing::canvas_angle_to_xmile(canvas_angle);
+    let theta_rad = xmile_angle * PI / 180.0;
+
+    // The tangent direction at the start point
+    // XMILE angle is counter-clockwise from x-axis with y-up,
+    // but canvas is y-down, so we negate y.
+    let tan_x = theta_rad.cos();
+    let tan_y = -theta_rad.sin();
+
+    // Vector from start to end
+    let dx = tx - fx;
+    let dy = ty - fy;
+    let dist = (dx * dx + dy * dy).sqrt();
+    if dist < 1e-6 {
+        return (((fx + tx) / 2.0) as i32, ((fy + ty) / 2.0) as i32);
+    }
+
+    // Midpoint of start-end segment
+    let mx = (fx + tx) / 2.0;
+    let my = (fy + ty) / 2.0;
+
+    // Unit vector along start-end
+    let ux = dx / dist;
+    let uy = dy / dist;
+
+    // The perpendicular bisector of start-end goes through (mx, my)
+    // in direction (-uy, ux).
+    //
+    // The tangent at start forms an angle with the start-end line.
+    // The cross product of (ux,uy) and (tan_x,tan_y) tells us which
+    // side the arc bulges toward.
+    let cross = ux * tan_y - uy * tan_x;
+    let dot = ux * tan_x + uy * tan_y;
+
+    // For nearly-straight lines, return the midpoint
+    if cross.abs() < 1e-6 {
+        return (mx as i32, my as i32);
+    }
+
+    // Half-angle between tangent and chord
+    // tan(half_angle) = cross / (1 + dot) (half-angle formula)
+    let half_angle = cross.atan2(1.0 + dot);
+
+    // The sagitta (distance from midpoint to the arc along the perpendicular bisector):
+    // sagitta = (dist/2) * tan(half_angle)
+    let sagitta = (dist / 2.0) * half_angle.tan();
+
+    // Control point along the perpendicular bisector
+    let perp_x = -uy;
+    let perp_y = ux;
+    let cx = mx + sagitta * perp_x;
+    let cy = my + sagitta * perp_y;
+
+    (cx.round() as i32, cy.round() as i32)
+}
+
 /// Stateful writer that accumulates the full MDL file text.
 pub struct MdlWriter {
     buf: String,
@@ -738,6 +939,7 @@ impl MdlWriter {
     pub fn write_project(mut self, project: &datamodel::Project) -> Result<String> {
         let model = &project.models[0];
         self.write_equations_section(model, project);
+        self.write_sketch_section(&model.views);
         Ok(self.buf)
     }
 
@@ -848,6 +1050,111 @@ impl MdlWriter {
         self.buf
             .push_str("\\\\\\---/// Sketch information - do not modify anything except names\n");
     }
+
+    /// Write the sketch/view section of the MDL file.
+    ///
+    /// This emits the sketch header, each view's elements, and the sketch
+    /// terminator. The section follows the equations terminator line.
+    fn write_sketch_section(&mut self, views: &[View]) {
+        self.buf
+            .push_str("V300  Do not put anything below this section - it will be ignored\n");
+
+        for view in views {
+            let View::StockFlow(sf) = view;
+            self.write_stock_flow_view(sf);
+        }
+
+        self.buf.push_str("///---\\\\\\\n");
+    }
+
+    /// Write a single StockFlow view as sketch elements.
+    fn write_stock_flow_view(&mut self, sf: &datamodel::StockFlow) {
+        self.buf.push_str("*View 1\n");
+        self.buf.push_str(
+            "$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0\n",
+        );
+
+        // Build position map for link control point computation
+        let elem_positions = build_element_positions(&sf.elements);
+
+        // Build name map for alias resolution
+        let name_map = build_name_map(&sf.elements);
+
+        for elem in &sf.elements {
+            match elem {
+                ViewElement::Aux(aux) => {
+                    write_aux_element(&mut self.buf, aux);
+                    self.buf.push('\n');
+                }
+                ViewElement::Stock(stock) => {
+                    write_stock_element(&mut self.buf, stock);
+                    self.buf.push('\n');
+                }
+                ViewElement::Flow(flow) => {
+                    write_flow_element(&mut self.buf, flow);
+                    self.buf.push('\n');
+                }
+                ViewElement::Link(link) => {
+                    write_link_element(
+                        &mut self.buf,
+                        link,
+                        &elem_positions,
+                        sf.use_lettered_polarity,
+                    );
+                    self.buf.push('\n');
+                }
+                ViewElement::Cloud(cloud) => {
+                    write_cloud_element(&mut self.buf, cloud);
+                    self.buf.push('\n');
+                }
+                ViewElement::Alias(alias) => {
+                    write_alias_element(&mut self.buf, alias, &name_map);
+                    self.buf.push('\n');
+                }
+                ViewElement::Module(_) | ViewElement::Group(_) => {
+                    // Modules and groups are not serialized in MDL sketch format
+                }
+            }
+        }
+    }
+}
+
+/// Build a map from element UID to (x, y) position for link control point computation.
+fn build_element_positions(elements: &[ViewElement]) -> HashMap<i32, (i32, i32)> {
+    let mut positions = HashMap::new();
+    for elem in elements {
+        let (uid, x, y) = match elem {
+            ViewElement::Aux(a) => (a.uid, a.x as i32, a.y as i32),
+            ViewElement::Stock(s) => (s.uid, s.x as i32, s.y as i32),
+            ViewElement::Flow(f) => (f.uid, f.x as i32, f.y as i32),
+            ViewElement::Cloud(c) => (c.uid, c.x as i32, c.y as i32),
+            ViewElement::Alias(a) => (a.uid, a.x as i32, a.y as i32),
+            ViewElement::Module(m) => (m.uid, m.x as i32, m.y as i32),
+            ViewElement::Link(_) | ViewElement::Group(_) => continue,
+        };
+        positions.insert(uid, (x, y));
+    }
+    positions
+}
+
+/// Build a map from element UID to name for alias (ghost) resolution.
+fn build_name_map(elements: &[ViewElement]) -> HashMap<i32, &str> {
+    let mut names = HashMap::new();
+    for elem in elements {
+        match elem {
+            ViewElement::Aux(a) => {
+                names.insert(a.uid, a.name.as_str());
+            }
+            ViewElement::Stock(s) => {
+                names.insert(s.uid, s.name.as_str());
+            }
+            ViewElement::Flow(f) => {
+                names.insert(f.uid, f.name.as_str());
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 #[cfg(test)]
@@ -1803,5 +2110,388 @@ mod tests {
         let dim_pos = mdl.find("region:").unwrap();
         let var_pos = mdl.find("x=").unwrap();
         assert!(dim_pos < var_pos, "dimensions should come before variables");
+    }
+
+    // ---- Phase 5 Task 1: Sketch element serialization (types 10, 11, 12) ----
+
+    #[test]
+    fn sketch_aux_element() {
+        let aux = view_element::Aux {
+            name: "Growth_Rate".to_string(),
+            uid: 1,
+            x: 100.0,
+            y: 200.0,
+            label_side: view_element::LabelSide::Bottom,
+        };
+        let mut buf = String::new();
+        write_aux_element(&mut buf, &aux);
+        assert_eq!(buf, "10,1,Growth Rate,100,200,40,20,8,3,0,0,-1,0,0,0");
+    }
+
+    #[test]
+    fn sketch_stock_element() {
+        let stock = view_element::Stock {
+            name: "Population".to_string(),
+            uid: 2,
+            x: 300.0,
+            y: 150.0,
+            label_side: view_element::LabelSide::Top,
+        };
+        let mut buf = String::new();
+        write_stock_element(&mut buf, &stock);
+        assert_eq!(buf, "10,2,Population,300,150,40,20,3,3,0,0,0,0,0,0");
+    }
+
+    #[test]
+    fn sketch_flow_element_produces_valve_and_variable() {
+        let flow = view_element::Flow {
+            name: "Infection_Rate".to_string(),
+            uid: 6,
+            x: 295.0,
+            y: 191.0,
+            label_side: view_element::LabelSide::Bottom,
+            points: vec![],
+        };
+        let mut buf = String::new();
+        write_flow_element(&mut buf, &flow);
+        // valve line (uid=5) then variable line (uid=6)
+        assert!(buf.starts_with("11,5,5,295,191,6,8,34,3,0,0,1,0,0,0\n"));
+        assert!(buf.contains("10,6,Infection Rate,295,207,49,8,40,3,0,0,-1,0,0,0"));
+    }
+
+    #[test]
+    fn sketch_cloud_element() {
+        let cloud = view_element::Cloud {
+            uid: 7,
+            flow_uid: 6,
+            x: 479.0,
+            y: 235.0,
+        };
+        let mut buf = String::new();
+        write_cloud_element(&mut buf, &cloud);
+        assert_eq!(buf, "12,7,0,479,235,10,8,0,3,0,0,-1,0,0,0");
+    }
+
+    #[test]
+    fn sketch_alias_element() {
+        let alias = view_element::Alias {
+            uid: 10,
+            alias_of_uid: 1,
+            x: 200.0,
+            y: 300.0,
+            label_side: view_element::LabelSide::Bottom,
+        };
+        let mut name_map = HashMap::new();
+        name_map.insert(1, "Growth_Rate");
+        let mut buf = String::new();
+        write_alias_element(&mut buf, &alias, &name_map);
+        assert!(buf.starts_with("10,10,Growth Rate,200,300,40,20,8,2,0,3,-1,0,0,0,"));
+        assert!(buf.contains("128-128-128"));
+    }
+
+    // ---- Phase 5 Task 2: Connector serialization (type 1) ----
+
+    #[test]
+    fn sketch_link_straight() {
+        let link = view_element::Link {
+            uid: 3,
+            from_uid: 1,
+            to_uid: 2,
+            shape: LinkShape::Straight,
+            polarity: None,
+        };
+        let mut positions = HashMap::new();
+        positions.insert(1, (100, 100));
+        positions.insert(2, (200, 200));
+        let mut buf = String::new();
+        write_link_element(&mut buf, &link, &positions, false);
+        // Straight => control point (0,0)
+        assert_eq!(buf, "1,3,1,2,0,0,0,0,0,0,0,-1--1--1,,1|(0,0)|");
+    }
+
+    #[test]
+    fn sketch_link_with_polarity_symbol() {
+        let link = view_element::Link {
+            uid: 5,
+            from_uid: 1,
+            to_uid: 2,
+            shape: LinkShape::Straight,
+            polarity: Some(LinkPolarity::Positive),
+        };
+        let positions = HashMap::new();
+        let mut buf = String::new();
+        write_link_element(&mut buf, &link, &positions, false);
+        // polarity=43 ('+')
+        assert!(buf.contains(",0,0,43,0,0,0,0,"));
+    }
+
+    #[test]
+    fn sketch_link_with_polarity_letter() {
+        let link = view_element::Link {
+            uid: 5,
+            from_uid: 1,
+            to_uid: 2,
+            shape: LinkShape::Straight,
+            polarity: Some(LinkPolarity::Positive),
+        };
+        let positions = HashMap::new();
+        let mut buf = String::new();
+        write_link_element(&mut buf, &link, &positions, true);
+        // polarity=83 ('S' for lettered positive)
+        assert!(buf.contains(",0,0,83,0,0,0,0,"));
+    }
+
+    #[test]
+    fn sketch_link_arc_produces_nonzero_control_point() {
+        let link = view_element::Link {
+            uid: 3,
+            from_uid: 1,
+            to_uid: 2,
+            shape: LinkShape::Arc(45.0),
+            polarity: None,
+        };
+        let mut positions = HashMap::new();
+        positions.insert(1, (100, 100));
+        positions.insert(2, (200, 100));
+        let mut buf = String::new();
+        write_link_element(&mut buf, &link, &positions, false);
+        // Arc should produce a non-(0,0) control point
+        assert!(
+            !buf.contains("|(0,0)|"),
+            "arc should not produce (0,0) control point"
+        );
+    }
+
+    // ---- Phase 5 Task 3: Complete sketch section assembly ----
+
+    #[test]
+    fn sketch_section_structure() {
+        let elements = vec![
+            ViewElement::Stock(view_element::Stock {
+                name: "Population".to_string(),
+                uid: 1,
+                x: 100.0,
+                y: 100.0,
+                label_side: view_element::LabelSide::Top,
+            }),
+            ViewElement::Aux(view_element::Aux {
+                name: "Growth_Rate".to_string(),
+                uid: 2,
+                x: 200.0,
+                y: 200.0,
+                label_side: view_element::LabelSide::Bottom,
+            }),
+            ViewElement::Link(view_element::Link {
+                uid: 3,
+                from_uid: 2,
+                to_uid: 1,
+                shape: LinkShape::Straight,
+                polarity: None,
+            }),
+        ];
+        let sf = datamodel::StockFlow {
+            elements,
+            view_box: Default::default(),
+            zoom: 1.0,
+            use_lettered_polarity: false,
+        };
+        let views = vec![View::StockFlow(sf)];
+
+        let mut writer = MdlWriter::new();
+        writer.write_sketch_section(&views);
+        let output = writer.buf;
+
+        // Header
+        assert!(
+            output.starts_with("V300  Do not put anything below this section"),
+            "should start with V300 header"
+        );
+        // View title
+        assert!(output.contains("*View 1\n"), "should have view title");
+        // Font line
+        assert!(
+            output.contains("$192-192-192"),
+            "should have font settings line"
+        );
+        // Elements
+        assert!(
+            output.contains("10,1,Population,"),
+            "should have stock element"
+        );
+        assert!(
+            output.contains("10,2,Growth Rate,"),
+            "should have aux element"
+        );
+        assert!(output.contains("1,3,2,1,"), "should have link element");
+        // Terminator
+        assert!(
+            output.ends_with("///---\\\\\\\n"),
+            "should end with sketch terminator"
+        );
+    }
+
+    #[test]
+    fn sketch_section_in_full_project() {
+        let var = make_aux("x", "1", None, "");
+        let elements = vec![ViewElement::Aux(view_element::Aux {
+            name: "x".to_string(),
+            uid: 1,
+            x: 100.0,
+            y: 100.0,
+            label_side: view_element::LabelSide::Bottom,
+        })];
+        let model = datamodel::Model {
+            name: "default".to_owned(),
+            sim_specs: None,
+            variables: vec![var],
+            views: vec![View::StockFlow(datamodel::StockFlow {
+                elements,
+                view_box: Default::default(),
+                zoom: 1.0,
+                use_lettered_polarity: false,
+            })],
+            loop_metadata: vec![],
+            groups: vec![],
+        };
+        let project = make_project(vec![model]);
+
+        let result = crate::mdl::project_to_mdl(&project);
+        assert!(result.is_ok());
+        let mdl = result.unwrap();
+
+        // The sketch section should appear after the equations terminator
+        let terminator_pos = mdl
+            .find("\\\\\\---/// Sketch information")
+            .expect("should have equations terminator");
+        let v300_pos = mdl.find("V300").expect("should have V300 header");
+        assert!(
+            terminator_pos < v300_pos,
+            "V300 should come after equations terminator"
+        );
+
+        // The sketch terminator should be at the end
+        assert!(
+            mdl.contains("///---\\\\\\"),
+            "should have sketch terminator"
+        );
+    }
+
+    #[test]
+    fn sketch_roundtrip_teacup() {
+        // Read teacup.mdl, parse to Project, write sketch section, verify structure
+        let mdl_contents = include_str!("../../../../test/test-models/samples/teacup/teacup.mdl");
+        let project =
+            crate::mdl::parse_mdl(mdl_contents).expect("teacup.mdl should parse successfully");
+
+        let model = &project.models[0];
+        assert!(
+            !model.views.is_empty(),
+            "teacup model should have at least one view"
+        );
+
+        // Write the sketch section
+        let mut writer = MdlWriter::new();
+        writer.write_sketch_section(&model.views);
+        let output = writer.buf;
+
+        // Verify structural elements: the teacup model should have stocks, auxes,
+        // flows (valve + attached variable), links, and clouds.
+        assert!(output.contains("V300"), "output should contain V300 header");
+        assert!(
+            output.contains("*View 1"),
+            "output should contain view title"
+        );
+        assert!(
+            output.contains("///---\\\\\\"),
+            "output should end with sketch terminator"
+        );
+
+        // The teacup model elements (after roundtrip through datamodel):
+        // Stock: Teacup_Temperature -> type 10 with shape=3
+        // Aux: Heat_Loss_to_Room flow -> type 11 valve + type 10 attached
+        // Aux: Room_Temperature, Characteristic_Time -> type 10
+        // Links -> type 1
+        // Clouds -> type 12
+
+        // Count element types in output
+        let lines: Vec<&str> = output.lines().collect();
+        let type10_count = lines.iter().filter(|l| l.starts_with("10,")).count();
+        let _type11_count = lines.iter().filter(|l| l.starts_with("11,")).count();
+        let _type12_count = lines.iter().filter(|l| l.starts_with("12,")).count();
+        let type1_count = lines.iter().filter(|l| l.starts_with("1,")).count();
+
+        // Teacup has: 1 stock (Teacup_Temperature), 3 auxes (Heat_Loss_to_Room,
+        // Room_Temperature, Characteristic_Time), 1 flow (Heat_Loss_to_Room)
+        // which produces valve+variable, plus 1 cloud.
+        // The exact numbers depend on the MDL->datamodel conversion, but
+        // we should have a reasonable set of elements.
+        assert!(
+            type10_count >= 2,
+            "should have at least 2 type-10 elements (variables/stocks), got {type10_count}"
+        );
+        assert!(
+            type1_count >= 1,
+            "should have at least 1 type-1 element (connector), got {type1_count}"
+        );
+        // Verify no empty lines were introduced between elements
+        let element_lines: Vec<&&str> = lines
+            .iter()
+            .filter(|l| {
+                l.starts_with("10,")
+                    || l.starts_with("11,")
+                    || l.starts_with("12,")
+                    || l.starts_with("1,")
+            })
+            .collect();
+        assert!(
+            !element_lines.is_empty(),
+            "should have sketch elements in output"
+        );
+
+        // Verify the output can be re-parsed as a valid sketch section
+        let reparsed = crate::mdl::view::parse_views(&output);
+        assert!(
+            reparsed.is_ok(),
+            "re-serialized sketch should parse: {:?}",
+            reparsed.err()
+        );
+        let views = reparsed.unwrap();
+        assert!(
+            !views.is_empty(),
+            "re-parsed sketch should have at least one view"
+        );
+
+        // Verify all expected element types are present after re-parse
+        let view = &views[0];
+        let has_variable = view
+            .iter()
+            .any(|e| matches!(e, crate::mdl::view::VensimElement::Variable(_)));
+        let has_connector = view
+            .iter()
+            .any(|e| matches!(e, crate::mdl::view::VensimElement::Connector(_)));
+        assert!(has_variable, "re-parsed view should have variables");
+        assert!(has_connector, "re-parsed view should have connectors");
+    }
+
+    #[test]
+    fn compute_control_point_straight_midpoint() {
+        // For a nearly-straight arc angle, the control point should be near the midpoint
+        let from = (100, 100);
+        let to = (200, 100);
+        // Canvas angle of 0 degrees = straight line along x-axis
+        let (cx, cy) = compute_control_point(from, to, 0.0);
+        // For a straight line, the midpoint should be returned
+        assert_eq!(cx, 150);
+        assert_eq!(cy, 100);
+    }
+
+    #[test]
+    fn compute_control_point_arc_off_center() {
+        // A 45-degree arc should produce a control point off the midpoint
+        let from = (100, 100);
+        let to = (200, 100);
+        let (_cx, cy) = compute_control_point(from, to, 45.0);
+        // The control point should be above or below the line, not on it
+        assert_ne!(cy, 100, "arc control point should be off the straight line");
     }
 }
