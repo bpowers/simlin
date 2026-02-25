@@ -2966,7 +2966,7 @@ fn test_compile_var_fragment_produces_result() {
     let model = sync.models["main"].source;
     let alpha_var = sync.models["main"].variables["alpha"].source;
 
-    let result = compile_var_fragment(&db, alpha_var, model, sync.project, true);
+    let result = compile_var_fragment(&db, alpha_var, model, sync.project, true, vec![]);
     assert!(result.is_some(), "alpha should compile successfully");
 
     let frag = &result.as_ref().unwrap().fragment;
@@ -2994,8 +2994,9 @@ fn test_compile_var_fragment_caching() {
         let alpha_var = sync1.models["main"].variables["alpha"].source;
         let beta_var = sync1.models["main"].variables["beta"].source;
 
-        let alpha_result1 = compile_var_fragment(&db, alpha_var, model, sync1.project, true);
-        let beta_result1 = compile_var_fragment(&db, beta_var, model, sync1.project, true);
+        let alpha_result1 =
+            compile_var_fragment(&db, alpha_var, model, sync1.project, true, vec![]);
+        let beta_result1 = compile_var_fragment(&db, beta_var, model, sync1.project, true, vec![]);
         assert!(alpha_result1.is_some());
         assert!(beta_result1.is_some());
 
@@ -3021,13 +3022,13 @@ fn test_compile_var_fragment_caching() {
 
     // Alpha should be recompiled (different equation)
     let alpha_var2 = sync2.models["main"].variables["alpha"].source;
-    let alpha_result2 = compile_var_fragment(&db, alpha_var2, model2, sync2.project, true);
+    let alpha_result2 = compile_var_fragment(&db, alpha_var2, model2, sync2.project, true, vec![]);
     assert!(alpha_result2.is_some());
 
     // Beta's fragment should be unchanged since beta's equation
     // and deps haven't changed
     let beta_var2 = sync2.models["main"].variables["beta"].source;
-    let beta_result2 = compile_var_fragment(&db, beta_var2, model2, sync2.project, true);
+    let beta_result2 = compile_var_fragment(&db, beta_var2, model2, sync2.project, true, vec![]);
     assert!(beta_result2.is_some());
     assert_eq!(
         beta_frag1,
@@ -3524,6 +3525,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model1,
         sync1.project,
         true,
+        vec![],
     )
     .as_ref()
     .unwrap()
@@ -3536,6 +3538,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model1,
         sync1.project,
         true,
+        vec![],
     )
     .as_ref()
     .unwrap()
@@ -3550,6 +3553,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model2,
         sync2.project,
         true,
+        vec![],
     )
     .as_ref()
     .unwrap()
@@ -3562,6 +3566,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model2,
         sync2.project,
         true,
+        vec![],
     )
     .as_ref()
     .unwrap()
@@ -3596,6 +3601,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model3,
         sync3.project,
         true,
+        vec![],
     )
     .as_ref()
     .unwrap()
@@ -3608,6 +3614,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model3,
         sync3.project,
         true,
+        vec![],
     )
     .as_ref()
     .unwrap()
@@ -3700,6 +3707,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         model1,
         sync1.project,
         true,
+        vec![],
     )
     .as_ref()
     .unwrap()
@@ -3712,6 +3720,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         model1,
         sync1.project,
         true,
+        vec![],
     )
     .as_ref()
     .unwrap()
@@ -3736,6 +3745,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         model2,
         sync2.project,
         true,
+        vec![],
     )
     .as_ref()
     .unwrap()
@@ -3754,6 +3764,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         model2,
         sync2.project,
         true,
+        vec![],
     )
     .as_ref()
     .unwrap()
@@ -4335,7 +4346,7 @@ fn test_malformed_graphical_function_fails_fragment() {
     let model = sync.models["main"].source;
     let var = sync.models["main"].variables["lookup_var"].source;
 
-    let result = compile_var_fragment(&db, var, model, sync.project, true);
+    let result = compile_var_fragment(&db, var, model, sync.project, true, vec![]);
     assert!(
         result.is_none(),
         "compile_var_fragment should return None for malformed graphical function"
@@ -4557,6 +4568,206 @@ fn test_incremental_compile_smooth_over_module_output() {
         .get_series(&smoothed)
         .expect("smoothed should exist in simulation output");
     assert!(!series.is_empty(), "smoothed series should not be empty");
+}
+
+#[test]
+fn test_incremental_compile_distinguishes_module_input_sets() {
+    use crate::vm::Vm;
+
+    let project = datamodel::Project {
+        name: "module_input_sets".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "shared_input".to_string(),
+                        equation: datamodel::Equation::Scalar("10".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "override_value".to_string(),
+                        equation: datamodel::Equation::Scalar("99".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "without_override".to_string(),
+                        model_name: "sub".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "shared_input".to_string(),
+                            dst: "without_override.input".to_string(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "with_override".to_string(),
+                        model_name: "sub".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![
+                            datamodel::ModuleReference {
+                                src: "shared_input".to_string(),
+                                dst: "with_override.input".to_string(),
+                            },
+                            datamodel::ModuleReference {
+                                src: "override_value".to_string(),
+                                dst: "with_override.initial_value".to_string(),
+                            },
+                        ],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "out_without".to_string(),
+                        equation: datamodel::Equation::Scalar(
+                            "without_override.output".to_string(),
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "out_with".to_string(),
+                        equation: datamodel::Equation::Scalar("with_override.output".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "sub".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "initial_value".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "output".to_string(),
+                        equation: datamodel::Equation::Scalar(
+                            "if isModuleInput(initial_value) then initial_value else input"
+                                .to_string(),
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("incremental compile should support per-instance module inputs");
+
+    let sub_input_sets: std::collections::HashSet<Vec<String>> = compiled
+        .modules
+        .keys()
+        .filter(|(model_name, _)| model_name.as_str() == "sub")
+        .map(|(_, inputs)| inputs.iter().map(|i| i.as_str().to_string()).collect())
+        .collect();
+    assert_eq!(
+        sub_input_sets.len(),
+        2,
+        "sub should have two module instances"
+    );
+    assert!(
+        sub_input_sets.contains(&vec!["input".to_string()]),
+        "missing sub instance wired with only input"
+    );
+    assert!(
+        sub_input_sets.contains(&vec!["initial_value".to_string(), "input".to_string()]),
+        "missing sub instance wired with input+initial_value"
+    );
+
+    let mut vm = Vm::new(compiled).expect("incremental VM should build");
+    vm.run_to_end()
+        .expect("incremental simulation should run to completion");
+
+    let out_without = crate::common::Ident::new("out_without");
+    let out_with = crate::common::Ident::new("out_with");
+    let out_without_series = vm
+        .get_series(&out_without)
+        .expect("out_without should exist");
+    let out_with_series = vm.get_series(&out_with).expect("out_with should exist");
+
+    let without_value = *out_without_series
+        .last()
+        .expect("out_without series should be non-empty");
+    let with_value = *out_with_series
+        .last()
+        .expect("out_with series should be non-empty");
+
+    assert!(
+        (without_value - 10.0).abs() < 1e-6,
+        "without_override output should be 10, got {without_value}"
+    );
+    assert!(
+        (with_value - 99.0).abs() < 1e-6,
+        "with_override output should be 99, got {with_value}"
+    );
 }
 
 #[test]

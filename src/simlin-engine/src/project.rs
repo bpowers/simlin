@@ -66,37 +66,43 @@ impl Project {
     }
 }
 
+fn run_default_model_checks(
+    models: &HashMap<Ident<Canonical>, &ModelStage1>,
+    units_ctx: &Context,
+    model: &mut ModelStage1,
+) {
+    // Run unit inference to compute units for variables without explicit declarations.
+    // The check_units call below validates inferred units against declared units.
+    // Check if the model has any variables with declared units.
+    // If not, we skip surfacing unit inference errors since the model
+    // wasn't designed with dimensional analysis in mind.
+    let has_declared_units = model.variables.values().any(|var| var.units().is_some());
+
+    let inferred_units =
+        crate::units_infer::infer(models, units_ctx, model).unwrap_or_else(|err| {
+            // Only surface unit mismatches for models that have declared units.
+            // Store in unit_warnings (not errors) so simulation can still proceed.
+            // Unit mismatches are common in real-world models and shouldn't block simulation.
+            if has_declared_units
+                && let crate::common::UnitError::InferenceError { code, .. } = &err
+                && *code == crate::common::ErrorCode::UnitMismatch
+            {
+                let mut warnings = model.unit_warnings.take().unwrap_or_default();
+                warnings.push(crate::common::Error {
+                    kind: crate::common::ErrorKind::Model,
+                    code: *code,
+                    details: Some(format!("{}", err)),
+                });
+                model.unit_warnings = Some(warnings);
+            }
+            Default::default()
+        });
+    model.check_units(units_ctx, &inferred_units)
+}
+
 impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
-        Self::base_from(project_datamodel, |models, units_ctx, model| {
-            // Run unit inference to compute units for variables without explicit declarations.
-            // The check_units call below validates inferred units against declared units.
-            // Check if the model has any variables with declared units.
-            // If not, we skip surfacing unit inference errors since the model
-            // wasn't designed with dimensional analysis in mind.
-            let has_declared_units = model.variables.values().any(|var| var.units().is_some());
-
-            let inferred_units = crate::units_infer::infer(models, units_ctx, model)
-                .unwrap_or_else(|err| {
-                    // Only surface unit mismatches for models that have declared units.
-                    // Store in unit_warnings (not errors) so simulation can still proceed.
-                    // Unit mismatches are common in real-world models and shouldn't block simulation.
-                    if has_declared_units
-                        && let crate::common::UnitError::InferenceError { code, .. } = &err
-                        && *code == crate::common::ErrorCode::UnitMismatch
-                    {
-                        let mut warnings = model.unit_warnings.take().unwrap_or_default();
-                        warnings.push(crate::common::Error {
-                            kind: crate::common::ErrorKind::Model,
-                            code: *code,
-                            details: Some(format!("{}", err)),
-                        });
-                        model.unit_warnings = Some(warnings);
-                    }
-                    Default::default()
-                });
-            model.check_units(units_ctx, &inferred_units)
-        })
+        Self::base_from(project_datamodel, None, run_default_model_checks)
     }
 }
 
@@ -148,7 +154,32 @@ fn inject_ltm_vars(
 }
 
 impl Project {
-    pub(crate) fn base_from<F>(project_datamodel: datamodel::Project, mut model_cb: F) -> Self
+    /// Compile a project using caller-provided salsa source handles.
+    ///
+    /// This enables patch-validation paths to reuse an existing persistent
+    /// salsa DB instead of constructing a fresh DB for each compilation.
+    pub fn from_with_salsa_sync(
+        project_datamodel: datamodel::Project,
+        salsa_db: &dyn crate::db::Db,
+        source_project: crate::db::SourceProject,
+        source_models: &HashMap<String, crate::db::SourceModel>,
+    ) -> Self {
+        Self::base_from(
+            project_datamodel,
+            Some((salsa_db, source_project, source_models)),
+            run_default_model_checks,
+        )
+    }
+
+    pub(crate) fn base_from<'a, F>(
+        project_datamodel: datamodel::Project,
+        cached_sources: Option<(
+            &'a dyn crate::db::Db,
+            crate::db::SourceProject,
+            &'a HashMap<String, crate::db::SourceModel>,
+        )>,
+        mut model_cb: F,
+    ) -> Self
     where
         F: FnMut(&HashMap<Ident<Canonical>, &ModelStage1>, &Context, &mut ModelStage1),
     {
@@ -173,9 +204,28 @@ impl Project {
                     Default::default()
                 });
 
-        // Set up salsa database for incremental per-variable caching.
-        let salsa_db = SimlinDb::default();
-        let sync_result = sync_from_datamodel(&salsa_db, &project_datamodel);
+        // Set up salsa database/source handles for per-variable caching.
+        let mut local_salsa_db: Option<SimlinDb> = None;
+        let mut local_source_models: Option<HashMap<String, crate::db::SourceModel>> = None;
+        let (salsa_db, source_project, source_models): (
+            &dyn crate::db::Db,
+            crate::db::SourceProject,
+            &HashMap<String, crate::db::SourceModel>,
+        ) = if let Some((db, source_project, source_models)) = cached_sources {
+            (db, source_project, source_models)
+        } else {
+            let db = local_salsa_db.insert(SimlinDb::default());
+            let sync_result = sync_from_datamodel(db, &project_datamodel);
+            let source_project = sync_result.project;
+            let source_models_ref = local_source_models.insert(
+                sync_result
+                    .models
+                    .iter()
+                    .map(|(name, synced_model)| (name.clone(), synced_model.source))
+                    .collect(),
+            );
+            (db, source_project, source_models_ref)
+        };
 
         // Build set of model names present in the datamodel so we can detect
         // when a stdlib model has been overridden (e.g., by LTM augmentation
@@ -208,11 +258,11 @@ impl Project {
                 .iter()
                 .any(|name| canonicalize(&format!("stdlib\u{205A}{name}")) == canonical_name);
 
-            if let Some(synced_model) = sync_result.models.get(canonical_name.as_ref()) {
+            if let Some(source_model) = source_models.get(canonical_name.as_ref()) {
                 ModelStage0::new_cached(
-                    &salsa_db,
-                    synced_model.source,
-                    sync_result.project,
+                    salsa_db,
+                    *source_model,
+                    source_project,
                     m,
                     &project_datamodel.dimensions,
                     &units_ctx,
@@ -281,8 +331,11 @@ impl Project {
                     .get(&model.name)
                     .unwrap_or(&no_instantiations);
                 // Use cached path when we have a synced model in the salsa db
-                if sync_result.models.contains_key(model.name.as_str()) {
+                if let Some(source_model) = source_models.get(model.name.as_str()) {
                     model.set_dependencies_cached(
+                        salsa_db,
+                        *source_model,
+                        source_project,
                         &models,
                         &project_datamodel.dimensions,
                         instantiations,
@@ -362,6 +415,46 @@ fn abort_if_arrayed(project: &Project) -> crate::common::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_project_from_with_salsa_sync_uses_provided_sources() {
+        use salsa::Setter;
+
+        use crate::db;
+        use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
+
+        let model = x_model("main", vec![x_aux("x", "1", None)]);
+        let project_datamodel = x_project(sim_specs_with_units("years"), &[model]);
+
+        let mut db = db::SimlinDb::default();
+        let state = db::sync_from_datamodel_incremental(&mut db, &project_datamodel, None);
+        let sync = state.to_sync_result();
+
+        let mut source_models: HashMap<String, db::SourceModel> = HashMap::new();
+        source_models.insert("main".to_string(), sync.models["main"].source);
+
+        let source_var = sync.models["main"].variables["x"].source;
+        source_var
+            .set_equation(&mut db)
+            .to(db::SourceEquation::Scalar("2".to_string()));
+
+        let compiled =
+            Project::from_with_salsa_sync(project_datamodel, &db, sync.project, &source_models);
+        let main = compiled
+            .models
+            .get(&Ident::new("main"))
+            .expect("main model should exist");
+        let x_var = main
+            .variables
+            .get(&Ident::new("x"))
+            .expect("x variable should exist");
+
+        assert_eq!(
+            x_var.scalar_equation().map(|s| s.as_str()),
+            Some("2"),
+            "from_with_salsa_sync should compile from the provided source handles"
+        );
+    }
 
     #[test]
     fn test_project_with_ltm() {
