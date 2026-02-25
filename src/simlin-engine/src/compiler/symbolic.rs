@@ -630,10 +630,12 @@ pub(crate) fn symbolize_module_decl(
     decl: &ModuleDeclaration,
     rmap: &ReverseOffsetMap,
 ) -> Result<SymbolicModuleDecl, String> {
+    let off = u32::try_from(decl.off)
+        .map_err(|_| format!("module declaration offset {} does not fit in u32", decl.off))?;
     Ok(SymbolicModuleDecl {
         model_name: decl.model_name.clone(),
         input_set: decl.input_set.clone(),
-        var: rmap.lookup(decl.off as u32)?,
+        var: rmap.lookup(off)?,
     })
 }
 
@@ -2093,6 +2095,28 @@ mod tests {
 
         let resolved = resolve_module_decl(&sym, &layout).unwrap();
         assert_eq!(resolved.off, large_off);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn test_module_decl_offset_overflow_is_rejected() {
+        let mut entries = HashMap::new();
+        entries.insert("wrapped".to_string(), LayoutEntry { offset: 4, size: 1 });
+        let layout = VariableLayout::new(entries, 5);
+        let rmap = ReverseOffsetMap::from_layout(&layout);
+
+        let overflowing_off = (u32::MAX as usize) + 5;
+        let decl = ModuleDeclaration {
+            model_name: Ident::new("sub"),
+            input_set: BTreeSet::new(),
+            off: overflowing_off,
+        };
+
+        let err = symbolize_module_decl(&decl, &rmap).unwrap_err();
+        assert!(
+            err.contains("does not fit in u32"),
+            "expected explicit overflow error, got: {err}"
+        );
     }
 
     #[test]
