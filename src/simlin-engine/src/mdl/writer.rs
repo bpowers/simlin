@@ -112,3 +112,73 @@ pub fn expr0_to_mdl(expr: &Expr0) -> String {
     let mut visitor = MdlPrintVisitor;
     visitor.walk(expr)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Expr0;
+    use crate::lexer::LexerType;
+
+    /// Parse XMILE equation text to Expr0, then convert to MDL and assert.
+    fn assert_mdl(xmile_eqn: &str, expected_mdl: &str) {
+        let ast = Expr0::new(xmile_eqn, LexerType::Equation)
+            .expect("parse should succeed")
+            .expect("expression should not be empty");
+        let mdl = expr0_to_mdl(&ast);
+        assert_eq!(
+            expected_mdl, &mdl,
+            "MDL mismatch for XMILE input: {xmile_eqn:?}"
+        );
+    }
+
+    #[test]
+    fn constants() {
+        assert_mdl("5", "5");
+        assert_mdl("3.14", "3.14");
+        assert_mdl("1e3", "1e3");
+    }
+
+    #[test]
+    fn nan_constant() {
+        let ast = Expr0::new("NAN", LexerType::Equation).unwrap().unwrap();
+        let mdl = expr0_to_mdl(&ast);
+        assert_eq!("NaN", &mdl);
+    }
+
+    #[test]
+    fn variable_references() {
+        assert_mdl("population_growth_rate", "population growth rate");
+        assert_mdl("x", "x");
+        assert_mdl("a_b_c", "a b c");
+    }
+
+    #[test]
+    fn arithmetic_operators() {
+        assert_mdl("a + b", "a + b");
+        assert_mdl("a - b", "a - b");
+        assert_mdl("a * b", "a * b");
+        assert_mdl("a / b", "a / b");
+        assert_mdl("a ^ b", "a ^ b");
+    }
+
+    #[test]
+    fn precedence_no_extra_parens() {
+        assert_mdl("a + b * c", "a + b * c");
+    }
+
+    #[test]
+    fn precedence_parens_emitted() {
+        assert_mdl("(a + b) * c", "(a + b) * c");
+    }
+
+    #[test]
+    fn nested_precedence() {
+        assert_mdl("a * (b + c) / d", "a * (b + c) / d");
+    }
+
+    #[test]
+    fn unary_operators() {
+        assert_mdl("-a", "-a");
+        assert_mdl("+a", "+a");
+    }
+}
