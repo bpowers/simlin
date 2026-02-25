@@ -35,6 +35,8 @@ use convert::convert_mdl;
 
 /// Convert a Project to Vensim MDL text.
 pub fn project_to_mdl(_project: &Project) -> Result<String> {
+    // ErrorKind has no Export variant; Import is the closest available option
+    // for format conversion errors until a dedicated Export kind is added.
     Err(Error::new(
         ErrorKind::Import,
         ErrorCode::Generic,

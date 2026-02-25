@@ -67,13 +67,13 @@ impl Visitor<String> for MdlPrintVisitor {
                 }
                 _ => {
                     let l = mdl_paren_if_necessary(expr, l, self.walk(l));
-                    let op_str = match op {
-                        UnaryOp::Positive => "+",
-                        UnaryOp::Negative => "-",
-                        UnaryOp::Not => "!",
+                    match op {
+                        UnaryOp::Positive => format!("+{l}"),
+                        UnaryOp::Negative => format!("-{l}"),
+                        // MDL uses the keyword form with a trailing space before the operand
+                        UnaryOp::Not => format!(":NOT: {l}"),
                         UnaryOp::Transpose => unreachable!(),
-                    };
-                    format!("{op_str}{l}")
+                    }
                 }
             },
             Expr0::Op2(op, l, r, _) => {
@@ -180,5 +180,7 @@ mod tests {
     fn unary_operators() {
         assert_mdl("-a", "-a");
         assert_mdl("+a", "+a");
+        // XMILE uses `not` keyword; MDL uses `:NOT:` with a trailing space before the operand
+        assert_mdl("not a", ":NOT: a");
     }
 }
