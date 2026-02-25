@@ -908,6 +908,7 @@ fn test_inference() {
                 Ok(Default::default());
             let _project = crate::project::Project::base_from(
                 project_datamodel.clone(),
+                None,
                 |models, units_ctx, model| {
                     results = infer(models, units_ctx, model);
                 },
@@ -992,6 +993,7 @@ fn test_inference_negative() {
                 });
             let _project = crate::project::Project::base_from(
                 project_datamodel.clone(),
+                None,
                 |models, units_ctx, model| {
                     results = infer(models, units_ctx, model);
                 },
@@ -1016,6 +1018,7 @@ fn test_inference_error_has_location() {
     let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
     let _project = crate::project::Project::base_from(
         project_datamodel.clone(),
+        None,
         |models, units_ctx, model| {
             results = infer(models, units_ctx, model);
         },
@@ -1157,6 +1160,7 @@ fn test_multi_metavar_constraint_mismatch() {
         });
     let _project = crate::project::Project::base_from(
         project_datamodel.clone(),
+        None,
         |models, units_ctx, model| {
             results = infer(models, units_ctx, model);
         },
@@ -1395,6 +1399,7 @@ fn test_rank_builtin_unit_inference() {
     let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
     let _project = crate::project::Project::base_from(
         project_datamodel.clone(),
+        None,
         |models, units_ctx, model| {
             results = infer(models, units_ctx, model);
         },
@@ -1440,6 +1445,7 @@ fn test_unify_conflict_detection() {
     let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
     let _project = crate::project::Project::base_from(
         project_datamodel.clone(),
+        None,
         |models, units_ctx, model| {
             results = infer(models, units_ctx, model);
         },

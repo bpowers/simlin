@@ -1080,10 +1080,14 @@ impl ModelStage1 {
     /// extraction. Editing an equation to `a * b` from `a + b` (same deps)
     /// skips re-extracting deps for that variable.
     ///
-    /// Falls back to the existing `direct_deps` for cross-model module analysis
-    /// (module output deps, stock filtering in modules).
+    /// Falls back to the existing `all_deps` path for models that use module
+    /// variables (cross-model dependency analysis), preserving existing
+    /// semantics while still routing non-module models through salsa.
     pub(crate) fn set_dependencies_cached(
         &mut self,
+        salsa_db: &dyn db::Db,
+        source_model: SourceModel,
+        source_project: SourceProject,
         models: &HashMap<Ident<Canonical>, &ModelStage1>,
         dimensions: &[Dimension],
         instantiations: &BTreeSet<ModuleInputSet>,
@@ -1093,6 +1097,74 @@ impl ModelStage1 {
 
         let mut var_errors: HashMap<Ident<Canonical>, HashSet<EquationError>> = HashMap::new();
         let mut errors: Vec<Error> = Vec::new();
+        let has_module_variables = self.variables.values().any(|var| var.is_module());
+        let source_vars = source_model.variables(salsa_db);
+        let known_var_names: HashSet<String> = self
+            .variables
+            .keys()
+            .map(|ident| ident.as_str().to_string())
+            .collect();
+        let module_var_names: HashSet<String> = self
+            .variables
+            .iter()
+            .filter_map(|(ident, var)| {
+                if var.is_module() {
+                    Some(ident.as_str().to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let dep_requires_all_deps = |dep: &str| -> bool {
+            // Absolute references should keep using the legacy path so
+            // existing validation errors are preserved.
+            if dep.starts_with("\\\u{00B7}") {
+                return true;
+            }
+
+            let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
+            if let Some(dot_pos) = effective.find('\u{00B7}') {
+                let base = &effective[..dot_pos];
+                if !known_var_names.contains(base) {
+                    return true;
+                }
+                !module_var_names.contains(base)
+            } else {
+                !known_var_names.contains(effective)
+            }
+        };
+
+        let has_unknown_cached_dep = |module_input_names: &[String]| -> bool {
+            for source_var in source_vars.values() {
+                let deps = if module_input_names.is_empty() {
+                    db::variable_direct_dependencies(salsa_db, *source_var, source_project)
+                } else {
+                    db::variable_direct_dependencies_with_inputs(
+                        salsa_db,
+                        *source_var,
+                        source_project,
+                        module_input_names.to_vec(),
+                    )
+                };
+
+                for dep in deps.dt_deps.iter().chain(deps.initial_deps.iter()) {
+                    if dep_requires_all_deps(dep) {
+                        return true;
+                    }
+                }
+
+                for implicit in &deps.implicit_vars {
+                    for dep in implicit.dt_deps.iter().chain(implicit.initial_deps.iter()) {
+                        if dep_requires_all_deps(dep) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            false
+        };
 
         let instantiations = instantiations
             .iter()
@@ -1106,28 +1178,83 @@ impl ModelStage1 {
                     dimensions,
                 };
 
-                // For non-module variables, use the cached deps directly via
-                // an adapter that wraps all_deps. For module variables, fall
-                // back to the existing direct_deps which handles cross-model
-                // analysis. This is the existing all_deps call -- the caching
-                // benefit comes from variable_direct_dependencies being fast
-                // (salsa-cached) when called from other contexts.
-                let dt_deps = match all_deps(&ctx, self.variables.values()) {
-                    Ok(deps) => Some(deps),
-                    Err((ident, err)) => {
-                        var_errors.entry(ident).or_default().insert(err);
-                        None
-                    }
-                };
+                let module_input_names: Vec<String> = instantiation
+                    .iter()
+                    .map(|ident| ident.as_str().to_string())
+                    .collect();
 
-                ctx.is_initial = true;
+                let can_use_salsa_graph =
+                    !has_module_variables && !has_unknown_cached_dep(&module_input_names);
 
-                let initial_deps = match all_deps(&ctx, self.variables.values()) {
-                    Ok(deps) => Some(deps),
-                    Err((ident, err)) => {
-                        var_errors.entry(ident).or_default().insert(err);
-                        None
+                let (dt_deps, initial_deps) = if can_use_salsa_graph {
+                    let dep_graph = if module_input_names.is_empty() {
+                        db::model_dependency_graph(salsa_db, source_model, source_project)
+                    } else {
+                        db::model_dependency_graph_with_inputs(
+                            salsa_db,
+                            source_model,
+                            source_project,
+                            module_input_names.clone(),
+                        )
+                    };
+
+                    if dep_graph.has_cycle {
+                        let dt_deps = match all_deps(&ctx, self.variables.values()) {
+                            Ok(deps) => Some(deps),
+                            Err((ident, err)) => {
+                                var_errors.entry(ident).or_default().insert(err);
+                                None
+                            }
+                        };
+
+                        ctx.is_initial = true;
+
+                        let initial_deps = match all_deps(&ctx, self.variables.values()) {
+                            Ok(deps) => Some(deps),
+                            Err((ident, err)) => {
+                                var_errors.entry(ident).or_default().insert(err);
+                                None
+                            }
+                        };
+
+                        (dt_deps, initial_deps)
+                    } else {
+                        let convert_dep_map = |deps: &HashMap<String, BTreeSet<String>>| {
+                            deps.iter()
+                                .map(|(name, values)| {
+                                    (
+                                        Ident::new(name),
+                                        values.iter().map(|value| Ident::new(value)).collect(),
+                                    )
+                                })
+                                .collect()
+                        };
+
+                        (
+                            Some(convert_dep_map(&dep_graph.dt_dependencies)),
+                            Some(convert_dep_map(&dep_graph.initial_dependencies)),
+                        )
                     }
+                } else {
+                    let dt_deps = match all_deps(&ctx, self.variables.values()) {
+                        Ok(deps) => Some(deps),
+                        Err((ident, err)) => {
+                            var_errors.entry(ident).or_default().insert(err);
+                            None
+                        }
+                    };
+
+                    ctx.is_initial = true;
+
+                    let initial_deps = match all_deps(&ctx, self.variables.values()) {
+                        Ok(deps) => Some(deps),
+                        Err((ident, err)) => {
+                            var_errors.entry(ident).or_default().insert(err);
+                            None
+                        }
+                    };
+
+                    (dt_deps, initial_deps)
                 };
 
                 let build_runlist =
@@ -1531,6 +1658,161 @@ fn test_errors() {
             code: ErrorCode::UnknownDependency
         },
         err
+    );
+}
+
+#[test]
+fn test_cached_dependencies_preserve_unknown_dependency_errors() {
+    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let main_model = x_model(
+        "main",
+        vec![x_aux("aux_3", "unknown_variable * 3.14", None)],
+    );
+    let project_datamodel = datamodel::Project {
+        name: "cached_deps_errors".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![main_model.clone()],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let source_model = sync.models["main"].source;
+
+    let owned_models: HashMap<Ident<Canonical>, ModelStage0> =
+        vec![("main".to_string(), &main_model)]
+            .into_iter()
+            .map(|(name, m)| {
+                (
+                    Ident::new(&name),
+                    ModelStage0::new_cached(
+                        &db,
+                        source_model,
+                        sync.project,
+                        m,
+                        &[],
+                        &units_ctx,
+                        false,
+                    ),
+                )
+            })
+            .collect();
+    let models: HashMap<Ident<Canonical>, &ModelStage0> =
+        owned_models.iter().map(|(k, v)| (k.clone(), v)).collect();
+
+    let no_module_inputs: ModuleInputSet = BTreeSet::new();
+    let default_instantiation = [no_module_inputs].iter().cloned().collect();
+    let scope = ScopeStage0 {
+        models: &models,
+        dimensions: &Default::default(),
+        model_name: "main",
+    };
+    let mut model = ModelStage1::new(&scope, models[&*canonicalize("main")]);
+    model.set_dependencies_cached(
+        &db,
+        source_model,
+        sync.project,
+        &HashMap::new(),
+        &[],
+        &default_instantiation,
+    );
+
+    assert!(model.errors.is_some());
+    assert_eq!(
+        &Error::new(ErrorKind::Model, ErrorCode::VariablesHaveErrors, None),
+        &model.errors.as_ref().unwrap()[0]
+    );
+
+    let var_errors = model.get_variable_errors();
+    let aux_3_key = Ident::new("aux_3");
+    assert!(var_errors.contains_key(&aux_3_key));
+    let err = &var_errors[&aux_3_key][0];
+    assert_eq!(
+        &EquationError {
+            start: 0,
+            end: 16,
+            code: ErrorCode::UnknownDependency
+        },
+        err
+    );
+}
+
+#[test]
+fn test_cached_dependencies_preserve_expected_module_errors() {
+    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let main_model = x_model(
+        "main",
+        vec![x_aux("foo", "1", None), x_aux("bad_ref", "foo.bar", None)],
+    );
+    let project_datamodel = datamodel::Project {
+        name: "cached_deps_expected_module".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![main_model.clone()],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let source_model = sync.models["main"].source;
+
+    let owned_models: HashMap<Ident<Canonical>, ModelStage0> =
+        vec![("main".to_string(), &main_model)]
+            .into_iter()
+            .map(|(name, m)| {
+                (
+                    Ident::new(&name),
+                    ModelStage0::new_cached(
+                        &db,
+                        source_model,
+                        sync.project,
+                        m,
+                        &[],
+                        &units_ctx,
+                        false,
+                    ),
+                )
+            })
+            .collect();
+    let models: HashMap<Ident<Canonical>, &ModelStage0> =
+        owned_models.iter().map(|(k, v)| (k.clone(), v)).collect();
+
+    let no_module_inputs: ModuleInputSet = BTreeSet::new();
+    let default_instantiation = [no_module_inputs].iter().cloned().collect();
+    let scope = ScopeStage0 {
+        models: &models,
+        dimensions: &Default::default(),
+        model_name: "main",
+    };
+    let mut model = ModelStage1::new(&scope, models[&*canonicalize("main")]);
+    model.set_dependencies_cached(
+        &db,
+        source_model,
+        sync.project,
+        &HashMap::new(),
+        &[],
+        &default_instantiation,
+    );
+
+    assert!(model.errors.is_some());
+    assert_eq!(
+        &Error::new(ErrorKind::Model, ErrorCode::VariablesHaveErrors, None),
+        &model.errors.as_ref().unwrap()[0]
+    );
+
+    let var_errors = model.get_variable_errors();
+    let bad_ref_key = Ident::new("bad_ref");
+    assert!(var_errors.contains_key(&bad_ref_key));
+    assert!(
+        var_errors[&bad_ref_key]
+            .iter()
+            .any(|err| err.code == ErrorCode::ExpectedModule),
+        "cached dependency path should preserve ExpectedModule errors"
     );
 }
 

@@ -475,8 +475,6 @@ pub(crate) unsafe fn apply_project_patch_internal(
         return;
     }
 
-    let staged_project = engine::Project::from(staged_datamodel);
-
     // Hold the db lock for the entire sync-evaluate-decide cycle so that
     // concurrent readers (simlin_sim_new, simlin_project_get_errors) never
     // observe staged state for patches that are ultimately rejected or
@@ -485,13 +483,25 @@ pub(crate) unsafe fn apply_project_patch_internal(
     let prev_state = project_ref.sync_state.lock().unwrap().clone();
     let staged_sync_state = engine::db::sync_from_datamodel_incremental(
         &mut db,
-        &staged_project.datamodel,
+        &staged_datamodel,
         prev_state.as_ref(),
     );
     #[cfg(test)]
     invoke_patch_test_hook(PatchHookPoint::StagedSyncWhileDbLocked, project_ref);
 
     let staged_sync = staged_sync_state.to_sync_result();
+    let staged_source_models: std::collections::HashMap<String, engine::db::SourceModel> =
+        staged_sync
+            .models
+            .iter()
+            .map(|(name, synced_model)| (name.clone(), synced_model.source))
+            .collect();
+    let staged_project = engine::Project::from_with_salsa_sync(
+        staged_datamodel,
+        &*db,
+        staged_sync.project,
+        &staged_source_models,
+    );
     let (all_errors, sim_error, _compiled) =
         gather_error_details_with_db(&staged_project, Some((&db, &staged_sync)));
 

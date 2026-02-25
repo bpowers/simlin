@@ -632,15 +632,18 @@ pub struct VariableDeps {
     pub implicit_vars: Vec<ImplicitVarDeps>,
 }
 
-/// Per-variable tracked function for dependency extraction. Salsa memoizes the
-/// result and only re-executes when the parsed variable changes. This means
-/// editing an equation to `a * b` from `a + b` (same deps) produces the same
-/// VariableDeps, so downstream dependency graph computation is skipped.
-#[salsa::tracked(returns(ref))]
-pub fn variable_direct_dependencies(
+fn canonical_module_input_set(module_input_names: &[String]) -> BTreeSet<Ident<Canonical>> {
+    module_input_names
+        .iter()
+        .map(|name| Ident::new(canonicalize(name).as_ref()))
+        .collect()
+}
+
+fn variable_direct_dependencies_impl(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
+    module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
 ) -> VariableDeps {
     match var.kind(db) {
         SourceVariableKind::Module => {
@@ -679,7 +682,7 @@ pub fn variable_direct_dependencies(
                 .collect();
 
             let dt_deps = match lowered.ast() {
-                Some(ast) => crate::variable::identifier_set(ast, &converted_dims, None)
+                Some(ast) => crate::variable::identifier_set(ast, &converted_dims, module_inputs)
                     .into_iter()
                     .map(|id| id.to_string())
                     .collect(),
@@ -687,7 +690,7 @@ pub fn variable_direct_dependencies(
             };
 
             let initial_deps = match lowered.init_ast() {
-                Some(ast) => crate::variable::identifier_set(ast, &converted_dims, None)
+                Some(ast) => crate::variable::identifier_set(ast, &converted_dims, module_inputs)
                     .into_iter()
                     .map(|id| id.to_string())
                     .collect(),
@@ -695,7 +698,8 @@ pub fn variable_direct_dependencies(
             };
 
             // Extract deps for implicit variables (SMOOTH, DELAY create internal stocks)
-            let implicit_vars = extract_implicit_var_deps(parsed, &dims, &dim_context);
+            let implicit_vars =
+                extract_implicit_var_deps(parsed, &dims, &dim_context, module_inputs);
 
             VariableDeps {
                 dt_deps,
@@ -706,10 +710,40 @@ pub fn variable_direct_dependencies(
     }
 }
 
+/// Per-variable tracked function for dependency extraction. Salsa memoizes the
+/// result and only re-executes when the parsed variable changes. This means
+/// editing an equation to `a * b` from `a + b` (same deps) produces the same
+/// VariableDeps, so downstream dependency graph computation is skipped.
+#[salsa::tracked(returns(ref))]
+pub fn variable_direct_dependencies(
+    db: &dyn Db,
+    var: SourceVariable,
+    project: SourceProject,
+) -> VariableDeps {
+    variable_direct_dependencies_impl(db, var, project, None)
+}
+
+/// Per-variable dependency extraction for a specific module input set.
+///
+/// This is required for module instances that use `isModuleInput(...)` in
+/// their equations (for example stdlib DELAY/SMOOTH variants), where the
+/// dependency set changes by instance wiring.
+#[salsa::tracked(returns(ref))]
+pub fn variable_direct_dependencies_with_inputs(
+    db: &dyn Db,
+    var: SourceVariable,
+    project: SourceProject,
+    module_input_names: Vec<String>,
+) -> VariableDeps {
+    let module_inputs = canonical_module_input_set(&module_input_names);
+    variable_direct_dependencies_impl(db, var, project, Some(&module_inputs))
+}
+
 fn extract_implicit_var_deps(
     parsed: &ParsedVariableResult,
     dims: &[datamodel::Dimension],
     dim_context: &crate::dimensions::DimensionsContext,
+    module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
 ) -> Vec<ImplicitVarDeps> {
     if parsed.implicit_vars.is_empty() {
         return Vec::new();
@@ -768,14 +802,14 @@ fn extract_implicit_var_deps(
             let lowered = crate::model::lower_variable(&scope, &parsed_implicit);
 
             let dt = match lowered.ast() {
-                Some(ast) => crate::variable::identifier_set(ast, &converted_dims, None)
+                Some(ast) => crate::variable::identifier_set(ast, &converted_dims, module_inputs)
                     .into_iter()
                     .map(|id| id.to_string())
                     .collect(),
                 None => BTreeSet::new(),
             };
             let initial = match lowered.init_ast() {
-                Some(ast) => crate::variable::identifier_set(ast, &converted_dims, None)
+                Some(ast) => crate::variable::identifier_set(ast, &converted_dims, module_inputs)
                     .into_iter()
                     .map(|id| id.to_string())
                     .collect(),
@@ -937,13 +971,14 @@ pub struct ModelDepGraphResult {
 /// This handles models without cross-model module dependencies. Models with
 /// module references use `set_dependencies_cached` which combines this
 /// function's per-variable caching with the existing cross-model analysis.
-#[salsa::tracked(returns(ref))]
-pub fn model_dependency_graph(
+fn model_dependency_graph_impl(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
+    module_input_names: &[String],
 ) -> ModelDepGraphResult {
     let source_vars = model.variables(db);
+    let module_input_names = module_input_names.to_vec();
 
     // Collect per-variable info: kind and direct deps
     struct VarInfo {
@@ -971,7 +1006,16 @@ pub fn model_dependency_graph(
     };
 
     for (name, source_var) in source_vars.iter() {
-        let deps = variable_direct_dependencies(db, *source_var, project);
+        let deps = if module_input_names.is_empty() {
+            variable_direct_dependencies(db, *source_var, project)
+        } else {
+            variable_direct_dependencies_with_inputs(
+                db,
+                *source_var,
+                project,
+                module_input_names.clone(),
+            )
+        };
         // Use SourceVariableKind from the salsa input directly -- this avoids
         // creating a dependency on parse_source_variable's result (which
         // changes when equation text changes even if deps don't).
@@ -1228,6 +1272,30 @@ pub fn model_dependency_graph(
         runlist_stocks,
         has_cycle,
     }
+}
+
+/// Per-model tracked dependency graph for a specific module-input set.
+///
+/// Models instantiated with different input wiring can have different
+/// dependency sets when `isModuleInput(...)` appears in equations.
+#[salsa::tracked(returns(ref))]
+pub fn model_dependency_graph_with_inputs(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    module_input_names: Vec<String>,
+) -> ModelDepGraphResult {
+    model_dependency_graph_impl(db, model, project, &module_input_names)
+}
+
+/// Default per-model tracked dependency graph (no module inputs).
+#[salsa::tracked(returns(ref))]
+pub fn model_dependency_graph(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> ModelDepGraphResult {
+    model_dependency_graph_impl(db, model, project, &[])
 }
 
 // ── Diagnostic collection ──────────────────────────────────────────────
@@ -3122,6 +3190,7 @@ pub(crate) struct VarFragmentResult {
 /// Dependencies (salsa tracks these):
 /// - parse_source_variable(var) -- this variable's equation
 /// - variable_direct_dependencies(var) -- this variable's dep set
+///   (or module-input-aware deps for module instantiations)
 /// - variable_dimensions(Y) -- each referenced var's dimensions
 /// - variable_size(Y) -- each referenced var's size
 /// - project.dimensions -- for array compilation
@@ -3140,6 +3209,7 @@ pub fn compile_var_fragment(
     model: SourceModel,
     project: SourceProject,
     is_root: bool,
+    module_input_names: Vec<String>,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{
         CompiledVarFragment, PerVarBytecodes, ReverseOffsetMap, VariableLayout,
@@ -3157,6 +3227,8 @@ pub fn compile_var_fragment(
         return None;
     }
 
+    // Build metadata from the full, input-agnostic dependency set so both
+    // branches of `if isModuleInput(...)` remain compilable in the mini-context.
     let deps = variable_direct_dependencies(db, var, project);
 
     // Get project dimensions and build dimension context
@@ -3646,11 +3718,15 @@ pub fn compile_var_fragment(
     }
 
     // Build the minimal Module
-    let inputs = BTreeSet::new();
+    let inputs = canonical_module_input_set(&module_input_names);
     let module_models = model_module_map(db, model, project).clone();
 
     // Determine which runlists this variable belongs to
-    let dep_graph = model_dependency_graph(db, model, project);
+    let dep_graph = if module_input_names.is_empty() {
+        model_dependency_graph(db, model, project)
+    } else {
+        model_dependency_graph_with_inputs(db, model, project, module_input_names.clone())
+    };
     let is_stock = var.kind(db) == SourceVariableKind::Stock;
     let is_module = var.kind(db) == SourceVariableKind::Module;
 
@@ -3713,9 +3789,10 @@ pub fn compile_var_fragment(
 
         // Build a minimal Module for this phase
         let runlist_initials_by_var = vec![];
+        let module_inputs: HashSet<Ident<Canonical>> = inputs.iter().cloned().collect();
         let module = crate::compiler::Module {
             ident: model_name_ident.clone(),
-            inputs: HashSet::new(),
+            inputs: module_inputs,
             n_slots: mini_offset,
             n_temps: 0,
             temp_sizes: vec![],
@@ -3858,6 +3935,7 @@ fn compile_implicit_var_fragment(
     project: SourceProject,
     is_root: bool,
     dep_graph: &ModelDepGraphResult,
+    module_input_names: &[String],
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{
         CompiledVarFragment, PerVarBytecodes, ReverseOffsetMap, VariableLayout,
@@ -4070,6 +4148,8 @@ fn compile_implicit_var_fragment(
     mini_offset += self_size;
 
     // Implicit vars' deps are always explicit vars in the same model (or other implicit vars)
+    // Keep dependency context conservative for implicit vars as well: both
+    // branches of `if isModuleInput(...)` may still be compiled.
     let deps = variable_direct_dependencies(db, meta.parent_source_var, project);
     let implicit_dep = deps
         .implicit_vars
@@ -4331,7 +4411,7 @@ fn compile_implicit_var_fragment(
         }
     }
 
-    let inputs = BTreeSet::new();
+    let inputs = canonical_module_input_set(module_input_names);
     let (module_models, mut module_refs) = if meta.is_module {
         let mm = model_module_map(db, model, project).clone();
 
@@ -4390,9 +4470,10 @@ fn compile_implicit_var_fragment(
         }
 
         let runlist_initials_by_var = vec![];
+        let module_inputs: HashSet<Ident<Canonical>> = inputs.iter().cloned().collect();
         let module = crate::compiler::Module {
             ident: model_name_ident.clone(),
-            inputs: HashSet::new(),
+            inputs: module_inputs,
             n_slots: mini_offset,
             n_temps: 0,
             temp_sizes: vec![],
@@ -4535,7 +4616,15 @@ pub fn assemble_module(
         concatenate_fragments, resolve_module,
     };
 
-    let dep_graph = model_dependency_graph(db, model, project);
+    let module_input_names: Vec<String> = module_inputs
+        .iter()
+        .map(|ident| ident.as_str().to_string())
+        .collect();
+    let dep_graph = if module_input_names.is_empty() {
+        model_dependency_graph(db, model, project)
+    } else {
+        model_dependency_graph_with_inputs(db, model, project, module_input_names.clone())
+    };
     if dep_graph.has_cycle {
         return Err(format!(
             "model '{}' has circular dependencies",
@@ -4551,15 +4640,28 @@ pub fn assemble_module(
     let mut all_fragments: HashMap<String, VarFragmentResult> = HashMap::new();
 
     for (name, svar) in source_vars.iter() {
-        if let Some(result) = compile_var_fragment(db, *svar, model, project, is_root) {
+        if let Some(result) = compile_var_fragment(
+            db,
+            *svar,
+            model,
+            project,
+            is_root,
+            module_input_names.clone(),
+        ) {
             all_fragments.insert(name.clone(), result.clone());
         }
     }
 
     for (name, meta) in implicit_info.iter() {
-        if let Some(result) =
-            compile_implicit_var_fragment(db, meta, model, project, is_root, dep_graph)
-        {
+        if let Some(result) = compile_implicit_var_fragment(
+            db,
+            meta,
+            model,
+            project,
+            is_root,
+            dep_graph,
+            &module_input_names,
+        ) {
             all_fragments.insert(name.clone(), result);
         }
     }
