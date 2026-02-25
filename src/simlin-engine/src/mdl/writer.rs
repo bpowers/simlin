@@ -530,6 +530,16 @@ fn equation_to_mdl(xmile_eqn: &str) -> String {
     if xmile_eqn.is_empty() {
         return String::new();
     }
+    // Data equation placeholders (GET DIRECT DATA, GET XLS, etc.) are opaque
+    // strings that cannot be parsed as Expr0.  Emit them verbatim, stripping
+    // the outer braces that the normalizer adds.
+    if is_data_equation(xmile_eqn) {
+        let stripped = xmile_eqn
+            .strip_prefix('{')
+            .and_then(|s| s.strip_suffix('}'))
+            .unwrap_or(xmile_eqn);
+        return stripped.to_string();
+    }
     match Expr0::new(xmile_eqn, LexerType::Equation) {
         Ok(Some(ast)) => expr0_to_mdl(&ast),
         _ => underbar_to_space(xmile_eqn),
@@ -541,7 +551,14 @@ fn equation_to_mdl(xmile_eqn: &str) -> String {
 /// function tokens (stored as `{GET_...}` after canonicalization).
 fn is_data_equation(xmile_eqn: &str) -> bool {
     let s = xmile_eqn.trim_start_matches('{');
-    s.starts_with("GET_DIRECT")
+    // The normalizer produces space-separated prefixes like "{GET DIRECT DATA(...)}",
+    // but some code paths may store underscore-separated forms.  Accept both.
+    s.starts_with("GET DIRECT")
+        || s.starts_with("GET XLS")
+        || s.starts_with("GET VDF")
+        || s.starts_with("GET DATA")
+        || s.starts_with("GET 123")
+        || s.starts_with("GET_DIRECT")
         || s.starts_with("GET_XLS")
         || s.starts_with("GET_VDF")
         || s.starts_with("GET_DATA")
@@ -764,14 +781,47 @@ fn write_stock_element(buf: &mut String, stock: &view_element::Stock) {
     .unwrap();
 }
 
+/// Allocate non-conflicting valve UIDs for flow elements.
+///
+/// In MDL, each flow is two sketch elements: a valve (type 11) and an attached
+/// variable (type 10).  The valve needs a UID that doesn't collide with any
+/// existing element UID.  We find the max UID across all elements and allocate
+/// valve UIDs starting from max+1.
+fn allocate_valve_uids(elements: &[ViewElement]) -> HashMap<i32, i32> {
+    let mut max_uid: i32 = 0;
+    for elem in elements {
+        let uid = match elem {
+            ViewElement::Aux(a) => a.uid,
+            ViewElement::Stock(s) => s.uid,
+            ViewElement::Flow(f) => f.uid,
+            ViewElement::Cloud(c) => c.uid,
+            ViewElement::Alias(a) => a.uid,
+            ViewElement::Module(m) => m.uid,
+            ViewElement::Link(l) => l.uid,
+            ViewElement::Group(_) => continue,
+        };
+        max_uid = max_uid.max(uid);
+    }
+
+    let mut valve_uids = HashMap::new();
+    let mut next_uid = max_uid + 1;
+    for elem in elements {
+        if let ViewElement::Flow(f) = elem {
+            valve_uids.insert(f.uid, next_uid);
+            next_uid += 1;
+        }
+    }
+    valve_uids
+}
+
 /// Write type 11 (valve) + type 10 (attached flow) lines for a Flow element.
 ///
 /// In MDL, flows are two elements: a valve (type 11) at the flow position
-/// and an attached variable (type 10) below it. The valve gets uid-1 and
-/// the variable gets the flow's uid.
-fn write_flow_element(buf: &mut String, flow: &view_element::Flow) {
+/// and an attached variable (type 10) below it. The valve UID is looked up
+/// from the pre-allocated valve_uids map to avoid collisions.
+fn write_flow_element(buf: &mut String, flow: &view_element::Flow, valve_uids: &HashMap<i32, i32>) {
     let name = underbar_to_space(&flow.name);
-    let valve_uid = flow.uid - 1;
+    let valve_uid = valve_uids.get(&flow.uid).copied().unwrap_or(flow.uid - 1);
 
     // Type 11 (valve): the valve name in Vensim is typically a numeric
     // placeholder (like "48" or "444"). We use the valve uid as the name.
@@ -966,7 +1016,7 @@ impl MdlWriter {
     }
 
     /// Orchestrate the full MDL file assembly and return the result.
-    pub fn write_project(mut self, project: &datamodel::Project) -> Result<String> {
+    pub(super) fn write_project(mut self, project: &datamodel::Project) -> Result<String> {
         let model = &project.models[0];
         self.write_equations_section(model, project);
         self.write_sketch_section(&model.views);
@@ -1106,8 +1156,11 @@ impl MdlWriter {
             "$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0\n",
         );
 
+        // Allocate non-conflicting valve UIDs for flow elements
+        let valve_uids = allocate_valve_uids(&sf.elements);
+
         // Build position map for link control point computation
-        let elem_positions = build_element_positions(&sf.elements);
+        let elem_positions = build_element_positions(&sf.elements, &valve_uids);
 
         // Build name map for alias resolution
         let name_map = build_name_map(&sf.elements);
@@ -1123,7 +1176,7 @@ impl MdlWriter {
                     self.buf.push('\n');
                 }
                 ViewElement::Flow(flow) => {
-                    write_flow_element(&mut self.buf, flow);
+                    write_flow_element(&mut self.buf, flow, &valve_uids);
                     self.buf.push('\n');
                 }
                 ViewElement::Link(link) => {
@@ -1227,16 +1280,21 @@ impl MdlWriter {
 /// For flow elements, `write_flow_element` emits a synthetic valve at `flow.uid - 1`.
 /// We register that valve UID here so that any connector whose endpoint was originally
 /// the valve (before MDL->datamodel conversion) can still resolve a position.
-fn build_element_positions(elements: &[ViewElement]) -> HashMap<i32, (i32, i32)> {
+fn build_element_positions(
+    elements: &[ViewElement],
+    valve_uids: &HashMap<i32, i32>,
+) -> HashMap<i32, (i32, i32)> {
     let mut positions = HashMap::new();
     for elem in elements {
         let (uid, x, y) = match elem {
             ViewElement::Aux(a) => (a.uid, a.x as i32, a.y as i32),
             ViewElement::Stock(s) => (s.uid, s.x as i32, s.y as i32),
             ViewElement::Flow(f) => {
-                // Also register the synthetic valve UID so connectors that
-                // reference the valve position can resolve without falling back to (0,0).
-                positions.insert(f.uid - 1, (f.x as i32, f.y as i32));
+                // Also register the allocated valve UID so connectors that
+                // reference the valve position can resolve.
+                if let Some(&valve_uid) = valve_uids.get(&f.uid) {
+                    positions.insert(valve_uid, (f.x as i32, f.y as i32));
+                }
                 (f.uid, f.x as i32, f.y as i32)
             }
             ViewElement::Cloud(c) => (c.uid, c.x as i32, c.y as i32),
@@ -1890,14 +1948,46 @@ mod tests {
 
     #[test]
     fn is_data_equation_detection() {
+        // Underscore-separated form (as might appear in some equation strings)
         assert!(is_data_equation("{GET_DIRECT_DATA('f',',','A','B')}"));
         assert!(is_data_equation("{GET_XLS_DATA('f','s','A','B')}"));
         assert!(is_data_equation("{GET_VDF_DATA('f','v')}"));
         assert!(is_data_equation("{GET_DATA_AT_TIME('v', 5)}"));
         assert!(is_data_equation("{GET_123_DATA('f','s','A','B')}"));
+
+        // Space-separated form (as produced by the normalizer's SymbolClass::GetXls)
+        assert!(is_data_equation("{GET DIRECT DATA('f',',','A','B')}"));
+        assert!(is_data_equation("{GET XLS DATA('f','s','A','B')}"));
+        assert!(is_data_equation("{GET VDF DATA('f','v')}"));
+        assert!(is_data_equation("{GET DATA AT TIME('v', 5)}"));
+        assert!(is_data_equation("{GET 123 DATA('f','s','A','B')}"));
+
         assert!(!is_data_equation("100"));
         assert!(!is_data_equation("integ(a, b)"));
         assert!(!is_data_equation(""));
+    }
+
+    #[test]
+    fn data_equation_preserves_raw_content() {
+        // Data equations should not go through expr0_to_mdl() because
+        // the GET XLS/DIRECT/etc. placeholders are not parseable as Expr0.
+        // Verify the raw content is preserved (not mangled by underbar_to_space).
+        let var = make_aux(
+            "my_data",
+            "{GET DIRECT DATA('data_file.csv',',','A','B2')}",
+            None,
+            "",
+        );
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        // The equation content must preserve underscores in quoted strings
+        assert!(
+            buf.contains("GET DIRECT DATA('data_file.csv',',','A','B2')"),
+            "Data equation content mangled: {}",
+            buf
+        );
+        // Must use := for data equations
+        assert!(buf.contains(":="), "Expected := for data equation: {}", buf);
     }
 
     #[test]
@@ -2299,10 +2389,39 @@ mod tests {
             points: vec![],
         };
         let mut buf = String::new();
-        write_flow_element(&mut buf, &flow);
-        // valve line (uid=5) then variable line (uid=6)
-        assert!(buf.starts_with("11,5,5,295,191,6,8,34,3,0,0,1,0,0,0\n"));
+        let valve_uids = HashMap::from([(6, 100)]);
+        write_flow_element(&mut buf, &flow, &valve_uids);
+        // valve line uses allocated UID, variable line uses flow's UID
+        assert!(buf.starts_with("11,100,100,295,191,6,8,34,3,0,0,1,0,0,0\n"));
         assert!(buf.contains("10,6,Infection Rate,295,207,49,8,40,3,0,0,-1,0,0,0"));
+    }
+
+    #[test]
+    fn valve_uids_do_not_collide_with_existing_elements() {
+        // stock uid=1, flow uid=2 -> valve must NOT get uid=1
+        let elements = vec![
+            ViewElement::Stock(view_element::Stock {
+                name: "Population".to_string(),
+                uid: 1,
+                x: 100.0,
+                y: 100.0,
+                label_side: view_element::LabelSide::Bottom,
+            }),
+            ViewElement::Flow(view_element::Flow {
+                name: "Birth_Rate".to_string(),
+                uid: 2,
+                x: 200.0,
+                y: 100.0,
+                label_side: view_element::LabelSide::Bottom,
+                points: vec![],
+            }),
+        ];
+
+        let valve_uids = allocate_valve_uids(&elements);
+        // The valve for flow uid=2 must not equal 1 (stock's uid)
+        let valve_uid = valve_uids[&2];
+        assert_ne!(valve_uid, 1, "Valve UID collides with stock UID");
+        assert_ne!(valve_uid, 2, "Valve UID collides with flow UID");
     }
 
     #[test]
