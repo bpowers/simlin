@@ -4770,11 +4770,8 @@ fn test_incremental_compile_distinguishes_module_input_sets() {
     );
 }
 
-#[test]
-fn test_incremental_compile_implicit_lookup_dep_tables() {
-    use crate::vm::Vm;
-
-    let project = datamodel::Project {
+fn implicit_lookup_smth1_project() -> datamodel::Project {
+    datamodel::Project {
         name: "implicit_lookup_tables".to_string(),
         sim_specs: datamodel::SimSpecs {
             start: 0.0,
@@ -4841,23 +4838,185 @@ fn test_incremental_compile_implicit_lookup_dep_tables() {
         }],
         source: None,
         ai_information: None,
-    };
+    }
+}
 
-    let db = SimlinDb::default();
-    let sync = sync_from_datamodel(&db, &project);
-    let incremental = compile_project_incremental(&db, sync.project, "main")
-        .expect("incremental compile should include lookup tables from implicit deps");
+fn pre_lookup_smth1_project() -> datamodel::Project {
+    datamodel::Project {
+        name: "implicit_lookup_tables".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "table_var".to_string(),
+                    equation: datamodel::Equation::Scalar("time".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "delay_time".to_string(),
+                    equation: datamodel::Equation::Scalar("2".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "smoothed".to_string(),
+                    equation: datamodel::Equation::Scalar(
+                        "SMTH1(table_var, delay_time)".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
 
-    let mut incr_vm = Vm::new(incremental).expect("incremental VM should build");
-    incr_vm
-        .run_to_end()
-        .expect("incremental simulation should run");
-
+fn run_smoothed_series(compiled: crate::vm::CompiledSimulation) -> Vec<f64> {
+    let mut vm = crate::vm::Vm::new(compiled).expect("VM should build");
+    vm.run_to_end().expect("simulation should run");
     let smoothed = crate::common::Ident::new("smoothed");
-    let series = incr_vm
-        .get_series(&smoothed)
-        .expect("smoothed should exist in simulation output");
-    assert!(!series.is_empty(), "smoothed series should not be empty");
+    vm.get_series(&smoothed)
+        .expect("smoothed should exist in simulation output")
+        .to_vec()
+}
+
+#[test]
+fn test_incremental_compile_implicit_lookup_dep_tables_after_equation_update() {
+    let mut db = SimlinDb::default();
+
+    let before_lookup = pre_lookup_smth1_project();
+    let state1 = sync_from_datamodel_incremental(&mut db, &before_lookup, None);
+    let before_lookup_compiled = compile_project_incremental(&db, state1.project, "main")
+        .expect("baseline incremental compile should succeed");
+    let before_lookup_series = run_smoothed_series(before_lookup_compiled);
+    assert!(
+        before_lookup_series.iter().all(|v| v.is_finite()),
+        "baseline series should be finite before lookup rewrite"
+    );
+
+    let project = implicit_lookup_smth1_project();
+    let engine_project = crate::project::Project::from(project.clone());
+    let mono_compiled = crate::interpreter::compile_project(&engine_project, "main")
+        .expect("monolithic compile should succeed");
+    let mono_series = run_smoothed_series(mono_compiled);
+
+    let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
+    let incr_compiled = compile_project_incremental(&db, state2.project, "main")
+        .expect("incremental compile after equation rewrite should succeed");
+    let incr_series = run_smoothed_series(incr_compiled);
+
+    assert_eq!(
+        incr_series.len(),
+        mono_series.len(),
+        "incremental and monolithic should have same number of timesteps"
+    );
+
+    for (step, (mono, incr)) in mono_series.iter().zip(incr_series.iter()).enumerate() {
+        assert!(
+            mono.is_finite(),
+            "monolithic produced non-finite value at step {step}: {mono}"
+        );
+        assert!(
+            incr.is_finite(),
+            "incremental produced non-finite value at step {step}: {incr}"
+        );
+        assert!(
+            (incr - mono).abs() < 1e-10,
+            "incremental mismatch at step {step}: incr={incr}, mono={mono}"
+        );
+    }
+}
+
+#[test]
+fn test_incremental_compile_implicit_lookup_dep_tables() {
+    let project = implicit_lookup_smth1_project();
+
+    let engine_project = crate::project::Project::from(project.clone());
+    let mono_compiled = crate::interpreter::compile_project(&engine_project, "main")
+        .expect("monolithic compile should succeed");
+    let mono_series = run_smoothed_series(mono_compiled);
+    assert!(
+        !mono_series.is_empty(),
+        "monolithic smoothed series should not be empty"
+    );
+
+    let mut db = SimlinDb::default();
+
+    let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+    let incr_compiled1 = compile_project_incremental(&db, state1.project, "main")
+        .expect("incremental compile should include lookup tables from implicit deps");
+    let incr_series1 = run_smoothed_series(incr_compiled1);
+
+    let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
+    let incr_compiled2 = compile_project_incremental(&db, state2.project, "main")
+        .expect("incremental compile after state reuse should succeed");
+    let incr_series2 = run_smoothed_series(incr_compiled2);
+
+    assert_eq!(
+        incr_series1.len(),
+        mono_series.len(),
+        "incremental (fresh state) should have same number of timesteps as monolithic"
+    );
+    assert_eq!(
+        incr_series2.len(),
+        mono_series.len(),
+        "incremental (reused state) should have same number of timesteps as monolithic"
+    );
+
+    for (step, (mono, incr)) in mono_series.iter().zip(incr_series1.iter()).enumerate() {
+        assert!(
+            mono.is_finite(),
+            "monolithic produced non-finite value at step {step}: {mono}"
+        );
+        assert!(
+            incr.is_finite(),
+            "incremental produced non-finite value at step {step}: {incr}"
+        );
+        assert!(
+            (incr - mono).abs() < 1e-10,
+            "incremental mismatch at step {step}: incr={incr}, mono={mono}"
+        );
+    }
+
+    for (step, (mono, incr)) in mono_series.iter().zip(incr_series2.iter()).enumerate() {
+        assert!(
+            incr.is_finite(),
+            "incremental (reused state) produced non-finite value at step {step}: {incr}"
+        );
+        assert!(
+            (incr - mono).abs() < 1e-10,
+            "incremental (reused state) mismatch at step {step}: incr={incr}, mono={mono}"
+        );
+    }
 }
 
 #[test]
