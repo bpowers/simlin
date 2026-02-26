@@ -1027,6 +1027,7 @@ pub mod view_element {
             },
         ];
         let view = StockFlow {
+            name: None,
             elements: vec![],
             view_box: Default::default(),
             zoom: 0.0,
@@ -1044,6 +1045,7 @@ pub mod view_element {
         // When exporting a LinkShape::Straight, we should calculate the angle
         // based on the from/to element positions so other software can read it.
         let view = StockFlow {
+            name: None,
             elements: vec![
                 datamodel::ViewElement::Aux(datamodel::view_element::Aux {
                     name: "from_var".to_string(),
@@ -1096,6 +1098,7 @@ pub mod view_element {
     fn test_straight_link_export_diagonal() {
         // Test a diagonal link (down and to the right in screen coords)
         let view = StockFlow {
+            name: None,
             elements: vec![
                 datamodel::ViewElement::Aux(datamodel::view_element::Aux {
                     name: "from_var".to_string(),
@@ -1142,6 +1145,7 @@ pub mod view_element {
         // When importing an XMILE link whose angle exactly matches the straight-line
         // angle, we should convert to LinkShape::Straight
         let view = StockFlow {
+            name: None,
             elements: vec![
                 datamodel::ViewElement::Aux(datamodel::view_element::Aux {
                     name: "from_var".to_string(),
@@ -1190,6 +1194,7 @@ pub mod view_element {
         // When importing an XMILE link whose angle differs significantly from
         // the straight-line angle, it should stay as LinkShape::Arc
         let view = StockFlow {
+            name: None,
             elements: vec![
                 datamodel::ViewElement::Aux(datamodel::view_element::Aux {
                     name: "from_var".to_string(),
@@ -1248,6 +1253,7 @@ pub mod view_element {
         // Angles that are "close enough" for visual straightness (within 6 degrees)
         // but not exact should stay as Arc to preserve the original value.
         let view = StockFlow {
+            name: None,
             elements: vec![
                 datamodel::ViewElement::Aux(datamodel::view_element::Aux {
                     name: "from_var".to_string(),
@@ -1462,6 +1468,7 @@ pub mod view_element {
             label_side: datamodel::view_element::LabelSide::Right,
         }];
         let view = StockFlow {
+            name: None,
             elements: vec![],
             view_box: Default::default(),
             zoom: 0.0,
@@ -1762,6 +1769,8 @@ pub struct View {
     pub next_uid: Option<i32>, // used internally
     #[serde(rename = "@type")]
     pub kind: Option<ViewType>,
+    #[serde(rename = "@name")]
+    pub name: Option<String>,
     #[serde(rename = "@background")]
     pub background: Option<String>,
     #[serde(rename = "@page_width")]
@@ -1786,7 +1795,7 @@ pub struct View {
 
 impl ToXml<XmlWriter> for View {
     fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
-        let attrs = &[
+        let mut attrs = vec![
             ("isee:show_pages", "false"),
             ("page_width", "800"),
             ("page_height", "600"),
@@ -1795,7 +1804,10 @@ impl ToXml<XmlWriter> for View {
                 self.kind.unwrap_or(ViewType::StockFlow).as_str(),
             ),
         ];
-        write_tag_start_with_attrs(writer, "view", attrs)?;
+        if let Some(name) = self.name.as_deref() {
+            attrs.push(("name", name));
+        }
+        write_tag_start_with_attrs(writer, "view", &attrs)?;
 
         for element in self.objects.iter() {
             element.write_xml(writer)?;
@@ -2131,6 +2143,7 @@ impl From<View> for datamodel::View {
                 .collect();
 
             datamodel::View::StockFlow(datamodel::StockFlow {
+                name: v.name,
                 elements: v
                     .objects
                     .into_iter()
@@ -2162,6 +2175,7 @@ impl From<datamodel::View> for View {
             datamodel::View::StockFlow(v) => View {
                 next_uid: None,
                 kind: Some(ViewType::StockFlow),
+                name: v.name.clone(),
                 background: None,
                 page_width: None,
                 page_height: None,
@@ -2186,6 +2200,7 @@ impl From<datamodel::View> for View {
 fn test_view_roundtrip() {
     use crate::datamodel::Rect;
     let cases: &[_] = &[datamodel::View::StockFlow(datamodel::StockFlow {
+        name: None,
         elements: vec![datamodel::ViewElement::Stock(
             datamodel::view_element::Stock {
                 name: "stock1".to_string(),

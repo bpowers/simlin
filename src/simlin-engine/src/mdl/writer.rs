@@ -621,7 +621,13 @@ fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
 
 /// Format f64 for MDL output: omit trailing `.0` for whole numbers.
 fn format_f64(v: f64) -> String {
-    if v == v.trunc() && v.abs() < 1e15 {
+    if v.is_infinite() {
+        if v.is_sign_positive() {
+            "1e+38".to_owned()
+        } else {
+            "-1e+38".to_owned()
+        }
+    } else if v == v.trunc() && v.abs() < 1e15 {
         format!("{}", v as i64)
     } else {
         format!("{}", v)
@@ -701,21 +707,98 @@ fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
         net_flow.push('0');
     }
 
-    let initial = match &stock.equation {
-        Equation::Scalar(eqn) => equation_to_mdl(eqn),
-        _ => String::new(),
-    };
+    match &stock.equation {
+        Equation::Scalar(eqn) => write_stock_entry(
+            buf,
+            &stock.ident,
+            &net_flow,
+            &equation_to_mdl(eqn),
+            &[],
+            &stock.units,
+            &stock.documentation,
+        ),
+        Equation::ApplyToAll(dims, eqn) => {
+            let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
+            write_stock_entry(
+                buf,
+                &stock.ident,
+                &net_flow,
+                &equation_to_mdl(eqn),
+                &dim_names,
+                &stock.units,
+                &stock.documentation,
+            );
+        }
+        Equation::Arrayed(_dims, elements) => {
+            write_arrayed_stock_entries(
+                buf,
+                &stock.ident,
+                &net_flow,
+                elements,
+                &stock.units,
+                &stock.documentation,
+            );
+        }
+    }
+}
 
-    // Build the INTEG equation directly in MDL format (uppercase, spaced names)
-    // rather than going through equation_to_mdl, since net_flow is already
-    // assembled from spaced identifiers.
-    let mdl_integ = format!("INTEG({net_flow}, {initial})");
+fn normalized_stock_initial(initial: &str) -> String {
+    if initial.trim().is_empty() {
+        "0".to_owned()
+    } else {
+        initial.to_owned()
+    }
+}
 
-    let name = underbar_to_space(&stock.ident);
-    write!(buf, "{name}=").unwrap();
+fn write_stock_entry(
+    buf: &mut String,
+    ident: &str,
+    net_flow: &str,
+    initial: &str,
+    dims: &[&str],
+    units: &Option<String>,
+    doc: &str,
+) {
+    let name = underbar_to_space(ident);
+    let initial = normalized_stock_initial(initial);
+
+    if dims.is_empty() {
+        write!(buf, "{name}=").unwrap();
+    } else {
+        let dim_strs: Vec<String> = dims.iter().map(|d| underbar_to_space(d)).collect();
+        write!(buf, "{name}[{}]=", dim_strs.join(",")).unwrap();
+    }
+
     buf.push_str("\n\t");
-    buf.push_str(&mdl_integ);
-    write_units_and_comment(buf, &stock.units, &stock.documentation);
+    buf.push_str(&format!("INTEG({net_flow}, {initial})"));
+    write_units_and_comment(buf, units, doc);
+}
+
+fn write_arrayed_stock_entries(
+    buf: &mut String,
+    ident: &str,
+    net_flow: &str,
+    elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    units: &Option<String>,
+    doc: &str,
+) {
+    let name = underbar_to_space(ident);
+    let last_idx = elements.len().saturating_sub(1);
+
+    for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
+        let elem_display = underbar_to_space(elem_name);
+        let initial = normalized_stock_initial(&equation_to_mdl(eqn));
+
+        write!(buf, "{name}[{elem_display}]=").unwrap();
+        buf.push_str("\n\t");
+        buf.push_str(&format!("INTEG({net_flow}, {initial})"));
+
+        if i < last_idx {
+            buf.push_str("\n\t~~|\n");
+        } else {
+            write_units_and_comment(buf, units, doc);
+        }
+    }
 }
 
 /// If a variable has ACTIVE INITIAL metadata, wrap the equation.
@@ -901,12 +984,58 @@ fn allocate_valve_uids(elements: &[ViewElement]) -> HashMap<i32, i32> {
     valve_uids
 }
 
-/// Write type 11 (valve) + type 10 (attached flow) lines for a Flow element.
+fn max_sketch_uid(elements: &[ViewElement], valve_uids: &HashMap<i32, i32>) -> i32 {
+    let mut max_uid = valve_uids.values().copied().max().unwrap_or(0);
+    for elem in elements {
+        let uid = match elem {
+            ViewElement::Aux(a) => a.uid,
+            ViewElement::Stock(s) => s.uid,
+            ViewElement::Flow(f) => f.uid,
+            ViewElement::Cloud(c) => c.uid,
+            ViewElement::Alias(a) => a.uid,
+            ViewElement::Module(m) => m.uid,
+            ViewElement::Link(l) => l.uid,
+            ViewElement::Group(_) => continue,
+        };
+        max_uid = max_uid.max(uid);
+    }
+    max_uid
+}
+
+/// MDL view titles are written on a single `*<title>` line.
+/// Collapse CR/LF runs so untrusted titles cannot break sketch structure.
+fn sanitize_view_title_for_mdl(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut prev_was_line_break = false;
+
+    for ch in title.chars() {
+        if matches!(ch, '\n' | '\r') {
+            if !prev_was_line_break {
+                out.push(' ');
+                prev_was_line_break = true;
+            }
+            continue;
+        }
+
+        out.push(ch);
+        prev_was_line_break = false;
+    }
+
+    out
+}
+
+/// Write a Flow element as type 11 (valve), type 10 (attached flow variable),
+/// and type 1 pipe connectors derived from flow endpoints.
 ///
 /// In MDL, flows are two elements: a valve (type 11) at the flow position
 /// and an attached variable (type 10) below it. The valve UID is looked up
 /// from the pre-allocated valve_uids map to avoid collisions.
-fn write_flow_element(buf: &mut String, flow: &view_element::Flow, valve_uids: &HashMap<i32, i32>) {
+fn write_flow_element(
+    buf: &mut String,
+    flow: &view_element::Flow,
+    valve_uids: &HashMap<i32, i32>,
+    next_connector_uid: &mut i32,
+) {
     let name = underbar_to_space(&flow.name);
     let valve_uid = valve_uids.get(&flow.uid).copied().unwrap_or(flow.uid - 1);
 
@@ -928,6 +1057,71 @@ fn write_flow_element(buf: &mut String, flow: &view_element::Flow, valve_uids: &
         flow.uid, name, flow.x as i32, var_y,
     )
     .unwrap();
+
+    write_flow_pipe_connectors(buf, flow, valve_uid, next_connector_uid);
+}
+
+fn write_flow_pipe_connectors(
+    buf: &mut String,
+    flow: &view_element::Flow,
+    valve_uid: i32,
+    next_connector_uid: &mut i32,
+) {
+    let write_connector =
+        |buf: &mut String, connector_uid: i32, from_uid: i32, to_uid: i32, x: i32, y: i32| {
+            write!(
+                buf,
+                "\n1,{},{},{},0,0,0,0,0,0,0,-1--1--1,,1|({},{})|",
+                connector_uid, from_uid, to_uid, x, y,
+            )
+            .unwrap();
+        };
+
+    if let Some(first) = flow.points.first()
+        && let Some(endpoint_uid) = first.attached_to_uid
+    {
+        write_connector(
+            buf,
+            *next_connector_uid,
+            valve_uid,
+            endpoint_uid,
+            first.x as i32,
+            first.y as i32,
+        );
+        *next_connector_uid += 1;
+    }
+
+    for point in flow
+        .points
+        .iter()
+        .skip(1)
+        .take(flow.points.len().saturating_sub(2))
+    {
+        write_connector(
+            buf,
+            *next_connector_uid,
+            valve_uid,
+            valve_uid,
+            point.x as i32,
+            point.y as i32,
+        );
+        *next_connector_uid += 1;
+    }
+
+    if flow.points.len() > 1
+        && let Some(last) = flow.points.last()
+        && let Some(endpoint_uid) = last.attached_to_uid
+    {
+        write_connector(
+            buf,
+            *next_connector_uid,
+            valve_uid,
+            endpoint_uid,
+            last.x as i32,
+            last.y as i32,
+        );
+        *next_connector_uid += 1;
+    }
 }
 
 /// Write a type 12 line for a Cloud element.
@@ -1104,6 +1298,7 @@ impl MdlWriter {
 
     /// Orchestrate the full MDL file assembly and return the result.
     pub(super) fn write_project(mut self, project: &datamodel::Project) -> Result<String> {
+        self.buf.push_str("{UTF-8}\n");
         let model = &project.models[0];
         self.write_equations_section(model, project);
         self.write_sketch_section(&model.views);
@@ -1237,14 +1432,15 @@ impl MdlWriter {
 
     /// Write a single StockFlow view as sketch elements.
     fn write_stock_flow_view(&mut self, sf: &datamodel::StockFlow) {
-        // datamodel::StockFlow does not carry a view title; "View 1" matches Vensim's default.
-        self.buf.push_str("*View 1\n");
+        let view_title = sanitize_view_title_for_mdl(sf.name.as_deref().unwrap_or("View 1"));
+        writeln!(self.buf, "*{}", view_title).unwrap();
         self.buf.push_str(
             "$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0\n",
         );
 
         // Allocate non-conflicting valve UIDs for flow elements
         let valve_uids = allocate_valve_uids(&sf.elements);
+        let mut next_connector_uid = max_sketch_uid(&sf.elements, &valve_uids) + 1;
 
         // Build position map for link control point computation
         let elem_positions = build_element_positions(&sf.elements, &valve_uids);
@@ -1263,7 +1459,7 @@ impl MdlWriter {
                     self.buf.push('\n');
                 }
                 ViewElement::Flow(flow) => {
-                    write_flow_element(&mut self.buf, flow, &valve_uids);
+                    write_flow_element(&mut self.buf, flow, &valve_uids, &mut next_connector_uid);
                     self.buf.push('\n');
                 }
                 ViewElement::Link(link) => {
@@ -1364,9 +1560,9 @@ impl MdlWriter {
 
 /// Build a map from element UID to (x, y) position for link control point computation.
 ///
-/// For flow elements, `write_flow_element` emits a synthetic valve at `flow.uid - 1`.
-/// We register that valve UID here so that any connector whose endpoint was originally
-/// the valve (before MDL->datamodel conversion) can still resolve a position.
+/// For flow elements, `write_flow_element` emits a synthetic valve using the
+/// pre-allocated `valve_uids` map. We register that valve UID here so that any
+/// connector whose endpoint is the valve can resolve a position.
 fn build_element_positions(
     elements: &[ViewElement],
     valve_uids: &HashMap<i32, i32>,
@@ -1849,6 +2045,61 @@ mod tests {
     }
 
     #[test]
+    fn arrayed_stock_apply_to_all_preserves_initial_value() {
+        let var = Variable::Stock(Stock {
+            ident: "inventory".to_owned(),
+            equation: Equation::ApplyToAll(vec!["region".to_owned()], "100".to_owned()),
+            documentation: "Stock by region".to_owned(),
+            units: Some("widgets".to_owned()),
+            inflows: vec!["inflow".to_owned()],
+            outflows: vec!["outflow".to_owned()],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert!(
+            buf.contains("inventory[region]=\n\tINTEG(inflow-outflow, 100)"),
+            "ApplyToAll stock should emit arrayed INTEG with initial value: {}",
+            buf
+        );
+    }
+
+    #[test]
+    fn arrayed_stock_elements_preserve_each_initial_value() {
+        let var = Variable::Stock(Stock {
+            ident: "inventory".to_owned(),
+            equation: Equation::Arrayed(
+                vec!["region".to_owned()],
+                vec![
+                    ("north".to_owned(), "100".to_owned(), None, None),
+                    ("south".to_owned(), "200".to_owned(), None, None),
+                ],
+            ),
+            documentation: "Stock by region".to_owned(),
+            units: Some("widgets".to_owned()),
+            inflows: vec!["inflow".to_owned()],
+            outflows: vec!["outflow".to_owned()],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert!(
+            buf.contains("inventory[north]=\n\tINTEG(inflow-outflow, 100)"),
+            "First arrayed stock element should retain initial value: {}",
+            buf
+        );
+        assert!(
+            buf.contains("inventory[south]=\n\tINTEG(inflow-outflow, 200)"),
+            "Second arrayed stock element should retain initial value: {}",
+            buf
+        );
+    }
+
+    #[test]
     fn active_initial_preserved_on_aux() {
         let var = Variable::Aux(Aux {
             ident: "x".to_owned(),
@@ -2166,6 +2417,12 @@ mod tests {
     }
 
     #[test]
+    fn format_f64_infinity_uses_vensim_numeric_sentinels() {
+        assert_eq!(format_f64(f64::INFINITY), "1e+38");
+        assert_eq!(format_f64(f64::NEG_INFINITY), "-1e+38");
+    }
+
+    #[test]
     fn flow_with_lookup() {
         let gf = make_gf();
         let var = Variable::Flow(Flow {
@@ -2277,6 +2534,11 @@ mod tests {
         let result = crate::mdl::project_to_mdl(&project);
         assert!(result.is_ok(), "should succeed: {:?}", result);
         let mdl = result.unwrap();
+        assert!(
+            mdl.starts_with("{UTF-8}\n"),
+            "MDL should start with UTF-8 marker, got: {:?}",
+            mdl.lines().next()
+        );
         assert!(mdl.contains("x="));
         assert!(mdl.contains("\\\\\\---///"));
     }
@@ -2551,10 +2813,57 @@ mod tests {
         };
         let mut buf = String::new();
         let valve_uids = HashMap::from([(6, 100)]);
-        write_flow_element(&mut buf, &flow, &valve_uids);
+        let mut next_connector_uid = 200;
+        write_flow_element(&mut buf, &flow, &valve_uids, &mut next_connector_uid);
         // valve line uses allocated UID, variable line uses flow's UID
         assert!(buf.starts_with("11,100,100,295,191,6,8,34,3,0,0,1,0,0,0\n"));
         assert!(buf.contains("10,6,Infection Rate,295,207,49,8,40,3,0,0,-1,0,0,0"));
+    }
+
+    #[test]
+    fn sketch_flow_element_emits_pipe_connectors_from_flow_points() {
+        let flow = view_element::Flow {
+            name: "Infection_Rate".to_string(),
+            uid: 6,
+            x: 150.0,
+            y: 100.0,
+            label_side: view_element::LabelSide::Bottom,
+            points: vec![
+                view_element::FlowPoint {
+                    x: 100.0,
+                    y: 100.0,
+                    attached_to_uid: Some(1),
+                },
+                view_element::FlowPoint {
+                    x: 200.0,
+                    y: 100.0,
+                    attached_to_uid: Some(2),
+                },
+            ],
+        };
+        let mut buf = String::new();
+        let valve_uids = HashMap::from([(6, 100)]);
+        let mut next_connector_uid = 200;
+        write_flow_element(&mut buf, &flow, &valve_uids, &mut next_connector_uid);
+
+        let connector_lines: Vec<&str> =
+            buf.lines().filter(|line| line.starts_with("1,")).collect();
+        assert_eq!(
+            connector_lines.len(),
+            2,
+            "Expected two type-1 connector lines for flow endpoints: {}",
+            buf
+        );
+        assert!(
+            connector_lines.iter().any(|line| line.contains(",100,1,")),
+            "Expected connector from valve uid 100 to endpoint uid 1: {}",
+            buf
+        );
+        assert!(
+            connector_lines.iter().any(|line| line.contains(",100,2,")),
+            "Expected connector from valve uid 100 to endpoint uid 2: {}",
+            buf
+        );
     }
 
     #[test]
@@ -2753,6 +3062,7 @@ mod tests {
             }),
         ];
         let sf = datamodel::StockFlow {
+            name: None,
             elements,
             view_box: Default::default(),
             zoom: 1.0,
@@ -2808,6 +3118,7 @@ mod tests {
             sim_specs: None,
             variables: vec![var],
             views: vec![View::StockFlow(datamodel::StockFlow {
+                name: None,
                 elements,
                 view_box: Default::default(),
                 zoom: 1.0,
@@ -2942,6 +3253,194 @@ mod tests {
             .any(|e| matches!(e, crate::mdl::view::VensimElement::Connector(_)));
         assert!(has_variable, "re-parsed view should have variables");
         assert!(has_connector, "re-parsed view should have connectors");
+    }
+
+    #[test]
+    fn sketch_roundtrip_preserves_view_title() {
+        let mdl_contents = r#"x = 5
+~ ~|
+\\\---/// Sketch information
+V300  Do not put anything below this section - it will be ignored
+*Overview
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,x,100,100,40,20,8,3,0,0,-1,0,0,0
+///---\\\
+"#;
+
+        let project =
+            crate::mdl::parse_mdl(mdl_contents).expect("source MDL should parse successfully");
+        let mdl = crate::mdl::project_to_mdl(&project).expect("roundtrip MDL write should work");
+
+        assert!(
+            mdl.contains("*Overview\n"),
+            "Roundtrip should preserve original view title: {}",
+            mdl
+        );
+    }
+
+    #[test]
+    fn sketch_roundtrip_sanitizes_multiline_view_title() {
+        let var = make_aux("x", "5", Some("Units"), "A constant");
+        let model = datamodel::Model {
+            name: "default".to_owned(),
+            sim_specs: None,
+            variables: vec![var],
+            views: vec![View::StockFlow(datamodel::StockFlow {
+                name: Some("Overview\r\nMain".to_owned()),
+                elements: vec![ViewElement::Aux(view_element::Aux {
+                    name: "x".to_owned(),
+                    uid: 1,
+                    x: 100.0,
+                    y: 100.0,
+                    label_side: view_element::LabelSide::Bottom,
+                })],
+                view_box: Default::default(),
+                zoom: 1.0,
+                use_lettered_polarity: false,
+            })],
+            loop_metadata: vec![],
+            groups: vec![],
+        };
+        let project = make_project(vec![model]);
+
+        let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
+        assert!(
+            mdl.contains("*Overview Main\n"),
+            "view title should be serialized as a single line: {mdl}",
+        );
+
+        let reparsed = crate::mdl::parse_mdl(&mdl).expect("written MDL should parse");
+        let View::StockFlow(sf) = &reparsed.models[0].views[0];
+        assert_eq!(
+            sf.name.as_deref(),
+            Some("Overview Main"),
+            "sanitized title should roundtrip through MDL",
+        );
+    }
+
+    #[test]
+    fn sketch_roundtrip_preserves_flow_endpoints_with_nonadjacent_valve_uid() {
+        let stock_a = Variable::Stock(Stock {
+            ident: "stock_a".to_owned(),
+            equation: Equation::Scalar("100".to_owned()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec!["flow_ab".to_owned()],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let stock_b = Variable::Stock(Stock {
+            ident: "stock_b".to_owned(),
+            equation: Equation::Scalar("0".to_owned()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["flow_ab".to_owned()],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let flow = Variable::Flow(Flow {
+            ident: "flow_ab".to_owned(),
+            equation: Equation::Scalar("10".to_owned()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+
+        let model = datamodel::Model {
+            name: "default".to_owned(),
+            sim_specs: None,
+            variables: vec![stock_a, stock_b, flow],
+            views: vec![View::StockFlow(datamodel::StockFlow {
+                name: Some("View 1".to_owned()),
+                elements: vec![
+                    ViewElement::Stock(view_element::Stock {
+                        name: "Stock_A".to_owned(),
+                        uid: 1,
+                        x: 100.0,
+                        y: 100.0,
+                        label_side: view_element::LabelSide::Bottom,
+                    }),
+                    ViewElement::Stock(view_element::Stock {
+                        name: "Stock_B".to_owned(),
+                        uid: 2,
+                        x: 300.0,
+                        y: 100.0,
+                        label_side: view_element::LabelSide::Bottom,
+                    }),
+                    ViewElement::Flow(view_element::Flow {
+                        name: "Flow_AB".to_owned(),
+                        uid: 6,
+                        x: 200.0,
+                        y: 100.0,
+                        label_side: view_element::LabelSide::Bottom,
+                        points: vec![
+                            view_element::FlowPoint {
+                                x: 122.5,
+                                y: 100.0,
+                                attached_to_uid: Some(1),
+                            },
+                            view_element::FlowPoint {
+                                x: 277.5,
+                                y: 100.0,
+                                attached_to_uid: Some(2),
+                            },
+                        ],
+                    }),
+                ],
+                view_box: Default::default(),
+                zoom: 1.0,
+                use_lettered_polarity: false,
+            })],
+            loop_metadata: vec![],
+            groups: vec![],
+        };
+        let project = make_project(vec![model]);
+
+        let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
+        let reparsed = crate::mdl::parse_mdl(&mdl).expect("written MDL should parse");
+        let View::StockFlow(sf) = &reparsed.models[0].views[0];
+
+        let stock_uid_by_name: HashMap<&str, i32> = sf
+            .elements
+            .iter()
+            .filter_map(|elem| {
+                if let ViewElement::Stock(stock) = elem {
+                    Some((stock.name.as_str(), stock.uid))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let flow = sf
+            .elements
+            .iter()
+            .find_map(|elem| {
+                if let ViewElement::Flow(flow) = elem {
+                    Some(flow)
+                } else {
+                    None
+                }
+            })
+            .expect("expected flow element after roundtrip");
+
+        assert_eq!(
+            flow.points.first().and_then(|pt| pt.attached_to_uid),
+            stock_uid_by_name.get("Stock_A").copied(),
+            "flow source attachment should roundtrip to Stock_A",
+        );
+        assert_eq!(
+            flow.points.last().and_then(|pt| pt.attached_to_uid),
+            stock_uid_by_name.get("Stock_B").copied(),
+            "flow sink attachment should roundtrip to Stock_B",
+        );
     }
 
     #[test]
@@ -3167,6 +3666,7 @@ mod tests {
             sim_specs: None,
             variables: vec![var],
             views: vec![View::StockFlow(datamodel::StockFlow {
+                name: None,
                 elements,
                 view_box: Default::default(),
                 zoom: 1.0,

@@ -95,6 +95,7 @@ fn delay1() -> Model {
             }),
         ],
         views: vec![View::StockFlow(StockFlow {
+            name: None,
             elements: vec![
                 ViewElement::Stock(view_element::Stock {
                     name: "Stock".to_string(),
@@ -296,6 +297,7 @@ fn delay3() -> Model {
         })
         ],
         views: vec![View::StockFlow(StockFlow {
+            name: None,
             elements: vec![ViewElement::Stock(view_element::Stock {
                 name: "Stock".to_string(),
                 uid: 1,
@@ -454,6 +456,7 @@ fn init() -> Model {
             }),
         ],
         views: vec![View::StockFlow(StockFlow {
+            name: None,
             elements: vec![
                 ViewElement::Stock(view_element::Stock {
                     name: "Output".to_string(),
@@ -542,6 +545,7 @@ fn previous() -> Model {
             }),
         ],
         views: vec![View::StockFlow(StockFlow {
+            name: None,
             elements: vec![
                 ViewElement::Stock(view_element::Stock {
                     name: "output".to_string(),
@@ -703,6 +707,7 @@ fn smth1() -> Model {
             }),
         ],
         views: vec![View::StockFlow(StockFlow {
+            name: None,
             elements: vec![
                 ViewElement::Link(view_element::Link {
                     uid: 1,
@@ -899,6 +904,7 @@ fn smth3() -> Model {
             }),
         ],
         views: vec![View::StockFlow(StockFlow {
+            name: None,
             elements: vec![
                 ViewElement::Link(view_element::Link {
                     uid: 1,
@@ -1163,6 +1169,7 @@ fn trend() -> Model {
         })
         ],
         views: vec![View::StockFlow(StockFlow {
+            name: None,
             elements: vec![ViewElement::Link(view_element::Link {
                 uid: 1,
                 from_uid: 3,

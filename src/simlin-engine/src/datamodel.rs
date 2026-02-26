@@ -593,6 +593,7 @@ pub struct Rect {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub struct StockFlow {
+    pub name: Option<String>,
     pub elements: Vec<ViewElement>,
     pub view_box: Rect,
     pub zoom: f64,

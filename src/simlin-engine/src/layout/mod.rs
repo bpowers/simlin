@@ -158,6 +158,7 @@ impl<'a> LayoutEngine<'a> {
         let chains = &self.metadata.chains;
         if chains.is_empty() && self.model.variables.is_empty() {
             return Ok(datamodel::StockFlow {
+                name: None,
                 elements: Vec::new(),
                 view_box: Rect {
                     x: 0.0,
@@ -220,6 +221,7 @@ impl<'a> LayoutEngine<'a> {
         };
 
         Ok(datamodel::StockFlow {
+            name: None,
             elements: self.elements,
             view_box,
             zoom: 1.0,
@@ -3093,6 +3095,7 @@ mod tests {
         let results = vec![
             Ok(LayoutResult {
                 view: datamodel::StockFlow {
+                    name: None,
                     elements: Vec::new(),
                     view_box: Rect {
                         x: 0.0,
@@ -3108,6 +3111,7 @@ mod tests {
             }),
             Ok(LayoutResult {
                 view: datamodel::StockFlow {
+                    name: None,
                     elements: Vec::new(),
                     view_box: Rect {
                         x: 0.0,
@@ -3132,6 +3136,7 @@ mod tests {
         let results = vec![
             Ok(LayoutResult {
                 view: datamodel::StockFlow {
+                    name: None,
                     elements: vec![ViewElement::Aux(view_element::Aux {
                         name: "from_seed_123".to_string(),
                         uid: 1,
@@ -3153,6 +3158,7 @@ mod tests {
             }),
             Ok(LayoutResult {
                 view: datamodel::StockFlow {
+                    name: None,
                     elements: vec![ViewElement::Aux(view_element::Aux {
                         name: "from_seed_42".to_string(),
                         uid: 2,
@@ -3677,6 +3683,7 @@ mod tests {
     #[test]
     fn test_count_view_crossings_shared_endpoint_bidirectional_links() {
         let view = datamodel::StockFlow {
+            name: None,
             elements: vec![
                 ViewElement::Aux(view_element::Aux {
                     name: "a".to_string(),

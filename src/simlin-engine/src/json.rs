@@ -434,6 +434,8 @@ pub enum ViewElement {
 pub struct View {
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
     pub elements: Vec<ViewElement>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub view_box: Option<Rect>,
@@ -1074,6 +1076,7 @@ fn label_side_from_string(s: &str) -> datamodel::view_element::LabelSide {
 impl From<View> for datamodel::View {
     fn from(view: View) -> Self {
         datamodel::View::StockFlow(datamodel::StockFlow {
+            name: view.name,
             elements: view.elements.into_iter().map(|e| e.into()).collect(),
             view_box: view
                 .view_box
@@ -1643,6 +1646,7 @@ impl From<datamodel::View> for View {
         match view {
             datamodel::View::StockFlow(sf) => View {
                 kind: "stock_flow".to_string(),
+                name: sf.name,
                 elements: sf.elements.into_iter().map(|e| e.into()).collect(),
                 view_box: Some(Rect {
                     x: sf.view_box.x,

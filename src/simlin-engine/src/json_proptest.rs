@@ -678,6 +678,7 @@ fn view_strategy() -> impl Strategy<Value = View> {
     )
         .prop_map(|(kind, elements, view_box, zoom)| View {
             kind,
+            name: None,
             elements,
             view_box,
             zoom,
@@ -1245,6 +1246,7 @@ mod protobuf_roundtrip_tests {
                 sim_specs: None,
                 views: vec![View {
                     kind: "stock_flow".to_string(),
+                    name: None,
                     elements: vec![
                         ViewElement::Stock(StockViewElement {
                             uid: 1,
