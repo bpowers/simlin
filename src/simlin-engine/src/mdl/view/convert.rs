@@ -11,8 +11,9 @@ use crate::datamodel::{self, View, ViewElement, view_element};
 use std::collections::HashSet;
 
 use super::processing::{
-    EffectiveGhosts, PrimaryMap, angle_from_points, associate_variables, compose_views,
-    is_cloud_endpoint, xmile_angle_to_canvas,
+    EffectiveGhosts, PrimaryMap, angle_from_points, associate_variables,
+    build_attached_valve_flow_maps, compose_views, is_cloud_endpoint, resolve_flow_uid_for_valve,
+    xmile_angle_to_canvas,
 };
 use super::types::{VensimComment, VensimElement, VensimVariable, VensimView};
 
@@ -286,11 +287,12 @@ fn convert_view(
 ) -> Option<View> {
     let mut elements = Vec::new();
     let uid_offset = view.uid_offset;
+    let (valve_to_flow, flow_to_valve) = build_attached_valve_flow_maps(view);
 
     // Track which comments are clouds (flow endpoints)
     let mut cloud_comments: HashMap<i32, i32> = HashMap::new(); // comment_uid -> flow_uid
     for (uid, _elem) in view.iter_with_uids() {
-        if let Some(flow_uid) = is_cloud_endpoint(uid, view) {
+        if let Some(flow_uid) = is_cloud_endpoint(uid, view, &valve_to_flow) {
             cloud_comments.insert(uid, flow_uid);
         }
     }
@@ -324,6 +326,7 @@ fn convert_view(
                     view_idx,
                     uid_offset,
                     view_offsets,
+                    &flow_to_valve,
                 ) {
                     if matches!(&view_elem, ViewElement::Flow(_)) {
                         emitted_flow_uids.insert(uid);
@@ -342,7 +345,9 @@ fn convert_view(
                 // Non-cloud comments are ignored
             }
             VensimElement::Connector(conn) => {
-                if let Some(link) = convert_connector(conn, uid, view, uid_offset, symbols) {
+                if let Some(link) =
+                    convert_connector(conn, uid, view, uid_offset, symbols, &valve_to_flow)
+                {
                     elements.push(link);
                 }
             }
@@ -407,6 +412,7 @@ fn convert_variable(
     view_idx: usize,
     uid_offset: i32,
     view_offsets: &[i32],
+    flow_to_valve: &HashMap<i32, i32>,
 ) -> Option<ViewElement> {
     let canonical = to_lower_space(&var.name);
 
@@ -470,7 +476,8 @@ fn convert_variable(
         })),
         VariableType::Flow => {
             // For flows, find the associated valve and compute flow points
-            let (flow_x, flow_y, points) = compute_flow_data(var, view, uid_offset, symbols);
+            let (flow_x, flow_y, points) =
+                compute_flow_data(var, view, uid_offset, symbols, flow_to_valve);
 
             Some(ViewElement::Flow(view_element::Flow {
                 name: xmile_name,
@@ -505,12 +512,13 @@ fn compute_flow_data(
     view: &VensimView,
     uid_offset: i32,
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
+    flow_to_valve: &HashMap<i32, i32>,
 ) -> (i32, i32, Vec<view_element::FlowPoint>) {
     // Look for valve at uid - 1 (typical Vensim layout)
     // xmutil requires BOTH conditions:
     // 1. Flow variable has attached=true (vele->Attached())
     // 2. Preceding element is a valve (elements[local_uid - 1]->Type() == VALVE)
-    let valve_uid = var.uid - 1;
+    let valve_uid = flow_to_valve.get(&var.uid).copied().unwrap_or(var.uid - 1);
     let (flow_x, flow_y) = if var.attached  // Flow must be attached
         && let Some(VensimElement::Valve(_valve)) = view.get(valve_uid)
     {
@@ -563,6 +571,7 @@ fn convert_connector(
     view: &VensimView,
     uid_offset: i32,
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
+    valve_to_flow: &HashMap<i32, i32>,
 ) -> Option<ViewElement> {
     let from_uid = uid_offset + conn.from_uid;
     let to_uid = uid_offset + conn.to_uid;
@@ -588,8 +597,9 @@ fn convert_connector(
     // Handle valve indirection: if 'from' is a valve, use the next element (flow)
     let (actual_from, actual_from_uid) = match from_elem {
         VensimElement::Valve(v) if v.attached => {
-            let flow = view.get(conn.from_uid + 1)?;
-            (flow, uid_offset + conn.from_uid + 1)
+            let flow_uid = resolve_flow_uid_for_valve(conn.from_uid, view, valve_to_flow)?;
+            let flow = view.get(flow_uid)?;
+            (flow, uid_offset + flow_uid)
         }
         _ => (from_elem, from_uid),
     };
@@ -597,8 +607,9 @@ fn convert_connector(
     // Similarly for 'to'
     let (actual_to, actual_to_uid) = match to_elem {
         VensimElement::Valve(v) if v.attached => {
-            let flow = view.get(conn.to_uid + 1)?;
-            (flow, uid_offset + conn.to_uid + 1)
+            let flow_uid = resolve_flow_uid_for_valve(conn.to_uid, view, valve_to_flow)?;
+            let flow = view.get(flow_uid)?;
+            (flow, uid_offset + flow_uid)
         }
         _ => (to_elem, to_uid),
     };
@@ -1299,8 +1310,9 @@ mod tests {
             "flow rate".to_string(),
             make_symbol_info(VariableType::Flow),
         );
+        let (valve_to_flow, _flow_to_valve) = build_attached_valve_flow_maps(&view);
 
-        let converted = convert_connector(&bend_connector, 10, &view, 0, &symbols);
+        let converted = convert_connector(&bend_connector, 10, &view, 0, &symbols, &valve_to_flow);
         assert!(
             converted.is_none(),
             "attached-valve self connector should be treated as flow pipe geometry"
@@ -1442,6 +1454,155 @@ mod tests {
         assert_eq!(
             link_count, 0,
             "flow pipe bend connectors should not become causal links"
+        );
+    }
+
+    #[test]
+    fn test_build_views_resolves_nonadjacent_attached_valve() {
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Stock A".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Stock B".to_string(),
+                x: 300,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+        view.insert(
+            100,
+            VensimElement::Valve(super::super::types::VensimValve {
+                uid: 100,
+                name: "100".to_string(),
+                x: 200,
+                y: 100,
+                width: 6,
+                height: 8,
+                attached: true,
+            }),
+        );
+        view.insert(
+            6,
+            VensimElement::Variable(VensimVariable {
+                uid: 6,
+                name: "Flow Rate".to_string(),
+                x: 200,
+                y: 116,
+                width: 40,
+                height: 20,
+                attached: true,
+                is_ghost: false,
+            }),
+        );
+        view.insert(
+            101,
+            VensimElement::Connector(super::super::types::VensimConnector {
+                uid: 101,
+                from_uid: 100,
+                to_uid: 1,
+                polarity: None,
+                letter_polarity: false,
+                control_point: (122, 100),
+            }),
+        );
+        view.insert(
+            102,
+            VensimElement::Connector(super::super::types::VensimConnector {
+                uid: 102,
+                from_uid: 100,
+                to_uid: 2,
+                polarity: None,
+                letter_polarity: false,
+                control_point: (278, 100),
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert(
+            "stock a".to_string(),
+            SymbolInfo {
+                var_type: VariableType::Stock,
+                equations: vec![],
+                inflows: vec![],
+                outflows: vec!["flow rate".to_string()],
+                unwanted: false,
+                alternate_name: None,
+            },
+        );
+        symbols.insert(
+            "stock b".to_string(),
+            SymbolInfo {
+                var_type: VariableType::Stock,
+                equations: vec![],
+                inflows: vec!["flow rate".to_string()],
+                outflows: vec![],
+                unwanted: false,
+                alternate_name: None,
+            },
+        );
+        symbols.insert(
+            "flow rate".to_string(),
+            make_symbol_info(VariableType::Flow),
+        );
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let stock_uids: HashMap<&str, i32> = sf
+            .elements
+            .iter()
+            .filter_map(|elem| {
+                if let ViewElement::Stock(stock) = elem {
+                    Some((stock.name.as_str(), stock.uid))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let flow = sf
+            .elements
+            .iter()
+            .find_map(|elem| {
+                if let ViewElement::Flow(flow) = elem {
+                    Some(flow)
+                } else {
+                    None
+                }
+            })
+            .expect("expected converted flow");
+
+        assert_eq!(
+            flow.points.first().and_then(|pt| pt.attached_to_uid),
+            stock_uids.get("Stock_A").copied(),
+            "source endpoint should remain attached to Stock_A",
+        );
+        assert_eq!(
+            flow.points.last().and_then(|pt| pt.attached_to_uid),
+            stock_uids.get("Stock_B").copied(),
+            "sink endpoint should remain attached to Stock_B",
         );
     }
 }

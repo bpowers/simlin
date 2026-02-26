@@ -3319,6 +3319,131 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
     }
 
     #[test]
+    fn sketch_roundtrip_preserves_flow_endpoints_with_nonadjacent_valve_uid() {
+        let stock_a = Variable::Stock(Stock {
+            ident: "stock_a".to_owned(),
+            equation: Equation::Scalar("100".to_owned()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec!["flow_ab".to_owned()],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let stock_b = Variable::Stock(Stock {
+            ident: "stock_b".to_owned(),
+            equation: Equation::Scalar("0".to_owned()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["flow_ab".to_owned()],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let flow = Variable::Flow(Flow {
+            ident: "flow_ab".to_owned(),
+            equation: Equation::Scalar("10".to_owned()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+
+        let model = datamodel::Model {
+            name: "default".to_owned(),
+            sim_specs: None,
+            variables: vec![stock_a, stock_b, flow],
+            views: vec![View::StockFlow(datamodel::StockFlow {
+                name: Some("View 1".to_owned()),
+                elements: vec![
+                    ViewElement::Stock(view_element::Stock {
+                        name: "Stock_A".to_owned(),
+                        uid: 1,
+                        x: 100.0,
+                        y: 100.0,
+                        label_side: view_element::LabelSide::Bottom,
+                    }),
+                    ViewElement::Stock(view_element::Stock {
+                        name: "Stock_B".to_owned(),
+                        uid: 2,
+                        x: 300.0,
+                        y: 100.0,
+                        label_side: view_element::LabelSide::Bottom,
+                    }),
+                    ViewElement::Flow(view_element::Flow {
+                        name: "Flow_AB".to_owned(),
+                        uid: 6,
+                        x: 200.0,
+                        y: 100.0,
+                        label_side: view_element::LabelSide::Bottom,
+                        points: vec![
+                            view_element::FlowPoint {
+                                x: 122.5,
+                                y: 100.0,
+                                attached_to_uid: Some(1),
+                            },
+                            view_element::FlowPoint {
+                                x: 277.5,
+                                y: 100.0,
+                                attached_to_uid: Some(2),
+                            },
+                        ],
+                    }),
+                ],
+                view_box: Default::default(),
+                zoom: 1.0,
+                use_lettered_polarity: false,
+            })],
+            loop_metadata: vec![],
+            groups: vec![],
+        };
+        let project = make_project(vec![model]);
+
+        let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
+        let reparsed = crate::mdl::parse_mdl(&mdl).expect("written MDL should parse");
+        let View::StockFlow(sf) = &reparsed.models[0].views[0];
+
+        let stock_uid_by_name: HashMap<&str, i32> = sf
+            .elements
+            .iter()
+            .filter_map(|elem| {
+                if let ViewElement::Stock(stock) = elem {
+                    Some((stock.name.as_str(), stock.uid))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let flow = sf
+            .elements
+            .iter()
+            .find_map(|elem| {
+                if let ViewElement::Flow(flow) = elem {
+                    Some(flow)
+                } else {
+                    None
+                }
+            })
+            .expect("expected flow element after roundtrip");
+
+        assert_eq!(
+            flow.points.first().and_then(|pt| pt.attached_to_uid),
+            stock_uid_by_name.get("Stock_A").copied(),
+            "flow source attachment should roundtrip to Stock_A",
+        );
+        assert_eq!(
+            flow.points.last().and_then(|pt| pt.attached_to_uid),
+            stock_uid_by_name.get("Stock_B").copied(),
+            "flow sink attachment should roundtrip to Stock_B",
+        );
+    }
+
+    #[test]
     fn compute_control_point_straight_midpoint() {
         // For a nearly-straight arc angle, the control point should be near the midpoint
         let from = (100, 100);

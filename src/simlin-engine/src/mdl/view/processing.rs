@@ -272,6 +272,95 @@ pub struct FlowEndpoints {
     pub to_uid: Option<i32>,
 }
 
+/// Build lookup tables between attached valves and attached flow variables.
+///
+/// Legacy MDL commonly uses `flow_uid = valve_uid + 1`, but writer output may
+/// allocate non-adjacent valve UIDs to avoid collisions. This resolver accepts
+/// both forms:
+/// 1. Prefer the legacy adjacency pair when present.
+/// 2. Otherwise, pair remaining attached valves/flows by nearest attached layout
+///    position (flow label anchored below the valve).
+pub fn build_attached_valve_flow_maps(view: &VensimView) -> (HashMap<i32, i32>, HashMap<i32, i32>) {
+    const ATTACHED_FLOW_LABEL_OFFSET_Y: i32 = 16;
+
+    let mut attached_flows: Vec<(i32, i32, i32)> = Vec::new();
+    let mut unmatched_valves: HashMap<i32, (i32, i32)> = HashMap::new();
+
+    for elem in view.iter() {
+        match elem {
+            VensimElement::Variable(flow) if flow.attached => {
+                attached_flows.push((flow.uid, flow.x, flow.y));
+            }
+            VensimElement::Valve(valve) if valve.attached => {
+                unmatched_valves.insert(valve.uid, (valve.x, valve.y));
+            }
+            _ => {}
+        }
+    }
+
+    let mut valve_to_flow: HashMap<i32, i32> = HashMap::new();
+    let mut flow_to_valve: HashMap<i32, i32> = HashMap::new();
+    let mut unmatched_flows: Vec<(i32, i32, i32)> = Vec::new();
+
+    // Prefer legacy adjacent UIDs when available.
+    for (flow_uid, flow_x, flow_y) in attached_flows {
+        let legacy_valve_uid = flow_uid - 1;
+        if unmatched_valves.remove(&legacy_valve_uid).is_some() {
+            valve_to_flow.insert(legacy_valve_uid, flow_uid);
+            flow_to_valve.insert(flow_uid, legacy_valve_uid);
+        } else {
+            unmatched_flows.push((flow_uid, flow_x, flow_y));
+        }
+    }
+
+    // Pair the rest by closest attached layout position.
+    for (flow_uid, flow_x, flow_y) in unmatched_flows {
+        let mut best: Option<(i32, i64)> = None;
+        for (&valve_uid, &(valve_x, valve_y)) in &unmatched_valves {
+            let dx = i64::from(flow_x) - i64::from(valve_x);
+            let dy =
+                i64::from(flow_y) - (i64::from(valve_y) + i64::from(ATTACHED_FLOW_LABEL_OFFSET_Y));
+            let score = dx * dx + dy * dy;
+
+            match best {
+                None => best = Some((valve_uid, score)),
+                Some((best_uid, best_score))
+                    if score < best_score || (score == best_score && valve_uid < best_uid) =>
+                {
+                    best = Some((valve_uid, score))
+                }
+                _ => {}
+            }
+        }
+
+        if let Some((valve_uid, _)) = best {
+            unmatched_valves.remove(&valve_uid);
+            valve_to_flow.insert(valve_uid, flow_uid);
+            flow_to_valve.insert(flow_uid, valve_uid);
+        }
+    }
+
+    (valve_to_flow, flow_to_valve)
+}
+
+/// Resolve an attached flow UID from a valve UID.
+///
+/// Uses the precomputed map when available and falls back to legacy
+/// `valve_uid + 1` adjacency for compatibility with older assumptions.
+pub fn resolve_flow_uid_for_valve(
+    valve_uid: i32,
+    view: &VensimView,
+    valve_to_flow: &HashMap<i32, i32>,
+) -> Option<i32> {
+    valve_to_flow.get(&valve_uid).copied().or_else(|| {
+        let candidate = valve_uid.checked_add(1)?;
+        match view.get(candidate) {
+            Some(VensimElement::Variable(flow)) if flow.attached => Some(candidate),
+            _ => None,
+        }
+    })
+}
+
 /// Compute flow points for a flow variable.
 ///
 /// This implements the XMILEGenerator.cpp:987-1072 algorithm for determining
@@ -427,16 +516,26 @@ pub fn compute_flow_points(
 /// Determine if a comment element is used as a cloud (flow endpoint).
 ///
 /// Returns the flow_uid if this comment is a flow endpoint, None otherwise.
-pub fn is_cloud_endpoint(comment_uid: i32, view: &VensimView) -> Option<i32> {
+pub fn is_cloud_endpoint(
+    comment_uid: i32,
+    view: &VensimView,
+    valve_to_flow: &HashMap<i32, i32>,
+) -> Option<i32> {
     // Look for connectors that connect to this comment
     for elem in view.iter() {
         if let VensimElement::Connector(conn) = elem
             && conn.to_uid == comment_uid
         {
             // Check if the source is a valve
-            if let Some(VensimElement::Valve(_)) = view.get(conn.from_uid) {
-                // The flow is at uid + 1 after the valve
-                return Some(conn.from_uid + 1);
+            if let Some(VensimElement::Valve(v)) = view.get(conn.from_uid)
+                && v.attached
+            {
+                // Prefer robust valve->flow mapping and keep legacy +1 as fallback.
+                if let Some(flow_uid) =
+                    resolve_flow_uid_for_valve(conn.from_uid, view, valve_to_flow)
+                {
+                    return Some(flow_uid);
+                }
             }
         }
     }
