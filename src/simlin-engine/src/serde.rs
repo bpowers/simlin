@@ -1736,18 +1736,26 @@ fn test_view_element_roundtrip() {
 impl From<View> for project_io::View {
     fn from(view: View) -> Self {
         match view {
-            View::StockFlow(view) => project_io::View {
-                kind: project_io::view::ViewType::StockFlow as i32,
-                elements: view
-                    .elements
-                    .into_iter()
-                    .map(project_io::ViewElement::from)
-                    .collect(),
-                view_box: Some(view.view_box.into()),
-                zoom: view.zoom,
-                use_lettered_polarity: view.use_lettered_polarity,
-                name: view.name.unwrap_or_default(),
-            },
+            View::StockFlow(view) => {
+                let (name, has_name) = match view.name {
+                    Some(name) => (name, true),
+                    None => (String::new(), false),
+                };
+
+                project_io::View {
+                    kind: project_io::view::ViewType::StockFlow as i32,
+                    elements: view
+                        .elements
+                        .into_iter()
+                        .map(project_io::ViewElement::from)
+                        .collect(),
+                    view_box: Some(view.view_box.into()),
+                    zoom: view.zoom,
+                    use_lettered_polarity: view.use_lettered_polarity,
+                    name,
+                    has_name,
+                }
+            }
         }
     }
 }
@@ -1760,11 +1768,16 @@ impl From<project_io::View> for View {
             zoom,
             use_lettered_polarity,
             name,
+            has_name,
             ..
         } = view;
 
         View::StockFlow(StockFlow {
-            name: if name.is_empty() { None } else { Some(name) },
+            name: if has_name || !name.is_empty() {
+                Some(name)
+            } else {
+                None
+            },
             elements: elements.into_iter().map(ViewElement::from).collect(),
             view_box: view_box.map(Rect::from).unwrap_or_default(),
             zoom: if approx_eq!(f64, zoom, 0.0) {
@@ -1775,6 +1788,57 @@ impl From<project_io::View> for View {
             use_lettered_polarity,
         })
     }
+}
+
+#[test]
+fn test_view_roundtrip_preserves_explicit_empty_title() {
+    let view = View::StockFlow(StockFlow {
+        name: Some(String::new()),
+        elements: vec![],
+        view_box: Rect::default(),
+        zoom: 1.0,
+        use_lettered_polarity: false,
+    });
+
+    let roundtrip = View::from(project_io::View::from(view));
+    let View::StockFlow(stock_flow) = roundtrip;
+    assert_eq!(
+        stock_flow.name,
+        Some(String::new()),
+        "explicit empty titles should not collapse to None"
+    );
+}
+
+#[test]
+fn test_view_roundtrip_preserves_absent_title() {
+    let view = View::StockFlow(StockFlow {
+        name: None,
+        elements: vec![],
+        view_box: Rect::default(),
+        zoom: 1.0,
+        use_lettered_polarity: false,
+    });
+
+    let roundtrip = View::from(project_io::View::from(view));
+    let View::StockFlow(stock_flow) = roundtrip;
+    assert_eq!(stock_flow.name, None);
+}
+
+#[test]
+fn test_view_deserialize_keeps_nonempty_name_without_presence_flag() {
+    let proto = project_io::View {
+        kind: project_io::view::ViewType::StockFlow as i32,
+        elements: vec![],
+        view_box: Some(project_io::Rect::from(Rect::default())),
+        zoom: 1.0,
+        use_lettered_polarity: false,
+        name: "Overview".to_string(),
+        has_name: false,
+    };
+
+    let view = View::from(proto);
+    let View::StockFlow(stock_flow) = view;
+    assert_eq!(stock_flow.name.as_deref(), Some("Overview"));
 }
 
 impl From<Model> for project_io::Model {

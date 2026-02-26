@@ -1298,6 +1298,7 @@ impl MdlWriter {
 
     /// Orchestrate the full MDL file assembly and return the result.
     pub(super) fn write_project(mut self, project: &datamodel::Project) -> Result<String> {
+        self.buf.push_str("{UTF-8}\n");
         let model = &project.models[0];
         self.write_equations_section(model, project);
         self.write_sketch_section(&model.views);
@@ -2533,6 +2534,11 @@ mod tests {
         let result = crate::mdl::project_to_mdl(&project);
         assert!(result.is_ok(), "should succeed: {:?}", result);
         let mdl = result.unwrap();
+        assert!(
+            mdl.starts_with("{UTF-8}\n"),
+            "MDL should start with UTF-8 marker, got: {:?}",
+            mdl.lines().next()
+        );
         assert!(mdl.contains("x="));
         assert!(mdl.contains("\\\\\\---///"));
     }

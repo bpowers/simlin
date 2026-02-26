@@ -48,6 +48,10 @@ pub fn build_views(
         })
     });
 
+    // Preserve original MDL titles for serialization fidelity. xmutil-style
+    // normalization/deduplication is used for internal composition only.
+    let original_titles: Vec<String> = views.iter().map(|view| view.title().to_string()).collect();
+
     // Normalize view titles and make them unique (xmutil MakeViewNamesUnique)
     make_view_names_unique(&mut views, all_names);
 
@@ -68,8 +72,13 @@ pub fn build_views(
     let mut start_y = 100;
 
     for (view_idx, view) in views.iter().enumerate() {
+        let original_title = original_titles
+            .get(view_idx)
+            .map(std::string::String::as_str)
+            .unwrap_or(view.title());
         if let Some(dm_view) = convert_view(
             view,
+            original_title,
             symbols,
             &primary_map,
             &effective_ghosts,
@@ -264,6 +273,7 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
 #[allow(clippy::too_many_arguments)]
 fn convert_view(
     view: &VensimView,
+    original_title: &str,
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
     primary_map: &PrimaryMap,
     effective_ghosts: &EffectiveGhosts,
@@ -347,7 +357,7 @@ fn convert_view(
     }
 
     Some(View::StockFlow(datamodel::StockFlow {
-        name: Some(view.title().to_string()),
+        name: Some(original_title.to_string()),
         elements,
         view_box: Default::default(),
         zoom: 1.0,
@@ -1066,6 +1076,46 @@ mod tests {
         assert_eq!(result.len(), 1);
         let View::StockFlow(sf) = &result[0];
         assert!(!sf.elements.is_empty());
+        assert_eq!(
+            sf.name.as_deref(),
+            Some("Population"),
+            "stored view title should preserve original MDL title"
+        );
+    }
+
+    #[test]
+    fn test_view_title_punctuation_is_preserved() {
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Demand/Supply-Overview*2026".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "x".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert("x".to_string(), make_symbol_info(VariableType::Aux));
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+
+        assert_eq!(result.len(), 1);
+        let View::StockFlow(sf) = &result[0];
+        assert_eq!(
+            sf.name.as_deref(),
+            Some("Demand/Supply-Overview*2026"),
+            "stored view title should keep punctuation from MDL"
+        );
     }
 
     #[test]
