@@ -129,6 +129,7 @@ fn xmile_to_mdl_function_name(xmile_name: &str) -> String {
         "normal" => "RANDOM NORMAL".to_owned(),
         "lookup" => "LOOKUP".to_owned(),
         "integ" => "INTEG".to_owned(),
+        // Built-in function names are always plain ASCII identifiers.
         _ => underbar_to_space(xmile_name).to_uppercase(),
     }
 }
@@ -633,6 +634,7 @@ fn equation_to_mdl(xmile_eqn: &str) -> String {
     }
     match Expr0::new(xmile_eqn, LexerType::Equation) {
         Ok(Some(ast)) => expr0_to_mdl(&ast),
+        // Fallback for unparseable equations; best-effort space conversion.
         _ => underbar_to_space(xmile_eqn),
     }
 }
@@ -998,6 +1000,9 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
 // ---- Sketch element serialization ----
 
 /// Write a type 10 line for an Aux element.
+/// Sketch element names use bare `underbar_to_space` (not `format_mdl_ident`)
+/// because MDL sketch lines are comma-delimited positional records where
+/// quoting is not used.
 fn write_aux_element(buf: &mut String, aux: &view_element::Aux) {
     let name = underbar_to_space(&aux.name);
     // shape=8 (has equation), bits=3 (visible, primary)
@@ -1009,7 +1014,8 @@ fn write_aux_element(buf: &mut String, aux: &view_element::Aux) {
     .unwrap();
 }
 
-/// Write a type 10 line for a Stock element.
+/// Write a type 10 line for a Stock element.  See `write_aux_element` for
+/// why sketch names use `underbar_to_space` instead of `format_mdl_ident`.
 fn write_stock_element(buf: &mut String, stock: &view_element::Stock) {
     let name = underbar_to_space(&stock.name);
     // shape=3 (box/stock shape), bits=3 (visible, primary)
@@ -1106,6 +1112,8 @@ fn write_flow_element(
     valve_uids: &HashMap<i32, i32>,
     next_connector_uid: &mut i32,
 ) {
+    // Sketch names: see `write_aux_element` for why `underbar_to_space` is
+    // used here instead of `format_mdl_ident`.
     let name = underbar_to_space(&flow.name);
     let valve_uid = valve_uids.get(&flow.uid).copied().unwrap_or(flow.uid - 1);
 
@@ -1211,6 +1219,7 @@ fn write_alias_element(
     alias: &view_element::Alias,
     name_map: &HashMap<i32, &str>,
 ) {
+    // Sketch names: see `write_aux_element` for why `underbar_to_space`.
     let name = name_map
         .get(&alias.alias_of_uid)
         .map(|n| underbar_to_space(n))
@@ -1450,6 +1459,7 @@ impl MdlWriter {
             write!(
                 self.buf,
                 "\n********************************************************\n\t.{}\n********************************************************~\n\t\t{}\n\t|\n",
+                // Group names appear in comment-like header blocks, not in equations.
                 underbar_to_space(&group.name),
                 group.doc.as_deref().unwrap_or(""),
             )
@@ -1739,6 +1749,27 @@ mod tests {
             Loc::default(),
         );
         assert_eq!(expr0_to_mdl(&expr), "\"$ euro\" + revenue");
+    }
+
+    #[test]
+    fn quoted_identifiers_escape_embedded_quotes_and_backslashes() {
+        assert_eq!(escape_mdl_quoted_ident(r#"it"s"#), r#"it\"s"#);
+        assert_eq!(escape_mdl_quoted_ident(r"back\slash"), r"back\\slash");
+        assert_eq!(escape_mdl_quoted_ident(r#"a"b\c"#), r#"a\"b\\c"#,);
+
+        assert_eq!(format_mdl_ident(r#"it"s_a_test"#), r#""it\"s a test""#,);
+    }
+
+    #[test]
+    fn needs_mdl_quoting_edge_cases() {
+        assert!(needs_mdl_quoting(""));
+        assert!(needs_mdl_quoting(" leading"));
+        assert!(needs_mdl_quoting("trailing "));
+        assert!(needs_mdl_quoting("1starts_with_digit"));
+        assert!(!needs_mdl_quoting("normal name"));
+        assert!(!needs_mdl_quoting("_private"));
+        assert!(needs_mdl_quoting("has/slash"));
+        assert!(needs_mdl_quoting("has|pipe"));
     }
 
     #[test]
