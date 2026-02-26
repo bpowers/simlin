@@ -5,7 +5,7 @@
 import { CollectionReference, FieldPath, Firestore } from '@google-cloud/firestore';
 import { Message } from 'google-protobuf';
 
-import { SerializableClass, Table } from './table';
+import { Query, SerializableClass, Table } from './table';
 
 interface FirestoreTableOptions {
   readonly db: Firestore;
@@ -17,7 +17,7 @@ interface Schema {
   // with Firestore, you specify the document name separately from the contents
   // _id: string;
   // additional stuff
-  [x: string]: any;
+  [x: string]: unknown;
 }
 
 export class FirestoreTable<T extends Message> implements Table<T> {
@@ -55,7 +55,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
     return this.deserialize(docSnapshot.get('value'));
   }
 
-  async findOneByScan(query: any): Promise<T | undefined> {
+  async findOneByScan(query: Query): Promise<T | undefined> {
     const docs = await this.findByScan(query);
     if (docs === undefined) {
       return undefined;
@@ -66,7 +66,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
     return docs[0];
   }
 
-  async findByScan(query: any): Promise<T[] | undefined> {
+  async findByScan(query: Query): Promise<T[] | undefined> {
     const keys = Object.keys(query);
     if (keys.length !== 1) {
       throw new Error('findByScan: expected single query key');
@@ -97,7 +97,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
 
   private doc(_id: string, pb: T): Schema {
     const serializedPb = pb.serializeBinary();
-    const doc: { [key: string]: any } = pb.toObject();
+    const doc = pb.toObject() as Record<string, unknown>;
 
     if (doc.hasOwnProperty('value')) {
       throw new Error('we expect document to not have "value" property');
@@ -112,7 +112,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
       if (key === 'jsonContents') {
         const contents = value;
         // if the JSON is too big, don't expose it (as its only for debugging info anyway)
-        if (contents.length > 100 * 1024) {
+        if (typeof contents === 'string' && contents.length > 100 * 1024) {
           doc[key] = null;
         }
       }
@@ -137,7 +137,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
     await docRef.create(this.doc(id, pb));
   }
 
-  async update(id: string, cond: any, pb: T): Promise<T | null> {
+  async update(id: string, cond: Query, pb: T): Promise<T | null> {
     try {
       await this.db.runTransaction(async (tx) => {
         const docRef = this.docRef(id);

@@ -7,7 +7,7 @@ import * as React from 'react';
 import clsx from 'clsx';
 import IconButton from './components/IconButton';
 import TextField from './components/TextField';
-import Autocomplete from './components/Autocomplete';
+import Autocomplete, { type AutocompleteRenderInputParams } from './components/Autocomplete';
 import Snackbar from './components/Snackbar';
 import { ClearIcon, EditIcon, MenuIcon } from './components/icons';
 import SpeedDial, { CloseReason, SpeedDialAction, SpeedDialIcon } from './components/SpeedDial';
@@ -139,6 +139,27 @@ class EditorError implements Error {
   constructor(msg: string) {
     this.message = msg;
   }
+}
+
+interface ErrorDetailsLike {
+  code?: unknown;
+  message?: string;
+  details?: unknown;
+}
+
+function getErrorDetails(error: unknown): ErrorDetailsLike {
+  if (typeof error === 'object' && error !== null) {
+    const maybeError = error as Record<string, unknown>;
+    return {
+      code: maybeError.code,
+      message: typeof maybeError.message === 'string' ? maybeError.message : undefined,
+      details: maybeError.details,
+    };
+  }
+  if (typeof error === 'string') {
+    return { message: error };
+  }
+  return {};
 }
 
 interface CachedErrorDetails {
@@ -493,9 +514,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     try {
       await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: any) {
-      console.error('applyPatch error (rename):', e?.code, e?.message, e?.details);
-      const msg = e?.message ?? 'Unknown error during rename';
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (rename):', err.code, err.message, err.details);
+      const msg = err.message ?? 'Unknown error during rename';
       this.appendModelError(msg);
       return;
     }
@@ -594,9 +616,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       };
       try {
         await engine.applyPatch(patch, { allowErrors: true });
-      } catch (e: any) {
-        console.error('applyPatch error (delete):', e?.code, e?.message, e?.details);
-        this.appendModelError(e?.message ?? 'Unknown error during delete');
+      } catch (e: unknown) {
+        const err = getErrorDetails(e);
+        console.error('applyPatch error (delete):', err.code, err.message, err.details);
+        this.appendModelError(err.message ?? 'Unknown error during delete');
       }
     }
 
@@ -990,9 +1013,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       };
       try {
         await engine.applyPatch(patch, { allowErrors: true });
-      } catch (e: any) {
-        console.error('applyPatch error (flow attach):', e?.code, e?.message, e?.details);
-        this.appendModelError(e?.message ?? 'Unknown error during flow attach');
+      } catch (e: unknown) {
+        const err = getErrorDetails(e);
+        console.error('applyPatch error (flow attach):', err.code, err.message, err.details);
+        this.appendModelError(err.message ?? 'Unknown error during flow attach');
         this.setState({ selection, flowStillBeingCreated: inCreation });
         return;
       }
@@ -1096,9 +1120,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       };
       try {
         await engine.applyPatch(patch, { allowErrors: true });
-      } catch (e: any) {
-        console.error('applyPatch error (view update):', e?.code, e?.message, e?.details);
-        const msg = e?.message ?? 'Unknown error during view update';
+      } catch (e: unknown) {
+        const err = getErrorDetails(e);
+        console.error('applyPatch error (view update):', err.code, err.message, err.details);
+        const msg = err.message ?? 'Unknown error during view update';
         this.appendModelError(msg);
         return;
       }
@@ -1159,9 +1184,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     try {
       await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: any) {
-      console.error('applyPatch error (variable creation):', e?.code, e?.message, e?.details);
-      this.appendModelError(e?.message ?? 'Unknown error during variable creation');
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (variable creation):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during variable creation');
     }
 
     await this.updateView({ ...view, nextUid, elements });
@@ -1242,9 +1268,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     try {
       await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: any) {
-      console.error('applyPatch error (sim specs):', e?.code, e?.message, e?.details);
-      this.appendModelError(e?.message ?? 'Unknown error updating sim specs');
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (sim specs):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error updating sim specs');
       return;
     }
 
@@ -1288,7 +1315,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const a = document.createElement('a');
       document.body.appendChild(a);
       try {
-        (a as unknown as any).style = 'display: none';
+        a.style.display = 'none';
       } catch {
         // oh well
       }
@@ -1296,9 +1323,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       a.download = `${this.props.name}-${this.state.projectVersion | 0}.stmx`;
       a.click();
       window.URL.revokeObjectURL(url);
-    } catch (err: any) {
-      if (err && err.message) {
-        this.appendModelError(err.message);
+    } catch (err: unknown) {
+      const details = getErrorDetails(err);
+      if (details.message) {
+        this.appendModelError(details.message);
       }
     }
   };
@@ -1382,9 +1410,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       };
       try {
         await engine.applyPatch(patch, { allowErrors: true });
-      } catch (e: any) {
-        console.error('applyPatch error (queue view update):', e?.code, e?.message, e?.details);
-        const msg = e?.message ?? 'Unknown error during view update';
+      } catch (e: unknown) {
+        const err = getErrorDetails(e);
+        console.error('applyPatch error (queue view update):', err.code, err.message, err.details);
+        const msg = err.message ?? 'Unknown error during view update';
         this.appendModelError(msg);
         return;
       }
@@ -1578,7 +1607,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   };
 
-  handleSearchChange = async (_event: any, newValue: string | null) => {
+  handleSearchChange = async (_event: React.SyntheticEvent | null, newValue: string | null) => {
     if (!newValue) {
       this.handleSelection(new Set());
       return;
@@ -1637,7 +1666,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
             clearOnEscape={true}
             defaultValue={name}
             options={autocompleteOptions}
-            renderInput={(params: any) => {
+            renderInput={(params: AutocompleteRenderInputParams) => {
               if (params.InputProps) {
                 params.InputProps.disableUnderline = true;
               }
@@ -1778,9 +1807,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     try {
       await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: any) {
-      console.error('applyPatch error (equation update):', e?.code, e?.message, e?.details);
-      this.appendModelError(e?.message ?? 'Unknown error during equation update');
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (equation update):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during equation update');
       return;
     }
 
@@ -1854,9 +1884,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     try {
       await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: any) {
-      console.error('applyPatch error (table update):', e?.code, e?.message, e?.details);
-      this.appendModelError(e?.message ?? 'Unknown error during table update');
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (table update):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during table update');
       return;
     }
 
@@ -2074,8 +2105,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       } else {
         engine = await EngineProject.openProtobuf(this.props.initialProjectBinary as Uint8Array);
       }
-    } catch (e: any) {
-      this.appendModelError(`opening the project in the engine failed: ${e?.message ?? 'Unknown error'}`);
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      this.appendModelError(`opening the project in the engine failed: ${err.message ?? 'Unknown error'}`);
       return;
     }
 
@@ -2099,8 +2131,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     let engine: EngineProject;
     try {
       engine = await EngineProject.openProtobuf(serializedProject as Uint8Array);
-    } catch (e: any) {
-      this.appendModelError(`opening the project in the engine failed: ${e?.message ?? 'Unknown error'}`);
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      this.appendModelError(`opening the project in the engine failed: ${err.message ?? 'Unknown error'}`);
       return;
     }
     this.engineProject = engine;

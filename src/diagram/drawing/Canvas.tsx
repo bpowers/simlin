@@ -1743,7 +1743,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       this.pointerId = e.pointerId;
       this.selectionCenterOffset = client;
 
-      (e.target as any).setPointerCapture(e.pointerId);
+      (e.target as Element).setPointerCapture(e.pointerId);
 
       this.setState({
         isEditingName: false,
@@ -1872,7 +1872,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     this.selectionCenterOffset = this.getCanvasPoint(e.clientX, e.clientY);
 
     if (!isEditingName) {
-      (e.target as any).setPointerCapture(e.pointerId);
+      (e.target as Element).setPointerCapture(e.pointerId);
     }
 
     const { selectedTool } = this.props;
@@ -2044,10 +2044,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // an SVG element can't actually be focused.  Instead, blur any _other_
     // focused element.
     if (typeof document !== 'undefined' && document && document.activeElement) {
-      const e: any = document.activeElement;
-      // blur doesn't exist on "Element" but it definitely is a real thing
-
-      e.blur();
+      const activeElement = document.activeElement;
+      if ('blur' in activeElement && typeof activeElement.blur === 'function') {
+        activeElement.blur();
+      }
     }
   }
 

@@ -8,6 +8,7 @@ import { Response } from 'express';
 
 export function interceptWriteHeaders(res: Response, callback: (statusCode: number) => void): void {
   const realWriteHead = res.writeHead;
+  const writeHead = realWriteHead.bind(res);
 
   // eslint-disable-next-line
   // @ts-ignore
@@ -18,21 +19,17 @@ export function interceptWriteHeaders(res: Response, callback: (statusCode: numb
   ): ServerResponse => {
     callback(statusCode);
 
-    // ensure arguments.length is right
-    const args: [number, (string | OutgoingHttpHeaders | undefined)?, (OutgoingHttpHeaders | undefined)?] = [
-      statusCode,
-    ];
-    if (reasonOrHeaders !== undefined) {
-      args.push(reasonOrHeaders);
+    if (typeof reasonOrHeaders === 'string') {
       if (headers !== undefined) {
-        args.push(headers);
+        writeHead(statusCode, reasonOrHeaders, headers);
+      } else {
+        writeHead(statusCode, reasonOrHeaders);
       }
+    } else if (reasonOrHeaders !== undefined) {
+      writeHead(statusCode, reasonOrHeaders);
+    } else {
+      writeHead(statusCode);
     }
-
-    // TODO: remove this any cast in the future -- for now,
-    // typescript can't quite handle the insanity of Node's
-    // writeHead's signature
-    realWriteHead.apply(res, args as any);
 
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment
     // @ts-ignore

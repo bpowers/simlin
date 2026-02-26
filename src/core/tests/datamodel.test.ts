@@ -59,6 +59,12 @@ import type {
   Project,
   Variable,
 } from '../datamodel';
+import type {
+  JsonStockViewElement,
+  JsonFlowViewElement,
+  JsonLinkViewElement,
+  JsonCloudViewElement,
+} from '@simlin/engine';
 
 describe('GraphicalFunctionScale', () => {
   it('should roundtrip correctly', () => {
@@ -311,14 +317,14 @@ describe('View Elements', () => {
       zoom: -1,
       useLetteredPolarity: false,
     });
-    const stockJson = json.elements[0];
+    const stockJson = json.elements[0] as JsonStockViewElement;
     expect(stockJson.type).toBe('stock');
-    expect((stockJson as any).name).toBe('Population');
-    expect((stockJson as any).x).toBe(100);
-    expect((stockJson as any).y).toBe(200);
-    expect((stockJson as any).labelSide).toBe('top');
+    expect(stockJson.name).toBe('Population');
+    expect(stockJson.x).toBe(100);
+    expect(stockJson.y).toBe(200);
+    expect(stockJson.labelSide).toBe('top');
 
-    const restored = stockViewElementFromJson(stockJson as any);
+    const restored = stockViewElementFromJson(stockJson);
     expect(restored.uid).toBe(1);
     expect(restored.name).toBe('Population');
     expect(restored.x).toBe(100);
@@ -349,7 +355,7 @@ describe('View Elements', () => {
       zoom: -1,
       useLetteredPolarity: false,
     });
-    const flowJson = json.elements[0] as any;
+    const flowJson = json.elements[0] as JsonFlowViewElement;
     expect(flowJson.type).toBe('flow');
     expect(flowJson.points).toHaveLength(2);
     expect(flowJson.points[1].attachedToUid).toBe(1);
@@ -382,7 +388,7 @@ describe('View Elements', () => {
       zoom: -1,
       useLetteredPolarity: false,
     });
-    const linkJson = json.elements[0] as any;
+    const linkJson = json.elements[0] as JsonLinkViewElement;
     expect(linkJson.type).toBe('link');
     expect(linkJson.arc).toBe(30);
     expect(linkJson.multiPoints).toBeUndefined();
@@ -415,7 +421,7 @@ describe('View Elements', () => {
       zoom: -1,
       useLetteredPolarity: false,
     });
-    const linkJson = json.elements[0] as any;
+    const linkJson = json.elements[0] as JsonLinkViewElement;
     expect(linkJson.type).toBe('link');
     expect(linkJson.arc).toBeUndefined();
 
@@ -442,7 +448,7 @@ describe('View Elements', () => {
       zoom: -1,
       useLetteredPolarity: false,
     });
-    const cloudJson = json.elements[0] as any;
+    const cloudJson = json.elements[0] as JsonCloudViewElement;
     expect(cloudJson.type).toBe('cloud');
     expect(cloudJson.flowUid).toBe(2);
 
@@ -764,11 +770,12 @@ describe('LinkViewElement multiPoint', () => {
       zoom: -1,
       useLetteredPolarity: false,
     });
-    const linkJson = json.elements[0] as any;
+    const linkJson = json.elements[0] as JsonLinkViewElement;
     expect(linkJson.type).toBe('link');
     expect(linkJson.arc).toBeUndefined();
-    expect(linkJson.multiPoints).toHaveLength(3);
-    expect(linkJson.multiPoints[1]).toEqual({ x: 150, y: 75 });
+    const multiPoints = linkJson.multiPoints;
+    expect(multiPoints).toHaveLength(3);
+    expect(multiPoints?.[1]).toEqual({ x: 150, y: 75 });
 
     const restored = linkViewElementFromJson(linkJson);
     expect(restored.arc).toBeUndefined();

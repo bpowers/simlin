@@ -8,7 +8,7 @@ import { LineChart, ChartSeries } from '../LineChart';
 
 // Polyfill PointerEvent for jsdom (which doesn't provide it)
 if (typeof PointerEvent === 'undefined') {
-  (global as any).PointerEvent = class PointerEvent extends MouseEvent {
+  class PointerEventPolyfill extends MouseEvent {
     readonly pointerId: number;
     readonly width: number;
     readonly height: number;
@@ -29,7 +29,12 @@ if (typeof PointerEvent === 'undefined') {
       this.pointerType = params.pointerType ?? '';
       this.isPrimary = params.isPrimary ?? false;
     }
-  };
+  }
+  Object.defineProperty(globalThis, 'PointerEvent', {
+    value: PointerEventPolyfill,
+    configurable: true,
+    writable: true,
+  });
 }
 
 // Mock ResizeObserver
@@ -58,11 +63,15 @@ class MockResizeObserver {
 }
 
 beforeAll(() => {
-  (global as any).ResizeObserver = MockResizeObserver;
+  Object.defineProperty(globalThis, 'ResizeObserver', {
+    value: MockResizeObserver,
+    configurable: true,
+    writable: true,
+  });
 });
 
 afterAll(() => {
-  delete (global as any).ResizeObserver;
+  Reflect.deleteProperty(globalThis, 'ResizeObserver');
 });
 
 // Mock setPointerCapture / releasePointerCapture on elements

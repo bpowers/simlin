@@ -41,6 +41,17 @@ interface ContentSecurityPolicyDirectives {
   [directiveName: string]: Iterable<ContentSecurityPolicyDirectiveValue>;
 }
 
+type SessionCallback = (err?: Error) => void;
+
+type SessionWithCompat = Record<string, unknown> & {
+  regenerate?: (cb: SessionCallback) => void;
+  save?: (cb: SessionCallback) => void;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 export async function createApp(): Promise<App> {
   const app = new App();
   await app.setup();
@@ -53,7 +64,7 @@ class App {
   private readonly authn: admin.auth.Auth;
 
   constructor() {
-    this.app = express() as any as Application;
+    this.app = express() as unknown as Application;
 
     // initialize firebase
     admin.initializeApp();
@@ -97,13 +108,13 @@ class App {
       } else {
         let component = defined(path[0]);
         path = path.slice(1);
-        let obj: any = this.app.get(component);
-        while (obj && path.length > 1) {
+        let obj: unknown = this.app.get(component);
+        while (isRecord(obj) && path.length > 1) {
           component = defined(path[0]);
           path = path.slice(1);
           obj = obj[component];
         }
-        if (obj) {
+        if (isRecord(obj)) {
           obj[defined(path[0])] = value;
         }
       }
@@ -137,17 +148,20 @@ class App {
     // Passport 0.7.0 requires session.regenerate() and session.save()
     // that seshcookie's plain-object sessions don't provide.
     this.app.use((req: express.Request, _res: express.Response, next: express.NextFunction) => {
-      const addSessionMethods = (session: Record<string, any>): void => {
-        session.regenerate = (cb: (err?: any) => void) => {
+      const addSessionMethods = (session: SessionWithCompat): void => {
+        session.regenerate = (cb: SessionCallback) => {
           req.session = {};
-          addSessionMethods(req.session);
+          addSessionMethods(req.session as SessionWithCompat);
           cb();
         };
-        session.save = (cb: (err?: any) => void) => {
+        session.save = (cb: SessionCallback) => {
           cb();
         };
       };
-      addSessionMethods(req.session);
+      if (!isRecord(req.session)) {
+        req.session = {};
+      }
+      addSessionMethods(req.session as SessionWithCompat);
       next();
     });
 
