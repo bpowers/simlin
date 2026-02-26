@@ -5,7 +5,7 @@ This directory contains implementation plans for significant work items.
 - `active/` -- Plans currently being implemented
 - `completed/` -- Finished plans
 
-For MDL parser design history, see [doc/design/mdl-parser.md](/doc/design/mdl-parser.md).
+For MDL parser design history, see [docs/design/mdl-parser.md](/docs/design/mdl-parser.md).
 
 ## Template
 
@@ -35,4 +35,4 @@ When creating a new plan, use this template:
 - Plans start as `active/plan-name.md`
 - When completed, move to `completed/` and fill in the Outcome section
 - Review active plans monthly; mark stale plans as abandoned with an explanation
-- Link to plans from `doc/tech-debt.md` when they address known debt items
+- Link to plans from `docs/tech-debt.md` when they address known debt items

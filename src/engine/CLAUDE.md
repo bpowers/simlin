@@ -3,7 +3,7 @@
 TypeScript API for interacting with the WASM-compiled simulation engine. Promise-based; in the browser, WASM runs in a Web Worker to avoid jank.
 
 For global development standards, see the root [CLAUDE.md](/CLAUDE.md).
-For build/test/lint commands, see [doc/dev/commands.md](/doc/dev/commands.md).
+For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 
 ## Key Files
 

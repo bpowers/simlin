@@ -1738,7 +1738,7 @@ mod schema_tests {
             .unwrap()
             .parent()
             .unwrap()
-            .join("doc/simlin-project.schema.json");
+            .join("docs/simlin-project.schema.json");
 
         fs::write(&schema_path, &schema_json).expect("failed to write schema file");
 

@@ -3,7 +3,7 @@ set -e
 
 # Project-specific lint rules.
 # Only includes rules with near-zero baseline violations or ratchet mechanisms.
-# See doc/tech-debt.md for items tracked by measurement commands.
+# See docs/tech-debt.md for items tracked by measurement commands.
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Validate path references in CLAUDE.md and doc/ files.
+"""Validate path references in CLAUDE.md and docs/ files.
 
 Checks:
   - Backtick-quoted paths in CLAUDE.md files that contain `/`
     (indicating an actual file path, not just a filename mention).
-  - Markdown link targets [text](path) in CLAUDE.md and doc/ files
+  - Markdown link targets [text](path) in CLAUDE.md and docs/ files
     where the target is a local path (not a URL).
 
 Paths are resolved relative to the file's directory first, then repo root.
@@ -125,8 +125,8 @@ def main() -> int:
             continue
         files_to_check.append(claude_md)
 
-    # All files in doc/ (markdown only)
-    doc_dir = repo_root / "doc"
+    # All files in docs/ (markdown only)
+    doc_dir = repo_root / "docs"
     if doc_dir.exists():
         for md_file in doc_dir.rglob("*.md"):
             files_to_check.append(md_file)

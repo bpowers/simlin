@@ -402,7 +402,7 @@ mod schema_tests {
             .unwrap()
             .parent()
             .unwrap()
-            .join("doc/sdai-model.schema.json");
+            .join("docs/sdai-model.schema.json");
 
         fs::write(&schema_path, &schema_json).expect("failed to write schema file");
 

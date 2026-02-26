@@ -3,8 +3,8 @@
 Python bindings for the simulation engine via CFFI. Exposes full engine functionality in idiomatic Python, targeting AI agents for model analysis, calibration, etc.
 
 For global development standards, see the root [CLAUDE.md](/CLAUDE.md).
-For build/test/lint commands, see [doc/dev/commands.md](/doc/dev/commands.md).
-For Python-specific standards (thread safety, lock ordering), see [doc/dev/python.md](/doc/dev/python.md).
+For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
+For Python-specific standards (thread safety, lock ordering), see [docs/dev/python.md](/docs/dev/python.md).
 
 ## Key Files
 
@@ -20,7 +20,7 @@ For Python-specific standards (thread safety, lock ordering), see [doc/dev/pytho
 
 ## Thread Safety
 
-All wrapper classes have per-instance `threading.Lock`. Lock ordering: release `Model._lock` before calling `Project` methods. See [doc/dev/python.md](/doc/dev/python.md).
+All wrapper classes have per-instance `threading.Lock`. Lock ordering: release `Model._lock` before calling `Project` methods. See [docs/dev/python.md](/docs/dev/python.md).
 
 ## Non-Standard Commands
 

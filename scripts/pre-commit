@@ -37,7 +37,7 @@ else
     echo -e "${RED}✗${NC}"
     echo -e "${RED}Dependency policy violation:${NC}"
     cat "$DEPS_OUTPUT"
-    echo -e "${YELLOW}See doc/architecture.md for the dependency graph${NC}"
+    echo -e "${YELLOW}See docs/architecture.md for the dependency graph${NC}"
     POLICY_FAIL=1
 fi
 rm -f "$DEPS_OUTPUT"

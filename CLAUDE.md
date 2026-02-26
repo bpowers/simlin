@@ -2,12 +2,12 @@
 
 ## Overview
 
-Simlin is a system dynamics (SD) modeling tool for building and simulating stock-and-flow models, including models from Vensim and Stella. The XMILE specification (`doc/reference/xmile-v1.0.html`) is a crucial reference for simulation concepts, array/subscript notation, and equation syntax.
+Simlin is a system dynamics (SD) modeling tool for building and simulating stock-and-flow models, including models from Vensim and Stella. The XMILE specification (`docs/reference/xmile-v1.0.html`) is a crucial reference for simulation concepts, array/subscript notation, and equation syntax.
 
 The engine is in Rust, the interactive editor in TypeScript/React, the server and app in TypeScript. This is a monorepo without external users -- breaking changes are OK if tests pass. Exception: protobuf files must follow standard versioning (we have a DB with serialized instances).
 
-For detailed architecture and the dependency graph, see [doc/architecture.md](/doc/architecture.md).
-For documentation index, see [doc/README.md](/doc/README.md).
+For detailed architecture and the dependency graph, see [docs/architecture.md](/docs/architecture.md).
+For documentation index, see [docs/README.md](/docs/README.md).
 
 ## Components
 
@@ -37,11 +37,11 @@ Idempotent and fast -- short-circuits work already done.
 
 ## Build / Test / Lint
 
-See [doc/dev/commands.md](/doc/dev/commands.md) for the full command reference.
+See [docs/dev/commands.md](/docs/dev/commands.md) for the full command reference.
 
 Quick reference: `pnpm build`, `cargo test`, `pnpm test`, `pnpm lint`, `pnpm format`.
 
-For benchmarks and profiling, see [doc/dev/benchmarks.md](/doc/dev/benchmarks.md).
+For benchmarks and profiling, see [docs/dev/benchmarks.md](/docs/dev/benchmarks.md).
 
 ## Pre-commit Hooks
 
@@ -78,10 +78,10 @@ IMPORTANT: If feedback seems non-actionable, it means you need comments explaini
 
 ## Development Standards
 
-- Rust: [doc/dev/rust.md](/doc/dev/rust.md)
-- TypeScript/React: [doc/dev/typescript.md](/doc/dev/typescript.md)
-- Python (pysimlin): [doc/dev/python.md](/doc/dev/python.md)
-- Workflow and problem-solving: [doc/dev/workflow.md](/doc/dev/workflow.md)
+- Rust: [docs/dev/rust.md](/docs/dev/rust.md)
+- TypeScript/React: [docs/dev/typescript.md](/docs/dev/typescript.md)
+- Python (pysimlin): [docs/dev/python.md](/docs/dev/python.md)
+- Workflow and problem-solving: [docs/dev/workflow.md](/docs/dev/workflow.md)
 
 ## Development Workflow for LLM Agents
 
@@ -98,7 +98,7 @@ Keep the FFI surface small and orthogonal. Prefer composable primitives over bul
 
 When you discover something wrong or concerning during your work -- tech debt, design limitations, broken tooling, missing CI checks, unintended consequences of a committed design, deferred review feedback -- it must be explicitly tracked. Never silently drop these observations.
 
-Spawn the `track-issue` agent (via the Task tool with `subagent_type: "track-issue"`) with a description of the problem. The agent checks for duplicates in GitHub issues and [doc/tech-debt.md](/doc/tech-debt.md), then files the item if it's not already tracked. Using a sub-agent preserves your context on the main task.
+Spawn the `track-issue` agent (via the Task tool with `subagent_type: "track-issue"`) with a description of the problem. The agent checks for duplicates in GitHub issues and [docs/tech-debt.md](/docs/tech-debt.md), then files the item if it's not already tracked. Using a sub-agent preserves your context on the main task.
 
 ## Generated/Noise Paths
 

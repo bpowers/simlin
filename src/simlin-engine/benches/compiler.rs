@@ -23,7 +23,7 @@
 //!
 //! ## Profiling with external tools
 //!
-//! See `doc/dev/benchmarks.md` for instructions on using valgrind/callgrind,
+//! See `docs/dev/benchmarks.md` for instructions on using valgrind/callgrind,
 //! perf, and gperftools/heaptrack to analyze allocations and CPU time.
 
 use std::path::Path;

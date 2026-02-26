@@ -2,7 +2,7 @@
 
 Simlin is an [open source](LICENSE) tool for creating and editing [System Dynamics models](https://www.systemdynamics.org/what-is-sd#overview).  **You can try it today at https://simlin.com**.
 
-![simple example model](doc/population-model.png)
+![simple example model](docs/population-model.png)
 
 ## Controls
 

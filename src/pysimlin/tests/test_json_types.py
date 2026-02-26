@@ -2,7 +2,7 @@
 
 These tests ensure:
 1. JSON roundtrip fidelity (Python -> JSON -> Python)
-2. Schema compliance (generated JSON validates against doc/simlin-project.schema.json)
+2. Schema compliance (generated JSON validates against docs/simlin-project.schema.json)
 """
 
 import json

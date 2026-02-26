@@ -15,7 +15,7 @@ Core simulation engine. Compiles, type-checks, unit-checks, and simulates SD mod
 - Simulations run on a stack-based bytecode VM (`vm.rs`)
 - AST-walking `interpreter.rs` serves as a reference spec to verify VM correctness
 - `builtins.rs` defines builtin functions; stateful module functions (TREND, SMOOTH3) are model definitions in `stdlib/*.stmx`, generated into `stdlib.gen.rs`
-- Native Vensim MDL parser in `mdl/` (replaces C++ xmutil); see [doc/design/mdl-parser.md](/doc/design/mdl-parser.md)
+- Native Vensim MDL parser in `mdl/` (replaces C++ xmutil); see [docs/design/mdl-parser.md](/docs/design/mdl-parser.md)
 
 ### `src/libsimlin` (Rust)
 Flat "C" FFI wrapper around simlin-engine. Used from TypeScript (WASM), Go (CGo), and C/C++ (`simlin.h`).
@@ -113,4 +113,4 @@ Treat these as generated output unless the task explicitly targets them:
 
 ## XMILE Specification
 
-The XMILE interchange format spec is at `doc/xmile-v1.0.html`. It covers simulation concepts, array/subscript notation, XML structure, and equation syntax. Consult it when adding engine functionality.
+The XMILE interchange format spec is at `docs/xmile-v1.0.html`. It covers simulation concepts, array/subscript notation, XML structure, and equation syntax. Consult it when adding engine functionality.

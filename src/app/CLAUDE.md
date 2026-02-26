@@ -3,7 +3,7 @@
 Full-featured system dynamics application. Browse existing models, create or import new models, login/logout.
 
 For global development standards, see the root [CLAUDE.md](/CLAUDE.md).
-For build/test/lint commands, see [doc/dev/commands.md](/doc/dev/commands.md).
+For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 
 ## Key Files
 

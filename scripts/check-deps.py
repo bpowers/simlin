@@ -106,7 +106,7 @@ def check_rust_deps(repo_root: Path, policy: dict[str, list[str]]) -> list[str]:
                 errors.append(
                     f"ERROR: {pkg_name} must not depend on {dep}.\n"
                     f"  Allowed dependencies for {pkg_name}: {', '.join(sorted(allowed)) or '(none)'}\n"
-                    f"  See doc/architecture.md for the dependency graph.\n"
+                    f"  See docs/architecture.md for the dependency graph.\n"
                     f"  To add a new allowed dependency, update scripts/dep-policy.json."
                 )
 
@@ -164,7 +164,7 @@ def check_typescript_deps(repo_root: Path, policy: dict[str, list[str]]) -> list
                 errors.append(
                     f"ERROR: {pkg_name} must not depend on {dep}.\n"
                     f"  Allowed dependencies for {pkg_name}: {', '.join(sorted(allowed)) or '(none)'}\n"
-                    f"  See doc/architecture.md for the dependency graph.\n"
+                    f"  See docs/architecture.md for the dependency graph.\n"
                     f"  To add a new allowed dependency, update scripts/dep-policy.json."
                 )
 

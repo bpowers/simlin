@@ -6,7 +6,7 @@
  * High-level TypeScript types for the Simlin API.
  *
  * These types are immutable data structures representing model elements.
- * They match the schema in doc/simlin-project.schema.json for full fidelity.
+ * They match the schema in docs/simlin-project.schema.json for full fidelity.
  */
 
 // ============================================================================

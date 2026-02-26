@@ -5,7 +5,7 @@
 //! Parser for Vensim VDF (binary data file) format.
 //!
 //! VDF is Vensim's proprietary binary format for simulation output. The format
-//! is completely undocumented. See `doc/design/vdf.md` for the full format
+//! is completely undocumented. See `docs/design/vdf.md` for the full format
 //! specification, field-level analysis, and known pitfalls.
 //!
 //! This module handles:
@@ -94,7 +94,7 @@ pub fn read_f32(data: &[u8], offset: usize) -> f32 {
 ///
 /// Each section has a 24-byte header followed by data. A section's extent runs
 /// from its header to the start of the next section header (magic-to-magic),
-/// captured by `region_end`. See `doc/design/vdf.md` for details.
+/// captured by `region_end`. See `docs/design/vdf.md` for details.
 #[derive(Debug, Clone)]
 pub struct Section {
     /// Absolute file offset of the section magic bytes.

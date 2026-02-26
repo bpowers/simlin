@@ -3,7 +3,7 @@
 React components for model visualization and editing. Designed as a general-purpose SD model editor toolkit without dependencies on the Simlin app or server API.
 
 For global development standards, see the root [CLAUDE.md](/CLAUDE.md).
-For build/test/lint commands, see [doc/dev/commands.md](/doc/dev/commands.md).
+For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 
 ## Key Files
 
