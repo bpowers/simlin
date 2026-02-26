@@ -34,24 +34,6 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Owner**: unassigned
 - **Last reviewed**: 2026-02-15
 
-### 4. `@typescript-eslint/no-explicit-any` Disabled
-
-- **Component**: TypeScript packages (diagram, app, server)
-- **Severity**: medium
-- **Description**: The `no-explicit-any` eslint rule is turned off. `any` types bypass TypeScript's type system and can mask bugs. Should be enabled with a gradual cleanup of existing violations.
-- **Measure**: `rg 'no-explicit-any.*off' --type js --type ts`
-- **Owner**: unassigned
-- **Last reviewed**: 2026-02-15
-
-### 5. Class Component Migration
-
-- **Component**: diagram
-- **Severity**: low
-- **Description**: Project preference is class components, but hooks usage exists in the diagram package. When touching these files, prefer migrating to class components.
-- **Measure**: `rg 'use(State|Effect|Ref|Memo|Callback|Context)\b' --glob '*.tsx' src/diagram/`
-- **Owner**: unassigned
-- **Last reviewed**: 2026-02-15
-
 ### 6. `@simlin/core` -> `@simlin/engine` Dependency Direction
 
 - **Component**: core, engine

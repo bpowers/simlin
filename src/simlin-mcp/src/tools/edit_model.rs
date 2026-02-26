@@ -202,9 +202,14 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     let model_name = super::resolve_model_name(&project, requested_name).to_string();
     let dry_run = input.dry_run.unwrap_or(false);
 
+    let has_variable_ops = input.operations.as_ref().is_some_and(|ops| !ops.is_empty());
     let patch = build_patch(&model_name, input.sim_specs, input.operations);
     simlin_engine::apply_patch(&mut project, patch)
         .map_err(|e| anyhow::anyhow!("patch application failed: {e:?}"))?;
+
+    if !dry_run && has_variable_ops {
+        sync_diagram(&mut project, &model_name);
+    }
 
     let ext = path
         .extension()
@@ -249,6 +254,33 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     };
 
     serde_json::to_value(output).map_err(Into::into)
+}
+
+/// Regenerate the diagram layout for the named model, replacing its views
+/// in-place.  Preserves the existing zoom level when the model already has
+/// a view.  Layout failures are silently ignored -- a missing diagram is
+/// non-fatal and the model data is still correct.
+fn sync_diagram(project: &mut simlin_engine::datamodel::Project, model_name: &str) {
+    let existing_zoom = project
+        .get_model(model_name)
+        .and_then(|m| m.views.first())
+        .map(|v| match v {
+            simlin_engine::datamodel::View::StockFlow(sf) => sf.zoom,
+        })
+        .filter(|&z| z > 0.0);
+
+    let mut layout = match simlin_engine::layout::generate_best_layout(project, model_name) {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+
+    if let Some(zoom) = existing_zoom {
+        layout.zoom = zoom;
+    }
+
+    if let Some(model) = project.get_model_mut(model_name) {
+        model.views = vec![simlin_engine::datamodel::View::StockFlow(layout)];
+    }
 }
 
 /// Build an engine `ProjectPatch` from the curated MCP inputs.
@@ -839,6 +871,138 @@ mod tests {
             original_contents, after_contents,
             "file must not be modified when analysis fails"
         );
+    }
+
+    // ---- diagram regeneration after edits ----
+
+    #[test]
+    fn edit_regenerates_diagram_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        // Add a stock with a flow -- should produce a diagram with view elements.
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [
+                {
+                    "upsertStock": {
+                        "name": "population",
+                        "initialEquation": "100",
+                        "inflows": ["births"]
+                    }
+                },
+                {
+                    "upsertFlow": {
+                        "name": "births",
+                        "equation": "population * 0.1"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        // Read the file back and verify it has non-empty views.
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let views = saved["models"][0]["views"]
+            .as_array()
+            .expect("views must be an array");
+        assert!(
+            !views.is_empty(),
+            "saved file must contain regenerated views after edit"
+        );
+        // The view should contain elements for the stock and flow.
+        let elements = views[0]["elements"]
+            .as_array()
+            .expect("view must have elements");
+        assert!(
+            elements.len() >= 2,
+            "view must have at least 2 elements (stock + flow), got {}",
+            elements.len()
+        );
+    }
+
+    #[test]
+    fn sim_specs_only_edit_does_not_regenerate_diagram() {
+        let dir = tempfile::tempdir().unwrap();
+        // Start with a project that has hand-arranged views.
+        let project_with_views = serde_json::json!({
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "views": [{
+                    "kind": "stock_flow",
+                    "elements": [
+                        {"uid": 1, "type": "aux", "name": "hand_placed", "x": 999.0, "y": 999.0, "labelSide": "bottom"}
+                    ]
+                }]
+            }]
+        });
+        let path = write_model(dir.path(), "model.simlin.json", &project_with_views);
+
+        // Edit only simSpecs -- views should be preserved as-is.
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 200.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            }
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let views = saved["models"][0]["views"]
+            .as_array()
+            .expect("views must be preserved");
+        assert!(
+            !views.is_empty(),
+            "simSpecs-only edit must not destroy existing views"
+        );
+        let elements = views[0]["elements"].as_array().unwrap();
+        assert!(
+            elements.iter().any(|e| e["name"] == "hand_placed"),
+            "hand-placed elements must be preserved for simSpecs-only edits"
+        );
+    }
+
+    #[test]
+    fn dry_run_does_not_regenerate_diagram_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "dryRun": true,
+            "operations": [{
+                "upsertStock": {
+                    "name": "population",
+                    "initialEquation": "100"
+                }
+            }]
+        }))
+        .unwrap();
+
+        // File should be unchanged (empty model, no views).
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let views = saved["models"][0]["views"]
+            .as_array()
+            .map(|v| v.len())
+            .unwrap_or(0);
+        assert_eq!(views, 0, "dry-run must not write regenerated views to disk");
     }
 
     // ---- model name resolution falls back to first model when no "main" ----
