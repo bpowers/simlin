@@ -82,7 +82,12 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
   };
 
   setProjectName = async (): Promise<void> => {
-    const bodyContents: any = {
+    const bodyContents: {
+      projectName: string;
+      description: string;
+      projectPB?: string;
+      isPublic?: boolean;
+    } = {
       projectName: this.state.projectNameField,
       description: this.state.descriptionField,
     };

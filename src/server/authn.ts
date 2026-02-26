@@ -16,8 +16,38 @@ import { User } from './schemas/user_pb';
 
 interface StrategyOptions {}
 
+interface SerializedSessionUser {
+  id: string;
+}
+
+type VerifyDone = (error: Error | null, user?: unknown) => void;
+
 interface VerifyFunction {
-  (firestoreIdToken: string, done: (error: any, user?: any) => void): Promise<void>;
+  (firestoreIdToken: string, done: VerifyDone): Promise<void>;
+}
+
+function toError(error: unknown): Error {
+  if (error instanceof Error) {
+    return error;
+  }
+  if (typeof error === 'string') {
+    return new Error(error);
+  }
+  if (typeof error === 'object' && error !== null) {
+    const message = (error as Record<string, unknown>).message;
+    if (typeof message === 'string') {
+      return new Error(message);
+    }
+  }
+  return new Error(String(error));
+}
+
+function isSerializedSessionUser(value: unknown): value is SerializedSessionUser {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Record<string, unknown>).id === 'string'
+  );
 }
 
 class FirestoreAuthStrategy extends BaseStrategy implements passport.Strategy {
@@ -30,7 +60,7 @@ class FirestoreAuthStrategy extends BaseStrategy implements passport.Strategy {
     this.verify = verify;
   }
 
-  authenticate(req: Request, _options?: any): void {
+  authenticate(req: Request, _options?: unknown): void {
     if (!req.body || !req.body.idToken) {
       this.error(new Error('no idToken in body'));
       return;
@@ -38,20 +68,20 @@ class FirestoreAuthStrategy extends BaseStrategy implements passport.Strategy {
 
     const idToken = req.body.idToken as string;
 
-    const verified = (error: any, user?: any): void => {
+    const verified: VerifyDone = (error, user): void => {
       if (error) {
         return this.error(error);
       }
       if (!user) {
         return this.fail(401);
       }
-      this.success(user);
+      this.success(user as User);
     };
 
     this.verify(idToken, verified)
       .then(() => {})
       .catch((err) => {
-        this.error(err);
+        this.error(toError(err));
       });
   }
 }
@@ -157,41 +187,45 @@ export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void =>
   // const config = app.get('authentication');
 
   passport.use(
-    new FirestoreAuthStrategy({}, async (firestoreIdToken: string, done: (error: any, user?: any) => void) => {
+    new FirestoreAuthStrategy({}, async (firestoreIdToken: string, done: VerifyDone) => {
       const [user, err] = await getOrCreateUserFromProfile(app.db.user, firebaseAuthn, firestoreIdToken);
       if (err !== undefined) {
         logger.error(err);
         done(err);
       } else if (user) {
-        done(undefined, user);
+        done(null, user);
       } else {
         throw new Error('unreachable');
       }
     }),
   );
 
-  passport.serializeUser((rawUser: any, done: (error: any, user?: any) => void) => {
-    const user = rawUser as User;
+  passport.serializeUser((rawUser, done) => {
+    if (!(rawUser instanceof User)) {
+      done(new Error('serializeUser expected a User instance'));
+      return;
+    }
+    const user = rawUser;
     console.log(`serialize user: ${user.getId()}`);
-    const serializedUser: any = {
+    const serializedUser: SerializedSessionUser = {
       id: user.getId(),
     };
-    done(undefined, serializedUser);
+    done(null, serializedUser);
   });
 
-  passport.deserializeUser(async (user: any, done: (error: any, user?: any) => void) => {
-    if (!user || !user.id) {
-      done(new Error(`no or incorrectly serialized User: ${user}`));
+  passport.deserializeUser(async (user, done) => {
+    if (!isSerializedSessionUser(user)) {
+      done(new Error(`no or incorrectly serialized User: ${String(user)}`));
       return;
     }
 
     const userModel = await app.db.user.findOne(user.id);
     if (!userModel) {
       logger.info(`couldn't find user '${user.id}' in DB`);
-      done(undefined, null);
+      done(null, null);
       return;
     }
-    done(undefined, userModel);
+    done(null, userModel);
   });
 
   app.use(passport.initialize());

@@ -10,14 +10,22 @@ import clsx from 'clsx';
 
 import styles from './Autocomplete.module.css';
 
+export interface AutocompleteRenderInputParams {
+  InputProps: {
+    disableUnderline: boolean;
+    ref: React.Ref<HTMLDivElement>;
+  };
+  inputProps: React.InputHTMLAttributes<HTMLInputElement>;
+}
+
 interface AutocompleteProps {
   key?: string;
   value?: string | null;
   defaultValue?: string;
-  onChange: (event: any, newValue: string | null) => void;
+  onChange: (event: React.SyntheticEvent | null, newValue: string | null) => void;
   clearOnEscape?: boolean;
   options: string[];
-  renderInput: (params: any) => React.ReactNode;
+  renderInput: (params: AutocompleteRenderInputParams) => React.ReactNode;
 }
 
 function itemToString(item: string | null): string {
@@ -81,8 +89,8 @@ export default function Autocomplete(props: AutocompleteProps) {
     }
   }, [isOpen]);
 
-  const inputProps = getInputProps();
-  const params = {
+  const inputProps = getInputProps() as React.InputHTMLAttributes<HTMLInputElement>;
+  const params: AutocompleteRenderInputParams = {
     InputProps: {
       disableUnderline: false,
       ref: wrapperRef,

@@ -169,7 +169,7 @@ export class Label extends React.PureComponent<LabelPropsFull> {
     }
     this.inMove = true;
 
-    (e.target as any).setPointerCapture(e.pointerId);
+    (e.target as Element).setPointerCapture(e.pointerId);
     this.props.onLabelDrag?.(this.props.uid, e);
   };
 

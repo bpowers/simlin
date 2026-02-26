@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import type { JsonView, JsonViewElement, JsonRect, JsonFlowPoint, JsonLinkPoint } from '@simlin/engine';
+import type { JsonView, JsonViewElement, JsonRect, JsonFlowPoint, JsonLinkPoint, JsonLinkViewElement } from '@simlin/engine';
 
 import {
   ViewElement,
@@ -78,7 +78,7 @@ function elementToJson(element: ViewElement): JsonViewElement {
       };
 
     case 'link': {
-      const result: JsonViewElement = {
+      const result: JsonLinkViewElement = {
         type: 'link',
         uid: element.uid,
         fromUid: element.fromUid,
@@ -86,11 +86,11 @@ function elementToJson(element: ViewElement): JsonViewElement {
       };
 
       if (element.arc !== undefined) {
-        (result as any).arc = element.arc;
+        result.arc = element.arc;
       }
 
       if (element.multiPoint) {
-        (result as any).multiPoints = element.multiPoint.map(pointToLinkPoint);
+        result.multiPoints = element.multiPoint.map(pointToLinkPoint);
       }
 
       return result;

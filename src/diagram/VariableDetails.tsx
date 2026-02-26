@@ -251,8 +251,9 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
   };
 
   renderLeaf = (props: RenderLeafProps) => {
-    const isError = !!(props.leaf as unknown as any).error;
-    const isWarning = !!(props.leaf as unknown as any).warning;
+    const leaf = props.leaf as FormattedText;
+    const isError = !!leaf.error;
+    const isWarning = !!leaf.warning;
     const className = isError ? styles.eqnError : isWarning ? styles.eqnWarning : undefined;
     return (
       <span {...props.attributes} className={className}>
@@ -472,12 +473,12 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
         try {
           const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
           while (walker.nextNode()) {
-            const tn = walker.currentNode as any;
-            const text: string = (tn && (tn as any).nodeValue) || '';
+            const tn = walker.currentNode;
+            const text: string = tn?.nodeValue ?? '';
             for (let i = 0; i < text.length; i++) {
               const rng = document.createRange();
-              rng.setStart(tn as Node, i);
-              rng.setEnd(tn as Node, i + 1);
+              rng.setStart(tn, i);
+              rng.setEnd(tn, i + 1);
               const r = rng.getBoundingClientRect();
               if (!r || r.width <= 0 || r.height <= 0) continue;
               const raw = text[i];

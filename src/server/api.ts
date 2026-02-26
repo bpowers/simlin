@@ -16,6 +16,32 @@ import { Project as ProjectPb } from './schemas/project_pb';
 import { User as UserPb } from './schemas/user_pb';
 import { UsernameDenylist } from './usernames';
 
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === 'string') {
+    return error;
+  }
+  if (typeof error === 'object' && error !== null) {
+    const message = (error as Record<string, unknown>).message;
+    if (typeof message === 'string') {
+      return message;
+    }
+  }
+  return String(error);
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  if (typeof error === 'object' && error !== null) {
+    const code = (error as Record<string, unknown>).code;
+    if (typeof code === 'string') {
+      return code;
+    }
+  }
+  return undefined;
+}
+
 export async function updatePreview(db: Database, project: ProjectPb): Promise<PreviewPb> {
   const fileDoc = await db.file.findOne(project.getFileId());
   if (!fileDoc) {
@@ -26,8 +52,7 @@ export async function updatePreview(db: Database, project: ProjectPb): Promise<P
   try {
     png = await renderToPNG(fileDoc);
   } catch (error) {
-    const err = error as any;
-    throw new Error(`renderToPNG: ${err.message}`);
+    throw new Error(`renderToPNG: ${getErrorMessage(error)}`);
   }
 
   const created = new Timestamp();
@@ -101,14 +126,13 @@ export const apiRouter = (app: Application): Router => {
 
       res.status(200).json(project.toObject());
     } catch (error) {
-      const err = error as any;
-      if (err.code === 'wut') {
+      if (getErrorCode(error) === 'wut') {
         res.status(400).json({ error: 'project name already taken' });
         return;
       }
       logger.error(':ohno:');
-      logger.error(err);
-      throw err;
+      logger.error(error);
+      throw error;
     }
   });
 
@@ -319,8 +343,7 @@ export const apiRouter = (app: Application): Router => {
       await app.db.user.deleteOne(origUserId);
       logger.error(`done deleting old user ${origUserId}`);
     } catch (error) {
-      const err = error as any;
-      if (err.code === 'wut') {
+      if (getErrorCode(error) === 'wut') {
         res.status(400).json({ error: 'username already taken' });
         return;
       } else {

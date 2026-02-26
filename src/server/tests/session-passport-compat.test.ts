@@ -9,12 +9,22 @@ import { Strategy as BaseStrategy } from 'passport-strategy';
 import { seshcookie } from 'seshcookie';
 import http from 'http';
 
+type SessionCallback = (err?: Error) => void;
+type SessionWithCompat = Record<string, unknown> & {
+  regenerate?: (cb: SessionCallback) => void;
+  save?: (cb: SessionCallback) => void;
+};
+
+interface TestSessionUser {
+  id: string;
+}
+
 // Minimal passport strategy that always succeeds with a test user.
 class TestStrategy extends BaseStrategy implements passport.Strategy {
   readonly name = 'test';
 
   authenticate(_req: express.Request): void {
-    this.success({ id: 'test-user' });
+    this.success({ id: 'test-user' } as TestSessionUser);
   }
 }
 
@@ -34,24 +44,24 @@ function createTestApp(options?: { addSessionCompat?: boolean }): express.Expres
 
   if (options?.addSessionCompat) {
     app.use((req: express.Request, _res: express.Response, next: express.NextFunction) => {
-      const addSessionMethods = (session: Record<string, any>): void => {
-        session.regenerate = (cb: (err?: any) => void) => {
+      const addSessionMethods = (session: SessionWithCompat): void => {
+        session.regenerate = (cb: SessionCallback) => {
           req.session = {};
-          addSessionMethods(req.session);
+          addSessionMethods(req.session as SessionWithCompat);
           cb();
         };
-        session.save = (cb: (err?: any) => void) => {
+        session.save = (cb: SessionCallback) => {
           cb();
         };
       };
-      addSessionMethods(req.session);
+      addSessionMethods(req.session as SessionWithCompat);
       next();
     });
   }
 
   passport.use(new TestStrategy());
-  passport.serializeUser((user: any, done) => done(undefined, user));
-  passport.deserializeUser((user: any, done) => done(undefined, user));
+  passport.serializeUser((user, done) => done(undefined, user as TestSessionUser));
+  passport.deserializeUser((user, done) => done(undefined, user as TestSessionUser));
 
   app.use(passport.initialize());
   app.use(passport.session());
@@ -76,7 +86,7 @@ function request(
   method: string,
   path: string,
   headers?: Record<string, string>,
-): Promise<{ status: number; body: any; headers: http.IncomingHttpHeaders }> {
+): Promise<{ status: number; body: unknown; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const addr = server.address();
     if (!addr || typeof addr === 'string') {
@@ -94,9 +104,9 @@ function request(
         let data = '';
         res.on('data', (chunk) => (data += chunk));
         res.on('end', () => {
-          let body: any;
+          let body: unknown;
           try {
-            body = JSON.parse(data);
+            body = JSON.parse(data) as unknown;
           } catch {
             body = data;
           }
@@ -136,7 +146,7 @@ describe('seshcookie + passport session compatibility', () => {
 
       const checkRes = await request(server, 'GET', '/check', { cookie: cookieHeader });
       expect(checkRes.status).toBe(200);
-      expect(checkRes.body.user).toEqual({ id: 'test-user' });
+      expect((checkRes.body as { user?: TestSessionUser }).user).toEqual({ id: 'test-user' });
     } finally {
       server.close();
     }
