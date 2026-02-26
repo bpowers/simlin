@@ -19,10 +19,80 @@ use crate::common::Result;
 use crate::datamodel::view_element::{self, LinkPolarity, LinkShape};
 use crate::datamodel::{self, DimensionElements, Equation, GraphicalFunction, View, ViewElement};
 use crate::lexer::LexerType;
+use unicode_xid::UnicodeXID;
 
 /// Replace underscores with spaces -- the reverse of `space_to_underbar()`.
 fn underbar_to_space(name: &str) -> String {
     name.replace('_', " ")
+}
+
+fn is_mdl_quoted_ident(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"'
+}
+
+/// Check whether an MDL identifier requires quoting after underscore->space conversion.
+/// Spaces are allowed in bare MDL names, but characters outside identifier classes
+/// (for example `$`, `/`, `|`) must be quoted.
+fn needs_mdl_quoting(name: &str) -> bool {
+    if name.is_empty() || name != name.trim() {
+        return true;
+    }
+
+    let mut chars = name.chars();
+    match chars.next() {
+        None => return true,
+        Some(c) if !UnicodeXID::is_xid_start(c) && c != '_' => return true,
+        _ => {}
+    }
+
+    for c in chars {
+        if c == ' ' {
+            continue;
+        }
+        if !UnicodeXID::is_xid_continue(c) && c != '_' {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn escape_mdl_quoted_ident(name: &str) -> String {
+    let mut escaped = String::with_capacity(name.len());
+    for c in name.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+/// Format a canonical identifier for MDL output, preserving spaces and
+/// adding quotes when the bare form would not round-trip through MDL parsing.
+fn format_mdl_ident(name: &str) -> String {
+    let display = underbar_to_space(name);
+    if is_mdl_quoted_ident(&display) {
+        return display;
+    }
+    if needs_mdl_quoting(&display) {
+        format!("\"{}\"", escape_mdl_quoted_ident(&display))
+    } else {
+        display
+    }
+}
+
+/// Arrayed element keys encode multidimensional indices as comma-separated
+/// canonical names (for example `c,a,f`). Preserve tuple structure so MDL
+/// parsers can split indices, and format each token independently.
+fn format_mdl_element_key(element_key: &str) -> String {
+    element_key
+        .split(',')
+        .map(format_mdl_ident)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Map zero-argument XMILE builtins that are bare keywords in MDL.
@@ -311,7 +381,7 @@ fn recognize_allocate(expr: &Expr0, walk: &mut impl FnMut(&Expr0) -> String) -> 
 
         // args[1] is the last subscript dimension name (a Var)
         let dim_name = if let Expr0::Var(id, _) = &args[1] {
-            underbar_to_space(id.as_str())
+            format_mdl_ident(id.as_str())
         } else {
             return None;
         };
@@ -319,7 +389,7 @@ fn recognize_allocate(expr: &Expr0, walk: &mut impl FnMut(&Expr0) -> String) -> 
         // args[2] is the demand variable, possibly with a final `*` subscript
         // that should be replaced with the dimension name
         let demand_str = if let Expr0::Subscript(id, subs, _) = &args[2] {
-            let demand_name = underbar_to_space(id.as_str());
+            let demand_name = format_mdl_ident(id.as_str());
             if subs.is_empty() {
                 demand_name
             } else {
@@ -459,7 +529,7 @@ impl Visitor<String> for MdlPrintVisitor {
         match expr {
             IndexExpr0::Wildcard(_) => "*".to_string(),
             IndexExpr0::StarRange(id, _) => {
-                format!("*:{}", underbar_to_space(id.as_str()))
+                format!("*:{}", format_mdl_ident(id.as_str()))
             }
             IndexExpr0::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
             IndexExpr0::DimPosition(n, _) => format!("@{n}"),
@@ -474,7 +544,7 @@ impl Visitor<String> for MdlPrintVisitor {
         }
         match expr {
             Expr0::Const(s, _, _) => s.clone(),
-            Expr0::Var(id, _) => underbar_to_space(id.as_str()),
+            Expr0::Var(id, _) => format_mdl_ident(id.as_str()),
             Expr0::App(UntypedBuiltinFn(func, args), _) => {
                 // In MDL, TIME and DT are bare keywords (no parentheses).
                 if args.is_empty()
@@ -489,7 +559,7 @@ impl Visitor<String> for MdlPrintVisitor {
             }
             Expr0::Subscript(id, args, _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
-                format!("{}[{}]", underbar_to_space(id.as_str()), args.join(", "))
+                format!("{}[{}]", format_mdl_ident(id.as_str()), args.join(", "))
             }
             Expr0::Op1(op, l, _) => match op {
                 UnaryOp::Transpose => {
@@ -697,11 +767,11 @@ fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
         if i > 0 {
             net_flow.push('+');
         }
-        net_flow.push_str(&underbar_to_space(inflow));
+        net_flow.push_str(&format_mdl_ident(inflow));
     }
     for outflow in &stock.outflows {
         net_flow.push('-');
-        net_flow.push_str(&underbar_to_space(outflow));
+        net_flow.push_str(&format_mdl_ident(outflow));
     }
     if net_flow.is_empty() {
         net_flow.push('0');
@@ -759,13 +829,13 @@ fn write_stock_entry(
     units: &Option<String>,
     doc: &str,
 ) {
-    let name = underbar_to_space(ident);
+    let name = format_mdl_ident(ident);
     let initial = normalized_stock_initial(initial);
 
     if dims.is_empty() {
         write!(buf, "{name}=").unwrap();
     } else {
-        let dim_strs: Vec<String> = dims.iter().map(|d| underbar_to_space(d)).collect();
+        let dim_strs: Vec<String> = dims.iter().map(|d| format_mdl_ident(d)).collect();
         write!(buf, "{name}[{}]=", dim_strs.join(",")).unwrap();
     }
 
@@ -782,11 +852,11 @@ fn write_arrayed_stock_entries(
     units: &Option<String>,
     doc: &str,
 ) {
-    let name = underbar_to_space(ident);
+    let name = format_mdl_ident(ident);
     let last_idx = elements.len().saturating_sub(1);
 
     for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
-        let elem_display = underbar_to_space(elem_name);
+        let elem_display = format_mdl_element_key(elem_name);
         let initial = normalized_stock_initial(&equation_to_mdl(eqn));
 
         write!(buf, "{name}[{elem_display}]=").unwrap();
@@ -827,13 +897,13 @@ fn write_single_entry(
     doc: &str,
     gf: Option<&GraphicalFunction>,
 ) {
-    let name = underbar_to_space(ident);
+    let name = format_mdl_ident(ident);
     let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
 
     if dims.is_empty() {
         write!(buf, "{name}{assign_op}").unwrap();
     } else {
-        let dim_strs: Vec<String> = dims.iter().map(|d| underbar_to_space(d)).collect();
+        let dim_strs: Vec<String> = dims.iter().map(|d| format_mdl_ident(d)).collect();
         write!(buf, "{name}[{}]{assign_op}", dim_strs.join(",")).unwrap();
     }
 
@@ -859,11 +929,11 @@ fn write_arrayed_entries(
     units: &Option<String>,
     doc: &str,
 ) {
-    let name = underbar_to_space(ident);
+    let name = format_mdl_ident(ident);
     let last_idx = elements.len().saturating_sub(1);
 
     for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
-        let elem_display = underbar_to_space(elem_name);
+        let elem_display = format_mdl_element_key(elem_name);
         let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
 
         write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
@@ -904,13 +974,13 @@ fn write_units_and_comment(buf: &mut String, units: &Option<String>, doc: &str) 
 /// Indexed: `DimName: (1-N) ~~|`
 /// Mapped:  `DimName: Elem1, Elem2 -> MappedDim ~~|`
 pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
-    let name = underbar_to_space(&dim.name);
+    let name = format_mdl_ident(&dim.name);
     write!(buf, "{name}:").unwrap();
 
     match &dim.elements {
         DimensionElements::Named(elems) => {
             buf.push_str("\n\t");
-            let elem_strs: Vec<String> = elems.iter().map(|e| underbar_to_space(e)).collect();
+            let elem_strs: Vec<String> = elems.iter().map(|e| format_mdl_ident(e)).collect();
             buf.push_str(&elem_strs.join(", "));
         }
         DimensionElements::Indexed(size) => {
@@ -919,7 +989,7 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
     }
 
     if let Some(maps_to) = &dim.maps_to {
-        write!(buf, " -> {}", underbar_to_space(maps_to)).unwrap();
+        write!(buf, " -> {}", format_mdl_ident(maps_to)).unwrap();
     }
 
     buf.push_str("\n\t~~|\n");
@@ -1613,7 +1683,8 @@ fn build_name_map(elements: &[ViewElement]) -> HashMap<i32, &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Expr0;
+    use crate::ast::{Expr0, Loc};
+    use crate::common::RawIdent;
     use crate::datamodel::{
         Aux, Compat, DimensionElements, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
         GraphicalFunctionScale, SimMethod, Stock, Unit, Variable,
@@ -1651,6 +1722,23 @@ mod tests {
         assert_mdl("population_growth_rate", "population growth rate");
         assert_mdl("x", "x");
         assert_mdl("a_b_c", "a b c");
+    }
+
+    #[test]
+    fn variable_references_quote_special_identifiers() {
+        let special = Expr0::Var(RawIdent::new_from_str("$_euro"), Loc::default());
+        assert_eq!(expr0_to_mdl(&special), "\"$ euro\"");
+
+        let expr = Expr0::Op2(
+            BinaryOp::Add,
+            Box::new(Expr0::Var(RawIdent::new_from_str("$_euro"), Loc::default())),
+            Box::new(Expr0::Var(
+                RawIdent::new_from_str("revenue"),
+                Loc::default(),
+            )),
+            Loc::default(),
+        );
+        assert_eq!(expr0_to_mdl(&expr), "\"$ euro\" + revenue");
     }
 
     #[test]
@@ -1991,6 +2079,14 @@ mod tests {
     }
 
     #[test]
+    fn scalar_aux_entry_quotes_special_identifier_name() {
+        let var = make_aux("$_euro", "10", Some("Dmnl"), "");
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert_eq!(buf, "\"$ euro\"=\n\t10\n\t~\tDmnl\n\t~\t\n\t|");
+    }
+
+    #[test]
     fn scalar_aux_no_units() {
         let var = make_aux("rate", "a + b", None, "");
         let mut buf = String::new();
@@ -2270,6 +2366,51 @@ mod tests {
         // Underscored element names should appear with spaces
         assert!(buf.contains("[north america]"));
         assert!(buf.contains("[south america]"));
+    }
+
+    #[test]
+    fn arrayed_multidimensional_element_keys_preserve_tuple_shape() {
+        let var = Variable::Aux(Aux {
+            ident: "power5".to_owned(),
+            equation: Equation::Arrayed(
+                vec!["subs2".to_owned(), "subs1".to_owned(), "subs3".to_owned()],
+                vec![
+                    (
+                        "c,a,f".to_owned(),
+                        "power(var3[subs2, subs1], var4[subs2, subs3])".to_owned(),
+                        None,
+                        None,
+                    ),
+                    (
+                        "d,b,g".to_owned(),
+                        "power(var3[subs2, subs1], var4[subs2, subs3])".to_owned(),
+                        None,
+                        None,
+                    ),
+                ],
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+
+        assert!(
+            buf.contains("power5[c,a,f]="),
+            "missing first tuple key: {buf}"
+        );
+        assert!(
+            buf.contains("power5[d,b,g]="),
+            "missing second tuple key: {buf}"
+        );
+        assert!(
+            !buf.contains("power5[\"c,a,f\"]"),
+            "tuple key must not be quoted as a single symbol: {buf}"
+        );
     }
 
     #[test]
