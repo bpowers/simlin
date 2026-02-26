@@ -202,11 +202,14 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     let model_name = super::resolve_model_name(&project, requested_name).to_string();
     let dry_run = input.dry_run.unwrap_or(false);
 
+    let has_variable_ops = input.operations.as_ref().is_some_and(|ops| !ops.is_empty());
     let patch = build_patch(&model_name, input.sim_specs, input.operations);
     simlin_engine::apply_patch(&mut project, patch)
         .map_err(|e| anyhow::anyhow!("patch application failed: {e:?}"))?;
 
-    sync_diagram(&mut project, &model_name);
+    if !dry_run && has_variable_ops {
+        sync_diagram(&mut project, &model_name);
+    }
 
     let ext = path
         .extension()
@@ -916,6 +919,62 @@ mod tests {
             elements.len() >= 2,
             "view must have at least 2 elements (stock + flow), got {}",
             elements.len()
+        );
+    }
+
+    #[test]
+    fn sim_specs_only_edit_does_not_regenerate_diagram() {
+        let dir = tempfile::tempdir().unwrap();
+        // Start with a project that has hand-arranged views.
+        let project_with_views = serde_json::json!({
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "views": [{
+                    "kind": "stock_flow",
+                    "elements": [
+                        {"uid": 1, "type": "aux", "name": "hand_placed", "x": 999.0, "y": 999.0, "labelSide": "bottom"}
+                    ]
+                }]
+            }]
+        });
+        let path = write_model(dir.path(), "model.simlin.json", &project_with_views);
+
+        // Edit only simSpecs -- views should be preserved as-is.
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 200.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            }
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let views = saved["models"][0]["views"]
+            .as_array()
+            .expect("views must be preserved");
+        assert!(
+            !views.is_empty(),
+            "simSpecs-only edit must not destroy existing views"
+        );
+        let elements = views[0]["elements"].as_array().unwrap();
+        assert!(
+            elements.iter().any(|e| e["name"] == "hand_placed"),
+            "hand-placed elements must be preserved for simSpecs-only edits"
         );
     }
 
