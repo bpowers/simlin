@@ -762,6 +762,36 @@ impl Expr2 {
                         ctx.set_allow_dimension_union(prev);
                         result
                     }
+                    VectorSelect(sel, expr, max_val, action, err) => {
+                        let prev = ctx.set_allow_dimension_union(true);
+                        let result = VectorSelect(
+                            Box::new(Expr2::from(*sel, ctx)?),
+                            Box::new(Expr2::from(*expr, ctx)?),
+                            Box::new(Expr2::from(*max_val, ctx)?),
+                            Box::new(Expr2::from(*action, ctx)?),
+                            Box::new(Expr2::from(*err, ctx)?),
+                        );
+                        ctx.set_allow_dimension_union(prev);
+                        result
+                    }
+                    VectorElmMap(src, offs) => {
+                        let prev = ctx.set_allow_dimension_union(true);
+                        let result = VectorElmMap(
+                            Box::new(Expr2::from(*src, ctx)?),
+                            Box::new(Expr2::from(*offs, ctx)?),
+                        );
+                        ctx.set_allow_dimension_union(prev);
+                        result
+                    }
+                    VectorSortOrder(arr, dir) => {
+                        let prev = ctx.set_allow_dimension_union(true);
+                        let result = VectorSortOrder(
+                            Box::new(Expr2::from(*arr, ctx)?),
+                            Box::new(Expr2::from(*dir, ctx)?),
+                        );
+                        ctx.set_allow_dimension_union(prev);
+                        result
+                    }
                 };
                 // TODO: Handle array sources for builtin functions that return arrays
                 Expr2::App(builtin, None, loc)

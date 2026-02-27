@@ -674,6 +674,21 @@ fn rename_builtin(
             BuiltinFn::Stddev(Box::new(rename_expr(expr, old_ident, new_ident)))
         }
         BuiltinFn::Sum(expr) => BuiltinFn::Sum(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::VectorSelect(a, b, c, d, e) => BuiltinFn::VectorSelect(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+            Box::new(rename_expr(c, old_ident, new_ident)),
+            Box::new(rename_expr(d, old_ident, new_ident)),
+            Box::new(rename_expr(e, old_ident, new_ident)),
+        ),
+        BuiltinFn::VectorElmMap(a, b) => BuiltinFn::VectorElmMap(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+        ),
+        BuiltinFn::VectorSortOrder(a, b) => BuiltinFn::VectorSortOrder(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+        ),
     }
 }
 
@@ -854,6 +869,24 @@ pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn
             UntypedBuiltinFn("stddev".to_string(), vec![expr2_to_expr0(expr)])
         }
         BuiltinFn::Sum(expr) => UntypedBuiltinFn("sum".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::VectorSelect(a, b, c, d, e) => UntypedBuiltinFn(
+            "vector_select".to_string(),
+            vec![
+                expr2_to_expr0(a),
+                expr2_to_expr0(b),
+                expr2_to_expr0(c),
+                expr2_to_expr0(d),
+                expr2_to_expr0(e),
+            ],
+        ),
+        BuiltinFn::VectorElmMap(a, b) => UntypedBuiltinFn(
+            "vector_elm_map".to_string(),
+            vec![expr2_to_expr0(a), expr2_to_expr0(b)],
+        ),
+        BuiltinFn::VectorSortOrder(a, b) => UntypedBuiltinFn(
+            "vector_sort_order".to_string(),
+            vec![expr2_to_expr0(a), expr2_to_expr0(b)],
+        ),
     }
 }
 

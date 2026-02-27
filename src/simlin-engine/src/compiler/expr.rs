@@ -201,6 +201,19 @@ impl Expr {
                     BuiltinFn::Size(a) => BuiltinFn::Size(Box::new(a.strip_loc())),
                     BuiltinFn::Stddev(a) => BuiltinFn::Stddev(Box::new(a.strip_loc())),
                     BuiltinFn::Sum(a) => BuiltinFn::Sum(Box::new(a.strip_loc())),
+                    BuiltinFn::VectorSelect(a, b, c, d, e) => BuiltinFn::VectorSelect(
+                        Box::new(a.strip_loc()),
+                        Box::new(b.strip_loc()),
+                        Box::new(c.strip_loc()),
+                        Box::new(d.strip_loc()),
+                        Box::new(e.strip_loc()),
+                    ),
+                    BuiltinFn::VectorElmMap(a, b) => {
+                        BuiltinFn::VectorElmMap(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                    }
+                    BuiltinFn::VectorSortOrder(a, b) => {
+                        BuiltinFn::VectorSortOrder(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                    }
                 };
                 Expr::App(builtin, loc)
             }

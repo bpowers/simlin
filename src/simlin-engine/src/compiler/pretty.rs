@@ -198,6 +198,22 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Size(a) => format!("size({})", pretty(a)),
             BuiltinFn::Stddev(a) => format!("stddev({})", pretty(a)),
             BuiltinFn::Sum(a) => format!("sum({})", pretty(a)),
+            BuiltinFn::VectorSelect(a, b, c, d, e) => {
+                format!(
+                    "vector_select({}, {}, {}, {}, {})",
+                    pretty(a),
+                    pretty(b),
+                    pretty(c),
+                    pretty(d),
+                    pretty(e)
+                )
+            }
+            BuiltinFn::VectorElmMap(a, b) => {
+                format!("vector_elm_map({}, {})", pretty(a), pretty(b))
+            }
+            BuiltinFn::VectorSortOrder(a, b) => {
+                format!("vector_sort_order({}, {})", pretty(a), pretty(b))
+            }
         },
         Expr::EvalModule(module, model_name, _input_set, args) => {
             let args: Vec<_> = args.iter().map(pretty).collect();

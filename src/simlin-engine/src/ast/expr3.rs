@@ -214,6 +214,16 @@ impl Expr3 {
                                     || b.as_ref().is_some_and(|e| e.references_a2a_dimension())
                             })
                     }
+                    VectorSelect(a, b, c, d, e) => {
+                        a.references_a2a_dimension()
+                            || b.references_a2a_dimension()
+                            || c.references_a2a_dimension()
+                            || d.references_a2a_dimension()
+                            || e.references_a2a_dimension()
+                    }
+                    VectorElmMap(a, b) | VectorSortOrder(a, b) => {
+                        a.references_a2a_dimension() || b.references_a2a_dimension()
+                    }
                     Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {
                         false
                     }
@@ -904,6 +914,40 @@ impl<'a> Pass1Context<'a> {
                     None => (None, false),
                 };
                 (Rank(Box::new(new_e), new_opt), e_has_a2a || opt_has_a2a)
+            }
+
+            VectorSelect(sel, expr, max_val, action, err) => {
+                let (new_sel, sel_a2a) = self.maybe_decompose_array_arg_inner(*sel);
+                let (new_expr, expr_a2a) = self.maybe_decompose_array_arg_inner(*expr);
+                let (new_max, max_a2a) = self.transform_inner(*max_val);
+                let (new_act, act_a2a) = self.transform_inner(*action);
+                let (new_err, err_a2a) = self.transform_inner(*err);
+                (
+                    VectorSelect(
+                        Box::new(new_sel),
+                        Box::new(new_expr),
+                        Box::new(new_max),
+                        Box::new(new_act),
+                        Box::new(new_err),
+                    ),
+                    sel_a2a || expr_a2a || max_a2a || act_a2a || err_a2a,
+                )
+            }
+            VectorElmMap(src, offs) => {
+                let (new_src, src_a2a) = self.maybe_decompose_array_arg_inner(*src);
+                let (new_offs, offs_a2a) = self.maybe_decompose_array_arg_inner(*offs);
+                (
+                    VectorElmMap(Box::new(new_src), Box::new(new_offs)),
+                    src_a2a || offs_a2a,
+                )
+            }
+            VectorSortOrder(arr, dir) => {
+                let (new_arr, arr_a2a) = self.maybe_decompose_array_arg_inner(*arr);
+                let (new_dir, dir_a2a) = self.transform_inner(*dir);
+                (
+                    VectorSortOrder(Box::new(new_arr), Box::new(new_dir)),
+                    arr_a2a || dir_a2a,
+                )
             }
 
             // 0-arity builtins - no A2A refs

@@ -865,6 +865,14 @@ impl<'module> Compiler<'module> {
                         self.push(Opcode::PopView {});
                         return Ok(Some(()));
                     }
+                    BuiltinFn::VectorSelect(_, _, _, _, _)
+                    | BuiltinFn::VectorElmMap(_, _)
+                    | BuiltinFn::VectorSortOrder(_, _) => {
+                        return sim_err!(
+                            TodoArrayBuiltin,
+                            "VECTOR builtins not yet supported in VM".to_owned()
+                        );
+                    }
                 };
                 let func = match builtin {
                     BuiltinFn::Lookup(_, _, _)
@@ -903,7 +911,10 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Rank(_, _)
                     | BuiltinFn::Size(_)
                     | BuiltinFn::Stddev(_)
-                    | BuiltinFn::Sum(_) => {
+                    | BuiltinFn::Sum(_)
+                    | BuiltinFn::VectorSelect(_, _, _, _, _)
+                    | BuiltinFn::VectorElmMap(_, _)
+                    | BuiltinFn::VectorSortOrder(_, _) => {
                         return sim_err!(TodoArrayBuiltin, "".to_owned());
                     }
                 };
@@ -1226,6 +1237,17 @@ impl<'module> Compiler<'module> {
                         self.collect_iter_source_views_impl(c, views, seen);
                     }
                 }
+            }
+            VectorSelect(a, b, c, d, e) => {
+                self.collect_iter_source_views_impl(a, views, seen);
+                self.collect_iter_source_views_impl(b, views, seen);
+                self.collect_iter_source_views_impl(c, views, seen);
+                self.collect_iter_source_views_impl(d, views, seen);
+                self.collect_iter_source_views_impl(e, views, seen);
+            }
+            VectorElmMap(a, b) | VectorSortOrder(a, b) => {
+                self.collect_iter_source_views_impl(a, views, seen);
+                self.collect_iter_source_views_impl(b, views, seen);
             }
             // Constants/no-arg builtins
             Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {}

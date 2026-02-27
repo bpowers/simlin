@@ -379,8 +379,71 @@ impl<'input> Parser<'input> {
         Ok(left)
     }
 
+    /// Check for a multi-word function name at the current position.
+    /// Returns `Some((combined_name, token_count))` if the next tokens
+    /// form a known multi-word function followed by `(`.
+    fn try_multiword_function(&self) -> Option<(String, usize)> {
+        // Multi-word function patterns: the last word is followed by '('
+        // VECTOR SELECT(  -> 2 words
+        // VECTOR ELM MAP( -> 3 words
+        // VECTOR SORT ORDER( -> 3 words
+        static PATTERNS: &[&[&str]] = &[
+            &["vector", "select"],
+            &["vector", "elm", "map"],
+            &["vector", "sort", "order"],
+        ];
+
+        if self.peek_kind() != Some(TokenKind::Ident) {
+            return None;
+        }
+
+        for pattern in PATTERNS {
+            let n = pattern.len();
+            if self.pos + n >= self.tokens.len() {
+                continue;
+            }
+            // Check that word [n] (just past the pattern) is '('
+            if TokenKind::from(&self.tokens[self.pos + n].1) != TokenKind::LParen {
+                continue;
+            }
+            let mut matched = true;
+            for (i, &word) in pattern.iter().enumerate() {
+                if let (_, Token::Ident(s), _) = &self.tokens[self.pos + i] {
+                    if !s.eq_ignore_ascii_case(word) {
+                        matched = false;
+                        break;
+                    }
+                } else {
+                    matched = false;
+                    break;
+                }
+            }
+            if matched {
+                let name = pattern.join("_");
+                return Some((name, n));
+            }
+        }
+        None
+    }
+
     /// Parse function application: id(args)
     fn parse_app(&mut self) -> Result<Expr0, EquationError> {
+        // Check for multi-word function names (e.g., VECTOR SELECT, VECTOR ELM MAP)
+        if let Some((name, word_count)) = self.try_multiword_function() {
+            let (lpos, _, _) = self.tokens[self.pos];
+            for _ in 0..word_count {
+                self.advance();
+            }
+            self.advance(); // consume '('
+            let args = self.parse_comma_separated_exprs()?;
+            let (_, _, rpos) = *self.expect(TokenKind::RParen)?;
+
+            return Ok(Expr0::App(
+                UntypedBuiltinFn(name, args),
+                Loc::new(lpos, rpos),
+            ));
+        }
+
         // Check if we have an identifier followed by '('
         if self.peek_kind() == Some(TokenKind::Ident)
             && self.pos + 1 < self.tokens.len()

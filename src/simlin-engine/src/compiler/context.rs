@@ -687,6 +687,20 @@ impl Context<'_> {
 
             // IsModuleInput has string + loc, no Expr
             IsModuleInput(name, loc) => IsModuleInput(name.clone(), *loc),
+
+            VectorSelect(a, b, c, d, e) => VectorSelect(
+                Box::new(self.lower_pass0(a)),
+                Box::new(self.lower_pass0(b)),
+                Box::new(self.lower_pass0(c)),
+                Box::new(self.lower_pass0(d)),
+                Box::new(self.lower_pass0(e)),
+            ),
+            VectorElmMap(a, b) => {
+                VectorElmMap(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b)))
+            }
+            VectorSortOrder(a, b) => {
+                VectorSortOrder(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b)))
+            }
         }
     }
 
@@ -1843,6 +1857,30 @@ impl Context<'_> {
             BFn::Sum(a) => {
                 let a = self.with_preserved_wildcards().lower_from_expr3(a)?;
                 BuiltinFn::Sum(Box::new(a))
+            }
+            BFn::VectorSelect(sel, expr, max_val, action, err) => {
+                let ctx = self.with_preserved_wildcards();
+                BuiltinFn::VectorSelect(
+                    Box::new(ctx.lower_from_expr3(sel)?),
+                    Box::new(ctx.lower_from_expr3(expr)?),
+                    Box::new(self.lower_from_expr3(max_val)?),
+                    Box::new(self.lower_from_expr3(action)?),
+                    Box::new(self.lower_from_expr3(err)?),
+                )
+            }
+            BFn::VectorElmMap(src, offs) => {
+                let ctx = self.with_preserved_wildcards();
+                BuiltinFn::VectorElmMap(
+                    Box::new(ctx.lower_from_expr3(src)?),
+                    Box::new(ctx.lower_from_expr3(offs)?),
+                )
+            }
+            BFn::VectorSortOrder(arr, dir) => {
+                let ctx = self.with_preserved_wildcards();
+                BuiltinFn::VectorSortOrder(
+                    Box::new(ctx.lower_from_expr3(arr)?),
+                    Box::new(self.lower_from_expr3(dir)?),
+                )
             }
         })
     }

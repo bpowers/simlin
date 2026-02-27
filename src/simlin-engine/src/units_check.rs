@@ -218,6 +218,9 @@ impl UnitEvaluator<'_> {
                         Ok(units)
                     }
                     BuiltinFn::Rank(a, _rest) => self.check(a),
+                    BuiltinFn::VectorSelect(_, expr_array, _, _, _) => self.check(expr_array),
+                    BuiltinFn::VectorElmMap(source, _) => self.check(source),
+                    BuiltinFn::VectorSortOrder(_, _) => Ok(Units::Constant),
                 }
             }
             Expr2::Subscript(base_name, _, _, loc) => {

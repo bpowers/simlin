@@ -132,6 +132,10 @@ impl ModuleEvaluator<'_> {
                 BuiltinFn::SafeDiv(a, b, _) => {
                     Self::find_array_dims(a).or_else(|| Self::find_array_dims(b))
                 }
+                // Array-producing: output has same dims as offset_array
+                BuiltinFn::VectorElmMap(_, offset) => Self::find_array_dims(offset),
+                // Array-producing: output has same dims as input array
+                BuiltinFn::VectorSortOrder(arr, _) => Self::find_array_dims(arr),
                 _ => None,
             },
             _ => None,
@@ -320,6 +324,44 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Arccos(e) => self.eval_at_index(e, index).acos(),
                     BuiltinFn::Arcsin(e) => self.eval_at_index(e, index).asin(),
                     BuiltinFn::Arctan(e) => self.eval_at_index(e, index).atan(),
+                    BuiltinFn::VectorElmMap(source_array, offset_array) => {
+                        let mut source_values = Vec::new();
+                        self.iter_array_elements(source_array, |val| {
+                            source_values.push(val);
+                        });
+                        let offset = self.eval_at_index(offset_array, index).round() as usize;
+                        if offset < source_values.len() {
+                            source_values[offset]
+                        } else {
+                            f64::NAN
+                        }
+                    }
+                    BuiltinFn::VectorSortOrder(array_expr, direction_expr) => {
+                        let direction = self.eval(direction_expr).round() as i32;
+                        let mut values = Vec::new();
+                        self.iter_array_elements(array_expr, |val| {
+                            values.push(val);
+                        });
+                        let mut indexed: Vec<(usize, f64)> = values
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &v)| (i + 1, v))
+                            .collect();
+                        if direction == 1 {
+                            indexed.sort_by(|a, b| {
+                                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        } else {
+                            indexed.sort_by(|a, b| {
+                                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        }
+                        if index < indexed.len() {
+                            indexed[index].0 as f64
+                        } else {
+                            f64::NAN
+                        }
+                    }
                     _ => self.eval(expr), // Fall back to scalar eval for other builtins
                 }
             }
@@ -1039,6 +1081,99 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Size(arg) => self.get_array_size(arg) as f64,
                     BuiltinFn::Rank(_, _) => {
                         unreachable!();
+                    }
+                    BuiltinFn::VectorSelect(
+                        selection_array,
+                        expression_array,
+                        max_value,
+                        action_expr,
+                        _error_handling,
+                    ) => {
+                        let action = self.eval(action_expr).round() as i32;
+                        let max_val = self.eval(max_value);
+
+                        let mut selection_values = Vec::new();
+                        self.iter_array_elements(selection_array, |val| {
+                            selection_values.push(val);
+                        });
+
+                        let mut expression_values = Vec::new();
+                        self.iter_array_elements(expression_array, |val| {
+                            expression_values.push(val);
+                        });
+
+                        let selected: Vec<f64> = selection_values
+                            .iter()
+                            .zip(expression_values.iter())
+                            .filter(|(sel, _)| is_truthy(**sel))
+                            .map(|(_, expr)| *expr)
+                            .collect();
+
+                        if selected.is_empty() {
+                            max_val
+                        } else if action == 3 {
+                            // VSMAX
+                            selected.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                        } else {
+                            // VSSUM (action == 0)
+                            selected.iter().sum()
+                        }
+                    }
+                    BuiltinFn::VectorElmMap(source_array, offset_array) => {
+                        let mut source_values = Vec::new();
+                        self.iter_array_elements(source_array, |val| {
+                            source_values.push(val);
+                        });
+
+                        let mut offset_values = Vec::new();
+                        self.iter_array_elements(offset_array, |val| {
+                            offset_values.push(val);
+                        });
+
+                        // Evaluated per-element: offset is 0-based into source.
+                        // For scalar eval, use the first offset.
+                        if offset_values.is_empty() {
+                            return f64::NAN;
+                        }
+
+                        let idx = offset_values[0].round() as usize;
+                        if idx < source_values.len() {
+                            source_values[idx]
+                        } else {
+                            f64::NAN
+                        }
+                    }
+                    BuiltinFn::VectorSortOrder(array_expr, direction_expr) => {
+                        let direction = self.eval(direction_expr).round() as i32;
+
+                        let mut values = Vec::new();
+                        self.iter_array_elements(array_expr, |val| {
+                            values.push(val);
+                        });
+
+                        // Create 1-based index-value pairs
+                        let mut indexed: Vec<(usize, f64)> = values
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &v)| (i + 1, v))
+                            .collect();
+
+                        if direction == 1 {
+                            indexed.sort_by(|a, b| {
+                                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        } else {
+                            indexed.sort_by(|a, b| {
+                                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        }
+
+                        if indexed.is_empty() {
+                            return f64::NAN;
+                        }
+
+                        // Return the first sorted index for scalar eval
+                        indexed[0].0 as f64
                     }
                 }
             }

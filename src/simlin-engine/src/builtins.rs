@@ -94,6 +94,12 @@ pub enum BuiltinFn<Expr> {
     Size(Box<Expr>),
     Stddev(Box<Expr>),
     Sum(Box<Expr>),
+    // VECTOR SELECT(selection_array, expression_array, max_value, action, error_handling)
+    VectorSelect(Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>),
+    // VECTOR ELM MAP(source_array, offset_array)
+    VectorElmMap(Box<Expr>, Box<Expr>),
+    // VECTOR SORT ORDER(array, direction)
+    VectorSortOrder(Box<Expr>, Box<Expr>),
 }
 
 impl<Expr> BuiltinFn<Expr> {
@@ -137,6 +143,9 @@ impl<Expr> BuiltinFn<Expr> {
             Size(_) => "size",
             Stddev(_) => "stddev",
             Sum(_) => "sum",
+            VectorSelect(_, _, _, _, _) => "vector_select",
+            VectorElmMap(_, _) => "vector_elm_map",
+            VectorSortOrder(_, _) => "vector_sort_order",
         }
     }
 
@@ -221,6 +230,15 @@ impl<Expr> BuiltinFn<Expr> {
             Size(a) => Size(Box::new(f(*a)?)),
             Stddev(a) => Stddev(Box::new(f(*a)?)),
             Sum(a) => Sum(Box::new(f(*a)?)),
+            VectorSelect(a, b, c, d, e) => VectorSelect(
+                Box::new(f(*a)?),
+                Box::new(f(*b)?),
+                Box::new(f(*c)?),
+                Box::new(f(*d)?),
+                Box::new(f(*e)?),
+            ),
+            VectorElmMap(a, b) => VectorElmMap(Box::new(f(*a)?), Box::new(f(*b)?)),
+            VectorSortOrder(a, b) => VectorSortOrder(Box::new(f(*a)?), Box::new(f(*b)?)),
         })
     }
 
@@ -289,6 +307,17 @@ impl<Expr> BuiltinFn<Expr> {
                     }
                 }
             }
+            VectorSelect(a, b, c, d, e) => {
+                f(a);
+                f(b);
+                f(c);
+                f(d);
+                f(e);
+            }
+            VectorElmMap(a, b) | VectorSortOrder(a, b) => {
+                f(a);
+                f(b);
+            }
         }
     }
 }
@@ -336,6 +365,9 @@ pub fn is_builtin_fn(name: &str) -> bool {
         | "size"
         | "stddev"
         | "sum"
+        | "vector_select"
+        | "vector_elm_map"
+        | "vector_sort_order"
         )
 }
 
@@ -415,6 +447,17 @@ where
                     cb(BuiltinContents::Expr(c));
                 }
             }
+        }
+        BuiltinFn::VectorSelect(a, b, c, d, e) => {
+            cb(BuiltinContents::Expr(a));
+            cb(BuiltinContents::Expr(b));
+            cb(BuiltinContents::Expr(c));
+            cb(BuiltinContents::Expr(d));
+            cb(BuiltinContents::Expr(e));
+        }
+        BuiltinFn::VectorElmMap(a, b) | BuiltinFn::VectorSortOrder(a, b) => {
+            cb(BuiltinContents::Expr(a));
+            cb(BuiltinContents::Expr(b));
         }
     }
 }

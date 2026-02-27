@@ -848,6 +848,17 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
             extract_temp_sizes(a, temp_sizes_map);
             extract_temp_sizes(b, temp_sizes_map);
         }
+        BuiltinFn::VectorSelect(a, b, c, d, e) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+            extract_temp_sizes(c, temp_sizes_map);
+            extract_temp_sizes(d, temp_sizes_map);
+            extract_temp_sizes(e, temp_sizes_map);
+        }
+        BuiltinFn::VectorElmMap(a, b) | BuiltinFn::VectorSortOrder(a, b) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+        }
         BuiltinFn::Inf
         | BuiltinFn::Pi
         | BuiltinFn::Time

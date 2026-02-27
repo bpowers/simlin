@@ -508,6 +508,13 @@ impl UnitInferer<'_> {
 
                     Ok(a_units)
                 }
+                BuiltinFn::VectorSelect(_, expr_array, _, _, _) => {
+                    self.gen_constraints(expr_array, prefix, current_var, constraints)
+                }
+                BuiltinFn::VectorElmMap(source, _) => {
+                    self.gen_constraints(source, prefix, current_var, constraints)
+                }
+                BuiltinFn::VectorSortOrder(_, _) => Ok(Units::Constant),
             },
             Expr2::Subscript(base_name, _, _, _) => {
                 // A subscripted expression has the same units as the base array
