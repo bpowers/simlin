@@ -24,11 +24,12 @@ pub(super) enum GetDirectCall {
         time_col: String,
         data_cell: String,
     },
-    /// GET DIRECT CONSTANTS(file, tab, cell)
+    /// GET DIRECT CONSTANTS(file, tab, row_or_cell, col)
     Constants {
         file: String,
         tab: String,
-        cell: String,
+        row_or_cell: String,
+        col: String,
     },
     /// GET DIRECT LOOKUPS(file, tab, x_col, y_cell)
     Lookups {
@@ -97,7 +98,8 @@ pub(super) fn parse_get_direct(s: &str) -> Option<GetDirectCall> {
                 Some(GetDirectCall::Constants {
                     file: args[0].clone(),
                     tab: args[1].clone(),
-                    cell: args[2].clone(),
+                    row_or_cell: args[2].clone(),
+                    col: args.get(3).cloned().unwrap_or_default(),
                 })
             } else {
                 None
@@ -195,9 +197,14 @@ pub(super) fn resolve_get_direct(
             let gf = pairs_to_graphical_function(&pairs);
             Ok(ResolvedData::Lookup("TIME".to_string(), gf))
         }
-        GetDirectCall::Constants { file, tab, cell } => {
+        GetDirectCall::Constants {
+            file,
+            tab,
+            row_or_cell,
+            col,
+        } => {
             let file = resolve_file_alias(file, aliases);
-            let value = provider.load_constant(&file, tab, cell, "")?;
+            let value = provider.load_constant(&file, tab, row_or_cell, col)?;
             Ok(ResolvedData::Constant(value))
         }
         GetDirectCall::Lookups {
@@ -332,10 +339,36 @@ mod tests {
         let s = "{GET DIRECT CONSTANTS('data/a.csv', ',', 'B2')}";
         let call = parse_get_direct(s).unwrap();
         match call {
-            GetDirectCall::Constants { file, tab, cell } => {
+            GetDirectCall::Constants {
+                file,
+                tab,
+                row_or_cell,
+                col,
+            } => {
                 assert_eq!(file, "data/a.csv");
                 assert_eq!(tab, ",");
-                assert_eq!(cell, "B2");
+                assert_eq!(row_or_cell, "B2");
+                assert_eq!(col, "");
+            }
+            _ => panic!("Expected Constants call"),
+        }
+    }
+
+    #[test]
+    fn test_parse_get_direct_constants_4_args() {
+        let s = "{GET DIRECT CONSTANTS('data/a.xlsx', 'Sheet1', '2', 'B')}";
+        let call = parse_get_direct(s).unwrap();
+        match call {
+            GetDirectCall::Constants {
+                file,
+                tab,
+                row_or_cell,
+                col,
+            } => {
+                assert_eq!(file, "data/a.xlsx");
+                assert_eq!(tab, "Sheet1");
+                assert_eq!(row_or_cell, "2");
+                assert_eq!(col, "B");
             }
             _ => panic!("Expected Constants call"),
         }
@@ -463,10 +496,16 @@ mod tests {
         let s = "{GET DIRECT CONSTANTS('data/b.csv', ',', 'B2*')}";
         let call = parse_get_direct(s).unwrap();
         match call {
-            GetDirectCall::Constants { file, tab, cell } => {
+            GetDirectCall::Constants {
+                file,
+                tab,
+                row_or_cell,
+                col,
+            } => {
                 assert_eq!(file, "data/b.csv");
                 assert_eq!(tab, ",");
-                assert_eq!(cell, "B2*");
+                assert_eq!(row_or_cell, "B2*");
+                assert_eq!(col, "");
             }
             _ => panic!("Expected Constants call"),
         }
