@@ -1211,6 +1211,7 @@ mod tests {
                 elements: canonical_elements,
                 indexed_elements,
                 maps_to: None,
+                mappings: vec![],
             },
         )
     }

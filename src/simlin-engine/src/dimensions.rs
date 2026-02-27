@@ -19,6 +19,18 @@ pub struct NamedDimension {
     /// Elements correspond positionally: elements[i] of this dimension corresponds to
     /// elements[i] of the target dimension.
     pub maps_to: Option<CanonicalDimensionName>,
+    /// All dimension mappings including element-level correspondence.
+    /// Empty for dimensions with no mappings.
+    pub mappings: Vec<DimensionMappingInfo>,
+}
+
+/// Element-level dimension mapping info.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
+pub struct DimensionMappingInfo {
+    pub target: CanonicalDimensionName,
+    /// Source element -> target element pairs. When empty, positional mapping is assumed.
+    pub element_map: Vec<(CanonicalElementName, CanonicalElementName)>,
 }
 
 impl NamedDimension {
@@ -158,12 +170,30 @@ impl From<&datamodel::Dimension> for Dimension {
                     // system dynamic indexes are 1-indexed
                     .map(|(i, elem): (usize, &CanonicalElementName)| (elem.clone(), i + 1))
                     .collect();
+                let mappings = dim
+                    .mappings
+                    .iter()
+                    .map(|m| DimensionMappingInfo {
+                        target: CanonicalDimensionName::from_raw(&m.target),
+                        element_map: m
+                            .element_map
+                            .iter()
+                            .map(|(s, t)| {
+                                (
+                                    CanonicalElementName::from_raw(s),
+                                    CanonicalElementName::from_raw(t),
+                                )
+                            })
+                            .collect(),
+                    })
+                    .collect();
                 Dimension::Named(
                     CanonicalDimensionName::from_raw(&dim.name),
                     NamedDimension {
                         indexed_elements,
                         elements: canonical_elements,
                         maps_to,
+                        mappings,
                     },
                 )
             }
@@ -249,12 +279,47 @@ impl DimensionsContext {
 
     /// Get the maps_to target for a dimension (e.g., DimA -> DimB).
     /// Returns None for indexed dimensions or dimensions without a mapping.
+    /// For dimensions with multiple mapping targets, returns the first one.
     pub fn get_maps_to(
         &self,
         dim_name: &CanonicalDimensionName,
     ) -> Option<&CanonicalDimensionName> {
         if let Some(Dimension::Named(_, named)) = self.dimensions.get(dim_name) {
-            named.maps_to.as_ref()
+            // Prefer the legacy maps_to field (set for simple single positional mappings)
+            if named.maps_to.is_some() {
+                return named.maps_to.as_ref();
+            }
+            // Fall back to the first mapping target
+            named.mappings.first().map(|m| &m.target)
+        } else {
+            None
+        }
+    }
+
+    /// Check if a dimension has any mapping to a specific target dimension.
+    pub fn has_mapping_to(
+        &self,
+        dim_name: &CanonicalDimensionName,
+        target: &CanonicalDimensionName,
+    ) -> bool {
+        if let Some(Dimension::Named(_, named)) = self.dimensions.get(dim_name) {
+            if named.maps_to.as_ref() == Some(target) {
+                return true;
+            }
+            named.mappings.iter().any(|m| &m.target == target)
+        } else {
+            false
+        }
+    }
+
+    /// Find the mapping info for a specific source -> target pair.
+    fn find_mapping_info(
+        &self,
+        source_dim: &CanonicalDimensionName,
+        target_dim: &CanonicalDimensionName,
+    ) -> Option<&DimensionMappingInfo> {
+        if let Some(Dimension::Named(_, named)) = self.dimensions.get(source_dim) {
+            named.mappings.iter().find(|m| &m.target == target_dim)
         } else {
             None
         }
@@ -283,26 +348,33 @@ impl DimensionsContext {
         target_dim: &CanonicalDimensionName,
         target_element: &CanonicalElementName,
     ) -> Option<CanonicalElementName> {
-        // Verify source maps to target
-        if self.get_maps_to(source_dim) != Some(target_dim) {
+        // Verify source has a mapping to target
+        if !self.has_mapping_to(source_dim, target_dim) {
             return None;
         }
 
-        // Get source dimension first to validate it's named
+        // Check if there's an element-level mapping
+        if let Some(mapping_info) = self.find_mapping_info(source_dim, target_dim)
+            && !mapping_info.element_map.is_empty()
+        {
+            return mapping_info
+                .element_map
+                .iter()
+                .find(|(_, t)| t == target_element)
+                .map(|(s, _)| s.clone());
+        }
+
+        // Positional mapping fallback
         let source_named = match self.dimensions.get(source_dim)? {
             Dimension::Named(_, named) => named,
             Dimension::Indexed(_, _) => return None,
         };
 
-        // Get the target dimension to find element's position
         let target_named = match self.dimensions.get(target_dim)? {
             Dimension::Named(_, named) => named,
             Dimension::Indexed(_, _) => return None,
         };
 
-        // Validate dimensions have same size for valid positional mapping.
-        // If sizes don't match, this is a configuration error in the model -
-        // dimension mappings require 1:1 positional correspondence.
         if source_named.elements.len() != target_named.elements.len() {
             return None;
         }
@@ -312,6 +384,64 @@ impl DimensionsContext {
 
         // Get element at same position in source (convert 1-indexed to 0-indexed)
         source_named.elements.get(position - 1).cloned()
+    }
+
+    /// Translate an element using dimension mapping in either direction.
+    ///
+    /// Unlike `translate_to_source_via_mapping` which only handles the forward case
+    /// (source.maps_to == target), this method handles both directions:
+    /// - Forward: source_dim.maps_to == target_dim
+    /// - Reverse: target_dim.maps_to == source_dim
+    ///
+    /// In the reverse case, we know the target element and need to find the
+    /// corresponding source element using positional correspondence.
+    pub fn translate_via_mapping(
+        &self,
+        source_dim: &CanonicalDimensionName,
+        target_dim: &CanonicalDimensionName,
+        target_element: &CanonicalElementName,
+    ) -> Option<CanonicalElementName> {
+        // Try forward: source.maps_to == target
+        if let Some(result) =
+            self.translate_to_source_via_mapping(source_dim, target_dim, target_element)
+        {
+            return Some(result);
+        }
+
+        // Try reverse: target has a mapping to source
+        if self.has_mapping_to(target_dim, source_dim) {
+            // Check for element-level mapping in reverse
+            if let Some(mapping_info) = self.find_mapping_info(target_dim, source_dim)
+                && !mapping_info.element_map.is_empty()
+            {
+                // element_map is (target_elem, source_elem) pairs for target->source.
+                // We have target_element and need the corresponding source element.
+                return mapping_info
+                    .element_map
+                    .iter()
+                    .find(|(t, _)| t == target_element)
+                    .map(|(_, s)| s.clone());
+            }
+
+            // Positional fallback
+            let target_named = match self.dimensions.get(target_dim)? {
+                Dimension::Named(_, named) => named,
+                Dimension::Indexed(_, _) => return None,
+            };
+            let source_named = match self.dimensions.get(source_dim)? {
+                Dimension::Named(_, named) => named,
+                Dimension::Indexed(_, _) => return None,
+            };
+
+            if source_named.elements.len() != target_named.elements.len() {
+                return None;
+            }
+
+            let position = *target_named.indexed_elements.get(target_element)?;
+            return source_named.elements.get(position - 1).cloned();
+        }
+
+        None
     }
 
     /// Check if child is a subdimension of parent (all child elements exist in parent).

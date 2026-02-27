@@ -888,6 +888,21 @@ fn simulates_smooth_with_dim_mappings() {
 }
 
 #[test]
+fn simulates_subscript_mdl() {
+    simulate_mdl_path("../../test/sdeverywhere/models/subscript/subscript.mdl");
+}
+
+#[test]
+fn simulates_mapping_mdl() {
+    simulate_mdl_path("../../test/sdeverywhere/models/mapping/mapping.mdl");
+}
+
+#[test]
+fn simulates_multimap_mdl() {
+    simulate_mdl_path("../../test/sdeverywhere/models/multimap/multimap.mdl");
+}
+
+#[test]
 fn simulates_npv_xmile() {
     simulate_path("../../test/sdeverywhere/models/npv/npv.xmile");
 }
