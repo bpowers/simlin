@@ -4423,6 +4423,7 @@ fn test_sparse_per_element_gfs_preserve_table_indices() {
                             }),
                         ),
                     ],
+                    None,
                 ),
                 documentation: String::new(),
                 units: None,

@@ -1915,6 +1915,7 @@ fn test_arrays() {
                                 ("b".to_owned(), "7".to_owned(), None, None),
                                 ("c".to_owned(), "5".to_owned(), None, None),
                             ],
+                            None,
                         ),
                         documentation: "".to_owned(),
                         units: None,

@@ -291,7 +291,7 @@ impl From<Equation> for project_io::variable::Equation {
                         },
                     )
                 }
-                Equation::Arrayed(dimension_names, elements) => {
+                Equation::Arrayed(dimension_names, elements, _default_eq) => {
                     project_io::variable::equation::Equation::Arrayed(
                         project_io::variable::ArrayedEquation {
                             dimension_names,
@@ -347,6 +347,7 @@ impl From<project_io::variable::Equation> for Equation {
                         )
                     })
                     .collect(),
+                None,
             ),
         }
     }
@@ -368,6 +369,7 @@ fn test_equation_roundtrip() {
                     None,
                 ),
             ],
+            None,
         ),
     ];
     for expected in cases {

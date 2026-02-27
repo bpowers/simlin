@@ -135,7 +135,7 @@ fn gen_equation(eq: &Equation) -> String {
                 escape_string(s),
             )
         }
-        Equation::Arrayed(dims, elements) => {
+        Equation::Arrayed(dims, elements, _default_eq) => {
             let elems: Vec<String> = elements
                 .iter()
                 .map(|(name, eqn, units, gf)| {
@@ -149,7 +149,7 @@ fn gen_equation(eq: &Equation) -> String {
                 })
                 .collect();
             format!(
-                "Equation::Arrayed({}, vec![{}])",
+                "Equation::Arrayed({}, vec![{}], None)",
                 gen_vec_string(dims),
                 elems.join(", ")
             )

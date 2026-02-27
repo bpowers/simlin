@@ -444,7 +444,7 @@ fn apply_ast_to_equation_main(equation: &mut datamodel::Equation, ast: &Ast<Expr
         (datamodel::Equation::ApplyToAll(_, main), Ast::ApplyToAll(_, expr)) => {
             *main = expr2_to_string(expr);
         }
-        (datamodel::Equation::Arrayed(_, elements), Ast::Arrayed(_, exprs)) => {
+        (datamodel::Equation::Arrayed(_, elements, _), Ast::Arrayed(_, exprs)) => {
             for (element_name, equation, _, _) in elements.iter_mut() {
                 let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
                 if let Some(expr) = exprs.get(&canonical_element) {
@@ -464,7 +464,7 @@ fn apply_ast_to_equation_initial(equation: &mut datamodel::Equation, ast: &Ast<E
         (datamodel::Equation::ApplyToAll(_, _), Ast::ApplyToAll(_, _)) => {
             // active_initial now lives in Compat, not in Equation
         }
-        (datamodel::Equation::Arrayed(_, elements), Ast::Arrayed(_, exprs)) => {
+        (datamodel::Equation::Arrayed(_, elements, _), Ast::Arrayed(_, exprs)) => {
             for (element_name, _, initial, _) in elements.iter_mut() {
                 if let Some(initial_value) = initial.as_mut() {
                     let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
@@ -1498,6 +1498,7 @@ mod tests {
                                     None,
                                 ),
                             ],
+                            None,
                         ),
                         documentation: String::new(),
                         units: None,
@@ -1531,7 +1532,7 @@ mod tests {
 
         match model.get_variable("regional_growth").unwrap() {
             Variable::Aux(aux) => match &aux.equation {
-                datamodel::Equation::Arrayed(dims, elements) => {
+                datamodel::Equation::Arrayed(dims, elements, _default_eq) => {
                     assert_eq!(dims, &vec!["Region".to_string()]);
                     assert_eq!(elements[0].0, "North");
                     assert_eq!(elements[0].1, "initial_value * 1.5");

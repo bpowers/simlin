@@ -307,7 +307,7 @@ impl From<&datamodel::Equation> for SourceEquation {
             datamodel::Equation::ApplyToAll(dims, s) => {
                 SourceEquation::ApplyToAll(dims.clone(), s.clone())
             }
-            datamodel::Equation::Arrayed(dims, elements) => SourceEquation::Arrayed(
+            datamodel::Equation::Arrayed(dims, elements, _default_eq) => SourceEquation::Arrayed(
                 dims.clone(),
                 elements
                     .iter()
@@ -475,6 +475,7 @@ fn source_equation_to_datamodel(eq: &SourceEquation) -> datamodel::Equation {
                     )
                 })
                 .collect(),
+            None,
         ),
     }
 }

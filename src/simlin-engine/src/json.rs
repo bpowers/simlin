@@ -703,6 +703,7 @@ impl From<Stock> for datamodel::Stock {
                                 )
                             })
                             .collect(),
+                        arrayed.equation,
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -776,6 +777,7 @@ impl From<Flow> for datamodel::Flow {
                                 )
                             })
                             .collect(),
+                        arrayed.equation,
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -844,6 +846,7 @@ impl From<Auxiliary> for datamodel::Aux {
                                 )
                             })
                             .collect(),
+                        arrayed.equation,
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -1286,7 +1289,7 @@ impl From<datamodel::Stock> for Stock {
                     elements: None,
                 }),
             ),
-            datamodel::Equation::Arrayed(dims, elems) => {
+            datamodel::Equation::Arrayed(dims, elems, default_eq) => {
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1305,7 +1308,7 @@ impl From<datamodel::Stock> for Stock {
                     String::new(),
                     Some(ArrayedEquation {
                         dimensions: dims,
-                        equation: None,
+                        equation: default_eq,
                         compat: None,
                         elements: Some(ees),
                     }),
@@ -1354,7 +1357,7 @@ impl From<datamodel::Flow> for Flow {
                     elements: None,
                 }),
             ),
-            datamodel::Equation::Arrayed(dims, elems) => {
+            datamodel::Equation::Arrayed(dims, elems, default_eq) => {
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1373,7 +1376,7 @@ impl From<datamodel::Flow> for Flow {
                     String::new(),
                     Some(ArrayedEquation {
                         dimensions: dims,
-                        equation: None,
+                        equation: default_eq,
                         compat: None,
                         elements: Some(ees),
                     }),
@@ -1421,7 +1424,7 @@ impl From<datamodel::Aux> for Auxiliary {
                     elements: None,
                 }),
             ),
-            datamodel::Equation::Arrayed(dims, elems) => {
+            datamodel::Equation::Arrayed(dims, elems, default_eq) => {
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1440,7 +1443,7 @@ impl From<datamodel::Aux> for Auxiliary {
                     String::new(),
                     Some(ArrayedEquation {
                         dimensions: dims,
-                        equation: None,
+                        equation: default_eq,
                         compat: None,
                         elements: Some(ees),
                     }),
@@ -3333,7 +3336,7 @@ mod tests {
         };
         let dm_flow: datamodel::Flow = flow.into();
         match &dm_flow.equation {
-            datamodel::Equation::Arrayed(_, elems) => {
+            datamodel::Equation::Arrayed(_, elems, _) => {
                 assert_eq!(elems[0].2, None);
             }
             _ => panic!("expected Arrayed equation"),

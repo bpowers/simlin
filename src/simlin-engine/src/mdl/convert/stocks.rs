@@ -500,7 +500,7 @@ impl<'input> ConversionContext<'input> {
             return None;
         }
 
-        Some(Equation::Arrayed(formatted_dims, elements))
+        Some(Equation::Arrayed(formatted_dims, elements, None))
     }
 
     /// Extract the rate expression from an INTEG call.
@@ -1149,7 +1149,7 @@ Stock[DimA] = INTEG(10, 0)
                 Equation::ApplyToAll(dims, _eq_str) => {
                     assert_eq!(dims, &["DimA"], "Should have stock's dimensions");
                 }
-                Equation::Arrayed(dims, elements) => {
+                Equation::Arrayed(dims, elements, _default_eq) => {
                     assert_eq!(dims, &["DimA"], "Should have stock's dimensions");
                     assert_eq!(elements.len(), 2, "Should have 2 elements");
                 }
@@ -1183,7 +1183,7 @@ Stock[a2] = INTEG(20, 0)
 
         if let Variable::Flow(f) = net_flow {
             match &f.equation {
-                Equation::Arrayed(dims, elements) => {
+                Equation::Arrayed(dims, elements, _default_eq) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
 

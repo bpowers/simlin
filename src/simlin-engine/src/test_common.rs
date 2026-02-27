@@ -307,7 +307,7 @@ impl TestProject {
 
         self.variables.push(Variable::Aux(datamodel::Aux {
             ident: name.to_string(),
-            equation: Equation::Arrayed(dims, arrayed_equations),
+            equation: Equation::Arrayed(dims, arrayed_equations, None),
             documentation: String::new(),
             units: units.map(|s| s.to_string()),
             gf: None,

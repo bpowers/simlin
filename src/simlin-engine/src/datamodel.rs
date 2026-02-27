@@ -200,6 +200,9 @@ pub enum Equation {
             Option<String>,
             Option<GraphicalFunction>,
         )>,
+        // Default equation for elements not explicitly listed (EXCEPT semantics).
+        // When Some, this equation applies to all elements not in the Vec above.
+        Option<String>,
     ),
 }
 

@@ -752,7 +752,7 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
             let effective_eqn = wrap_active_initial(eqn, compat);
             write_single_entry(buf, ident, &effective_eqn, &dim_names, units, doc, gf);
         }
-        Equation::Arrayed(dims, elements) => {
+        Equation::Arrayed(dims, elements, _default_eq) => {
             write_arrayed_entries(buf, ident, dims, elements, units, doc);
         }
     }
@@ -801,7 +801,7 @@ fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
                 &stock.documentation,
             );
         }
-        Equation::Arrayed(_dims, elements) => {
+        Equation::Arrayed(_dims, elements, _default_eq) => {
             write_arrayed_stock_entries(
                 buf,
                 &stock.ident,
@@ -2203,6 +2203,7 @@ mod tests {
                     ("north".to_owned(), "100".to_owned(), None, None),
                     ("south".to_owned(), "200".to_owned(), None, None),
                 ],
+                None,
             ),
             documentation: "Stock by region".to_owned(),
             units: Some("widgets".to_owned()),
@@ -2358,6 +2359,7 @@ mod tests {
                     ("entry_2".to_owned(), "0.2".to_owned(), None, None),
                     ("entry_3".to_owned(), "0.3".to_owned(), None, None),
                 ],
+                None,
             ),
             documentation: String::new(),
             units: None,
@@ -2384,6 +2386,7 @@ mod tests {
                     ("north_america".to_owned(), "100".to_owned(), None, None),
                     ("south_america".to_owned(), "200".to_owned(), None, None),
                 ],
+                None,
             ),
             documentation: String::new(),
             units: None,
@@ -2419,6 +2422,7 @@ mod tests {
                         None,
                     ),
                 ],
+                None,
             ),
             documentation: String::new(),
             units: None,
@@ -2455,6 +2459,7 @@ mod tests {
                     ("a".to_owned(), String::new(), None, Some(gf.clone())),
                     ("b".to_owned(), "5".to_owned(), None, None),
                 ],
+                None,
             ),
             documentation: String::new(),
             units: None,

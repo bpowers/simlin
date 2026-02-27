@@ -538,7 +538,7 @@ x[DimA] = 1
         // Should be recognized and processed correctly
         if let Variable::Aux(a) = x {
             match &a.equation {
-                crate::datamodel::Equation::Arrayed(dims, elements) => {
+                crate::datamodel::Equation::Arrayed(dims, elements, _default_eq) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
                 }
@@ -573,7 +573,7 @@ x[b1] = 2
 
         if let Variable::Aux(a) = x {
             match &a.equation {
-                crate::datamodel::Equation::Arrayed(dims, elements) => {
+                crate::datamodel::Equation::Arrayed(dims, elements, _default_eq) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
 

@@ -302,7 +302,7 @@ fn build_tables(
     let mut errors = Vec::new();
 
     // Check for per-element gfs in arrayed equation
-    if let datamodel::Equation::Arrayed(_, elements) = equation {
+    if let datamodel::Equation::Arrayed(_, elements, _) = equation {
         let has_element_gfs = elements.iter().any(|(_, _, _, gf)| gf.is_some());
         if has_element_gfs {
             for (_, _, _, elem_gf) in elements {
@@ -388,7 +388,7 @@ fn parse_equation(
                 }
             }
         }
-        datamodel::Equation::Arrayed(dimension_names, elements) => {
+        datamodel::Equation::Arrayed(dimension_names, elements, _default_eq) => {
             let mut errors: Vec<EquationError> = vec![];
             let elements: HashMap<_, _> = elements
                 .iter()

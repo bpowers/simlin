@@ -480,7 +480,7 @@ fn normalize_equation(eq: &mut Equation) {
             dims.sort();
             *expr = normalize_expr(expr);
         }
-        Equation::Arrayed(dims, elements) => {
+        Equation::Arrayed(dims, elements, _default_eq) => {
             // Lowercase and sort dimension names for consistent comparison
             for dim in dims.iter_mut() {
                 *dim = dim.to_lowercase();
@@ -537,6 +537,7 @@ fn test_normalize_arrayed_to_apply_to_all_preserves_initial() {
                 None,
             ),
         ],
+        None,
     );
     normalize_equation(&mut eq);
     // After normalization, expressions are lowercased and spaces around operators
@@ -1251,6 +1252,7 @@ fn test_normalize_equation_sorts_arrayed_elements() {
             ("a".to_string(), "2".to_string(), None, None),
             ("c".to_string(), "3".to_string(), None, None),
         ],
+        None,
     );
     let mut eq_b = Equation::Arrayed(
         vec!["dim".to_string()],
@@ -1259,6 +1261,7 @@ fn test_normalize_equation_sorts_arrayed_elements() {
             ("c".to_string(), "3".to_string(), None, None),
             ("b".to_string(), "1".to_string(), None, None),
         ],
+        None,
     );
 
     normalize_equation(&mut eq_a);
@@ -1282,6 +1285,7 @@ fn test_normalize_equation_sorts_multidim_arrayed_elements() {
             ("a,y".to_string(), "2".to_string(), None, None),
             ("b,x".to_string(), "4".to_string(), None, None),
         ],
+        None,
     );
     let mut eq_b = Equation::Arrayed(
         vec!["dima".to_string(), "dimb".to_string()],
@@ -1291,6 +1295,7 @@ fn test_normalize_equation_sorts_multidim_arrayed_elements() {
             ("b,x".to_string(), "4".to_string(), None, None),
             ("b,y".to_string(), "3".to_string(), None, None),
         ],
+        None,
     );
 
     normalize_equation(&mut eq_a);
