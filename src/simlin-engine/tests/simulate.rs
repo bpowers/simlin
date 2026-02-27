@@ -359,6 +359,89 @@ fn simulate_path_interpreter_only(xmile_path: &str) {
     ensure_results(&expected, &results);
 }
 
+fn load_expected_results_for_mdl(mdl_path: &str) -> Option<Results> {
+    let mdl_name = std::path::Path::new(mdl_path).file_name().unwrap();
+    let dir_path = &mdl_path[0..(mdl_path.len() - mdl_name.len())];
+    let dir_path = std::path::Path::new(dir_path);
+
+    for (output_file, delimiter) in OUTPUT_FILES.iter() {
+        let output_path = dir_path.join(output_file);
+        if !output_path.exists() {
+            continue;
+        }
+        return Some(load_csv(&output_path.to_string_lossy(), *delimiter).unwrap());
+    }
+
+    let dat_file = mdl_path.replace(".mdl", ".dat");
+    let dat_path = std::path::Path::new(&dat_file);
+    if dat_path.exists() {
+        return Some(load_dat(&dat_file).unwrap());
+    }
+
+    None
+}
+
+/// Simulate a Vensim MDL file via the native parser, running both interpreter
+/// and VM and comparing against expected output.
+#[allow(dead_code)]
+fn simulate_mdl_path(mdl_path: &str) {
+    eprintln!("model (vensim mdl): {mdl_path}");
+
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+    let project = Rc::new(Project::from(datamodel_project.clone()));
+
+    let sim = Simulation::new(&project, "main")
+        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
+
+    let results1 = sim
+        .run_to_end()
+        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
+
+    let compiled = sim
+        .compile()
+        .unwrap_or_else(|e| panic!("compilation failed for {mdl_path}: {e}"));
+    let mut vm =
+        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
+    let results2 = vm.into_results();
+
+    ensure_results(&results1, &results2);
+
+    if let Some(expected) = load_expected_results_for_mdl(mdl_path) {
+        ensure_results(&expected, &results1);
+        ensure_results(&expected, &results2);
+    }
+}
+
+/// Interpreter-only simulation test for MDL files (for models that use
+/// array builtins like SUM which aren't yet supported in bytecode).
+fn simulate_mdl_path_interpreter_only(mdl_path: &str) {
+    eprintln!("model (vensim mdl, interpreter-only): {mdl_path}");
+
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+    let project = Rc::new(Project::from(datamodel_project));
+
+    let sim = Simulation::new(&project, "main")
+        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
+
+    let results = sim
+        .run_to_end()
+        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
+
+    if let Some(expected) = load_expected_results_for_mdl(mdl_path) {
+        ensure_results(&expected, &results);
+    }
+}
+
 #[test]
 fn simulates_models_correctly() {
     for &path in TEST_MODELS {
@@ -453,10 +536,28 @@ fn simulates_lookup() {
     simulate_path("../../test/sdeverywhere/models/lookup/lookup.xmile");
 }
 
+// Ignored: xmutil drops EXCEPT semantics and subscript mappings when converting
+// MDL to XMILE. The XMILE file has incorrect/incomplete equations.
+#[test]
+#[ignore]
+fn simulates_except_xmile() {
+    simulate_path("../../test/sdeverywhere/models/except/except.xmile");
+}
+
+// Ignored: the except/except2 models use cross-dimension mappings
+// (DimD -> DimA) which the compiler does not yet resolve. The EXCEPT
+// conversion itself works; the failure is in dimension mapping resolution.
 #[test]
 #[ignore]
 fn simulates_except() {
-    simulate_path("../../test/sdeverywhere/models/except/except.xmile");
+    simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/except/except.mdl");
+}
+
+// Ignored: same cross-dimension mapping issue as simulates_except.
+#[test]
+#[ignore]
+fn simulates_except2() {
+    simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/except2/except2.mdl");
 }
 
 #[test]
@@ -469,14 +570,119 @@ fn simulates_sum_interpreter_only() {
     simulate_path_interpreter_only("../../test/sdeverywhere/models/sum/sum.xmile");
 }
 
-// Ignored: The except model uses Vensim subscript mappings (e.g., "DimD: D1, D2 -> (DimA: SubA, A1)")
-// that are not preserved in the XMILE conversion. Without these mappings, equations like
-// "k[DimA] = a[DimA] + j[DimD]" cannot be resolved since there's no way to map DimD elements
-// to DimA elements.
+// Ignored: xmutil drops EXCEPT semantics and subscript mappings when converting
+// MDL to XMILE.
 #[test]
 #[ignore]
-fn simulates_except_interpreter_only() {
+fn simulates_except_xmile_interpreter_only() {
     simulate_path_interpreter_only("../../test/sdeverywhere/models/except/except.xmile");
+}
+
+/// End-to-end test for EXCEPT through the MDL->simulation pipeline.
+/// Uses a model without cross-dimension mappings so it doesn't hit the
+/// DimD->DimA mapping limitation that blocks the full except/except2 models.
+#[test]
+fn simulates_except_basic_mdl() {
+    let mdl = "\
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+SubA: A2, A3 ~~|
+g[DimA] :EXCEPT: [A1] = 7 ~~|
+g[A1] = 10 ~~|
+h[DimA] :EXCEPT: [SubA] = 8 ~~|
+p[DimA] :EXCEPT: [A1] = 2 ~~|
+p[A1] = 5 ~~|
+s[A3] = 13 ~~|
+s[SubA] :EXCEPT: [A3] = 14 ~~|
+u[DimA] :EXCEPT: [A1] = 1 ~~|
+u[A1] = 99 ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let datamodel_project =
+        open_vensim(mdl).unwrap_or_else(|e| panic!("failed to parse except_basic mdl: {e}"));
+    let project = Rc::new(Project::from(datamodel_project));
+
+    let sim = Simulation::new(&project, "main")
+        .unwrap_or_else(|e| panic!("failed to create simulation: {e}"));
+
+    let results = sim
+        .run_to_end()
+        .unwrap_or_else(|e| panic!("interpreter run failed: {e}"));
+
+    let get = |name: &str| -> f64 {
+        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+        let off = results.offsets[&ident];
+        results.iter().next().unwrap()[off]
+    };
+
+    // g[DimA] :EXCEPT: [A1] = 7, g[A1] = 10
+    assert!((get("g[a1]") - 10.0).abs() < 1e-10, "g[A1] should be 10");
+    assert!((get("g[a2]") - 7.0).abs() < 1e-10, "g[A2] should be 7");
+    assert!((get("g[a3]") - 7.0).abs() < 1e-10, "g[A3] should be 7");
+
+    // h[DimA] :EXCEPT: [SubA] = 8 (no overrides for A2, A3)
+    assert!((get("h[a1]") - 8.0).abs() < 1e-10, "h[A1] should be 8");
+    assert!(
+        (get("h[a2]") - 0.0).abs() < 1e-10,
+        "h[A2] should be 0 (undefined)"
+    );
+    assert!(
+        (get("h[a3]") - 0.0).abs() < 1e-10,
+        "h[A3] should be 0 (undefined)"
+    );
+
+    // p[DimA] :EXCEPT: [A1] = 2, p[A1] = 5
+    assert!((get("p[a1]") - 5.0).abs() < 1e-10, "p[A1] should be 5");
+    assert!((get("p[a2]") - 2.0).abs() < 1e-10, "p[A2] should be 2");
+    assert!((get("p[a3]") - 2.0).abs() < 1e-10, "p[A3] should be 2");
+
+    // s[A3] = 13, s[SubA] :EXCEPT: [A3] = 14 => s[A2]=14, s[A3]=13
+    assert!((get("s[a2]") - 14.0).abs() < 1e-10, "s[A2] should be 14");
+    assert!((get("s[a3]") - 13.0).abs() < 1e-10, "s[A3] should be 13");
+
+    // u[DimA] :EXCEPT: [A1] = 1, u[A1] = 99
+    assert!((get("u[a1]") - 99.0).abs() < 1e-10, "u[A1] should be 99");
+    assert!((get("u[a2]") - 1.0).abs() < 1e-10, "u[A2] should be 1");
+    assert!((get("u[a3]") - 1.0).abs() < 1e-10, "u[A3] should be 1");
+
+    // Also verify VM path works
+    let compiled = sim
+        .compile()
+        .unwrap_or_else(|e| panic!("compilation failed: {e}"));
+    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed: {e}"));
+    let vm_results = vm.into_results();
+
+    let get_vm = |name: &str| -> f64 {
+        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+        let off = vm_results.offsets[&ident];
+        vm_results.iter().next().unwrap()[off]
+    };
+
+    assert!(
+        (get_vm("g[a1]") - 10.0).abs() < 1e-10,
+        "VM g[A1] should be 10"
+    );
+    assert!(
+        (get_vm("g[a2]") - 7.0).abs() < 1e-10,
+        "VM g[A2] should be 7"
+    );
+    assert!(
+        (get_vm("p[a1]") - 5.0).abs() < 1e-10,
+        "VM p[A1] should be 5"
+    );
+    assert!(
+        (get_vm("s[a2]") - 14.0).abs() < 1e-10,
+        "VM s[A2] should be 14"
+    );
+    assert!(
+        (get_vm("s[a3]") - 13.0).abs() < 1e-10,
+        "VM s[A3] should be 13"
+    );
 }
 
 #[test]
@@ -538,7 +744,8 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // EmptyEquation: uses GET DIRECT SUBSCRIPT
     // "test/sdeverywhere/models/directsubs/directsubs.xmile",
     //
-    // MismatchedDimensions: uses Vensim EXCEPT syntax with subscript mappings
+    // xmutil drops EXCEPT semantics and subscript mappings in XMILE conversion.
+    // These models are tested via the MDL path (simulates_except, simulates_except2).
     // "test/sdeverywhere/models/except/except.xmile",
     // "test/sdeverywhere/models/except2/except2.xmile",
     //
