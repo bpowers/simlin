@@ -752,8 +752,8 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
             let effective_eqn = wrap_active_initial(eqn, compat);
             write_single_entry(buf, ident, &effective_eqn, &dim_names, units, doc, gf);
         }
-        Equation::Arrayed(dims, elements, _default_eq) => {
-            write_arrayed_entries(buf, ident, dims, elements, units, doc);
+        Equation::Arrayed(dims, elements, default_eq) => {
+            write_arrayed_entries(buf, ident, dims, elements, default_eq, units, doc);
         }
     }
 }
@@ -801,12 +801,14 @@ fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
                 &stock.documentation,
             );
         }
-        Equation::Arrayed(_dims, elements, _default_eq) => {
+        Equation::Arrayed(dims, elements, default_eq) => {
             write_arrayed_stock_entries(
                 buf,
                 &stock.ident,
                 &net_flow,
+                dims,
                 elements,
+                default_eq,
                 &stock.units,
                 &stock.documentation,
             );
@@ -846,29 +848,57 @@ fn write_stock_entry(
     write_units_and_comment(buf, units, doc);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_arrayed_stock_entries(
     buf: &mut String,
     ident: &str,
     net_flow: &str,
+    dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    default_equation: &Option<String>,
     units: &Option<String>,
     doc: &str,
 ) {
     let name = format_mdl_ident(ident);
-    let last_idx = elements.len().saturating_sub(1);
 
-    for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
-        let elem_display = format_mdl_element_key(elem_name);
-        let initial = normalized_stock_initial(&equation_to_mdl(eqn));
-
-        write!(buf, "{name}[{elem_display}]=").unwrap();
+    if let Some(default_eq) = default_equation {
+        let dim_display: Vec<String> = dims.iter().map(|d| format_mdl_ident(d)).collect();
+        let initial = normalized_stock_initial(&equation_to_mdl(default_eq));
+        write!(buf, "{name}[{}]=", dim_display.join(",")).unwrap();
         buf.push_str("\n\t");
         buf.push_str(&format!("INTEG({net_flow}, {initial})"));
+        buf.push_str("\n\t~~|\n");
 
-        if i < last_idx {
-            buf.push_str("\n\t~~|\n");
-        } else {
-            write_units_and_comment(buf, units, doc);
+        let last_idx = elements.len().saturating_sub(1);
+        for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
+            let elem_display = format_mdl_element_key(elem_name);
+            let initial = normalized_stock_initial(&equation_to_mdl(eqn));
+            write!(buf, "{name}[{elem_display}]=").unwrap();
+            buf.push_str("\n\t");
+            buf.push_str(&format!("INTEG({net_flow}, {initial})"));
+
+            if i < last_idx {
+                buf.push_str("\n\t~~|\n");
+            } else {
+                write_units_and_comment(buf, units, doc);
+            }
+        }
+    } else {
+        let last_idx = elements.len().saturating_sub(1);
+
+        for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
+            let elem_display = format_mdl_element_key(elem_name);
+            let initial = normalized_stock_initial(&equation_to_mdl(eqn));
+
+            write!(buf, "{name}[{elem_display}]=").unwrap();
+            buf.push_str("\n\t");
+            buf.push_str(&format!("INTEG({net_flow}, {initial})"));
+
+            if i < last_idx {
+                buf.push_str("\n\t~~|\n");
+            } else {
+                write_units_and_comment(buf, units, doc);
+            }
         }
     }
 }
@@ -923,38 +953,71 @@ fn write_single_entry(
 }
 
 /// Write arrayed (per-element) entries.
+///
+/// When `default_equation` is `Some`, the MDL EXCEPT syntax is emitted:
+/// the default equation is written with the dimension names, then each
+/// element override is written as a separate `:EXCEPT:` entry.
 fn write_arrayed_entries(
     buf: &mut String,
     ident: &str,
-    _dims: &[String],
+    dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    default_equation: &Option<String>,
     units: &Option<String>,
     doc: &str,
 ) {
     let name = format_mdl_ident(ident);
-    let last_idx = elements.len().saturating_sub(1);
 
-    for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
-        let elem_display = format_mdl_element_key(elem_name);
-        let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-
-        write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-
-        if let Some(gf) = elem_gf {
-            buf.push_str("\n\t");
-            write_lookup(buf, gf);
+    if let Some(default_eq) = default_equation {
+        let dim_display: Vec<String> = dims.iter().map(|d| format_mdl_ident(d)).collect();
+        let mdl_default = equation_to_mdl(default_eq);
+        let assign_op = if is_data_equation(default_eq) {
+            ":="
         } else {
+            "="
+        };
+        write!(buf, "{name}[{}]{assign_op}", dim_display.join(",")).unwrap();
+        buf.push_str("\n\t");
+        buf.push_str(&mdl_default);
+        buf.push_str("\n\t~~|\n");
+
+        let last_idx = elements.len().saturating_sub(1);
+        for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
+            let elem_display = format_mdl_element_key(elem_name);
             let mdl_eqn = equation_to_mdl(eqn);
+            write!(buf, "{name}[{elem_display}]=").unwrap();
             buf.push_str("\n\t");
             buf.push_str(&mdl_eqn);
-        }
 
-        if i < last_idx {
-            // Intermediate arrayed entries use the terse `~~|` separator
-            buf.push_str("\n\t~~|\n");
-        } else {
-            // Last element gets the full units/comment block
-            write_units_and_comment(buf, units, doc);
+            if i < last_idx {
+                buf.push_str("\n\t~~|\n");
+            } else {
+                write_units_and_comment(buf, units, doc);
+            }
+        }
+    } else {
+        let last_idx = elements.len().saturating_sub(1);
+
+        for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
+            let elem_display = format_mdl_element_key(elem_name);
+            let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+
+            write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
+
+            if let Some(gf) = elem_gf {
+                buf.push_str("\n\t");
+                write_lookup(buf, gf);
+            } else {
+                let mdl_eqn = equation_to_mdl(eqn);
+                buf.push_str("\n\t");
+                buf.push_str(&mdl_eqn);
+            }
+
+            if i < last_idx {
+                buf.push_str("\n\t~~|\n");
+            } else {
+                write_units_and_comment(buf, units, doc);
+            }
         }
     }
 }
@@ -975,6 +1038,7 @@ fn write_units_and_comment(buf: &mut String, units: &Option<String>, doc: &str) 
 /// Named:   `DimName: Elem1, Elem2, Elem3 ~~|`
 /// Indexed: `DimName: (1-N) ~~|`
 /// Mapped:  `DimName: Elem1, Elem2 -> MappedDim ~~|`
+/// Element-mapped: `DimName: A1, A2 -> MappedDim: B2, B1 ~~|`
 pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
     let name = format_mdl_ident(&dim.name);
     write!(buf, "{name}:").unwrap();
@@ -992,6 +1056,23 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
 
     if let Some(maps_to) = dim.maps_to() {
         write!(buf, " -> {}", format_mdl_ident(maps_to)).unwrap();
+    } else {
+        for mapping in &dim.mappings {
+            if !mapping.element_map.is_empty() {
+                let target_elems: Vec<String> = mapping
+                    .element_map
+                    .iter()
+                    .map(|(_, tgt)| format_mdl_ident(tgt))
+                    .collect();
+                write!(
+                    buf,
+                    " -> {}: {}",
+                    format_mdl_ident(&mapping.target),
+                    target_elems.join(", ")
+                )
+                .unwrap();
+            }
+        }
     }
 
     buf.push_str("\n\t~~|\n");
@@ -3902,6 +3983,72 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert_eq!(
             direct, compat,
             "compat::to_mdl should produce same result as mdl::project_to_mdl"
+        );
+    }
+
+    #[test]
+    fn write_arrayed_with_default_equation_emits_except_syntax() {
+        let var = datamodel::Variable::Aux(datamodel::Aux {
+            ident: "cost".to_string(),
+            equation: datamodel::Equation::Arrayed(
+                vec!["region".to_string()],
+                vec![
+                    ("north".to_string(), "base+1".to_string(), None, None),
+                    ("south".to_string(), "base+2".to_string(), None, None),
+                ],
+                Some("base".to_string()),
+            ),
+            documentation: String::new(),
+            units: Some("dollars".to_string()),
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        });
+
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+
+        // The default equation appears with the dimension name
+        assert!(
+            buf.contains("cost[region]="),
+            "should contain default equation entry with dimension name, got: {buf}"
+        );
+        assert!(
+            buf.contains("\tbase\n"),
+            "should contain the default equation 'base', got: {buf}"
+        );
+        // Override entries appear with element names
+        assert!(
+            buf.contains("cost[north]="),
+            "should contain north override, got: {buf}"
+        );
+        assert!(
+            buf.contains("cost[south]="),
+            "should contain south override, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_dimension_with_element_level_mapping() {
+        let dim = datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: datamodel::DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![datamodel::DimensionMapping {
+                target: "dim_b".to_string(),
+                element_map: vec![
+                    ("a1".to_string(), "b2".to_string()),
+                    ("a2".to_string(), "b1".to_string()),
+                ],
+            }],
+        };
+
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+
+        assert!(
+            buf.contains("-> dim b: b2, b1"),
+            "should contain element-level mapping, got: {buf}"
         );
     }
 }
