@@ -1212,6 +1212,15 @@ fn diff_field<T: std::fmt::Debug + PartialEq + ?Sized>(
 
 /// Compare the xmutil and native parser outputs for the C-LEARN model,
 /// collecting all differences rather than stopping at the first.
+///
+/// Ignored: 5 remaining diffs (down from 233 at the start of MDL full-compat work).
+/// Remaining issues:
+///   - 2 dimension mapping diffs (semi_agg, aggregated_regions): xmutil emits empty
+///     element_map for multi-target mappings, but the native parser builds the full
+///     per-element correspondence.
+///   - 3 equation diffs: xmutil emits ramp_from_to() (a macro call) but the native
+///     parser inlines it as ramp() (the expanded form). Resolving requires macro
+///     expansion support in the native parser's post-processing stage.
 #[test]
 #[ignore]
 fn test_clearn_equivalence() {

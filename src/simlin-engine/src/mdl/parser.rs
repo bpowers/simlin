@@ -71,6 +71,14 @@ fn extract_number(e: &Expr<'_>) -> Option<f64> {
                 None
             }
         }
+        // +2 is a valid constant array element in Vensim MDL
+        Expr::Op1(UnaryOp::Positive, inner, _) => {
+            if let Expr::Const(n, _) = inner.as_ref() {
+                Some(*n)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -1759,10 +1767,10 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_number_unary_positive_returns_none() {
+    fn test_extract_number_unary_positive_returns_value() {
         let inner = Expr::Const(7.0, loc());
         let expr = Expr::Op1(UnaryOp::Positive, Box::new(inner), loc());
-        assert_eq!(extract_number(&expr), None);
+        assert_eq!(extract_number(&expr), Some(7.0));
     }
 
     #[test]

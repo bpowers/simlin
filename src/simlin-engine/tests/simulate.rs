@@ -784,7 +784,11 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // "test/sdeverywhere/models/delayfixed2/delayfixed2.xmile",
     //
     // xmutil strips GET DIRECT CONSTANTS during XMILE conversion, leaving
-    // empty equations. Tested via the MDL path.
+    // empty equations. Not yet fully testable via MDL path: the MDL parser
+    // now handles +/- signed literals in number lists and mixed fixed-element/
+    // dimension subscripts, but multiple TabbedArray definitions for the same
+    // variable (e.g. z[C1,...] and z[C2,...]) are not yet merged into a single
+    // Arrayed equation.
     // "test/sdeverywhere/models/arrays_cname/arrays_cname.xmile",
     // "test/sdeverywhere/models/arrays_varname/arrays_varname.xmile",
     //
@@ -799,15 +803,25 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // "test/sdeverywhere/models/directsubs/directsubs.xmile",
     //
     // xmutil drops EXCEPT semantics and subscript mappings in XMILE conversion.
-    // These models are tested via the MDL path (simulates_except, simulates_except2).
+    // MDL path tests exist (simulates_except, simulates_except2) but remain
+    // #[ignore] due to MismatchedDimensions errors and missing output variables
+    // (z[a1] absent). Resolving these requires further work on dimension mapping
+    // for variables with EXCEPT and subscript-mapped dimensions.
     // "test/sdeverywhere/models/except/except.xmile",
     // "test/sdeverywhere/models/except2/except2.xmile",
     //
-    // xmutil strips GET XLS DATA during conversion. Tested via MDL path.
+    // xmutil strips GET XLS DATA during conversion. The MDL file has variables
+    // with no equations (e.g. D Values, BC Values) that Vensim populates from
+    // companion extdata_data.dat via implicit per-run data loading, which the
+    // engine does not auto-discover. Not testable via MDL path.
     // "test/sdeverywhere/models/extdata/extdata.xmile",
     //
     // xmutil strips GET DATA BETWEEN TIMES calls, leaving broken data variable
-    // references. Tested via MDL path.
+    // references. The MDL path also cannot simulate this model: the normalizer
+    // wraps GET DATA BETWEEN TIMES in opaque {GET DATA(...)} references, which
+    // the XMILE equation lexer silently discards as comments, producing empty
+    // equations. Additionally, Values[DimA] requires external data from
+    // getdata_data.dat via implicit per-run loading. Not testable via MDL path.
     // "test/sdeverywhere/models/getdata/getdata.xmile",
     //
     // xmutil drops subscript mappings in XMILE conversion.
@@ -816,7 +830,9 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // "test/sdeverywhere/models/multimap/multimap.xmile",
     //
     // xmutil doesn't inline external data from prune_data.dat into XMILE.
-    // Tested via MDL path.
+    // The MDL file has variables with no equations (A Values, BC Values, D Values,
+    // etc.) that Vensim populates from prune_data.dat via implicit per-run data
+    // loading, which the engine does not auto-discover. Not testable via MDL path.
     // "test/sdeverywhere/models/prune/prune.xmile",
     //
     // xmutil expands QUANTUM(x,q) -> (q)*INT((x)/(q)), but INT is floor
@@ -989,15 +1005,22 @@ fn simulates_longeqns_mdl() {
     simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/longeqns/longeqns.mdl");
 }
 
-// Ignored: the XMILE path is broken (xmutil strips GET DATA BETWEEN TIMES to
-// zeroed-out equations). The MDL path requires external .dat file loading for
-// data variables, which is not yet fully supported.
+// Ignored: xmutil strips GET DATA BETWEEN TIMES calls in XMILE conversion,
+// leaving zeroed-out equations for variables that depend on the data.
 #[test]
 #[ignore]
 fn simulates_getdata_xmile() {
     simulate_path("../../test/sdeverywhere/models/getdata/getdata.xmile");
 }
 
+// Ignored: two blocking issues prevent MDL path simulation.
+// (1) The MDL normalizer wraps GET DATA BETWEEN TIMES in opaque {GET DATA(...)}
+//     references, which the XMILE equation lexer discards as comments, producing
+//     empty equations for variables like value_for_a1_at_time_minus_half_year_backward.
+// (2) Values[DimA] has no equation in the MDL and must be populated from
+//     getdata_data.dat via Vensim's implicit per-run data loading, which the
+//     engine does not auto-discover. Fixing requires DataProvider integration
+//     for implicit companion .dat files.
 #[test]
 #[ignore]
 fn simulates_getdata_mdl() {

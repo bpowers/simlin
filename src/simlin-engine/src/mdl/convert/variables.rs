@@ -914,6 +914,14 @@ impl<'input> ConversionContext<'input> {
     ///
     /// For TabbedArray and NumberList, we need to create element-specific equations.
     /// This requires knowing the dimension elements to map values to subscripts.
+    ///
+    /// Handles mixed subscripts where some positions are dimension names (free/varying)
+    /// and others are element names (fixed). For example:
+    ///   `v[DimA, B1] = 1, 2, 3` -- DimA varies (A1,A2,A3), B1 is fixed
+    ///   `w[A1, DimB] = 1, 2, 3` -- A1 is fixed, DimB varies (B1,B2,B3)
+    ///
+    /// The resulting dims list contains only valid dimension names (the parent
+    /// dimension for any fixed element subscripts), matching the XMILE convention.
     fn make_array_equation(
         &self,
         lhs: &Lhs<'_>,
@@ -929,8 +937,8 @@ impl<'input> ConversionContext<'input> {
             return (Equation::Scalar(eq_str), None);
         }
 
-        // Get dimension names from subscripts
-        let dims: Vec<String> = lhs
+        // Get all subscript names from LHS (spaces->underscores, preserving case)
+        let lhs_names: Vec<String> = lhs
             .subscripts
             .iter()
             .map(|s| match s {
@@ -940,22 +948,134 @@ impl<'input> ConversionContext<'input> {
             })
             .collect();
 
-        // Look up dimension elements to create Arrayed equation
-        let elements = match self.get_dimension_elements(&dims) {
-            Some(e) => e,
-            None => {
-                // Dimension not found - fall back to ApplyToAll with first value
-                let eq_str = if !values.is_empty() {
-                    format_number(values[0])
-                } else {
-                    String::new()
-                };
-                return (Equation::ApplyToAll(dims, eq_str), None);
+        // Classify each LHS subscript as a dimension (free/varying) or a fixed element.
+        //
+        // For each position, collect:
+        //   - dim_name: the dimension name for the Arrayed dims list
+        //   - is_free: whether the position varies (true) or is fixed (false)
+        //   - fixed_elem: for fixed positions, the element name to use in keys
+        //   - free_elems: for free positions, the list of dimension elements to iterate
+        struct SubscriptInfo {
+            dim_name: String,
+            is_free: bool,
+            fixed_elem: Option<String>,
+            free_elems: Vec<String>,
+        }
+
+        let mut infos: Vec<SubscriptInfo> = Vec::with_capacity(lhs_names.len());
+        let mut all_resolved = true;
+
+        for name in &lhs_names {
+            let canonical = canonical_name(name);
+            // First try to match as a dimension name
+            let mut found = None;
+            for dim in &self.dimensions {
+                if eq_lower_space(&dim.name, &canonical)
+                    && let DimensionElements::Named(elements) = &dim.elements
+                {
+                    found = Some((dim.name.clone(), true, elements.clone()));
+                    break;
+                }
             }
+            if let Some((dim_name, is_free, elems)) = found {
+                infos.push(SubscriptInfo {
+                    dim_name,
+                    is_free,
+                    fixed_elem: None,
+                    free_elems: elems,
+                });
+                continue;
+            }
+
+            // Not a dimension name: look for it as an element in one of the dimensions
+            let mut found_parent = None;
+            for dim in &self.dimensions {
+                if let DimensionElements::Named(elements) = &dim.elements {
+                    for elem in elements {
+                        if eq_lower_space(elem, &canonical) {
+                            found_parent = Some((dim.name.clone(), elem.clone()));
+                            break;
+                        }
+                    }
+                }
+                if found_parent.is_some() {
+                    break;
+                }
+            }
+            if let Some((dim_name, elem_name)) = found_parent {
+                infos.push(SubscriptInfo {
+                    dim_name,
+                    is_free: false,
+                    fixed_elem: Some(elem_name),
+                    free_elems: vec![],
+                });
+            } else {
+                all_resolved = false;
+                break;
+            }
+        }
+
+        if !all_resolved || infos.is_empty() {
+            let eq_str = if !values.is_empty() {
+                format_number(values[0])
+            } else {
+                String::new()
+            };
+            return (Equation::ApplyToAll(lhs_names, eq_str), None);
+        }
+
+        // Build the dims list from resolved dimension names (in LHS order)
+        let dims: Vec<String> = infos.iter().map(|info| info.dim_name.clone()).collect();
+
+        // Compute Cartesian product over the free dimensions only.
+        // varying_combos[i] is a Vec<(position, element_name)> for one combination.
+        let free_positions: Vec<usize> = infos
+            .iter()
+            .enumerate()
+            .filter(|(_, info)| info.is_free)
+            .map(|(i, _)| i)
+            .collect();
+        let free_elem_lists: Vec<&Vec<String>> = infos
+            .iter()
+            .filter(|info| info.is_free)
+            .map(|info| &info.free_elems)
+            .collect();
+
+        if free_positions.is_empty() {
+            // All subscripts are fixed elements -- just one equation
+            if values.is_empty() {
+                return (Equation::ApplyToAll(dims, String::new()), None);
+            }
+            let key: String = infos
+                .iter()
+                .map(|info| info.fixed_elem.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join(",");
+            let element_eqs = vec![(key, format_number(values[0]), None, None)];
+            return (Equation::Arrayed(dims, element_eqs, None), None);
+        }
+
+        // Cartesian product of free dimension elements as Vec<Vec<String>>
+        let varying_combos: Vec<Vec<String>> = if free_elem_lists.len() == 1 {
+            free_elem_lists[0].iter().map(|e| vec![e.clone()]).collect()
+        } else {
+            let mut result: Vec<Vec<String>> =
+                free_elem_lists[0].iter().map(|e| vec![e.clone()]).collect();
+            for elems in &free_elem_lists[1..] {
+                let mut new_result = Vec::with_capacity(result.len() * elems.len());
+                for prefix in &result {
+                    for elem in *elems {
+                        let mut combo = prefix.clone();
+                        combo.push(elem.clone());
+                        new_result.push(combo);
+                    }
+                }
+                result = new_result;
+            }
+            result
         };
 
-        if elements.len() != values.len() {
-            // Length mismatch - this is an error, but for now fall back to ApplyToAll
+        if varying_combos.len() != values.len() {
             let eq_str = if !values.is_empty() {
                 format_number(values[0])
             } else {
@@ -964,58 +1084,28 @@ impl<'input> ConversionContext<'input> {
             return (Equation::ApplyToAll(dims, eq_str), None);
         }
 
-        // Create element-specific equations
+        // Build element keys: for each combination of free elements, fill in fixed elements too
         let element_eqs: Vec<(String, String, Option<String>, Option<GraphicalFunction>)> =
-            elements
+            varying_combos
                 .into_iter()
                 .zip(values.iter())
-                .map(|(elem, &val)| (elem, format_number(val), None, None))
+                .map(|(combo, &val)| {
+                    let mut parts = vec![String::new(); infos.len()];
+                    let mut free_idx = 0;
+                    for (pos, info) in infos.iter().enumerate() {
+                        if info.is_free {
+                            parts[pos] = combo[free_idx].clone();
+                            free_idx += 1;
+                        } else {
+                            parts[pos] = info.fixed_elem.as_deref().unwrap_or("").to_string();
+                        }
+                    }
+                    let key = parts.join(",");
+                    (key, format_number(val), None, None)
+                })
                 .collect();
 
         (Equation::Arrayed(dims, element_eqs, None), None)
-    }
-
-    /// Get dimension elements for the given dimension names.
-    ///
-    /// For single-dimensional arrays, returns the elements of that dimension.
-    /// For multi-dimensional arrays, returns the Cartesian product of elements
-    /// in row-major order (first dimension varies slowest).
-    ///
-    /// Returns `None` if any dimension is not found.
-    fn get_dimension_elements(&self, dim_names: &[String]) -> Option<Vec<String>> {
-        if dim_names.is_empty() {
-            return None;
-        }
-
-        // Look up elements for each dimension (case-insensitive)
-        let mut dim_elements: Vec<Vec<String>> = Vec::with_capacity(dim_names.len());
-        for dim_name in dim_names {
-            let canonical_dim = canonical_name(dim_name);
-            let mut found = false;
-            for dim in &self.dimensions {
-                // Compare canonicalized names for case-insensitive matching
-                if eq_lower_space(&dim.name, &canonical_dim)
-                    && let DimensionElements::Named(elements) = &dim.elements
-                {
-                    dim_elements.push(elements.clone());
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                return None;
-            }
-        }
-
-        // Compute Cartesian product in row-major order
-        if dim_elements.len() == 1 {
-            // Single dimension: just return the elements.
-            // len() == 1 guarantees next() returns Some.
-            return dim_elements.into_iter().next();
-        }
-
-        // Multi-dimensional: compute Cartesian product
-        Some(cartesian_product(&dim_elements))
     }
 
     /// Extract the initial value expression from an INTEG call.
@@ -1611,6 +1701,90 @@ x[a1, DimB] = 5
                     let keys: Vec<&str> = elements.iter().map(|(k, _, _, _)| k.as_str()).collect();
                     assert!(keys.contains(&"a1,b1"), "Should have a1,b1");
                     assert!(keys.contains(&"a1,b2"), "Should have a1,b2");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_number_list_dim_then_fixed_element() {
+        // v[DimA, B1] = 1, 2, 3: DimA varies (A1,A2,A3), B1 is fixed.
+        // Values map to (A1,B1)=1, (A2,B1)=2, (A3,B1)=3.
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+DimB: B1, B2, B3
+~ ~|
+v[DimA, B1] = 1, 2, 3
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let v = project.models[0]
+            .variables
+            .iter()
+            .find(|var| var.get_ident() == "v");
+        assert!(v.is_some(), "Should have v variable");
+
+        if let Some(Variable::Aux(a)) = v {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq) => {
+                    // B1 is an element of DimB, so the dims list contains the parent: DimB
+                    assert_eq!(dims, &["DimA", "DimB"]);
+                    assert_eq!(elements.len(), 3);
+                    assert_eq!(elements[0].0, "A1,B1");
+                    assert_eq!(elements[0].1, "1");
+                    assert_eq!(elements[1].0, "A2,B1");
+                    assert_eq!(elements[1].1, "2");
+                    assert_eq!(elements[2].0, "A3,B1");
+                    assert_eq!(elements[2].1, "3");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_number_list_fixed_element_then_dim() {
+        // w[A1, DimB] = 1, 2, 3: A1 is fixed, DimB varies (B1,B2,B3).
+        // Values map to (A1,B1)=1, (A1,B2)=2, (A1,B3)=3.
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+DimB: B1, B2, B3
+~ ~|
+w[A1, DimB] = 1, 2, 3
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let w = project.models[0]
+            .variables
+            .iter()
+            .find(|var| var.get_ident() == "w");
+        assert!(w.is_some(), "Should have w variable");
+
+        if let Some(Variable::Aux(a)) = w {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq) => {
+                    // A1 is an element of DimA, so the dims list contains the parent: DimA
+                    assert_eq!(dims, &["DimA", "DimB"]);
+                    assert_eq!(elements.len(), 3);
+                    assert_eq!(elements[0].0, "A1,B1");
+                    assert_eq!(elements[0].1, "1");
+                    assert_eq!(elements[1].0, "A1,B2");
+                    assert_eq!(elements[1].1, "2");
+                    assert_eq!(elements[2].0, "A1,B3");
+                    assert_eq!(elements[2].1, "3");
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
             }
