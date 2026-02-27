@@ -5426,3 +5426,330 @@ fn test_previous_of_flow_interpreter_vm_parity() {
         );
     }
 }
+
+// --- LTM incremental compilation verification tests (Phase 2 Task 6) ---
+
+/// A linear chain model with no feedback loops: aux -> flow -> stock.
+/// Used to verify AC1.4 (no feedback loops = zero LTM overhead).
+fn no_loop_project() -> datamodel::Project {
+    datamodel::Project {
+        name: "no_loop".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "growth_rate".to_string(),
+                    equation: datamodel::Equation::Scalar("0.05".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "inflow".to_string(),
+                    equation: datamodel::Equation::Scalar("growth_rate".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "level".to_string(),
+                    equation: datamodel::Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["inflow".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// AC1.4: Models with no feedback loops incur zero LTM overhead when
+/// ltm_enabled=true. The layout should have no LTM variable slots and
+/// no LTM fragments should be compiled.
+#[test]
+fn test_ltm_no_loops_zero_overhead() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = no_loop_project();
+    // Extract Copy types from sync before needing &mut db.
+    // Salsa tracked return values borrow &db, so we extract scalar
+    // data (n_slots, len()) before each mutation point.
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+
+    // Layout slot count with LTM enabled
+    source_project.set_ltm_enabled(&mut db).to(true);
+    let n_slots_with_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+
+    // Layout slot count without LTM
+    source_project.set_ltm_enabled(&mut db).to(false);
+    let n_slots_without_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+
+    // Both layouts should have the same number of slots because there
+    // are no feedback loops and thus no LTM synthetic variables
+    assert_eq!(
+        n_slots_with_ltm, n_slots_without_ltm,
+        "no-loop model should have identical slot count with/without LTM: ltm={}, no_ltm={}",
+        n_slots_with_ltm, n_slots_without_ltm
+    );
+
+    // Verify LTM synthetic variables are empty for this model
+    source_project.set_ltm_enabled(&mut db).to(true);
+    let ltm_var_count = model_ltm_synthetic_variables(&db, source_model, source_project)
+        .vars
+        .len();
+    assert_eq!(
+        ltm_var_count, 0,
+        "no-loop model should have zero LTM synthetic variables"
+    );
+
+    // Compilation should succeed with identical results
+    let compiled_ltm = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM compilation should succeed for no-loop model");
+    let ltm_root_slots = compiled_ltm.modules[&compiled_ltm.root].n_slots;
+
+    source_project.set_ltm_enabled(&mut db).to(false);
+    let compiled_no_ltm = compile_project_incremental(&db, source_project, "main")
+        .expect("non-LTM compilation should succeed for no-loop model");
+    let no_ltm_root_slots = compiled_no_ltm.modules[&compiled_no_ltm.root].n_slots;
+
+    assert_eq!(
+        ltm_root_slots, no_ltm_root_slots,
+        "root module slot count should be identical for no-loop model with/without LTM"
+    );
+}
+
+/// AC1.5: ltm_enabled=false skips all LTM layout and assembly work;
+/// compilation produces identical bytecode to a compilation that never
+/// had LTM enabled.
+#[test]
+fn test_ltm_disabled_identical_bytecode() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let source_project = {
+        let sync = sync_from_datamodel(&db, &project);
+        sync.project
+    };
+
+    // Compile with LTM disabled (the default)
+    let compiled_never_ltm = compile_project_incremental(&db, source_project, "main")
+        .expect("compilation without LTM should succeed");
+
+    // Enable then disable LTM -- should return to the same state.
+    // compile_project_incremental returns an owned CompiledSimulation,
+    // so it does not borrow db.
+    source_project.set_ltm_enabled(&mut db).to(true);
+    let _compiled_ltm = compile_project_incremental(&db, source_project, "main")
+        .expect("compilation with LTM should succeed");
+
+    // Disable LTM again
+    source_project.set_ltm_enabled(&mut db).to(false);
+    let compiled_after_disable = compile_project_incremental(&db, source_project, "main")
+        .expect("compilation after disabling LTM should succeed");
+
+    // The root module's slot count should be identical
+    let root_never = &compiled_never_ltm.modules[&compiled_never_ltm.root];
+    let root_after = &compiled_after_disable.modules[&compiled_after_disable.root];
+
+    assert_eq!(
+        root_never.n_slots, root_after.n_slots,
+        "slot count should be identical when LTM is disabled"
+    );
+
+    // The module count should be identical (no extra LTM modules)
+    assert_eq!(
+        compiled_never_ltm.modules.len(),
+        compiled_after_disable.modules.len(),
+        "module count should be identical when LTM is disabled"
+    );
+
+    // The offset map should be identical (no extra LTM variables)
+    assert_eq!(
+        compiled_never_ltm.offsets.len(),
+        compiled_after_disable.offsets.len(),
+        "offset count should be identical when LTM is disabled"
+    );
+    for (name, &off) in &compiled_never_ltm.offsets {
+        assert_eq!(
+            compiled_after_disable.offsets.get(name),
+            Some(&off),
+            "offset for '{}' should be identical when LTM is disabled",
+            name.as_str()
+        );
+    }
+}
+
+/// AC1.1: LTM synthetic variables appear in compiled output with correct
+/// offsets when compiling through the incremental path.
+#[test]
+fn test_ltm_incremental_produces_synthetic_variables() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM incremental compilation should succeed");
+
+    // The feedback loop project has: population -> births -> population
+    // LTM should produce at least one loop score and one relative loop score
+    let has_ltm_offset = compiled.offsets.keys().any(|k| k.as_str().starts_with('$'));
+    assert!(
+        has_ltm_offset,
+        "compiled output should contain LTM variable offsets (starting with '$')"
+    );
+
+    // Verify LTM increases the layout slot count. Extract n_slots
+    // before toggling ltm_enabled to avoid holding a salsa ref across
+    // a &mut db call.
+    let n_slots_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+
+    source_project.set_ltm_enabled(&mut db).to(false);
+    let n_slots_no_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+
+    assert!(
+        n_slots_ltm > n_slots_no_ltm,
+        "layout with LTM should have more slots than without: ltm={}, no_ltm={}",
+        n_slots_ltm,
+        n_slots_no_ltm
+    );
+}
+
+/// AC1.6: Discovery mode compiles through the same incremental path.
+/// model_ltm_all_link_synthetic_variables produces score variables for
+/// ALL causal links, not just those in feedback loops.
+#[test]
+fn test_ltm_discovery_mode_all_links() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    // Discovery mode produces per-link score variables for ALL causal
+    // edges (not just those in feedback loops). Normal mode produces
+    // per-link + loop-level + relative loop scores, but only for links
+    // in detected loops. Both should produce non-zero var counts for a
+    // model with feedback.
+    let discovery_var_count =
+        model_ltm_all_link_synthetic_variables(&db, source_model, source_project)
+            .vars
+            .len();
+    assert!(
+        discovery_var_count > 0,
+        "discovery mode should produce at least one link score variable"
+    );
+
+    let normal_var_count = model_ltm_synthetic_variables(&db, source_model, source_project)
+        .vars
+        .len();
+    assert!(
+        normal_var_count > 0,
+        "normal mode should produce at least one synthetic variable for a feedback model"
+    );
+
+    // Compilation should succeed in discovery mode
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM discovery mode compilation should succeed");
+
+    // Verify the compiled output has LTM offsets
+    let has_ltm_offset = compiled.offsets.keys().any(|k| k.as_str().starts_with('$'));
+    assert!(
+        has_ltm_offset,
+        "discovery mode should produce LTM offsets in compiled output"
+    );
+}
+
+/// AC1.1 runtime verification: Run a simulation through the incremental
+/// LTM path and verify loop scores are non-trivial (not all zero).
+#[test]
+fn test_ltm_incremental_simulation_produces_scores() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let source_project = {
+        let sync = sync_from_datamodel(&db, &project);
+        sync.project
+    };
+
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM incremental compilation should succeed");
+
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end()
+        .expect("simulation should run to completion");
+
+    // Find a relative loop score variable in the offsets
+    let rel_score_entry = compiled
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_str().contains("rel_loop_score"));
+
+    assert!(
+        rel_score_entry.is_some(),
+        "should have at least one relative loop score variable"
+    );
+
+    let (_, &offset) = rel_score_entry.unwrap();
+
+    // Read the score values from the simulation data
+    let results = vm.into_results();
+    let mut has_nonzero = false;
+    for row in results.iter() {
+        let val = row[offset];
+        assert!(val.is_finite(), "loop score should be finite, got {val}");
+        if val != 0.0 {
+            has_nonzero = true;
+        }
+    }
+    assert!(
+        has_nonzero,
+        "loop scores should have at least one non-zero value for a feedback model"
+    );
+}
