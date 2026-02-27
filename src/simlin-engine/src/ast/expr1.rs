@@ -215,10 +215,12 @@ impl Expr1 {
                     "min" => check_arity!(Min, 1, 2),
                     "pi" => check_arity!(Pi, 0),
                     "pulse" => check_arity!(Pulse, 2, 3),
+                    "quantum" => check_arity!(Quantum, 2),
                     "ramp" => check_arity!(Ramp, 2, 3),
                     "safediv" => check_arity!(SafeDiv, 2, 3),
                     "sign" => check_arity!(Sign, 1),
                     "sin" => check_arity!(Sin, 1),
+                    "sshape" => check_arity!(Sshape, 3),
                     "sqrt" => check_arity!(Sqrt, 1),
                     "step" => check_arity!(Step, 2),
                     "tan" => check_arity!(Tan, 1),
@@ -337,6 +339,10 @@ impl Expr1 {
                             loc,
                         )
                     }
+                    BuiltinFn::Quantum(a, b) => BuiltinFn::Quantum(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                    ),
                     BuiltinFn::Pulse(a, b, c) => BuiltinFn::Pulse(
                         Box::new(a.constify_dimensions(scope)),
                         Box::new(b.constify_dimensions(scope)),
@@ -351,6 +357,11 @@ impl Expr1 {
                         Box::new(a.constify_dimensions(scope)),
                         Box::new(b.constify_dimensions(scope)),
                         c.map(|arg| Box::new(arg.constify_dimensions(scope))),
+                    ),
+                    BuiltinFn::Sshape(a, b, c) => BuiltinFn::Sshape(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                        Box::new(c.constify_dimensions(scope)),
                     ),
                     BuiltinFn::Rank(a, rest) => BuiltinFn::Rank(
                         Box::new(a.constify_dimensions(scope)),

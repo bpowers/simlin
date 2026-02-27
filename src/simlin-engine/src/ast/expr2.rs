@@ -668,6 +668,10 @@ impl Expr2 {
                         result
                     }
                     Pi => Pi,
+                    Quantum(e1, e2) => Quantum(
+                        Box::new(Expr2::from(*e1, ctx)?),
+                        Box::new(Expr2::from(*e2, ctx)?),
+                    ),
                     Pulse(e1, e2, e3) => Pulse(
                         Box::new(Expr2::from(*e1, ctx)?),
                         Box::new(Expr2::from(*e2, ctx)?),
@@ -684,6 +688,11 @@ impl Expr2 {
                         e3.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
                     ),
                     Sign(e) => Sign(Box::new(Expr2::from(*e, ctx)?)),
+                    Sshape(e1, e2, e3) => Sshape(
+                        Box::new(Expr2::from(*e1, ctx)?),
+                        Box::new(Expr2::from(*e2, ctx)?),
+                        Box::new(Expr2::from(*e3, ctx)?),
+                    ),
                     Sin(e) => Sin(Box::new(Expr2::from(*e, ctx)?)),
                     Sqrt(e) => Sqrt(Box::new(Expr2::from(*e, ctx)?)),
                     Step(e1, e2) => Step(

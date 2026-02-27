@@ -819,12 +819,21 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
                 extract_temp_sizes(arg, temp_sizes_map);
             }
         }
+        BuiltinFn::Quantum(a, b) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+        }
         BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
             extract_temp_sizes(a, temp_sizes_map);
             extract_temp_sizes(b, temp_sizes_map);
             if let Some(c) = c {
                 extract_temp_sizes(c, temp_sizes_map);
             }
+        }
+        BuiltinFn::Sshape(a, b, c) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+            extract_temp_sizes(c, temp_sizes_map);
         }
         BuiltinFn::Rank(a, opt) => {
             extract_temp_sizes(a, temp_sizes_map);

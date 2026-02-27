@@ -199,7 +199,14 @@ impl Expr3 {
                             || b.references_a2a_dimension()
                             || c.as_ref().is_some_and(|e| e.references_a2a_dimension())
                     }
-                    Step(a, b) => a.references_a2a_dimension() || b.references_a2a_dimension(),
+                    Sshape(a, b, c) => {
+                        a.references_a2a_dimension()
+                            || b.references_a2a_dimension()
+                            || c.references_a2a_dimension()
+                    }
+                    Quantum(a, b) | Step(a, b) => {
+                        a.references_a2a_dimension() || b.references_a2a_dimension()
+                    }
                     Rank(e, opt) => {
                         e.references_a2a_dimension()
                             || opt.as_ref().is_some_and(|(a, b)| {
@@ -818,6 +825,14 @@ impl<'a> Pass1Context<'a> {
                     a_has_a2a || b_has_a2a,
                 )
             }
+            Quantum(a, b) => {
+                let (new_a, a_has_a2a) = self.transform_inner(*a);
+                let (new_b, b_has_a2a) = self.transform_inner(*b);
+                (
+                    Quantum(Box::new(new_a), Box::new(new_b)),
+                    a_has_a2a || b_has_a2a,
+                )
+            }
             Pulse(a, b, c) => {
                 let (new_a, a_has_a2a) = self.transform_inner(*a);
                 let (new_b, b_has_a2a) = self.transform_inner(*b);
@@ -860,6 +875,15 @@ impl<'a> Pass1Context<'a> {
                 };
                 (
                     SafeDiv(Box::new(new_a), Box::new(new_b), new_c),
+                    a_has_a2a || b_has_a2a || c_has_a2a,
+                )
+            }
+            Sshape(a, b, c) => {
+                let (new_a, a_has_a2a) = self.transform_inner(*a);
+                let (new_b, b_has_a2a) = self.transform_inner(*b);
+                let (new_c, c_has_a2a) = self.transform_inner(*c);
+                (
+                    Sshape(Box::new(new_a), Box::new(new_b), Box::new(new_c)),
                     a_has_a2a || b_has_a2a || c_has_a2a,
                 )
             }

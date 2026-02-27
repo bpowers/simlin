@@ -589,6 +589,7 @@ impl Context<'_> {
             Step(a, b) => Step(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b))),
 
             // Three expression arguments (last optional)
+            Quantum(a, b) => Quantum(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b))),
             Pulse(a, b, c) => Pulse(
                 Box::new(self.lower_pass0(a)),
                 Box::new(self.lower_pass0(b)),
@@ -603,6 +604,11 @@ impl Context<'_> {
                 Box::new(self.lower_pass0(a)),
                 Box::new(self.lower_pass0(b)),
                 c.as_ref().map(|e| Box::new(self.lower_pass0(e))),
+            ),
+            Sshape(a, b, c) => Sshape(
+                Box::new(self.lower_pass0(a)),
+                Box::new(self.lower_pass0(b)),
+                Box::new(self.lower_pass0(c)),
             ),
 
             // Vec of expressions
@@ -1681,6 +1687,10 @@ impl Context<'_> {
                 }
             }
             BFn::Pi => BuiltinFn::Pi,
+            BFn::Quantum(a, b) => BuiltinFn::Quantum(
+                Box::new(self.lower_from_expr3(a)?),
+                Box::new(self.lower_from_expr3(b)?),
+            ),
             BFn::Pulse(a, b, c) => {
                 let c = match c {
                     Some(c) => Some(Box::new(self.lower_from_expr3(c)?)),
@@ -1716,6 +1726,11 @@ impl Context<'_> {
             }
             BFn::Sign(a) => BuiltinFn::Sign(Box::new(self.lower_from_expr3(a)?)),
             BFn::Sin(a) => BuiltinFn::Sin(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Sshape(a, b, c) => BuiltinFn::Sshape(
+                Box::new(self.lower_from_expr3(a)?),
+                Box::new(self.lower_from_expr3(b)?),
+                Box::new(self.lower_from_expr3(c)?),
+            ),
             BFn::Sqrt(a) => BuiltinFn::Sqrt(Box::new(self.lower_from_expr3(a)?)),
             BFn::Step(a, b) => BuiltinFn::Step(
                 Box::new(self.lower_from_expr3(a)?),

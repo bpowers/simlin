@@ -291,11 +291,13 @@ impl XmileFormatter {
                 }
             }
             "quantum" => {
-                // QUANTUM(x, q) -> (q)*INT((x)/(q))
+                // QUANTUM(x, q) passes through as a VM builtin
                 if args.len() >= 2 {
-                    let x = self.format_expr_ctx(&args[0], ctx);
-                    let q = self.format_expr_ctx(&args[1], ctx);
-                    return format!("({})*INT(({})/({}))", q, x, q);
+                    return format!(
+                        "QUANTUM({}, {})",
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx)
+                    );
                 }
             }
             "pulse" => {
@@ -446,6 +448,9 @@ impl XmileFormatter {
             "zidz" => "SAFEDIV".to_string(),
             "xidz" => "SAFEDIV".to_string(),
             "lookup extrapolate" => "LOOKUP".to_string(),
+            "quantum" => "QUANTUM".to_string(),
+            "ramp from to" => "RAMP".to_string(),
+            "sshape" => "SSHAPE".to_string(),
             "vmax" => "MAX".to_string(),
             "vmin" => "MIN".to_string(),
             "forecast" => "FORCST".to_string(),
@@ -1004,7 +1009,7 @@ mod tests {
             CallKind::Builtin,
             loc(),
         );
-        assert_eq!(formatter.format_expr(&expr), "(0.5)*INT((x)/(0.5))");
+        assert_eq!(formatter.format_expr(&expr), "QUANTUM(x, 0.5)");
     }
 
     #[test]

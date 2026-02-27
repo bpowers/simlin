@@ -465,6 +465,12 @@ impl UnitInferer<'_> {
                     }
                     Ok(a_units)
                 }
+                BuiltinFn::Quantum(a, _) => {
+                    self.gen_constraints(a, prefix, current_var, constraints)
+                }
+                BuiltinFn::Sshape(_, bottom, _) => {
+                    self.gen_constraints(bottom, prefix, current_var, constraints)
+                }
                 BuiltinFn::Pulse(_, _, _) | BuiltinFn::Ramp(_, _, _) | BuiltinFn::Step(_, _) => {
                     Ok(Units::Constant)
                 }

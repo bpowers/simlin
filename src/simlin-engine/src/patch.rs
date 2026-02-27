@@ -626,6 +626,10 @@ fn rename_builtin(
             c.as_ref()
                 .map(|expr| Box::new(rename_expr(expr, old_ident, new_ident))),
         ),
+        BuiltinFn::Quantum(a, b) => BuiltinFn::Quantum(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+        ),
         BuiltinFn::Ramp(a, b, c) => BuiltinFn::Ramp(
             Box::new(rename_expr(a, old_ident, new_ident)),
             Box::new(rename_expr(b, old_ident, new_ident)),
@@ -639,6 +643,11 @@ fn rename_builtin(
                 .map(|expr| Box::new(rename_expr(expr, old_ident, new_ident))),
         ),
         BuiltinFn::Sign(expr) => BuiltinFn::Sign(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Sshape(a, b, c) => BuiltinFn::Sshape(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+            Box::new(rename_expr(c, old_ident, new_ident)),
+        ),
         BuiltinFn::Sin(expr) => BuiltinFn::Sin(Box::new(rename_expr(expr, old_ident, new_ident))),
         BuiltinFn::Sqrt(expr) => BuiltinFn::Sqrt(Box::new(rename_expr(expr, old_ident, new_ident))),
         BuiltinFn::Step(a, b) => BuiltinFn::Step(
@@ -796,6 +805,10 @@ pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn
             }
             UntypedBuiltinFn("pulse".to_string(), args)
         }
+        BuiltinFn::Quantum(a, b) => UntypedBuiltinFn(
+            "quantum".to_string(),
+            vec![expr2_to_expr0(a), expr2_to_expr0(b)],
+        ),
         BuiltinFn::Ramp(a, b, c) => {
             let mut args = vec![expr2_to_expr0(a), expr2_to_expr0(b)];
             if let Some(c) = c {
@@ -812,6 +825,10 @@ pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn
         }
         BuiltinFn::Sign(expr) => UntypedBuiltinFn("sign".to_string(), vec![expr2_to_expr0(expr)]),
         BuiltinFn::Sin(expr) => UntypedBuiltinFn("sin".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Sshape(a, b, c) => UntypedBuiltinFn(
+            "sshape".to_string(),
+            vec![expr2_to_expr0(a), expr2_to_expr0(b), expr2_to_expr0(c)],
+        ),
         BuiltinFn::Sqrt(expr) => UntypedBuiltinFn("sqrt".to_string(), vec![expr2_to_expr0(expr)]),
         BuiltinFn::Step(a, b) => UntypedBuiltinFn(
             "step".to_string(),

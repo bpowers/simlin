@@ -149,6 +149,9 @@ pub fn pretty(expr: &Expr) -> String {
                 }
             }
             BuiltinFn::Pi => "\u{1D70B}".to_string(),
+            BuiltinFn::Quantum(a, b) => {
+                format!("quantum({}, {})", pretty(a), pretty(b))
+            }
             BuiltinFn::Pulse(a, b, c) => {
                 let c = match c.as_ref() {
                     Some(c) => pretty(c),
@@ -173,6 +176,9 @@ pub fn pretty(expr: &Expr) -> String {
             ),
             BuiltinFn::Sign(l) => format!("sign({})", pretty(l)),
             BuiltinFn::Sin(l) => format!("sin({})", pretty(l)),
+            BuiltinFn::Sshape(a, b, c) => {
+                format!("sshape({}, {}, {})", pretty(a), pretty(b), pretty(c))
+            }
             BuiltinFn::Sqrt(l) => format!("sqrt({})", pretty(l)),
             BuiltinFn::Step(a, b) => {
                 format!("step({}, {})", pretty(a), pretty(b))

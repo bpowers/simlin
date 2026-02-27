@@ -1996,6 +1996,11 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
             }
         }
         BuiltinId::Pi => std::f64::consts::PI,
+        BuiltinId::Quantum => {
+            let x = a;
+            let q = b;
+            if q == 0.0 { x } else { (x / q).trunc() * q }
+        }
         BuiltinId::Pulse => {
             let volume = a;
             let first_pulse = b;
@@ -2024,6 +2029,12 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
             }
         }
         BuiltinId::Sin => a.sin(),
+        BuiltinId::Sshape => {
+            let x = a;
+            let bottom = b;
+            let top = c;
+            bottom + (top - bottom) / (1.0 + (-4.0 * (2.0 * x - 1.0)).exp())
+        }
         BuiltinId::Sqrt => a.sqrt(),
         BuiltinId::Step => {
             let height = a;
@@ -5067,5 +5078,71 @@ mod vm_reset_run_to_and_constants_tests {
                 "step {step}: reference={a} vs reset={b}"
             );
         }
+    }
+
+    #[test]
+    fn test_sshape_midpoint() {
+        let result = apply(BuiltinId::Sshape, 0.0, 1.0, 0.5, 0.0, 100.0);
+        assert!(
+            (result - 50.0).abs() < 1e-10,
+            "SSHAPE(0.5, 0, 100) should be 50, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_sshape_endpoints() {
+        let at_zero = apply(BuiltinId::Sshape, 0.0, 1.0, 0.0, 0.0, 100.0);
+        assert!(
+            at_zero < 2.0,
+            "SSHAPE(0, 0, 100) should approach 0, got {at_zero}"
+        );
+
+        let at_one = apply(BuiltinId::Sshape, 0.0, 1.0, 1.0, 0.0, 100.0);
+        assert!(
+            at_one > 98.0,
+            "SSHAPE(1, 0, 100) should approach 100, got {at_one}"
+        );
+    }
+
+    #[test]
+    fn test_sshape_custom_range() {
+        let result = apply(BuiltinId::Sshape, 0.0, 1.0, 0.5, 10.0, 20.0);
+        assert!(
+            (result - 15.0).abs() < 1e-10,
+            "SSHAPE(0.5, 10, 20) should be 15, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_quantum_positive() {
+        let result = apply(BuiltinId::Quantum, 0.0, 1.0, 7.3, 2.0, 0.0);
+        assert!(
+            (result - 6.0).abs() < 1e-10,
+            "QUANTUM(7.3, 2) should be 6, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_quantum_negative_truncates_toward_zero() {
+        let result = apply(BuiltinId::Quantum, 0.0, 1.0, -0.9, 1.0, 0.0);
+        assert!(
+            result.abs() < 1e-10,
+            "QUANTUM(-0.9, 1) should be 0 (truncate toward zero), got {result}"
+        );
+
+        let result2 = apply(BuiltinId::Quantum, 0.0, 1.0, -2.7, 1.0, 0.0);
+        assert!(
+            (result2 - (-2.0)).abs() < 1e-10,
+            "QUANTUM(-2.7, 1) should be -2 (truncate toward zero), got {result2}"
+        );
+    }
+
+    #[test]
+    fn test_quantum_zero_quantum_returns_input() {
+        let result = apply(BuiltinId::Quantum, 0.0, 1.0, 3.7, 0.0, 0.0);
+        assert!(
+            (result - 3.7).abs() < 1e-10,
+            "QUANTUM(3.7, 0) should return 3.7, got {result}"
+        );
     }
 }

@@ -174,6 +174,9 @@ impl Expr {
                         Box::new(b.strip_loc()),
                         c.map(|expr| Box::new(expr.strip_loc())),
                     ),
+                    BuiltinFn::Quantum(a, b) => {
+                        BuiltinFn::Quantum(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                    }
                     BuiltinFn::Ramp(a, b, c) => BuiltinFn::Ramp(
                         Box::new(a.strip_loc()),
                         Box::new(b.strip_loc()),
@@ -183,6 +186,11 @@ impl Expr {
                         Box::new(a.strip_loc()),
                         Box::new(b.strip_loc()),
                         c.map(|expr| Box::new(expr.strip_loc())),
+                    ),
+                    BuiltinFn::Sshape(a, b, c) => BuiltinFn::Sshape(
+                        Box::new(a.strip_loc()),
+                        Box::new(b.strip_loc()),
+                        Box::new(c.strip_loc()),
                     ),
                     BuiltinFn::Rank(a, rest) => BuiltinFn::Rank(
                         Box::new(a.strip_loc()),

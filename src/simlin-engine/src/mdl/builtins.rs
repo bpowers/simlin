@@ -327,6 +327,8 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "game",
         "time base",
         "npv",
+        "sshape",
+        "ramp from to",
         "allocate by priority",
         "get direct data",
         "get data mean",

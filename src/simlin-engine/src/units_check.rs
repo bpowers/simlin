@@ -185,6 +185,8 @@ impl UnitEvaluator<'_> {
                         }
                         Ok(a_units)
                     }
+                    BuiltinFn::Quantum(a, _) => self.check(a),
+                    BuiltinFn::Sshape(_, bottom, _) => self.check(bottom),
                     BuiltinFn::Pulse(_, _, _)
                     | BuiltinFn::Ramp(_, _, _)
                     | BuiltinFn::Step(_, _) => Ok(Units::Constant),

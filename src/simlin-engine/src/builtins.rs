@@ -76,9 +76,11 @@ pub enum BuiltinFn<Expr> {
     Min(Box<Expr>, Option<Box<Expr>>),
     Pi,
     Pulse(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
+    Quantum(Box<Expr>, Box<Expr>),
     Ramp(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     SafeDiv(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Sign(Box<Expr>),
+    Sshape(Box<Expr>, Box<Expr>, Box<Expr>),
     Sin(Box<Expr>),
     Sqrt(Box<Expr>),
     Step(Box<Expr>, Box<Expr>),
@@ -117,9 +119,11 @@ impl<Expr> BuiltinFn<Expr> {
             Min(_, _) => "min",
             Pi => "pi",
             Pulse(_, _, _) => "pulse",
+            Quantum(_, _) => "quantum",
             Ramp(_, _, _) => "ramp",
             SafeDiv(_, _, _) => "safediv",
             Sign(_) => "sign",
+            Sshape(_, _, _) => "sshape",
             Sin(_) => "sin",
             Sqrt(_) => "sqrt",
             Step(_, _) => "step",
@@ -183,6 +187,7 @@ impl<Expr> BuiltinFn<Expr> {
                 Box::new(f(*b)?),
                 c.map(|c| f(*c)).transpose()?.map(Box::new),
             ),
+            Quantum(a, b) => Quantum(Box::new(f(*a)?), Box::new(f(*b)?)),
             Ramp(a, b, c) => Ramp(
                 Box::new(f(*a)?),
                 Box::new(f(*b)?),
@@ -194,6 +199,7 @@ impl<Expr> BuiltinFn<Expr> {
                 c.map(|c| f(*c)).transpose()?.map(Box::new),
             ),
             Sign(a) => Sign(Box::new(f(*a)?)),
+            Sshape(a, b, c) => Sshape(Box::new(f(*a)?), Box::new(f(*b)?), Box::new(f(*c)?)),
             Sin(a) => Sin(Box::new(f(*a)?)),
             Sqrt(a) => Sqrt(Box::new(f(*a)?)),
             Step(a, b) => Step(Box::new(f(*a)?), Box::new(f(*b)?)),
@@ -254,12 +260,21 @@ impl<Expr> BuiltinFn<Expr> {
                     f(a);
                 }
             }
+            Quantum(a, b) => {
+                f(a);
+                f(b);
+            }
             Pulse(a, b, c) | Ramp(a, b, c) | SafeDiv(a, b, c) => {
                 f(a);
                 f(b);
                 if let Some(c) = c {
                     f(c);
                 }
+            }
+            Sshape(a, b, c) => {
+                f(a);
+                f(b);
+                f(c);
             }
             Step(a, b) => {
                 f(a);
@@ -307,10 +322,12 @@ pub fn is_builtin_fn(name: &str) -> bool {
         | "mean"
         | "min"
         | "pulse"
+        | "quantum"
         | "ramp"
         | "safediv"
         | "sign"
         | "sin"
+        | "sshape"
         | "sqrt"
         | "step"
         | "tan"
@@ -374,12 +391,21 @@ where
                 cb(BuiltinContents::Expr(b));
             }
         }
+        BuiltinFn::Quantum(a, b) => {
+            cb(BuiltinContents::Expr(a));
+            cb(BuiltinContents::Expr(b));
+        }
         BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
             cb(BuiltinContents::Expr(a));
             cb(BuiltinContents::Expr(b));
             if let Some(c) = c {
                 cb(BuiltinContents::Expr(c))
             }
+        }
+        BuiltinFn::Sshape(a, b, c) => {
+            cb(BuiltinContents::Expr(a));
+            cb(BuiltinContents::Expr(b));
+            cb(BuiltinContents::Expr(c));
         }
         BuiltinFn::Rank(a, rest) => {
             cb(BuiltinContents::Expr(a));

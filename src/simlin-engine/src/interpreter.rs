@@ -787,6 +787,17 @@ impl ModuleEvaluator<'_> {
                             0.0
                         }
                     }
+                    BuiltinFn::Quantum(x, q) => {
+                        let x = self.eval(x);
+                        let q = self.eval(q);
+                        if q == 0.0 { x } else { (x / q).trunc() * q }
+                    }
+                    BuiltinFn::Sshape(x, bottom, top) => {
+                        let x = self.eval(x);
+                        let bottom = self.eval(bottom);
+                        let top = self.eval(top);
+                        bottom + (top - bottom) / (1.0 + (-4.0 * (2.0 * x - 1.0)).exp())
+                    }
                     BuiltinFn::Sqrt(a) => self.eval(a).sqrt(),
                     BuiltinFn::Min(a, b) => {
                         // Check if this is array min or scalar min

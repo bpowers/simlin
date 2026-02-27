@@ -767,6 +767,12 @@ impl<'module> Compiler<'module> {
                             return Ok(Some(()));
                         }
                     }
+                    BuiltinFn::Quantum(a, b) => {
+                        self.walk_expr(a)?.unwrap();
+                        self.walk_expr(b)?.unwrap();
+                        let id = self.curr_code.intern_literal(0.0);
+                        self.push(Opcode::LoadConstant { id });
+                    }
                     BuiltinFn::Pulse(a, b, c) => {
                         self.walk_expr(a)?.unwrap();
                         self.walk_expr(b)?.unwrap();
@@ -796,6 +802,11 @@ impl<'module> Compiler<'module> {
                             let id = self.curr_code.intern_literal(0.0);
                             self.push(Opcode::LoadConstant { id });
                         }
+                    }
+                    BuiltinFn::Sshape(a, b, c) => {
+                        self.walk_expr(a)?.unwrap();
+                        self.walk_expr(b)?.unwrap();
+                        self.walk_expr(c)?.unwrap();
                     }
                     BuiltinFn::Mean(args) => {
                         // Check if this is a single array argument (array mean)
@@ -875,10 +886,12 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Min(_, _) => BuiltinId::Min,
                     BuiltinFn::Pi => BuiltinId::Pi,
                     BuiltinFn::Pulse(_, _, _) => BuiltinId::Pulse,
+                    BuiltinFn::Quantum(_, _) => BuiltinId::Quantum,
                     BuiltinFn::Ramp(_, _, _) => BuiltinId::Ramp,
                     BuiltinFn::SafeDiv(_, _, _) => BuiltinId::SafeDiv,
                     BuiltinFn::Sign(_) => BuiltinId::Sign,
                     BuiltinFn::Sin(_) => BuiltinId::Sin,
+                    BuiltinFn::Sshape(_, _, _) => BuiltinId::Sshape,
                     BuiltinFn::Sqrt(_) => BuiltinId::Sqrt,
                     BuiltinFn::Step(_, _) => BuiltinId::Step,
                     BuiltinFn::Tan(_) => BuiltinId::Tan,
@@ -1180,12 +1193,21 @@ impl<'module> Compiler<'module> {
                     self.collect_iter_source_views_impl(e, views, seen);
                 }
             }
+            Quantum(a, b) => {
+                self.collect_iter_source_views_impl(a, views, seen);
+                self.collect_iter_source_views_impl(b, views, seen);
+            }
             Pulse(a, b, opt_c) | Ramp(a, b, opt_c) | SafeDiv(a, b, opt_c) => {
                 self.collect_iter_source_views_impl(a, views, seen);
                 self.collect_iter_source_views_impl(b, views, seen);
                 if let Some(c) = opt_c {
                     self.collect_iter_source_views_impl(c, views, seen);
                 }
+            }
+            Sshape(a, b, c) => {
+                self.collect_iter_source_views_impl(a, views, seen);
+                self.collect_iter_source_views_impl(b, views, seen);
+                self.collect_iter_source_views_impl(c, views, seen);
             }
             Step(a, b) => {
                 self.collect_iter_source_views_impl(a, views, seen);
