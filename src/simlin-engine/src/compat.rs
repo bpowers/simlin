@@ -123,41 +123,20 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
 
     for (ident, var_off) in offsets.iter() {
         let data = &unprocessed[ident.as_str()];
-        let mut data_iter = data.iter().cloned();
-        let mut curr: Option<(f64, f64)> = data_iter.next();
-        let mut next: Option<(f64, f64)> = data_iter.next();
+        let mut data_iter = data.iter().cloned().peekable();
+        let mut last_value: f64 = f64::NAN;
         for step in 0..step_count {
             let t: f64 = initial_time + saveper * (step as f64);
-            let datapoint: f64 = if let Some((data_time, value)) = curr {
-                if approx_eq!(f64, data_time, t) {
-                    if next.is_some() {
-                        curr = next;
-                        next = data_iter.next();
-                    }
-                    value
-                } else {
-                    assert!(data_time < t);
-                    // curr is in the past
-                    if let Some((next_time, next_value)) = next {
-                        if approx_eq!(f64, next_time, t) {
-                            // next is now now
-                            curr = next;
-                            next = data_iter.next();
-                            next_value
-                        } else {
-                            // next is still in the future
-                            assert!(next_time > t);
-                            value
-                        }
-                    } else {
-                        // at the end of the iter, so just use curr
-                        value
-                    }
+            // Advance past data points at or before the current time,
+            // keeping the most recent value (sample-and-hold).
+            while let Some(&(data_time, value)) = data_iter.peek() {
+                if data_time > t && !approx_eq!(f64, data_time, t) {
+                    break;
                 }
-            } else {
-                unreachable!("curr is None");
-            };
-            step_data[step * step_size + var_off] = datapoint;
+                last_value = value;
+                data_iter.next();
+            }
+            step_data[step * step_size + var_off] = last_value;
         }
     }
 

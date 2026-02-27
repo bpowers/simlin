@@ -487,6 +487,38 @@ fn simulate_mdl_path_with_data(mdl_path: &str) {
     }
 }
 
+/// Like simulate_mdl_path_with_data, but interpreter-only (for models using
+/// array builtins not yet implemented in the VM bytecode compiler).
+#[cfg(feature = "file_io")]
+#[allow(dead_code)]
+fn simulate_mdl_path_with_data_interpreter_only(mdl_path: &str) {
+    eprintln!("model (vensim mdl with data, interpreter-only): {mdl_path}");
+
+    let mdl_abs = std::path::Path::new(mdl_path);
+    let model_dir = mdl_abs
+        .parent()
+        .unwrap_or_else(|| panic!("no parent dir for {mdl_path}"));
+
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+
+    let provider = FilesystemDataProvider::new(model_dir);
+    let datamodel_project = open_vensim_with_data(&contents, Some(&provider))
+        .unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+    let project = Rc::new(Project::from(datamodel_project));
+
+    let sim = Simulation::new(&project, "main")
+        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
+
+    let results = sim
+        .run_to_end()
+        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
+
+    if let Some(expected) = load_expected_results_for_mdl(mdl_path) {
+        ensure_results(&expected, &results);
+    }
+}
+
 #[test]
 fn simulates_models_correctly() {
     for &path in TEST_MODELS {
@@ -766,7 +798,7 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     //
     // Failing tests - commented out with reasons
     //
-    // NotSimulatable: uses ALLOCATE AVAILABLE builtin
+    // Tested via simulates_allocate_xmile (interpreter-only; VM lacks ALLOCATE AVAILABLE)
     // "test/sdeverywhere/models/allocate/allocate.xmile",
     //
     // NotSimulatable: uses GET DIRECT CONSTANTS
@@ -846,10 +878,13 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // Cross-dimension broadcasting: SUM(a[*]+h[*]) with different dimensions
     // "test/sdeverywhere/models/sum/sum.xmile",
     //
-    // EmptyEquation: uses SUM OF builtin with condition
+    // Data variable loading: A Values uses Vensim's implicit companion .dat file
+    // loading (not GET DIRECT), which isn't yet supported. The SUM(IF ...) pattern
+    // is covered by array_tests::sum_of_conditional_tests.
     // "test/sdeverywhere/models/sumif/sumif.xmile",
     //
-    // MismatchedDimensions: uses VECTOR ELM MAP
+    // MismatchedDimensions: VECTOR ELM MAP cross-dimension indexing (b[B1] in DimA
+    // context). The vector_simple subset is tested via simulates_vector_simple_mdl.
     // "test/sdeverywhere/models/vector/vector.xmile",
 ];
 
@@ -965,6 +1000,11 @@ fn simulates_vector_simple_mdl() {
 #[test]
 fn simulates_allocate_mdl() {
     simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/allocate/allocate.mdl");
+}
+
+#[test]
+fn simulates_allocate_xmile() {
+    simulate_path_interpreter_only("../../test/sdeverywhere/models/allocate/allocate.xmile");
 }
 
 // Ignored: the XMILE path is broken (xmutil strips GET DATA BETWEEN TIMES to
