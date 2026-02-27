@@ -503,6 +503,7 @@ impl XmileFormatter {
             "vector select" => "VECTOR SELECT".to_string(),
             "vector elm map" => "VECTOR ELM MAP".to_string(),
             "vector sort order" => "VECTOR SORT ORDER".to_string(),
+            "allocate available" => "ALLOCATE AVAILABLE".to_string(),
             "vector reorder" => "VECTOR_REORDER".to_string(),
             "vector lookup" => "VECTOR LOOKUP".to_string(),
             _ => canonical.to_uppercase().replace(' ', "_"),

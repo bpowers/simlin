@@ -391,6 +391,7 @@ impl<'input> Parser<'input> {
             &["vector", "select"],
             &["vector", "elm", "map"],
             &["vector", "sort", "order"],
+            &["allocate", "available"],
         ];
 
         if self.peek_kind() != Some(TokenKind::Ident) {

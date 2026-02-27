@@ -859,6 +859,11 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
             extract_temp_sizes(a, temp_sizes_map);
             extract_temp_sizes(b, temp_sizes_map);
         }
+        BuiltinFn::AllocateAvailable(a, b, c) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+            extract_temp_sizes(c, temp_sizes_map);
+        }
         BuiltinFn::Inf
         | BuiltinFn::Pi
         | BuiltinFn::Time

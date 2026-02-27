@@ -100,6 +100,8 @@ pub enum BuiltinFn<Expr> {
     VectorElmMap(Box<Expr>, Box<Expr>),
     // VECTOR SORT ORDER(array, direction)
     VectorSortOrder(Box<Expr>, Box<Expr>),
+    // ALLOCATE AVAILABLE(request, priority_profile, avail)
+    AllocateAvailable(Box<Expr>, Box<Expr>, Box<Expr>),
 }
 
 impl<Expr> BuiltinFn<Expr> {
@@ -146,6 +148,7 @@ impl<Expr> BuiltinFn<Expr> {
             VectorSelect(_, _, _, _, _) => "vector_select",
             VectorElmMap(_, _) => "vector_elm_map",
             VectorSortOrder(_, _) => "vector_sort_order",
+            AllocateAvailable(_, _, _) => "allocate_available",
         }
     }
 
@@ -239,6 +242,9 @@ impl<Expr> BuiltinFn<Expr> {
             ),
             VectorElmMap(a, b) => VectorElmMap(Box::new(f(*a)?), Box::new(f(*b)?)),
             VectorSortOrder(a, b) => VectorSortOrder(Box::new(f(*a)?), Box::new(f(*b)?)),
+            AllocateAvailable(a, b, c) => {
+                AllocateAvailable(Box::new(f(*a)?), Box::new(f(*b)?), Box::new(f(*c)?))
+            }
         })
     }
 
@@ -318,6 +324,11 @@ impl<Expr> BuiltinFn<Expr> {
                 f(a);
                 f(b);
             }
+            AllocateAvailable(a, b, c) => {
+                f(a);
+                f(b);
+                f(c);
+            }
         }
     }
 }
@@ -325,7 +336,15 @@ impl<Expr> BuiltinFn<Expr> {
 pub fn is_0_arity_builtin_fn(name: &str) -> bool {
     matches!(
         name,
-        "inf" | "pi" | "time" | "time_step" | "dt" | "initial_time" | "final_time"
+        "inf"
+            | "pi"
+            | "time"
+            | "time_step"
+            | "dt"
+            | "initial_time"
+            | "starttime"
+            | "final_time"
+            | "stoptime"
     )
 }
 
@@ -368,6 +387,7 @@ pub fn is_builtin_fn(name: &str) -> bool {
         | "vector_select"
         | "vector_elm_map"
         | "vector_sort_order"
+        | "allocate_available"
         )
 }
 
@@ -458,6 +478,11 @@ where
         BuiltinFn::VectorElmMap(a, b) | BuiltinFn::VectorSortOrder(a, b) => {
             cb(BuiltinContents::Expr(a));
             cb(BuiltinContents::Expr(b));
+        }
+        BuiltinFn::AllocateAvailable(a, b, c) => {
+            cb(BuiltinContents::Expr(a));
+            cb(BuiltinContents::Expr(b));
+            cb(BuiltinContents::Expr(c));
         }
     }
 }

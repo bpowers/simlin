@@ -792,6 +792,16 @@ impl Expr2 {
                         ctx.set_allow_dimension_union(prev);
                         result
                     }
+                    AllocateAvailable(req, pp, avail) => {
+                        let prev = ctx.set_allow_dimension_union(true);
+                        let result = AllocateAvailable(
+                            Box::new(Expr2::from(*req, ctx)?),
+                            Box::new(Expr2::from(*pp, ctx)?),
+                            Box::new(Expr2::from(*avail, ctx)?),
+                        );
+                        ctx.set_allow_dimension_union(prev);
+                        result
+                    }
                 };
                 // TODO: Handle array sources for builtin functions that return arrays
                 Expr2::App(builtin, None, loc)

@@ -214,6 +214,14 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::VectorSortOrder(a, b) => {
                 format!("vector_sort_order({}, {})", pretty(a), pretty(b))
             }
+            BuiltinFn::AllocateAvailable(a, b, c) => {
+                format!(
+                    "allocate_available({}, {}, {})",
+                    pretty(a),
+                    pretty(b),
+                    pretty(c)
+                )
+            }
         },
         Expr::EvalModule(module, model_name, _input_set, args) => {
             let args: Vec<_> = args.iter().map(pretty).collect();

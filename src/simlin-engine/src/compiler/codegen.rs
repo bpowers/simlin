@@ -867,10 +867,11 @@ impl<'module> Compiler<'module> {
                     }
                     BuiltinFn::VectorSelect(_, _, _, _, _)
                     | BuiltinFn::VectorElmMap(_, _)
-                    | BuiltinFn::VectorSortOrder(_, _) => {
+                    | BuiltinFn::VectorSortOrder(_, _)
+                    | BuiltinFn::AllocateAvailable(_, _, _) => {
                         return sim_err!(
                             TodoArrayBuiltin,
-                            "VECTOR builtins not yet supported in VM".to_owned()
+                            "array builtins not yet supported in VM".to_owned()
                         );
                     }
                 };
@@ -914,7 +915,8 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::Sum(_)
                     | BuiltinFn::VectorSelect(_, _, _, _, _)
                     | BuiltinFn::VectorElmMap(_, _)
-                    | BuiltinFn::VectorSortOrder(_, _) => {
+                    | BuiltinFn::VectorSortOrder(_, _)
+                    | BuiltinFn::AllocateAvailable(_, _, _) => {
                         return sim_err!(TodoArrayBuiltin, "".to_owned());
                     }
                 };
@@ -1248,6 +1250,11 @@ impl<'module> Compiler<'module> {
             VectorElmMap(a, b) | VectorSortOrder(a, b) => {
                 self.collect_iter_source_views_impl(a, views, seen);
                 self.collect_iter_source_views_impl(b, views, seen);
+            }
+            AllocateAvailable(a, b, c) => {
+                self.collect_iter_source_views_impl(a, views, seen);
+                self.collect_iter_source_views_impl(b, views, seen);
+                self.collect_iter_source_views_impl(c, views, seen);
             }
             // Constants/no-arg builtins
             Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {}

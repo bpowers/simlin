@@ -962,6 +962,11 @@ fn simulates_vector_simple_mdl() {
     );
 }
 
+#[test]
+fn simulates_allocate_mdl() {
+    simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/allocate/allocate.mdl");
+}
+
 // Ignored: the XMILE path is broken (xmutil strips GET DATA BETWEEN TIMES to
 // zeroed-out equations). The MDL path requires external .dat file loading for
 // data variables, which is not yet fully supported.

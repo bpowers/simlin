@@ -701,6 +701,11 @@ impl Context<'_> {
             VectorSortOrder(a, b) => {
                 VectorSortOrder(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b)))
             }
+            AllocateAvailable(a, b, c) => AllocateAvailable(
+                Box::new(self.lower_pass0(a)),
+                Box::new(self.lower_pass0(b)),
+                Box::new(self.lower_pass0(c)),
+            ),
         }
     }
 
@@ -1880,6 +1885,14 @@ impl Context<'_> {
                 BuiltinFn::VectorSortOrder(
                     Box::new(ctx.lower_from_expr3(arr)?),
                     Box::new(self.lower_from_expr3(dir)?),
+                )
+            }
+            BFn::AllocateAvailable(req, pp, avail) => {
+                let ctx = self.with_preserved_wildcards();
+                BuiltinFn::AllocateAvailable(
+                    Box::new(ctx.lower_from_expr3(req)?),
+                    Box::new(ctx.lower_from_expr3(pp)?),
+                    Box::new(self.lower_from_expr3(avail)?),
                 )
             }
         })

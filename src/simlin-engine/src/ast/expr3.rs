@@ -224,6 +224,11 @@ impl Expr3 {
                     VectorElmMap(a, b) | VectorSortOrder(a, b) => {
                         a.references_a2a_dimension() || b.references_a2a_dimension()
                     }
+                    AllocateAvailable(a, b, c) => {
+                        a.references_a2a_dimension()
+                            || b.references_a2a_dimension()
+                            || c.references_a2a_dimension()
+                    }
                     Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {
                         false
                     }
@@ -947,6 +952,15 @@ impl<'a> Pass1Context<'a> {
                 (
                     VectorSortOrder(Box::new(new_arr), Box::new(new_dir)),
                     arr_a2a || dir_a2a,
+                )
+            }
+            AllocateAvailable(req, pp, avail) => {
+                let (new_req, req_a2a) = self.maybe_decompose_array_arg_inner(*req);
+                let (new_pp, pp_a2a) = self.maybe_decompose_array_arg_inner(*pp);
+                let (new_avail, avail_a2a) = self.transform_inner(*avail);
+                (
+                    AllocateAvailable(Box::new(new_req), Box::new(new_pp), Box::new(new_avail)),
+                    req_a2a || pp_a2a || avail_a2a,
                 )
             }
 

@@ -102,7 +102,7 @@ fn mdl_bare_keyword(xmile_name: &str) -> Option<&'static str> {
         "time" => Some("Time"),
         "dt" | "time_step" => Some("TIME STEP"),
         "starttime" | "initial_time" => Some("INITIAL TIME"),
-        "endtime" | "final_time" => Some("FINAL TIME"),
+        "endtime" | "stoptime" | "final_time" => Some("FINAL TIME"),
         _ => None,
     }
 }

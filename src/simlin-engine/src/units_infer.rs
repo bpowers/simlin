@@ -515,6 +515,9 @@ impl UnitInferer<'_> {
                     self.gen_constraints(source, prefix, current_var, constraints)
                 }
                 BuiltinFn::VectorSortOrder(_, _) => Ok(Units::Constant),
+                BuiltinFn::AllocateAvailable(req, _, _) => {
+                    self.gen_constraints(req, prefix, current_var, constraints)
+                }
             },
             Expr2::Subscript(base_name, _, _, _) => {
                 // A subscripted expression has the same units as the base array

@@ -214,6 +214,11 @@ impl Expr {
                     BuiltinFn::VectorSortOrder(a, b) => {
                         BuiltinFn::VectorSortOrder(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
                     }
+                    BuiltinFn::AllocateAvailable(a, b, c) => BuiltinFn::AllocateAvailable(
+                        Box::new(a.strip_loc()),
+                        Box::new(b.strip_loc()),
+                        Box::new(c.strip_loc()),
+                    ),
                 };
                 Expr::App(builtin, loc)
             }

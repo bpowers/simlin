@@ -226,8 +226,8 @@ impl Expr1 {
                     "tan" => check_arity!(Tan, 1),
                     "time" => check_arity!(Time, 0),
                     "time_step" | "dt" => check_arity!(TimeStep, 0),
-                    "initial_time" => check_arity!(StartTime, 0),
-                    "final_time" => check_arity!(FinalTime, 0),
+                    "initial_time" | "starttime" => check_arity!(StartTime, 0),
+                    "final_time" | "stoptime" => check_arity!(FinalTime, 0),
                     "rank" => check_arity!(Rank, 1, 3),
                     "size" => check_arity!(Size, 1),
                     "stddev" => check_arity!(Stddev, 1),
@@ -251,6 +251,7 @@ impl Expr1 {
                     }
                     "vector_elm_map" => check_arity!(VectorElmMap, 2),
                     "vector_sort_order" => check_arity!(VectorSortOrder, 2),
+                    "allocate_available" => check_arity!(AllocateAvailable, 3),
                     _ => {
                         // TODO: this could be a table reference, array reference,
                         //       or module instantiation according to 3.3.2 of the spec
@@ -410,6 +411,11 @@ impl Expr1 {
                     BuiltinFn::VectorSortOrder(a, b) => BuiltinFn::VectorSortOrder(
                         Box::new(a.constify_dimensions(scope)),
                         Box::new(b.constify_dimensions(scope)),
+                    ),
+                    BuiltinFn::AllocateAvailable(a, b, c) => BuiltinFn::AllocateAvailable(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                        Box::new(c.constify_dimensions(scope)),
                     ),
                 };
                 Expr1::App(func, loc)

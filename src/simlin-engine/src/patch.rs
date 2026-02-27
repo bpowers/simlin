@@ -689,6 +689,11 @@ fn rename_builtin(
             Box::new(rename_expr(a, old_ident, new_ident)),
             Box::new(rename_expr(b, old_ident, new_ident)),
         ),
+        BuiltinFn::AllocateAvailable(a, b, c) => BuiltinFn::AllocateAvailable(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+            Box::new(rename_expr(c, old_ident, new_ident)),
+        ),
     }
 }
 
@@ -886,6 +891,10 @@ pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn
         BuiltinFn::VectorSortOrder(a, b) => UntypedBuiltinFn(
             "vector_sort_order".to_string(),
             vec![expr2_to_expr0(a), expr2_to_expr0(b)],
+        ),
+        BuiltinFn::AllocateAvailable(a, b, c) => UntypedBuiltinFn(
+            "allocate_available".to_string(),
+            vec![expr2_to_expr0(a), expr2_to_expr0(b), expr2_to_expr0(c)],
         ),
     }
 }
