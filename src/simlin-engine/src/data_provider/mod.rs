@@ -134,17 +134,28 @@ fn data_provider_error(file: &str) -> Error {
 /// Convert a column letter(s) to a 0-based column index.
 /// "A" -> 0, "B" -> 1, ..., "Z" -> 25, "AA" -> 26, etc.
 #[cfg(feature = "file_io")]
-pub(crate) fn col_index(col: &str) -> usize {
-    col.bytes().fold(0usize, |acc, b| {
+pub(crate) fn col_index(col: &str) -> Result<usize> {
+    if col.is_empty() || !col.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return Err(Error::new(
+            ErrorKind::Import,
+            ErrorCode::Generic,
+            Some(format!(
+                "invalid column reference '{}': expected alphabetic characters only",
+                col
+            )),
+        ));
+    }
+    Ok(col.bytes().fold(0usize, |acc, b| {
         acc * 26 + (b.to_ascii_uppercase() - b'A' + 1) as usize
-    }) - 1
+    }) - 1)
 }
 
 /// Parse an A1-style cell reference into 0-based (row, col) indices.
 /// "A1" -> (0, 0), "B2" -> (1, 1), "AA10" -> (9, 26)
+/// Trailing '*' (Vensim range indicator) is stripped before parsing.
 #[cfg(feature = "file_io")]
 pub(crate) fn parse_cell_ref(s: &str) -> Result<(usize, usize)> {
-    let s = s.trim();
+    let s = s.trim().trim_end_matches('*');
     let split = s.find(|c: char| c.is_ascii_digit()).ok_or_else(|| {
         Error::new(
             ErrorKind::Import,
@@ -159,7 +170,7 @@ pub(crate) fn parse_cell_ref(s: &str) -> Result<(usize, usize)> {
             Some(format!("invalid cell reference '{}': no column letter", s)),
         ));
     }
-    let col = col_index(&s[..split]);
+    let col = col_index(&s[..split])?;
     let row_1based: usize = s[split..].parse::<usize>().map_err(|_| {
         Error::new(
             ErrorKind::Import,
@@ -246,13 +257,22 @@ mod tests {
     #[cfg(feature = "file_io")]
     #[test]
     fn test_col_index() {
-        assert_eq!(col_index("A"), 0);
-        assert_eq!(col_index("B"), 1);
-        assert_eq!(col_index("Z"), 25);
-        assert_eq!(col_index("AA"), 26);
-        assert_eq!(col_index("AB"), 27);
-        assert_eq!(col_index("a"), 0);
-        assert_eq!(col_index("b"), 1);
+        assert_eq!(col_index("A").unwrap(), 0);
+        assert_eq!(col_index("B").unwrap(), 1);
+        assert_eq!(col_index("Z").unwrap(), 25);
+        assert_eq!(col_index("AA").unwrap(), 26);
+        assert_eq!(col_index("AB").unwrap(), 27);
+        assert_eq!(col_index("a").unwrap(), 0);
+        assert_eq!(col_index("b").unwrap(), 1);
+    }
+
+    #[cfg(feature = "file_io")]
+    #[test]
+    fn test_col_index_rejects_invalid_input() {
+        assert!(col_index("").is_err());
+        assert!(col_index("1").is_err());
+        assert!(col_index("A1").is_err());
+        assert!(col_index("$A").is_err());
     }
 
     #[cfg(feature = "file_io")]
@@ -262,6 +282,13 @@ mod tests {
         assert_eq!(parse_cell_ref("B2").unwrap(), (1, 1));
         assert_eq!(parse_cell_ref("C10").unwrap(), (9, 2));
         assert_eq!(parse_cell_ref("AA1").unwrap(), (0, 26));
+    }
+
+    #[cfg(feature = "file_io")]
+    #[test]
+    fn test_parse_cell_ref_strips_star() {
+        assert_eq!(parse_cell_ref("B2*").unwrap(), (1, 1));
+        assert_eq!(parse_cell_ref("A1*").unwrap(), (0, 0));
     }
 
     #[cfg(feature = "file_io")]

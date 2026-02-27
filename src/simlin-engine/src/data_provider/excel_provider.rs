@@ -20,7 +20,7 @@ impl FilesystemDataProvider {
         let range = self.open_sheet(file, sheet_name)?;
         let time_col_or_row = time_col_or_row.trim();
 
-        if time_col_or_row.chars().all(|c| c.is_ascii_digit()) {
+        if !time_col_or_row.is_empty() && time_col_or_row.chars().all(|c| c.is_ascii_digit()) {
             self.load_data_excel_row_oriented(&range, file, time_col_or_row, cell_label)
         } else {
             self.load_data_excel_col_oriented(&range, file, time_col_or_row, cell_label)
@@ -34,7 +34,7 @@ impl FilesystemDataProvider {
         time_col: &str,
         cell_label: &str,
     ) -> Result<Vec<(f64, f64)>> {
-        let time_col_idx = col_index(time_col) as u32;
+        let time_col_idx = col_index(time_col)? as u32;
         let (data_start_row, data_col_idx) = parse_cell_ref(cell_label)?;
         let data_start_row = data_start_row as u32;
         let data_col_idx = data_col_idx as u32;
@@ -210,7 +210,7 @@ impl FilesystemDataProvider {
         let start_col = start_col as u32;
 
         let (end_row, end_col) = if is_column_only(last_cell.trim()) {
-            let col = col_index(last_cell.trim()) as u32;
+            let col = col_index(last_cell.trim())? as u32;
             let (height, _) = range.get_size();
             let range_start = range.start().unwrap_or((0, 0));
             let mut last_row = start_row;

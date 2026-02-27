@@ -122,7 +122,7 @@ impl FilesystemDataProvider {
         // 2. time_col_or_row is a row number (e.g. "1") - row-oriented
         let time_col_or_row = time_col_or_row.trim();
 
-        if time_col_or_row.chars().all(|c| c.is_ascii_digit()) {
+        if !time_col_or_row.is_empty() && time_col_or_row.chars().all(|c| c.is_ascii_digit()) {
             // Row-oriented: time values are in the specified row
             self.load_data_csv_row_oriented(&records, file, time_col_or_row, cell_label)
         } else {
@@ -138,7 +138,7 @@ impl FilesystemDataProvider {
         time_col: &str,
         cell_label: &str,
     ) -> Result<Vec<(f64, f64)>> {
-        let time_col_idx = col_index(time_col);
+        let time_col_idx = col_index(time_col)?;
         let (data_start_row, data_col_idx) = parse_cell_ref(cell_label)?;
 
         let mut pairs = Vec::new();
@@ -284,7 +284,7 @@ impl FilesystemDataProvider {
         let col_idx = if col_label.is_empty() {
             col_idx
         } else if is_column_only(col_label) {
-            col_index(col_label)
+            col_index(col_label)?
         } else {
             let (_r, c) = parse_cell_ref(col_label)?;
             c
@@ -364,7 +364,7 @@ impl FilesystemDataProvider {
             };
             (row_idx, last_col)
         } else if is_column_only(last_cell.trim()) {
-            let col = col_index(last_cell.trim());
+            let col = col_index(last_cell.trim())?;
             let mut last_row = start_row;
             for (i, row) in records.iter().enumerate().skip(start_row) {
                 if let Some(val) = row.get(col)

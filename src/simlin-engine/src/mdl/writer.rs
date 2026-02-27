@@ -1015,11 +1015,11 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
     } else if !dim.mappings.is_empty() {
         // Build a source-position index so element-level mappings emit
         // targets in the same order as the source dimension's elements.
-        let source_positions: HashMap<&str, usize> = match &dim.elements {
+        let source_positions: HashMap<String, usize> = match &dim.elements {
             DimensionElements::Named(elems) => elems
                 .iter()
                 .enumerate()
-                .map(|(i, e)| (e.as_str(), i))
+                .map(|(i, e)| (e.to_lowercase(), i))
                 .collect(),
             DimensionElements::Indexed(_) => HashMap::new(),
         };
@@ -4088,6 +4088,36 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert!(
             buf.contains("-> (dim b: b1, b2, b3)"),
             "targets should be in source element order (a1->b1, a2->b2, a3->b3), got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_dimension_element_mapping_case_insensitive_lookup() {
+        // element_map uses canonical (lowercase) keys, but dim.elements
+        // may preserve original casing -- the sort must still work.
+        let dim = datamodel::Dimension {
+            name: "Region".to_string(),
+            elements: datamodel::DimensionElements::Named(vec![
+                "North".to_string(),
+                "South".to_string(),
+                "East".to_string(),
+            ]),
+            mappings: vec![datamodel::DimensionMapping {
+                target: "zone".to_string(),
+                element_map: vec![
+                    ("east".to_string(), "z3".to_string()),
+                    ("north".to_string(), "z1".to_string()),
+                    ("south".to_string(), "z2".to_string()),
+                ],
+            }],
+        };
+
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+
+        assert!(
+            buf.contains("-> (zone: z1, z2, z3)"),
+            "targets should be sorted by source element order despite case mismatch, got: {buf}"
         );
     }
 }

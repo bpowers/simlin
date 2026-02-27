@@ -132,10 +132,10 @@ fn alloc_curve(p: f64, request: f64, ptype: i32, ppriority: f64, pwidth: f64, pe
                 0.0
             } else if p <= ppriority {
                 let t = (hi - p) / (hi - lo);
-                1.0 - 2.0 * (1.0 - t) * (1.0 - t) / 2.0
+                1.0 - 2.0 * (1.0 - t) * (1.0 - t)
             } else {
                 let t = (hi - p) / (hi - lo);
-                2.0 * t * t / 2.0
+                2.0 * t * t
             }
         }
         3 => {
@@ -166,7 +166,7 @@ fn alloc_curve(p: f64, request: f64, ptype: i32, ppriority: f64, pwidth: f64, pe
             } else {
                 let ratio = ppriority / p;
                 let q = ratio.powf(pextra);
-                q / (1.0 + q)
+                if q.is_infinite() { 1.0 } else { q / (1.0 + q) }
             }
         }
         _ => {
@@ -416,7 +416,7 @@ impl ModuleEvaluator<'_> {
                     BinaryOp::Sub => lval - rval,
                     BinaryOp::Mul => lval * rval,
                     BinaryOp::Div => lval / rval,
-                    BinaryOp::Mod => lval % rval,
+                    BinaryOp::Mod => lval.rem_euclid(rval),
                     BinaryOp::Exp => lval.powf(rval),
                     BinaryOp::Lt => {
                         if lval < rval {
@@ -514,11 +514,11 @@ impl ModuleEvaluator<'_> {
                         self.iter_array_elements(source_array, |val| {
                             source_values.push(val);
                         });
-                        let offset = self.eval_at_index(offset_array, index).round() as usize;
-                        if offset < source_values.len() {
-                            source_values[offset]
-                        } else {
+                        let raw = self.eval_at_index(offset_array, index).round();
+                        if raw.is_nan() || raw < 0.0 || raw >= source_values.len() as f64 {
                             f64::NAN
+                        } else {
+                            source_values[raw as usize]
                         }
                     }
                     BuiltinFn::VectorSortOrder(array_expr, direction_expr) => {
@@ -1481,11 +1481,11 @@ impl ModuleEvaluator<'_> {
                             return f64::NAN;
                         }
 
-                        let idx = offset_values[0].round() as usize;
-                        if idx < source_values.len() {
-                            source_values[idx]
-                        } else {
+                        let raw = offset_values[0].round();
+                        if raw.is_nan() || raw < 0.0 || raw >= source_values.len() as f64 {
                             f64::NAN
+                        } else {
+                            source_values[raw as usize]
                         }
                     }
                     BuiltinFn::VectorSortOrder(array_expr, direction_expr) => {
@@ -1732,7 +1732,7 @@ impl ModuleEvaluator<'_> {
                                 BinaryOp::Mul => l_val * r_val,
                                 BinaryOp::Div => l_val / r_val,
                                 BinaryOp::Exp => l_val.powf(r_val),
-                                BinaryOp::Mod => l_val % r_val,
+                                BinaryOp::Mod => l_val.rem_euclid(r_val),
                                 BinaryOp::Lt => (l_val < r_val) as i8 as f64,
                                 BinaryOp::Lte => (l_val <= r_val) as i8 as f64,
                                 BinaryOp::Gt => (l_val > r_val) as i8 as f64,
@@ -2287,6 +2287,60 @@ pub fn calc_flattened_offsets(
     }
 
     offsets
+}
+
+#[cfg(test)]
+mod alloc_curve_tests {
+    use super::alloc_curve;
+
+    #[test]
+    fn triangular_survival_continuous_at_mode() {
+        let ppriority = 10.0;
+        let pwidth = 5.0;
+        // At p = ppriority (the mode), both branches should yield 0.5
+        let left = alloc_curve(ppriority, 1.0, 2, ppriority, pwidth, 0.0);
+        let right = alloc_curve(ppriority + f64::EPSILON, 1.0, 2, ppriority, pwidth, 0.0);
+        assert!(
+            (left - 0.5).abs() < 1e-10,
+            "left branch at mode should be 0.5, got {left}"
+        );
+        assert!(
+            (right - 0.5).abs() < 1e-6,
+            "right branch near mode should be ~0.5, got {right}"
+        );
+    }
+
+    #[test]
+    fn triangular_survival_endpoints() {
+        let ppriority = 10.0;
+        let pwidth = 5.0;
+        let lo = ppriority - pwidth;
+        let hi = ppriority + pwidth;
+        assert_eq!(alloc_curve(lo, 1.0, 2, ppriority, pwidth, 0.0), 1.0);
+        assert_eq!(alloc_curve(hi, 1.0, 2, ppriority, pwidth, 0.0), 0.0);
+    }
+
+    #[test]
+    fn ces_survives_large_exponent() {
+        // Large pextra with ratio > 1 should produce 1.0, not NaN
+        let result = alloc_curve(1.0, 1.0, 5, 10.0, 0.0, 1000.0);
+        assert!(
+            result.is_finite(),
+            "CES with large exponent produced {result}"
+        );
+        assert!((result - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn ces_survives_large_exponent_both_sides() {
+        // ratio < 1 with large exponent: q -> 0, fraction -> 0
+        let result = alloc_curve(10.0, 1.0, 5, 1.0, 0.0, 1000.0);
+        assert!(
+            result.is_finite(),
+            "CES with large exponent produced {result}"
+        );
+        assert!(result.abs() < 1e-10);
+    }
 }
 
 #[cfg(test)]

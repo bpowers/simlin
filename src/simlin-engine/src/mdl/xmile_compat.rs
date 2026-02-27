@@ -382,6 +382,19 @@ impl XmileFormatter {
                     );
                 }
             }
+            "ramp from to" => {
+                // RAMP FROM TO(y_start, y_end, t_start, t_end) ->
+                // y_start + RAMP((y_end - y_start) / (t_end - t_start), t_start, t_end)
+                if args.len() >= 4 {
+                    let y_start = self.format_expr_ctx(&args[0], ctx);
+                    let y_end = self.format_expr_ctx(&args[1], ctx);
+                    let t_start = self.format_expr_ctx(&args[2], ctx);
+                    let t_end = self.format_expr_ctx(&args[3], ctx);
+                    return format!(
+                        "({y_start}) + RAMP((({y_end}) - ({y_start})) / (({t_end}) - ({t_start})), {t_start}, {t_end})"
+                    );
+                }
+            }
             "modulo" => {
                 // MODULO(x, y) -> (x) MOD (y)
                 if args.len() >= 2 {
@@ -493,7 +506,7 @@ impl XmileFormatter {
             "xidz" => "SAFEDIV".to_string(),
             "lookup extrapolate" => "LOOKUP".to_string(),
             "quantum" => "QUANTUM".to_string(),
-            "ramp from to" => "RAMP".to_string(),
+            "ramp from to" => "RAMP_FROM_TO".to_string(),
             "sshape" => "SSHAPE".to_string(),
             "npv" => "NPV".to_string(),
             "vmax" => "MAX".to_string(),
@@ -1982,5 +1995,29 @@ mod tests {
         let formatter = XmileFormatter::new();
         let expr = Expr::Na(loc());
         assert_eq!(formatter.format_expr(&expr), "NAN");
+    }
+
+    #[test]
+    fn test_ramp_from_to_transforms_args() {
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("ramp from to"),
+            vec![],
+            vec![
+                Expr::Const(0.0, loc()),
+                Expr::Const(100.0, loc()),
+                Expr::Const(5.0, loc()),
+                Expr::Const(15.0, loc()),
+            ],
+            CallKind::Builtin,
+            loc(),
+        );
+        let result = formatter.format_expr(&expr);
+        assert!(result.contains("RAMP"), "should contain RAMP: {result}");
+        assert!(
+            !result.starts_with("RAMP_FROM_TO"),
+            "should not be bare RAMP_FROM_TO: {result}"
+        );
+        assert!(result.contains("100") && result.contains("0"), "{result}");
     }
 }
