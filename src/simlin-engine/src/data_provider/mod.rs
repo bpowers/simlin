@@ -133,6 +133,7 @@ fn data_provider_error(file: &str) -> Error {
 
 /// Convert a column letter(s) to a 0-based column index.
 /// "A" -> 0, "B" -> 1, ..., "Z" -> 25, "AA" -> 26, etc.
+#[cfg(feature = "file_io")]
 pub(crate) fn col_index(col: &str) -> usize {
     col.bytes().fold(0usize, |acc, b| {
         acc * 26 + (b.to_ascii_uppercase() - b'A' + 1) as usize
@@ -141,6 +142,7 @@ pub(crate) fn col_index(col: &str) -> usize {
 
 /// Parse an A1-style cell reference into 0-based (row, col) indices.
 /// "A1" -> (0, 0), "B2" -> (1, 1), "AA10" -> (9, 26)
+#[cfg(feature = "file_io")]
 pub(crate) fn parse_cell_ref(s: &str) -> Result<(usize, usize)> {
     let s = s.trim();
     let split = s.find(|c: char| c.is_ascii_digit()).ok_or_else(|| {
@@ -169,6 +171,7 @@ pub(crate) fn parse_cell_ref(s: &str) -> Result<(usize, usize)> {
 }
 
 /// Check if a string is purely column letters (no digits).
+#[cfg(feature = "file_io")]
 pub(crate) fn is_column_only(s: &str) -> bool {
     let s = s.trim();
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphabetic())
@@ -230,6 +233,7 @@ mod tests {
         assert!(err.details.as_ref().unwrap().contains("subs.csv"));
     }
 
+    #[cfg(feature = "file_io")]
     #[test]
     fn test_col_index() {
         assert_eq!(col_index("A"), 0);
@@ -241,6 +245,7 @@ mod tests {
         assert_eq!(col_index("b"), 1);
     }
 
+    #[cfg(feature = "file_io")]
     #[test]
     fn test_parse_cell_ref() {
         assert_eq!(parse_cell_ref("A1").unwrap(), (0, 0));
@@ -249,12 +254,14 @@ mod tests {
         assert_eq!(parse_cell_ref("AA1").unwrap(), (0, 26));
     }
 
+    #[cfg(feature = "file_io")]
     #[test]
     fn test_parse_cell_ref_errors() {
         assert!(parse_cell_ref("123").is_err());
         assert!(parse_cell_ref("").is_err());
     }
 
+    #[cfg(feature = "file_io")]
     #[test]
     fn test_is_column_only() {
         assert!(is_column_only("A"));
