@@ -1193,23 +1193,34 @@ impl From<Dimension> for datamodel::Dimension {
         } else {
             datamodel::Dimension::named(dim.name, vec![])
         };
-        // Reconstruct mappings from both maps_to (first positional) and
-        // the mappings array (additional positional or element-level).
-        if let Some(target) = dim.maps_to {
-            result.mappings.push(datamodel::DimensionMapping {
-                target,
-                element_map: vec![],
-            });
-        }
-        for m in dim.mappings {
-            result.mappings.push(datamodel::DimensionMapping {
-                target: m.target,
-                element_map: m
-                    .element_map
-                    .into_iter()
-                    .map(|e| (e.source, e.target))
-                    .collect(),
-            });
+        // Reconstruct mappings: if the richer `mappings` array is present,
+        // use it exclusively (it may include the maps_to target). Otherwise
+        // fall back to the legacy `maps_to` field for backward compatibility.
+        if !dim.mappings.is_empty() {
+            for m in dim.mappings {
+                result.mappings.push(datamodel::DimensionMapping {
+                    target: m.target,
+                    element_map: m
+                        .element_map
+                        .into_iter()
+                        .map(|e| (e.source, e.target))
+                        .collect(),
+                });
+            }
+            // If maps_to refers to a target not already in mappings, include it.
+            if let Some(target) = dim.maps_to
+                && !result.mappings.iter().any(|m| m.target == target)
+            {
+                result.mappings.insert(
+                    0,
+                    datamodel::DimensionMapping {
+                        target,
+                        element_map: vec![],
+                    },
+                );
+            }
+        } else if let Some(target) = dim.maps_to {
+            result.set_maps_to(target);
         }
         result
     }
