@@ -938,42 +938,103 @@ fn write_single_entry(
 
 /// Write arrayed (per-element) entries.
 ///
-/// When `default_equation` is `Some` (from EXCEPT syntax), we intentionally
-/// omit a dimension-level default line (name[Dim...]=default) because it
-/// would apply the default equation to ALL elements including excepted ones
-/// that should default to 0. Each element is written individually so
-/// excepted elements (absent from the list) have no equation on re-import.
+/// When `default_equation` is `Some` (from EXCEPT syntax), emit the EXCEPT
+/// form so that re-importing the MDL preserves the default semantics for
+/// elements not explicitly listed. Exception elements (those whose equation
+/// differs from the default) are written individually after the default line.
 fn write_arrayed_entries(
     buf: &mut String,
     ident: &str,
-    _dims: &[String],
+    dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
-    _default_equation: &Option<String>,
+    default_equation: &Option<String>,
     units: &Option<String>,
     doc: &str,
 ) {
     let name = format_mdl_ident(ident);
-    let last_idx = elements.len().saturating_sub(1);
 
-    for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
-        let elem_display = format_mdl_element_key(elem_name);
-        let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+    if let Some(default_eq) = default_equation {
+        // Separate exception elements (equation differs from default)
+        // from default elements (equation matches default).
+        let exceptions: Vec<_> = elements
+            .iter()
+            .filter(|(_, eqn, _, _)| eqn != default_eq)
+            .collect();
 
-        write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-
-        if let Some(gf) = elem_gf {
-            buf.push_str("\n\t");
-            write_lookup(buf, gf);
-        } else {
-            let mdl_eqn = equation_to_mdl(eqn);
-            buf.push_str("\n\t");
-            buf.push_str(&mdl_eqn);
+        // Emit the default line with :EXCEPT: listing exception subscripts
+        let dim_strs: Vec<String> = dims.iter().map(|d| format_mdl_ident(d)).collect();
+        write!(buf, "{name}[{}]", dim_strs.join(",")).unwrap();
+        if !exceptions.is_empty() {
+            buf.push_str(" :EXCEPT: ");
+            for (i, (elem_name, _, _, _)) in exceptions.iter().enumerate() {
+                if i > 0 {
+                    buf.push_str(", ");
+                }
+                let elem_display = format_mdl_element_key(elem_name);
+                write!(buf, "[{elem_display}]").unwrap();
+            }
         }
-
-        if i < last_idx {
-            buf.push_str("\n\t~~|\n");
+        let assign_op = if is_data_equation(default_eq) {
+            ":="
         } else {
+            "="
+        };
+        write!(buf, "{assign_op}").unwrap();
+        let mdl_eqn = equation_to_mdl(default_eq);
+        buf.push_str("\n\t");
+        buf.push_str(&mdl_eqn);
+
+        if exceptions.is_empty() {
             write_units_and_comment(buf, units, doc);
+        } else {
+            buf.push_str("\n\t~~|\n");
+
+            // Emit each exception element
+            let last_exc = exceptions.len().saturating_sub(1);
+            for (i, (elem_name, eqn, _comment, elem_gf)) in exceptions.iter().enumerate() {
+                let elem_display = format_mdl_element_key(elem_name);
+                let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+                write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
+
+                if let Some(gf) = elem_gf {
+                    buf.push_str("\n\t");
+                    write_lookup(buf, gf);
+                } else {
+                    let mdl_eqn = equation_to_mdl(eqn);
+                    buf.push_str("\n\t");
+                    buf.push_str(&mdl_eqn);
+                }
+
+                if i < last_exc {
+                    buf.push_str("\n\t~~|\n");
+                } else {
+                    write_units_and_comment(buf, units, doc);
+                }
+            }
+        }
+    } else {
+        // No default equation: write each element individually.
+        let last_idx = elements.len().saturating_sub(1);
+        for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
+            let elem_display = format_mdl_element_key(elem_name);
+            let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+
+            write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
+
+            if let Some(gf) = elem_gf {
+                buf.push_str("\n\t");
+                write_lookup(buf, gf);
+            } else {
+                let mdl_eqn = equation_to_mdl(eqn);
+                buf.push_str("\n\t");
+                buf.push_str(&mdl_eqn);
+            }
+
+            if i < last_idx {
+                buf.push_str("\n\t~~|\n");
+            } else {
+                write_units_and_comment(buf, units, doc);
+            }
         }
     }
 }
@@ -1033,7 +1094,9 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
                     // Detect one-to-many mappings (from subdimension
                     // expansion) by checking for duplicate source keys.
                     // MDL positional notation can't represent these, so
-                    // fall back to a plain dimension-name mapping.
+                    // fall back to a plain dimension-name mapping. This
+                    // loses element-level mapping detail on re-import;
+                    // use protobuf serialization for lossless roundtrips.
                     let mut seen_sources = std::collections::HashSet::new();
                     let has_one_to_many = mapping
                         .element_map
@@ -4158,6 +4221,85 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert!(
             buf.contains("-> dim a") && !buf.contains("(dim a:"),
             "one-to-many mapping should fall back to positional notation, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_arrayed_except_emits_except_syntax() {
+        let mut buf = String::new();
+        write_arrayed_entries(
+            &mut buf,
+            "g",
+            &["DimA".to_string()],
+            &[
+                ("A1".to_string(), "10".to_string(), None, None),
+                ("A2".to_string(), "7".to_string(), None, None),
+                ("A3".to_string(), "7".to_string(), None, None),
+            ],
+            &Some("7".to_string()),
+            &None,
+            "",
+        );
+        assert!(
+            buf.contains(":EXCEPT:"),
+            "should emit EXCEPT syntax when default_equation is Some, got: {buf}"
+        );
+        assert!(
+            buf.contains("[A1]"),
+            "exception element A1 should be listed in EXCEPT clause, got: {buf}"
+        );
+        assert!(
+            !buf.contains("[A2]") || buf.contains("g[A2]"),
+            "non-exception elements should not appear in EXCEPT list"
+        );
+    }
+
+    #[test]
+    fn write_arrayed_no_default_writes_all_elements() {
+        let mut buf = String::new();
+        write_arrayed_entries(
+            &mut buf,
+            "h",
+            &["DimA".to_string()],
+            &[
+                ("A1".to_string(), "8".to_string(), None, None),
+                ("A2".to_string(), "0".to_string(), None, None),
+            ],
+            &None,
+            &None,
+            "",
+        );
+        assert!(
+            !buf.contains(":EXCEPT:"),
+            "should not emit EXCEPT when no default_equation, got: {buf}"
+        );
+        assert!(buf.contains("h[A1]"), "should write A1 element, got: {buf}");
+        assert!(buf.contains("h[A2]"), "should write A2 element, got: {buf}");
+    }
+
+    #[test]
+    fn write_arrayed_except_no_exceptions_all_default() {
+        let mut buf = String::new();
+        write_arrayed_entries(
+            &mut buf,
+            "k",
+            &["DimA".to_string()],
+            &[
+                ("A1".to_string(), "5".to_string(), None, None),
+                ("A2".to_string(), "5".to_string(), None, None),
+            ],
+            &Some("5".to_string()),
+            &None,
+            "",
+        );
+        // All elements match the default, so no EXCEPT exceptions needed
+        assert!(
+            buf.contains("k[DimA]"),
+            "should emit dimension-level default, got: {buf}"
+        );
+        assert!(
+            !buf.contains(":EXCEPT:") || buf.contains(":EXCEPT: ="),
+            "no exceptions means EXCEPT clause should be empty or absent, got: {buf}"
         );
     }
 }
