@@ -5,7 +5,9 @@
 use std::path::PathBuf;
 
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
-use crate::data_provider::{DataProvider, col_index, is_column_only, parse_cell_ref};
+use crate::data_provider::{
+    DataProvider, col_index, is_column_only, parse_cell_ref, parse_row_or_cell_ref,
+};
 
 /// Filesystem-based data provider that reads CSV and Excel files.
 ///
@@ -291,7 +293,7 @@ impl FilesystemDataProvider {
         let delimiter = Self::parse_delimiter(tab_or_delimiter);
         let records = self.read_csv_records(file, delimiter)?;
 
-        let (row_idx, col_idx) = parse_cell_ref(row_label)?;
+        let (row_idx, col_idx) = parse_row_or_cell_ref(row_label)?;
 
         // For scalar constants, col_label is empty and the column comes
         // from row_label's cell reference (e.g. "B2" -> col B).
@@ -764,6 +766,15 @@ mod tests {
         // 4-arg form: row "A2" provides cell but col "C" overrides column
         let val = provider.load_constant(&file, ",", "A2", "C").unwrap();
         assert_eq!(val, 20.0);
+    }
+
+    #[test]
+    fn test_load_constant_with_row_number_and_col_label() {
+        let (dir, file) = create_temp_csv("const.csv", "h,a,b\n1,10,20\n2,30,40\n");
+        let provider = FilesystemDataProvider::new(dir.path());
+        // 4-arg form: row_label is a plain row number "2", col_label is "B"
+        let val = provider.load_constant(&file, ",", "2", "B").unwrap();
+        assert_eq!(val, 10.0);
     }
 
     #[test]

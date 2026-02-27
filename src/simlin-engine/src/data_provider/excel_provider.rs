@@ -5,7 +5,7 @@
 use calamine::{Data, DataType, Reader, open_workbook_auto};
 
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
-use crate::data_provider::{col_index, is_column_only, parse_cell_ref};
+use crate::data_provider::{col_index, is_column_only, parse_cell_ref, parse_row_or_cell_ref};
 
 use super::csv_provider::FilesystemDataProvider;
 
@@ -160,7 +160,7 @@ impl FilesystemDataProvider {
     ) -> Result<f64> {
         let range = self.open_sheet(file, sheet_name)?;
 
-        let (row_idx, col_idx) = parse_cell_ref(row_label)?;
+        let (row_idx, col_idx) = parse_row_or_cell_ref(row_label)?;
         // When col_label is present, it overrides the column from row_label.
         // This handles 4-argument GET DIRECT CONSTANTS calls where row and
         // column are specified separately.

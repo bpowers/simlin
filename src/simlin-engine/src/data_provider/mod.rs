@@ -191,6 +191,38 @@ pub(crate) fn parse_cell_ref(s: &str) -> Result<(usize, usize)> {
     Ok((row_1based - 1, col))
 }
 
+/// Parse a row-or-cell reference into 0-based (row, col) indices.
+/// Accepts either a full cell reference ("B2" -> (1, 1)) or a plain
+/// 1-based row number ("2" -> (1, 0)). When a plain row number is
+/// given, the column defaults to 0 and the caller should override it
+/// from the separate col_label argument (4-arg GET DIRECT CONSTANTS).
+#[cfg(feature = "file_io")]
+pub(crate) fn parse_row_or_cell_ref(s: &str) -> Result<(usize, usize)> {
+    let trimmed = s.trim().trim_end_matches('*');
+    if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        let row_1based: usize = trimmed.parse::<usize>().map_err(|_| {
+            Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                Some(format!("invalid row reference '{}': bad row number", s)),
+            )
+        })?;
+        if row_1based == 0 {
+            return Err(Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                Some(format!(
+                    "invalid row reference '{}': row numbers are 1-indexed",
+                    s
+                )),
+            ));
+        }
+        Ok((row_1based - 1, 0))
+    } else {
+        parse_cell_ref(s)
+    }
+}
+
 /// Check if a string is purely column letters (no digits).
 #[cfg(feature = "file_io")]
 pub(crate) fn is_column_only(s: &str) -> bool {
@@ -306,6 +338,28 @@ mod tests {
             result.is_err(),
             "cell reference 'A0' with row 0 should return an error (rows are 1-indexed)"
         );
+    }
+
+    #[cfg(feature = "file_io")]
+    #[test]
+    fn test_parse_row_or_cell_ref_cell_reference() {
+        assert_eq!(parse_row_or_cell_ref("B2").unwrap(), (1, 1));
+        assert_eq!(parse_row_or_cell_ref("A1").unwrap(), (0, 0));
+        assert_eq!(parse_row_or_cell_ref("C10").unwrap(), (9, 2));
+    }
+
+    #[cfg(feature = "file_io")]
+    #[test]
+    fn test_parse_row_or_cell_ref_plain_row_number() {
+        assert_eq!(parse_row_or_cell_ref("2").unwrap(), (1, 0));
+        assert_eq!(parse_row_or_cell_ref("1").unwrap(), (0, 0));
+        assert_eq!(parse_row_or_cell_ref("10").unwrap(), (9, 0));
+    }
+
+    #[cfg(feature = "file_io")]
+    #[test]
+    fn test_parse_row_or_cell_ref_rejects_row_zero() {
+        assert!(parse_row_or_cell_ref("0").is_err());
     }
 
     #[cfg(feature = "file_io")]
