@@ -462,15 +462,38 @@ pub fn instantiate_implicit_modules(
             }
         }
         Ast::Arrayed(dimensions, elements) => {
-            let mut builtin_visitor = BuiltinVisitor::new(variable_name);
-            let elements: std::result::Result<HashMap<_, _>, EquationError> = elements
-                .into_iter()
-                .map(|(subscript, equation)| {
-                    builtin_visitor.walk(equation).map(|ast| (subscript, ast))
-                })
-                .collect();
-            let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
-            Ok((Ast::Arrayed(dimensions, elements?), vars))
+            let any_stdlib = elements.values().any(contains_stdlib_call);
+            if any_stdlib && !dimensions.is_empty() {
+                let mut all_vars = Vec::new();
+                let mut new_elements = HashMap::new();
+                for (subscript_key, equation) in elements {
+                    let subscript_parts: Vec<String> = subscript_key
+                        .as_str()
+                        .split(',')
+                        .map(|s| s.to_string())
+                        .collect();
+                    let mut visitor = BuiltinVisitor::new_with_subscript_context(
+                        variable_name,
+                        &dimensions,
+                        &subscript_parts,
+                        dimensions_ctx,
+                    );
+                    let transformed = visitor.walk(equation)?;
+                    new_elements.insert(subscript_key, transformed);
+                    all_vars.extend(visitor.vars.values().cloned());
+                }
+                Ok((Ast::Arrayed(dimensions, new_elements), all_vars))
+            } else {
+                let mut builtin_visitor = BuiltinVisitor::new(variable_name);
+                let elements: std::result::Result<HashMap<_, _>, EquationError> = elements
+                    .into_iter()
+                    .map(|(subscript, equation)| {
+                        builtin_visitor.walk(equation).map(|ast| (subscript, ast))
+                    })
+                    .collect();
+                let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
+                Ok((Ast::Arrayed(dimensions, elements?), vars))
+            }
         }
     }
 }
@@ -691,6 +714,68 @@ mod tests {
             .aux("input", "10", None)
             .array_const("delay_a[DimA]", 1.0)
             .array_aux("d[DimA]", "k * DELAY3(input, delay_a[DimA])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+    }
+
+    /// Test that per-element (Arrayed) equations with stdlib calls get unique module names.
+    /// When each element has its own equation containing DELAY1, each element
+    /// must produce a uniquely-named module to avoid collisions.
+    #[test]
+    fn test_arrayed_per_element_delay1() {
+        let project = TestProject::new("arrayed_per_element_delay")
+            .named_dimension("DimA", &["A1", "A2"])
+            .aux("input1", "10", None)
+            .aux("input2", "20", None)
+            .aux("delay_time", "5", None)
+            .aux("init", "0", None)
+            .array_with_ranges(
+                "d[DimA]",
+                vec![
+                    ("A1", "DELAY1(input1, delay_time, init)"),
+                    ("A2", "DELAY1(input2, delay_time, init)"),
+                ],
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+    }
+
+    /// Test per-element Arrayed equations mixing stdlib and non-stdlib expressions
+    #[test]
+    fn test_arrayed_per_element_mixed_stdlib() {
+        let project = TestProject::new("arrayed_per_element_mixed")
+            .named_dimension("DimA", &["A1", "A2"])
+            .aux("input1", "10", None)
+            .aux("delay_time", "5", None)
+            .aux("init", "0", None)
+            .array_with_ranges(
+                "d[DimA]",
+                vec![("A1", "DELAY1(input1, delay_time, init)"), ("A2", "42")],
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+    }
+
+    /// Test that per-element (Arrayed) equations with stdlib calls using
+    /// subscripted inputs produce correctly-suffixed module names.
+    /// This verifies dimension reference substitution works in the Arrayed path.
+    #[test]
+    fn test_arrayed_per_element_delay1_with_subscripted_inputs() {
+        let project = TestProject::new("arrayed_per_element_subscripted")
+            .named_dimension("DimA", &["A1", "A2"])
+            .array_with_ranges("input_a[DimA]", vec![("A1", "10"), ("A2", "20")])
+            .aux("delay_time", "5", None)
+            .aux("init", "0", None)
+            .array_with_ranges(
+                "d[DimA]",
+                vec![
+                    ("A1", "DELAY1(input_a[A1], delay_time, init)"),
+                    ("A2", "DELAY1(input_a[A2], delay_time, init)"),
+                ],
+            );
 
         project.assert_compiles();
         project.assert_sim_builds();
