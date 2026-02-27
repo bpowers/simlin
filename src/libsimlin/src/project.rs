@@ -564,6 +564,103 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
     }
 }
 
+/// Open a Vensim MDL model with external data file support.
+///
+/// When `data_dir` is non-null and the `file_io` feature is enabled, a
+/// `FilesystemDataProvider` is created using that directory as the base path
+/// for resolving relative data file references. When `data_dir` is null,
+/// a `NullDataProvider` is used (any GET DIRECT DATA references will error).
+///
+/// Returns NULL and populates `out_error` on failure.
+///
+/// # Safety
+/// - `data` must be a valid pointer to at least `len` bytes of UTF-8 MDL text
+/// - `data_dir` may be null; when non-null it must point to `data_dir_len` bytes
+///   of valid UTF-8 representing a directory path
+/// - `out_error` may be null
+/// - The returned project must be freed with `simlin_project_unref`
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_open_vensim_with_data(
+    data: *const u8,
+    len: usize,
+    data_dir: *const u8,
+    data_dir_len: usize,
+    out_error: *mut *mut SimlinError,
+) -> *mut SimlinProject {
+    clear_out_error(out_error);
+    if data.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("data pointer must not be NULL"),
+        );
+        return ptr::null_mut();
+    }
+
+    let slice = std::slice::from_raw_parts(data, len);
+    let contents = match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("MDL data is not valid UTF-8"),
+            );
+            return ptr::null_mut();
+        }
+    };
+
+    let result = if data_dir.is_null() {
+        simlin_engine::open_vensim(contents)
+    } else {
+        let dir_slice = std::slice::from_raw_parts(data_dir, data_dir_len);
+        let dir_str = match std::str::from_utf8(dir_slice) {
+            Ok(s) => s,
+            Err(_) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("data_dir is not valid UTF-8"),
+                );
+                return ptr::null_mut();
+            }
+        };
+
+        #[cfg(feature = "file_io")]
+        {
+            let provider = simlin_engine::FilesystemDataProvider::new(dir_str);
+            simlin_engine::open_vensim_with_data(contents, Some(&provider))
+        }
+        #[cfg(not(feature = "file_io"))]
+        {
+            let _ = dir_str;
+            simlin_engine::open_vensim(contents)
+        }
+    };
+
+    match result {
+        Ok(datamodel_project) => {
+            let project: engine::Project = datamodel_project.into();
+            let (db, sync_state) = new_synced_db(&project);
+            let boxed = Box::new(SimlinProject {
+                project: Mutex::new(project),
+                db: Mutex::new(db),
+                sync_state: Mutex::new(Some(sync_state)),
+                ref_count: AtomicUsize::new(1),
+            });
+            Box::into_raw(boxed)
+        }
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::from(err.code))
+                    .with_message(format!("failed to import MDL: {err}")),
+            );
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Check if a project's model can be simulated
 ///
 /// Returns true if the model can be simulated (i.e., can be compiled to a VM
