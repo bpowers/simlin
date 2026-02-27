@@ -22,11 +22,6 @@ const PLATFORMS: &[Platform] = &[
         cpu: "arm64",
     },
     Platform {
-        suffix: "darwin-x64",
-        os: "darwin",
-        cpu: "x64",
-    },
-    Platform {
         suffix: "linux-x64",
         os: "linux",
         cpu: "x64",

@@ -10,7 +10,6 @@
   ],
   "optionalDependencies": {
     "@simlin/mcp-darwin-arm64": "0.1.0",
-    "@simlin/mcp-darwin-x64": "0.1.0",
     "@simlin/mcp-linux-arm64": "0.1.0",
     "@simlin/mcp-linux-x64": "0.1.0",
     "@simlin/mcp-win32-x64": "0.1.0"
