@@ -487,38 +487,6 @@ fn simulate_mdl_path_with_data(mdl_path: &str) {
     }
 }
 
-/// Like simulate_mdl_path_with_data, but interpreter-only (for models using
-/// array builtins not yet implemented in the VM bytecode compiler).
-#[cfg(feature = "file_io")]
-#[allow(dead_code)]
-fn simulate_mdl_path_with_data_interpreter_only(mdl_path: &str) {
-    eprintln!("model (vensim mdl with data, interpreter-only): {mdl_path}");
-
-    let mdl_abs = std::path::Path::new(mdl_path);
-    let model_dir = mdl_abs
-        .parent()
-        .unwrap_or_else(|| panic!("no parent dir for {mdl_path}"));
-
-    let contents = std::fs::read_to_string(mdl_path)
-        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
-
-    let provider = FilesystemDataProvider::new(model_dir);
-    let datamodel_project = open_vensim_with_data(&contents, Some(&provider))
-        .unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
-    let project = Rc::new(Project::from(datamodel_project));
-
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
-
-    let results = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
-
-    if let Some(expected) = load_expected_results_for_mdl(mdl_path) {
-        ensure_results(&expected, &results);
-    }
-}
-
 #[test]
 fn simulates_models_correctly() {
     for &path in TEST_MODELS {
