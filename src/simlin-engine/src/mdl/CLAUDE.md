@@ -24,10 +24,11 @@ For design history and detailed implementation notes, see [docs/design/mdl-parse
 - `settings.rs` -- Post-equation settings section parser (integration type, unit equivalences)
 
 ### Conversion (`convert/`)
-- `mod.rs` -- Main conversion orchestration, group building
-- `variables.rs` -- Variable type detection (stock/flow/aux) and building
+- `mod.rs` -- Main conversion orchestration, group building, `DataProvider` threading
+- `variables.rs` -- Variable type detection (stock/flow/aux) and building; EXCEPT default_equation handling, GET DIRECT resolution
 - `stocks.rs` -- Stock/flow linking via is_all_plus_minus algorithm
-- `dimensions.rs` -- Dimension/subscript building with range expansion
+- `dimensions.rs` -- Dimension/subscript building with range expansion and `DimensionMapping` construction
+- `external_data.rs` -- GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT resolution via `DataProvider` trait
 - `types.rs` -- Internal types (`SymbolInfo`, etc.)
 - `helpers.rs` -- Utility functions (units, expressions)
 
