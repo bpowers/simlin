@@ -874,6 +874,13 @@ impl<'module> Compiler<'module> {
                             "array builtins not yet supported in VM".to_owned()
                         );
                     }
+                    // Previous/Init are handled in a separate early-return path
+                    // added in Task 4. Until then, nothing emits these variants.
+                    BuiltinFn::Previous(_) | BuiltinFn::Init(_) => {
+                        unreachable!(
+                            "Previous/Init builtins should be handled before reaching BuiltinId dispatch"
+                        );
+                    }
                 };
                 let func = match builtin {
                     BuiltinFn::Lookup(_, _, _)
@@ -918,6 +925,14 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::VectorSortOrder(_, _)
                     | BuiltinFn::AllocateAvailable(_, _, _) => {
                         return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    }
+                    // Previous/Init are handled in a separate early-return path
+                    // (Task 4 of phase 1 adds that path). Until then, nothing
+                    // emits these variants, so reaching here is a logic error.
+                    BuiltinFn::Previous(_) | BuiltinFn::Init(_) => {
+                        unreachable!(
+                            "Previous/Init builtins should be handled before reaching BuiltinId dispatch"
+                        );
                     }
                 };
 
@@ -1255,6 +1270,10 @@ impl<'module> Compiler<'module> {
                 self.collect_iter_source_views_impl(a, views, seen);
                 self.collect_iter_source_views_impl(b, views, seen);
                 self.collect_iter_source_views_impl(c, views, seen);
+            }
+            // Single expression argument (non-array)
+            Previous(a) | Init(a) => {
+                self.collect_iter_source_views_impl(a, views, seen);
             }
             // Constants/no-arg builtins
             Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {}

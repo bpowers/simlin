@@ -1540,6 +1540,12 @@ impl ModuleEvaluator<'_> {
                             f64::NAN
                         }
                     }
+                    // Previous/Init are compiled to opcodes, not interpreted
+                    // through this path. Nothing currently emits them as Expr
+                    // nodes for the interpreter.
+                    BuiltinFn::Previous(_) | BuiltinFn::Init(_) => {
+                        unreachable!("Previous/Init builtins not yet supported in interpreter");
+                    }
                 }
             }
             Expr::TempArray(id, view, _) => {

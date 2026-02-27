@@ -417,6 +417,10 @@ impl Expr1 {
                         Box::new(b.constify_dimensions(scope)),
                         Box::new(c.constify_dimensions(scope)),
                     ),
+                    BuiltinFn::Previous(a) => {
+                        BuiltinFn::Previous(Box::new(a.constify_dimensions(scope)))
+                    }
+                    BuiltinFn::Init(a) => BuiltinFn::Init(Box::new(a.constify_dimensions(scope))),
                 };
                 Expr1::App(func, loc)
             }

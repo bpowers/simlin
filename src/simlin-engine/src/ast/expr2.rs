@@ -802,6 +802,8 @@ impl Expr2 {
                         ctx.set_allow_dimension_union(prev);
                         result
                     }
+                    Previous(e) => Previous(Box::new(Expr2::from(*e, ctx)?)),
+                    Init(e) => Init(Box::new(Expr2::from(*e, ctx)?)),
                 };
                 // TODO: Handle array sources for builtin functions that return arrays
                 Expr2::App(builtin, None, loc)

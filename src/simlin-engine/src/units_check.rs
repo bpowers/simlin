@@ -222,6 +222,8 @@ impl UnitEvaluator<'_> {
                     BuiltinFn::VectorElmMap(source, _) => self.check(source),
                     BuiltinFn::VectorSortOrder(_, _) => Ok(Units::Constant),
                     BuiltinFn::AllocateAvailable(req, _, _) => self.check(req),
+                    // Previous(x) and Init(x) preserve the units of their argument
+                    BuiltinFn::Previous(a) | BuiltinFn::Init(a) => self.check(a),
                 }
             }
             Expr2::Subscript(base_name, _, _, loc) => {

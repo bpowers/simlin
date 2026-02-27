@@ -222,6 +222,8 @@ pub fn pretty(expr: &Expr) -> String {
                     pretty(c)
                 )
             }
+            BuiltinFn::Previous(a) => format!("previous({})", pretty(a)),
+            BuiltinFn::Init(a) => format!("init({})", pretty(a)),
         },
         Expr::EvalModule(module, model_name, _input_set, args) => {
             let args: Vec<_> = args.iter().map(pretty).collect();

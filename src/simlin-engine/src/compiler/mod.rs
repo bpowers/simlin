@@ -1011,6 +1011,10 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
         | BuiltinFn::StartTime
         | BuiltinFn::FinalTime
         | BuiltinFn::IsModuleInput(_, _) => {}
+        // Single expression builtins replacing stdlib modules
+        BuiltinFn::Previous(expr) | BuiltinFn::Init(expr) => {
+            extract_temp_sizes(expr, temp_sizes_map);
+        }
     }
 }
 

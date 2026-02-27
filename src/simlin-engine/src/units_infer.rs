@@ -518,6 +518,10 @@ impl UnitInferer<'_> {
                 BuiltinFn::AllocateAvailable(req, _, _) => {
                     self.gen_constraints(req, prefix, current_var, constraints)
                 }
+                // Previous(x) and Init(x) preserve the units of their argument
+                BuiltinFn::Previous(a) | BuiltinFn::Init(a) => {
+                    self.gen_constraints(a, prefix, current_var, constraints)
+                }
             },
             Expr2::Subscript(base_name, _, _, _) => {
                 // A subscripted expression has the same units as the base array
