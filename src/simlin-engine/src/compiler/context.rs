@@ -1412,7 +1412,6 @@ impl Context<'_> {
                                     let target_dim_name = target_dim.canonical_name();
 
                                     // Use bidirectional translation which handles:
-                                    // Use bidirectional translation which handles:
                                     // - Forward: source_dim maps to target_dim
                                     // - Reverse: target_dim maps to source_dim
                                     // - Subdimension: source_dim maps to parent of target_dim

@@ -1030,22 +1030,35 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
                 if mapping.element_map.is_empty() {
                     format_mdl_ident(&mapping.target)
                 } else {
-                    let mut sorted_map = mapping.element_map.clone();
-                    sorted_map.sort_by_key(|(src, _)| {
-                        source_positions
-                            .get(src.as_str())
-                            .copied()
-                            .unwrap_or(usize::MAX)
-                    });
-                    let target_elems: Vec<String> = sorted_map
+                    // Detect one-to-many mappings (from subdimension
+                    // expansion) by checking for duplicate source keys.
+                    // MDL positional notation can't represent these, so
+                    // fall back to a plain dimension-name mapping.
+                    let mut seen_sources = std::collections::HashSet::new();
+                    let has_one_to_many = mapping
+                        .element_map
                         .iter()
-                        .map(|(_, tgt)| format_mdl_ident(tgt))
-                        .collect();
-                    format!(
-                        "({}: {})",
-                        format_mdl_ident(&mapping.target),
-                        target_elems.join(", ")
-                    )
+                        .any(|(src, _)| !seen_sources.insert(src.as_str()));
+                    if has_one_to_many {
+                        format_mdl_ident(&mapping.target)
+                    } else {
+                        let mut sorted_map = mapping.element_map.clone();
+                        sorted_map.sort_by_key(|(src, _)| {
+                            source_positions
+                                .get(src.as_str())
+                                .copied()
+                                .unwrap_or(usize::MAX)
+                        });
+                        let target_elems: Vec<String> = sorted_map
+                            .iter()
+                            .map(|(_, tgt)| format_mdl_ident(tgt))
+                            .collect();
+                        format!(
+                            "({}: {})",
+                            format_mdl_ident(&mapping.target),
+                            target_elems.join(", ")
+                        )
+                    }
                 }
             })
             .collect();
@@ -4118,6 +4131,33 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert!(
             buf.contains("-> (zone: z1, z2, z3)"),
             "targets should be sorted by source element order despite case mismatch, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_dimension_one_to_many_falls_back_to_positional() {
+        // When a source element maps to multiple targets (from subdimension
+        // expansion), the element-level notation can't round-trip correctly.
+        // The writer should fall back to a positional dimension-name mapping.
+        let dim = datamodel::Dimension {
+            name: "dim_b".to_string(),
+            elements: datamodel::DimensionElements::Named(vec!["b1".to_string(), "b2".to_string()]),
+            mappings: vec![datamodel::DimensionMapping {
+                target: "dim_a".to_string(),
+                element_map: vec![
+                    ("b1".to_string(), "a1".to_string()),
+                    ("b1".to_string(), "a2".to_string()),
+                    ("b2".to_string(), "a3".to_string()),
+                ],
+            }],
+        };
+
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+
+        assert!(
+            buf.contains("-> dim a") && !buf.contains("(dim a:"),
+            "one-to-many mapping should fall back to positional notation, got: {buf}"
         );
     }
 }
