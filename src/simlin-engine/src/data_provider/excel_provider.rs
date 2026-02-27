@@ -161,11 +161,17 @@ impl FilesystemDataProvider {
         let range = self.open_sheet(file, sheet_name)?;
 
         let (row_idx, col_idx) = parse_cell_ref(row_label)?;
-        // col_label is intentionally unused: GET DIRECT CONSTANTS always
-        // passes a full cell reference (e.g. "B2") as row_label, so both
-        // row and column are encoded in that single argument. The external_data
-        // resolver passes "" as col_label for this function.
-        let _ = col_label;
+        // When col_label is present, it overrides the column from row_label.
+        // This handles 4-argument GET DIRECT CONSTANTS calls where row and
+        // column are specified separately.
+        let col_idx = if col_label.is_empty() {
+            col_idx
+        } else if is_column_only(col_label) {
+            col_index(col_label)?
+        } else {
+            let (_r, c) = parse_cell_ref(col_label)?;
+            c
+        };
 
         let val = range
             .get_value((row_idx as u32, col_idx as u32))

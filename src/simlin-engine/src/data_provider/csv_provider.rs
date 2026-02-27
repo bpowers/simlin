@@ -369,7 +369,7 @@ impl FilesystemDataProvider {
                     )),
                 ));
             }
-            let row_idx = row_num - 1;
+            let row_idx = (row_num - 1).min(records.len().saturating_sub(1));
             let empty = Vec::new();
             let row = records.get(row_idx).unwrap_or(&empty);
             let last_col = if row.is_empty() {
@@ -755,5 +755,25 @@ mod tests {
             result.is_err(),
             "time_row '0' should return an error, not underflow"
         );
+    }
+
+    #[test]
+    fn test_load_constant_with_col_label() {
+        let (dir, file) = create_temp_csv("const.csv", "h,a,b\n1,10,20\n2,30,40\n");
+        let provider = FilesystemDataProvider::new(dir.path());
+        // 4-arg form: row "A2" provides cell but col "C" overrides column
+        let val = provider.load_constant(&file, ",", "A2", "C").unwrap();
+        assert_eq!(val, 20.0);
+    }
+
+    #[test]
+    fn test_load_subscript_huge_numeric_last_cell_does_not_hang() {
+        let (dir, file) = create_temp_csv("subs.csv", "DimA\nA1\nA2\nA3\n");
+        let provider = FilesystemDataProvider::new(dir.path());
+        // A very large numeric last_cell should not cause pathological iteration
+        let result = provider.load_subscript(&file, ",", "A2", "999999999");
+        assert!(result.is_ok());
+        let elements = result.unwrap();
+        assert_eq!(elements, vec!["A1", "A2", "A3"]);
     }
 }
