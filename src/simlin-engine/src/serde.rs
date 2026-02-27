@@ -2069,6 +2069,7 @@ fn test_model_with_groups_roundtrip() {
 
 impl From<Dimension> for project_io::Dimension {
     fn from(dimension: Dimension) -> Self {
+        let maps_to = dimension.maps_to().map(|s| s.to_owned());
         let dim = match dimension.elements {
             DimensionElements::Indexed(size) => {
                 project_io::dimension::Dimension::Size(project_io::dimension::DimensionSize {
@@ -2083,7 +2084,7 @@ impl From<Dimension> for project_io::Dimension {
             name: dimension.name,
             obsolete_elements: vec![],
             dimension: Some(dim),
-            maps_to: dimension.maps_to,
+            maps_to,
         }
     }
 }
@@ -2103,11 +2104,15 @@ impl From<project_io::Dimension> for Dimension {
             // originally we ignored dimensions with only indexes -- treat that as a fallback
             DimensionElements::Named(dimension.obsolete_elements)
         };
-        Dimension {
+        let mut result = Dimension {
             name: dimension.name,
             elements,
-            maps_to: dimension.maps_to,
+            mappings: vec![],
+        };
+        if let Some(target) = dimension.maps_to {
+            result.set_maps_to(target);
         }
+        result
     }
 }
 

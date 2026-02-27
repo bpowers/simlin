@@ -284,7 +284,7 @@ impl From<&datamodel::Dimension> for SourceDimension {
         SourceDimension {
             name: dim.name.clone(),
             elements: SourceDimensionElements::from(&dim.elements),
-            maps_to: dim.maps_to.clone(),
+            maps_to: dim.maps_to().map(|s| s.to_owned()),
         }
     }
 }
@@ -392,10 +392,16 @@ pub fn source_dims_to_datamodel(dims: &[SourceDimension]) -> Vec<datamodel::Dime
                     datamodel::DimensionElements::Named(names.clone())
                 }
             };
-            datamodel::Dimension {
-                name: sd.name.clone(),
-                elements,
-                maps_to: sd.maps_to.clone(),
+            {
+                let mut dim = datamodel::Dimension {
+                    name: sd.name.clone(),
+                    elements,
+                    mappings: vec![],
+                };
+                if let Some(target) = sd.maps_to.clone() {
+                    dim.set_maps_to(target);
+                }
+                dim
             }
         })
         .collect()

@@ -1137,7 +1137,9 @@ impl From<Dimension> for datamodel::Dimension {
         } else {
             datamodel::Dimension::named(dim.name, vec![])
         };
-        result.maps_to = dim.maps_to;
+        if let Some(target) = dim.maps_to {
+            result.set_maps_to(target);
+        }
         result
     }
 }
@@ -1706,18 +1708,19 @@ impl From<datamodel::Model> for Model {
 
 impl From<datamodel::Dimension> for Dimension {
     fn from(dim: datamodel::Dimension) -> Self {
+        let maps_to = dim.maps_to().map(|s| s.to_owned());
         match dim.elements {
             datamodel::DimensionElements::Named(elements) => Dimension {
                 name: dim.name,
                 elements,
                 size: 0,
-                maps_to: dim.maps_to,
+                maps_to,
             },
             datamodel::DimensionElements::Indexed(size) => Dimension {
                 name: dim.name,
                 elements: vec![],
                 size: size as i32,
-                maps_to: dim.maps_to,
+                maps_to,
             },
         }
     }
@@ -2729,7 +2732,7 @@ mod tests {
 
         // Convert to datamodel and back
         let dm_dim: datamodel::Dimension = dim.into();
-        assert_eq!(dm_dim.maps_to, Some("DimB".to_string()));
+        assert_eq!(dm_dim.maps_to(), Some("DimB"));
 
         let json_dim: Dimension = dm_dim.into();
         assert_eq!(json_dim.maps_to, Some("DimB".to_string()));

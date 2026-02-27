@@ -133,13 +133,13 @@ impl<'input> ConversionContext<'input> {
         self.build_dimensions()?;
 
         // Pass 2.5: Set subrange dimensions on formatter for bang-subscript formatting
-        // Subranges are dimensions with maps_to set (they map to a parent dimension).
+        // Subranges are dimensions with a mapping set (they map to a parent dimension).
         // Use canonical form (to_lower_space) since the formatter lookup also uses
         // to_lower_space for consistency.
         let mut subrange_dims: HashSet<String> = self
             .dimensions
             .iter()
-            .filter(|d| d.maps_to.is_some())
+            .filter(|d| d.maps_to().is_some())
             .map(|d| canonical_name(&d.name))
             .collect();
 

@@ -101,11 +101,12 @@ impl<'input> ConversionContext<'input> {
                     .get(src)
                     .map(|s| s.as_str())
                     .unwrap_or(src);
-                let alias = Dimension {
+                let mut alias = Dimension {
                     name: space_to_underbar(original_name),
                     elements: target_dim.elements.clone(),
-                    maps_to: Some(dst.clone()),
+                    mappings: vec![],
                 };
+                alias.set_maps_to(dst.clone());
                 // Add alias to dimension_elements so expand_subscript can find it
                 if let DimensionElements::Named(elements) = &alias.elements {
                     self.dimension_elements
@@ -131,11 +132,15 @@ impl<'input> ConversionContext<'input> {
         // Get mapping info from raw subscript def
         let maps_to = self.get_dimension_mapping(original_name);
 
-        Ok(Dimension {
+        let mut dim = Dimension {
             name: space_to_underbar(original_name),
             elements: DimensionElements::Named(elements),
-            maps_to,
-        })
+            mappings: vec![],
+        };
+        if let Some(target) = maps_to {
+            dim.set_maps_to(target);
+        }
+        Ok(dim)
     }
 
     /// Get the maps_to target for a dimension from its SubscriptDef.
@@ -366,11 +371,7 @@ y = 1
         // DimA should map to DimB
         let dim_a = project.dimensions.iter().find(|d| d.name == "DimA");
         if let Some(dim) = dim_a {
-            assert_eq!(
-                dim.maps_to,
-                Some("dimb".to_string()),
-                "DimA should map to dimb"
-            );
+            assert_eq!(dim.maps_to(), Some("dimb"), "DimA should map to dimb");
         }
     }
 
@@ -394,8 +395,8 @@ x = 1
         assert!(dim_a.is_some(), "Should have DimA dimension");
         if let Some(dim) = dim_a {
             assert_eq!(
-                dim.maps_to,
-                Some("dimb".to_string()),
+                dim.maps_to(),
+                Some("dimb"),
                 "DimA should map to dimb via explicit mapping"
             );
         }
@@ -659,7 +660,7 @@ MyCamelCase <-> TargetDim
         let alias = project
             .dimensions
             .iter()
-            .find(|d| d.maps_to == Some("targetdim".to_string()));
+            .find(|d| d.maps_to() == Some("targetdim"));
         assert!(alias.is_some(), "Should have alias dimension");
         assert_eq!(
             alias.unwrap().name,

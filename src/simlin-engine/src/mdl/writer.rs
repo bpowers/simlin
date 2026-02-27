@@ -990,7 +990,7 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
         }
     }
 
-    if let Some(maps_to) = &dim.maps_to {
+    if let Some(maps_to) = dim.maps_to() {
         write!(buf, " -> {}", format_mdl_ident(maps_to)).unwrap();
     }
 
@@ -1696,7 +1696,7 @@ mod tests {
     use crate::ast::{Expr0, Loc};
     use crate::common::RawIdent;
     use crate::datamodel::{
-        Aux, Compat, DimensionElements, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
+        Aux, Compat, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
         GraphicalFunctionScale, SimMethod, Stock, Unit, Variable,
     };
     use crate::lexer::LexerType;
@@ -2497,15 +2497,11 @@ mod tests {
 
     #[test]
     fn dimension_def_with_mapping() {
-        let dim = datamodel::Dimension {
-            name: "dim_c".to_owned(),
-            elements: DimensionElements::Named(vec![
-                "dc1".to_owned(),
-                "dc2".to_owned(),
-                "dc3".to_owned(),
-            ]),
-            maps_to: Some("dim_b".to_owned()),
-        };
+        let mut dim = datamodel::Dimension::named(
+            "dim_c".to_owned(),
+            vec!["dc1".to_owned(), "dc2".to_owned(), "dc3".to_owned()],
+        );
+        dim.set_maps_to("dim_b".to_owned());
         let mut buf = String::new();
         write_dimension_def(&mut buf, &dim);
         assert_eq!(buf, "dim c:\n\tdc1, dc2, dc3 -> dim b\n\t~~|\n");

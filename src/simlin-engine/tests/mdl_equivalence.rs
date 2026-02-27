@@ -121,8 +121,8 @@ fn normalize_dimension(dim: &mut Dimension) {
             *elem = elem.to_lowercase();
         }
     }
-    if let Some(maps_to) = &mut dim.maps_to {
-        *maps_to = maps_to.to_lowercase();
+    for mapping in &mut dim.mappings {
+        mapping.target = mapping.target.to_lowercase();
     }
 }
 
@@ -208,17 +208,18 @@ fn normalize_project(mut project: Project) -> Project {
         }
 
         for dim in &mut project.dimensions {
-            if let Some(ref mut maps_to) = dim.maps_to {
-                // If maps_to is a subrange dimension, resolve to its parent
-                if let Some(parent) = dim_to_parent.get(maps_to.as_str()) {
-                    *maps_to = parent.clone();
+            for mapping in &mut dim.mappings {
+                let target = &mapping.target;
+                // If target is a subrange dimension, resolve to its parent
+                if let Some(parent) = dim_to_parent.get(target.as_str()) {
+                    mapping.target = parent.clone();
                 }
-                // If maps_to is an element, resolve to its owning dimension
+                // If target is an element, resolve to its owning dimension
                 else if let Some(parent_dim) = elem_to_dim
-                    .get(maps_to.as_str())
+                    .get(target.as_str())
                     .filter(|pd| *pd != &dim.name)
                 {
-                    *maps_to = parent_dim.clone();
+                    mapping.target = parent_dim.clone();
                 }
             }
         }

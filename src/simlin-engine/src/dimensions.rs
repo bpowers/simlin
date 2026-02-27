@@ -142,10 +142,7 @@ impl Dimension {
 
 impl From<&datamodel::Dimension> for Dimension {
     fn from(dim: &datamodel::Dimension) -> Dimension {
-        let maps_to = dim
-            .maps_to
-            .as_ref()
-            .map(|m| CanonicalDimensionName::from_raw(m));
+        let maps_to = dim.maps_to().map(CanonicalDimensionName::from_raw);
         match &dim.elements {
             datamodel::DimensionElements::Indexed(size) => {
                 Dimension::Indexed(CanonicalDimensionName::from_raw(&dim.name), *size)
@@ -196,18 +193,18 @@ impl PartialEq for DimensionsContext {
 
 impl DimensionsContext {
     pub(crate) fn from(dimensions: &[datamodel::Dimension]) -> DimensionsContext {
-        // Validate: indexed dimensions should not have maps_to set.
+        // Validate: indexed dimensions should not have mappings set.
         // Dimension mappings only make sense for named dimensions where we can
         // establish positional correspondence between element names.
         for dim in dimensions {
             if let datamodel::DimensionElements::Indexed(_) = &dim.elements
-                && dim.maps_to.is_some()
+                && dim.maps_to().is_some()
             {
                 eprintln!(
                     "warning: indexed dimension '{}' has maps_to='{}' which will be ignored; \
                      dimension mappings are only supported for named dimensions",
                     dim.name(),
-                    dim.maps_to.as_ref().unwrap()
+                    dim.maps_to().unwrap()
                 );
             }
         }
@@ -625,7 +622,7 @@ mod tests {
             "DimA".to_string(),
             vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
         );
-        dim_a.maps_to = Some("DimB".to_string());
+        dim_a.set_maps_to("DimB".to_string());
 
         let dim_b = datamodel::Dimension::named(
             "DimB".to_string(),
@@ -701,7 +698,7 @@ mod tests {
             "DimA".to_string(),
             vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
         );
-        dim_a.maps_to = Some("DimB".to_string());
+        dim_a.set_maps_to("DimB".to_string());
 
         let dim_b = datamodel::Dimension::named(
             "DimB".to_string(),
@@ -765,7 +762,7 @@ mod tests {
             "DimA".to_string(),
             vec!["A1".to_string(), "A2".to_string()],
         );
-        dim_a.maps_to = Some("DimB".to_string());
+        dim_a.set_maps_to("DimB".to_string());
 
         let dim_b = datamodel::Dimension::named(
             "DimB".to_string(),
@@ -811,7 +808,7 @@ mod tests {
             "DimA".to_string(),
             vec!["A1".to_string(), "A2".to_string()],
         );
-        dim_a.maps_to = Some("DimB".to_string());
+        dim_a.set_maps_to("DimB".to_string());
 
         let dim_b = datamodel::Dimension::named(
             "DimB".to_string(),
@@ -844,7 +841,7 @@ mod tests {
             "DimA".to_string(),
             vec!["A1".to_string(), "A2".to_string()],
         );
-        dim_a.maps_to = Some("DimB".to_string());
+        dim_a.set_maps_to("DimB".to_string());
 
         let dim_b = datamodel::Dimension::named(
             "DimB".to_string(),
@@ -1448,7 +1445,7 @@ mod tests {
 
         // Create an indexed dimension with maps_to set (invalid configuration)
         let mut indexed_dim = datamodel::Dimension::indexed("IndexedDim".to_string(), 3);
-        indexed_dim.maps_to = Some("TargetDim".to_string());
+        indexed_dim.set_maps_to("TargetDim".to_string());
 
         // Also create the target dimension
         let target_dim = datamodel::Dimension::named(

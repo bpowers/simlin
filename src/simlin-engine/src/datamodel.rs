@@ -730,6 +730,23 @@ pub enum DimensionElements {
     Named(Vec<String>),
 }
 
+/// Element-level correspondence between two subscript families.
+///
+/// A positional mapping (empty `element_map`) means elements correspond by index:
+/// source[0] <-> target[0], source[1] <-> target[1], etc.
+///
+/// An element-level mapping (non-empty `element_map`) provides explicit
+/// source -> target element name pairs for arbitrary correspondence.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
+pub struct DimensionMapping {
+    /// Target dimension name
+    pub target: String,
+    /// Element-level correspondence. When empty, positional mapping is assumed.
+    /// When present, maps source elements to target elements by name.
+    pub element_map: Vec<(String, String)>,
+}
+
 /// A dimension definition, optionally mapping to another dimension.
 ///
 /// Vensim allows specifying dimension mappings like `DimA: A1, A2, A3 -> DimB`
@@ -740,15 +757,15 @@ pub enum DimensionElements {
 pub struct Dimension {
     pub name: String,
     pub elements: DimensionElements,
-    /// Name of the dimension this dimension maps to (if any).
-    /// When set, elements correspond positionally: A1<->B1, A2<->B2, etc.
+    /// Dimension mappings. Supports both simple positional mappings (single target,
+    /// empty element_map) and element-level correspondence mappings.
     ///
     /// **Important**: Dimension mappings are only supported for named dimensions
     /// (those with explicit element names). Indexed dimensions (numeric subscripts)
     /// cannot have mappings - the engine will return None from `get_maps_to` for
     /// indexed dimensions. Additionally, both dimensions in a mapping must have
     /// the same number of elements for valid positional correspondence.
-    pub maps_to: Option<String>,
+    pub mappings: Vec<DimensionMapping>,
 }
 
 impl Dimension {
@@ -757,7 +774,7 @@ impl Dimension {
         Dimension {
             name,
             elements: DimensionElements::Indexed(size),
-            maps_to: None,
+            mappings: vec![],
         }
     }
 
@@ -766,8 +783,27 @@ impl Dimension {
         Dimension {
             name,
             elements: DimensionElements::Named(elements),
-            maps_to: None,
+            mappings: vec![],
         }
+    }
+
+    /// Convenience accessor for the simple single-target positional mapping case.
+    /// Returns the target dimension name if exactly one positional mapping exists
+    /// (i.e., one mapping with an empty element_map).
+    pub fn maps_to(&self) -> Option<&str> {
+        if self.mappings.len() == 1 && self.mappings[0].element_map.is_empty() {
+            Some(&self.mappings[0].target)
+        } else {
+            None
+        }
+    }
+
+    /// Set a simple positional mapping to a target dimension.
+    pub fn set_maps_to(&mut self, target: String) {
+        self.mappings = vec![DimensionMapping {
+            target,
+            element_map: vec![],
+        }];
     }
 
     pub fn get_offset(&self, subscript: &str) -> Option<usize> {
