@@ -582,14 +582,12 @@ impl Var {
                                         let canonical_key =
                                             CanonicalElementName::from_raw(&subscript_str);
                                         let Some(ast) = elements.get(&canonical_key) else {
-                                            return sim_err!(
-                                                DoesNotExist,
-                                                format!(
-                                                    "missing array element '{}' for variable '{}'",
-                                                    canonical_key.as_str(),
-                                                    var.ident()
-                                                )
-                                            );
+                                            // EXCEPT semantics: elements excluded by :EXCEPT:
+                                            // with no override are undefined and default to 0
+                                            return Ok(vec![Expr::AssignCurr(
+                                                off + i,
+                                                Box::new(Expr::Const(0.0, Loc::default())),
+                                            )]);
                                         };
                                         let ctx = ctx.with_active_subscripts(
                                             active_dims.clone(),
@@ -693,14 +691,12 @@ impl Var {
                                     let canonical_key =
                                         CanonicalElementName::from_raw(&subscript_str);
                                     let Some(ast) = elements.get(&canonical_key) else {
-                                        return sim_err!(
-                                            DoesNotExist,
-                                            format!(
-                                                "missing array element '{}' for variable '{}'",
-                                                canonical_key.as_str(),
-                                                var.ident()
-                                            )
-                                        );
+                                        // EXCEPT semantics: elements excluded by :EXCEPT:
+                                        // with no override are undefined and default to 0
+                                        return Ok(vec![Expr::AssignCurr(
+                                            off + i,
+                                            Box::new(Expr::Const(0.0, Loc::default())),
+                                        )]);
                                     };
                                     let ctx = ctx
                                         .with_active_subscripts(active_dims.clone(), &subscripts);
