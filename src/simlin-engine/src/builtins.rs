@@ -397,6 +397,9 @@ pub fn is_builtin_fn(name: &str) -> bool {
         | "vector_elm_map"
         | "vector_sort_order"
         | "allocate_available"
+        // builtins replacing stdlib modules
+        | "previous"
+        | "init"
         )
 }
 

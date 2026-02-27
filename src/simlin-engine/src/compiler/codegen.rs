@@ -684,6 +684,40 @@ impl<'module> Compiler<'module> {
                     return Ok(Some(()));
                 };
 
+                // PREVIOUS(x) and INIT(x) compile to dedicated opcodes that
+                // read from curr[] (previous timestep) or the initial-value
+                // buffer, respectively.  Handle them before the general
+                // builtin dispatch because they do not use CallBuiltin.
+                match builtin {
+                    BuiltinFn::Previous(arg) => {
+                        let off = match arg.as_ref() {
+                            Expr::Var(off, _) => *off as VariableOffset,
+                            _ => {
+                                return sim_err!(
+                                    NotSimulatable,
+                                    "PREVIOUS requires a variable reference argument".to_string()
+                                );
+                            }
+                        };
+                        self.push(Opcode::LoadPrev { off });
+                        return Ok(Some(()));
+                    }
+                    BuiltinFn::Init(arg) => {
+                        let off = match arg.as_ref() {
+                            Expr::Var(off, _) => *off as VariableOffset,
+                            _ => {
+                                return sim_err!(
+                                    NotSimulatable,
+                                    "INIT requires a variable reference argument".to_string()
+                                );
+                            }
+                        };
+                        self.push(Opcode::LoadInitial { off });
+                        return Ok(Some(()));
+                    }
+                    _ => {}
+                }
+
                 match builtin {
                     BuiltinFn::Time
                     | BuiltinFn::TimeStep

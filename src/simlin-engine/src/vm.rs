@@ -236,6 +236,9 @@ pub struct Vm {
     // Tracks original literal values before override, keyed by absolute offset.
     // Each entry stores the locations and their original values so clear_values can restore them.
     original_literals: HashMap<usize, Vec<(BytecodeLocation, f64)>>,
+    // Snapshot of curr[] captured after the initials phase (t=0).
+    // Used by LoadInitial opcode to freeze a variable's initial value.
+    initial_values: Box<[f64]>,
 }
 
 #[derive(Clone)]
@@ -307,6 +310,8 @@ struct EvalState<'a> {
     view_stack: &'a mut Vec<RuntimeView>,
     iter_stack: &'a mut Vec<IterState>,
     broadcast_stack: &'a mut Vec<BroadcastState>,
+    // Snapshot of curr[] after t=0 initials; used by LoadInitial opcode.
+    initial_values: &'a [f64],
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -490,6 +495,7 @@ impl Vm {
             broadcast_stack: Vec::with_capacity(1),
             constant_info: sim.cached_constant_info,
             original_literals: HashMap::new(),
+            initial_values: vec![0.0; n_slots].into_boxed_slice(),
         })
     }
 
@@ -527,6 +533,7 @@ impl Vm {
             view_stack: &mut self.view_stack,
             iter_stack: &mut self.iter_stack,
             broadcast_stack: &mut self.broadcast_stack,
+            initial_values: &self.initial_values,
         };
 
         loop {
@@ -827,6 +834,9 @@ impl Vm {
             view_stack: &mut self.view_stack,
             iter_stack: &mut self.iter_stack,
             broadcast_stack: &mut self.broadcast_stack,
+            // During initials, LoadInitial falls back to curr[] (which IS the
+            // initial value being computed). The snapshot hasn't been captured yet.
+            initial_values: &self.initial_values,
         };
 
         Self::eval_initials(
@@ -849,6 +859,12 @@ impl Vm {
             data[base + INITIAL_TIME_OFF] = spec_start;
             data[base + FINAL_TIME_OFF] = spec_stop;
         }
+
+        // Capture a snapshot of curr[] after the initials phase for INIT(x).
+        // The initial_values buffer preserves t=0 values across all timesteps.
+        let curr_start = self.curr_chunk * self.n_slots;
+        self.initial_values
+            .copy_from_slice(&data[curr_start..curr_start + self.n_slots]);
 
         self.did_initials = true;
         self.step_accum = 0;
@@ -983,6 +999,7 @@ impl Vm {
         let mut view_stack = &mut *state.view_stack;
         let mut iter_stack = &mut *state.iter_stack;
         let mut broadcast_stack = &mut *state.broadcast_stack;
+        let initial_values = state.initial_values;
 
         let mut condition = false;
         let mut subscript_index: SmallVec<[(u16, u16); 4]> = SmallVec::new();
@@ -1020,11 +1037,16 @@ impl Vm {
                     stack.push(curr[module_off + *off as usize]);
                 }
                 // LoadInitial reads from the initial-value buffer captured at t=0.
-                // The initial_values parameter will be added to eval_bytecode in
-                // Task 5 when the VM dispatch is fully wired. Nothing emits this
-                // opcode until then.
-                Opcode::LoadInitial { off: _ } => {
-                    unreachable!("LoadInitial not yet wired: initial_values buffer not available");
+                // During the initials phase, the snapshot hasn't been taken yet,
+                // so we fall back to curr[] (which IS being initialized).
+                Opcode::LoadInitial { off } => {
+                    let abs_off = module_off + *off as usize;
+                    let value = if part == StepPart::Initials {
+                        curr[abs_off]
+                    } else {
+                        initial_values[abs_off]
+                    };
+                    stack.push(value);
                 }
                 Opcode::PushSubscriptIndex { bounds } => {
                     let index = stack.pop().floor() as u16;
@@ -1077,6 +1099,7 @@ impl Vm {
                         view_stack,
                         iter_stack,
                         broadcast_stack,
+                        initial_values,
                     };
                     match part {
                         StepPart::Initials => {
@@ -1121,6 +1144,7 @@ impl Vm {
                         view_stack: vs,
                         iter_stack: is_,
                         broadcast_stack: bs,
+                        initial_values: _,
                     } = child_state;
                     stack = s;
                     temp_storage = ts;

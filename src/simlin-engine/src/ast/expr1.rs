@@ -252,6 +252,8 @@ impl Expr1 {
                     "vector_elm_map" => check_arity!(VectorElmMap, 2),
                     "vector_sort_order" => check_arity!(VectorSortOrder, 2),
                     "allocate_available" => check_arity!(AllocateAvailable, 3),
+                    "previous" => check_arity!(Previous, 1),
+                    "init" => check_arity!(Init, 1),
                     _ => {
                         // TODO: this could be a table reference, array reference,
                         //       or module instantiation according to 3.3.2 of the spec

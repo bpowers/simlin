@@ -1540,11 +1540,38 @@ impl ModuleEvaluator<'_> {
                             f64::NAN
                         }
                     }
-                    // Previous/Init are compiled to opcodes, not interpreted
-                    // through this path. Nothing currently emits them as Expr
-                    // nodes for the interpreter.
-                    BuiltinFn::Previous(_) | BuiltinFn::Init(_) => {
-                        unreachable!("Previous/Init builtins not yet supported in interpreter");
+                    BuiltinFn::Previous(arg) => {
+                        // PREVIOUS(x): return the previous-timestep value of x.
+                        // During the flows/stocks phase, curr[] holds the committed
+                        // values from the previous timestep, so reading from curr
+                        // gives the previous value.
+                        match arg.as_ref() {
+                            Expr::Var(off, _) => self.curr[self.off + *off],
+                            _ => {
+                                // Fallback: just evaluate the expression normally.
+                                // For non-Var arguments, the value in curr IS the
+                                // previous-timestep value.
+                                self.eval(arg)
+                            }
+                        }
+                    }
+                    BuiltinFn::Init(arg) => {
+                        // INIT(x): return the value of x captured at t=0.
+                        let initial_vals = self.sim.initial_values.borrow();
+                        if initial_vals.is_empty() {
+                            // During the initials phase itself, INIT(x) returns
+                            // the current value (which IS the initial value).
+                            drop(initial_vals);
+                            self.eval(arg)
+                        } else {
+                            match arg.as_ref() {
+                                Expr::Var(off, _) => initial_vals[self.off + *off],
+                                _ => {
+                                    drop(initial_vals);
+                                    self.eval(arg)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1841,6 +1868,9 @@ pub struct Simulation {
     offsets: HashMap<Ident<Canonical>, usize>,
     temps: std::rc::Rc<RefCell<Vec<f64>>>, // Flat storage for all temporary arrays
     temp_offsets: Vec<usize>,              // Offset of each temporary in the temps vector
+    // Snapshot of curr[] captured after the initials phase (t=0).
+    // Used by INIT(x) to freeze a variable's initial value.
+    initial_values: std::rc::Rc<RefCell<Vec<f64>>>,
 }
 
 impl Simulation {
@@ -1933,6 +1963,7 @@ impl Simulation {
             offsets,
             temps,
             temp_offsets,
+            initial_values: std::rc::Rc::new(RefCell::new(Vec::new())),
         })
     }
 
@@ -2095,6 +2126,8 @@ impl Simulation {
             curr[INITIAL_TIME_OFF] = self.specs.start;
             curr[FINAL_TIME_OFF] = self.specs.stop;
             self.calc(StepPart::Initials, module, 0, module_inputs, curr, next);
+            // Capture a snapshot of curr[] after the initials phase for INIT(x).
+            *(*self.initial_values).borrow_mut() = curr.to_vec();
             let mut is_initial_timestep = true;
             let mut step = 0;
             loop {
