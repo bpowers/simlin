@@ -684,6 +684,7 @@ impl From<Stock> for datamodel::Stock {
             } else {
                 datamodel::Visibility::Private
             },
+            ..Default::default()
         };
         let equation = match stock.arrayed_equation {
             Some(arrayed) => {
@@ -758,6 +759,7 @@ impl From<Flow> for datamodel::Flow {
             } else {
                 datamodel::Visibility::Private
             },
+            ..Default::default()
         };
         let equation = match flow.arrayed_equation {
             Some(arrayed) => {
@@ -827,6 +829,7 @@ impl From<Auxiliary> for datamodel::Aux {
             } else {
                 datamodel::Visibility::Private
             },
+            ..Default::default()
         };
         let equation = match aux.arrayed_equation {
             Some(arrayed) => {
@@ -904,8 +907,6 @@ impl From<Module> for datamodel::Module {
                 Some(module.uid)
             },
             compat: datamodel::Compat {
-                active_initial: None,
-                non_negative: false,
                 can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false)
                     || module.can_be_module_input,
                 visibility: if c.map(|c| c.is_public).unwrap_or(false) || module.is_public {
@@ -913,6 +914,7 @@ impl From<Module> for datamodel::Module {
                 } else {
                     datamodel::Visibility::Private
                 },
+                ..Default::default()
             },
         }
     }

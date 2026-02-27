@@ -508,6 +508,7 @@ impl From<project_io::variable::Stock> for Stock {
                 non_negative: compat_nn,
                 can_be_module_input: compat_cbmi,
                 visibility: compat_vis,
+                ..Default::default()
             },
             ai_state: None,
             uid: if stock.uid == 0 {
@@ -685,6 +686,7 @@ impl From<project_io::variable::Flow> for Flow {
                 non_negative: compat_nn,
                 can_be_module_input: compat_cbmi,
                 visibility: compat_vis,
+                ..Default::default()
             },
             ai_state: None,
             uid: if flow.uid == 0 { None } else { Some(flow.uid) },
@@ -810,9 +812,9 @@ impl From<project_io::variable::Aux> for Aux {
             gf: aux.gf.map(GraphicalFunction::from),
             compat: Compat {
                 active_initial: compat_ai,
-                non_negative: false,
                 can_be_module_input: compat_cbmi,
                 visibility: compat_vis,
+                ..Default::default()
             },
             ai_state: None,
             uid: if aux.uid == 0 { None } else { Some(aux.uid) },
@@ -979,10 +981,9 @@ impl From<project_io::variable::Module> for Module {
                 Some(module.uid)
             },
             compat: Compat {
-                active_initial: None,
-                non_negative: false,
                 can_be_module_input: cbmi,
                 visibility: vis,
+                ..Default::default()
             },
         }
     }

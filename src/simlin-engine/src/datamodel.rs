@@ -206,6 +206,34 @@ pub enum Equation {
     ),
 }
 
+/// The kind of external data function from Vensim's GET DIRECT family.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
+pub enum DataSourceKind {
+    Data,
+    Constants,
+    Lookups,
+    Subscript,
+}
+
+/// Metadata for variables backed by external data files.
+/// Stores the parsed arguments from GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT
+/// so the MDL writer can reconstruct the original function call.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
+pub struct DataSource {
+    /// The kind of data function (Data, Constants, Lookups, Subscript)
+    pub kind: DataSourceKind,
+    /// Path to the external data file
+    pub file: String,
+    /// Tab/sheet name (for Excel) or delimiter (for CSV)
+    pub tab_or_delimiter: String,
+    /// Row or column label for data lookup
+    pub row_or_col: String,
+    /// Cell label for data lookup
+    pub cell: String,
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Default, salsa::Update)]
 pub struct Compat {
@@ -213,6 +241,7 @@ pub struct Compat {
     pub non_negative: bool,
     pub can_be_module_input: bool,
     pub visibility: Visibility,
+    pub data_source: Option<DataSource>,
 }
 
 impl Compat {
@@ -221,6 +250,7 @@ impl Compat {
             && !self.non_negative
             && !self.can_be_module_input
             && self.visibility == Visibility::Private
+            && self.data_source.is_none()
     }
 }
 

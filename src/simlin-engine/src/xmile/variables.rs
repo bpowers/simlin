@@ -150,9 +150,9 @@ macro_rules! extract_compat(
         let active_initial = $var.initial_eqn.filter(|s| !s.is_empty());
         datamodel::Compat {
             active_initial,
-            non_negative: false,
             can_be_module_input: can_be_module_input(&$access),
             visibility: visibility(&$access),
+            ..Default::default()
         }
     }}
 );
