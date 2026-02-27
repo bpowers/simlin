@@ -269,11 +269,13 @@ impl<'input> ConversionContext<'input> {
             eq: &'a FullEquation<'a>,
             element_keys: Vec<String>, // Cartesian product of expanded subscripts
             lhs_subscripts: Vec<String>, // LHS subscript names (raw, for context building)
+            has_except: bool,
         }
 
         let mut expanded_eqs: Vec<ExpandedEquation<'_>> = Vec::new();
         let mut parent_dims: Option<Vec<String>> = None;
         let mut has_subscripted_eq = false;
+        let mut has_except_eq = false;
 
         for eq in &valid_eqs {
             if let Some(lhs) = get_lhs(&eq.equation) {
@@ -342,11 +344,39 @@ impl<'input> ConversionContext<'input> {
                     .collect();
 
                 // Compute Cartesian product of expanded elements
-                let element_keys = cartesian_product(&expanded_elements);
+                let mut element_keys = cartesian_product(&expanded_elements);
+
+                // Filter out excepted element keys when EXCEPT is present
+                let eq_has_except = lhs.except.is_some();
+                if let Some(ref except) = lhs.except {
+                    has_except_eq = true;
+                    let mut excepted_keys = std::collections::HashSet::new();
+                    for bracket_group in &except.subscripts {
+                        let mut except_expanded: Vec<Vec<String>> = Vec::new();
+                        for s in bracket_group {
+                            let sub_name = match s {
+                                Subscript::Element(n, _) | Subscript::BangElement(n, _) => {
+                                    n.as_ref()
+                                }
+                            };
+                            if let Some((_dim, elements)) = self.expand_subscript(sub_name) {
+                                except_expanded.push(elements);
+                            }
+                        }
+                        if !except_expanded.is_empty() {
+                            for key in cartesian_product(&except_expanded) {
+                                excepted_keys.insert(key);
+                            }
+                        }
+                    }
+                    element_keys.retain(|k| !excepted_keys.contains(k));
+                }
+
                 expanded_eqs.push(ExpandedEquation {
                     eq,
                     element_keys,
                     lhs_subscripts,
+                    has_except: eq_has_except,
                 });
             } else {
                 return None;
@@ -368,13 +398,34 @@ impl<'input> ConversionContext<'input> {
         let mut element_map: HashMap<String, (String, Option<String>, Option<GraphicalFunction>)> =
             HashMap::new();
 
-        // Per-element substitution is only needed when there are multiple equations
-        // (element-specific, multi-subrange, or overrides). For a single apply-to-all
-        // equation, all elements get the same expression string with dimension names
-        // preserved, matching xmutil's ApplyToAll behavior.
-        let needs_substitution = expanded_eqs.len() > 1;
+        // Track the default equation text for EXCEPT semantics.
+        // When an equation has :EXCEPT:, its RHS becomes the default for all
+        // non-excepted elements.
+        let mut default_equation: Option<String> = None;
+
+        // Per-element substitution is needed when there are multiple equations
+        // (element-specific, multi-subrange, or overrides), or when EXCEPT is
+        // present (non-excepted elements need dimension references substituted).
+        let needs_substitution = expanded_eqs.len() > 1 || has_except_eq;
 
         for exp_eq in expanded_eqs {
+            // When this equation has EXCEPT, capture its unsubstituted RHS as the
+            // default equation text (metadata for the Equation::Arrayed).
+            if exp_eq.has_except {
+                let empty_ctx = crate::mdl::xmile_compat::ElementContext {
+                    lhs_var_canonical: canonical_name(name),
+                    substitutions: HashMap::new(),
+                    subrange_mappings: HashMap::new(),
+                };
+                let (raw_eq, _, _) = self.build_equation_rhs_with_context(
+                    name,
+                    &exp_eq.eq.equation,
+                    info.var_type == VariableType::Stock,
+                    &empty_ctx,
+                );
+                default_equation = Some(raw_eq);
+            }
+
             for key in &exp_eq.element_keys {
                 // Split element key to get per-dimension element names
                 let element_parts: Vec<&str> = key.split(',').collect();
@@ -430,7 +481,7 @@ impl<'input> ConversionContext<'input> {
             .map(|d| self.get_formatted_dimension_name(d))
             .collect();
 
-        let equation = Equation::Arrayed(formatted_dims.clone(), elements, None);
+        let equation = Equation::Arrayed(formatted_dims.clone(), elements, default_equation);
 
         // Build the variable
         let ident = quoted_space_to_underbar(name);
@@ -2301,6 +2352,238 @@ x[a2] := y[a2] * 3
                         !a2_eq.unwrap().1.is_empty(),
                         "a2 equation should not be empty"
                     );
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_except_basic_single_element() {
+        // g[DimA] :EXCEPT: [A1] = 7 means A2 and A3 get "7", A1 gets its own equation.
+        // g[A1] = 10 is the override.
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+g[DimA] :EXCEPT: [A1] = 7 ~~|
+g[A1] = 10
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let g = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "g");
+        assert!(g.is_some(), "Should have g variable");
+
+        if let Some(Variable::Aux(a)) = g {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, default_eq) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert!(
+                        default_eq.is_some(),
+                        "Should have default_equation from EXCEPT"
+                    );
+                    assert_eq!(default_eq.as_deref(), Some("7"));
+
+                    let find_eq = |key: &str| -> String {
+                        elements
+                            .iter()
+                            .find(|(k, _, _, _)| k == key)
+                            .map(|(_, eq, _, _)| eq.clone())
+                            .unwrap_or_else(|| panic!("Should have key {}", key))
+                    };
+
+                    assert_eq!(elements.len(), 3);
+                    assert_eq!(find_eq("A1"), "10");
+                    assert_eq!(find_eq("A2"), "7");
+                    assert_eq!(find_eq("A3"), "7");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_except_with_subrange() {
+        // h[DimA] :EXCEPT: [SubA] = 8 means A1 gets "8", SubA (A2, A3) are excepted.
+        // No explicit overrides for SubA elements.
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+SubA: A2, A3
+~ ~|
+h[DimA] :EXCEPT: [SubA] = 8 ~~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let h = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "h");
+        assert!(h.is_some(), "Should have h variable");
+
+        if let Some(Variable::Aux(a)) = h {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, default_eq) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(default_eq.as_deref(), Some("8"));
+                    // Only A1 should have the default equation.
+                    // A2 and A3 are excepted and have no overrides, so only A1 is present.
+                    assert_eq!(elements.len(), 1);
+                    assert_eq!(elements[0].0, "A1");
+                    assert_eq!(elements[0].1, "8");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_except_with_dimension_reference_substitution() {
+        // k[DimA] :EXCEPT: [A1] = a[DimA] + 1
+        // k[A1] = 10
+        // Non-excepted elements (A2, A3) should get per-element substituted equations.
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+k[DimA] :EXCEPT: [A1] = a[DimA] + 1 ~~|
+k[A1] = 10
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let k = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "k");
+        assert!(k.is_some(), "Should have k variable");
+
+        if let Some(Variable::Aux(a)) = k {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, default_eq) => {
+                    assert_eq!(dims, &["DimA"]);
+                    // default_equation captures the unsubstituted form
+                    assert!(default_eq.is_some());
+
+                    let find_eq = |key: &str| -> String {
+                        elements
+                            .iter()
+                            .find(|(k, _, _, _)| k == key)
+                            .map(|(_, eq, _, _)| eq.clone())
+                            .unwrap_or_else(|| panic!("Should have key {}", key))
+                    };
+
+                    assert_eq!(elements.len(), 3);
+                    assert_eq!(find_eq("A1"), "10");
+                    assert_eq!(find_eq("A2"), "a[A2] + 1");
+                    assert_eq!(find_eq("A3"), "a[A3] + 1");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_except_2d() {
+        // p[DimA, DimC] :EXCEPT: [A1, C1] = 10
+        // Except (A1,C1), all other 2D combinations get "10".
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+DimC: C1, C2, C3
+~ ~|
+p[DimA, DimC] :EXCEPT: [A1, C1] = 10 ~~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let p = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "p");
+        assert!(p.is_some(), "Should have p variable");
+
+        if let Some(Variable::Aux(a)) = p {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, default_eq) => {
+                    assert_eq!(dims, &["DimA", "DimC"]);
+                    assert_eq!(default_eq.as_deref(), Some("10"));
+                    // 3x3=9 combinations, minus 1 excepted = 8 elements
+                    assert_eq!(elements.len(), 8);
+                    // A1,C1 should NOT be in the element list
+                    assert!(
+                        !elements.iter().any(|(k, _, _, _)| k == "A1,C1"),
+                        "A1,C1 should be excluded by EXCEPT"
+                    );
+                    // All present elements should have equation "10"
+                    for (_, eq, _, _) in elements {
+                        assert_eq!(eq, "10");
+                    }
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_except_subrange_with_override() {
+        // s[A3] = 13; s[SubA] :EXCEPT: [A3] = 14
+        // SubA = {A2, A3}. EXCEPT [A3] means s[A2] = 14. s[A3] = 13 from the override.
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+SubA: A2, A3
+~ ~|
+s[A3] = 13 ~~|
+s[SubA] :EXCEPT: [A3] = 14
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let s = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "s");
+        assert!(s.is_some(), "Should have s variable");
+
+        if let Some(Variable::Aux(a)) = s {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, default_eq) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(default_eq.as_deref(), Some("14"));
+
+                    let find_eq = |key: &str| -> String {
+                        elements
+                            .iter()
+                            .find(|(k, _, _, _)| k == key)
+                            .map(|(_, eq, _, _)| eq.clone())
+                            .unwrap_or_else(|| panic!("Should have key {}", key))
+                    };
+
+                    // s[A3] = 13 (explicit override), s[A2] = 14 (from EXCEPT default)
+                    assert_eq!(find_eq("A3"), "13");
+                    assert_eq!(find_eq("A2"), "14");
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
             }
