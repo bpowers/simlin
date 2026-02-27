@@ -5233,3 +5233,196 @@ fn test_initial_sync_marks_stdlib_models() {
         );
     }
 }
+
+// ── Phase 1 scaffolding verification tests ──────────────────────────
+
+/// AC5.4 (partial): PREVIOUS(stock) via module expansion produces identical
+/// results in interpreter and VM. The stock increases by a constant flow
+/// each timestep; PREVIOUS(stock) should lag by one dt.
+///
+/// This test exercises the module-expansion path that PREVIOUS currently
+/// uses. When PREVIOUS is promoted to a builtin opcode (LoadPrev), this
+/// test remains valid -- it just verifies the new codepath instead.
+///
+/// The 1-arg PREVIOUS(x) form uses initial_value=0 at t=0 (stdlib module
+/// default). At subsequent timesteps it returns x's value from the prior
+/// timestep.
+#[test]
+fn test_previous_module_expansion_interpreter_vm_parity() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("previous_parity")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("level", "100", &["inflow"], &[], None)
+        .flow("inflow", "10", None)
+        .aux("prev_level", "PREVIOUS(level)", None);
+
+    let interp = tp
+        .run_interpreter()
+        .expect("interpreter should run successfully");
+    let vm = tp.run_vm().expect("VM should run successfully");
+
+    let interp_vals = interp
+        .get("prev_level")
+        .expect("prev_level not in interpreter results");
+    let vm_vals = vm.get("prev_level").expect("prev_level not in VM results");
+
+    assert_eq!(
+        interp_vals.len(),
+        vm_vals.len(),
+        "step count mismatch between interpreter ({}) and VM ({})",
+        interp_vals.len(),
+        vm_vals.len()
+    );
+
+    for (step, (iv, vv)) in interp_vals.iter().zip(vm_vals.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "prev_level mismatch at step {step}: interpreter={iv}, vm={vv}"
+        );
+    }
+
+    // The stdlib PREVIOUS module uses initial_value=0 for the 1-arg form,
+    // so at t=0, PREVIOUS(level) returns 0 (not level's initial value).
+    let level_vals = interp
+        .get("level")
+        .expect("level not in interpreter results");
+    assert!(
+        (interp_vals[0] - 0.0).abs() < 1e-10,
+        "prev_level at t=0 should be 0 (stdlib default initial_value), got {}",
+        interp_vals[0]
+    );
+    // At subsequent steps, prev_level[t] == level[t-1]
+    for step in 1..interp_vals.len() {
+        assert!(
+            (interp_vals[step] - level_vals[step - 1]).abs() < 1e-10,
+            "prev_level at step {step} should equal level at step {}: expected {}, got {}",
+            step - 1,
+            level_vals[step - 1],
+            interp_vals[step]
+        );
+    }
+}
+
+/// AC5.4 (partial): INIT(aux) via module expansion freezes the t=0
+/// value and returns it at every timestep. Interpreter and VM must agree.
+///
+/// Uses INIT on an aux variable (matching the existing XMILE test model
+/// pattern in test/builtin_init/). The INIT stdlib module captures the
+/// module input's value at t=0 and holds it constant via a stock with no
+/// flows.
+#[test]
+fn test_init_module_expansion_interpreter_vm_parity() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("init_parity")
+        .with_sim_time(1.0, 5.0, 1.0)
+        .aux("rate", "TIME", None)
+        .aux("init_rate", "INIT(rate)", None);
+
+    let interp = tp
+        .run_interpreter()
+        .expect("interpreter should run successfully");
+    let vm = tp.run_vm().expect("VM should run successfully");
+
+    let interp_vals = interp
+        .get("init_rate")
+        .expect("init_rate not in interpreter results");
+    let vm_vals = vm.get("init_rate").expect("init_rate not in VM results");
+
+    assert_eq!(
+        interp_vals.len(),
+        vm_vals.len(),
+        "step count mismatch between interpreter and VM"
+    );
+
+    for (step, (iv, vv)) in interp_vals.iter().zip(vm_vals.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "init_rate mismatch at step {step}: interpreter={iv}, vm={vv}"
+        );
+    }
+
+    // INIT(rate) should freeze rate's t=0 value (rate=TIME, TIME starts
+    // at 1.0) and return 1.0 at every timestep even as TIME advances.
+    for (step, val) in interp_vals.iter().enumerate() {
+        assert!(
+            (val - 1.0).abs() < 1e-10,
+            "init_rate should be 1.0 at every step, got {val} at step {step}"
+        );
+    }
+}
+
+/// AC6.4 status check: "previous" and "init" are still in MODEL_NAMES
+/// because PREVIOUS activation was deferred (see builtins_visitor.rs
+/// comment). This test documents the current state; when PREVIOUS and
+/// INIT are promoted to builtins, update this assertion.
+#[test]
+fn test_previous_and_init_still_in_stdlib_model_names() {
+    let names = crate::stdlib::MODEL_NAMES;
+    assert!(
+        names.contains(&"previous"),
+        "expected 'previous' in MODEL_NAMES (still module-expanded)"
+    );
+    assert!(
+        names.contains(&"init"),
+        "expected 'init' in MODEL_NAMES (still module-expanded)"
+    );
+}
+
+/// AC5.4: PREVIOUS of a flow (not just a stock) works correctly. The flow
+/// is recomputed each timestep; PREVIOUS(flow) should return the prior
+/// timestep's computed flow value.
+///
+/// Like stocks, the 1-arg PREVIOUS(flow) form returns 0 at t=0
+/// (stdlib module default initial_value).
+#[test]
+fn test_previous_of_flow_interpreter_vm_parity() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("previous_flow")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("level", "100", &["growth"], &[], None)
+        .flow("growth", "level * 0.1", None)
+        .aux("prev_growth", "PREVIOUS(growth)", None);
+
+    let interp = tp
+        .run_interpreter()
+        .expect("interpreter should run successfully");
+    let vm = tp.run_vm().expect("VM should run successfully");
+
+    let interp_vals = interp
+        .get("prev_growth")
+        .expect("prev_growth not in interpreter results");
+    let vm_vals = vm
+        .get("prev_growth")
+        .expect("prev_growth not in VM results");
+
+    for (step, (iv, vv)) in interp_vals.iter().zip(vm_vals.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "prev_growth mismatch at step {step}: interpreter={iv}, vm={vv}"
+        );
+    }
+
+    // The stdlib PREVIOUS module defaults initial_value=0 for the 1-arg
+    // form. At t=0, PREVIOUS(growth) returns 0. At subsequent steps it
+    // returns growth's value from the prior timestep.
+    let growth_vals = interp
+        .get("growth")
+        .expect("growth not in interpreter results");
+    assert!(
+        (interp_vals[0] - 0.0).abs() < 1e-10,
+        "prev_growth at t=0 should be 0 (stdlib default), got {}",
+        interp_vals[0]
+    );
+    for step in 1..interp_vals.len() {
+        assert!(
+            (interp_vals[step] - growth_vals[step - 1]).abs() < 1e-10,
+            "prev_growth at step {step} should equal growth at step {}: expected {}, got {}",
+            step - 1,
+            growth_vals[step - 1],
+            interp_vals[step]
+        );
+    }
+}
