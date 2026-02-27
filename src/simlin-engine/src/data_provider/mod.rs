@@ -160,14 +160,24 @@ pub(crate) fn parse_cell_ref(s: &str) -> Result<(usize, usize)> {
         ));
     }
     let col = col_index(&s[..split]);
-    let row: usize = s[split..].parse::<usize>().map_err(|_| {
+    let row_1based: usize = s[split..].parse::<usize>().map_err(|_| {
         Error::new(
             ErrorKind::Import,
             ErrorCode::Generic,
             Some(format!("invalid cell reference '{}': bad row number", s)),
         )
-    })? - 1;
-    Ok((row, col))
+    })?;
+    if row_1based == 0 {
+        return Err(Error::new(
+            ErrorKind::Import,
+            ErrorCode::Generic,
+            Some(format!(
+                "invalid cell reference '{}': row numbers are 1-indexed",
+                s
+            )),
+        ));
+    }
+    Ok((row_1based - 1, col))
 }
 
 /// Check if a string is purely column letters (no digits).
@@ -259,6 +269,16 @@ mod tests {
     fn test_parse_cell_ref_errors() {
         assert!(parse_cell_ref("123").is_err());
         assert!(parse_cell_ref("").is_err());
+    }
+
+    #[cfg(feature = "file_io")]
+    #[test]
+    fn test_parse_cell_ref_row_zero_returns_error() {
+        let result = parse_cell_ref("A0");
+        assert!(
+            result.is_err(),
+            "cell reference 'A0' with row 0 should return an error (rows are 1-indexed)"
+        );
     }
 
     #[cfg(feature = "file_io")]
