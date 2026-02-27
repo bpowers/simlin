@@ -3025,6 +3025,26 @@ pub fn compute_layout(
         offset += size;
     }
 
+    // Section 3: LTM synthetic variables (only when ltm_enabled).
+    // LTM vars are always scalar aux equations occupying 1 slot each.
+    // When ltm_enabled is false, this section is skipped entirely (zero
+    // overhead). When the model has no feedback loops,
+    // model_ltm_synthetic_variables returns an empty list (also zero
+    // overhead).
+    if project.ltm_enabled(db) {
+        let ltm_vars = if project.ltm_discovery_mode(db) {
+            model_ltm_all_link_synthetic_variables(db, model, project)
+        } else {
+            model_ltm_synthetic_variables(db, model, project)
+        };
+        let mut ltm_names: Vec<&str> = ltm_vars.vars.iter().map(|v| v.name.as_str()).collect();
+        ltm_names.sort_unstable();
+        for name in ltm_names {
+            entries.insert(name.to_string(), LayoutEntry { offset, size: 1 });
+            offset += 1;
+        }
+    }
+
     VariableLayout::new(entries, offset)
 }
 
