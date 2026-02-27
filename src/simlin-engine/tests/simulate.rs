@@ -621,9 +621,11 @@ fn simulates_except_xmile() {
     simulate_path("../../test/sdeverywhere/models/except/except.xmile");
 }
 
-// Ignored: the except/except2 models use cross-dimension mappings
-// (DimD -> DimA) which the compiler does not yet resolve. The EXCEPT
-// conversion itself works; the failure is in dimension mapping resolution.
+// Ignored: the except/except2 models use cross-dimension subscript mappings
+// (DimD -> DimA) causing "output missing variable" errors -- the simulation
+// completes but output variable names don't match the expected .dat names
+// due to unresolved dimension mapping. EXCEPT parsing and compilation work;
+// the basic EXCEPT test (simulates_except_basic_mdl) verifies correctness.
 #[test]
 #[ignore]
 fn simulates_except() {
@@ -796,30 +798,36 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     "test/sdeverywhere/models/subalias/subalias.xmile",
     "test/sdeverywhere/models/trend/trend.xmile",
     //
-    // Failing tests - commented out with reasons
+    // xmutil strips GET DIRECT CONSTANTS data during conversion. Tested via MDL path.
+    // "test/sdeverywhere/models/directconst/directconst.xmile",
+    "test/sdeverywhere/models/longeqns/longeqns.xmile",
+    "test/sdeverywhere/models/npv/npv.xmile",
+    "test/sdeverywhere/models/sample/sample.xmile",
+    "test/sdeverywhere/models/sum/sum.xmile",
+    //
+    // --- XMILE-path limitations (xmutil conversion issues) ---
     //
     // Tested via simulates_allocate_xmile (interpreter-only; VM lacks ALLOCATE AVAILABLE)
     // "test/sdeverywhere/models/allocate/allocate.xmile",
     //
-    // NotSimulatable: uses GET DIRECT CONSTANTS
-    // "test/sdeverywhere/models/arrays_cname/arrays_cname.xmile",
-    // "test/sdeverywhere/models/arrays_varname/arrays_varname.xmile",
-    //
-    // Wrong values (NaN): DELAY FIXED requires ring-buffer semantics,
-    // currently approximated via delay1 which produces NaN
+    // xmutil converts DELAY FIXED into delay1 approximation which produces NaN.
+    // Tested via MDL path.
     // "test/sdeverywhere/models/delayfixed/delayfixed.xmile",
     // "test/sdeverywhere/models/delayfixed2/delayfixed2.xmile",
     //
-    // Wrong values: sparse array initialization not fully supported
-    // "test/sdeverywhere/models/directconst/directconst.xmile",
+    // xmutil strips GET DIRECT CONSTANTS during XMILE conversion, leaving
+    // empty equations. Tested via the MDL path.
+    // "test/sdeverywhere/models/arrays_cname/arrays_cname.xmile",
+    // "test/sdeverywhere/models/arrays_varname/arrays_varname.xmile",
     //
-    // Assertion failure in dat loading: time ordering issue
+    // xmutil strips GET DIRECT DATA during conversion, leaving empty equations.
+    // Tested via the MDL path (simulates_directdata_mdl etc.).
     // "test/sdeverywhere/models/directdata/directdata.xmile",
     //
-    // EmptyEquation: uses GET DIRECT LOOKUPS
+    // xmutil strips GET DIRECT LOOKUPS during conversion
     // "test/sdeverywhere/models/directlookups/directlookups.xmile",
     //
-    // EmptyEquation: uses GET DIRECT SUBSCRIPT
+    // xmutil strips GET DIRECT SUBSCRIPT during conversion
     // "test/sdeverywhere/models/directsubs/directsubs.xmile",
     //
     // xmutil drops EXCEPT semantics and subscript mappings in XMILE conversion.
@@ -827,56 +835,38 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // "test/sdeverywhere/models/except/except.xmile",
     // "test/sdeverywhere/models/except2/except2.xmile",
     //
-    // EmptyEquation: uses GET XLS DATA
+    // xmutil strips GET XLS DATA during conversion. Tested via MDL path.
     // "test/sdeverywhere/models/extdata/extdata.xmile",
     //
-    // No expected results / not test models (preprocessing test files)
-    // "test/sdeverywhere/models/flatten/expected.xmile",
-    // "test/sdeverywhere/models/flatten/input1.xmile",
-    // "test/sdeverywhere/models/flatten/input2.xmile",
-    //
-    // Assertion failure: xmutil strips GET DATA BETWEEN TIMES calls,
-    // leaving broken data variable references
+    // xmutil strips GET DATA BETWEEN TIMES calls, leaving broken data variable
+    // references. Tested via MDL path.
     // "test/sdeverywhere/models/getdata/getdata.xmile",
     //
-    // EmptyEquation: uses INTEG with complex initialization
-    // "test/sdeverywhere/models/interleaved/interleaved.xmile",
-    //
-    // EmptyEquation: uses :EXCEPT: in equations
-    // "test/sdeverywhere/models/longeqns/longeqns.xmile",
-    //
-    // MismatchedDimensions: uses subscript mappings
+    // xmutil drops subscript mappings in XMILE conversion.
+    // Tested via MDL path.
     // "test/sdeverywhere/models/mapping/mapping.xmile",
     // "test/sdeverywhere/models/multimap/multimap.xmile",
     //
-    "test/sdeverywhere/models/npv/npv.xmile",
-    //
-    // No expected results (preprocessing test files)
-    // "test/sdeverywhere/models/preprocess/expected.xmile",
-    // "test/sdeverywhere/models/preprocess/input.xmile",
-    //
-    // No expected results
+    // xmutil doesn't inline external data from prune_data.dat into XMILE.
+    // Tested via MDL path.
     // "test/sdeverywhere/models/prune/prune.xmile",
     //
     // xmutil expands QUANTUM(x,q) -> (q)*INT((x)/(q)), but INT is floor
     // per XMILE spec while Vensim INTEGER is truncation-toward-zero.
-    // This gives wrong results for negative inputs. The MDL native path
-    // handles this correctly via inline expansion with ABS/SIGN.
+    // This gives wrong results for negative inputs. Tested via MDL path.
     // "test/sdeverywhere/models/quantum/quantum.xmile",
     //
-    // EmptyEquation: uses :EXCEPT: syntax
-    // "test/sdeverywhere/models/ref/ref.xmile",
-    //
-    "test/sdeverywhere/models/sample/sample.xmile",
-    //
-    // No expected results (nested model directory)
-    // "test/sdeverywhere/models/sir/model/sir.xmile",
-    //
-    // MismatchedDimensions: uses subscript mappings
+    // xmutil drops subscript mappings. Tested via MDL path.
     // "test/sdeverywhere/models/subscript/subscript.xmile",
     //
-    // Cross-dimension broadcasting: SUM(a[*]+h[*]) with different dimensions
-    // "test/sdeverywhere/models/sum/sum.xmile",
+    // --- Engine limitations ---
+    //
+    // NotSimulatable: element-level circular dependency (ce[t2] depends on ecc[t1],
+    // ecc[t1] depends on ce[t1]) -- requires element-level dependency resolution
+    // "test/sdeverywhere/models/ref/ref.xmile",
+    //
+    // NotSimulatable: element-level circular dependency via both XMILE and MDL paths
+    // "test/sdeverywhere/models/interleaved/interleaved.xmile",
     //
     // Data variable loading: A Values uses Vensim's implicit companion .dat file
     // loading (not GET DIRECT), which isn't yet supported. The SUM(IF ...) pattern
@@ -886,6 +876,18 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // MismatchedDimensions: VECTOR ELM MAP cross-dimension indexing (b[B1] in DimA
     // context). The vector_simple subset is tested via simulates_vector_simple_mdl.
     // "test/sdeverywhere/models/vector/vector.xmile",
+    //
+    // --- Permanently excluded (not test models) ---
+    //
+    // Preprocessing test files with no simulation output
+    // "test/sdeverywhere/models/flatten/expected.xmile",
+    // "test/sdeverywhere/models/flatten/input1.xmile",
+    // "test/sdeverywhere/models/flatten/input2.xmile",
+    // "test/sdeverywhere/models/preprocess/expected.xmile",
+    // "test/sdeverywhere/models/preprocess/input.xmile",
+    //
+    // Nested model directory duplicate, no .dat
+    // "test/sdeverywhere/models/sir/model/sir.xmile",
 ];
 
 #[test]
@@ -1005,6 +1007,11 @@ fn simulates_allocate_mdl() {
 #[test]
 fn simulates_allocate_xmile() {
     simulate_path_interpreter_only("../../test/sdeverywhere/models/allocate/allocate.xmile");
+}
+
+#[test]
+fn simulates_longeqns_mdl() {
+    simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/longeqns/longeqns.mdl");
 }
 
 // Ignored: the XMILE path is broken (xmutil strips GET DATA BETWEEN TIMES to
@@ -1134,6 +1141,56 @@ fn simulates_wrld3_03() {
     // Cross-simulator comparison needs wider tolerance than our own
     // interpreter vs VM check: Vensim's integration may differ slightly,
     // and VDF stores f32 values (~7 significant digits).
+    ensure_vdf_results(&vdf_results, &results1);
+}
+
+// C-LEARN uses Vensim macros (SAMPLE UNTIL, SSHAPE) that the native MDL
+// parser reads but cannot yet expand/inline into the model. Without macro
+// expansion, the macro-generated variables appear as UnknownBuiltin errors
+// and the model is NotSimulatable. Macro expansion is a significant new
+// feature -- parsing is complete but conversion/inlining is not implemented.
+#[test]
+#[ignore]
+fn simulates_clearn() {
+    let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+
+    eprintln!("model (vensim mdl): {mdl_path}");
+
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+    let project = Rc::new(Project::from(datamodel_project.clone()));
+
+    let sim = Simulation::new(&project, "main")
+        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
+
+    let results1 = sim
+        .run_to_end()
+        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
+
+    let compiled = sim
+        .compile()
+        .unwrap_or_else(|e| panic!("compilation failed for {mdl_path}: {e}"));
+    let mut vm =
+        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
+    let results2 = vm.into_results();
+
+    ensure_results(&results1, &results2);
+
+    let vdf_path = "../../test/xmutil_test_models/Ref.vdf";
+    let vdf_data_bytes =
+        std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
+    let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
+        .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
+
+    let vdf_results = vdf_file
+        .to_results(&results1)
+        .unwrap_or_else(|e| panic!("VDF to_results failed: {e}"));
+
     ensure_vdf_results(&vdf_results, &results1);
 }
 

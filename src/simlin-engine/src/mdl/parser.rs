@@ -421,6 +421,25 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
         }
     }
 
+    /// Accept either a Symbol or Function token and return the name string.
+    /// Needed for macro definitions where the macro name may shadow a builtin.
+    fn expect_symbol_or_function(&mut self, what: &str) -> Result<Cow<'input, str>, ParseError> {
+        match self.peek_kind() {
+            Some(TokenKind::Symbol) => self.expect_symbol(what),
+            Some(TokenKind::Function) => {
+                let (_, tok, _) = self.expect_ref(TokenKind::Function, what)?;
+                match tok {
+                    Token::Function(s) => Ok(s.clone()),
+                    _ => unreachable!(),
+                }
+            }
+            _ => {
+                // Fall through to the Symbol expectation for a proper error message
+                self.expect_symbol(what)
+            }
+        }
+    }
+
     /// Expect a Symbol token and return (start, name, end).
     fn expect_symbol_with_pos(
         &mut self,
@@ -491,7 +510,9 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
             Some(TokenKind::Macro) => {
                 let (l, r) = self.advance_pos().unwrap();
                 let loc = Loc::new(l, r);
-                let name = self.expect_symbol("macro name")?;
+                // Macro names may shadow builtin function names (e.g. SSHAPE),
+                // so accept both Symbol and Function tokens here.
+                let name = self.expect_symbol_or_function("macro name")?;
                 self.expect(TokenKind::LParen, "'('")?;
                 let args = if self.peek_kind() == Some(TokenKind::RParen) {
                     vec![]
@@ -563,17 +584,28 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
     /// Parse an equation (Eqn rule).
     /// Disambiguates between SubscriptDef, Equivalence, and LHS-based equations.
     fn parse_eqn(&mut self) -> Result<Equation<'input>, ParseError> {
-        // All equation forms start with a Symbol token.
-        // Save position to try disambiguation.
-        if self.peek_kind() != Some(TokenKind::Symbol) {
-            return Err(self.unexpected_error("equation (expected variable name)"));
-        }
-
+        // All equation forms start with a Symbol token (or a Function token
+        // inside macros where the macro name shadows a builtin).
+        let is_function_token = self.peek_kind() == Some(TokenKind::Function);
         let saved_pos = self.pos;
-        let (sym_l, sym_tok, _sym_r) = self.advance().unwrap();
-        let sym_name = match sym_tok {
-            Token::Symbol(s) => s.clone(),
-            _ => unreachable!(),
+        let (sym_start, sym_name) = match self.peek_kind() {
+            Some(TokenKind::Symbol) => {
+                let (l, tok, _) = self.advance().unwrap();
+                match tok {
+                    Token::Symbol(s) => (*l, s.clone()),
+                    _ => unreachable!(),
+                }
+            }
+            Some(TokenKind::Function) => {
+                let (l, tok, _) = self.advance().unwrap();
+                match tok {
+                    Token::Function(s) => (*l, s.clone()),
+                    _ => unreachable!(),
+                }
+            }
+            _ => {
+                return Err(self.unexpected_error("equation (expected variable name)"));
+            }
         };
 
         // Check what follows the first symbol
@@ -588,15 +620,32 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
             }
             Some(TokenKind::Equiv) => {
                 // Equivalence: Symbol <-> Symbol
-                let l = *sym_l;
+                let l = sym_start;
                 self.advance_pos(); // consume '<->'
                 let (_, b_name, r) = self.expect_symbol_with_pos("symbol after '<->'")?;
                 Ok(Equation::Equivalence(sym_name, b_name, Loc::new(l, r)))
             }
-            _ => {
-                // Restore position and parse as LHS-based equation
+            _ if !is_function_token => {
+                // Restore position and parse as LHS-based equation.
+                // Safe because parse_lhs -> parse_var -> expect_symbol
+                // will correctly re-consume the Symbol token.
                 self.pos = saved_pos;
                 self.parse_lhs_equation()
+            }
+            _ => {
+                // The first token was a Function (macro body variable that
+                // shadows a builtin). We can't restore and re-parse because
+                // parse_lhs expects a Symbol token. Build the LHS directly
+                // from the name we already consumed.
+                let r = self.end_pos();
+                let lhs = Lhs {
+                    name: sym_name,
+                    subscripts: vec![],
+                    except: None,
+                    interp_mode: None,
+                    loc: Loc::new(sym_start, r),
+                };
+                self.parse_lhs_equation_with_lhs(lhs)
             }
         }
     }
@@ -604,7 +653,14 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
     /// Parse a LHS-based equation (regular, lookup, data, implicit, etc.)
     fn parse_lhs_equation(&mut self) -> Result<Equation<'input>, ParseError> {
         let lhs = self.parse_lhs()?;
+        self.parse_lhs_equation_with_lhs(lhs)
+    }
 
+    /// Parse the RHS of an equation given a pre-built LHS.
+    fn parse_lhs_equation_with_lhs(
+        &mut self,
+        lhs: Lhs<'input>,
+    ) -> Result<Equation<'input>, ParseError> {
         match self.peek_kind() {
             Some(TokenKind::Eq) => self.parse_eq_rhs(lhs),
             Some(TokenKind::LParen) => {

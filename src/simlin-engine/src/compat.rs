@@ -112,9 +112,32 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
         .map(|(i, r)| (Ident::<Canonical>::from_str_unchecked(r.as_str()), i))
         .collect();
 
-    let initial_time = unprocessed["initial_time"][0].1;
-    let final_time = unprocessed["final_time"][0].1;
-    let saveper = unprocessed["saveper"][0].1;
+    // Infer simulation parameters from data when not explicitly present
+    let (initial_time, final_time, saveper) =
+        if unprocessed.contains_key("initial_time") && unprocessed.contains_key("final_time") {
+            let it = unprocessed["initial_time"][0].1;
+            let ft = unprocessed["final_time"][0].1;
+            let sp = if unprocessed.contains_key("saveper") {
+                unprocessed["saveper"][0].1
+            } else {
+                1.0
+            };
+            (it, ft, sp)
+        } else {
+            // Find the variable with the most data points to infer time range
+            let longest = unprocessed
+                .values()
+                .max_by_key(|v| v.len())
+                .expect("dat file has no data");
+            let it = longest.first().map(|p| p.0).unwrap_or(0.0);
+            let ft = longest.last().map(|p| p.0).unwrap_or(1.0);
+            let sp = if longest.len() >= 2 {
+                longest[1].0 - longest[0].0
+            } else {
+                1.0
+            };
+            (it, ft, sp)
+        };
 
     let step_size = unprocessed.len();
     let step_count = ((final_time - initial_time) / saveper).ceil() as usize + 1;
