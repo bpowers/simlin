@@ -531,6 +531,7 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
                 7.0,
                 Loc::default(),
             )),
+            true,
         )),
         init_ast: None,
         eqn: None,
@@ -667,11 +668,12 @@ impl Var {
                                     .collect();
                                 exprs?.into_iter().flatten().collect()
                             }
-                            Ast::Arrayed(dims, elements, default_ast) => {
-                                let apply_default_for_missing =
-                                    default_ast.as_ref().is_some_and(|default_expr| {
-                                        !elements.values().any(|expr| expr == default_expr)
-                                    });
+                            Ast::Arrayed(
+                                dims,
+                                elements,
+                                default_ast,
+                                apply_default_for_missing,
+                            ) => {
                                 let active_dims = Arc::<[Dimension]>::from(dims.clone());
                                 let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
                                     .enumerate()
@@ -682,7 +684,7 @@ impl Var {
                                         let ast = match elements.get(&canonical_key) {
                                             Some(ast) => ast,
                                             None => {
-                                                if apply_default_for_missing
+                                                if *apply_default_for_missing
                                                     && let Some(default_ast) = default_ast
                                                 {
                                                     let ctx = ctx.with_active_subscripts(
@@ -734,7 +736,7 @@ impl Var {
                                 off,
                                 Box::new(ctx.build_stock_update_expr(off, var)?),
                             )],
-                            Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _) => {
+                            Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => {
                                 let active_dims = Arc::<[Dimension]>::from(dims.clone());
                                 let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                     .enumerate()
@@ -801,11 +803,7 @@ impl Var {
                                 .collect();
                             exprs?.into_iter().flatten().collect()
                         }
-                        Ast::Arrayed(dims, elements, default_ast) => {
-                            let apply_default_for_missing =
-                                default_ast.as_ref().is_some_and(|default_expr| {
-                                    !elements.values().any(|expr| expr == default_expr)
-                                });
+                        Ast::Arrayed(dims, elements, default_ast, apply_default_for_missing) => {
                             let active_dims = Arc::<[Dimension]>::from(dims.clone());
                             let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
                                 .enumerate()
@@ -816,7 +814,7 @@ impl Var {
                                     let ast = match elements.get(&canonical_key) {
                                         Some(ast) => ast,
                                         None => {
-                                            if apply_default_for_missing
+                                            if *apply_default_for_missing
                                                 && let Some(default_ast) = default_ast
                                             {
                                                 let ctx = ctx.with_active_subscripts(
@@ -1202,7 +1200,7 @@ pub(crate) fn build_metadata<'p>(
             sub_offsets.values().map(|metadata| metadata.size).sum()
         } else if let Some(Ast::ApplyToAll(dims, _)) = model.variables[canonical_ident].ast() {
             dims.iter().map(|dim| dim.len()).product()
-        } else if let Some(Ast::Arrayed(dims, _, _)) = model.variables[canonical_ident].ast() {
+        } else if let Some(Ast::Arrayed(dims, _, _, _)) = model.variables[canonical_ident].ast() {
             dims.iter().map(|dim| dim.len()).product()
         } else {
             1

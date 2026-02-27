@@ -378,7 +378,7 @@ pub fn check(
 
         // Check that all elements of arrayed expressions have consistent units,
         // even when the array variable has no declared units
-        if let Some(Ast::Arrayed(_, asts, default_expr)) = var.ast() {
+        if let Some(Ast::Arrayed(_, asts, default_expr, _)) = var.ast() {
             let mut first_units: Option<UnitMap> = None;
             for (element, expr) in asts.iter() {
                 match units.check(expr) {
@@ -534,7 +534,7 @@ pub fn check(
                             errors.push((ident.clone(), err));
                         }
                     },
-                    Ast::Arrayed(_, asts, default_expr) => {
+                    Ast::Arrayed(_, asts, default_expr, _) => {
                         // Check each element expression in the arrayed variable
                         for (_element, expr) in asts.iter() {
                             match units.check(expr) {

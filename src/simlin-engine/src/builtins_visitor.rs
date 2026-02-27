@@ -475,7 +475,7 @@ pub fn instantiate_implicit_modules(
                     all_vars.extend(visitor.vars.values().cloned());
                 }
 
-                Ok((Ast::Arrayed(dimensions, elements, None), all_vars))
+                Ok((Ast::Arrayed(dimensions, elements, None, false), all_vars))
             } else {
                 // No stdlib calls - original behavior
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name);
@@ -484,7 +484,7 @@ pub fn instantiate_implicit_modules(
                 Ok((Ast::ApplyToAll(dimensions, transformed), vars))
             }
         }
-        Ast::Arrayed(dimensions, elements, default_expr) => {
+        Ast::Arrayed(dimensions, elements, default_expr, apply_default_to_missing) => {
             let any_stdlib = elements.values().any(contains_stdlib_call)
                 || default_expr.as_ref().is_some_and(contains_stdlib_call);
             if any_stdlib && !dimensions.is_empty() {
@@ -515,7 +515,12 @@ pub fn instantiate_implicit_modules(
                     None
                 };
                 Ok((
-                    Ast::Arrayed(dimensions, new_elements, transformed_default),
+                    Ast::Arrayed(
+                        dimensions,
+                        new_elements,
+                        transformed_default,
+                        apply_default_to_missing,
+                    ),
                     all_vars,
                 ))
             } else {
@@ -533,7 +538,12 @@ pub fn instantiate_implicit_modules(
                 };
                 let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
                 Ok((
-                    Ast::Arrayed(dimensions, elements?, transformed_default),
+                    Ast::Arrayed(
+                        dimensions,
+                        elements?,
+                        transformed_default,
+                        apply_default_to_missing,
+                    ),
                     vars,
                 ))
             }

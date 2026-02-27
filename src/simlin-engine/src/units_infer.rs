@@ -681,7 +681,7 @@ impl UnitInferer<'_> {
                     Some(Ast::ApplyToAll(_, ast)) => {
                         self.gen_constraints(ast, prefix, &current_var, constraints)
                     }
-                    Some(Ast::Arrayed(_, asts, default_expr)) => {
+                    Some(Ast::Arrayed(_, asts, default_expr, _)) => {
                         // For arrayed variables, each element may have a different expression,
                         // but all elements must have the same units. Process each expression
                         // and add a constraint tying each element's units to the array variable.
@@ -747,7 +747,7 @@ impl UnitInferer<'_> {
                     let loc = var.ast().map(|ast| match ast {
                         Ast::Scalar(expr) => expr.get_loc(),
                         Ast::ApplyToAll(_, expr) => expr.get_loc(),
-                        Ast::Arrayed(_, asts, default_expr) => {
+                        Ast::Arrayed(_, asts, default_expr, _) => {
                             // Use the first element's location if available
                             asts.values().next().map_or_else(
                                 || {

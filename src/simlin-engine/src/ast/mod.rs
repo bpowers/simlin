@@ -35,6 +35,7 @@ pub enum Ast<Expr> {
         Vec<Dimension>,
         HashMap<CanonicalElementName, Expr>,
         Option<Expr>,
+        bool,
     ),
 }
 
@@ -43,7 +44,7 @@ impl Ast<Expr2> {
         match self {
             Ast::Scalar(expr) => expr.get_var_loc(ident),
             Ast::ApplyToAll(_, expr) => expr.get_var_loc(ident),
-            Ast::Arrayed(_, subscripts, default_expr) => {
+            Ast::Arrayed(_, subscripts, default_expr, _) => {
                 for (_, expr) in subscripts.iter() {
                     if let Some(loc) = expr.get_var_loc(ident) {
                         return Some(loc);
@@ -61,7 +62,7 @@ impl Ast<Expr2> {
         match self {
             Ast::Scalar(expr) => latex_eqn(expr),
             Ast::ApplyToAll(_, _expr) => "TODO(array)".to_owned(),
-            Ast::Arrayed(_, _, _) => "TODO(array)".to_owned(),
+            Ast::Arrayed(_, _, _, _) => "TODO(array)".to_owned(),
         }
     }
 }
@@ -196,7 +197,7 @@ pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<
                 .and_then(|expr| Expr2::from(expr, &mut ctx))
                 .map(|expr| Ast::ApplyToAll(dims, expr))
         }
-        Ast::Arrayed(dims, elements, default_expr) => {
+        Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
             let mut ctx = ArrayContext::with_array_context(scope, scope.model_name);
             let elements: EquationResult<HashMap<CanonicalElementName, Expr2>> = elements
                 .into_iter()
@@ -219,7 +220,12 @@ pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<
                 None => None,
             };
             match elements {
-                Ok(elements) => Ok(Ast::Arrayed(dims, elements, default_expr)),
+                Ok(elements) => Ok(Ast::Arrayed(
+                    dims,
+                    elements,
+                    default_expr,
+                    apply_default_to_missing,
+                )),
                 Err(err) => Err(err),
             }
         }

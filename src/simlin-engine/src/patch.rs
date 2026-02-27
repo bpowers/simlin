@@ -446,7 +446,7 @@ fn apply_ast_to_equation_main(equation: &mut datamodel::Equation, ast: &Ast<Expr
         }
         (
             datamodel::Equation::Arrayed(_, elements, default_eq),
-            Ast::Arrayed(_, exprs, default_expr),
+            Ast::Arrayed(_, exprs, default_expr, _),
         ) => {
             for (element_name, equation, _, _) in elements.iter_mut() {
                 let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
@@ -454,9 +454,7 @@ fn apply_ast_to_equation_main(equation: &mut datamodel::Equation, ast: &Ast<Expr
                     *equation = expr2_to_string(expr);
                 }
             }
-            if let Some(default_expr) = default_expr {
-                *default_eq = Some(expr2_to_string(default_expr));
-            }
+            *default_eq = default_expr.as_ref().map(expr2_to_string);
         }
         _ => {}
     }
@@ -470,7 +468,7 @@ fn apply_ast_to_equation_initial(equation: &mut datamodel::Equation, ast: &Ast<E
         (datamodel::Equation::ApplyToAll(_, _), Ast::ApplyToAll(_, _)) => {
             // active_initial now lives in Compat, not in Equation
         }
-        (datamodel::Equation::Arrayed(_, elements, _), Ast::Arrayed(_, exprs, _)) => {
+        (datamodel::Equation::Arrayed(_, elements, _), Ast::Arrayed(_, exprs, _, _)) => {
             for (element_name, _, initial, _) in elements.iter_mut() {
                 if let Some(initial_value) = initial.as_mut() {
                     let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
@@ -498,7 +496,7 @@ fn rewrite_compat_active_initial(
             Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
                 compat.active_initial = Some(expr2_to_string(expr));
             }
-            Ast::Arrayed(_, _, _) => {}
+            Ast::Arrayed(_, _, _, _) => {}
         }
     }
 }
@@ -513,7 +511,7 @@ fn rename_ast(
         Ast::ApplyToAll(dims, expr) => {
             Ast::ApplyToAll(dims.clone(), rename_expr(expr, old_ident, new_ident))
         }
-        Ast::Arrayed(dims, elements, default_expr) => {
+        Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
             let rewritten = elements
                 .iter()
                 .map(|(name, expr)| (name.clone(), rename_expr(expr, old_ident, new_ident)))
@@ -521,7 +519,12 @@ fn rename_ast(
             let rewritten_default = default_expr
                 .as_ref()
                 .map(|expr| rename_expr(expr, old_ident, new_ident));
-            Ast::Arrayed(dims.clone(), rewritten, rewritten_default)
+            Ast::Arrayed(
+                dims.clone(),
+                rewritten,
+                rewritten_default,
+                *apply_default_to_missing,
+            )
         }
     }
 }
@@ -1610,6 +1613,31 @@ mod tests {
                 _ => panic!("expected arrayed equation"),
             },
             _ => panic!("expected auxiliary variable"),
+        }
+    }
+
+    #[test]
+    fn apply_ast_to_arrayed_equation_clears_default_when_missing() {
+        let mut equation = datamodel::Equation::Arrayed(
+            vec!["region".to_string()],
+            vec![("north".to_string(), "old".to_string(), None, None)],
+            Some("legacy_default".to_string()),
+        );
+        let mut exprs = std::collections::HashMap::new();
+        exprs.insert(
+            CanonicalElementName::from_raw("north"),
+            Expr2::Const("2".to_string(), 2.0, crate::ast::Loc::default()),
+        );
+        let ast = Ast::Arrayed(vec![], exprs, None, false);
+
+        apply_ast_to_equation_main(&mut equation, &ast);
+
+        match equation {
+            datamodel::Equation::Arrayed(_, elements, default_eq) => {
+                assert_eq!(elements[0].1, "2");
+                assert_eq!(default_eq, None);
+            }
+            _ => panic!("expected arrayed equation"),
         }
     }
 

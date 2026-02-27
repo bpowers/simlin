@@ -2263,7 +2263,8 @@ pub fn calc_flattened_offsets(
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
             dims.iter().map(|dim| dim.len()).product()
-        } else if let Some(Ast::Arrayed(dims, _, _)) = &model.variables[&*canonicalize(ident)].ast()
+        } else if let Some(Ast::Arrayed(dims, _, _, _)) =
+            &model.variables[&*canonicalize(ident)].ast()
         {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");

@@ -751,20 +751,82 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
         _ => unreachable!(),
     };
 
+    let data_source_eqn = compat_get_direct_equation(compat);
+    let effective_gf = if data_source_eqn.is_some() { None } else { gf };
+
     match equation {
         Equation::Scalar(eqn) => {
-            let effective_eqn = wrap_active_initial(eqn, compat);
-            write_single_entry(buf, ident, &effective_eqn, &[], units, doc, gf);
+            let effective_eqn = data_source_eqn
+                .clone()
+                .unwrap_or_else(|| wrap_active_initial(eqn, compat));
+            write_single_entry(buf, ident, &effective_eqn, &[], units, doc, effective_gf);
         }
         Equation::ApplyToAll(dims, eqn) => {
             let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
-            let effective_eqn = wrap_active_initial(eqn, compat);
-            write_single_entry(buf, ident, &effective_eqn, &dim_names, units, doc, gf);
+            let effective_eqn = data_source_eqn
+                .clone()
+                .unwrap_or_else(|| wrap_active_initial(eqn, compat));
+            write_single_entry(
+                buf,
+                ident,
+                &effective_eqn,
+                &dim_names,
+                units,
+                doc,
+                effective_gf,
+            );
         }
         Equation::Arrayed(dims, elements, default_eq) => {
             write_arrayed_entries(buf, ident, dims, elements, default_eq, units, doc);
         }
     }
+}
+
+fn compat_get_direct_equation(compat: &datamodel::Compat) -> Option<String> {
+    let ds = compat.data_source.as_ref()?;
+    let quote = |s: &str| s.replace('\'', "\\'");
+    let eq = match ds.kind {
+        datamodel::DataSourceKind::Data => format!(
+            "{{GET DIRECT DATA('{}', '{}', '{}', '{}')}}",
+            quote(&ds.file),
+            quote(&ds.tab_or_delimiter),
+            quote(&ds.row_or_col),
+            quote(&ds.cell)
+        ),
+        datamodel::DataSourceKind::Constants => {
+            if ds.cell.is_empty() {
+                format!(
+                    "{{GET DIRECT CONSTANTS('{}', '{}', '{}')}}",
+                    quote(&ds.file),
+                    quote(&ds.tab_or_delimiter),
+                    quote(&ds.row_or_col)
+                )
+            } else {
+                format!(
+                    "{{GET DIRECT CONSTANTS('{}', '{}', '{}', '{}')}}",
+                    quote(&ds.file),
+                    quote(&ds.tab_or_delimiter),
+                    quote(&ds.row_or_col),
+                    quote(&ds.cell)
+                )
+            }
+        }
+        datamodel::DataSourceKind::Lookups => format!(
+            "{{GET DIRECT LOOKUPS('{}', '{}', '{}', '{}')}}",
+            quote(&ds.file),
+            quote(&ds.tab_or_delimiter),
+            quote(&ds.row_or_col),
+            quote(&ds.cell)
+        ),
+        datamodel::DataSourceKind::Subscript => format!(
+            "{{GET DIRECT SUBSCRIPT('{}', '{}', '{}', '{}', '')}}",
+            quote(&ds.file),
+            quote(&ds.tab_or_delimiter),
+            quote(&ds.row_or_col),
+            quote(&ds.cell)
+        ),
+    };
+    Some(eq)
 }
 
 /// Reconstruct a stock's INTEG equation from its decomposed fields.
@@ -2336,6 +2398,44 @@ mod tests {
             buf.contains("ACTIVE INITIAL(y * 2, 100)"),
             "Expected ACTIVE INITIAL wrapper: {}",
             buf
+        );
+    }
+
+    #[test]
+    fn compat_data_source_reconstructs_get_direct_constants() {
+        let var = Variable::Aux(Aux {
+            ident: "imported_constants".to_owned(),
+            equation: Equation::Scalar("0".to_owned()),
+            documentation: String::new(),
+            units: None,
+            gf: Some(make_gf()),
+            ai_state: None,
+            uid: None,
+            compat: Compat {
+                data_source: Some(crate::datamodel::DataSource {
+                    kind: crate::datamodel::DataSourceKind::Constants,
+                    file: "workbook.xlsx".to_owned(),
+                    tab_or_delimiter: "Sheet1".to_owned(),
+                    row_or_col: "A".to_owned(),
+                    cell: String::new(),
+                }),
+                ..Compat::default()
+            },
+        });
+
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert!(
+            buf.contains("imported constants:="),
+            "GET DIRECT reconstruction should use := for data equations: {buf}"
+        );
+        assert!(
+            buf.contains("GET DIRECT CONSTANTS('workbook.xlsx', 'Sheet1', 'A')"),
+            "writer should reconstruct GET DIRECT CONSTANTS from compat metadata: {buf}"
+        );
+        assert!(
+            !buf.contains("([(0,0)-(2,1)]"),
+            "lookup table output must be suppressed when data_source metadata is present: {buf}"
         );
     }
 
