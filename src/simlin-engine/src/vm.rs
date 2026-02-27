@@ -1012,6 +1012,20 @@ impl Vm {
                 Opcode::LoadVar { off } => {
                     stack.push(curr[module_off + *off as usize]);
                 }
+                // LoadPrev reads from curr[] which holds the previous timestep's
+                // committed values during the dt-phase. Semantically identical to
+                // LoadVar at the VM level; the distinction matters for dependency
+                // tracking in the compiler.
+                Opcode::LoadPrev { off } => {
+                    stack.push(curr[module_off + *off as usize]);
+                }
+                // LoadInitial reads from the initial-value buffer captured at t=0.
+                // The initial_values parameter will be added to eval_bytecode in
+                // Task 5 when the VM dispatch is fully wired. Nothing emits this
+                // opcode until then.
+                Opcode::LoadInitial { off: _ } => {
+                    unreachable!("LoadInitial not yet wired: initial_values buffer not available");
+                }
                 Opcode::PushSubscriptIndex { bounds } => {
                     let index = stack.pop().floor() as u16;
                     if index == 0 || index > *bounds {

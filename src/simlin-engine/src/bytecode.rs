@@ -560,6 +560,20 @@ pub(crate) enum Opcode {
         off: VariableOffset,
     },
 
+    /// Load the previous-timestep value of a variable.
+    /// Pushes `curr[module_off + off]` onto the stack.
+    /// Semantically distinct from LoadVar to signal previous-timestep access
+    /// for dependency tracking, but identical VM behavior during the dt-phase
+    /// (curr[] holds the previous timestep's committed values).
+    LoadPrev {
+        off: VariableOffset,
+    },
+    /// Load the initial (t=0) value of a variable from the initial-value buffer.
+    /// Pushes `initial_values[module_off + off]` onto the stack.
+    LoadInitial {
+        off: VariableOffset,
+    },
+
     // === LEGACY SUBSCRIPT (dynamic, for backward compatibility) ===
     PushSubscriptIndex {
         bounds: VariableOffset,
@@ -857,6 +871,8 @@ impl Opcode {
             // Constants/variables: push 1
             Opcode::LoadConstant { .. }
             | Opcode::LoadVar { .. }
+            | Opcode::LoadPrev { .. }
+            | Opcode::LoadInitial { .. }
             | Opcode::LoadGlobalVar { .. }
             | Opcode::LoadModuleInput { .. } => (0, 1),
 

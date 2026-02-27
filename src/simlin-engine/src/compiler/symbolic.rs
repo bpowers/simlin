@@ -61,6 +61,14 @@ pub(crate) enum SymbolicOpcode {
     LoadVar {
         var: SymVarRef,
     },
+    /// Symbolic counterpart of `Opcode::LoadPrev`.
+    SymLoadPrev {
+        var: SymVarRef,
+    },
+    /// Symbolic counterpart of `Opcode::LoadInitial`.
+    SymLoadInitial {
+        var: SymVarRef,
+    },
     LoadGlobalVar {
         off: VariableOffset,
     },
@@ -455,6 +463,12 @@ pub(crate) fn symbolize_opcode(
         Opcode::LoadVar { off } => Ok(SymbolicOpcode::LoadVar {
             var: rmap.lookup(u32::from(*off))?,
         }),
+        Opcode::LoadPrev { off } => Ok(SymbolicOpcode::SymLoadPrev {
+            var: rmap.lookup(u32::from(*off))?,
+        }),
+        Opcode::LoadInitial { off } => Ok(SymbolicOpcode::SymLoadInitial {
+            var: rmap.lookup(u32::from(*off))?,
+        }),
         Opcode::LoadSubscript { off } => Ok(SymbolicOpcode::LoadSubscript {
             var: rmap.lookup(u32::from(*off))?,
         }),
@@ -742,6 +756,12 @@ pub(crate) fn resolve_opcode(
     match op {
         // Opcodes with symbolic variable references
         SymbolicOpcode::LoadVar { var } => Ok(Opcode::LoadVar {
+            off: resolve_var_ref(var, layout)?,
+        }),
+        SymbolicOpcode::SymLoadPrev { var } => Ok(Opcode::LoadPrev {
+            off: resolve_var_ref(var, layout)?,
+        }),
+        SymbolicOpcode::SymLoadInitial { var } => Ok(Opcode::LoadInitial {
             off: resolve_var_ref(var, layout)?,
         }),
         SymbolicOpcode::LoadSubscript { var } => Ok(Opcode::LoadSubscript {
