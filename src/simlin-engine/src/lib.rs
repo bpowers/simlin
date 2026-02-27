@@ -24,6 +24,7 @@ mod bytecode;
 pub mod common;
 pub mod compat;
 mod compiler;
+pub mod data_provider;
 pub mod datamodel;
 pub mod db;
 pub mod diagram;
@@ -85,6 +86,9 @@ pub use self::compat::open_vensim_xmutil;
 #[cfg(feature = "file_io")]
 pub use self::compat::{load_csv, load_dat};
 pub use self::compat::{open_vensim, open_xmile, to_mdl, to_xmile};
+#[cfg(feature = "file_io")]
+pub use self::data_provider::FilesystemDataProvider;
+pub use self::data_provider::{DataProvider, NullDataProvider};
 #[cfg(feature = "file_io")]
 pub use self::vdf::load_vdf;
 
