@@ -186,13 +186,24 @@ impl FilesystemDataProvider {
         time_row: &str,
         cell_label: &str,
     ) -> Result<Vec<(f64, f64)>> {
-        let time_row_idx: usize = time_row.parse::<usize>().map_err(|_| {
+        let time_row_num: usize = time_row.parse::<usize>().map_err(|_| {
             Error::new(
                 ErrorKind::Import,
                 ErrorCode::Generic,
                 Some(format!("bad row number '{}' in '{}'", time_row, file)),
             )
-        })? - 1;
+        })?;
+        if time_row_num == 0 {
+            return Err(Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                Some(format!(
+                    "time row '{}' must be >= 1 (1-indexed) in '{}'",
+                    time_row, file
+                )),
+            ));
+        }
+        let time_row_idx = time_row_num - 1;
 
         let (data_row_idx, data_start_col) = parse_cell_ref(cell_label)?;
 
@@ -718,5 +729,16 @@ mod tests {
         let provider = FilesystemDataProvider::new(dir.path());
         let result = provider.load_data("/etc/passwd", ",", "A", "B2");
         assert!(result.is_err(), "absolute paths should be rejected");
+    }
+
+    #[test]
+    fn test_row_oriented_time_row_zero_returns_error() {
+        let (dir, file) = create_temp_csv("test.csv", "m,1990,2005\nM1,11,12\n");
+        let provider = FilesystemDataProvider::new(dir.path());
+        let result = provider.load_data(&file, ",", "0", "B2");
+        assert!(
+            result.is_err(),
+            "time_row '0' should return an error, not underflow"
+        );
     }
 }

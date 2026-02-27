@@ -87,13 +87,24 @@ impl FilesystemDataProvider {
         time_row: &str,
         cell_label: &str,
     ) -> Result<Vec<(f64, f64)>> {
-        let time_row_idx: u32 = time_row.parse::<u32>().map_err(|_| {
+        let time_row_num: u32 = time_row.parse::<u32>().map_err(|_| {
             Error::new(
                 ErrorKind::Import,
                 ErrorCode::Generic,
                 Some(format!("bad row number '{}' in '{}'", time_row, file)),
             )
-        })? - 1;
+        })?;
+        if time_row_num == 0 {
+            return Err(Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                Some(format!(
+                    "time row '{}' must be >= 1 (1-indexed) in '{}'",
+                    time_row, file
+                )),
+            ));
+        }
+        let time_row_idx = time_row_num - 1;
 
         let (data_row_idx, data_start_col) = parse_cell_ref(cell_label)?;
         let data_row_idx = data_row_idx as u32;

@@ -1012,23 +1012,28 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
 
     if let Some(maps_to) = dim.maps_to() {
         write!(buf, " -> {}", format_mdl_ident(maps_to)).unwrap();
-    } else {
-        for mapping in &dim.mappings {
-            if !mapping.element_map.is_empty() {
-                let target_elems: Vec<String> = mapping
-                    .element_map
-                    .iter()
-                    .map(|(_, tgt)| format_mdl_ident(tgt))
-                    .collect();
-                write!(
-                    buf,
-                    " -> {}: {}",
-                    format_mdl_ident(&mapping.target),
-                    target_elems.join(", ")
-                )
-                .unwrap();
-            }
-        }
+    } else if !dim.mappings.is_empty() {
+        let parts: Vec<String> = dim
+            .mappings
+            .iter()
+            .map(|mapping| {
+                if mapping.element_map.is_empty() {
+                    format_mdl_ident(&mapping.target)
+                } else {
+                    let target_elems: Vec<String> = mapping
+                        .element_map
+                        .iter()
+                        .map(|(_, tgt)| format_mdl_ident(tgt))
+                        .collect();
+                    format!(
+                        "({}: {})",
+                        format_mdl_ident(&mapping.target),
+                        target_elems.join(", ")
+                    )
+                }
+            })
+            .collect();
+        write!(buf, " -> {}", parts.join(", ")).unwrap();
     }
 
     buf.push_str("\n\t~~|\n");
@@ -4008,8 +4013,34 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         write_dimension_def(&mut buf, &dim);
 
         assert!(
-            buf.contains("-> dim b: b2, b1"),
-            "should contain element-level mapping, got: {buf}"
+            buf.contains("-> (dim b: b2, b1)"),
+            "element-level mapping must use parenthesized syntax, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_dimension_with_multi_target_positional_mapping() {
+        let dim = datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: datamodel::DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![
+                datamodel::DimensionMapping {
+                    target: "dim_b".to_string(),
+                    element_map: vec![],
+                },
+                datamodel::DimensionMapping {
+                    target: "dim_c".to_string(),
+                    element_map: vec![],
+                },
+            ],
+        };
+
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+
+        assert!(
+            buf.contains("dim b") && buf.contains("dim c"),
+            "both positional mapping targets should be emitted, got: {buf}"
         );
     }
 }
