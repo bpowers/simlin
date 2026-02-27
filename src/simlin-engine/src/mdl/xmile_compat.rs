@@ -181,6 +181,12 @@ impl XmileFormatter {
     }
 
     fn format_name(&self, name: &str) -> String {
+        // Pass through opaque GET DIRECT/GET XLS references from the normalizer.
+        // These are resolved during data conversion, not formatted as variable names.
+        if name.starts_with('{') {
+            return name.to_string();
+        }
+
         // Handle special TIME-related names without allocating
         if self.use_xmile_time_names {
             if eq_lower_space(name, "time") {

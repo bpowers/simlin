@@ -374,6 +374,21 @@ pub fn classify_symbol(name: &str) -> SymbolClass {
         if rest.starts_with("data") {
             return SymbolClass::GetXls("{GET DATA");
         }
+        if let Some(direct_rest) = rest.strip_prefix("direct ") {
+            if direct_rest.starts_with("data") {
+                return SymbolClass::GetXls("{GET DIRECT DATA");
+            }
+            if direct_rest.starts_with("constants") {
+                return SymbolClass::GetXls("{GET DIRECT CONSTANTS");
+            }
+            if direct_rest.starts_with("lookups") {
+                return SymbolClass::GetXls("{GET DIRECT LOOKUPS");
+            }
+            if direct_rest.starts_with("subscript") {
+                return SymbolClass::GetXls("{GET DIRECT SUBSCRIPT");
+            }
+            return SymbolClass::GetXls("{GET DIRECT");
+        }
         if rest.starts_with("direct") {
             return SymbolClass::GetXls("{GET DIRECT");
         }

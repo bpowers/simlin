@@ -9,11 +9,13 @@ use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
+#[cfg(feature = "file_io")]
+use simlin_engine::FilesystemDataProvider;
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::interpreter::Simulation;
 use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{Project, Results, Vm, project_io};
-use simlin_engine::{load_csv, load_dat, open_vensim, xmile};
+use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
@@ -439,6 +441,49 @@ fn simulate_mdl_path_interpreter_only(mdl_path: &str) {
 
     if let Some(expected) = load_expected_results_for_mdl(mdl_path) {
         ensure_results(&expected, &results);
+    }
+}
+
+/// Simulate a Vensim MDL file that references external data files.
+/// Uses FilesystemDataProvider to resolve GET DIRECT references.
+#[cfg(feature = "file_io")]
+fn simulate_mdl_path_with_data(mdl_path: &str) {
+    eprintln!("model (vensim mdl with data): {mdl_path}");
+
+    let mdl_abs = std::path::Path::new(mdl_path);
+    let model_dir = mdl_abs
+        .parent()
+        .unwrap_or_else(|| panic!("no parent dir for {mdl_path}"));
+
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+
+    let provider = FilesystemDataProvider::new(model_dir);
+    let datamodel_project = open_vensim_with_data(&contents, Some(&provider))
+        .unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+    let project = Rc::new(Project::from(datamodel_project.clone()));
+
+    let sim = Simulation::new(&project, "main")
+        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
+
+    let results1 = sim
+        .run_to_end()
+        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
+
+    let compiled = sim
+        .compile()
+        .unwrap_or_else(|e| panic!("compilation failed for {mdl_path}: {e}"));
+    let mut vm =
+        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
+    let results2 = vm.into_results();
+
+    ensure_results(&results1, &results2);
+
+    if let Some(expected) = load_expected_results_for_mdl(mdl_path) {
+        ensure_results(&expected, &results1);
+        ensure_results(&expected, &results2);
     }
 }
 
@@ -1046,4 +1091,219 @@ fn incremental_compilation_covers_all_models() {
             ALL_INCREMENTALLY_COMPILABLE_MODELS.len() + TEST_MODELS.len(),
         );
     }
+}
+
+// -- External data model tests (MDL path with FilesystemDataProvider) --
+
+// Ignored: requires Excel data support AND dimension equivalences (DimC <-> DimM)
+#[cfg(feature = "ext_data")]
+#[test]
+#[ignore]
+fn simulates_directdata_mdl() {
+    simulate_mdl_path_with_data("../../test/sdeverywhere/models/directdata/directdata.mdl");
+}
+
+// Ignored: requires arrayed GET DIRECT CONSTANTS (B2* pattern) and EXCEPT support
+#[test]
+#[ignore]
+fn simulates_directconst_mdl() {
+    simulate_mdl_path_with_data("../../test/sdeverywhere/models/directconst/directconst.mdl");
+}
+
+// Ignored: requires arrayed GET DIRECT LOOKUPS with row-oriented addressing
+#[test]
+#[ignore]
+fn simulates_directlookups_mdl() {
+    simulate_mdl_path_with_data("../../test/sdeverywhere/models/directlookups/directlookups.mdl");
+}
+
+// Ignored: requires cross-dimension mapping (DimA -> DimB, DimC)
+#[test]
+#[ignore]
+fn simulates_directsubs_mdl() {
+    simulate_mdl_path_with_data("../../test/sdeverywhere/models/directsubs/directsubs.mdl");
+}
+
+/// End-to-end test: scalar GET DIRECT DATA from CSV, parsed through MDL
+/// pipeline with FilesystemDataProvider, simulated via interpreter and VM.
+#[test]
+fn simulates_get_direct_data_scalar_csv() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // Write a simple CSV data file
+    let csv_path = dir.path().join("scalar_data.csv");
+    let mut f = std::fs::File::create(&csv_path).unwrap();
+    write!(f, "Year,Value\n2000,100\n2010,200\n2020,300\n").unwrap();
+
+    let mdl = "\
+{UTF-8}
+x := GET DIRECT DATA('scalar_data.csv', ',', 'A', 'B2') ~~|
+y = x * 2 ~~|
+INITIAL TIME = 2000 ~~|
+FINAL TIME = 2020 ~~|
+TIME STEP = 10 ~~|
+SAVEPER = TIME STEP ~~|
+";
+    let provider = FilesystemDataProvider::new(dir.path());
+    let datamodel_project = open_vensim_with_data(mdl, Some(&provider))
+        .unwrap_or_else(|e| panic!("failed to parse: {e}"));
+    let project = Rc::new(Project::from(datamodel_project));
+
+    let sim = Simulation::new(&project, "main")
+        .unwrap_or_else(|e| panic!("failed to create simulation: {e}"));
+
+    let results = sim
+        .run_to_end()
+        .unwrap_or_else(|e| panic!("interpreter run failed: {e}"));
+
+    let get = |name: &str| -> Vec<f64> {
+        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+        let off = results.offsets[&ident];
+        results.iter().map(|row| row[off]).collect()
+    };
+
+    let x_vals = get("x");
+    assert_eq!(x_vals.len(), 3);
+    assert!(
+        (x_vals[0] - 100.0).abs() < 1e-6,
+        "x at t=2000 should be 100"
+    );
+    assert!(
+        (x_vals[1] - 200.0).abs() < 1e-6,
+        "x at t=2010 should be 200"
+    );
+    assert!(
+        (x_vals[2] - 300.0).abs() < 1e-6,
+        "x at t=2020 should be 300"
+    );
+
+    let y_vals = get("y");
+    assert!(
+        (y_vals[0] - 200.0).abs() < 1e-6,
+        "y at t=2000 should be 200"
+    );
+    assert!(
+        (y_vals[2] - 600.0).abs() < 1e-6,
+        "y at t=2020 should be 600"
+    );
+
+    // Also verify VM path works
+    let compiled = sim
+        .compile()
+        .unwrap_or_else(|e| panic!("compilation failed: {e}"));
+    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed: {e}"));
+    let vm_results = vm.into_results();
+    ensure_results(&results, &vm_results);
+}
+
+/// End-to-end test: scalar GET DIRECT CONSTANTS from CSV.
+#[test]
+fn simulates_get_direct_constants_scalar_csv() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+
+    let csv_path = dir.path().join("const_data.csv");
+    let mut f = std::fs::File::create(&csv_path).unwrap();
+    write!(f, "label,\n,42\n").unwrap();
+
+    let mdl = "\
+{UTF-8}
+a = GET DIRECT CONSTANTS('const_data.csv', ',', 'B2') ~~|
+b = a + 8 ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|
+";
+    let provider = FilesystemDataProvider::new(dir.path());
+    let datamodel_project = open_vensim_with_data(mdl, Some(&provider))
+        .unwrap_or_else(|e| panic!("failed to parse: {e}"));
+    let project = Rc::new(Project::from(datamodel_project));
+
+    let sim = Simulation::new(&project, "main")
+        .unwrap_or_else(|e| panic!("failed to create simulation: {e}"));
+
+    let results = sim
+        .run_to_end()
+        .unwrap_or_else(|e| panic!("interpreter run failed: {e}"));
+
+    let get = |name: &str| -> f64 {
+        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+        let off = results.offsets[&ident];
+        results.iter().next().unwrap()[off]
+    };
+
+    assert!((get("a") - 42.0).abs() < 1e-6, "a should be 42");
+    assert!((get("b") - 50.0).abs() < 1e-6, "b should be 50");
+
+    // Also verify VM path
+    let compiled = sim.compile().unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let vm_results = vm.into_results();
+    ensure_results(&results, &vm_results);
+}
+
+/// End-to-end test: scalar GET DIRECT LOOKUPS from CSV.
+#[test]
+fn simulates_get_direct_lookups_scalar_csv() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // CSV with time in column 1 and values in column 2:
+    // row 1: header
+    // row 2+: data pairs (x, y)
+    let csv_path = dir.path().join("lookup_data.csv");
+    let mut f = std::fs::File::create(&csv_path).unwrap();
+    write!(f, "time,value\n0,10\n5,20\n10,30\n").unwrap();
+
+    let mdl = "\
+{UTF-8}
+x := GET DIRECT LOOKUPS('lookup_data.csv', ',', 'A', 'B2') ~~|
+y = x * 2 ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 10 ~~|
+TIME STEP = 5 ~~|
+SAVEPER = TIME STEP ~~|
+";
+    let provider = FilesystemDataProvider::new(dir.path());
+    let datamodel_project = open_vensim_with_data(mdl, Some(&provider))
+        .unwrap_or_else(|e| panic!("failed to parse: {e}"));
+    let project = Rc::new(Project::from(datamodel_project));
+
+    let sim = Simulation::new(&project, "main")
+        .unwrap_or_else(|e| panic!("failed to create simulation: {e}"));
+
+    let results = sim
+        .run_to_end()
+        .unwrap_or_else(|e| panic!("interpreter run failed: {e}"));
+
+    let get = |name: &str, step: usize| -> f64 {
+        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+        let off = results.offsets[&ident];
+        results.iter().nth(step).unwrap()[off]
+    };
+
+    // At time 0: x=10, y=20
+    assert!((get("x", 0) - 10.0).abs() < 1e-6, "x at t=0 should be 10");
+    assert!((get("y", 0) - 20.0).abs() < 1e-6, "y at t=0 should be 20");
+    // At time 5: x=20, y=40
+    assert!((get("x", 1) - 20.0).abs() < 1e-6, "x at t=5 should be 20");
+    assert!((get("y", 1) - 40.0).abs() < 1e-6, "y at t=5 should be 40");
+    // At time 10: x=30, y=60
+    assert!((get("x", 2) - 30.0).abs() < 1e-6, "x at t=10 should be 30");
+    assert!((get("y", 2) - 60.0).abs() < 1e-6, "y at t=10 should be 60");
+
+    // Also verify VM path
+    let compiled = sim.compile().unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let vm_results = vm.into_results();
+    ensure_results(&results, &vm_results);
 }

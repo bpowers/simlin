@@ -545,11 +545,14 @@ impl<'input> ConversionContext<'input> {
                     let initial_str = self.formatter.format_expr_with_context(initial_expr, ctx);
                     return (eq_str, Some(initial_str), None);
                 }
-                (
-                    self.formatter.format_expr_with_context(expr, ctx),
-                    None,
-                    None,
-                )
+                let eq_str = self.formatter.format_expr_with_context(expr, ctx);
+                // GET DIRECT CONSTANTS uses `=` (not `:=`), so it is parsed
+                // as Regular rather than Data. Detect the opaque reference
+                // and resolve it through the data provider.
+                if super::external_data::is_get_direct_ref(&eq_str) {
+                    return self.try_resolve_data_equation(&eq_str);
+                }
+                (eq_str, None, None)
             }
             MdlEquation::Lookup(_, table) => (
                 "0+0".to_string(),
@@ -779,6 +782,15 @@ impl<'input> ConversionContext<'input> {
                 }
 
                 let eq_str = self.formatter.format_expr(expr);
+                // GET DIRECT CONSTANTS uses `=` (not `:=`), so it is parsed
+                // as Regular rather than Data. Detect and resolve via the
+                // data provider.
+                if super::external_data::is_get_direct_ref(&eq_str) {
+                    let (resolved_eq, _resolved_compat, gf) =
+                        self.try_resolve_data_equation(&eq_str);
+                    let (equation, compat) = self.make_equation(lhs, &resolved_eq);
+                    return (equation, compat, gf);
+                }
                 let (equation, compat) = self.make_equation(lhs, &eq_str);
                 (equation, compat, None)
             }

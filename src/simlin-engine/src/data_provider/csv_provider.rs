@@ -241,14 +241,17 @@ impl FilesystemDataProvider {
 
         let (row_idx, col_idx) = parse_cell_ref(row_label)?;
 
-        // col_label may be a cell reference or a column letter
-        let actual_col = if is_column_only(col_label) {
+        // For scalar constants, col_label is empty and the column comes
+        // from row_label's cell reference (e.g. "B2" -> col B).
+        // For arrayed constants, col_label overrides the column.
+        let col_idx = if col_label.is_empty() {
+            col_idx
+        } else if is_column_only(col_label) {
             col_index(col_label)
         } else {
             let (_r, c) = parse_cell_ref(col_label)?;
             c
         };
-        let _ = actual_col;
 
         let row = records.get(row_idx).ok_or_else(|| {
             Error::new(
@@ -286,9 +289,24 @@ impl FilesystemDataProvider {
 
         let (start_row, start_col) = parse_cell_ref(first_cell)?;
 
-        // last_cell can be a full cell ref ("A5") or just a column letter ("A")
-        // If just a column, read down to end of data
-        let (end_row, end_col) = if is_column_only(last_cell.trim()) {
+        // last_cell can be:
+        // - a full cell ref ("A5") - read to that cell
+        // - just a column letter ("A") - read down to end of data
+        // - just a row number ("2") - read across that row to end of data
+        // - empty ("") - read down the start column to end of data
+        let is_row_number =
+            last_cell.trim().chars().all(|c| c.is_ascii_digit()) && !last_cell.trim().is_empty();
+        let (end_row, end_col) = if is_row_number {
+            let row_idx: usize = last_cell.trim().parse::<usize>().unwrap() - 1;
+            let empty = Vec::new();
+            let row = records.get(row_idx).unwrap_or(&empty);
+            let last_col = if row.is_empty() {
+                start_col
+            } else {
+                row.len() - 1
+            };
+            (row_idx, last_col)
+        } else if is_column_only(last_cell.trim()) {
             let col = col_index(last_cell.trim());
             let mut last_row = start_row;
             for (i, row) in records.iter().enumerate().skip(start_row) {
