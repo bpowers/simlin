@@ -481,6 +481,27 @@ fn test_build_stock_update_expr_multiple_flows() {
     }
 }
 
+#[test]
+fn test_sparse_array_element_returns_error_not_panic() {
+    use crate::test_common::TestProject;
+
+    // Build a project with a 3-element dimension but only 2 of the 3
+    // element keys provided. The compiler must not panic on the missing
+    // element key -- whether it reports an error or silently succeeds
+    // depends on the pipeline stage, but no panic is the guarantee.
+    let _result = TestProject::new("sparse_test")
+        .named_dimension("dim", &["a", "b", "c"])
+        .array_with_ranges(
+            "x[dim]",
+            vec![("a", "1"), ("b", "2")], // 'c' intentionally missing
+        )
+        .aux("y", "1", None)
+        .compile();
+    // Reaching this point without panicking is the success criterion.
+    // Before the fix, elements[&canonical_key] would panic for the
+    // missing "c" key.
+}
+
 impl Var {
     pub(crate) fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         // if this variable is overriden by a module input, our expression is easy
@@ -560,7 +581,16 @@ impl Var {
                                         let subscript_str = subscripts.join(",");
                                         let canonical_key =
                                             CanonicalElementName::from_raw(&subscript_str);
-                                        let ast = &elements[&canonical_key];
+                                        let Some(ast) = elements.get(&canonical_key) else {
+                                            return sim_err!(
+                                                DoesNotExist,
+                                                format!(
+                                                    "missing array element '{}' for variable '{}'",
+                                                    canonical_key.as_str(),
+                                                    var.ident()
+                                                )
+                                            );
+                                        };
                                         let ctx = ctx.with_active_subscripts(
                                             active_dims.clone(),
                                             &subscripts,
@@ -662,7 +692,16 @@ impl Var {
                                     let subscript_str = subscripts.join(",");
                                     let canonical_key =
                                         CanonicalElementName::from_raw(&subscript_str);
-                                    let ast = &elements[&canonical_key];
+                                    let Some(ast) = elements.get(&canonical_key) else {
+                                        return sim_err!(
+                                            DoesNotExist,
+                                            format!(
+                                                "missing array element '{}' for variable '{}'",
+                                                canonical_key.as_str(),
+                                                var.ident()
+                                            )
+                                        );
+                                    };
                                     let ctx = ctx
                                         .with_active_subscripts(active_dims.clone(), &subscripts);
                                     ctx.lower(ast).map(|mut exprs| {
