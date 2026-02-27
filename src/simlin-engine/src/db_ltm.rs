@@ -712,7 +712,17 @@ pub(super) fn compile_ltm_equation_fragment(
     let tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
 
     let inputs = BTreeSet::new();
-    let module_models = model_module_map(db, model, project).clone();
+    let mut module_models = model_module_map(db, model, project).clone();
+
+    // Merge LTM implicit module references (PREVIOUS instances from LTM
+    // equation expansion) into the module_models map so the compiler
+    // context can resolve module_var_name -> sub_model_name lookups.
+    if !implicit_module_refs.is_empty() {
+        let current_model_modules = module_models.entry(model_name_ident.clone()).or_default();
+        for (var_ident, (sub_model_name, _input_set)) in &implicit_module_refs {
+            current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
+        }
+    }
 
     let core = crate::compiler::ContextCore {
         dimensions: &converted_dims,
@@ -1078,20 +1088,8 @@ pub(super) fn compile_ltm_implicit_var_fragment(
             (Ident::new(&dm_module.model_name), input_set),
         );
 
-        // Populate sub-model metadata
-        let sub_canonical = canonicalize(&dm_module.model_name);
-        if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-            build_submodel_metadata(&arena, db, *sub_model, project, &mut {
-                let mut all_md: HashMap<
-                    Ident<Canonical>,
-                    HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
-                > = HashMap::new();
-                all_md.insert(model_name_ident.clone(), mini_metadata.clone());
-                all_md
-            });
-        }
-
         // Add dependency stubs for module input sources
+        let ltm_implicit_all = model_ltm_implicit_var_info(db, model, project);
         for mr in &dm_module.references {
             let src = canonicalize(&mr.src);
             let effective = src.strip_prefix('\u{00B7}').unwrap_or(&src);
@@ -1100,7 +1098,35 @@ pub(super) fn compile_ltm_implicit_var_fragment(
             {
                 continue;
             }
-            if effective.contains('\u{00B7}') {
+            // For submodel references like `module_var·output`, extract the
+            // module variable name and add it as a module-type dependency so
+            // the compiler context can resolve the submodel offset lookup.
+            if let Some(dot_pos) = effective.find('\u{00B7}') {
+                let module_var_name = &effective[..dot_pos];
+                let dep_ident = Ident::new(module_var_name);
+                if mini_metadata.contains_key(&dep_ident)
+                    || dep_variables.iter().any(|(id, _, _)| id == &dep_ident)
+                {
+                    continue;
+                }
+                // Look up the referenced module in LTM implicit vars
+                if let Some(ref_meta) = ltm_implicit_all.get(module_var_name)
+                    && ref_meta.is_module
+                    && let Some(ref mn) = ref_meta.model_name
+                {
+                    dep_variables.push((
+                        dep_ident.clone(),
+                        crate::variable::Variable::Module {
+                            ident: dep_ident,
+                            model_name: Ident::new(mn),
+                            units: None,
+                            inputs: vec![],
+                            errors: vec![],
+                            unit_errors: vec![],
+                        },
+                        ref_meta.size,
+                    ));
+                }
                 continue;
             }
             let dep_ident = Ident::new(effective);
@@ -1174,7 +1200,29 @@ pub(super) fn compile_ltm_implicit_var_fragment(
 
     let tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
     let inputs = canonical_module_input_set(module_input_names);
-    let module_models = model_module_map(db, model, project).clone();
+    let mut module_models = model_module_map(db, model, project).clone();
+
+    // Merge ALL LTM implicit module references into the module_models map.
+    // A module's inputs may reference outputs from OTHER LTM implicit modules
+    // (e.g., PREVIOUS instance #6 reading from PREVIOUS instance #5's output),
+    // so we must include all LTM implicit modules, not just the current one.
+    {
+        let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
+        let current_model_modules = module_models.entry(model_name_ident.clone()).or_default();
+        // Add the current variable's own module refs
+        for (var_ident, (sub_model_name, _input_set)) in &module_refs {
+            current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
+        }
+        // Add all other LTM implicit module refs so cross-references resolve
+        for (name, im_meta) in ltm_implicit.iter() {
+            if im_meta.is_module
+                && let Some(mn) = &im_meta.model_name
+            {
+                let im_ident: Ident<Canonical> = Ident::new(name);
+                current_model_modules.insert(im_ident, Ident::new(mn.as_str()));
+            }
+        }
+    }
 
     let core = crate::compiler::ContextCore {
         dimensions: &converted_dims,

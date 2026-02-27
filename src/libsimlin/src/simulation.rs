@@ -20,8 +20,8 @@ use std::sync::Mutex;
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
 use crate::{
-    clear_out_error, compile_simulation, drop_c_string, ffi_error_from_engine, require_model,
-    require_sim, store_error, store_ffi_error, SimState, SimlinErrorCode, SimlinModel, SimlinSim,
+    clear_out_error, drop_c_string, ffi_error_from_engine, require_model, require_sim, store_error,
+    store_ffi_error, SimState, SimlinErrorCode, SimlinModel, SimlinSim,
 };
 
 /// Internal/instrumentation variables (e.g. LTM `$time`, `$dt`) start
@@ -51,54 +51,33 @@ pub unsafe extern "C" fn simlin_sim_new(
     let project_ptr = model_ref.project;
     let project_ref = &*project_ptr;
 
-    let (compiled, vm, vm_error) = if !enable_ltm {
-        // Salsa-based incremental compilation. The DB is kept in sync by
-        // apply_patch and project constructors, so this is typically a
-        // cache hit when nothing changed since the last patch.
-        let incremental_result: std::result::Result<engine::CompiledSimulation, engine::Error> = {
-            let db = project_ref.db.lock().unwrap();
-            let sync_state = project_ref.sync_state.lock().unwrap();
-            if let Some(ref state) = *sync_state {
-                let sync = state.to_sync_result();
-                engine::db::compile_project_incremental(&db, sync.project, &model_ref.model_name)
-            } else {
-                Err(engine::Error {
-                    kind: engine::ErrorKind::Simulation,
-                    code: engine::ErrorCode::NotSimulatable,
-                    details: Some("incremental compilation: no sync state available".to_string()),
-                })
-            }
-        };
-
-        match incremental_result {
-            Ok(compiled) => match Vm::new(compiled.clone()) {
-                Ok(vm) => (Some(compiled), Some(vm), None),
-                Err(err) => (Some(compiled), None, Some(err)),
-            },
-            Err(err) => (None, None, Some(err)),
+    // Salsa-based incremental compilation. Both LTM and non-LTM paths
+    // use the same pipeline; the only difference is the ltm_enabled flag
+    // on the SourceProject input. The DB is kept in sync by apply_patch
+    // and project constructors, so this is typically a cache hit when
+    // nothing changed since the last patch.
+    let incremental_result: std::result::Result<engine::CompiledSimulation, engine::Error> = {
+        let mut db = project_ref.db.lock().unwrap();
+        let sync_state = project_ref.sync_state.lock().unwrap();
+        if let Some(ref state) = *sync_state {
+            let source_project = state.to_sync_result().project;
+            engine::db::set_project_ltm_enabled(&mut db, source_project, enable_ltm);
+            engine::db::compile_project_incremental(&db, source_project, &model_ref.model_name)
+        } else {
+            Err(engine::Error {
+                kind: engine::ErrorKind::Simulation,
+                code: engine::ErrorCode::NotSimulatable,
+                details: Some("incremental compilation: no sync state available".to_string()),
+            })
         }
-    } else {
-        // LTM path: must go through the monolithic pipeline
-        let cloned_project = {
-            let project_locked = project_ref.project.lock().unwrap();
-            project_locked.clone()
-        };
+    };
 
-        let project_variant = match cloned_project.with_ltm() {
-            Ok(proj) => proj,
-            Err(err) => {
-                store_ffi_error(out_error, ffi_error_from_engine(&err));
-                return ptr::null_mut();
-            }
-        };
-
-        match compile_simulation(&project_variant, &model_ref.model_name) {
-            Ok(compiled) => match Vm::new(compiled.clone()) {
-                Ok(vm) => (Some(compiled), Some(vm), None),
-                Err(err) => (Some(compiled), None, Some(err)),
-            },
-            Err(err) => (None, None, Some(err)),
-        }
+    let (compiled, vm, vm_error) = match incremental_result {
+        Ok(compiled) => match Vm::new(compiled.clone()) {
+            Ok(vm) => (Some(compiled), Some(vm), None),
+            Err(err) => (Some(compiled), None, Some(err)),
+        },
+        Err(err) => (None, None, Some(err)),
     };
 
     crate::model_ref(model);

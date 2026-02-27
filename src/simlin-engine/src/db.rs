@@ -3036,7 +3036,13 @@ pub fn compute_layout(
     // overhead). When the model has no feedback loops,
     // model_ltm_synthetic_variables returns an empty list (also zero
     // overhead).
-    if project.ltm_enabled(db) {
+    //
+    // LTM variables only exist in the root model. Stdlib sub-models
+    // (previous, init, smth1, etc.) have no feedback loops of their own
+    // and must not enter LTM resolution, which would cause a salsa
+    // dependency cycle (compute_layout -> model_ltm_implicit_var_info
+    // -> compute_layout for the stdlib model).
+    if is_root && project.ltm_enabled(db) {
         let ltm_vars = if project.ltm_discovery_mode(db) {
             model_ltm_all_link_synthetic_variables(db, model, project)
         } else {
@@ -4768,8 +4774,11 @@ pub fn assemble_module(
     // variables because PREVIOUS reads from the previous timestep's
     // committed values. They can be appended to the end of the flows
     // runlist.
+    //
+    // LTM variables only exist in the root model -- stdlib sub-models
+    // never have LTM instrumentation.
     let mut ltm_flow_names: Vec<String> = Vec::new();
-    if project.ltm_enabled(db) {
+    if is_root && project.ltm_enabled(db) {
         let ltm_vars = if project.ltm_discovery_mode(db) {
             model_ltm_all_link_synthetic_variables(db, model, project)
         } else {
@@ -4919,7 +4928,7 @@ pub fn assemble_module(
     // Append LTM implicit module fragments to initials and stocks
     // runlists. PREVIOUS module instances contain stocks that need
     // initialization and stock update phases.
-    if project.ltm_enabled(db) {
+    if is_root && project.ltm_enabled(db) {
         let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
         let mut ltm_im_names: Vec<&String> = ltm_implicit.keys().collect();
         ltm_im_names.sort_unstable();
@@ -5299,6 +5308,69 @@ fn enumerate_module_instances_inner(
         }
     }
 
+    // Include LTM implicit MODULE variables (e.g. PREVIOUS instances from
+    // feedback loop instrumentation). These are only present when LTM is
+    // enabled and exist only in the root model.
+    if project.ltm_enabled(db) {
+        let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
+        let dims = project_datamodel_dims(db, project);
+        let units_ctx = project_units_context(db, project);
+
+        let ltm_vars = if project.ltm_discovery_mode(db) {
+            model_ltm_all_link_synthetic_variables(db, *source_model, project)
+        } else {
+            model_ltm_synthetic_variables(db, *source_model, project)
+        };
+
+        for ltm_var in &ltm_vars.vars {
+            let parsed =
+                db_ltm::parse_ltm_equation(&ltm_var.name, &ltm_var.equation, dims, units_ctx);
+
+            for implicit_dm_var in &parsed.implicit_vars {
+                let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+                if let Some(im_meta) = ltm_implicit.get(&im_name) {
+                    if !im_meta.is_module {
+                        continue;
+                    }
+                    let sub_model_name = match &im_meta.model_name {
+                        Some(n) => n,
+                        None => continue,
+                    };
+                    let sub_canonical = canonicalize(sub_model_name);
+                    if !project_models.contains_key(sub_canonical.as_ref()) {
+                        continue;
+                    }
+
+                    // Extract input set from the implicit module's references
+                    let input_prefix = format!("{im_name}\u{00B7}");
+                    let inputs: BTreeSet<Ident<Canonical>> =
+                        if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
+                            dm_module
+                                .references
+                                .iter()
+                                .filter_map(|mr| {
+                                    let dst_canonical = canonicalize(&mr.dst);
+                                    let bare = dst_canonical.strip_prefix(&input_prefix)?;
+                                    Some(Ident::new(bare))
+                                })
+                                .collect()
+                        } else {
+                            BTreeSet::new()
+                        };
+
+                    let key = Ident::<Canonical>::new(sub_model_name);
+                    let is_new = !modules.contains_key(&key);
+
+                    modules.entry(key).or_default().insert(inputs);
+
+                    if is_new {
+                        enumerate_module_instances_inner(db, project, sub_model_name, modules)?;
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -5442,7 +5514,97 @@ fn calc_flattened_offsets_incremental(
         }
     }
 
+    // Include LTM variables (loop scores, relative loop scores, and their
+    // implicit PREVIOUS module instances) when LTM is enabled and this is
+    // the root model. These occupy slots after the implicit variables,
+    // matching compute_layout's Section 3 ordering.
+    if is_root && project.ltm_enabled(db) {
+        let layout = compute_layout(db, *source_model, project, true);
+
+        // Enumerate all LTM variable names from the synthetic variables list
+        // and their implicit PREVIOUS module variables.
+        let ltm_vars = if project.ltm_discovery_mode(db) {
+            model_ltm_all_link_synthetic_variables(db, *source_model, project)
+        } else {
+            model_ltm_synthetic_variables(db, *source_model, project)
+        };
+
+        let dims = project_datamodel_dims(db, project);
+        let units_ctx = project_units_context(db, project);
+        let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
+
+        // Add explicit LTM variables (loop scores, relative loop scores)
+        for ltm_var in &ltm_vars.vars {
+            let canonical_name = canonicalize(&ltm_var.name);
+            if let Some(entry) = layout.get(&canonical_name) {
+                offsets.insert(
+                    Ident::<Canonical>::from_unchecked(
+                        Ident::<Canonical>::new(&canonical_name).to_source_repr(),
+                    ),
+                    (entry.offset, entry.size),
+                );
+            }
+
+            // Add implicit PREVIOUS module variables from this LTM equation
+            let parsed =
+                db_ltm::parse_ltm_equation(&ltm_var.name, &ltm_var.equation, dims, units_ctx);
+            for implicit_dm_var in &parsed.implicit_vars {
+                let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+                if let Some(im_meta) = ltm_implicit.get(&im_name)
+                    && let Some(entry) = layout.get(&im_name)
+                {
+                    if im_meta.is_module {
+                        // Module-type: include sub-model variable offsets
+                        if let Some(sub_model_name) = &im_meta.model_name {
+                            let sub_offsets = calc_flattened_offsets_incremental(
+                                db,
+                                project,
+                                sub_model_name,
+                                false,
+                            );
+                            let mut sub_var_names: Vec<&Ident<Canonical>> =
+                                sub_offsets.keys().collect();
+                            sub_var_names.sort_unstable();
+                            let im_ident = Ident::new(im_name.as_str());
+                            for sub_name in &sub_var_names {
+                                let (sub_off, sub_size) = sub_offsets[*sub_name];
+                                let sub_canonical = Ident::new(sub_name.as_str());
+                                offsets.insert(
+                                    Ident::<Canonical>::from_unchecked(format!(
+                                        "{}.{}",
+                                        im_ident.to_source_repr(),
+                                        sub_canonical.to_source_repr()
+                                    )),
+                                    (entry.offset + sub_off, sub_size),
+                                );
+                            }
+                        }
+                    } else {
+                        offsets.insert(
+                            Ident::<Canonical>::from_unchecked(
+                                Ident::<Canonical>::new(&im_name).to_source_repr(),
+                            ),
+                            (entry.offset, entry.size),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     offsets
+}
+
+/// Set the `ltm_enabled` flag on a `SourceProject` salsa input.
+///
+/// This is a thin wrapper around the salsa-generated setter so that
+/// downstream crates (e.g. libsimlin) can toggle LTM without taking
+/// a direct dependency on the salsa crate.
+pub fn set_project_ltm_enabled(db: &mut SimlinDb, project: SourceProject, enabled: bool) {
+    use salsa::Setter;
+    if project.ltm_enabled(db) != enabled {
+        project.set_ltm_enabled(db).to(enabled);
+    }
 }
 
 /// Compile a project incrementally using salsa.
