@@ -289,7 +289,7 @@ fn simulate_path(xmile_path: &str) {
     let results3 = {
         use simlin_engine::prost::Message;
 
-        let pb_project_inner = serialize(&datamodel_project);
+        let pb_project_inner = serialize(&datamodel_project).unwrap();
         let pb_project = &pb_project_inner;
         let mut buf = Vec::with_capacity(pb_project.encoded_len());
         pb_project.encode(&mut buf).unwrap();

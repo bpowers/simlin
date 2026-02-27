@@ -22,7 +22,7 @@ use simlin_engine::{datamodel, json, project_io, serde as project_serde};
 /// datamodel -> protobuf bytes -> datamodel -> JSON string
 fn roundtrip_to_json(dm: &datamodel::Project) -> (Vec<u8>, String) {
     // datamodel -> protobuf -> bytes
-    let pb: project_io::Project = project_serde::serialize(dm);
+    let pb: project_io::Project = project_serde::serialize(dm).unwrap();
     let mut pb_bytes = Vec::new();
     pb.encode(&mut pb_bytes).unwrap();
 

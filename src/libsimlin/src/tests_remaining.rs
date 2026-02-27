@@ -2077,7 +2077,7 @@ fn test_get_incoming_links() {
 
     // Build the datamodel and serialize to protobuf
     let datamodel_project = test_project.build_datamodel();
-    let project = engine_serde::serialize(&datamodel_project);
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
 
     let mut buf = Vec::new();
     project.encode(&mut buf).unwrap();
@@ -2325,7 +2325,7 @@ fn test_get_incoming_links_with_private_variables() {
         .aux("result", "smoothed * 2", None);
 
     let datamodel_project = test_project.build_datamodel();
-    let project = engine_serde::serialize(&datamodel_project);
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
     let mut buf = Vec::new();
     project.encode(&mut buf).unwrap();
 
@@ -2444,7 +2444,7 @@ fn test_get_incoming_links_nested_private_vars() {
         .aux("final_output", "smooth2 * 1.5", None);
 
     let datamodel_project = test_project.build_datamodel();
-    let project = engine_serde::serialize(&datamodel_project);
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
     let mut buf = Vec::new();
     project.encode(&mut buf).unwrap();
 
@@ -3145,7 +3145,7 @@ fn test_concurrent_project_ref_unref() {
     unsafe {
         // Create a test project
         let datamodel = TestProject::new("concurrent_test").build_datamodel();
-        let pb_project = engine_serde::serialize(&datamodel);
+        let pb_project = engine_serde::serialize(&datamodel).unwrap();
         let encoded = pb_project.encode_to_vec();
 
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -3203,7 +3203,7 @@ fn test_concurrent_model_creation() {
     unsafe {
         // Create a test project
         let datamodel = TestProject::new("concurrent_model").build_datamodel();
-        let pb_project = engine_serde::serialize(&datamodel);
+        let pb_project = engine_serde::serialize(&datamodel).unwrap();
         let encoded = pb_project.encode_to_vec();
 
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -3291,7 +3291,7 @@ fn test_concurrent_sim_operations() {
             .stock("inventory", "0", &[], &[], None)
             .flow("production", "5", None)
             .build_datamodel();
-        let pb_project = engine_serde::serialize(&datamodel);
+        let pb_project = engine_serde::serialize(&datamodel).unwrap();
         let encoded = pb_project.encode_to_vec();
 
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -3376,7 +3376,7 @@ fn test_stress_ref_counting() {
         let datamodel = TestProject::new("stress_test")
             .stock("s", "10", &[], &[], None)
             .build_datamodel();
-        let pb_project = engine_serde::serialize(&datamodel);
+        let pb_project = engine_serde::serialize(&datamodel).unwrap();
         let encoded = pb_project.encode_to_vec();
 
         let mut err: *mut SimlinError = ptr::null_mut();

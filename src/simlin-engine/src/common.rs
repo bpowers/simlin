@@ -101,6 +101,7 @@ pub enum ErrorCode {
     CantSubscriptScalar,
     DimensionInScalarContext,
     BadOverride,
+    UnsupportedForSerialization,
 }
 
 impl fmt::Display for ErrorCode {
@@ -159,6 +160,7 @@ impl fmt::Display for ErrorCode {
             CantSubscriptScalar => "cant_subscript_scalar",
             DimensionInScalarContext => "dimension_in_scalar_context",
             BadOverride => "bad_override",
+            UnsupportedForSerialization => "unsupported_for_serialization",
         };
 
         write!(f, "{name}")

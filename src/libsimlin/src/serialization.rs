@@ -66,7 +66,17 @@ pub unsafe extern "C" fn simlin_project_serialize_protobuf(
     };
 
     let project_locked = proj.project.lock().unwrap();
-    let pb_project = engine_serde::serialize(&project_locked.datamodel);
+    let pb_project = match engine_serde::serialize(&project_locked.datamodel) {
+        Ok(pb) => pb,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::ProtobufDecode)
+                    .with_message(format!("serialization validation failed: {}", err)),
+            );
+            return;
+        }
+    };
 
     let mut bytes = Vec::new();
     if pb_project.encode(&mut bytes).is_err() {

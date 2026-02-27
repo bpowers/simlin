@@ -793,7 +793,7 @@ mod protobuf_roundtrip_tests {
     fn roundtrip_sdai_pb_json(sdai_model: &SdaiModel) -> (Vec<u8>, String) {
         // sdai -> datamodel -> protobuf
         let dm_project: datamodel::Project = sdai_model.clone().into();
-        let pb_project: project_io::Project = project_serde::serialize(&dm_project);
+        let pb_project: project_io::Project = project_serde::serialize(&dm_project).unwrap();
 
         // Encode to protobuf bytes
         let mut pb_bytes = Vec::new();
