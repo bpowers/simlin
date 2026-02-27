@@ -112,6 +112,14 @@ pub struct SourceProject {
     pub model_names: Vec<String>,
     #[returns(ref)]
     pub models: HashMap<String, SourceModel>,
+    /// Whether LTM (Loops That Matter) synthetic variable compilation is
+    /// enabled. When true, `compute_layout` allocates slots and
+    /// `assemble_module` compiles fragments for LTM variables.
+    pub ltm_enabled: bool,
+    /// When true, use discovery mode (`model_ltm_all_link_synthetic_variables`)
+    /// which generates scores for every causal edge, not just edges in detected
+    /// loops.
+    pub ltm_discovery_mode: bool,
 }
 
 #[salsa::input]
@@ -2464,6 +2472,8 @@ pub fn sync_from_datamodel<'db>(
         project.units.iter().map(SourceUnit::from).collect(),
         model_names,
         source_model_map,
+        false,
+        false,
     );
 
     SyncResult {
