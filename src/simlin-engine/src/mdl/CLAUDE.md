@@ -43,10 +43,11 @@ For design history and detailed implementation notes, see [docs/design/mdl-parse
 
 ## Known Gaps
 
-- Macro output in datamodel format (parsing complete, conversion not implemented)
+- Macro expansion/inlining (parsing complete, conversion not implemented). C-LEARN model requires this to simulate.
 - Name post-processing (`SpaceToUnderBar`, `MakeViewNamesUnique`)
 - Variable filtering (Time, ARRAY types in views)
 - 26 C-LEARN equivalence diffs (see design doc for root cause analysis)
+- Element-level dependency resolution (models like `ref`, `interleaved` have per-element equations that create false circular dependencies at the whole-variable level)
 
 ## Commands
 

@@ -37,7 +37,8 @@ Equation text flows through these stages in order:
 
 ## Format import/export
 
-- **`src/compat.rs`** - Top-level format entry points: `open_vensim()`, `open_xmile()`, `to_xmile()`, `.dat`/CSV loading
+- **`src/compat.rs`** - Top-level format entry points: `open_vensim()`, `open_vensim_with_data()`, `open_xmile()`, `to_xmile()`, `.dat`/CSV loading
+- **`src/data_provider/`** - `DataProvider` trait for resolving external data references (GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT). `NullDataProvider` (default), `FilesystemDataProvider` (CSV/Excel via calamine; feature-gated on `file_io`)
 - **`src/xmile/`** - XMILE (XML interchange format) parsing and generation. Submodules: `model.rs`, `variables.rs`, `dimensions.rs`, `views.rs`
 - **`src/mdl/`** - Native Rust Vensim MDL parser (replaces C++ xmutil):
   - `lexer.rs` -> `normalizer.rs` -> `parser.rs` -> `reader.rs` (pipeline)
