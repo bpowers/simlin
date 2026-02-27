@@ -104,7 +104,7 @@ impl XmileFormatter {
                 // But xmutil strips quotes from literals in expression output
                 lit.to_string()
             }
-            Expr::Na(_) => ":NA:".to_string(),
+            Expr::Na(_) => "NAN".to_string(),
         }
     }
 
@@ -1918,5 +1918,12 @@ mod tests {
             formatter.format_expr_with_context(&expr, &ctx),
             "Layer_Depth[layer2]"
         );
+    }
+
+    #[test]
+    fn test_format_na_emits_nan() {
+        let formatter = XmileFormatter::new();
+        let expr = Expr::Na(loc());
+        assert_eq!(formatter.format_expr(&expr), "NAN");
     }
 }
