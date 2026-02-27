@@ -806,6 +806,11 @@ impl ModuleEvaluator<'_> {
             .copied()
     }
 
+    // NOTE: This function is called once per array element during evaluation (O(N^2) total)
+    // because the interpreter evaluates each element independently. The bisection algorithm
+    // inside build_profiles_and_allocate runs in O(N log N) per call, giving O(N^2 log N)
+    // overall. This is acceptable since the interpreter is a reference implementation, not
+    // the performance-critical path (the VM handles production simulation).
     fn compute_allocate_available(
         &mut self,
         req_expr: &Expr,
@@ -1449,12 +1454,14 @@ impl ModuleEvaluator<'_> {
 
                         if selected.is_empty() {
                             max_val
-                        } else if action == 3 {
-                            // VSMAX
-                            selected.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
                         } else {
-                            // VSSUM (action == 0)
-                            selected.iter().sum()
+                            match action {
+                                1 => selected.iter().cloned().fold(f64::INFINITY, f64::min), // VSMIN
+                                2 => selected.iter().sum::<f64>() / selected.len() as f64, // VSMEAN
+                                3 => selected.iter().cloned().fold(f64::NEG_INFINITY, f64::max), // VSMAX
+                                4 => selected.iter().product(), // VSPROD
+                                _ => selected.iter().sum(),     // VSSUM (action == 0)
+                            }
                         }
                     }
                     BuiltinFn::VectorElmMap(source_array, offset_array) => {

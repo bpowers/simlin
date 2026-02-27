@@ -868,13 +868,20 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // NotSimulatable: element-level circular dependency via both XMILE and MDL paths
     // "test/sdeverywhere/models/interleaved/interleaved.xmile",
     //
-    // Data variable loading: A Values uses Vensim's implicit companion .dat file
-    // loading (not GET DIRECT), which isn't yet supported. The SUM(IF ...) pattern
-    // is covered by array_tests::sum_of_conditional_tests.
+    // Vensim implicit data variable loading: "A Values[DimA]" has no equation
+    // in the MDL -- values come from the companion sumif_data.dat file via Vensim's
+    // implicit per-run data loading, distinct from GET DIRECT DATA. The engine has no
+    // mechanism to auto-discover and load companion .dat files by convention.
+    // The SUM(IF ...) arithmetic pattern itself is covered by
+    // array_tests::sum_of_conditional_tests.
     // "test/sdeverywhere/models/sumif/sumif.xmile",
     //
-    // MismatchedDimensions: VECTOR ELM MAP cross-dimension indexing (b[B1] in DimA
-    // context). The vector_simple subset is tested via simulates_vector_simple_mdl.
+    // VECTOR ELM MAP with cross-dimension source: `VECTOR ELM MAP(b[B1], a[DimA])`
+    // uses b[B1] (a single-element B-subscript slice) as the source array in a DimA
+    // context. The compiler cannot resolve the dimension mismatch because b's DimB
+    // dimension has no mapping to DimA. Fixing requires either element-level subscript
+    // flattening or a new cross-dimension indexing strategy.
+    // The vector_simple subset (no cross-dim indexing) passes via simulates_vector_simple_mdl.
     // "test/sdeverywhere/models/vector/vector.xmile",
     //
     // --- Permanently excluded (not test models) ---
