@@ -508,7 +508,26 @@ impl<'input> ConversionContext<'input> {
                 Some(self.build_graphical_function(var_name, table)),
             ),
             MdlEquation::EmptyRhs(_, _) => ("0+0".to_string(), None, None),
-            _ => (String::new(), None, None),
+            MdlEquation::Implicit(_) => {
+                let gf = self.make_default_lookup();
+                ("TIME".to_string(), None, Some(gf))
+            }
+            MdlEquation::Data(_, expr) => {
+                let eq_str = expr
+                    .as_ref()
+                    .map(|e| self.formatter.format_expr_with_context(e, ctx))
+                    .unwrap_or_default();
+                (eq_str, None, None)
+            }
+            MdlEquation::TabbedArray(_, _) | MdlEquation::NumberList(_, _) => {
+                // Per-element expansion is handled by make_array_equation at the
+                // build_equation level. If we reach here, return empty and let
+                // the caller handle it.
+                (String::new(), None, None)
+            }
+            MdlEquation::SubscriptDef(_, _) | MdlEquation::Equivalence(_, _, _) => {
+                unreachable!("SubscriptDef and Equivalence should not reach per-element expansion")
+            }
         }
     }
 
@@ -2235,6 +2254,53 @@ x[bottom] = 2
             let gf = a.gf.as_ref().expect("Should have graphical function");
             assert_eq!(gf.y_scale.min, 0.0);
             assert_eq!(gf.y_scale.max, 1.0); // 0 + 1 = 1
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_data_equation_subscripted_per_element() {
+        // A Data equation (:=) with per-element subscripts should produce
+        // non-empty equation strings through build_equation_rhs_with_context.
+        let mdl = "DimA: a1, a2
+~ ~|
+x[a1] := y[a1] * 2
+~ ~|
+x[a2] := y[a2] * 3
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 2);
+                    let a1_eq = elements.iter().find(|(k, _, _, _)| k == "a1");
+                    let a2_eq = elements.iter().find(|(k, _, _, _)| k == "a2");
+                    assert!(a1_eq.is_some(), "Should have a1 element");
+                    assert!(a2_eq.is_some(), "Should have a2 element");
+                    assert!(
+                        !a1_eq.unwrap().1.is_empty(),
+                        "a1 equation should not be empty"
+                    );
+                    assert!(
+                        !a2_eq.unwrap().1.is_empty(),
+                        "a2 equation should not be empty"
+                    );
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
         } else {
             panic!("Expected Aux variable");
         }
