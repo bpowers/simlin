@@ -907,4 +907,24 @@ $font
         // But the model should still have variables
         assert!(!model.variables.is_empty());
     }
+
+    #[test]
+    fn test_get_direct_error_propagates() {
+        // When a DataProvider is configured but returns an error (e.g. missing file),
+        // the conversion should fail rather than silently keeping the raw expression.
+        use crate::data_provider::NullDataProvider;
+
+        let mdl = "x := GET DIRECT DATA('nonexistent.csv', ',', 'A', 'B2')
+~ Units
+~ Data variable |
+\\\\\\---///
+";
+        let provider = NullDataProvider;
+        let result = convert_mdl_with_data(mdl, Some(&provider));
+        assert!(
+            result.is_err(),
+            "GET DIRECT resolution failure should propagate as a conversion error, \
+             not silently keep the raw expression"
+        );
+    }
 }

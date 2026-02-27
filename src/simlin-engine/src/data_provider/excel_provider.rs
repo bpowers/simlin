@@ -150,6 +150,8 @@ impl FilesystemDataProvider {
         let range = self.open_sheet(file, sheet_name)?;
 
         let (row_idx, col_idx) = parse_cell_ref(row_label)?;
+        // col_label is unused for Excel: row_label already contains the full
+        // cell reference (e.g. "B2") with both row and column information.
         let _ = col_label;
 
         let val = range

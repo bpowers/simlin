@@ -46,14 +46,14 @@ impl<'input> ConversionContext<'input> {
 
             // Check if this variable has element-specific equations (x[a]=1; x[b]=2)
             // If so, build an Arrayed equation from all element-specific equations
-            if let Some(var) = self.build_variable_with_elements(name, info) {
+            if let Some(var) = self.build_variable_with_elements(name, info)? {
                 variables.push(var);
             } else {
                 // Fall back to single-equation handling
                 // PurgeAFOEq: If multiple equations and first is A FUNCTION OF or EmptyRhs, skip it
                 let eq = self.select_equation(&info.equations);
                 if let Some(eq) = eq
-                    && let Some(var) = self.build_variable(name, info, eq)
+                    && let Some(var) = self.build_variable(name, info, eq)?
                 {
                     variables.push(var);
                 }
@@ -250,7 +250,11 @@ impl<'input> ConversionContext<'input> {
     ///
     /// NumberList and TabbedArray equations are excluded - they have special handling
     /// in build_equation that handles their multi-value RHS correctly.
-    fn build_variable_with_elements(&self, name: &str, info: &SymbolInfo<'_>) -> Option<Variable> {
+    fn build_variable_with_elements(
+        &self,
+        name: &str,
+        info: &SymbolInfo<'_>,
+    ) -> Result<Option<Variable>, super::types::ConvertError> {
         // Filter to get valid equations (not empty, not AFO, not number list/tabbed)
         let valid_eqs: Vec<&FullEquation<'_>> = info
             .equations
@@ -261,7 +265,7 @@ impl<'input> ConversionContext<'input> {
             .collect();
 
         if valid_eqs.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         // Classify equations and determine parent dimensions
@@ -282,7 +286,7 @@ impl<'input> ConversionContext<'input> {
                 if lhs.subscripts.is_empty() {
                     // Scalar equation - can't mix with subscripted
                     if has_subscripted_eq {
-                        return None;
+                        return Ok(None);
                     }
                     continue;
                 }
@@ -303,7 +307,7 @@ impl<'input> ConversionContext<'input> {
                         expanded_elements.push(elements);
                     } else {
                         // Unknown subscript - fall back to normal handling
-                        return None;
+                        return Ok(None);
                     }
                 }
 
@@ -318,7 +322,7 @@ impl<'input> ConversionContext<'input> {
                         dims.iter().map(|d| self.normalize_dimension(d)).collect();
                     if normalized_existing != normalized_new {
                         // Inconsistent dimensions - can't form a proper array
-                        return None;
+                        return Ok(None);
                     }
                     // If the raw dimension names differ but normalized names match,
                     // the equations span different subranges of the same parent.
@@ -379,18 +383,21 @@ impl<'input> ConversionContext<'input> {
                     has_except: eq_has_except,
                 });
             } else {
-                return None;
+                return Ok(None);
             }
         }
 
         // If no subscripted equations found, use normal handling
         if !has_subscripted_eq {
-            return None;
+            return Ok(None);
         }
 
-        let parent_dims = parent_dims?;
+        let parent_dims = match parent_dims {
+            Some(dims) => dims,
+            None => return Ok(None),
+        };
         if parent_dims.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         // Build element map: key -> (equation_string, initial_equation, gf)
@@ -422,7 +429,7 @@ impl<'input> ConversionContext<'input> {
                     &exp_eq.eq.equation,
                     info.var_type == VariableType::Stock,
                     &empty_ctx,
-                );
+                )?;
                 default_equation = Some(raw_eq);
             }
 
@@ -456,7 +463,7 @@ impl<'input> ConversionContext<'input> {
                     &exp_eq.eq.equation,
                     info.var_type == VariableType::Stock,
                     &ctx,
-                );
+                )?;
 
                 element_map.insert(key.clone(), (eq_str, initial_eq, gf));
             }
@@ -471,7 +478,7 @@ impl<'input> ConversionContext<'input> {
         elements.sort_by(|a, b| a.0.cmp(&b.0));
 
         if elements.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         // Format dimension names -- parent_dims are already normalized to
@@ -488,7 +495,7 @@ impl<'input> ConversionContext<'input> {
         let (documentation, units) = extract_metadata(&info.equations);
 
         match info.var_type {
-            VariableType::Stock => Some(Variable::Stock(datamodel::Stock {
+            VariableType::Stock => Ok(Some(Variable::Stock(datamodel::Stock {
                 ident,
                 equation,
                 documentation,
@@ -498,8 +505,8 @@ impl<'input> ConversionContext<'input> {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })),
-            VariableType::Flow => Some(Variable::Flow(datamodel::Flow {
+            }))),
+            VariableType::Flow => Ok(Some(Variable::Flow(datamodel::Flow {
                 ident,
                 equation,
                 documentation,
@@ -508,8 +515,8 @@ impl<'input> ConversionContext<'input> {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })),
-            VariableType::Aux => Some(Variable::Aux(datamodel::Aux {
+            }))),
+            VariableType::Aux => Ok(Some(Variable::Aux(datamodel::Aux {
                 ident,
                 equation,
                 documentation,
@@ -518,7 +525,7 @@ impl<'input> ConversionContext<'input> {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })),
+            }))),
         }
     }
 
@@ -530,20 +537,21 @@ impl<'input> ConversionContext<'input> {
         eq: &MdlEquation<'_>,
         is_stock: bool,
         ctx: &crate::mdl::xmile_compat::ElementContext,
-    ) -> (String, Option<String>, Option<GraphicalFunction>) {
+    ) -> Result<(String, Option<String>, Option<GraphicalFunction>), super::types::ConvertError>
+    {
         match eq {
             MdlEquation::Regular(_, expr) => {
                 if is_stock && let Some(initial) = self.extract_integ_initial(expr) {
-                    return (
+                    return Ok((
                         self.formatter.format_expr_with_context(initial, ctx),
                         None,
                         None,
-                    );
+                    ));
                 }
                 if let Some((equation_expr, initial_expr)) = self.extract_active_initial(expr) {
                     let eq_str = self.formatter.format_expr_with_context(equation_expr, ctx);
                     let initial_str = self.formatter.format_expr_with_context(initial_expr, ctx);
-                    return (eq_str, Some(initial_str), None);
+                    return Ok((eq_str, Some(initial_str), None));
                 }
                 let eq_str = self.formatter.format_expr_with_context(expr, ctx);
                 // GET DIRECT CONSTANTS uses `=` (not `:=`), so it is parsed
@@ -552,22 +560,22 @@ impl<'input> ConversionContext<'input> {
                 if super::external_data::is_get_direct_ref(&eq_str) {
                     return self.try_resolve_data_equation(&eq_str);
                 }
-                (eq_str, None, None)
+                Ok((eq_str, None, None))
             }
-            MdlEquation::Lookup(_, table) => (
+            MdlEquation::Lookup(_, table) => Ok((
                 "0+0".to_string(),
                 None,
                 Some(self.build_graphical_function(var_name, table)),
-            ),
-            MdlEquation::WithLookup(_, input, table) => (
+            )),
+            MdlEquation::WithLookup(_, input, table) => Ok((
                 self.formatter.format_expr_with_context(input, ctx),
                 None,
                 Some(self.build_graphical_function(var_name, table)),
-            ),
-            MdlEquation::EmptyRhs(_, _) => ("0+0".to_string(), None, None),
+            )),
+            MdlEquation::EmptyRhs(_, _) => Ok(("0+0".to_string(), None, None)),
             MdlEquation::Implicit(_) => {
                 let gf = self.make_default_lookup();
-                ("TIME".to_string(), None, Some(gf))
+                Ok(("TIME".to_string(), None, Some(gf)))
             }
             MdlEquation::Data(_, expr) => {
                 let eq_str = expr
@@ -580,7 +588,7 @@ impl<'input> ConversionContext<'input> {
                 // Per-element expansion is handled by make_array_equation at the
                 // build_equation level. If we reach here, return empty and let
                 // the caller handle it.
-                (String::new(), None, None)
+                Ok((String::new(), None, None))
             }
             MdlEquation::SubscriptDef(_, _) | MdlEquation::Equivalence(_, _, _) => {
                 unreachable!("SubscriptDef and Equivalence should not reach per-element expansion")
@@ -700,7 +708,7 @@ impl<'input> ConversionContext<'input> {
         name: &str,
         info: &SymbolInfo<'_>,
         eq: &FullEquation<'_>,
-    ) -> Option<Variable> {
+    ) -> Result<Option<Variable>, super::types::ConvertError> {
         let ident = quoted_space_to_underbar(name);
         let documentation = eq
             .comment
@@ -711,8 +719,8 @@ impl<'input> ConversionContext<'input> {
 
         match info.var_type {
             VariableType::Stock => {
-                let (equation, compat, _gf) = self.build_equation(&eq.equation, true);
-                Some(Variable::Stock(datamodel::Stock {
+                let (equation, compat, _gf) = self.build_equation(&eq.equation, true)?;
+                Ok(Some(Variable::Stock(datamodel::Stock {
                     ident,
                     equation,
                     documentation,
@@ -722,11 +730,11 @@ impl<'input> ConversionContext<'input> {
                     ai_state: None,
                     uid: None,
                     compat,
-                }))
+                })))
             }
             VariableType::Flow => {
-                let (equation, compat, gf) = self.build_equation(&eq.equation, false);
-                Some(Variable::Flow(datamodel::Flow {
+                let (equation, compat, gf) = self.build_equation(&eq.equation, false)?;
+                Ok(Some(Variable::Flow(datamodel::Flow {
                     ident,
                     equation,
                     documentation,
@@ -735,11 +743,11 @@ impl<'input> ConversionContext<'input> {
                     ai_state: None,
                     uid: None,
                     compat,
-                }))
+                })))
             }
             VariableType::Aux => {
-                let (equation, compat, gf) = self.build_equation(&eq.equation, false);
-                Some(Variable::Aux(datamodel::Aux {
+                let (equation, compat, gf) = self.build_equation(&eq.equation, false)?;
+                Ok(Some(Variable::Aux(datamodel::Aux {
                     ident,
                     equation,
                     documentation,
@@ -748,7 +756,7 @@ impl<'input> ConversionContext<'input> {
                     ai_state: None,
                     uid: None,
                     compat,
-                }))
+                })))
             }
         }
     }
@@ -760,7 +768,7 @@ impl<'input> ConversionContext<'input> {
         &self,
         eq: &MdlEquation<'_>,
         is_stock: bool,
-    ) -> (Equation, Compat, Option<GraphicalFunction>) {
+    ) -> Result<(Equation, Compat, Option<GraphicalFunction>), super::types::ConvertError> {
         match eq {
             MdlEquation::Regular(lhs, expr) => {
                 if is_stock {
@@ -768,7 +776,7 @@ impl<'input> ConversionContext<'input> {
                     if let Some(initial) = self.extract_integ_initial(expr) {
                         let initial_str = self.formatter.format_expr(initial);
                         let (equation, compat) = self.make_equation(lhs, &initial_str);
-                        return (equation, compat, None);
+                        return Ok((equation, compat, None));
                     }
                 }
 
@@ -778,7 +786,7 @@ impl<'input> ConversionContext<'input> {
                     let initial_str = self.formatter.format_expr(initial_expr);
                     let (equation, compat) =
                         self.make_equation_with_initial(lhs, &eq_str, Some(initial_str));
-                    return (equation, compat, None);
+                    return Ok((equation, compat, None));
                 }
 
                 let eq_str = self.formatter.format_expr(expr);
@@ -787,50 +795,51 @@ impl<'input> ConversionContext<'input> {
                 // data provider.
                 if super::external_data::is_get_direct_ref(&eq_str) {
                     let (resolved_eq, _resolved_compat, gf) =
-                        self.try_resolve_data_equation(&eq_str);
+                        self.try_resolve_data_equation(&eq_str)?;
                     let (equation, compat) = self.make_equation(lhs, &resolved_eq);
-                    return (equation, compat, gf);
+                    return Ok((equation, compat, gf));
                 }
                 let (equation, compat) = self.make_equation(lhs, &eq_str);
-                (equation, compat, None)
+                Ok((equation, compat, None))
             }
             MdlEquation::Lookup(lhs, table) => {
                 let gf = self.build_graphical_function(&lhs.name, table);
                 let (equation, compat) = self.make_equation(lhs, "0+0");
-                (equation, compat, Some(gf))
+                Ok((equation, compat, Some(gf)))
             }
             MdlEquation::WithLookup(lhs, input, table) => {
                 let gf = self.build_graphical_function(&lhs.name, table);
                 let input_str = self.formatter.format_expr(input);
                 let (equation, compat) = self.make_equation(lhs, &input_str);
-                (equation, compat, Some(gf))
+                Ok((equation, compat, Some(gf)))
             }
             MdlEquation::EmptyRhs(lhs, _) => {
                 let (equation, compat) = self.make_equation(lhs, "0+0");
-                (equation, compat, None)
+                Ok((equation, compat, None))
             }
             MdlEquation::Implicit(lhs) => {
                 // Implicit equations become lookups on TIME with a default table
                 let gf = self.make_default_lookup();
                 let (equation, compat) = self.make_equation(lhs, "TIME");
-                (equation, compat, Some(gf))
+                Ok((equation, compat, Some(gf)))
             }
             MdlEquation::Data(lhs, expr) => {
                 let eq_str = expr
                     .as_ref()
                     .map(|e| self.formatter.format_expr(e))
                     .unwrap_or_default();
-                let (resolved_eq, _resolved_compat, gf) = self.try_resolve_data_equation(&eq_str);
+                let (resolved_eq, _resolved_compat, gf) =
+                    self.try_resolve_data_equation(&eq_str)?;
                 let (equation, compat) = self.make_equation(lhs, &resolved_eq);
-                (equation, compat, gf)
+                Ok((equation, compat, gf))
             }
             MdlEquation::TabbedArray(lhs, values) | MdlEquation::NumberList(lhs, values) => {
                 // Create an arrayed equation from the number list
                 let (equation, gf) = self.make_array_equation(lhs, values);
-                (equation, Compat::default(), gf)
+                Ok((equation, Compat::default(), gf))
             }
             MdlEquation::SubscriptDef(_, _) | MdlEquation::Equivalence(_, _, _) => {
-                (Equation::Scalar(String::new()), Compat::default(), None)
+                Ok((Equation::Scalar(String::new()), Compat::default(), None))
             }
         }
     }
@@ -841,25 +850,26 @@ impl<'input> ConversionContext<'input> {
     fn try_resolve_data_equation(
         &self,
         eq_str: &str,
-    ) -> (String, Option<String>, Option<GraphicalFunction>) {
+    ) -> Result<(String, Option<String>, Option<GraphicalFunction>), super::types::ConvertError>
+    {
         use super::external_data::{ResolvedData, try_resolve_data_expr};
 
         match try_resolve_data_expr(eq_str, self.data_provider, &self.file_aliases) {
-            Some(Ok(ResolvedData::Lookup(eq, gf))) => (eq, None, Some(gf)),
-            Some(Ok(ResolvedData::Constant(value))) => (format_number(value), None, None),
+            Some(Ok(ResolvedData::Lookup(eq, gf))) => Ok((eq, None, Some(gf))),
+            Some(Ok(ResolvedData::Constant(value))) => Ok((format_number(value), None, None)),
             Some(Ok(ResolvedData::Subscript(_))) => {
                 // Subscripts are resolved during dimension building, not here
-                (eq_str.to_string(), None, None)
+                Ok((eq_str.to_string(), None, None))
             }
-            Some(Err(_)) | None => {
-                // Either not a GET DIRECT ref, or resolution failed.
-                // For implicit data variables (no expression), produce
-                // a default lookup on TIME.
+            Some(Err(e)) => Err(e.into()),
+            None => {
+                // Not a GET DIRECT ref. For implicit data variables (no
+                // expression), produce a default lookup on TIME.
                 if eq_str.is_empty() {
                     let gf = self.make_default_lookup();
-                    ("TIME".to_string(), None, Some(gf))
+                    Ok(("TIME".to_string(), None, Some(gf)))
                 } else {
-                    (eq_str.to_string(), None, None)
+                    Ok((eq_str.to_string(), None, None))
                 }
             }
         }

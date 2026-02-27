@@ -297,7 +297,27 @@ impl FilesystemDataProvider {
         let is_row_number =
             last_cell.trim().chars().all(|c| c.is_ascii_digit()) && !last_cell.trim().is_empty();
         let (end_row, end_col) = if is_row_number {
-            let row_idx: usize = last_cell.trim().parse::<usize>().unwrap() - 1;
+            let row_num: usize = last_cell.trim().parse::<usize>().map_err(|_| {
+                Error::new(
+                    ErrorKind::Import,
+                    ErrorCode::Generic,
+                    Some(format!(
+                        "invalid row number '{}' in last_cell",
+                        last_cell.trim()
+                    )),
+                )
+            })?;
+            if row_num == 0 {
+                return Err(Error::new(
+                    ErrorKind::Import,
+                    ErrorCode::Generic,
+                    Some(format!(
+                        "row number '{}' in last_cell must be >= 1 (1-indexed)",
+                        last_cell.trim()
+                    )),
+                ));
+            }
+            let row_idx = row_num - 1;
             let empty = Vec::new();
             let row = records.get(row_idx).unwrap_or(&empty);
             let last_col = if row.is_empty() {
@@ -629,5 +649,27 @@ mod tests {
         let provider = FilesystemDataProvider::new(dir.path());
         let result = provider.load_data("nonexistent.csv", ",", "A", "B2");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_subscript_row_number_zero_returns_error() {
+        let (dir, file) = create_temp_csv("subs.csv", "DimB\nB1\nB2\nB3\n");
+        let provider = FilesystemDataProvider::new(dir.path());
+        let result = provider.load_subscript(&file, ",", "A1", "0");
+        assert!(
+            result.is_err(),
+            "row number '0' should return an error, not panic"
+        );
+    }
+
+    #[test]
+    fn test_load_subscript_row_number_non_numeric_returns_error() {
+        let (dir, file) = create_temp_csv("subs.csv", "DimB\nB1\nB2\nB3\n");
+        let provider = FilesystemDataProvider::new(dir.path());
+        let result = provider.load_subscript(&file, ",", "A1", "999999999999999999999");
+        assert!(
+            result.is_err(),
+            "overflow row number should return an error, not panic"
+        );
     }
 }

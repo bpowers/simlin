@@ -136,7 +136,7 @@ fn parse_quoted_args(s: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let mut depth = 0;
+    let mut depth: u32 = 0;
 
     for ch in s.chars() {
         match ch {
@@ -148,7 +148,7 @@ fn parse_quoted_args(s: &str) -> Vec<String> {
                 current.push(ch);
             }
             ')' if !in_quotes => {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 current.push(ch);
             }
             ',' if !in_quotes && depth == 0 => {

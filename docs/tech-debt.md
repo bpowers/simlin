@@ -107,11 +107,11 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: simlin-engine
 - **Severity**: low
-- **Description**: 13 tests are marked `#[ignore]`. 8 are in array_tests.rs (deferred array features: range operations, transpose, star-to-indexed subdimensions, bounds checking). 2 are in tests/simulate.rs (EXCEPT statement handling). 2 are in json_sdai_proptest.rs (file system writes). 1 is in tests/mdl_equivalence.rs (tracked by item 1). These represent planned but incomplete functionality.
+- **Description**: 36 tests are marked `#[ignore]`. 16 are in tests/simulate.rs (tracked individually by GitHub issues: #345 EXCEPT+cross-dimension mapping [4 tests], #346 DELAY FIXED ring-buffer [4 tests], #347 GET DATA BETWEEN TIMES+implicit .dat loading [2 tests], #348 directdata/directconst/directlookups/directsubs [4 tests], #349 C-LEARN macro expansion [1 test], plus 1 basic EXCEPT test). 8 are in array_tests.rs (deferred array features: range operations, transpose, star-to-indexed subdimensions, bounds checking). 8 are in vdf.rs (VDF binary format tests). 2 are in json_sdai_proptest.rs (file system writes). 1 is in tests/mdl_equivalence.rs (tracked by item 1). 1 is in tests/mdl_roundtrip.rs.
 - **Measure**: `rg '#\[ignore\]' --type rust src/simlin-engine/ -c`
-- **Count**: 13 ignored tests across 4 files (as of 2026-02-15)
+- **Count**: 36 ignored tests across 6 files (as of 2026-02-27)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-02-15
+- **Last reviewed**: 2026-02-27
 
 ### 14. TypeScript Test Coverage Gaps
 

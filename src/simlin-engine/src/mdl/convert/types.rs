@@ -19,6 +19,8 @@ pub enum ConvertError {
     InvalidRange(String),
     /// Cyclic dimension definition detected (e.g., DimA: DimB, DimB: DimA)
     CyclicDimensionDefinition(String),
+    /// External data resolution failure (e.g. missing CSV, bad cell reference)
+    Import(crate::common::Error),
     /// Generic error with a descriptive message
     Other(String),
 }
@@ -32,6 +34,7 @@ impl std::fmt::Display for ConvertError {
             ConvertError::CyclicDimensionDefinition(s) => {
                 write!(f, "cyclic dimension definition: {}", s)
             }
+            ConvertError::Import(e) => write!(f, "import error: {}", e),
             ConvertError::Other(s) => write!(f, "{}", s),
         }
     }
@@ -42,6 +45,7 @@ impl std::error::Error for ConvertError {
         match self {
             ConvertError::Reader(e) => Some(e),
             ConvertError::View(e) => Some(e),
+            ConvertError::Import(e) => Some(e),
             _ => None,
         }
     }
@@ -56,6 +60,12 @@ impl From<crate::mdl::reader::ReaderError> for ConvertError {
 impl From<crate::mdl::view::ViewError> for ConvertError {
     fn from(e: crate::mdl::view::ViewError) -> Self {
         ConvertError::View(e)
+    }
+}
+
+impl From<crate::common::Error> for ConvertError {
+    fn from(e: crate::common::Error) -> Self {
+        ConvertError::Import(e)
     }
 }
 
@@ -170,6 +180,14 @@ mod tests {
 
         let view_err = ConvertError::View(ViewError::UnexpectedEndOfInput);
         assert!(view_err.source().is_some());
+
+        let import_err = ConvertError::Import(crate::common::Error::new(
+            crate::common::ErrorKind::Import,
+            crate::common::ErrorCode::Generic,
+            Some("test".to_string()),
+        ));
+        assert!(import_err.source().is_some());
+        assert!(format!("{}", import_err).contains("import error"));
 
         let range_err = ConvertError::InvalidRange("x".to_string());
         assert!(range_err.source().is_none());
