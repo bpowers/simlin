@@ -18,7 +18,7 @@
 
 #![cfg(feature = "xmutil")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use simlin_engine::canonicalize;
@@ -313,7 +313,7 @@ fn normalize_synthetic_flows(model: &mut Model) {
         return;
     }
 
-    let synthetic_idents: std::collections::HashSet<String> = model
+    let synthetic_idents: HashSet<String> = model
         .variables
         .iter()
         .filter_map(|v| {
@@ -329,7 +329,7 @@ fn normalize_synthetic_flows(model: &mut Model) {
     // Collect all flow idents referenced from stock inflows/outflows BEFORE
     // clearing, so we can decide which Flows are unambiguous (referenced in
     // at least one stock on this side).
-    let all_stock_flow_idents: std::collections::HashSet<String> = model
+    let all_stock_flow_idents: HashSet<String> = model
         .variables
         .iter()
         .filter_map(|v| {
@@ -352,14 +352,13 @@ fn normalize_synthetic_flows(model: &mut Model) {
 
     // Flow idents referenced in stocks that do NOT overlap with any
     // synthetic-flow stock are considered unambiguous.
-    let affected_stocks: std::collections::HashSet<String> = synthetic_idents
+    let affected_stocks: HashSet<String> = synthetic_idents
         .iter()
         .filter_map(|s| s.strip_suffix("_net_flow").map(|stem| stem.to_string()))
         .collect();
 
     // Collect idents of flows used only by affected stocks
-    let mut affected_flow_idents: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut affected_flow_idents: HashSet<String> = HashSet::new();
     for var in &model.variables {
         if let Variable::Stock(stock) = var
             && (affected_stocks.contains(&stock.ident)
@@ -374,7 +373,7 @@ fn normalize_synthetic_flows(model: &mut Model) {
     }
 
     // Unambiguous = referenced as a flow in some stock AND not only in affected stocks
-    let unambiguous_flow_idents: std::collections::HashSet<String> = all_stock_flow_idents
+    let unambiguous_flow_idents: HashSet<String> = all_stock_flow_idents
         .difference(&affected_flow_idents)
         .cloned()
         .collect();
@@ -1071,23 +1070,31 @@ fn collect_single_model_diffs(diffs: &mut Vec<Diff>, xm: &Model, nm: &Model, pat
     }
 }
 
+struct FlowAuxFields {
+    equation: Equation,
+    documentation: String,
+    units: Option<String>,
+    gf: Option<GraphicalFunction>,
+    non_negative: bool,
+}
+
 /// Extract the comparable fields from a Flow or Aux variable.
-fn extract_flow_aux_fields(
-    v: &Variable,
-) -> Option<(Equation, String, Option<String>, Option<GraphicalFunction>)> {
+fn extract_flow_aux_fields(v: &Variable) -> Option<FlowAuxFields> {
     match v {
-        Variable::Flow(f) => Some((
-            f.equation.clone(),
-            f.documentation.clone(),
-            f.units.clone(),
-            f.gf.clone(),
-        )),
-        Variable::Aux(a) => Some((
-            a.equation.clone(),
-            a.documentation.clone(),
-            a.units.clone(),
-            a.gf.clone(),
-        )),
+        Variable::Flow(f) => Some(FlowAuxFields {
+            equation: f.equation.clone(),
+            documentation: f.documentation.clone(),
+            units: f.units.clone(),
+            gf: f.gf.clone(),
+            non_negative: f.compat.non_negative,
+        }),
+        Variable::Aux(a) => Some(FlowAuxFields {
+            equation: a.equation.clone(),
+            documentation: a.documentation.clone(),
+            units: a.units.clone(),
+            gf: a.gf.clone(),
+            non_negative: a.compat.non_negative,
+        }),
         _ => None,
     }
 }
@@ -1164,10 +1171,23 @@ fn collect_variable_field_diffs(diffs: &mut Vec<Diff>, xv: &Variable, nv: &Varia
             let x_fields = extract_flow_aux_fields(xv);
             let n_fields = extract_flow_aux_fields(nv);
             if let (Some(xf), Some(nf)) = (x_fields, n_fields) {
-                diff_field(diffs, path, "equation", &xf.0, &nf.0);
-                diff_field(diffs, path, "documentation", xf.1.as_str(), nf.1.as_str());
-                diff_field(diffs, path, "units", &xf.2, &nf.2);
-                diff_field(diffs, path, "gf", &xf.3, &nf.3);
+                diff_field(diffs, path, "equation", &xf.equation, &nf.equation);
+                diff_field(
+                    diffs,
+                    path,
+                    "documentation",
+                    xf.documentation.as_str(),
+                    nf.documentation.as_str(),
+                );
+                diff_field(diffs, path, "units", &xf.units, &nf.units);
+                diff_field(diffs, path, "gf", &xf.gf, &nf.gf);
+                diff_field(
+                    diffs,
+                    path,
+                    "non_negative",
+                    &xf.non_negative,
+                    &nf.non_negative,
+                );
             }
         }
     }
