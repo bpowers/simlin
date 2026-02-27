@@ -302,6 +302,23 @@ impl Context<'_> {
                     {
                         return dim.get_offset(&translated);
                     }
+
+                    // If dim maps to a parent of the active subdimension, translate through
+                    // that mapped parent (active subdimension elements are a subset of parent).
+                    if active_dim.get_offset(&element).is_some()
+                        && let Some(parent_dim) = self.dimensions_ctx.find_mapping_parent_of(
+                            dim.canonical_name(),
+                            active_dim.canonical_name(),
+                        )
+                        && let Some(translated) =
+                            self.dimensions_ctx.translate_to_source_via_mapping(
+                                dim.canonical_name(),
+                                parent_dim,
+                                &element,
+                            )
+                    {
+                        return dim.get_offset(&translated);
+                    }
                 }
                 None
             });
@@ -2412,4 +2429,57 @@ fn test_with_active_subscripts_reuses_dimension_storage() {
     ));
     assert_eq!(ctx_a.active_subscript.as_ref().unwrap()[0].as_str(), "1");
     assert_eq!(ctx_b.active_subscript.as_ref().unwrap()[0].as_str(), "2");
+}
+
+#[test]
+fn test_get_implicit_subscript_off_translates_through_mapping_parent() {
+    let dim_a = crate::datamodel::Dimension::named(
+        "dima".to_string(),
+        vec!["a1".to_string(), "a2".to_string(), "a3".to_string()],
+    );
+    let sub_a = crate::datamodel::Dimension::named(
+        "suba".to_string(),
+        vec!["a2".to_string(), "a3".to_string()],
+    );
+    let mut dim_b = crate::datamodel::Dimension::named(
+        "dimb".to_string(),
+        vec!["b1".to_string(), "b2".to_string(), "b3".to_string()],
+    );
+    dim_b.set_maps_to("dima".to_string());
+
+    let dims_ctx = DimensionsContext::from(&[dim_a.clone(), sub_a.clone(), dim_b.clone()]);
+    let all_dims = vec![
+        Dimension::from(&dim_a),
+        Dimension::from(&sub_a),
+        Dimension::from(&dim_b),
+    ];
+    let metadata: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'_>>> =
+        HashMap::new();
+    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
+        HashMap::new();
+    let inputs = BTreeSet::new();
+    let model_name = Ident::new("main");
+    let ident = Ident::new("test_var");
+
+    let base = Context::new(
+        ContextCore {
+            dimensions: &all_dims,
+            dimensions_ctx: &dims_ctx,
+            model_name: &model_name,
+            metadata: &metadata,
+            module_models: &module_models,
+            inputs: &inputs,
+        },
+        &ident,
+        false,
+    );
+
+    let active_dims = Arc::<[Dimension]>::from(vec![Dimension::from(&sub_a)]);
+    let ctx = base.with_active_subscripts(active_dims, &["a2"]);
+    let source_dims = vec![Dimension::from(&dim_b)];
+
+    let off = ctx
+        .get_implicit_subscript_off(&source_dims, "src")
+        .expect("implicit offset should map suba[a2] -> dimb[b2]");
+    assert_eq!(off, 1);
 }

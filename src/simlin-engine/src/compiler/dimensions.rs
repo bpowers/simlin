@@ -838,6 +838,28 @@ mod tests {
     }
 
     #[test]
+    fn test_implicit_subscript_through_mapped_parent_dimension() {
+        use crate::test_common::TestProject;
+
+        let project = TestProject::new("implicit_parent_mapping")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("SubA", &["A2", "A3"])
+            .named_dimension_with_mapping("DimB", &["B1", "B2", "B3"], "DimA")
+            .array_with_ranges("src[DimB]", vec![("B1", "10"), ("B2", "20"), ("B3", "30")])
+            .array_aux("dst[SubA]", "src");
+
+        let results = project.run_interpreter();
+        assert!(
+            results.is_ok(),
+            "implicit subscript through mapped parent should compile and run: {:?}",
+            results.err()
+        );
+        let results = results.unwrap();
+        assert_eq!(results["dst[a2]"].last().copied().unwrap(), 20.0);
+        assert_eq!(results["dst[a3]"].last().copied().unwrap(), 30.0);
+    }
+
+    #[test]
     fn test_match_dimensions_with_mapping_forward() {
         // Test that match_dimensions_with_mapping finds matches via maps_to
         use crate::dimensions::DimensionsContext;

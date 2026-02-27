@@ -213,24 +213,30 @@ impl<'a> BuiltinVisitor<'a> {
                 // translate the reference to DimA to its equivalent element "a1".
                 if let Some(ctx) = self.dimensions_ctx {
                     for (i, dim_name) in self.dimension_names.iter().enumerate() {
-                        // Check if canonical_name maps to dim_name
-                        if ctx.get_maps_to(&canonical_name) == Some(dim_name) {
-                            // Translate: find the element in canonical_name that corresponds to
-                            // subscript[i] in dim_name
-                            let target_element = CanonicalElementName::from_raw(&subscript[i]);
-                            if let Some(source_element) = ctx.translate_to_source_via_mapping(
+                        let target_element = CanonicalElementName::from_raw(&subscript[i]);
+
+                        // Try direct/reverse mapping first, including secondary targets.
+                        if let Some(source_element) =
+                            ctx.translate_via_mapping(&canonical_name, dim_name, &target_element)
+                        {
+                            let qualified_name =
+                                format!("{}·{}", canonical_name.as_str(), source_element.as_str());
+                            return Var(RawIdent::new_from_str(&qualified_name), loc);
+                        }
+
+                        // If the active dimension is a subdimension of a mapped target,
+                        // resolve through that mapped parent.
+                        if let Some(parent_dim) =
+                            ctx.find_mapping_parent_of(&canonical_name, dim_name)
+                            && let Some(source_element) = ctx.translate_to_source_via_mapping(
                                 &canonical_name,
-                                dim_name,
+                                parent_dim,
                                 &target_element,
-                            ) {
-                                // Return qualified element from the source dimension
-                                let qualified_name = format!(
-                                    "{}·{}",
-                                    canonical_name.as_str(),
-                                    source_element.as_str()
-                                );
-                                return Var(RawIdent::new_from_str(&qualified_name), loc);
-                            }
+                            )
+                        {
+                            let qualified_name =
+                                format!("{}·{}", canonical_name.as_str(), source_element.as_str());
+                            return Var(RawIdent::new_from_str(&qualified_name), loc);
                         }
                     }
                 }
@@ -517,7 +523,54 @@ pub fn instantiate_implicit_modules(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::builtins::Loc;
     use crate::test_common::TestProject;
+
+    #[test]
+    fn test_substitute_dimension_refs_uses_secondary_mapping_target() {
+        let dim_a = datamodel::Dimension::named(
+            "dima".to_string(),
+            vec!["a1".to_string(), "a2".to_string()],
+        );
+        let dim_x = datamodel::Dimension::named(
+            "dimx".to_string(),
+            vec!["x1".to_string(), "x2".to_string()],
+        );
+        let mut dim_b = datamodel::Dimension::named(
+            "dimb".to_string(),
+            vec!["b1".to_string(), "b2".to_string()],
+        );
+        dim_b.mappings = vec![
+            datamodel::DimensionMapping {
+                target: "dimx".to_string(),
+                element_map: vec![],
+            },
+            datamodel::DimensionMapping {
+                target: "dima".to_string(),
+                element_map: vec![],
+            },
+        ];
+
+        let dims_ctx = DimensionsContext::from(&[dim_a.clone(), dim_x, dim_b.clone()]);
+        let active_dims = vec![Dimension::from(&dim_a)];
+        let active_subscript = vec!["a1".to_string()];
+        let visitor = BuiltinVisitor::new_with_subscript_context(
+            "test_var",
+            &active_dims,
+            &active_subscript,
+            Some(&dims_ctx),
+        );
+
+        let expr = Expr0::Var(RawIdent::new_from_str("dimb"), Loc::default());
+        let rewritten = visitor.substitute_dimension_refs(expr);
+        match rewritten {
+            Expr0::Var(id, _) => {
+                assert_eq!(id.as_str(), "dimb·b1");
+            }
+            other => panic!("expected Var, got {other:?}"),
+        }
+    }
 
     /// Test that arrayed DELAY1 compiles and simulates
     /// d[SubA] = DELAY1(input[SubA], delay_time, init)

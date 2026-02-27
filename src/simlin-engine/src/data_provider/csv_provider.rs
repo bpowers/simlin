@@ -70,10 +70,9 @@ impl FilesystemDataProvider {
     }
 
     fn is_excel_file(path: &std::path::Path) -> bool {
-        matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("xls" | "xlsx" | "xlsm")
-        )
+        path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "xls" | "xlsx" | "xlsm"))
     }
 
     fn read_csv_records(&self, file: &str, delimiter: u8) -> Result<Vec<Vec<String>>> {
@@ -786,5 +785,18 @@ mod tests {
         assert!(result.is_ok());
         let elements = result.unwrap();
         assert_eq!(elements, vec!["A1", "A2", "A3"]);
+    }
+
+    #[test]
+    fn test_is_excel_file_case_insensitive() {
+        assert!(FilesystemDataProvider::is_excel_file(std::path::Path::new(
+            "DATA.XLSX"
+        )));
+        assert!(FilesystemDataProvider::is_excel_file(std::path::Path::new(
+            "input.Xls"
+        )));
+        assert!(FilesystemDataProvider::is_excel_file(std::path::Path::new(
+            "model.XLSM"
+        )));
     }
 }
