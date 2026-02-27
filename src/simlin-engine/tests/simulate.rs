@@ -773,7 +773,8 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // "test/sdeverywhere/models/arrays_cname/arrays_cname.xmile",
     // "test/sdeverywhere/models/arrays_varname/arrays_varname.xmile",
     //
-    // EmptyEquation: uses DELAY FIXED builtin
+    // Wrong values (NaN): DELAY FIXED requires ring-buffer semantics,
+    // currently approximated via delay1 which produces NaN
     // "test/sdeverywhere/models/delayfixed/delayfixed.xmile",
     // "test/sdeverywhere/models/delayfixed2/delayfixed2.xmile",
     //
@@ -802,7 +803,8 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // "test/sdeverywhere/models/flatten/input1.xmile",
     // "test/sdeverywhere/models/flatten/input2.xmile",
     //
-    // EmptyEquation: uses GET DATA BETWEEN TIMES
+    // Assertion failure: xmutil strips GET DATA BETWEEN TIMES calls,
+    // leaving broken data variable references
     // "test/sdeverywhere/models/getdata/getdata.xmile",
     //
     // EmptyEquation: uses INTEG with complex initialization
