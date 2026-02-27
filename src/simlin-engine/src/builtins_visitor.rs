@@ -327,20 +327,17 @@ impl<'a> BuiltinVisitor<'a> {
                 }
                 // PREVIOUS and INIT always go through module expansion.
                 //
-                // PREVIOUS: The LoadPrev opcode reads from curr[] which during
-                // the Flows phase holds the CURRENT timestep's value for
-                // non-stock variables (flows, auxes, TIME) that have already
-                // been evaluated. The stdlib module uses an internal stock to
-                // correctly capture the previous value.
+                // PREVIOUS: The LoadPrev opcode and prev_values snapshot buffer
+                // exist as scaffolding, but activating them changes the model's
+                // dependency graph. LTM link-score equations depend on the
+                // PREVIOUS module instances for correct evaluation ordering.
+                // Promoting PREVIOUS to a builtin requires reworking how
+                // evaluation order is determined for LTM-augmented models.
                 //
                 // INIT: The stdlib module contains a stock that pulls the
                 // variable into the Initials runlist. Without this, aux-only
                 // models (no stocks) would have an empty Initials runlist and
                 // the initial_values snapshot would be all zeros.
-                //
-                // The LoadPrev/LoadInitial opcodes and BuiltinFn::Previous/Init
-                // variants exist as scaffolding for future use when the
-                // evaluation model is updated to handle these cases.
                 if func == "previous" || func == "init" {
                     // Fall through to module expansion.
                 } else if is_builtin_fn(&func) {

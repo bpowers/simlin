@@ -690,16 +690,36 @@ impl<'module> Compiler<'module> {
                 // builtin dispatch because they do not use CallBuiltin.
                 match builtin {
                     BuiltinFn::Previous(arg) => {
-                        let off = match arg.as_ref() {
-                            Expr::Var(off, _) => *off as VariableOffset,
-                            _ => {
-                                return sim_err!(
-                                    NotSimulatable,
-                                    "PREVIOUS requires a variable reference argument".to_string()
-                                );
+                        // Only simple PREVIOUS(var) reaches the builtin path;
+                        // the builtins_visitor routes nested PREVIOUS,
+                        // PREVIOUS(TIME), and 2-arg forms through module
+                        // expansion.
+                        //
+                        // At Expr0 level, the arg was a plain Var, but during
+                        // lowering inside a submodule context (e.g. LTM-augmented
+                        // SMOOTH), the variable may resolve to a ModuleInput
+                        // instead of a Var. Module inputs don't have slots in
+                        // the flat curr[] buffer, so we can't use LoadPrev. We
+                        // fall back to LoadModuleInput which reads the current
+                        // value -- the PREVIOUS delay is already applied at the
+                        // call site by the parent module.
+                        match arg.as_ref() {
+                            Expr::Var(off, _) => {
+                                self.push(Opcode::LoadPrev {
+                                    off: *off as VariableOffset,
+                                });
                             }
-                        };
-                        self.push(Opcode::LoadPrev { off });
+                            Expr::ModuleInput(off, _) => {
+                                self.push(Opcode::LoadModuleInput {
+                                    input: *off as ModuleInputOffset,
+                                });
+                            }
+                            _ => {
+                                // Unexpected argument type -- emit the
+                                // expression normally as a fallback.
+                                self.walk_expr(arg)?;
+                            }
+                        }
                         return Ok(Some(()));
                     }
                     BuiltinFn::Init(arg) => {

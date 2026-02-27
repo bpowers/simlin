@@ -1541,17 +1541,32 @@ impl ModuleEvaluator<'_> {
                         }
                     }
                     BuiltinFn::Previous(arg) => {
-                        // PREVIOUS(x): return the previous-timestep value of x.
-                        // During the flows/stocks phase, curr[] holds the committed
-                        // values from the previous timestep, so reading from curr
-                        // gives the previous value.
-                        match arg.as_ref() {
-                            Expr::Var(off, _) => self.curr[self.off + *off],
-                            _ => {
-                                // Fallback: just evaluate the expression normally.
-                                // For non-Var arguments, the value in curr IS the
-                                // previous-timestep value.
-                                self.eval(arg)
+                        // PREVIOUS(x): return the value of x from the previous
+                        // timestep, read from the snapshot taken after stocks
+                        // but before the time advance.
+                        //
+                        // Only simple PREVIOUS(var) reaches here via the
+                        // builtin path. Nested PREVIOUS, PREVIOUS(TIME), and
+                        // 2-arg forms go through module expansion in the
+                        // builtins_visitor and never produce BuiltinFn::Previous
+                        // in the lowered AST.
+                        let prev_vals = self.sim.prev_values.borrow();
+                        if prev_vals.is_empty() {
+                            // During the initials phase, no snapshot yet --
+                            // fall back to the current value.
+                            drop(prev_vals);
+                            self.eval(arg)
+                        } else {
+                            match arg.as_ref() {
+                                Expr::Var(off, _) => prev_vals[self.off + *off],
+                                _ => {
+                                    // Fallback: evaluate the expression normally.
+                                    // In practice, only Var reaches here because
+                                    // the builtins_visitor only promotes simple
+                                    // PREVIOUS(var) to the builtin path.
+                                    drop(prev_vals);
+                                    self.eval(arg)
+                                }
                             }
                         }
                     }
@@ -1871,6 +1886,11 @@ pub struct Simulation {
     // Snapshot of curr[] captured after the initials phase (t=0).
     // Used by INIT(x) to freeze a variable's initial value.
     initial_values: std::rc::Rc<RefCell<Vec<f64>>>,
+    // Snapshot of curr[] taken after stocks but before the time advance
+    // each timestep.  PREVIOUS(x) reads from this buffer so it returns
+    // the value from the previous timestep, matching the stdlib module
+    // PREVIOUS behavior.
+    prev_values: std::rc::Rc<RefCell<Vec<f64>>>,
 }
 
 impl Simulation {
@@ -1964,6 +1984,7 @@ impl Simulation {
             temps,
             temp_offsets,
             initial_values: std::rc::Rc::new(RefCell::new(Vec::new())),
+            prev_values: std::rc::Rc::new(RefCell::new(Vec::new())),
         })
     }
 
@@ -2128,11 +2149,20 @@ impl Simulation {
             self.calc(StepPart::Initials, module, 0, module_inputs, curr, next);
             // Capture a snapshot of curr[] after the initials phase for INIT(x).
             *(*self.initial_values).borrow_mut() = curr.to_vec();
+            // Seed prev_values with the post-initials state so that
+            // PREVIOUS(x) at t=0 returns the initial value of x.
+            *(*self.prev_values).borrow_mut() = curr.to_vec();
             let mut is_initial_timestep = true;
             let mut step = 0;
             loop {
                 self.calc(StepPart::Flows, module, 0, module_inputs, curr, next);
                 self.calc(StepPart::Stocks, module, 0, module_inputs, curr, next);
+                // Snapshot curr[] AFTER stocks but BEFORE the time advance.
+                // PREVIOUS(x) in the next iteration will read from this
+                // snapshot, which contains the post-stock-update values at
+                // the current time. This matches the stdlib module behavior
+                // where PREVIOUS(TIME) returns the previous timestep's time.
+                *(*self.prev_values).borrow_mut() = curr.to_vec();
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
                 next[DT_OFF] = dt;
                 next[INITIAL_TIME_OFF] = self.specs.start;

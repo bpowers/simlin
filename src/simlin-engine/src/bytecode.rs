@@ -560,11 +560,11 @@ pub(crate) enum Opcode {
         off: VariableOffset,
     },
 
-    /// Load the previous-timestep value of a variable.
-    /// Pushes `curr[module_off + off]` onto the stack.
-    /// Semantically distinct from LoadVar to signal previous-timestep access
-    /// for dependency tracking, but identical VM behavior during the dt-phase
-    /// (curr[] holds the previous timestep's committed values).
+    /// Load the previous-timestep value of a variable from the prev_values
+    /// snapshot. Pushes `prev_values[module_off + off]` (or falls back to
+    /// `curr[]` during initials). Only simple PREVIOUS(var) compiles to
+    /// this opcode; nested PREVIOUS, PREVIOUS(TIME), and 2-arg forms use
+    /// module expansion instead.
     LoadPrev {
         off: VariableOffset,
     },
