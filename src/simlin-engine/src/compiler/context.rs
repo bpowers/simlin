@@ -1444,16 +1444,15 @@ impl Context<'_> {
                                     // - Forward: source_dim maps to target_dim
                                     // - Reverse: target_dim maps to source_dim
                                     // - Subdimension: source_dim maps to parent of target_dim
-                                    let has_any_mapping =
-                                        self.dimensions_ctx.get_maps_to(source_dim_name).is_some()
-                                            || self
-                                                .dimensions_ctx
-                                                .get_maps_to(target_dim_name)
-                                                .is_some()
-                                            || !self
-                                                .dimensions_ctx
-                                                .get_all_mapping_targets(source_dim_name)
-                                                .is_empty();
+                                    let has_direct_or_reverse_mapping = self
+                                        .dimensions_ctx
+                                        .has_mapping_to(source_dim_name, target_dim_name)
+                                        || self
+                                            .dimensions_ctx
+                                            .has_mapping_to(target_dim_name, source_dim_name);
+                                    let has_parent_mapping = self
+                                        .dimensions_ctx
+                                        .has_mapping_to_parent_of(source_dim_name, target_dim_name);
 
                                     if let Some(translated) =
                                         self.dimensions_ctx.translate_via_mapping(
@@ -1463,12 +1462,7 @@ impl Context<'_> {
                                         )
                                     {
                                         source_offset = source_dim.get_offset(&translated);
-                                    } else if has_any_mapping
-                                        && self.dimensions_ctx.has_mapping_to_parent_of(
-                                            source_dim_name,
-                                            target_dim_name,
-                                        )
-                                    {
+                                    } else if has_parent_mapping {
                                         // Source maps to a parent of target -- find the specific
                                         // parent (not just the first mapping target) and translate
                                         // through it.
@@ -1489,7 +1483,7 @@ impl Context<'_> {
                                         } else {
                                             mapping_failed = true;
                                         }
-                                    } else if has_any_mapping {
+                                    } else if has_direct_or_reverse_mapping {
                                         mapping_failed = true;
                                     }
                                 }
@@ -2482,4 +2476,99 @@ fn test_get_implicit_subscript_off_translates_through_mapping_parent() {
         .get_implicit_subscript_off(&source_dims, "src")
         .expect("implicit offset should map suba[a2] -> dimb[b2]");
     assert_eq!(off, 1);
+}
+
+#[test]
+fn test_positional_fallback_ignores_unrelated_mapping() {
+    let mut source = crate::datamodel::Dimension::named(
+        "source".to_string(),
+        vec!["s1".to_string(), "s2".to_string()],
+    );
+    let target = crate::datamodel::Dimension::named(
+        "target".to_string(),
+        vec!["t1".to_string(), "t2".to_string()],
+    );
+    let other = crate::datamodel::Dimension::named(
+        "other".to_string(),
+        vec!["o1".to_string(), "o2".to_string()],
+    );
+    // Mapping to an unrelated dimension should not block positional fallback.
+    source.set_maps_to("other".to_string());
+
+    let dims_ctx = DimensionsContext::from(&[source.clone(), target.clone(), other.clone()]);
+    let all_dims = vec![
+        Dimension::from(&source),
+        Dimension::from(&target),
+        Dimension::from(&other),
+    ];
+
+    let source_var = Variable::Var {
+        ident: Ident::new("source_var"),
+        ast: Some(ast::Ast::ApplyToAll(
+            vec![Dimension::from(&source)],
+            ast::Expr2::Const("0".to_string(), 0.0, Loc::default()),
+        )),
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+
+    let mut model_metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    model_metadata.insert(
+        Ident::new("source_var"),
+        VariableMetadata {
+            offset: 10,
+            size: 2,
+            var: &source_var,
+        },
+    );
+
+    let mut metadata: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'_>>> =
+        HashMap::new();
+    let model_name = Ident::new("main");
+    metadata.insert(model_name.clone(), model_metadata);
+
+    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
+        HashMap::new();
+    let inputs = BTreeSet::new();
+    let ident = Ident::new("test_var");
+    let base = Context::new(
+        ContextCore {
+            dimensions: &all_dims,
+            dimensions_ctx: &dims_ctx,
+            model_name: &model_name,
+            metadata: &metadata,
+            module_models: &module_models,
+            inputs: &inputs,
+        },
+        &ident,
+        false,
+    );
+
+    let active_dims = Arc::<[Dimension]>::from(vec![Dimension::from(&target)]);
+    let ctx = base.with_active_subscripts(active_dims, &["t2"]);
+    let expr = Expr3::Subscript(
+        Ident::new("source_var"),
+        vec![IndexExpr3::StarRange(
+            CanonicalDimensionName::from_raw("source"),
+            Loc::default(),
+        )],
+        None,
+        Loc::default(),
+    );
+
+    let lowered = ctx
+        .lower_from_expr3(&expr)
+        .expect("positional fallback should resolve source[*] in target context");
+    assert_eq!(
+        lowered,
+        Expr::Var(11, Loc::default()),
+        "target element t2 should select the second source element"
+    );
 }

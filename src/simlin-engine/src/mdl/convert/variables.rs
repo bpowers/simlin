@@ -796,7 +796,8 @@ impl<'input> ConversionContext<'input> {
                 if super::external_data::is_get_direct_ref(&eq_str) {
                     let (resolved_eq, _resolved_compat, gf) =
                         self.try_resolve_data_equation(&eq_str)?;
-                    let (equation, compat) = self.make_equation(lhs, &resolved_eq);
+                    let (equation, mut compat) = self.make_equation(lhs, &resolved_eq);
+                    compat.data_source = self.extract_get_direct_data_source(&eq_str);
                     return Ok((equation, compat, gf));
                 }
                 let (equation, compat) = self.make_equation(lhs, &eq_str);
@@ -830,7 +831,8 @@ impl<'input> ConversionContext<'input> {
                     .unwrap_or_default();
                 let (resolved_eq, _resolved_compat, gf) =
                     self.try_resolve_data_equation(&eq_str)?;
-                let (equation, compat) = self.make_equation(lhs, &resolved_eq);
+                let (equation, mut compat) = self.make_equation(lhs, &resolved_eq);
+                compat.data_source = self.extract_get_direct_data_source(&eq_str);
                 Ok((equation, compat, gf))
             }
             MdlEquation::TabbedArray(lhs, values) | MdlEquation::NumberList(lhs, values) => {
@@ -873,6 +875,64 @@ impl<'input> ConversionContext<'input> {
                 }
             }
         }
+    }
+
+    /// Parse GET DIRECT metadata from an expression string for compat persistence.
+    fn extract_get_direct_data_source(&self, eq_str: &str) -> Option<crate::datamodel::DataSource> {
+        use super::external_data::{GetDirectCall, parse_get_direct};
+
+        let call = parse_get_direct(eq_str)?;
+        Some(match call {
+            GetDirectCall::Data {
+                file,
+                tab,
+                time_col,
+                data_cell,
+            } => crate::datamodel::DataSource {
+                kind: crate::datamodel::DataSourceKind::Data,
+                file,
+                tab_or_delimiter: tab,
+                row_or_col: time_col,
+                cell: data_cell,
+            },
+            GetDirectCall::Constants {
+                file,
+                tab,
+                row_or_cell,
+                col,
+            } => crate::datamodel::DataSource {
+                kind: crate::datamodel::DataSourceKind::Constants,
+                file,
+                tab_or_delimiter: tab,
+                row_or_col: row_or_cell,
+                cell: col,
+            },
+            GetDirectCall::Lookups {
+                file,
+                tab,
+                x_col,
+                y_cell,
+            } => crate::datamodel::DataSource {
+                kind: crate::datamodel::DataSourceKind::Lookups,
+                file,
+                tab_or_delimiter: tab,
+                row_or_col: x_col,
+                cell: y_cell,
+            },
+            GetDirectCall::Subscript {
+                file,
+                tab,
+                first_cell,
+                last_cell,
+                ..
+            } => crate::datamodel::DataSource {
+                kind: crate::datamodel::DataSourceKind::Subscript,
+                file,
+                tab_or_delimiter: tab,
+                row_or_col: first_cell,
+                cell: last_cell,
+            },
+        })
     }
 
     /// Create a default lookup table for implicit equations.
@@ -1229,8 +1289,54 @@ impl<'input> ConversionContext<'input> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::convert_mdl;
-    use crate::datamodel::{Equation, Variable};
+    use super::super::{convert_mdl, convert_mdl_with_data};
+    use crate::common::Result;
+    use crate::data_provider::DataProvider;
+    use crate::datamodel::{DataSourceKind, Equation, Variable};
+
+    struct ConstantProvider;
+
+    impl DataProvider for ConstantProvider {
+        fn load_data(
+            &self,
+            _file: &str,
+            _tab_or_delimiter: &str,
+            _time_col_or_row: &str,
+            _cell_label: &str,
+        ) -> Result<Vec<(f64, f64)>> {
+            Ok(vec![])
+        }
+
+        fn load_constant(
+            &self,
+            _file: &str,
+            _tab_or_delimiter: &str,
+            _row_label: &str,
+            _col_label: &str,
+        ) -> Result<f64> {
+            Ok(42.0)
+        }
+
+        fn load_lookup(
+            &self,
+            _file: &str,
+            _tab_or_delimiter: &str,
+            _row_label: &str,
+            _col_label: &str,
+        ) -> Result<Vec<(f64, f64)>> {
+            Ok(vec![])
+        }
+
+        fn load_subscript(
+            &self,
+            _file: &str,
+            _tab_or_delimiter: &str,
+            _first_cell: &str,
+            _last_cell: &str,
+        ) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+    }
 
     #[test]
     fn test_stock_conversion() {
@@ -1261,6 +1367,43 @@ outflow = 5
             assert_eq!(s.outflows, vec!["outflow"]);
         } else {
             panic!("Expected Stock variable");
+        }
+    }
+
+    #[test]
+    fn test_regular_get_direct_constants_preserves_data_source_metadata() {
+        let mdl = "x = GET DIRECT CONSTANTS('data/a.csv', ',', 'B2')
+~ ~|
+\\\\\\---///
+";
+        let provider = ConstantProvider;
+        let result = convert_mdl_with_data(mdl, Some(&provider));
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            assert!(
+                matches!(&a.equation, Equation::Scalar(eq) if eq == "42"),
+                "GET DIRECT CONSTANTS should resolve to scalar equation"
+            );
+            let data_source = a
+                .compat
+                .data_source
+                .as_ref()
+                .expect("GET DIRECT metadata should be preserved in compat.data_source");
+            assert_eq!(data_source.kind, DataSourceKind::Constants);
+            assert_eq!(data_source.file, "data/a.csv");
+            assert_eq!(data_source.tab_or_delimiter, ",");
+            assert_eq!(data_source.row_or_col, "B2");
+            assert_eq!(data_source.cell, "");
+        } else {
+            panic!("Expected Aux variable");
         }
     }
 
