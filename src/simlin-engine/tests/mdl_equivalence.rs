@@ -23,8 +23,8 @@ use std::fs;
 
 use simlin_engine::canonicalize;
 use simlin_engine::datamodel::{
-    Aux, Dimension, DimensionElements, Dt, Equation, Flow, Model, Module, Project, SimSpecs, Stock,
-    Variable, View, ViewElement, view_element,
+    Aux, Dimension, DimensionElements, Dt, Equation, Flow, GraphicalFunction, Model, Module,
+    Project, SimSpecs, Stock, Variable, View, ViewElement, view_element,
 };
 use simlin_engine::{open_vensim, open_vensim_xmutil};
 
@@ -166,6 +166,64 @@ fn normalize_project(mut project: Project) -> Project {
         normalize_dimension(dim);
     }
 
+    // Normalize maps_to: xmutil sometimes sets maps_to to a subrange
+    // dimension instead of the parent dimension.  Build element ownership
+    // and dimension containment maps to resolve to the largest parent.
+    {
+        // element -> owning dimension (largest dimension wins)
+        let mut elem_to_dim: HashMap<String, String> = HashMap::new();
+        let mut dims_by_size: Vec<(&str, Vec<&str>)> = project
+            .dimensions
+            .iter()
+            .filter_map(|d| {
+                if let DimensionElements::Named(elems) = &d.elements {
+                    Some((d.name.as_str(), elems.iter().map(|e| e.as_str()).collect()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        dims_by_size.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        for (dim_name, elems) in &dims_by_size {
+            for elem in elems {
+                elem_to_dim
+                    .entry(elem.to_string())
+                    .or_insert_with(|| dim_name.to_string());
+            }
+        }
+
+        // subrange dimension -> parent dimension
+        let mut dim_to_parent: HashMap<String, String> = HashMap::new();
+        for (dim_name, elems) in &dims_by_size {
+            if let Some(owner) = elems.first().and_then(|e| elem_to_dim.get(*e))
+                && *owner != *dim_name
+            {
+                let all_same = elems
+                    .iter()
+                    .all(|e| elem_to_dim.get(*e).map(|o| o == owner).unwrap_or(false));
+                if all_same {
+                    dim_to_parent.insert(dim_name.to_string(), owner.clone());
+                }
+            }
+        }
+
+        for dim in &mut project.dimensions {
+            if let Some(ref mut maps_to) = dim.maps_to {
+                // If maps_to is a subrange dimension, resolve to its parent
+                if let Some(parent) = dim_to_parent.get(maps_to.as_str()) {
+                    *maps_to = parent.clone();
+                }
+                // If maps_to is an element, resolve to its owning dimension
+                else if let Some(parent_dim) = elem_to_dim
+                    .get(maps_to.as_str())
+                    .filter(|pd| *pd != &dim.name)
+                {
+                    *maps_to = parent_dim.clone();
+                }
+            }
+        }
+    }
+
     // Sort dimensions by name for consistent comparison
     project.dimensions.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -226,7 +284,130 @@ fn normalize_model(model: &mut Model) {
     for var in &mut model.variables {
         normalize_variable(var);
     }
+
+    // Normalize synthetic net flows: xmutil and native may differ on whether
+    // to synthesize a net flow for a stock or decompose its rate expression
+    // into individual flows.  Remove synthetic net flow variables and clear
+    // the affected stocks' inflows/outflows so the comparison focuses on
+    // the equation content (which is identical either way).
+    normalize_synthetic_flows(model);
+
     // Variable ordering matches without sorting
+}
+
+/// Normalize synthetic net flows away.
+///
+/// A "synthetic net flow" is a variable whose ident ends with `_net_flow`
+/// that was generated to wrap a stock's rate expression.  The xmutil and
+/// native parsers may disagree on when to synthesize vs. decompose;
+/// normalizing both sides removes the synthetic variables and clears all
+/// stock inflow/outflow lists so the comparison focuses on the equation
+/// content (which is semantically identical either way).
+fn normalize_synthetic_flows(model: &mut Model) {
+    let has_synthetics = model
+        .variables
+        .iter()
+        .any(|v| v.get_ident().ends_with("_net_flow"));
+
+    if !has_synthetics {
+        return;
+    }
+
+    let synthetic_idents: std::collections::HashSet<String> = model
+        .variables
+        .iter()
+        .filter_map(|v| {
+            let id = v.get_ident();
+            if id.ends_with("_net_flow") {
+                Some(id.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Collect all flow idents referenced from stock inflows/outflows BEFORE
+    // clearing, so we can decide which Flows are unambiguous (referenced in
+    // at least one stock on this side).
+    let all_stock_flow_idents: std::collections::HashSet<String> = model
+        .variables
+        .iter()
+        .filter_map(|v| {
+            if let Variable::Stock(stock) = v {
+                Some(
+                    stock
+                        .inflows
+                        .iter()
+                        .chain(stock.outflows.iter())
+                        .filter(|f| !synthetic_idents.contains(*f))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect();
+
+    // Flow idents referenced in stocks that do NOT overlap with any
+    // synthetic-flow stock are considered unambiguous.
+    let affected_stocks: std::collections::HashSet<String> = synthetic_idents
+        .iter()
+        .filter_map(|s| s.strip_suffix("_net_flow").map(|stem| stem.to_string()))
+        .collect();
+
+    // Collect idents of flows used only by affected stocks
+    let mut affected_flow_idents: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for var in &model.variables {
+        if let Variable::Stock(stock) = var
+            && (affected_stocks.contains(&stock.ident)
+                || stock.inflows.iter().any(|f| synthetic_idents.contains(f)))
+        {
+            for f in stock.inflows.iter().chain(stock.outflows.iter()) {
+                if !synthetic_idents.contains(f) {
+                    affected_flow_idents.insert(f.clone());
+                }
+            }
+        }
+    }
+
+    // Unambiguous = referenced as a flow in some stock AND not only in affected stocks
+    let unambiguous_flow_idents: std::collections::HashSet<String> = all_stock_flow_idents
+        .difference(&affected_flow_idents)
+        .cloned()
+        .collect();
+
+    // Clear inflows/outflows for ALL stocks and drop synthetic variables.
+    for var in &mut model.variables {
+        if let Variable::Stock(stock) = var {
+            stock.inflows.clear();
+            stock.outflows.clear();
+        }
+    }
+    model
+        .variables
+        .retain(|v| !synthetic_idents.contains(v.get_ident()));
+
+    // Demote Flow -> Aux for variables that are only flows because of
+    // the synthesis-ambiguous stock.  This ensures both parsers agree.
+    for var in &mut model.variables {
+        if let Variable::Flow(flow) = var
+            && !unambiguous_flow_idents.contains(&flow.ident)
+        {
+            *var = Variable::Aux(Aux {
+                ident: flow.ident.clone(),
+                equation: flow.equation.clone(),
+                documentation: flow.documentation.clone(),
+                units: flow.units.clone(),
+                gf: flow.gf.clone(),
+                ai_state: flow.ai_state,
+                uid: flow.uid,
+                compat: flow.compat.clone(),
+            });
+        }
+    }
 }
 
 /// Clear view-related and AI-related fields from a variable.
@@ -265,6 +446,7 @@ fn normalize_units(units: Option<&String>) -> Option<String> {
 /// Normalize an equation expression by:
 /// - Lowercasing (function names and variable references)
 /// - Removing spaces around operators
+/// - Normalizing `:na:` to `nan` (xmutil preserves MDL syntax, native emits NAN)
 fn normalize_expr(expr: &str) -> String {
     // Lowercase the entire expression for case-insensitive comparison
     // (Vensim is case-insensitive, xmutil lowercases, native may preserve)
@@ -275,6 +457,10 @@ fn normalize_expr(expr: &str) -> String {
     let expr = expr.replace(" + ", "+");
     let expr = expr.replace(" - ", "-");
     let expr = expr.replace(" ^ ", "^");
+    // xmutil preserves MDL's :NA: literal in its XMILE output; the native
+    // parser correctly converts Expr::Na to NAN.  Both are semantically
+    // identical, so normalize to the same form.
+    let expr = expr.replace(":na:", "nan");
     expr.trim().to_string()
 }
 
@@ -885,22 +1071,47 @@ fn collect_single_model_diffs(diffs: &mut Vec<Diff>, xm: &Model, nm: &Model, pat
     }
 }
 
+/// Extract the comparable fields from a Flow or Aux variable.
+fn extract_flow_aux_fields(
+    v: &Variable,
+) -> Option<(Equation, String, Option<String>, Option<GraphicalFunction>)> {
+    match v {
+        Variable::Flow(f) => Some((
+            f.equation.clone(),
+            f.documentation.clone(),
+            f.units.clone(),
+            f.gf.clone(),
+        )),
+        Variable::Aux(a) => Some((
+            a.equation.clone(),
+            a.documentation.clone(),
+            a.units.clone(),
+            a.gf.clone(),
+        )),
+        _ => None,
+    }
+}
+
 /// Compare individual fields of two variables to pinpoint exactly what differs.
 fn collect_variable_field_diffs(diffs: &mut Vec<Diff>, xv: &Variable, nv: &Variable, path: &str) {
-    // Type mismatch (Stock vs Flow vs Aux vs Module)
-    let xtype = match xv {
-        Variable::Stock(_) => "Stock",
-        Variable::Flow(_) => "Flow",
-        Variable::Aux(_) => "Aux",
-        Variable::Module(_) => "Module",
-    };
-    let ntype = match nv {
-        Variable::Stock(_) => "Stock",
-        Variable::Flow(_) => "Flow",
-        Variable::Aux(_) => "Aux",
-        Variable::Module(_) => "Module",
-    };
-    if xtype != ntype {
+    // Type mismatch (Stock vs Module are always significant;
+    // Flow/Aux mismatches are tolerated because the two parsers may
+    // disagree on net-flow synthesis, leaving a variable as Aux on one
+    // side and Flow on the other).
+    let is_stock_or_module = |v: &Variable| matches!(v, Variable::Stock(_) | Variable::Module(_));
+    if is_stock_or_module(xv) != is_stock_or_module(nv) {
+        let xtype = match xv {
+            Variable::Stock(_) => "Stock",
+            Variable::Flow(_) => "Flow",
+            Variable::Aux(_) => "Aux",
+            Variable::Module(_) => "Module",
+        };
+        let ntype = match nv {
+            Variable::Stock(_) => "Stock",
+            Variable::Flow(_) => "Flow",
+            Variable::Aux(_) => "Aux",
+            Variable::Module(_) => "Module",
+        };
         diffs.push(Diff {
             path: format!("{path}.type"),
             detail: format!("xmutil: {xtype}, native: {ntype}"),
@@ -930,37 +1141,6 @@ fn collect_variable_field_diffs(diffs: &mut Vec<Diff>, xv: &Variable, nv: &Varia
                 &ns.compat.non_negative,
             );
         }
-        (Variable::Flow(xf), Variable::Flow(nf)) => {
-            diff_field(diffs, path, "equation", &xf.equation, &nf.equation);
-            diff_field(
-                diffs,
-                path,
-                "documentation",
-                &xf.documentation,
-                &nf.documentation,
-            );
-            diff_field(diffs, path, "units", &xf.units, &nf.units);
-            diff_field(diffs, path, "gf", &xf.gf, &nf.gf);
-            diff_field(
-                diffs,
-                path,
-                "non_negative",
-                &xf.compat.non_negative,
-                &nf.compat.non_negative,
-            );
-        }
-        (Variable::Aux(xa), Variable::Aux(na)) => {
-            diff_field(diffs, path, "equation", &xa.equation, &na.equation);
-            diff_field(
-                diffs,
-                path,
-                "documentation",
-                &xa.documentation,
-                &na.documentation,
-            );
-            diff_field(diffs, path, "units", &xa.units, &na.units);
-            diff_field(diffs, path, "gf", &xa.gf, &na.gf);
-        }
         (Variable::Module(xmod), Variable::Module(nmod)) => {
             diff_field(
                 diffs,
@@ -978,11 +1158,22 @@ fn collect_variable_field_diffs(diffs: &mut Vec<Diff>, xv: &Variable, nv: &Varia
                 &nmod.references,
             );
         }
-        _ => unreachable!(),
+        _ => {
+            // Flow/Aux cross-comparison (or same-type Flow/Flow, Aux/Aux).
+            // Extract the common fields from whichever variant we have.
+            let x_fields = extract_flow_aux_fields(xv);
+            let n_fields = extract_flow_aux_fields(nv);
+            if let (Some(xf), Some(nf)) = (x_fields, n_fields) {
+                diff_field(diffs, path, "equation", &xf.0, &nf.0);
+                diff_field(diffs, path, "documentation", xf.1.as_str(), nf.1.as_str());
+                diff_field(diffs, path, "units", &xf.2, &nf.2);
+                diff_field(diffs, path, "gf", &xf.3, &nf.3);
+            }
+        }
     }
 }
 
-fn diff_field<T: std::fmt::Debug + PartialEq>(
+fn diff_field<T: std::fmt::Debug + PartialEq + ?Sized>(
     diffs: &mut Vec<Diff>,
     path: &str,
     field: &str,

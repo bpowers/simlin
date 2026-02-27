@@ -15,7 +15,7 @@ use crate::mdl::view;
 
 use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, FullEquation, Lhs, Subscript};
 use crate::mdl::builtins::{eq_lower_space, to_lower_space};
-use crate::mdl::xmile_compat::space_to_underbar;
+use crate::mdl::xmile_compat::{quoted_space_to_underbar, space_to_underbar};
 
 use super::ConversionContext;
 use super::helpers::{canonical_name, cartesian_product, extract_metadata, extract_units, get_lhs};
@@ -63,7 +63,7 @@ impl<'input> ConversionContext<'input> {
         // Add synthetic flow variables
         for synthetic in &self.synthetic_flows {
             let flow = Variable::Flow(datamodel::Flow {
-                ident: space_to_underbar(&synthetic.name),
+                ident: quoted_space_to_underbar(&synthetic.name),
                 equation: synthetic.equation.clone(),
                 documentation: String::new(),
                 units: None,
@@ -157,8 +157,11 @@ impl<'input> ConversionContext<'input> {
             .enumerate()
             .map(|(i, group)| {
                 let parent = group.parent_index.map(|idx| final_names[idx].clone());
-                // Members are stored as canonical names, convert to space_to_underbar format
-                let members = group.members.iter().map(|m| space_to_underbar(m)).collect();
+                let members = group
+                    .members
+                    .iter()
+                    .map(|m| quoted_space_to_underbar(m))
+                    .collect();
 
                 ModelGroup {
                     name: final_names[i].clone(),
@@ -430,7 +433,7 @@ impl<'input> ConversionContext<'input> {
         let equation = Equation::Arrayed(formatted_dims.clone(), elements);
 
         // Build the variable
-        let ident = space_to_underbar(name);
+        let ident = quoted_space_to_underbar(name);
         let (documentation, units) = extract_metadata(&info.equations);
 
         match info.var_type {
@@ -644,7 +647,7 @@ impl<'input> ConversionContext<'input> {
         info: &SymbolInfo<'_>,
         eq: &FullEquation<'_>,
     ) -> Option<Variable> {
-        let ident = space_to_underbar(name);
+        let ident = quoted_space_to_underbar(name);
         let documentation = eq
             .comment
             .as_ref()
