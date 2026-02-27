@@ -316,7 +316,7 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Ln(e) => self.eval_at_index(e, index).ln(),
                     BuiltinFn::Log10(e) => self.eval_at_index(e, index).log10(),
                     BuiltinFn::Sqrt(e) => self.eval_at_index(e, index).sqrt(),
-                    BuiltinFn::Int(e) => self.eval_at_index(e, index).trunc(),
+                    BuiltinFn::Int(e) => self.eval_at_index(e, index).floor(),
                     BuiltinFn::Arccos(e) => self.eval_at_index(e, index).acos(),
                     BuiltinFn::Arcsin(e) => self.eval_at_index(e, index).asin(),
                     BuiltinFn::Arctan(e) => self.eval_at_index(e, index).atan(),

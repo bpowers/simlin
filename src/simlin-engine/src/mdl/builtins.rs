@@ -306,6 +306,7 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "lookup backward",
         "tabxl",
         "get data at time",
+        "get data between times",
         "get data last time",
         // Array functions
         "sum",

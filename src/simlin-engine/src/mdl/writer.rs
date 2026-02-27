@@ -579,6 +579,15 @@ impl Visitor<String> for MdlPrintVisitor {
                 }
             },
             Expr0::Op2(op, l, r, _) => {
+                // Vensim uses MODULO(a, b) function form rather than the
+                // binary MOD operator that the XMILE equation parser
+                // produces.  Emit the function call so the MDL roundtrip
+                // re-parses correctly.
+                if *op == BinaryOp::Mod {
+                    let l = self.walk(l);
+                    let r = self.walk(r);
+                    return format!("MODULO({l}, {r})");
+                }
                 let l = mdl_paren_if_necessary(expr, l, false, self.walk(l));
                 let r = mdl_paren_if_necessary(expr, r, true, self.walk(r));
                 let op_str = match op {
@@ -587,7 +596,7 @@ impl Visitor<String> for MdlPrintVisitor {
                     BinaryOp::Exp => "^",
                     BinaryOp::Mul => "*",
                     BinaryOp::Div => "/",
-                    BinaryOp::Mod => "MOD",
+                    BinaryOp::Mod => unreachable!(),
                     BinaryOp::Gt => ">",
                     BinaryOp::Lt => "<",
                     BinaryOp::Gte => ">=",
@@ -2083,6 +2092,12 @@ mod tests {
             "if time >= start and time <= end_val and (time - start) mod interval < width then 1 else 0",
             "PULSE TRAIN(start, width, interval, end val)",
         );
+    }
+
+    #[test]
+    fn mod_emits_modulo() {
+        assert_mdl("a mod b", "MODULO(a, b)");
+        assert_mdl("(time) mod (5)", "MODULO(Time, 5)");
     }
 
     #[test]

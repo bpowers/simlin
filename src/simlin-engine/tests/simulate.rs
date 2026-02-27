@@ -815,8 +815,7 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // "test/sdeverywhere/models/mapping/mapping.xmile",
     // "test/sdeverywhere/models/multimap/multimap.xmile",
     //
-    // EmptyEquation: uses NPV builtin
-    // "test/sdeverywhere/models/npv/npv.xmile",
+    "test/sdeverywhere/models/npv/npv.xmile",
     //
     // No expected results (preprocessing test files)
     // "test/sdeverywhere/models/preprocess/expected.xmile",
@@ -825,14 +824,16 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // No expected results
     // "test/sdeverywhere/models/prune/prune.xmile",
     //
-    // EmptyEquation: uses QUANTUM builtin
+    // xmutil expands QUANTUM(x,q) -> (q)*INT((x)/(q)), but INT is floor
+    // per XMILE spec while Vensim INTEGER is truncation-toward-zero.
+    // This gives wrong results for negative inputs. The MDL native path
+    // handles this correctly via inline expansion with ABS/SIGN.
     // "test/sdeverywhere/models/quantum/quantum.xmile",
     //
     // EmptyEquation: uses :EXCEPT: syntax
     // "test/sdeverywhere/models/ref/ref.xmile",
     //
-    // EmptyEquation: uses SAMPLE IF TRUE builtin
-    // "test/sdeverywhere/models/sample/sample.xmile",
+    "test/sdeverywhere/models/sample/sample.xmile",
     //
     // No expected results (nested model directory)
     // "test/sdeverywhere/models/sir/model/sir.xmile",
@@ -882,6 +883,74 @@ fn simulates_smooth3() {
 #[test]
 fn simulates_smooth_with_dim_mappings() {
     simulate_path("../../test/sdeverywhere/models/smooth/smooth.xmile");
+}
+
+#[test]
+fn simulates_npv_xmile() {
+    simulate_path("../../test/sdeverywhere/models/npv/npv.xmile");
+}
+
+#[test]
+fn simulates_npv_mdl() {
+    simulate_mdl_path("../../test/sdeverywhere/models/npv/npv.mdl");
+}
+
+// DELAY FIXED requires ring-buffer (pipeline delay) semantics, not
+// exponential smoothing (delay1).  Currently mapped to delay1 as a rough
+// approximation; these tests are ignored until VM-level ring buffer state
+// is implemented.
+#[test]
+#[ignore]
+fn simulates_delayfixed_xmile() {
+    simulate_path("../../test/sdeverywhere/models/delayfixed/delayfixed.xmile");
+}
+
+#[test]
+#[ignore]
+fn simulates_delayfixed_mdl() {
+    simulate_mdl_path("../../test/sdeverywhere/models/delayfixed/delayfixed.mdl");
+}
+
+#[test]
+#[ignore]
+fn simulates_delayfixed2_xmile() {
+    simulate_path("../../test/sdeverywhere/models/delayfixed2/delayfixed2.xmile");
+}
+
+#[test]
+#[ignore]
+fn simulates_delayfixed2_mdl() {
+    simulate_mdl_path("../../test/sdeverywhere/models/delayfixed2/delayfixed2.mdl");
+}
+
+#[test]
+fn simulates_sample_xmile() {
+    simulate_path("../../test/sdeverywhere/models/sample/sample.xmile");
+}
+
+#[test]
+fn simulates_sample_mdl() {
+    simulate_mdl_path("../../test/sdeverywhere/models/sample/sample.mdl");
+}
+
+#[test]
+fn simulates_quantum_mdl() {
+    simulate_mdl_path("../../test/sdeverywhere/models/quantum/quantum.mdl");
+}
+
+// Ignored: the XMILE path is broken (xmutil strips GET DATA BETWEEN TIMES to
+// zeroed-out equations). The MDL path requires external .dat file loading for
+// data variables, which is not yet fully supported.
+#[test]
+#[ignore]
+fn simulates_getdata_xmile() {
+    simulate_path("../../test/sdeverywhere/models/getdata/getdata.xmile");
+}
+
+#[test]
+#[ignore]
+fn simulates_getdata_mdl() {
+    simulate_mdl_path("../../test/sdeverywhere/models/getdata/getdata.mdl");
 }
 
 #[test]

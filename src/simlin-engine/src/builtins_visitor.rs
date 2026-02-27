@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Ast, Expr0, IndexExpr0, print_eqn};
+use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, print_eqn};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, RawIdent,
@@ -14,9 +14,10 @@ use crate::{datamodel, eqn_err};
 
 fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
     let args: &'static [&'static str] = match name {
-        "smth1" | "smth3" | "delay1" | "delay3" | "trend" => {
+        "smth1" | "smth3" | "delay" | "delay1" | "delay3" | "trend" => {
             &["input", "delay_time", "initial_value"]
         }
+        "npv" => &["stream", "discount_rate", "initial_value", "factor"],
         "previous" => &["input", "initial_value"],
         "init" => &["input"],
         _ => {
@@ -34,7 +35,7 @@ fn contains_stdlib_call(expr: &Expr0) -> bool {
         Var(_, _) => false,
         App(UntypedBuiltinFn(func, args), _) => {
             if crate::stdlib::MODEL_NAMES.contains(&func.as_str())
-                || matches!(func.as_str(), "delayn" | "smthn")
+                || matches!(func.as_str(), "delay" | "delayn" | "smthn")
             {
                 return true;
             }
@@ -67,6 +68,15 @@ fn rewrite_alias_module_call(
     args: Vec<Expr0>,
     loc: crate::builtins::Loc,
 ) -> Result<(String, Vec<Expr0>), EquationError> {
+    // xmutil maps DELAY FIXED to DELAY(...); semantically this is a
+    // pipeline delay, not an exponential smooth like delay1.  The stdlib
+    // framework cannot represent the ring-buffer state needed for a true
+    // pipeline delay, so for now we map it to delay1 as a rough
+    // approximation.  This is known-incorrect for models where the exact
+    // delay matters (e.g. delay_time >> DT).
+    if func == "delay" {
+        return Ok(("delay1".to_string(), args));
+    }
     if !matches!(func.as_str(), "delayn" | "smthn") {
         return Ok((func, args));
     }
@@ -302,6 +312,13 @@ impl<'a> BuiltinVisitor<'a> {
                 self.self_allowed = orig_self_allowed;
                 let args = args?;
                 let (func, args) = rewrite_alias_module_call(func, args, loc)?;
+                // MODULO(x, y) is the function-call form of the MOD binary operator
+                if func == "modulo" && args.len() == 2 {
+                    let mut it = args.into_iter();
+                    let lhs = it.next().unwrap();
+                    let rhs = it.next().unwrap();
+                    return Ok(Op2(BinaryOp::Mod, Box::new(lhs), Box::new(rhs), loc));
+                }
                 if is_builtin_fn(&func) {
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
@@ -776,6 +793,91 @@ mod tests {
                     ("A2", "DELAY1(input_a[A2], delay_time, init)"),
                 ],
             );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+    }
+
+    /// Test that NPV stdlib model compiles and produces accumulation.
+    /// NPV output at time t includes the current step's discounted stream
+    /// (unlike a normal stock which reflects the state before the current step).
+    #[test]
+    fn test_npv_basic() {
+        // NPV with constant stream=10, discount_rate=0, init=0, factor=1
+        // With zero discount rate, NPV just accumulates stream*factor each step
+        let project = TestProject::new("npv_test")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .aux("stream", "10", None)
+            .aux("discount_rate", "0", None)
+            .aux("init_val", "0", None)
+            .aux("factor", "1", None)
+            .aux(
+                "result",
+                "NPV(stream, discount_rate, init_val, factor)",
+                None,
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // output = stock + inflow * DT
+        // t=0: stock=0, inflow=10*1*(1+0)^0=10, output = 0 + 10*1 = 10
+        // t=1: stock=10, inflow=10, output = 10 + 10 = 20
+        // t=2: stock=20, inflow=10, output = 20 + 10 = 30
+        project.assert_interpreter_result("result", &[10.0, 20.0, 30.0]);
+    }
+
+    /// Test NPV with non-zero discount rate
+    #[test]
+    fn test_npv_with_discount() {
+        // NPV with stream=100, discount_rate=0.1, init=0, factor=1
+        // discount_factor(t) = (1 + 0.1 * 1)^(-t/1) = 1.1^(-t)
+        let project = TestProject::new("npv_discount_test")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .aux("stream", "100", None)
+            .aux("discount_rate", "0.1", None)
+            .aux("init_val", "0", None)
+            .aux("factor", "1", None)
+            .aux(
+                "result",
+                "NPV(stream, discount_rate, init_val, factor)",
+                None,
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        let results = project.run_interpreter().unwrap();
+        let vals = results.get("result").unwrap();
+        eprintln!("NPV with discount: {:?}", vals);
+        // output = stock + inflow * DT
+        // t=0: stock=0, inflow=100*1.1^0=100, output = 0 + 100 = 100
+        // t=1: stock=100, inflow=100*1.1^(-1)=90.909, output = 100 + 90.909 = 190.909
+        // t=2: stock=190.909, inflow=100*1.1^(-2)=82.645, output = 190.909 + 82.645 = 273.554
+        assert!((vals[0] - 100.0).abs() < 1e-6);
+        assert!((vals[1] - 190.909).abs() < 0.01);
+        assert!((vals[2] - 273.554).abs() < 0.01);
+    }
+
+    /// Test that MODULO function call is converted to MOD binary op
+    #[test]
+    fn test_modulo_function() {
+        let project = TestProject::new("modulo_test")
+            .aux("a", "7", None)
+            .aux("b", "3", None)
+            .aux("result", "MODULO(a, b)", None);
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[1.0, 1.0]);
+    }
+
+    /// Test that DELAY (from DELAY FIXED mapping) works as delay1
+    #[test]
+    fn test_delay_alias() {
+        let project = TestProject::new("delay_alias_test")
+            .aux("input", "10", None)
+            .aux("delay_time", "1", None)
+            .aux("init", "0", None)
+            .aux("result", "DELAY(input, delay_time, init)", None);
 
         project.assert_compiles();
         project.assert_sim_builds();

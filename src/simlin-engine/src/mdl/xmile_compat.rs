@@ -370,6 +370,50 @@ impl XmileFormatter {
                     return format!("{} + ({}) * TIME", t, dt);
                 }
             }
+            "npv" => {
+                // NPV(stream, discount_rate, init_val, factor) passes through as stdlib call
+                if args.len() >= 4 {
+                    return format!(
+                        "NPV({}, {}, {}, {})",
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx),
+                        self.format_expr_ctx(&args[2], ctx),
+                        self.format_expr_ctx(&args[3], ctx)
+                    );
+                }
+            }
+            "modulo" => {
+                // MODULO(x, y) -> (x) MOD (y)
+                if args.len() >= 2 {
+                    return format!(
+                        "({}) MOD ({})",
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx)
+                    );
+                }
+            }
+            "get data between times" => {
+                // GET DATA BETWEEN TIMES(var, time, mode) -> lookup variant based on mode
+                // mode: 0=interpolate (LOOKUP), -1=backward (LOOKUP_BACKWARD), 1=forward (LOOKUP_FORWARD)
+                if args.len() >= 3 {
+                    let var_expr = self.format_expr_ctx(&args[0], ctx);
+                    let time_expr = self.format_expr_ctx(&args[1], ctx);
+                    let mode_expr = self.format_expr_ctx(&args[2], ctx);
+                    // Determine lookup variant based on mode
+                    // If mode is a constant, we can pick the right function at conversion time
+                    let mode_trimmed = mode_expr.trim();
+                    let lookup_fn = if mode_trimmed == "-1"
+                        || mode_trimmed.eq_ignore_ascii_case("backward")
+                    {
+                        "LOOKUP_BACKWARD"
+                    } else if mode_trimmed == "1" || mode_trimmed.eq_ignore_ascii_case("forward") {
+                        "LOOKUP_FORWARD"
+                    } else {
+                        "LOOKUP"
+                    };
+                    return format!("{}({}, {})", lookup_fn, var_expr, time_expr);
+                }
+            }
             "zidz" => {
                 // ZIDZ(a, b) -> SAFEDIV(a, b)
                 if args.len() >= 2 {
@@ -451,6 +495,7 @@ impl XmileFormatter {
             "quantum" => "QUANTUM".to_string(),
             "ramp from to" => "RAMP".to_string(),
             "sshape" => "SSHAPE".to_string(),
+            "npv" => "NPV".to_string(),
             "vmax" => "MAX".to_string(),
             "vmin" => "MIN".to_string(),
             "forecast" => "FORCST".to_string(),
