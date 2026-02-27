@@ -388,6 +388,12 @@ fn parse_equation(
                 }
             }
         }
+        // The default_equation (from EXCEPT semantics) is not used here because
+        // the MDL converter fully expands all elements at conversion time, applying
+        // the default to non-EXCEPT elements. Elements left undefined (e.g. the
+        // excepted elements when no separate equation exists) default to 0 in the
+        // compiler. See GitHub issue #353 for tracking the future improvement of
+        // carrying the default expression through the Ast type.
         datamodel::Equation::Arrayed(dimension_names, elements, _default_eq) => {
             let mut errors: Vec<EquationError> = vec![];
             let elements: HashMap<_, _> = elements

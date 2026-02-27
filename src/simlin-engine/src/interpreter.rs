@@ -2922,8 +2922,9 @@ mod compile_project_tests {
 
     #[test]
     fn sparse_arrayed_equation_defaults_missing_elements_to_zero() {
-        // Simulates EXCEPT output: h[DimA] :EXCEPT: [SubA] = 8
-        // Only A1 has an equation; A2 and A3 are undefined (default to 0)
+        // Sparse arrayed equations (not all elements present) default
+        // missing elements to 0.0, matching Vensim semantics for EXCEPT
+        // clauses and partial subscript definitions.
         let tp = TestProject::new("sparse_arrayed")
             .with_sim_time(0.0, 1.0, 1.0)
             .named_dimension("DimA", &["A1", "A2", "A3"]);
@@ -2947,34 +2948,51 @@ mod compile_project_tests {
             }));
 
         let project = Arc::new(crate::project::Project::from(datamodel));
-
-        // Verify the interpreter path works (Simulation::new compiles the model)
-        let sim = super::Simulation::new(&project, "main")
-            .expect("simulation with sparse arrayed should build");
+        let sim = super::Simulation::new(&project, "main").expect("sparse arrayed should compile");
         let results = sim.run_to_end().expect("should simulate");
 
-        let h_a1 = results.offsets.get(&Ident::new("h[a1]"));
-        let h_a2 = results.offsets.get(&Ident::new("h[a2]"));
-        let h_a3 = results.offsets.get(&Ident::new("h[a3]"));
-        assert!(h_a1.is_some(), "h[A1] should exist in offsets");
-        assert!(h_a2.is_some(), "h[A2] should exist in offsets");
-        assert!(h_a3.is_some(), "h[A3] should exist in offsets");
-
-        // h[A1] = 8, h[A2] = 0 (undefined), h[A3] = 0 (undefined)
         let step0 = results.iter().next().unwrap();
         assert!((step0[results.offsets[&Ident::new("h[a1]")]] - 8.0).abs() < 1e-10);
         assert!((step0[results.offsets[&Ident::new("h[a2]")]] - 0.0).abs() < 1e-10);
         assert!((step0[results.offsets[&Ident::new("h[a3]")]] - 0.0).abs() < 1e-10);
+    }
 
-        // Also verify the VM path works
-        let compiled = sim.compile().expect("should compile");
-        let mut vm = Vm::new(compiled).expect("vm");
-        vm.run_to_end().expect("vm should run");
-        let vm_results = vm.into_results();
+    #[test]
+    fn dense_arrayed_equation_compiles_and_simulates() {
+        // Dense arrayed equations (all elements present) should work.
+        let tp = TestProject::new("dense_arrayed")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("DimA", &["A1", "A2", "A3"]);
 
-        let step0 = vm_results.iter().next().unwrap();
-        assert!((step0[vm_results.offsets[&Ident::new("h[a1]")]] - 8.0).abs() < 1e-10);
-        assert!((step0[vm_results.offsets[&Ident::new("h[a2]")]] - 0.0).abs() < 1e-10);
-        assert!((step0[vm_results.offsets[&Ident::new("h[a3]")]] - 0.0).abs() < 1e-10);
+        let mut datamodel = tp.build_datamodel();
+        datamodel.models[0]
+            .variables
+            .push(crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+                ident: "h".to_string(),
+                equation: crate::datamodel::Equation::Arrayed(
+                    vec!["DimA".to_string()],
+                    vec![
+                        ("A1".to_string(), "8".to_string(), None, None),
+                        ("A2".to_string(), "0".to_string(), None, None),
+                        ("A3".to_string(), "0".to_string(), None, None),
+                    ],
+                    None,
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: crate::datamodel::Compat::default(),
+            }));
+
+        let project = Arc::new(crate::project::Project::from(datamodel));
+        let sim = super::Simulation::new(&project, "main").expect("dense arrayed should compile");
+        let results = sim.run_to_end().expect("should simulate");
+
+        let step0 = results.iter().next().unwrap();
+        assert!((step0[results.offsets[&Ident::new("h[a1]")]] - 8.0).abs() < 1e-10);
+        assert!((step0[results.offsets[&Ident::new("h[a2]")]] - 0.0).abs() < 1e-10);
+        assert!((step0[results.offsets[&Ident::new("h[a3]")]] - 0.0).abs() < 1e-10);
     }
 }

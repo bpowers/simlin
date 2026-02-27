@@ -71,7 +71,7 @@ pub unsafe extern "C" fn simlin_project_serialize_protobuf(
         Err(err) => {
             store_error(
                 out_error,
-                SimlinError::new(SimlinErrorCode::ProtobufDecode)
+                SimlinError::new(SimlinErrorCode::Generic)
                     .with_message(format!("serialization validation failed: {}", err)),
             );
             return;

@@ -581,13 +581,17 @@ impl Var {
                                         let subscript_str = subscripts.join(",");
                                         let canonical_key =
                                             CanonicalElementName::from_raw(&subscript_str);
-                                        let Some(ast) = elements.get(&canonical_key) else {
-                                            // EXCEPT semantics: elements excluded by :EXCEPT:
-                                            // with no override are undefined and default to 0
-                                            return Ok(vec![Expr::AssignCurr(
-                                                off + i,
-                                                Box::new(Expr::Const(0.0, Loc::default())),
-                                            )]);
+                                        let ast = match elements.get(&canonical_key) {
+                                            Some(ast) => ast,
+                                            // Vensim defaults undefined subscript
+                                            // elements to 0 (e.g. EXCEPT clauses
+                                            // that leave some elements unspecified).
+                                            None => {
+                                                return Ok(vec![Expr::AssignCurr(
+                                                    off + i,
+                                                    Box::new(Expr::Const(0.0, Loc::default())),
+                                                )]);
+                                            }
                                         };
                                         let ctx = ctx.with_active_subscripts(
                                             active_dims.clone(),
@@ -690,13 +694,17 @@ impl Var {
                                     let subscript_str = subscripts.join(",");
                                     let canonical_key =
                                         CanonicalElementName::from_raw(&subscript_str);
-                                    let Some(ast) = elements.get(&canonical_key) else {
-                                        // EXCEPT semantics: elements excluded by :EXCEPT:
-                                        // with no override are undefined and default to 0
-                                        return Ok(vec![Expr::AssignCurr(
-                                            off + i,
-                                            Box::new(Expr::Const(0.0, Loc::default())),
-                                        )]);
+                                    let ast = match elements.get(&canonical_key) {
+                                        Some(ast) => ast,
+                                        // Vensim defaults undefined subscript
+                                        // elements to 0 (e.g. EXCEPT clauses
+                                        // that leave some elements unspecified).
+                                        None => {
+                                            return Ok(vec![Expr::AssignCurr(
+                                                off + i,
+                                                Box::new(Expr::Const(0.0, Loc::default())),
+                                            )]);
+                                        }
                                     };
                                     let ctx = ctx
                                         .with_active_subscripts(active_dims.clone(), &subscripts);
