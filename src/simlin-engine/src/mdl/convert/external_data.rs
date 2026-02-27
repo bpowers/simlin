@@ -44,6 +44,7 @@ pub(super) enum GetDirectCall {
         tab: String,
         first_cell: String,
         last_cell: String,
+        prefix: String,
     },
 }
 
@@ -124,6 +125,7 @@ pub(super) fn parse_get_direct(s: &str) -> Option<GetDirectCall> {
                     tab: args[1].clone(),
                     first_cell: args[2].clone(),
                     last_cell: args[3].clone(),
+                    prefix: args.get(4).cloned().unwrap_or_default(),
                 })
             } else {
                 None
@@ -223,9 +225,18 @@ pub(super) fn resolve_get_direct(
             tab,
             first_cell,
             last_cell,
+            prefix,
         } => {
             let file = resolve_file_alias(file, aliases);
             let elements = provider.load_subscript(&file, tab, first_cell, last_cell)?;
+            let elements = if prefix.is_empty() {
+                elements
+            } else {
+                elements
+                    .into_iter()
+                    .map(|element| format!("{prefix}{element}"))
+                    .collect()
+            };
             Ok(ResolvedData::Subscript(elements))
         }
     }
@@ -313,6 +324,51 @@ pub(super) fn try_resolve_data_expr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_provider::DataProvider;
+
+    struct StubProvider;
+
+    impl DataProvider for StubProvider {
+        fn load_data(
+            &self,
+            _file: &str,
+            _tab_or_delimiter: &str,
+            _time_col_or_row: &str,
+            _cell_label: &str,
+        ) -> Result<Vec<(f64, f64)>> {
+            Ok(vec![])
+        }
+
+        fn load_constant(
+            &self,
+            _file: &str,
+            _tab_or_delimiter: &str,
+            _row_label: &str,
+            _col_label: &str,
+        ) -> Result<f64> {
+            Ok(0.0)
+        }
+
+        fn load_lookup(
+            &self,
+            _file: &str,
+            _tab_or_delimiter: &str,
+            _row_label: &str,
+            _col_label: &str,
+        ) -> Result<Vec<(f64, f64)>> {
+            Ok(vec![])
+        }
+
+        fn load_subscript(
+            &self,
+            _file: &str,
+            _tab_or_delimiter: &str,
+            _first_cell: &str,
+            _last_cell: &str,
+        ) -> Result<Vec<String>> {
+            Ok(vec!["1".to_string(), "2".to_string()])
+        }
+    }
 
     #[test]
     fn test_parse_get_direct_data() {
@@ -404,13 +460,29 @@ mod tests {
                 tab,
                 first_cell,
                 last_cell,
+                prefix,
             } => {
                 assert_eq!(file, "b_subs.csv");
                 assert_eq!(tab, ",");
                 assert_eq!(first_cell, "A2");
                 assert_eq!(last_cell, "A");
+                assert_eq!(prefix, "");
             }
             _ => panic!("Expected Subscript call"),
+        }
+    }
+
+    #[test]
+    fn test_try_resolve_subscript_applies_prefix() {
+        let expr = "{GET DIRECT SUBSCRIPT('b_subs.csv', ',', 'A2', 'A', 'A')}";
+        let result = try_resolve_data_expr(expr, Some(&StubProvider), &HashMap::new())
+            .expect("GET DIRECT expression should be parsed")
+            .expect("GET DIRECT expression should resolve");
+        match result {
+            ResolvedData::Subscript(elements) => {
+                assert_eq!(elements, vec!["A1".to_string(), "A2".to_string()]);
+            }
+            _ => panic!("Expected Subscript result"),
         }
     }
 

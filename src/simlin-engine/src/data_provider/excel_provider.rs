@@ -215,7 +215,47 @@ impl FilesystemDataProvider {
         let start_row = start_row as u32;
         let start_col = start_col as u32;
 
-        let (end_row, end_col) = if is_column_only(last_cell.trim()) {
+        let is_row_number =
+            last_cell.trim().chars().all(|c| c.is_ascii_digit()) && !last_cell.trim().is_empty();
+        let (end_row, end_col) = if is_row_number {
+            let row_num: u32 = last_cell.trim().parse::<u32>().map_err(|_| {
+                Error::new(
+                    ErrorKind::Import,
+                    ErrorCode::Generic,
+                    Some(format!(
+                        "invalid row number '{}' in last_cell",
+                        last_cell.trim()
+                    )),
+                )
+            })?;
+            if row_num == 0 {
+                return Err(Error::new(
+                    ErrorKind::Import,
+                    ErrorCode::Generic,
+                    Some(format!(
+                        "row number '{}' in last_cell must be >= 1 (1-indexed)",
+                        last_cell.trim()
+                    )),
+                ));
+            }
+            let (height, width) = range.get_size();
+            let range_start = range.start().unwrap_or((0, 0));
+            let max_row = if height == 0 {
+                range_start.0
+            } else {
+                range_start.0 + height as u32 - 1
+            };
+            let row_idx = (row_num - 1).min(max_row);
+            let mut last_col = start_col;
+            for col in start_col..(range_start.1 + width as u32) {
+                if let Some(val) = range.get_value((row_idx, col))
+                    && val.as_string().is_some_and(|s| !s.trim().is_empty())
+                {
+                    last_col = col;
+                }
+            }
+            (row_idx, last_col)
+        } else if is_column_only(last_cell.trim()) {
             let col = col_index(last_cell.trim())? as u32;
             let (height, _) = range.get_size();
             let range_start = range.start().unwrap_or((0, 0));
@@ -335,5 +375,15 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.details.as_ref().unwrap().contains("Nonexistent Sheet"));
+    }
+
+    #[test]
+    fn test_load_subscript_excel_row_number_endpoint() {
+        let provider = FilesystemDataProvider::new(test_data_dir());
+        let result = provider.load_subscript("data.xlsx", "A Data", "A2", "2");
+        assert!(
+            result.is_ok(),
+            "row-oriented last_cell should be supported for Excel files: {result:?}"
+        );
     }
 }
