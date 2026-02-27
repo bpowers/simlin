@@ -312,6 +312,49 @@ impl DimensionsContext {
         }
     }
 
+    /// Check if a dimension maps to any target that is a parent of the given
+    /// candidate dimension. Handles multi-target mappings correctly.
+    pub fn has_mapping_to_parent_of(
+        &self,
+        dim_name: &CanonicalDimensionName,
+        candidate: &CanonicalDimensionName,
+    ) -> bool {
+        if let Some(Dimension::Named(_, named)) = self.dimensions.get(dim_name) {
+            if let Some(maps_to) = &named.maps_to
+                && self.is_subdimension_of(candidate, maps_to)
+            {
+                return true;
+            }
+            for m in &named.mappings {
+                if self.is_subdimension_of(candidate, &m.target) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Get all mapping targets for a dimension.
+    pub fn get_all_mapping_targets(
+        &self,
+        dim_name: &CanonicalDimensionName,
+    ) -> Vec<&CanonicalDimensionName> {
+        if let Some(Dimension::Named(_, named)) = self.dimensions.get(dim_name) {
+            let mut targets = Vec::new();
+            if let Some(maps_to) = &named.maps_to {
+                targets.push(maps_to);
+            }
+            for m in &named.mappings {
+                if !targets.contains(&&m.target) {
+                    targets.push(&m.target);
+                }
+            }
+            targets
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Find the mapping info for a specific source -> target pair.
     fn find_mapping_info(
         &self,

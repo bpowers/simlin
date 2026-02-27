@@ -210,11 +210,9 @@ impl Context<'_> {
                     {
                         return Some(i);
                     }
-                    // Also check subdimension relationship via any mapping target
-                    if let Some(maps_to_dim) = self.dimensions_ctx.get_maps_to(dim.canonical_name())
-                        && self
-                            .dimensions_ctx
-                            .is_subdimension_of(candidate_name, maps_to_dim)
+                    if self
+                        .dimensions_ctx
+                        .has_mapping_to_parent_of(dim.canonical_name(), candidate_name)
                     {
                         return Some(i);
                     }
@@ -993,10 +991,12 @@ impl Context<'_> {
                             {
                                 let active_name =
                                     CanonicalDimensionName::from_raw(&canonicalize(dim.name()));
-                                let maps_to = self.dimensions_ctx.get_maps_to(&id_dim_name);
-                                let reverse_maps = self.dimensions_ctx.get_maps_to(&active_name);
-                                if maps_to == Some(&active_name)
-                                    || reverse_maps == Some(&id_dim_name)
+                                if self
+                                    .dimensions_ctx
+                                    .has_mapping_to(&id_dim_name, &active_name)
+                                    || self
+                                        .dimensions_ctx
+                                        .has_mapping_to(&active_name, &id_dim_name)
                                 {
                                     // Positional mapping: the index in the mapped dimension
                                     // equals the index in the active dimension
@@ -1250,13 +1250,10 @@ impl Context<'_> {
                                         {
                                             return true;
                                         }
-                                        // Also check if source maps to a parent of the active dim
-                                        if let Some(maps_to) =
-                                            self.dimensions_ctx.get_maps_to(&source_dim_name)
-                                            && self
-                                                .dimensions_ctx
-                                                .is_subdimension_of(&active_canonical, maps_to)
-                                        {
+                                        if self.dimensions_ctx.has_mapping_to_parent_of(
+                                            &source_dim_name,
+                                            &active_canonical,
+                                        ) {
                                             return true;
                                         }
                                     }
@@ -1341,13 +1338,10 @@ impl Context<'_> {
                                                 found = Some((active_idx, subscript));
                                                 break;
                                             }
-                                            // Check if source maps to a parent of active dim
-                                            if let Some(maps_to) =
-                                                self.dimensions_ctx.get_maps_to(&source_dim_name)
-                                                && self
-                                                    .dimensions_ctx
-                                                    .is_subdimension_of(&active_canonical, maps_to)
-                                            {
+                                            if self.dimensions_ctx.has_mapping_to_parent_of(
+                                                &source_dim_name,
+                                                &active_canonical,
+                                            ) {
                                                 found = Some((active_idx, subscript));
                                                 break;
                                             }
@@ -1418,15 +1412,20 @@ impl Context<'_> {
                                     let target_dim_name = target_dim.canonical_name();
 
                                     // Use bidirectional translation which handles:
-                                    // - Forward: source_dim.maps_to == target_dim
-                                    // - Reverse: target_dim.maps_to == source_dim
-                                    // - Subdimension: source_dim.maps_to subdim of target_dim
-                                    let forward_maps =
-                                        self.dimensions_ctx.get_maps_to(source_dim_name);
-                                    let reverse_maps =
-                                        self.dimensions_ctx.get_maps_to(target_dim_name);
-                                    let has_mapping =
-                                        forward_maps.is_some() || reverse_maps.is_some();
+                                    // Use bidirectional translation which handles:
+                                    // - Forward: source_dim maps to target_dim
+                                    // - Reverse: target_dim maps to source_dim
+                                    // - Subdimension: source_dim maps to parent of target_dim
+                                    let has_any_mapping =
+                                        self.dimensions_ctx.get_maps_to(source_dim_name).is_some()
+                                            || self
+                                                .dimensions_ctx
+                                                .get_maps_to(target_dim_name)
+                                                .is_some()
+                                            || !self
+                                                .dimensions_ctx
+                                                .get_all_mapping_targets(source_dim_name)
+                                                .is_empty();
 
                                     if let Some(translated) =
                                         self.dimensions_ctx.translate_via_mapping(
@@ -1436,27 +1435,30 @@ impl Context<'_> {
                                         )
                                     {
                                         source_offset = source_dim.get_offset(&translated);
-                                    } else if has_mapping {
-                                        // Also try subdimension: source.maps_to has subdim target
-                                        if let Some(maps_to_dim) = forward_maps
-                                            && self
-                                                .dimensions_ctx
-                                                .is_subdimension_of(target_dim_name, maps_to_dim)
-                                        {
-                                            if let Some(translated) =
+                                    } else if has_any_mapping
+                                        && self.dimensions_ctx.has_mapping_to_parent_of(
+                                            source_dim_name,
+                                            target_dim_name,
+                                        )
+                                    {
+                                        // Source maps to a parent of target -- try translating
+                                        // through the parent dimension.
+                                        let parent_target =
+                                            self.dimensions_ctx.get_maps_to(source_dim_name);
+                                        if let Some(parent) = parent_target
+                                            && let Some(translated) =
                                                 self.dimensions_ctx.translate_to_source_via_mapping(
                                                     source_dim_name,
-                                                    maps_to_dim,
+                                                    parent,
                                                     subscript,
                                                 )
-                                            {
-                                                source_offset = source_dim.get_offset(&translated);
-                                            } else {
-                                                mapping_failed = true;
-                                            }
+                                        {
+                                            source_offset = source_dim.get_offset(&translated);
                                         } else {
                                             mapping_failed = true;
                                         }
+                                    } else if has_any_mapping {
+                                        mapping_failed = true;
                                     }
                                 }
 
