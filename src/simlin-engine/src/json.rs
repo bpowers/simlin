@@ -1193,22 +1193,23 @@ impl From<Dimension> for datamodel::Dimension {
         } else {
             datamodel::Dimension::named(dim.name, vec![])
         };
-        // Prefer the richer `mappings` field; fall back to simple `maps_to`.
-        if !dim.mappings.is_empty() {
-            result.mappings = dim
-                .mappings
-                .into_iter()
-                .map(|m| datamodel::DimensionMapping {
-                    target: m.target,
-                    element_map: m
-                        .element_map
-                        .into_iter()
-                        .map(|e| (e.source, e.target))
-                        .collect(),
-                })
-                .collect();
-        } else if let Some(target) = dim.maps_to {
-            result.set_maps_to(target);
+        // Reconstruct mappings from both maps_to (first positional) and
+        // the mappings array (additional positional or element-level).
+        if let Some(target) = dim.maps_to {
+            result.mappings.push(datamodel::DimensionMapping {
+                target,
+                element_map: vec![],
+            });
+        }
+        for m in dim.mappings {
+            result.mappings.push(datamodel::DimensionMapping {
+                target: m.target,
+                element_map: m
+                    .element_map
+                    .into_iter()
+                    .map(|e| (e.source, e.target))
+                    .collect(),
+            });
         }
         result
     }
@@ -1802,13 +1803,23 @@ impl From<datamodel::Model> for Model {
 
 impl From<datamodel::Dimension> for Dimension {
     fn from(dim: datamodel::Dimension) -> Self {
-        // Simple positional mapping (single target, empty element_map) uses maps_to
-        // for backward compatibility. Element-level mappings use the mappings array.
+        // Single positional mapping (one mapping with empty element_map) is
+        // captured by maps_to for backward compatibility. All OTHER mappings
+        // (additional positional targets, element-level mappings) go in the
+        // mappings array so multi-target cases are not silently dropped.
         let maps_to = dim.maps_to().map(|s| s.to_owned());
+        let skip_first_positional = maps_to.is_some();
+        let mut skipped = false;
         let mappings: Vec<JsonDimensionMapping> = dim
             .mappings
             .iter()
-            .filter(|m| !m.element_map.is_empty())
+            .filter(|m| {
+                if skip_first_positional && !skipped && m.element_map.is_empty() {
+                    skipped = true;
+                    return false;
+                }
+                true
+            })
             .map(|m| JsonDimensionMapping {
                 target: m.target.clone(),
                 element_map: m
@@ -3703,5 +3714,35 @@ mod tests {
             .unwrap();
         assert_eq!(ds3.kind, "data");
         assert_eq!(ds3.file, "input.xlsx");
+    }
+
+    #[test]
+    fn json_preserves_multi_target_positional_mappings() {
+        // Dimensions with multiple positional mappings (empty element_map)
+        // must be preserved through JSON serialization, not silently dropped.
+        let dim = datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: datamodel::DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![
+                datamodel::DimensionMapping {
+                    target: "dim_b".to_string(),
+                    element_map: vec![],
+                },
+                datamodel::DimensionMapping {
+                    target: "dim_c".to_string(),
+                    element_map: vec![],
+                },
+            ],
+        };
+
+        let json_dim: Dimension = dim.clone().into();
+        let roundtripped: datamodel::Dimension = json_dim.into();
+        assert_eq!(
+            roundtripped.mappings.len(),
+            2,
+            "both positional mappings must survive JSON round-trip"
+        );
+        assert_eq!(roundtripped.mappings[0].target, "dim_b");
+        assert_eq!(roundtripped.mappings[1].target, "dim_c");
     }
 }

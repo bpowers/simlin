@@ -2258,6 +2258,13 @@ fn validate_compat_for_protobuf(var_ident: &str, compat: &Compat) -> Result<()> 
 }
 
 fn validate_dimension_for_protobuf(dim: &Dimension) -> Result<()> {
+    if dim.mappings.len() > 1 {
+        return Err(unsupported_err(&format!(
+            "dimension '{}': protobuf serialization does not support \
+             multiple dimension mappings -- use sd.json for full fidelity",
+            dim.name
+        )));
+    }
     for mapping in &dim.mappings {
         if !mapping.element_map.is_empty() {
             return Err(unsupported_err(&format!(
@@ -2447,6 +2454,34 @@ fn test_protobuf_accepts_simple_dimension_mapping() {
     );
     let result = serialize(&project);
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_protobuf_rejects_multi_target_positional_mappings() {
+    let project = make_test_project(
+        vec![],
+        vec![Dimension {
+            name: "dim_a".to_string(),
+            elements: DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![
+                crate::datamodel::DimensionMapping {
+                    target: "dim_b".to_string(),
+                    element_map: vec![],
+                },
+                crate::datamodel::DimensionMapping {
+                    target: "dim_c".to_string(),
+                    element_map: vec![],
+                },
+            ],
+        }],
+    );
+    let result = serialize(&project);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::common::ErrorCode::UnsupportedForSerialization
+    );
 }
 
 #[test]

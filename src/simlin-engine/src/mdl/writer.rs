@@ -862,52 +862,27 @@ fn write_arrayed_stock_entries(
     buf: &mut String,
     ident: &str,
     net_flow: &str,
-    dims: &[String],
+    _dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
-    default_equation: &Option<String>,
+    _default_equation: &Option<String>,
     units: &Option<String>,
     doc: &str,
 ) {
     let name = format_mdl_ident(ident);
+    let last_idx = elements.len().saturating_sub(1);
 
-    if let Some(default_eq) = default_equation {
-        let dim_display: Vec<String> = dims.iter().map(|d| format_mdl_ident(d)).collect();
-        let initial = normalized_stock_initial(&equation_to_mdl(default_eq));
-        write!(buf, "{name}[{}]=", dim_display.join(",")).unwrap();
+    for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
+        let elem_display = format_mdl_element_key(elem_name);
+        let initial = normalized_stock_initial(&equation_to_mdl(eqn));
+
+        write!(buf, "{name}[{elem_display}]=").unwrap();
         buf.push_str("\n\t");
         buf.push_str(&format!("INTEG({net_flow}, {initial})"));
-        buf.push_str("\n\t~~|\n");
 
-        let last_idx = elements.len().saturating_sub(1);
-        for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
-            let elem_display = format_mdl_element_key(elem_name);
-            let initial = normalized_stock_initial(&equation_to_mdl(eqn));
-            write!(buf, "{name}[{elem_display}]=").unwrap();
-            buf.push_str("\n\t");
-            buf.push_str(&format!("INTEG({net_flow}, {initial})"));
-
-            if i < last_idx {
-                buf.push_str("\n\t~~|\n");
-            } else {
-                write_units_and_comment(buf, units, doc);
-            }
-        }
-    } else {
-        let last_idx = elements.len().saturating_sub(1);
-
-        for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
-            let elem_display = format_mdl_element_key(elem_name);
-            let initial = normalized_stock_initial(&equation_to_mdl(eqn));
-
-            write!(buf, "{name}[{elem_display}]=").unwrap();
-            buf.push_str("\n\t");
-            buf.push_str(&format!("INTEG({net_flow}, {initial})"));
-
-            if i < last_idx {
-                buf.push_str("\n\t~~|\n");
-            } else {
-                write_units_and_comment(buf, units, doc);
-            }
+        if i < last_idx {
+            buf.push_str("\n\t~~|\n");
+        } else {
+            write_units_and_comment(buf, units, doc);
         }
     }
 }
@@ -963,70 +938,42 @@ fn write_single_entry(
 
 /// Write arrayed (per-element) entries.
 ///
-/// When `default_equation` is `Some`, the MDL EXCEPT syntax is emitted:
-/// the default equation is written with the dimension names, then each
-/// element override is written as a separate `:EXCEPT:` entry.
+/// When `default_equation` is `Some` (from EXCEPT syntax), we intentionally
+/// omit a dimension-level default line (name[Dim...]=default) because it
+/// would apply the default equation to ALL elements including excepted ones
+/// that should default to 0. Each element is written individually so
+/// excepted elements (absent from the list) have no equation on re-import.
 fn write_arrayed_entries(
     buf: &mut String,
     ident: &str,
-    dims: &[String],
+    _dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
-    default_equation: &Option<String>,
+    _default_equation: &Option<String>,
     units: &Option<String>,
     doc: &str,
 ) {
     let name = format_mdl_ident(ident);
+    let last_idx = elements.len().saturating_sub(1);
 
-    if let Some(default_eq) = default_equation {
-        let dim_display: Vec<String> = dims.iter().map(|d| format_mdl_ident(d)).collect();
-        let mdl_default = equation_to_mdl(default_eq);
-        let assign_op = if is_data_equation(default_eq) {
-            ":="
+    for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
+        let elem_display = format_mdl_element_key(elem_name);
+        let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+
+        write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
+
+        if let Some(gf) = elem_gf {
+            buf.push_str("\n\t");
+            write_lookup(buf, gf);
         } else {
-            "="
-        };
-        write!(buf, "{name}[{}]{assign_op}", dim_display.join(",")).unwrap();
-        buf.push_str("\n\t");
-        buf.push_str(&mdl_default);
-        buf.push_str("\n\t~~|\n");
-
-        let last_idx = elements.len().saturating_sub(1);
-        for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
-            let elem_display = format_mdl_element_key(elem_name);
             let mdl_eqn = equation_to_mdl(eqn);
-            write!(buf, "{name}[{elem_display}]=").unwrap();
             buf.push_str("\n\t");
             buf.push_str(&mdl_eqn);
-
-            if i < last_idx {
-                buf.push_str("\n\t~~|\n");
-            } else {
-                write_units_and_comment(buf, units, doc);
-            }
         }
-    } else {
-        let last_idx = elements.len().saturating_sub(1);
 
-        for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
-            let elem_display = format_mdl_element_key(elem_name);
-            let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-
-            write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-
-            if let Some(gf) = elem_gf {
-                buf.push_str("\n\t");
-                write_lookup(buf, gf);
-            } else {
-                let mdl_eqn = equation_to_mdl(eqn);
-                buf.push_str("\n\t");
-                buf.push_str(&mdl_eqn);
-            }
-
-            if i < last_idx {
-                buf.push_str("\n\t~~|\n");
-            } else {
-                write_units_and_comment(buf, units, doc);
-            }
+        if i < last_idx {
+            buf.push_str("\n\t~~|\n");
+        } else {
+            write_units_and_comment(buf, units, doc);
         }
     }
 }
@@ -4002,7 +3949,10 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
     }
 
     #[test]
-    fn write_arrayed_with_default_equation_emits_except_syntax() {
+    fn write_arrayed_with_default_equation_omits_dimension_level_default() {
+        // When default_equation is set (from EXCEPT syntax), the writer must
+        // NOT emit name[Dim...]=default because that would apply the default
+        // equation to excepted elements that should default to 0.
         let var = datamodel::Variable::Aux(datamodel::Aux {
             ident: "cost".to_string(),
             equation: datamodel::Equation::Arrayed(
@@ -4024,23 +3974,19 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var);
 
-        // The default equation appears with the dimension name
+        // Must NOT contain dimension-level default (would apply to excepted elements)
         assert!(
-            buf.contains("cost[region]="),
-            "should contain default equation entry with dimension name, got: {buf}"
+            !buf.contains("cost[region]="),
+            "should NOT contain dimension-level default equation, got: {buf}"
         );
-        assert!(
-            buf.contains("\tbase\n"),
-            "should contain the default equation 'base', got: {buf}"
-        );
-        // Override entries appear with element names
+        // Individual element equations should be present
         assert!(
             buf.contains("cost[north]="),
-            "should contain north override, got: {buf}"
+            "should contain north element equation, got: {buf}"
         );
         assert!(
             buf.contains("cost[south]="),
-            "should contain south override, got: {buf}"
+            "should contain south element equation, got: {buf}"
         );
     }
 

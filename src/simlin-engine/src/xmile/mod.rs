@@ -811,6 +811,13 @@ fn validate_for_xmile(project: &datamodel::Project) -> Result<()> {
     };
 
     for dim in &project.dimensions {
+        if dim.mappings.len() > 1 {
+            return Err(unsupported(&format!(
+                "dimension '{}': XMILE serialization does not support \
+                 multiple dimension mappings -- use sd.json for full fidelity",
+                dim.name
+            )));
+        }
         for mapping in &dim.mappings {
             if !mapping.element_map.is_empty() {
                 return Err(unsupported(&format!(
@@ -992,6 +999,55 @@ fn test_xmile_rejects_element_level_dimension_mapping() {
         crate::common::ErrorCode::UnsupportedForSerialization
     );
     assert!(err.details.unwrap().contains("element-level"));
+}
+
+#[test]
+fn test_xmile_rejects_multi_target_positional_mapping() {
+    use crate::datamodel::{DimensionElements, DimensionMapping, Dt, SimMethod, SimSpecs};
+
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![
+                DimensionMapping {
+                    target: "dim_b".to_string(),
+                    element_map: vec![],
+                },
+                DimensionMapping {
+                    target: "dim_c".to_string(),
+                    element_map: vec![],
+                },
+            ],
+        }],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: Default::default(),
+        ai_information: None,
+    };
+    let result = project_to_xmile(&project);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::common::ErrorCode::UnsupportedForSerialization
+    );
 }
 
 #[test]
