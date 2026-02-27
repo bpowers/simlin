@@ -10,6 +10,7 @@ use crate::mdl::ast::{Equation as MdlEquation, MdlItem, SubscriptElement};
 use crate::mdl::xmile_compat::space_to_underbar;
 
 use super::ConversionContext;
+use super::external_data;
 use super::helpers::{canonical_name, expand_range};
 use super::types::ConvertError;
 use crate::mdl::builtins::eq_lower_space;
@@ -193,6 +194,13 @@ impl<'input> ConversionContext<'input> {
         for elem in &elements {
             match elem {
                 SubscriptElement::Element(e, _) => {
+                    // Check if this element is a GET DIRECT SUBSCRIPT reference
+                    if external_data::is_get_direct_ref(e) {
+                        let resolved = self.resolve_subscript_from_data(e)?;
+                        result.extend(resolved);
+                        continue;
+                    }
+
                     let elem_canonical = canonical_name(e);
                     // Check if this element is actually a dimension reference
                     if self.raw_subscript_defs.contains_key(&elem_canonical) {
@@ -213,6 +221,36 @@ impl<'input> ConversionContext<'input> {
 
         visited.remove(dim_canonical);
         Ok(result)
+    }
+
+    /// Resolve a GET DIRECT SUBSCRIPT reference to a list of element names.
+    fn resolve_subscript_from_data(&self, opaque_str: &str) -> Result<Vec<String>, ConvertError> {
+        let call = external_data::parse_get_direct(opaque_str).ok_or_else(|| {
+            ConvertError::Other(format!(
+                "failed to parse GET DIRECT SUBSCRIPT reference: {}",
+                opaque_str
+            ))
+        })?;
+
+        let provider = self.data_provider.ok_or_else(|| {
+            ConvertError::Other(
+                "GET DIRECT SUBSCRIPT referenced but no DataProvider configured".to_string(),
+            )
+        })?;
+
+        match external_data::resolve_get_direct(&call, provider, &self.file_aliases) {
+            Ok(external_data::ResolvedData::Subscript(elements)) => Ok(elements
+                .into_iter()
+                .map(|e| space_to_underbar(&e))
+                .collect()),
+            Ok(_) => Err(ConvertError::Other(
+                "expected GET DIRECT SUBSCRIPT but got a different GET DIRECT type".to_string(),
+            )),
+            Err(e) => Err(ConvertError::Other(format!(
+                "failed to resolve GET DIRECT SUBSCRIPT: {}",
+                e.details.unwrap_or_default()
+            ))),
+        }
     }
 
     /// Resolve an element subscript to its owning dimension.

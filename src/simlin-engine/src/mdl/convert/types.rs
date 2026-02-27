@@ -19,6 +19,8 @@ pub enum ConvertError {
     InvalidRange(String),
     /// Cyclic dimension definition detected (e.g., DimA: DimB, DimB: DimA)
     CyclicDimensionDefinition(String),
+    /// Generic error with a descriptive message
+    Other(String),
 }
 
 impl std::fmt::Display for ConvertError {
@@ -30,6 +32,7 @@ impl std::fmt::Display for ConvertError {
             ConvertError::CyclicDimensionDefinition(s) => {
                 write!(f, "cyclic dimension definition: {}", s)
             }
+            ConvertError::Other(s) => write!(f, "{}", s),
         }
     }
 }

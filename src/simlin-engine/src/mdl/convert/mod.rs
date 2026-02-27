@@ -8,6 +8,7 @@
 //! bypassing the XMILE intermediate format.
 
 mod dimensions;
+mod external_data;
 mod helpers;
 mod stocks;
 mod types;
@@ -80,11 +81,24 @@ pub struct ConversionContext<'input> {
     current_group_index: Option<usize>,
     /// Parsed views from the sketch section
     views: Vec<VensimView>,
+    /// Optional data provider for resolving GET DIRECT references
+    data_provider: Option<&'input dyn crate::data_provider::DataProvider>,
+    /// File aliases from type 30 settings (e.g. "?data" -> "data.xlsx")
+    file_aliases: HashMap<String, String>,
 }
 
 impl<'input> ConversionContext<'input> {
-    /// Create a new conversion context from MDL source.
+    /// Create a new conversion context from MDL source (convenience wrapper for tests).
+    #[cfg(test)]
     pub fn new(source: &'input str) -> Result<Self, ConvertError> {
+        Self::new_with_data(source, None)
+    }
+
+    /// Create a new conversion context from MDL source with an optional DataProvider.
+    pub fn new_with_data(
+        source: &'input str,
+        data_provider: Option<&'input dyn crate::data_provider::DataProvider>,
+    ) -> Result<Self, ConvertError> {
         let mut reader = EquationReader::new(source);
         let items: Result<Vec<MdlItem<'input>>, _> = reader.by_ref().collect();
         let items = items?;
@@ -121,6 +135,8 @@ impl<'input> ConversionContext<'input> {
             groups: Vec::new(),
             current_group_index: None,
             views,
+            data_provider,
+            file_aliases: settings.file_aliases,
         })
     }
 
@@ -295,9 +311,19 @@ impl<'input> ConversionContext<'input> {
 
 // build_project and other variable building methods are in variables.rs
 
-/// Convert MDL source to a Project.
+/// Convert MDL source to a Project (convenience wrapper for tests).
+#[cfg(test)]
 pub fn convert_mdl(source: &str) -> Result<Project, ConvertError> {
-    let ctx = ConversionContext::new(source)?;
+    convert_mdl_with_data(source, None)
+}
+
+/// Convert MDL source to a Project with an optional DataProvider
+/// for resolving GET DIRECT external data references.
+pub fn convert_mdl_with_data(
+    source: &str,
+    data_provider: Option<&dyn crate::data_provider::DataProvider>,
+) -> Result<Project, ConvertError> {
+    let ctx = ConversionContext::new_with_data(source, data_provider)?;
     ctx.convert()
 }
 

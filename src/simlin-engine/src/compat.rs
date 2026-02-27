@@ -56,7 +56,16 @@ pub fn open_vensim_xmutil(contents: &str) -> Result<Project> {
 
 /// Parse a Vensim MDL file using the native Rust parser.
 pub fn open_vensim(contents: &str) -> Result<Project> {
-    mdl::parse_mdl(contents)
+    open_vensim_with_data(contents, None)
+}
+
+/// Parse a Vensim MDL file with an optional DataProvider for resolving
+/// GET DIRECT external data references (CSV, Excel).
+pub fn open_vensim_with_data(
+    contents: &str,
+    data_provider: Option<&dyn crate::data_provider::DataProvider>,
+) -> Result<Project> {
+    mdl::parse_mdl_with_data(contents, data_provider)
 }
 
 pub fn open_xmile(reader: &mut dyn BufRead) -> Result<Project> {

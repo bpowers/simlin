@@ -571,7 +571,7 @@ impl<'input> ConversionContext<'input> {
                     .as_ref()
                     .map(|e| self.formatter.format_expr_with_context(e, ctx))
                     .unwrap_or_default();
-                (eq_str, None, None)
+                self.try_resolve_data_equation(&eq_str)
             }
             MdlEquation::TabbedArray(_, _) | MdlEquation::NumberList(_, _) => {
                 // Per-element expansion is handled by make_array_equation at the
@@ -808,8 +808,9 @@ impl<'input> ConversionContext<'input> {
                     .as_ref()
                     .map(|e| self.formatter.format_expr(e))
                     .unwrap_or_default();
-                let (equation, compat) = self.make_equation(lhs, &eq_str);
-                (equation, compat, None)
+                let (resolved_eq, _resolved_compat, gf) = self.try_resolve_data_equation(&eq_str);
+                let (equation, compat) = self.make_equation(lhs, &resolved_eq);
+                (equation, compat, gf)
             }
             MdlEquation::TabbedArray(lhs, values) | MdlEquation::NumberList(lhs, values) => {
                 // Create an arrayed equation from the number list
@@ -818,6 +819,36 @@ impl<'input> ConversionContext<'input> {
             }
             MdlEquation::SubscriptDef(_, _) | MdlEquation::Equivalence(_, _, _) => {
                 (Equation::Scalar(String::new()), Compat::default(), None)
+            }
+        }
+    }
+
+    /// Try to resolve a GET DIRECT reference in a Data equation expression.
+    /// Returns (equation_string, initial_value, graphical_function) matching
+    /// the tuple format used by build_equation_for_element.
+    fn try_resolve_data_equation(
+        &self,
+        eq_str: &str,
+    ) -> (String, Option<String>, Option<GraphicalFunction>) {
+        use super::external_data::{ResolvedData, try_resolve_data_expr};
+
+        match try_resolve_data_expr(eq_str, self.data_provider, &self.file_aliases) {
+            Some(Ok(ResolvedData::Lookup(eq, gf))) => (eq, None, Some(gf)),
+            Some(Ok(ResolvedData::Constant(value))) => (format_number(value), None, None),
+            Some(Ok(ResolvedData::Subscript(_))) => {
+                // Subscripts are resolved during dimension building, not here
+                (eq_str.to_string(), None, None)
+            }
+            Some(Err(_)) | None => {
+                // Either not a GET DIRECT ref, or resolution failed.
+                // For implicit data variables (no expression), produce
+                // a default lookup on TIME.
+                if eq_str.is_empty() {
+                    let gf = self.make_default_lookup();
+                    ("TIME".to_string(), None, Some(gf))
+                } else {
+                    (eq_str.to_string(), None, None)
+                }
             }
         }
     }
