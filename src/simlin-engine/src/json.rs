@@ -84,6 +84,8 @@ pub struct Compat {
     pub can_be_module_input: bool,
     #[serde(skip_serializing_if = "is_false", default)]
     pub is_public: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub data_source: Option<JsonDataSource>,
 }
 
 impl Compat {
@@ -92,6 +94,7 @@ impl Compat {
             && !self.non_negative
             && !self.can_be_module_input
             && !self.is_public
+            && self.data_source.is_none()
     }
 }
 
@@ -474,6 +477,25 @@ pub struct Model {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct JsonElementMapEntry {
+    pub source: String,
+    pub target: String,
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct JsonDimensionMapping {
+    pub target: String,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub element_map: Vec<JsonElementMapEntry>,
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -483,11 +505,26 @@ pub struct Dimension {
     pub elements: Vec<String>,
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub size: i32,
-    /// Optional dimension mapping target (e.g., DimA: A1, A2, A3 -> DimB).
-    /// This establishes a positional correspondence between this dimension's
-    /// elements and the target dimension's elements.
+    /// Simple positional mapping target for backward compatibility.
+    /// Used when a dimension has a single positional mapping with no element-level entries.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub maps_to: Option<String>,
+    /// Element-level dimension mappings with explicit source->target correspondence.
+    /// Takes precedence over maps_to during deserialization.
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub mappings: Vec<JsonDimensionMapping>,
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct JsonDataSource {
+    pub kind: String,
+    pub file: String,
+    pub tab_or_delimiter: String,
+    pub row_or_col: String,
+    pub cell: String,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -684,7 +721,11 @@ impl From<Stock> for datamodel::Stock {
             } else {
                 datamodel::Visibility::Private
             },
-            ..Default::default()
+            data_source: stock
+                .compat
+                .as_ref()
+                .and_then(|c| c.data_source.clone())
+                .map(data_source_from_json),
         };
         let equation = match stock.arrayed_equation {
             Some(arrayed) => {
@@ -759,7 +800,11 @@ impl From<Flow> for datamodel::Flow {
             } else {
                 datamodel::Visibility::Private
             },
-            ..Default::default()
+            data_source: flow
+                .compat
+                .as_ref()
+                .and_then(|c| c.data_source.clone())
+                .map(data_source_from_json),
         };
         let equation = match flow.arrayed_equation {
             Some(arrayed) => {
@@ -829,7 +874,11 @@ impl From<Auxiliary> for datamodel::Aux {
             } else {
                 datamodel::Visibility::Private
             },
-            ..Default::default()
+            data_source: aux
+                .compat
+                .as_ref()
+                .and_then(|c| c.data_source.clone())
+                .map(data_source_from_json),
         };
         let equation = match aux.arrayed_equation {
             Some(arrayed) => {
@@ -914,6 +963,11 @@ impl From<Module> for datamodel::Module {
                 } else {
                     datamodel::Visibility::Private
                 },
+                data_source: module
+                    .compat
+                    .as_ref()
+                    .and_then(|c| c.data_source.clone())
+                    .map(data_source_from_json),
                 ..Default::default()
             },
         }
@@ -1139,7 +1193,21 @@ impl From<Dimension> for datamodel::Dimension {
         } else {
             datamodel::Dimension::named(dim.name, vec![])
         };
-        if let Some(target) = dim.maps_to {
+        // Prefer the richer `mappings` field; fall back to simple `maps_to`.
+        if !dim.mappings.is_empty() {
+            result.mappings = dim
+                .mappings
+                .into_iter()
+                .map(|m| datamodel::DimensionMapping {
+                    target: m.target,
+                    element_map: m
+                        .element_map
+                        .into_iter()
+                        .map(|e| (e.source, e.target))
+                        .collect(),
+                })
+                .collect();
+        } else if let Some(target) = dim.maps_to {
             result.set_maps_to(target);
         }
         result
@@ -1280,6 +1348,49 @@ impl From<datamodel::GraphicalFunction> for GraphicalFunction {
     }
 }
 
+fn data_source_to_json(ds: &datamodel::DataSource) -> JsonDataSource {
+    let kind = match ds.kind {
+        datamodel::DataSourceKind::Data => "data",
+        datamodel::DataSourceKind::Constants => "constants",
+        datamodel::DataSourceKind::Lookups => "lookups",
+        datamodel::DataSourceKind::Subscript => "subscript",
+    }
+    .to_string();
+    JsonDataSource {
+        kind,
+        file: ds.file.clone(),
+        tab_or_delimiter: ds.tab_or_delimiter.clone(),
+        row_or_col: ds.row_or_col.clone(),
+        cell: ds.cell.clone(),
+    }
+}
+
+fn data_source_from_json(ds: JsonDataSource) -> datamodel::DataSource {
+    let kind = match ds.kind.as_str() {
+        "constants" => datamodel::DataSourceKind::Constants,
+        "lookups" => datamodel::DataSourceKind::Lookups,
+        "subscript" => datamodel::DataSourceKind::Subscript,
+        _ => datamodel::DataSourceKind::Data,
+    };
+    datamodel::DataSource {
+        kind,
+        file: ds.file,
+        tab_or_delimiter: ds.tab_or_delimiter,
+        row_or_col: ds.row_or_col,
+        cell: ds.cell,
+    }
+}
+
+fn compat_to_json(compat: &datamodel::Compat) -> Compat {
+    Compat {
+        active_initial: compat.active_initial.clone(),
+        non_negative: compat.non_negative,
+        can_be_module_input: compat.can_be_module_input,
+        is_public: matches!(compat.visibility, datamodel::Visibility::Public),
+        data_source: compat.data_source.as_ref().map(data_source_to_json),
+    }
+}
+
 impl From<datamodel::Stock> for Stock {
     fn from(stock: datamodel::Stock) -> Self {
         let (initial_equation, arrayed_equation) = match stock.equation {
@@ -1320,12 +1431,7 @@ impl From<datamodel::Stock> for Stock {
             }
         };
 
-        let compat = Compat {
-            active_initial: stock.compat.active_initial,
-            non_negative: stock.compat.non_negative,
-            can_be_module_input: stock.compat.can_be_module_input,
-            is_public: matches!(stock.compat.visibility, datamodel::Visibility::Public),
-        };
+        let compat = compat_to_json(&stock.compat);
 
         Stock {
             uid: stock.uid.unwrap_or(0),
@@ -1388,12 +1494,7 @@ impl From<datamodel::Flow> for Flow {
             }
         };
 
-        let compat = Compat {
-            active_initial: flow.compat.active_initial,
-            non_negative: flow.compat.non_negative,
-            can_be_module_input: flow.compat.can_be_module_input,
-            is_public: matches!(flow.compat.visibility, datamodel::Visibility::Public),
-        };
+        let compat = compat_to_json(&flow.compat);
 
         Flow {
             uid: flow.uid.unwrap_or(0),
@@ -1455,12 +1556,7 @@ impl From<datamodel::Aux> for Auxiliary {
             }
         };
 
-        let compat = Compat {
-            active_initial: aux.compat.active_initial,
-            non_negative: aux.compat.non_negative,
-            can_be_module_input: aux.compat.can_be_module_input,
-            is_public: matches!(aux.compat.visibility, datamodel::Visibility::Public),
-        };
+        let compat = compat_to_json(&aux.compat);
 
         Auxiliary {
             uid: aux.uid.unwrap_or(0),
@@ -1492,11 +1588,7 @@ impl From<datamodel::ModuleReference> for ModuleReference {
 
 impl From<datamodel::Module> for Module {
     fn from(module: datamodel::Module) -> Self {
-        let compat = Compat {
-            can_be_module_input: module.compat.can_be_module_input,
-            is_public: matches!(module.compat.visibility, datamodel::Visibility::Public),
-            ..Default::default()
-        };
+        let compat = compat_to_json(&module.compat);
         Module {
             uid: module.uid.unwrap_or(0),
             name: module.ident,
@@ -1710,19 +1802,39 @@ impl From<datamodel::Model> for Model {
 
 impl From<datamodel::Dimension> for Dimension {
     fn from(dim: datamodel::Dimension) -> Self {
+        // Simple positional mapping (single target, empty element_map) uses maps_to
+        // for backward compatibility. Element-level mappings use the mappings array.
         let maps_to = dim.maps_to().map(|s| s.to_owned());
+        let mappings: Vec<JsonDimensionMapping> = dim
+            .mappings
+            .iter()
+            .filter(|m| !m.element_map.is_empty())
+            .map(|m| JsonDimensionMapping {
+                target: m.target.clone(),
+                element_map: m
+                    .element_map
+                    .iter()
+                    .map(|(src, tgt)| JsonElementMapEntry {
+                        source: src.clone(),
+                        target: tgt.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
         match dim.elements {
             datamodel::DimensionElements::Named(elements) => Dimension {
                 name: dim.name,
                 elements,
                 size: 0,
                 maps_to,
+                mappings,
             },
             datamodel::DimensionElements::Indexed(size) => Dimension {
                 name: dim.name,
                 elements: vec![],
                 size: size as i32,
                 maps_to,
+                mappings,
             },
         }
     }
@@ -2636,6 +2748,7 @@ mod tests {
                 elements: vec!["Boston".to_string(), "NYC".to_string()],
                 size: 0,
                 maps_to: None,
+                mappings: vec![],
             }],
             units: vec![Unit {
                 name: "people".to_string(),
@@ -2677,6 +2790,7 @@ mod tests {
                     elements: vec!["Boston".to_string(), "NYC".to_string()],
                     size: 0,
                     maps_to: None,
+                    mappings: vec![],
                 },
             ),
             (
@@ -2686,6 +2800,7 @@ mod tests {
                     elements: vec![],
                     size: 10,
                     maps_to: None,
+                    mappings: vec![],
                 },
             ),
             (
@@ -2695,6 +2810,7 @@ mod tests {
                     elements: vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
                     size: 0,
                     maps_to: Some("DimB".to_string()),
+                    mappings: vec![],
                 },
             ),
         ];
@@ -2756,6 +2872,7 @@ mod tests {
             elements: vec!["North".to_string(), "South".to_string()],
             size: 0,
             maps_to: None,
+            mappings: vec![],
         };
 
         let serialized = serde_json::to_string(&dim).unwrap();
@@ -3429,5 +3546,162 @@ mod tests {
             dm_aux.compat.can_be_module_input,
             "aux: legacy can_be_module_input lost"
         );
+    }
+
+    #[test]
+    fn test_arrayed_equation_with_default_equation_roundtrip() {
+        let json_aux = Auxiliary {
+            uid: 0,
+            name: "cost".to_string(),
+            equation: String::new(),
+            units: "dollars".to_string(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: Some("base_cost".to_string()),
+                compat: None,
+                elements: Some(vec![ElementEquation {
+                    subscript: "north".to_string(),
+                    equation: "base_cost * 1.1".to_string(),
+                    compat: None,
+                    graphical_function: None,
+                }]),
+            }),
+            compat: None,
+            can_be_module_input: false,
+            is_public: false,
+        };
+
+        let json_str = serde_json::to_string(&json_aux).unwrap();
+        let json_aux2: Auxiliary = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_aux, json_aux2);
+
+        let dm_aux: datamodel::Aux = json_aux.into();
+        match &dm_aux.equation {
+            datamodel::Equation::Arrayed(dims, elements, default_eq) => {
+                assert_eq!(dims, &["Region"]);
+                assert_eq!(elements.len(), 1);
+                assert_eq!(elements[0].0, "north");
+                assert_eq!(default_eq, &Some("base_cost".to_string()));
+            }
+            other => panic!("expected Arrayed, got {:?}", other),
+        }
+
+        let json_aux3: Auxiliary = dm_aux.into();
+        let json_str2 = serde_json::to_string(&json_aux3).unwrap();
+        let json_aux4: Auxiliary = serde_json::from_str(&json_str2).unwrap();
+        assert_eq!(json_aux3, json_aux4);
+    }
+
+    #[test]
+    fn test_dimension_with_element_level_mapping_roundtrip() {
+        let json_dim = Dimension {
+            name: "DimA".to_string(),
+            elements: vec!["A1".to_string(), "A2".to_string()],
+            size: 0,
+            maps_to: None,
+            mappings: vec![JsonDimensionMapping {
+                target: "DimB".to_string(),
+                element_map: vec![
+                    JsonElementMapEntry {
+                        source: "A1".to_string(),
+                        target: "B2".to_string(),
+                    },
+                    JsonElementMapEntry {
+                        source: "A2".to_string(),
+                        target: "B1".to_string(),
+                    },
+                ],
+            }],
+        };
+
+        let json_str = serde_json::to_string(&json_dim).unwrap();
+        let json_dim2: Dimension = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_dim, json_dim2);
+
+        let dm_dim: datamodel::Dimension = json_dim.into();
+        assert_eq!(dm_dim.mappings.len(), 1);
+        assert_eq!(dm_dim.mappings[0].target, "DimB");
+        assert_eq!(dm_dim.mappings[0].element_map.len(), 2);
+        assert_eq!(
+            dm_dim.mappings[0].element_map[0],
+            ("A1".to_string(), "B2".to_string())
+        );
+
+        let json_dim3: Dimension = dm_dim.into();
+        let json_str2 = serde_json::to_string(&json_dim3).unwrap();
+        let json_dim4: Dimension = serde_json::from_str(&json_str2).unwrap();
+        assert_eq!(json_dim3, json_dim4);
+    }
+
+    #[test]
+    fn test_dimension_simple_maps_to_backward_compat() {
+        let json_dim = Dimension {
+            name: "DimA".to_string(),
+            elements: vec!["A1".to_string(), "A2".to_string()],
+            size: 0,
+            maps_to: Some("DimB".to_string()),
+            mappings: vec![],
+        };
+
+        let json_str = serde_json::to_string(&json_dim).unwrap();
+        let json_dim2: Dimension = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_dim, json_dim2);
+
+        let dm_dim: datamodel::Dimension = json_dim.into();
+        assert_eq!(dm_dim.maps_to(), Some("DimB"));
+        assert_eq!(dm_dim.mappings.len(), 1);
+        assert!(dm_dim.mappings[0].element_map.is_empty());
+
+        let json_dim3: Dimension = dm_dim.into();
+        assert_eq!(json_dim3.maps_to, Some("DimB".to_string()));
+        assert!(json_dim3.mappings.is_empty());
+    }
+
+    #[test]
+    fn test_data_source_roundtrip_through_compat() {
+        let json_aux = Auxiliary {
+            uid: 0,
+            name: "ext_data".to_string(),
+            equation: "0".to_string(),
+            units: String::new(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: None,
+            compat: Some(Compat {
+                data_source: Some(JsonDataSource {
+                    kind: "data".to_string(),
+                    file: "input.xlsx".to_string(),
+                    tab_or_delimiter: "Sheet1".to_string(),
+                    row_or_col: "B".to_string(),
+                    cell: "B2".to_string(),
+                }),
+                ..Default::default()
+            }),
+            can_be_module_input: false,
+            is_public: false,
+        };
+
+        let json_str = serde_json::to_string(&json_aux).unwrap();
+        let json_aux2: Auxiliary = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_aux, json_aux2);
+
+        let dm_aux: datamodel::Aux = json_aux.into();
+        let ds = dm_aux.compat.data_source.as_ref().unwrap();
+        assert_eq!(ds.kind, datamodel::DataSourceKind::Data);
+        assert_eq!(ds.file, "input.xlsx");
+        assert_eq!(ds.tab_or_delimiter, "Sheet1");
+
+        let json_aux3: Auxiliary = dm_aux.into();
+        let ds3 = json_aux3
+            .compat
+            .as_ref()
+            .unwrap()
+            .data_source
+            .as_ref()
+            .unwrap();
+        assert_eq!(ds3.kind, "data");
+        assert_eq!(ds3.file, "input.xlsx");
     }
 }
