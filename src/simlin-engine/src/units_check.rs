@@ -378,7 +378,7 @@ pub fn check(
 
         // Check that all elements of arrayed expressions have consistent units,
         // even when the array variable has no declared units
-        if let Some(Ast::Arrayed(_, asts)) = var.ast() {
+        if let Some(Ast::Arrayed(_, asts, default_expr)) = var.ast() {
             let mut first_units: Option<UnitMap> = None;
             for (element, expr) in asts.iter() {
                 match units.check(expr) {
@@ -410,6 +410,34 @@ pub fn check(
                         // that doesn't have inferred units yet), skip the consistency check.
                         // Other error types are propagated as actual errors.
                     }
+                    Err(err) => {
+                        errors.push((ident.clone(), err));
+                    }
+                }
+            }
+
+            if let Some(default_expr) = default_expr {
+                match units.check(default_expr) {
+                    Ok(Units::Explicit(default_units)) => {
+                        if let Some(ref existing) = first_units
+                            && *existing != default_units
+                        {
+                            let loc = default_expr.get_loc();
+                            errors.push((
+                                ident.clone(),
+                                ConsistencyError(
+                                    ErrorCode::UnitMismatch,
+                                    Loc::new(loc.start.into(), loc.end.into()),
+                                    Some(format!(
+                                        "array default expression has units '{}' but element(s) have units '{}'",
+                                        default_units, existing
+                                    )),
+                                ),
+                            ));
+                        }
+                    }
+                    Ok(Units::Constant) => {}
+                    Err(ConsistencyError(ErrorCode::DoesNotExist, _, _)) => {}
                     Err(err) => {
                         errors.push((ident.clone(), err));
                     }
@@ -506,7 +534,7 @@ pub fn check(
                             errors.push((ident.clone(), err));
                         }
                     },
-                    Ast::Arrayed(_, asts) => {
+                    Ast::Arrayed(_, asts, default_expr) => {
                         // Check each element expression in the arrayed variable
                         for (_element, expr) in asts.iter() {
                             match units.check(expr) {
@@ -530,6 +558,31 @@ pub fn check(
                                 Ok(Units::Constant) => {
                                     // definitionally we're fine
                                 }
+                                Err(err) => {
+                                    errors.push((ident.clone(), err));
+                                }
+                            }
+                        }
+                        if let Some(default_expr) = default_expr {
+                            match units.check(default_expr) {
+                                Ok(Units::Explicit(actual)) => {
+                                    if actual != *expected {
+                                        let details = format!(
+                                            "computed units '{}' don't match specified units",
+                                            &actual,
+                                        );
+                                        let loc = default_expr.get_loc();
+                                        errors.push((
+                                            ident.clone(),
+                                            ConsistencyError(
+                                                ErrorCode::UnitMismatch,
+                                                Loc::new(loc.start.into(), loc.end.into()),
+                                                Some(details),
+                                            ),
+                                        ))
+                                    }
+                                }
+                                Ok(Units::Constant) => {}
                                 Err(err) => {
                                     errors.push((ident.clone(), err));
                                 }

@@ -166,11 +166,11 @@ impl<MI, E> Variable<MI, E> {
     pub fn get_dimensions(&self) -> Option<&[Dimension]> {
         match self {
             Variable::Stock {
-                init_ast: Some(Ast::Arrayed(dims, _)),
+                init_ast: Some(Ast::Arrayed(dims, _, _)),
                 ..
             }
             | Variable::Var {
-                ast: Some(Ast::Arrayed(dims, _)),
+                ast: Some(Ast::Arrayed(dims, _, _)),
                 ..
             } => Some(dims),
             Variable::Stock {
@@ -388,13 +388,9 @@ fn parse_equation(
                 }
             }
         }
-        // The default_equation (from EXCEPT semantics) is not used here because
-        // the MDL converter fully expands all elements at conversion time, applying
-        // the default to non-EXCEPT elements. Elements left undefined (e.g. the
-        // excepted elements when no separate equation exists) default to 0 in the
-        // compiler. See GitHub issue #353 for tracking the future improvement of
-        // carrying the default expression through the Ast type.
-        datamodel::Equation::Arrayed(dimension_names, elements, _default_eq) => {
+        // Preserve the default equation (EXCEPT semantics) so sparse array
+        // definitions can apply it to omitted elements during lowering.
+        datamodel::Equation::Arrayed(dimension_names, elements, default_eq) => {
             let mut errors: Vec<EquationError> = vec![];
             let elements: HashMap<_, _> = elements
                 .iter()
@@ -410,9 +406,14 @@ fn parse_equation(
                 .filter(|(_, ast)| ast.is_some())
                 .map(|(subscript, ast)| (subscript, ast.unwrap()))
                 .collect();
+            let default_expr = default_eq.as_ref().and_then(|eqn| {
+                let (ast, default_errors) = parse_inner(eqn);
+                errors.extend(default_errors);
+                ast
+            });
 
             match get_dimensions(dimensions, dimension_names) {
-                Ok(dims) => (Some(Ast::Arrayed(dims, elements)), errors),
+                Ok(dims) => (Some(Ast::Arrayed(dims, elements, default_expr)), errors),
                 Err(err) => {
                     errors.push(err);
                     (None, errors)
@@ -720,9 +721,12 @@ pub fn identifier_set(
     match ast {
         Ast::Scalar(ast) => id_visitor.walk(ast),
         Ast::ApplyToAll(_, ast) => id_visitor.walk(ast),
-        Ast::Arrayed(_, elements) => {
+        Ast::Arrayed(_, elements, default_expr) => {
             for ast in elements.values() {
                 id_visitor.walk(ast);
+            }
+            if let Some(default_expr) = default_expr {
+                id_visitor.walk(default_expr);
             }
         }
     };
@@ -792,6 +796,30 @@ fn test_identifier_sets() {
         }
         assert_eq!(id_set_expected, id_set_test);
     }
+}
+
+#[test]
+fn test_parse_equation_arrayed_preserves_default_expression() {
+    let dimensions = vec![datamodel::Dimension::named(
+        "dim".to_string(),
+        vec!["a".to_string(), "b".to_string()],
+    )];
+    let equation = datamodel::Equation::Arrayed(
+        vec!["dim".to_string()],
+        vec![("a".to_string(), "1".to_string(), None, None)],
+        Some("2 + 3".to_string()),
+    );
+
+    let (ast, errors) = parse_equation(&equation, &dimensions, false, None);
+    assert!(errors.is_empty(), "arrayed parse should not emit errors");
+
+    let Some(Ast::Arrayed(_, _, default_expr)) = ast else {
+        panic!("expected arrayed AST");
+    };
+    assert!(
+        default_expr.is_some(),
+        "arrayed default equation should be preserved in AST lowering"
+    );
 }
 
 #[test]

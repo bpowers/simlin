@@ -31,7 +31,11 @@ pub use expr3::{Expr3, Expr3LowerContext, IndexExpr3, Pass1Context};
 pub enum Ast<Expr> {
     Scalar(Expr),
     ApplyToAll(Vec<Dimension>, Expr),
-    Arrayed(Vec<Dimension>, HashMap<CanonicalElementName, Expr>),
+    Arrayed(
+        Vec<Dimension>,
+        HashMap<CanonicalElementName, Expr>,
+        Option<Expr>,
+    ),
 }
 
 impl Ast<Expr2> {
@@ -39,11 +43,14 @@ impl Ast<Expr2> {
         match self {
             Ast::Scalar(expr) => expr.get_var_loc(ident),
             Ast::ApplyToAll(_, expr) => expr.get_var_loc(ident),
-            Ast::Arrayed(_, subscripts) => {
+            Ast::Arrayed(_, subscripts, default_expr) => {
                 for (_, expr) in subscripts.iter() {
                     if let Some(loc) = expr.get_var_loc(ident) {
                         return Some(loc);
                     }
+                }
+                if let Some(expr) = default_expr {
+                    return expr.get_var_loc(ident);
                 }
                 None
             }
@@ -54,7 +61,7 @@ impl Ast<Expr2> {
         match self {
             Ast::Scalar(expr) => latex_eqn(expr),
             Ast::ApplyToAll(_, _expr) => "TODO(array)".to_owned(),
-            Ast::Arrayed(_, _) => "TODO(array)".to_owned(),
+            Ast::Arrayed(_, _, _) => "TODO(array)".to_owned(),
         }
     }
 }
@@ -189,7 +196,7 @@ pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<
                 .and_then(|expr| Expr2::from(expr, &mut ctx))
                 .map(|expr| Ast::ApplyToAll(dims, expr))
         }
-        Ast::Arrayed(dims, elements) => {
+        Ast::Arrayed(dims, elements, default_expr) => {
             let mut ctx = ArrayContext::with_array_context(scope, scope.model_name);
             let elements: EquationResult<HashMap<CanonicalElementName, Expr2>> = elements
                 .into_iter()
@@ -203,8 +210,16 @@ pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<
                     }
                 })
                 .collect();
+            let default_expr = match default_expr {
+                Some(expr) => Some(
+                    Expr1::from(expr)
+                        .map(|expr| expr.constify_dimensions(scope))
+                        .and_then(|expr| Expr2::from(expr, &mut ctx))?,
+                ),
+                None => None,
+            };
             match elements {
-                Ok(elements) => Ok(Ast::Arrayed(dims, elements)),
+                Ok(elements) => Ok(Ast::Arrayed(dims, elements, default_expr)),
                 Err(err) => Err(err),
             }
         }

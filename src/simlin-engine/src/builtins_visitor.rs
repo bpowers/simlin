@@ -475,7 +475,7 @@ pub fn instantiate_implicit_modules(
                     all_vars.extend(visitor.vars.values().cloned());
                 }
 
-                Ok((Ast::Arrayed(dimensions, elements), all_vars))
+                Ok((Ast::Arrayed(dimensions, elements, None), all_vars))
             } else {
                 // No stdlib calls - original behavior
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name);
@@ -484,8 +484,9 @@ pub fn instantiate_implicit_modules(
                 Ok((Ast::ApplyToAll(dimensions, transformed), vars))
             }
         }
-        Ast::Arrayed(dimensions, elements) => {
-            let any_stdlib = elements.values().any(contains_stdlib_call);
+        Ast::Arrayed(dimensions, elements, default_expr) => {
+            let any_stdlib = elements.values().any(contains_stdlib_call)
+                || default_expr.as_ref().is_some_and(contains_stdlib_call);
             if any_stdlib && !dimensions.is_empty() {
                 let mut all_vars = Vec::new();
                 let mut new_elements = HashMap::new();
@@ -505,7 +506,18 @@ pub fn instantiate_implicit_modules(
                     new_elements.insert(subscript_key, transformed);
                     all_vars.extend(visitor.vars.values().cloned());
                 }
-                Ok((Ast::Arrayed(dimensions, new_elements), all_vars))
+                let transformed_default = if let Some(default_expr) = default_expr {
+                    let mut default_visitor = BuiltinVisitor::new(variable_name);
+                    let transformed = default_visitor.walk(default_expr)?;
+                    all_vars.extend(default_visitor.vars.values().cloned());
+                    Some(transformed)
+                } else {
+                    None
+                };
+                Ok((
+                    Ast::Arrayed(dimensions, new_elements, transformed_default),
+                    all_vars,
+                ))
             } else {
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name);
                 let elements: std::result::Result<HashMap<_, _>, EquationError> = elements
@@ -514,8 +526,16 @@ pub fn instantiate_implicit_modules(
                         builtin_visitor.walk(equation).map(|ast| (subscript, ast))
                     })
                     .collect();
+                let transformed_default = if let Some(default_expr) = default_expr {
+                    Some(builtin_visitor.walk(default_expr)?)
+                } else {
+                    None
+                };
                 let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
-                Ok((Ast::Arrayed(dimensions, elements?), vars))
+                Ok((
+                    Ast::Arrayed(dimensions, elements?, transformed_default),
+                    vars,
+                ))
             }
         }
     }

@@ -2263,7 +2263,8 @@ pub fn calc_flattened_offsets(
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
             dims.iter().map(|dim| dim.len()).product()
-        } else if let Some(Ast::Arrayed(dims, _)) = &model.variables[&*canonicalize(ident)].ast() {
+        } else if let Some(Ast::Arrayed(dims, _, _)) = &model.variables[&*canonicalize(ident)].ast()
+        {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
                 let ident_canonical = Ident::new(ident);
@@ -2922,9 +2923,8 @@ mod compile_project_tests {
 
     #[test]
     fn sparse_arrayed_equation_defaults_missing_elements_to_zero() {
-        // Sparse arrayed equations (not all elements present) default
-        // missing elements to 0.0, matching Vensim semantics for EXCEPT
-        // clauses and partial subscript definitions.
+        // EXCEPT-style sparse arrays (where omitted elements are intentionally
+        // excluded) should keep omitted elements at 0.
         let tp = TestProject::new("sparse_arrayed")
             .with_sim_time(0.0, 1.0, 1.0)
             .named_dimension("DimA", &["A1", "A2", "A3"]);
@@ -2955,6 +2955,42 @@ mod compile_project_tests {
         assert!((step0[results.offsets[&Ident::new("h[a1]")]] - 8.0).abs() < 1e-10);
         assert!((step0[results.offsets[&Ident::new("h[a2]")]] - 0.0).abs() < 1e-10);
         assert!((step0[results.offsets[&Ident::new("h[a3]")]] - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn sparse_arrayed_equation_applies_default_for_override_only_arrays() {
+        // Sparse arrays with explicit overrides and a default equation should
+        // apply that default to unspecified elements.
+        let tp = TestProject::new("sparse_arrayed_default")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("DimA", &["A1", "A2", "A3"]);
+
+        let mut datamodel = tp.build_datamodel();
+        datamodel.models[0]
+            .variables
+            .push(crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+                ident: "h".to_string(),
+                equation: crate::datamodel::Equation::Arrayed(
+                    vec!["DimA".to_string()],
+                    vec![("A1".to_string(), "10".to_string(), None, None)],
+                    Some("7".to_string()),
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: crate::datamodel::Compat::default(),
+            }));
+
+        let project = Arc::new(crate::project::Project::from(datamodel));
+        let sim = super::Simulation::new(&project, "main").expect("sparse arrayed should compile");
+        let results = sim.run_to_end().expect("should simulate");
+
+        let step0 = results.iter().next().unwrap();
+        assert!((step0[results.offsets[&Ident::new("h[a1]")]] - 10.0).abs() < 1e-10);
+        assert!((step0[results.offsets[&Ident::new("h[a2]")]] - 7.0).abs() < 1e-10);
+        assert!((step0[results.offsets[&Ident::new("h[a3]")]] - 7.0).abs() < 1e-10);
     }
 
     #[test]

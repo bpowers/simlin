@@ -444,12 +444,18 @@ fn apply_ast_to_equation_main(equation: &mut datamodel::Equation, ast: &Ast<Expr
         (datamodel::Equation::ApplyToAll(_, main), Ast::ApplyToAll(_, expr)) => {
             *main = expr2_to_string(expr);
         }
-        (datamodel::Equation::Arrayed(_, elements, _), Ast::Arrayed(_, exprs)) => {
+        (
+            datamodel::Equation::Arrayed(_, elements, default_eq),
+            Ast::Arrayed(_, exprs, default_expr),
+        ) => {
             for (element_name, equation, _, _) in elements.iter_mut() {
                 let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
                 if let Some(expr) = exprs.get(&canonical_element) {
                     *equation = expr2_to_string(expr);
                 }
+            }
+            if let Some(default_expr) = default_expr {
+                *default_eq = Some(expr2_to_string(default_expr));
             }
         }
         _ => {}
@@ -464,7 +470,7 @@ fn apply_ast_to_equation_initial(equation: &mut datamodel::Equation, ast: &Ast<E
         (datamodel::Equation::ApplyToAll(_, _), Ast::ApplyToAll(_, _)) => {
             // active_initial now lives in Compat, not in Equation
         }
-        (datamodel::Equation::Arrayed(_, elements, _), Ast::Arrayed(_, exprs)) => {
+        (datamodel::Equation::Arrayed(_, elements, _), Ast::Arrayed(_, exprs, _)) => {
             for (element_name, _, initial, _) in elements.iter_mut() {
                 if let Some(initial_value) = initial.as_mut() {
                     let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
@@ -492,7 +498,7 @@ fn rewrite_compat_active_initial(
             Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
                 compat.active_initial = Some(expr2_to_string(expr));
             }
-            Ast::Arrayed(_, _) => {}
+            Ast::Arrayed(_, _, _) => {}
         }
     }
 }
@@ -507,12 +513,15 @@ fn rename_ast(
         Ast::ApplyToAll(dims, expr) => {
             Ast::ApplyToAll(dims.clone(), rename_expr(expr, old_ident, new_ident))
         }
-        Ast::Arrayed(dims, elements) => {
+        Ast::Arrayed(dims, elements, default_expr) => {
             let rewritten = elements
                 .iter()
                 .map(|(name, expr)| (name.clone(), rename_expr(expr, old_ident, new_ident)))
                 .collect();
-            Ast::Arrayed(dims.clone(), rewritten)
+            let rewritten_default = default_expr
+                .as_ref()
+                .map(|expr| rename_expr(expr, old_ident, new_ident));
+            Ast::Arrayed(dims.clone(), rewritten, rewritten_default)
         }
     }
 }
