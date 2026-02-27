@@ -998,8 +998,20 @@ impl Context<'_> {
                                         .dimensions_ctx
                                         .has_mapping_to(&active_name, &id_dim_name)
                                 {
-                                    // Positional mapping: the index in the mapped dimension
-                                    // equals the index in the active dimension
+                                    // Translate through mapping to find the position in the
+                                    // referenced dimension, not the active dimension. This
+                                    // matters for reordered element-level mappings.
+                                    if let Some(translated) =
+                                        self.dimensions_ctx.translate_via_mapping(
+                                            &id_dim_name,
+                                            &active_name,
+                                            subscript,
+                                        )
+                                        && let Some(id_dim) = self.dimensions_ctx.get(&id_dim_name)
+                                    {
+                                        let index = Self::subscript_to_index(id_dim, &translated);
+                                        return Ok(Expr::Const(index, *loc));
+                                    }
                                     let index = Self::subscript_to_index(dim, subscript);
                                     return Ok(Expr::Const(index, *loc));
                                 }
@@ -1440,10 +1452,14 @@ impl Context<'_> {
                                             target_dim_name,
                                         )
                                     {
-                                        // Source maps to a parent of target -- try translating
-                                        // through the parent dimension.
+                                        // Source maps to a parent of target -- find the specific
+                                        // parent (not just the first mapping target) and translate
+                                        // through it.
                                         let parent_target =
-                                            self.dimensions_ctx.get_maps_to(source_dim_name);
+                                            self.dimensions_ctx.find_mapping_parent_of(
+                                                source_dim_name,
+                                                target_dim_name,
+                                            );
                                         if let Some(parent) = parent_target
                                             && let Some(translated) =
                                                 self.dimensions_ctx.translate_to_source_via_mapping(

@@ -23,11 +23,26 @@ impl FilesystemDataProvider {
     }
 
     pub(crate) fn resolve_path(&self, file: &str) -> Result<PathBuf> {
+        // Syntactic pre-check: reject absolute paths and directory traversal
+        // before filesystem resolution. This catches cases where the target
+        // doesn't exist (so canonicalize would fail with ENOENT rather than
+        // our specific error message).
+        let file_path = std::path::Path::new(file);
+        if file_path.is_absolute()
+            || file_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                Some(format!("data file '{}' escapes base directory", file)),
+            ));
+        }
         let path = self.base_dir.join(file);
-        // Normalize the path to resolve ../ components, then verify the
-        // result stays within base_dir. This prevents model files from
-        // referencing arbitrary files on the filesystem via absolute paths
-        // or directory traversal.
+        // Canonicalize to resolve symlinks, then verify the result stays
+        // within base_dir. The syntactic check above catches ../ but
+        // symlinks could still escape.
         let canonical_base = self.base_dir.canonicalize().map_err(|e| {
             Error::new(
                 ErrorKind::Import,

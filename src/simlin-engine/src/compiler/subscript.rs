@@ -270,27 +270,20 @@ pub(crate) fn normalize_subscripts3(
                     .iter()
                     .position(|ad| &*canonicalize(ad.name()) == name.as_str())
                     .or_else(|| {
-                        // Try dimension mapping: name.maps_to == active_dim
-                        // or active_dim.maps_to == name
+                        // Try dimension mapping in both directions (handles
+                        // multi-target dimensions correctly).
                         let dim_name =
                             crate::common::CanonicalDimensionName::from_raw(name.as_str());
-                        let source_maps_to = config.dimensions_ctx.get_maps_to(&dim_name);
                         active_dims.iter().position(|ad| {
                             let active_canonical = crate::common::CanonicalDimensionName::from_raw(
                                 &canonicalize(ad.name()),
                             );
-                            // Forward: subscript dim maps to active dim
-                            if source_maps_to == Some(&active_canonical) {
-                                return true;
-                            }
-                            // Reverse: active dim maps to subscript dim
-                            if let Some(active_maps_to) =
-                                config.dimensions_ctx.get_maps_to(&active_canonical)
-                                && active_maps_to == &dim_name
-                            {
-                                return true;
-                            }
-                            false
+                            config
+                                .dimensions_ctx
+                                .has_mapping_to(&dim_name, &active_canonical)
+                                || config
+                                    .dimensions_ctx
+                                    .has_mapping_to(&active_canonical, &dim_name)
                         })
                     })?;
                 IndexOp::ActiveDimRef(active_idx)
