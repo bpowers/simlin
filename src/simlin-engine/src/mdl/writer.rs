@@ -938,103 +938,51 @@ fn write_single_entry(
 
 /// Write arrayed (per-element) entries.
 ///
-/// When `default_equation` is `Some` (from EXCEPT syntax), emit the EXCEPT
-/// form so that re-importing the MDL preserves the default semantics for
-/// elements not explicitly listed. Exception elements (those whose equation
-/// differs from the default) are written individually after the default line.
+/// `default_equation` records EXCEPT metadata, but the datamodel may omit
+/// excepted elements entirely. Without full dimension membership information at
+/// this callsite, emitting `name[Dim...]=default` can incorrectly apply the
+/// default to omitted EXCEPT members. To preserve behavior, always emit explicit
+/// element entries and leave omitted elements implicit.
 fn write_arrayed_entries(
     buf: &mut String,
     ident: &str,
-    dims: &[String],
+    _dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
-    default_equation: &Option<String>,
+    _default_equation: &Option<String>,
     units: &Option<String>,
     doc: &str,
 ) {
     let name = format_mdl_ident(ident);
+    write_arrayed_element_entries(buf, &name, elements, units, doc);
+}
 
-    if let Some(default_eq) = default_equation {
-        // Separate exception elements (equation differs from default)
-        // from default elements (equation matches default).
-        let exceptions: Vec<_> = elements
-            .iter()
-            .filter(|(_, eqn, _, _)| eqn != default_eq)
-            .collect();
+fn write_arrayed_element_entries(
+    buf: &mut String,
+    name: &str,
+    elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    units: &Option<String>,
+    doc: &str,
+) {
+    let last_idx = elements.len().saturating_sub(1);
+    for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
+        let elem_display = format_mdl_element_key(elem_name);
+        let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
 
-        // Emit the default line with :EXCEPT: listing exception subscripts
-        let dim_strs: Vec<String> = dims.iter().map(|d| format_mdl_ident(d)).collect();
-        write!(buf, "{name}[{}]", dim_strs.join(",")).unwrap();
-        if !exceptions.is_empty() {
-            buf.push_str(" :EXCEPT: ");
-            for (i, (elem_name, _, _, _)) in exceptions.iter().enumerate() {
-                if i > 0 {
-                    buf.push_str(", ");
-                }
-                let elem_display = format_mdl_element_key(elem_name);
-                write!(buf, "[{elem_display}]").unwrap();
-            }
+        write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
+
+        if let Some(gf) = elem_gf {
+            buf.push_str("\n\t");
+            write_lookup(buf, gf);
+        } else {
+            let mdl_eqn = equation_to_mdl(eqn);
+            buf.push_str("\n\t");
+            buf.push_str(&mdl_eqn);
         }
-        let assign_op = if is_data_equation(default_eq) {
-            ":="
-        } else {
-            "="
-        };
-        write!(buf, "{assign_op}").unwrap();
-        let mdl_eqn = equation_to_mdl(default_eq);
-        buf.push_str("\n\t");
-        buf.push_str(&mdl_eqn);
 
-        if exceptions.is_empty() {
-            write_units_and_comment(buf, units, doc);
-        } else {
+        if i < last_idx {
             buf.push_str("\n\t~~|\n");
-
-            // Emit each exception element
-            let last_exc = exceptions.len().saturating_sub(1);
-            for (i, (elem_name, eqn, _comment, elem_gf)) in exceptions.iter().enumerate() {
-                let elem_display = format_mdl_element_key(elem_name);
-                let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-                write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-
-                if let Some(gf) = elem_gf {
-                    buf.push_str("\n\t");
-                    write_lookup(buf, gf);
-                } else {
-                    let mdl_eqn = equation_to_mdl(eqn);
-                    buf.push_str("\n\t");
-                    buf.push_str(&mdl_eqn);
-                }
-
-                if i < last_exc {
-                    buf.push_str("\n\t~~|\n");
-                } else {
-                    write_units_and_comment(buf, units, doc);
-                }
-            }
-        }
-    } else {
-        // No default equation: write each element individually.
-        let last_idx = elements.len().saturating_sub(1);
-        for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
-            let elem_display = format_mdl_element_key(elem_name);
-            let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-
-            write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-
-            if let Some(gf) = elem_gf {
-                buf.push_str("\n\t");
-                write_lookup(buf, gf);
-            } else {
-                let mdl_eqn = equation_to_mdl(eqn);
-                buf.push_str("\n\t");
-                buf.push_str(&mdl_eqn);
-            }
-
-            if i < last_idx {
-                buf.push_str("\n\t~~|\n");
-            } else {
-                write_units_and_comment(buf, units, doc);
-            }
+        } else {
+            write_units_and_comment(buf, units, doc);
         }
     }
 }
@@ -4225,7 +4173,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
     }
 
     #[test]
-    fn write_arrayed_except_emits_except_syntax() {
+    fn write_arrayed_with_default_equation_writes_explicit_elements() {
         let mut buf = String::new();
         write_arrayed_entries(
             &mut buf,
@@ -4241,16 +4189,20 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
             "",
         );
         assert!(
-            buf.contains(":EXCEPT:"),
-            "should emit EXCEPT syntax when default_equation is Some, got: {buf}"
+            !buf.contains("g[DimA]"),
+            "dimension-level default must not be emitted, got: {buf}"
         );
         assert!(
-            buf.contains("[A1]"),
-            "exception element A1 should be listed in EXCEPT clause, got: {buf}"
+            !buf.contains(":EXCEPT:"),
+            "EXCEPT syntax should not be emitted"
         );
         assert!(
-            !buf.contains("[A2]") || buf.contains("g[A2]"),
-            "non-exception elements should not appear in EXCEPT list"
+            buf.contains("g[A1]"),
+            "A1 entry should be written explicitly, got: {buf}"
+        );
+        assert!(
+            buf.contains("g[A2]") && buf.contains("g[A3]"),
+            "all explicit array elements should be written, got: {buf}"
         );
     }
 
@@ -4292,14 +4244,38 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
             &None,
             "",
         );
-        // All elements match the default, so no EXCEPT exceptions needed
         assert!(
-            buf.contains("k[DimA]"),
-            "should emit dimension-level default, got: {buf}"
+            !buf.contains("k[DimA]"),
+            "dimension-level default must not be emitted, got: {buf}"
+        );
+        assert!(buf.contains("k[A1]"), "should write A1 element, got: {buf}");
+        assert!(buf.contains("k[A2]"), "should write A2 element, got: {buf}");
+        assert!(
+            !buf.contains(":EXCEPT:"),
+            "EXCEPT syntax should not be emitted, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_arrayed_except_with_omitted_elements_avoids_dimension_default() {
+        let mut buf = String::new();
+        write_arrayed_entries(
+            &mut buf,
+            "h",
+            &["DimA".to_string()],
+            &[("A1".to_string(), "8".to_string(), None, None)],
+            &Some("8".to_string()),
+            &None,
+            "",
+        );
+
+        assert!(
+            !buf.contains("h[DimA]"),
+            "dimension-level default would apply to omitted EXCEPT elements, got: {buf}"
         );
         assert!(
-            !buf.contains(":EXCEPT:") || buf.contains(":EXCEPT: ="),
-            "no exceptions means EXCEPT clause should be empty or absent, got: {buf}"
+            buf.contains("h[A1]"),
+            "explicitly present elements must still be emitted, got: {buf}"
         );
     }
 }

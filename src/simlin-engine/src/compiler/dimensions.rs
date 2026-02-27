@@ -59,11 +59,12 @@ pub(super) fn match_dimensions_with_mapping(
                 break;
             }
 
-            // source.maps_to == target.maps_to (both map to the same dimension)
-            if let (Some(s_mt), Some(t_mt)) = (
-                dims_ctx.get_maps_to(source_dim.canonical_name()),
-                dims_ctx.get_maps_to(target.canonical_name()),
-            ) && s_mt == t_mt
+            // source and target both map to at least one common dimension.
+            let source_targets = dims_ctx.get_all_mapping_targets(source_dim.canonical_name());
+            let target_targets = dims_ctx.get_all_mapping_targets(target.canonical_name());
+            if source_targets
+                .iter()
+                .any(|source_target| target_targets.contains(source_target))
             {
                 target_used[target_idx] = true;
                 source_to_target[source_idx] = Some(target_idx);
@@ -886,6 +887,66 @@ mod tests {
             result,
             vec![Some(0)],
             "DimB should match DimA via reverse maps_to"
+        );
+    }
+
+    #[test]
+    fn test_match_dimensions_with_mapping_shared_parent_second_target() {
+        use crate::dimensions::DimensionsContext;
+
+        let dim_a = crate::datamodel::Dimension::named(
+            "dima".to_string(),
+            vec!["a1".to_string(), "a2".to_string(), "a3".to_string()],
+        );
+        let dim_b = crate::datamodel::Dimension::named(
+            "dimb".to_string(),
+            vec!["b1".to_string(), "b2".to_string(), "b3".to_string()],
+        );
+        let dim_c = crate::datamodel::Dimension::named(
+            "dimc".to_string(),
+            vec!["c1".to_string(), "c2".to_string(), "c3".to_string()],
+        );
+
+        let mut dim_x = crate::datamodel::Dimension::named(
+            "dimx".to_string(),
+            vec!["x1".to_string(), "x2".to_string(), "x3".to_string()],
+        );
+        dim_x.mappings = vec![
+            crate::datamodel::DimensionMapping {
+                target: "dimb".to_string(),
+                element_map: vec![],
+            },
+            crate::datamodel::DimensionMapping {
+                target: "dimc".to_string(),
+                element_map: vec![],
+            },
+        ];
+
+        let mut dim_y = crate::datamodel::Dimension::named(
+            "dimy".to_string(),
+            vec!["y1".to_string(), "y2".to_string(), "y3".to_string()],
+        );
+        dim_y.mappings = vec![
+            crate::datamodel::DimensionMapping {
+                target: "dima".to_string(),
+                element_map: vec![],
+            },
+            crate::datamodel::DimensionMapping {
+                target: "dimc".to_string(),
+                element_map: vec![],
+            },
+        ];
+
+        let dims_ctx = DimensionsContext::from(&[dim_a, dim_b, dim_c, dim_x, dim_y]);
+
+        let source = vec![named_dim("dimx", &["x1", "x2", "x3"])];
+        let target = vec![named_dim("dimy", &["y1", "y2", "y3"])];
+
+        let result = match_dimensions_with_mapping(&source, &target, &[false], &dims_ctx);
+        assert_eq!(
+            result,
+            vec![Some(0)],
+            "dimensions sharing a non-first mapping target should match"
         );
     }
 }
