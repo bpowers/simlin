@@ -35,6 +35,8 @@ impl<'input> ConversionContext<'input> {
             {
                 let src_canonical = canonical_name(src);
                 let dst_canonical = canonical_name(dst);
+                self.equivalence_original_names
+                    .insert(src_canonical.clone(), src.to_string());
                 self.equivalences.insert(src_canonical, dst_canonical);
             }
         }
@@ -94,8 +96,13 @@ impl<'input> ConversionContext<'input> {
                 .iter()
                 .find(|d| eq_lower_space(&d.name, dst))
             {
+                let original_name = self
+                    .equivalence_original_names
+                    .get(src)
+                    .map(|s| s.as_str())
+                    .unwrap_or(src);
                 let alias = Dimension {
-                    name: space_to_underbar(src),
+                    name: space_to_underbar(original_name),
                     elements: target_dim.elements.clone(),
                     maps_to: Some(dst.clone()),
                 };
@@ -352,12 +359,12 @@ y = 1
             "Should have DimB dimension"
         );
         assert!(
-            project.dimensions.iter().any(|d| d.name == "dima"),
-            "Should have DimA dimension (alias)"
+            project.dimensions.iter().any(|d| d.name == "DimA"),
+            "Should have DimA dimension (alias) with preserved casing"
         );
 
         // DimA should map to DimB
-        let dim_a = project.dimensions.iter().find(|d| d.name == "dima");
+        let dim_a = project.dimensions.iter().find(|d| d.name == "DimA");
         if let Some(dim) = dim_a {
             assert_eq!(
                 dim.maps_to,
@@ -532,7 +539,7 @@ x[DimA] = 1
         if let Variable::Aux(a) = x {
             match &a.equation {
                 crate::datamodel::Equation::Arrayed(dims, elements) => {
-                    assert_eq!(dims, &["dima"]);
+                    assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
                 }
                 other => panic!("Expected Arrayed (dimension expansion), got {:?}", other),
@@ -567,8 +574,7 @@ x[b1] = 2
         if let Variable::Aux(a) = x {
             match &a.equation {
                 crate::datamodel::Equation::Arrayed(dims, elements) => {
-                    // Dimension should be dima (from the first equation)
-                    assert_eq!(dims, &["dima"]);
+                    assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
 
                     let b1_eq = elements.iter().find(|(k, _, _, _)| k == "b1");
@@ -635,6 +641,30 @@ x = 1
             ctx.normalize_dimension("scenario"),
             "scenario",
             "Top-level dimension should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn test_equivalence_preserves_original_casing() {
+        // Equivalence `CamelCase <-> other` should produce a dimension named
+        // "CamelCase", not "camelcase".
+        let mdl = "TargetDim: x1, x2
+~ ~|
+MyCamelCase <-> TargetDim
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        let alias = project
+            .dimensions
+            .iter()
+            .find(|d| d.maps_to == Some("targetdim".to_string()));
+        assert!(alias.is_some(), "Should have alias dimension");
+        assert_eq!(
+            alias.unwrap().name,
+            "MyCamelCase",
+            "Alias dimension should preserve original casing"
         );
     }
 }

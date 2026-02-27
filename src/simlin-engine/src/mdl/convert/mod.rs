@@ -48,8 +48,10 @@ pub struct ConversionContext<'input> {
     symbols: HashMap<String, SymbolInfo<'input>>,
     /// Collected dimensions
     dimensions: Vec<Dimension>,
-    /// Dimension equivalences: source -> target
+    /// Dimension equivalences: source canonical -> target canonical
     equivalences: HashMap<String, String>,
+    /// Original (pre-canonicalization) names for equivalence sources
+    equivalence_original_names: HashMap<String, String>,
     /// SimSpecs builder
     sim_specs: SimSpecsBuilder,
     /// Integration method (to be used in Phase 10 for settings parsing)
@@ -103,6 +105,7 @@ impl<'input> ConversionContext<'input> {
             symbols: HashMap::with_capacity(n_items),
             dimensions: Vec::new(),
             equivalences: HashMap::new(),
+            equivalence_original_names: HashMap::new(),
             sim_specs: SimSpecsBuilder {
                 sim_method: Some(settings.integration_method),
                 ..SimSpecsBuilder::default()
