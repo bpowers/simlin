@@ -161,8 +161,10 @@ impl FilesystemDataProvider {
         let range = self.open_sheet(file, sheet_name)?;
 
         let (row_idx, col_idx) = parse_cell_ref(row_label)?;
-        // col_label is unused for Excel: row_label already contains the full
-        // cell reference (e.g. "B2") with both row and column information.
+        // col_label is intentionally unused: GET DIRECT CONSTANTS always
+        // passes a full cell reference (e.g. "B2") as row_label, so both
+        // row and column are encoded in that single argument. The external_data
+        // resolver passes "" as col_label for this function.
         let _ = col_label;
 
         let val = range

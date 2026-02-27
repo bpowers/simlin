@@ -1013,6 +1013,16 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
     if let Some(maps_to) = dim.maps_to() {
         write!(buf, " -> {}", format_mdl_ident(maps_to)).unwrap();
     } else if !dim.mappings.is_empty() {
+        // Build a source-position index so element-level mappings emit
+        // targets in the same order as the source dimension's elements.
+        let source_positions: HashMap<&str, usize> = match &dim.elements {
+            DimensionElements::Named(elems) => elems
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (e.as_str(), i))
+                .collect(),
+            DimensionElements::Indexed(_) => HashMap::new(),
+        };
         let parts: Vec<String> = dim
             .mappings
             .iter()
@@ -1020,8 +1030,14 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
                 if mapping.element_map.is_empty() {
                     format_mdl_ident(&mapping.target)
                 } else {
-                    let target_elems: Vec<String> = mapping
-                        .element_map
+                    let mut sorted_map = mapping.element_map.clone();
+                    sorted_map.sort_by_key(|(src, _)| {
+                        source_positions
+                            .get(src.as_str())
+                            .copied()
+                            .unwrap_or(usize::MAX)
+                    });
+                    let target_elems: Vec<String> = sorted_map
                         .iter()
                         .map(|(_, tgt)| format_mdl_ident(tgt))
                         .collect();
@@ -4041,6 +4057,37 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert!(
             buf.contains("dim b") && buf.contains("dim c"),
             "both positional mapping targets should be emitted, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_dimension_element_mapping_sorted_by_source_position() {
+        // element_map entries out of source order should still emit
+        // targets in the dimension's element order for correct positional
+        // correspondence on re-import.
+        let dim = datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: datamodel::DimensionElements::Named(vec![
+                "a1".to_string(),
+                "a2".to_string(),
+                "a3".to_string(),
+            ]),
+            mappings: vec![datamodel::DimensionMapping {
+                target: "dim_b".to_string(),
+                element_map: vec![
+                    ("a3".to_string(), "b3".to_string()),
+                    ("a1".to_string(), "b1".to_string()),
+                    ("a2".to_string(), "b2".to_string()),
+                ],
+            }],
+        };
+
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+
+        assert!(
+            buf.contains("-> (dim b: b1, b2, b3)"),
+            "targets should be in source element order (a1->b1, a2->b2, a3->b3), got: {buf}"
         );
     }
 }
