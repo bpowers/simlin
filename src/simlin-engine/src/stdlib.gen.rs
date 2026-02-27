@@ -1,6 +1,10 @@
 // @generated from stdlib/*.stmx
 // DO NOT EDIT - regenerate with: pnpm rebuild-stdlib
 //
+// Some models (marked @hand-maintained below) cannot be expressed as .stmx files
+// because they reference simulation system variables (TIME, TIME STEP, INITIAL TIME).
+// Those models are defined in this file and re-emitted verbatim by gen_stdlib.rs.
+//
 // Stdlib SHA256: 7fb58d5c90732144633cb1210aa061b00667f84e6cf762eb0a4d3557fbaecf0c
 
 #![allow(
@@ -488,6 +492,10 @@ fn init() -> Model {
     }
 }
 
+// @hand-maintained: npv cannot be expressed as an .stmx file because its flow equation
+// references `time`, `initial_time`, and `time_step` -- simulation system variables that
+// the engine injects at runtime and that are not representable as named variables in a
+// self-contained XMILE stdlib model.
 fn npv() -> Model {
     Model {
         name: "stdlib⁚npv".to_string(),
