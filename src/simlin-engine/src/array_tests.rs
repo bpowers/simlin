@@ -3291,6 +3291,64 @@ mod cross_dimension_reduction_tests {
 }
 
 #[cfg(test)]
+mod sum_of_conditional_tests {
+    use crate::test_common::TestProject;
+
+    #[test]
+    fn sum_if_interpreter() {
+        // SUM(IF a[*] > 2 THEN a[*] ELSE 0) should sum only elements > 2
+        // a = [1, 3, 5], so only 3 and 5 pass => sum = 8
+        let project = TestProject::new("sum_if")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
+            .scalar_aux("result", "SUM(IF values[*] > 2 THEN values[*] ELSE 0)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[8.0, 8.0]);
+    }
+
+    #[test]
+    fn sum_if_vm() {
+        // Same test but for the VM path
+        let project = TestProject::new("sum_if_vm")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
+            .scalar_aux("result", "SUM(IF values[*] > 2 THEN values[*] ELSE 0)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_vm_result("result", &[8.0, 8.0]);
+    }
+
+    #[test]
+    fn sum_if_count_interpreter() {
+        // SUM(IF a[*] > 2 THEN 1 ELSE 0) counts elements > 2
+        // a = [1, 3, 5], so 2 elements pass => sum = 2
+        let project = TestProject::new("sum_if_count")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
+            .scalar_aux("result", "SUM(IF values[*] > 2 THEN 1 ELSE 0)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[2.0, 2.0]);
+    }
+
+    #[test]
+    fn sum_if_count_vm() {
+        let project = TestProject::new("sum_if_count_vm")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
+            .scalar_aux("result", "SUM(IF values[*] > 2 THEN 1 ELSE 0)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_vm_result("result", &[2.0, 2.0]);
+    }
+}
+
+#[cfg(test)]
 mod compiler_limit_tests {
     use crate::test_common::TestProject;
 

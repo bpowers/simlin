@@ -909,13 +909,19 @@ impl Expr2 {
                 let t_expr = Expr2::from(*t, ctx)?;
                 let f_expr = Expr2::from(*f, ctx)?;
 
-                // Compute array bounds for if expressions
-                let array_bounds = Self::unify_array_bounds(
+                // Compute array bounds for if expressions.
+                // First try to unify the then/else branch bounds.
+                let branch_bounds = Self::unify_array_bounds(
                     ctx,
                     t_expr.get_array_bounds(),
                     f_expr.get_array_bounds(),
                     loc,
                 )?;
+
+                // If the branches are both scalar but the condition is
+                // array-valued, the IF expression should inherit the
+                // condition's dimensions (broadcasting scalar branches).
+                let array_bounds = branch_bounds.or_else(|| cond_expr.get_array_bounds().cloned());
 
                 Expr2::If(
                     Box::new(cond_expr),
