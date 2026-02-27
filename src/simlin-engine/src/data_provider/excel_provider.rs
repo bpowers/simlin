@@ -255,7 +255,7 @@ impl FilesystemDataProvider {
     }
 
     fn open_sheet(&self, file: &str, sheet_name: &str) -> Result<calamine::Range<Data>> {
-        let path = self.resolve_path(file);
+        let path = self.resolve_path(file)?;
         let mut workbook = open_workbook_auto(&path).map_err(|e| {
             Error::new(
                 ErrorKind::Import,

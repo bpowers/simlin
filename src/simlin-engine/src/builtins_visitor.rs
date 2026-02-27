@@ -847,7 +847,6 @@ mod tests {
         project.assert_sim_builds();
         let results = project.run_interpreter().unwrap();
         let vals = results.get("result").unwrap();
-        eprintln!("NPV with discount: {:?}", vals);
         // output = stock + inflow * DT
         // t=0: stock=0, inflow=100*1.1^0=100, output = 0 + 100 = 100
         // t=1: stock=100, inflow=100*1.1^(-1)=90.909, output = 100 + 90.909 = 190.909

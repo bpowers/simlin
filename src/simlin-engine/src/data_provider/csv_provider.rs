@@ -22,8 +22,34 @@ impl FilesystemDataProvider {
         }
     }
 
-    pub(crate) fn resolve_path(&self, file: &str) -> PathBuf {
-        self.base_dir.join(file)
+    pub(crate) fn resolve_path(&self, file: &str) -> Result<PathBuf> {
+        let path = self.base_dir.join(file);
+        // Normalize the path to resolve ../ components, then verify the
+        // result stays within base_dir. This prevents model files from
+        // referencing arbitrary files on the filesystem via absolute paths
+        // or directory traversal.
+        let canonical_base = self.base_dir.canonicalize().map_err(|e| {
+            Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                Some(format!("cannot canonicalize base directory: {e}")),
+            )
+        })?;
+        let canonical_path = path.canonicalize().map_err(|e| {
+            Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                Some(format!("cannot resolve data file '{}': {e}", file)),
+            )
+        })?;
+        if !canonical_path.starts_with(&canonical_base) {
+            return Err(Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                Some(format!("data file '{}' escapes base directory", file)),
+            ));
+        }
+        Ok(canonical_path)
     }
 
     fn is_excel_file(path: &std::path::Path) -> bool {
@@ -34,7 +60,7 @@ impl FilesystemDataProvider {
     }
 
     fn read_csv_records(&self, file: &str, delimiter: u8) -> Result<Vec<Vec<String>>> {
-        let path = self.resolve_path(file);
+        let path = self.resolve_path(file)?;
         let mut rdr = csv::ReaderBuilder::new()
             .has_headers(false)
             .delimiter(delimiter)
@@ -386,7 +412,7 @@ impl DataProvider for FilesystemDataProvider {
         time_col_or_row: &str,
         cell_label: &str,
     ) -> Result<Vec<(f64, f64)>> {
-        let path = self.resolve_path(file);
+        let path = self.resolve_path(file)?;
         if Self::is_excel_file(&path) {
             #[cfg(feature = "ext_data")]
             {
@@ -414,7 +440,7 @@ impl DataProvider for FilesystemDataProvider {
         row_label: &str,
         col_label: &str,
     ) -> Result<f64> {
-        let path = self.resolve_path(file);
+        let path = self.resolve_path(file)?;
         if Self::is_excel_file(&path) {
             #[cfg(feature = "ext_data")]
             {
@@ -442,7 +468,7 @@ impl DataProvider for FilesystemDataProvider {
         row_label: &str,
         col_label: &str,
     ) -> Result<Vec<(f64, f64)>> {
-        let path = self.resolve_path(file);
+        let path = self.resolve_path(file)?;
         if Self::is_excel_file(&path) {
             #[cfg(feature = "ext_data")]
             {
@@ -471,7 +497,7 @@ impl DataProvider for FilesystemDataProvider {
         first_cell: &str,
         last_cell: &str,
     ) -> Result<Vec<String>> {
-        let path = self.resolve_path(file);
+        let path = self.resolve_path(file)?;
         if Self::is_excel_file(&path) {
             #[cfg(feature = "ext_data")]
             {
@@ -671,5 +697,26 @@ mod tests {
             result.is_err(),
             "overflow row number should return an error, not panic"
         );
+    }
+
+    #[test]
+    fn test_resolve_path_rejects_directory_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FilesystemDataProvider::new(dir.path());
+        let result = provider.load_data("../../../etc/passwd", ",", "A", "B2");
+        assert!(result.is_err(), "path traversal via ../ should be rejected");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("outside") || err_msg.contains("escapes"),
+            "error should mention path escaping the base directory, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_path_rejects_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FilesystemDataProvider::new(dir.path());
+        let result = provider.load_data("/etc/passwd", ",", "A", "B2");
+        assert!(result.is_err(), "absolute paths should be rejected");
     }
 }

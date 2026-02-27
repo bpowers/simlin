@@ -182,10 +182,17 @@ pub enum SourceSimMethod {
 }
 
 #[derive(Clone, Debug, PartialEq, salsa::Update)]
+pub struct SourceDimensionMapping {
+    pub target: String,
+    pub element_map: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, salsa::Update)]
 pub struct SourceDimension {
     pub name: String,
     pub elements: SourceDimensionElements,
     pub maps_to: Option<String>,
+    pub mappings: Vec<SourceDimensionMapping>,
 }
 
 #[derive(Clone, Debug, PartialEq, salsa::Update)]
@@ -198,7 +205,11 @@ pub enum SourceDimensionElements {
 pub enum SourceEquation {
     Scalar(String),
     ApplyToAll(Vec<String>, String),
-    Arrayed(Vec<String>, Vec<SourceArrayedEquationElement>),
+    Arrayed(
+        Vec<String>,
+        Vec<SourceArrayedEquationElement>,
+        Option<String>,
+    ),
 }
 
 #[derive(Clone, Debug, PartialEq, salsa::Update)]
@@ -285,6 +296,14 @@ impl From<&datamodel::Dimension> for SourceDimension {
             name: dim.name.clone(),
             elements: SourceDimensionElements::from(&dim.elements),
             maps_to: dim.maps_to().map(|s| s.to_owned()),
+            mappings: dim
+                .mappings
+                .iter()
+                .map(|m| SourceDimensionMapping {
+                    target: m.target.clone(),
+                    element_map: m.element_map.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -307,7 +326,7 @@ impl From<&datamodel::Equation> for SourceEquation {
             datamodel::Equation::ApplyToAll(dims, s) => {
                 SourceEquation::ApplyToAll(dims.clone(), s.clone())
             }
-            datamodel::Equation::Arrayed(dims, elements, _default_eq) => SourceEquation::Arrayed(
+            datamodel::Equation::Arrayed(dims, elements, default_eq) => SourceEquation::Arrayed(
                 dims.clone(),
                 elements
                     .iter()
@@ -318,6 +337,7 @@ impl From<&datamodel::Equation> for SourceEquation {
                         gf: gf.as_ref().map(SourceGraphicalFunction::from),
                     })
                     .collect(),
+                default_eq.clone(),
             ),
         }
     }
@@ -392,16 +412,27 @@ pub fn source_dims_to_datamodel(dims: &[SourceDimension]) -> Vec<datamodel::Dime
                     datamodel::DimensionElements::Named(names.clone())
                 }
             };
-            {
-                let mut dim = datamodel::Dimension {
-                    name: sd.name.clone(),
-                    elements,
-                    mappings: vec![],
-                };
-                if let Some(target) = sd.maps_to.clone() {
-                    dim.set_maps_to(target);
-                }
-                dim
+            // Prefer the richer mappings field; fall back to maps_to.
+            let mappings = if !sd.mappings.is_empty() {
+                sd.mappings
+                    .iter()
+                    .map(|m| datamodel::DimensionMapping {
+                        target: m.target.clone(),
+                        element_map: m.element_map.clone(),
+                    })
+                    .collect()
+            } else if let Some(target) = sd.maps_to.clone() {
+                vec![datamodel::DimensionMapping {
+                    target,
+                    element_map: vec![],
+                }]
+            } else {
+                vec![]
+            };
+            datamodel::Dimension {
+                name: sd.name.clone(),
+                elements,
+                mappings,
             }
         })
         .collect()
@@ -468,7 +499,7 @@ fn source_equation_to_datamodel(eq: &SourceEquation) -> datamodel::Equation {
         SourceEquation::ApplyToAll(dims, s) => {
             datamodel::Equation::ApplyToAll(dims.clone(), s.clone())
         }
-        SourceEquation::Arrayed(dims, elements) => datamodel::Equation::Arrayed(
+        SourceEquation::Arrayed(dims, elements, default_eq) => datamodel::Equation::Arrayed(
             dims.clone(),
             elements
                 .iter()
@@ -481,7 +512,7 @@ fn source_equation_to_datamodel(eq: &SourceEquation) -> datamodel::Equation {
                     )
                 })
                 .collect(),
-            None,
+            default_eq.clone(),
         ),
     }
 }
@@ -3000,7 +3031,7 @@ fn extract_tables_from_source_var(
     // For arrayed equations with per-element graphical functions, build one
     // table per element (matching variable.rs build_tables).  Elements without
     // a GF get an empty placeholder so that table[element_offset] stays aligned.
-    if let SourceEquation::Arrayed(_, elements) = eq {
+    if let SourceEquation::Arrayed(_, elements, _) = eq {
         let has_element_gfs = elements.iter().any(|e| e.gf.is_some());
         if has_element_gfs {
             return elements
@@ -5244,6 +5275,79 @@ pub fn compile_project_incremental(
     match assemble_simulation(db, project, main_model_name) {
         Ok(compiled) => Ok(compiled),
         Err(msg) => crate::sim_err!(NotSimulatable, msg),
+    }
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+
+    #[test]
+    fn source_dimension_preserves_element_level_mappings() {
+        let dim = datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: datamodel::DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![datamodel::DimensionMapping {
+                target: "dim_b".to_string(),
+                element_map: vec![
+                    ("a1".to_string(), "b2".to_string()),
+                    ("a2".to_string(), "b1".to_string()),
+                ],
+            }],
+        };
+        let source: SourceDimension = SourceDimension::from(&dim);
+        let roundtripped = source_dims_to_datamodel(&[source]);
+        assert_eq!(roundtripped.len(), 1);
+        assert_eq!(roundtripped[0].mappings.len(), 1);
+        assert_eq!(roundtripped[0].mappings[0].target, "dim_b");
+        assert_eq!(roundtripped[0].mappings[0].element_map.len(), 2);
+    }
+
+    #[test]
+    fn source_dimension_preserves_multi_target_positional_mappings() {
+        let dim = datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: datamodel::DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![
+                datamodel::DimensionMapping {
+                    target: "dim_b".to_string(),
+                    element_map: vec![],
+                },
+                datamodel::DimensionMapping {
+                    target: "dim_c".to_string(),
+                    element_map: vec![],
+                },
+            ],
+        };
+        let source: SourceDimension = SourceDimension::from(&dim);
+        let roundtripped = source_dims_to_datamodel(&[source]);
+        assert_eq!(roundtripped.len(), 1);
+        assert_eq!(
+            roundtripped[0].mappings.len(),
+            2,
+            "both positional mappings must survive DB round-trip"
+        );
+    }
+
+    #[test]
+    fn source_equation_preserves_default_equation() {
+        let eq = datamodel::Equation::Arrayed(
+            vec!["DimA".to_string()],
+            vec![("A1".to_string(), "5".to_string(), None, None)],
+            Some("default_val".to_string()),
+        );
+        let source = SourceEquation::from(&eq);
+        let roundtripped = source_equation_to_datamodel(&source);
+        match &roundtripped {
+            datamodel::Equation::Arrayed(_, _, default_eq) => {
+                assert_eq!(
+                    default_eq.as_deref(),
+                    Some("default_val"),
+                    "default_equation must survive DB round-trip"
+                );
+            }
+            _ => panic!("Expected Arrayed equation"),
+        }
     }
 }
 
