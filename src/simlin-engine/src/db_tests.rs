@@ -5753,3 +5753,149 @@ fn test_ltm_incremental_simulation_produces_scores() {
         "loop scores should have at least one non-zero value for a feedback model"
     );
 }
+
+// ---- Error accumulator consolidation tests (Phase 3, Tasks 5-6) ----
+
+/// Task 5 verification: model_all_diagnostics triggers all accumulation
+/// sources (parse errors, compilation errors, unit warnings). After calling
+/// collect_all_diagnostics, we should see diagnostics from parse errors,
+/// bad-table compilation errors, and unit check warnings -- all without
+/// invoking compile_project_incremental.
+#[test]
+fn test_model_all_diagnostics_triggers_all_sources() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "all_sources".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: Some("months".to_string()),
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                // 1) Syntax error -> Equation diagnostic (Error severity)
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "broken_syntax".to_string(),
+                    equation: datamodel::Equation::Scalar("if then".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // 2) Bad table: x_points length != y_points length
+                //    -> compilation-level error accumulated by compile_var_fragment
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "bad_table_var".to_string(),
+                    equation: datamodel::Equation::Scalar("bad_table_var".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: Some(datamodel::GraphicalFunction {
+                        kind: datamodel::GraphicalFunctionKind::Continuous,
+                        x_points: Some(vec![0.0, 1.0]),
+                        y_points: vec![0.0, 1.0, 2.0],
+                        x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+                        y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+                    }),
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // 3) Unit mismatch: adding "people" + "months" -> Unit warning
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "pop".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: Some("people".to_string()),
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "dur".to_string(),
+                    equation: datamodel::Equation::Scalar("5".to_string()),
+                    documentation: String::new(),
+                    units: Some("months".to_string()),
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "unit_mismatch".to_string(),
+                    equation: datamodel::Equation::Scalar("pop + dur".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, &sync);
+
+    // Check for equation error from syntax error
+    let has_equation_error = diags.iter().any(|d| {
+        d.variable.as_deref() == Some("broken_syntax")
+            && matches!(&d.error, DiagnosticError::Equation(_))
+            && d.severity == DiagnosticSeverity::Error
+    });
+    assert!(
+        has_equation_error,
+        "should have an equation error for 'broken_syntax'; got: {diags:?}"
+    );
+
+    // Check for BadTable compilation error from mismatched x/y points
+    let has_bad_table = diags.iter().any(|d| {
+        d.variable.as_deref() == Some("bad_table_var")
+            && matches!(
+                &d.error,
+                DiagnosticError::Model(crate::common::Error {
+                    code: crate::common::ErrorCode::BadTable,
+                    ..
+                })
+            )
+            && d.severity == DiagnosticSeverity::Error
+    });
+    assert!(
+        has_bad_table,
+        "should have a BadTable error for 'bad_table_var'; got: {diags:?}"
+    );
+
+    // Check for unit-related warning. The unit inference failure surfaces
+    // as a DiagnosticError::Model with ErrorCode::UnitMismatch at Warning
+    // severity (model-level inference error). Per-variable unit checking
+    // errors would surface as DiagnosticError::Unit.
+    let has_unit_warning = diags.iter().any(|d| {
+        d.severity == DiagnosticSeverity::Warning
+            && matches!(
+                &d.error,
+                DiagnosticError::Model(crate::common::Error {
+                    code: crate::common::ErrorCode::UnitMismatch,
+                    ..
+                }) | DiagnosticError::Unit(_)
+            )
+    });
+    assert!(
+        has_unit_warning,
+        "should have a unit warning for the unit mismatch; got: {diags:?}"
+    );
+}

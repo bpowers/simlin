@@ -1546,26 +1546,30 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 /// still populate struct fields for backward compatibility, but this
 /// function also pushes the same errors into the salsa accumulator so
 /// callers can eventually read diagnostics purely from the DB.
+///
+/// Triggers three diagnostic sources:
+/// 1. `compile_var_fragment` for each variable -- surfaces both parse-level
+///    equation errors (EmptyEquation, syntax errors) and compilation-level
+///    errors (BadTable, MismatchedDimensions, etc.)
+/// 2. `check_model_units` -- surfaces unit inference/checking warnings
 #[salsa::tracked]
 pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
-    let model_name = model.name(db).clone();
     let source_vars = model.variables(db);
 
-    for (var_name, source_var) in source_vars.iter() {
-        let parsed = parse_source_variable(db, *source_var, project);
-        let variable = &parsed.variable;
-
-        if let Some(errors) = variable.equation_errors() {
-            for err in errors {
-                CompilationDiagnostic(Diagnostic {
-                    model: model_name.clone(),
-                    variable: Some(var_name.clone()),
-                    error: DiagnosticError::Equation(err),
-                    severity: DiagnosticSeverity::Error,
-                })
-                .accumulate(db);
-            }
-        }
+    // Trigger compile_var_fragment for each variable. This is a superset
+    // of parse_source_variable: it first checks for parse errors (and
+    // accumulates them via the accumulator from Task 2), then proceeds
+    // with compilation which can surface additional errors like BadTable,
+    // MismatchedDimensions, etc.
+    //
+    // We use is_root: true and empty module_input_names for diagnostic
+    // purposes. The is_root flag only affects offset layout (whether
+    // implicit time/dt vars are included); using true ensures variables
+    // referencing TIME or DT don't produce false-positive missing-ref
+    // errors. The module_input_names are empty because we are not in an
+    // assembly context -- this is purely for error detection.
+    for (_var_name, source_var) in source_vars.iter() {
+        let _fragment = compile_var_fragment(db, *source_var, model, project, true, vec![]);
     }
 
     // Trigger unit checking. This is a separate tracked function so
