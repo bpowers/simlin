@@ -1402,7 +1402,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 
     // Skip stdlib models -- they are generic and unit checking doesn't
     // apply until instantiated with concrete inputs. Stdlib model names
-    // start with the "stdlib:" prefix.
+    // start with the "stdlib\u{205A}" prefix (two-dot punctuation separator).
     if model.name(db).starts_with("stdlib\u{205A}") {
         return;
     }
@@ -1547,7 +1547,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 /// function also pushes the same errors into the salsa accumulator so
 /// callers can eventually read diagnostics purely from the DB.
 ///
-/// Triggers three diagnostic sources:
+/// Triggers two diagnostic sources:
 /// 1. `compile_var_fragment` for each variable -- surfaces both parse-level
 ///    equation errors (EmptyEquation, syntax errors) and compilation-level
 ///    errors (BadTable, MismatchedDimensions, etc.)
