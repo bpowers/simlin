@@ -33,7 +33,16 @@ impl Project {
         &self.datamodel.name
     }
 
-    /// Create a new project with LTM instrumentation
+    /// Create a new project with LTM instrumentation.
+    ///
+    /// Deprecated: this is the monolithic (non-incremental) LTM pipeline.
+    /// Prefer the salsa incremental path via `db::compile_project_incremental`
+    /// with `set_ltm_enabled(true)`. Remaining production callers:
+    /// - `layout::try_detect_ltm_loops_monolithic` (fallback when no db_state)
+    /// - `simlin-cli simulate()` (will be migrated in a follow-up)
+    ///
+    /// Once those callers are migrated, this method and its helpers
+    /// (`abort_if_arrayed`, `inject_ltm_vars`) can be removed.
     pub fn with_ltm(self) -> crate::common::Result<Self> {
         abort_if_arrayed(&self)?;
 
@@ -54,6 +63,12 @@ impl Project {
     ///
     /// No loop score or relative loop score variables are generated -- those
     /// are computed post-simulation by `discover_loops()`.
+    ///
+    /// Deprecated: this is the monolithic (non-incremental) LTM pipeline.
+    /// Prefer the salsa incremental path via `db::compile_project_incremental`
+    /// with `set_ltm_enabled(true)` and `set_ltm_discovery_mode(true)`.
+    /// No production callers remain; this method is only used by tests.
+    /// It can be removed once tests are migrated to the incremental path.
     pub fn with_ltm_all_links(self) -> crate::common::Result<Self> {
         abort_if_arrayed(&self)?;
 
@@ -113,6 +128,9 @@ impl From<datamodel::Project> for Project {
 /// stock model from generated code, add the synthetic variables, and append
 /// it to `datamodel.models`. `base_from()` detects these overrides by name
 /// and skips loading the generated version.
+///
+/// Helper for the deprecated `with_ltm()` / `with_ltm_all_links()` methods.
+/// Can be removed when those methods are removed.
 fn inject_ltm_vars(
     mut datamodel: datamodel::Project,
     ltm_vars: &HashMap<Ident<Canonical>, Vec<(Ident<Canonical>, datamodel::Variable)>>,
@@ -373,7 +391,10 @@ impl Project {
     }
 }
 
-/// Check if any model in the project contains array variables
+/// Check if any model in the project contains array variables.
+///
+/// Helper for the deprecated `with_ltm()` / `with_ltm_all_links()` methods.
+/// Can be removed when those methods are removed.
 fn abort_if_arrayed(project: &Project) -> crate::common::Result<()> {
     for (model_name, model) in &project.models {
         // Skip implicit (stdlib) models

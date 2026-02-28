@@ -2098,7 +2098,10 @@ fn try_detect_ltm_loops_incremental(
 }
 
 /// Monolithic fallback path for LTM loop detection (used when no db is
-/// available).
+/// available). Uses the deprecated `Project::with_ltm()` pipeline.
+///
+/// This should be migrated to the salsa incremental path so that
+/// `with_ltm()` can be removed entirely.
 fn try_detect_ltm_loops_monolithic(
     project: &datamodel::Project,
     actual_name: &str,
