@@ -10,7 +10,11 @@ fn data_to_string(val: &Data) -> Option<String> {
     match val {
         Data::String(s) => Some(s.clone()),
         Data::Float(f) => {
-            if f.is_finite() && f.fract() == 0.0 {
+            if f.is_finite()
+                && f.fract() == 0.0
+                && *f >= (i128::MIN as f64)
+                && *f < (i128::MAX as f64)
+            {
                 Some(format!("{}", *f as i128))
             } else {
                 Some(format!("{f}"))
@@ -455,6 +459,38 @@ mod tests {
         assert!(
             !result.contains("9223372036854775807"),
             "large float must not be truncated to i64::MAX: {result}"
+        );
+    }
+
+    #[test]
+    fn data_to_string_beyond_i128_range() {
+        use super::data_to_string;
+        use calamine::Data;
+
+        // f64 values beyond i128::MAX (~1.7e38) that are integer-valued
+        // must not saturate to i128::MAX
+        let huge = 1.0e39_f64;
+        assert!(huge.is_finite() && huge.fract() == 0.0);
+        let result = data_to_string(&Data::Float(huge)).unwrap();
+        let i128_max_str = format!("{}", i128::MAX);
+        assert!(
+            !result.contains(&i128_max_str),
+            "value beyond i128 range must not saturate to i128::MAX: {result}"
+        );
+        // Should fall back to float formatting
+        assert!(
+            result.contains("e+") || result.contains("E+") || result.parse::<f64>().is_ok(),
+            "should produce a valid numeric string: {result}"
+        );
+
+        // Negative beyond i128::MIN
+        let huge_neg = -1.0e39_f64;
+        assert!(huge_neg.is_finite() && huge_neg.fract() == 0.0);
+        let result_neg = data_to_string(&Data::Float(huge_neg)).unwrap();
+        let i128_min_str = format!("{}", i128::MIN);
+        assert!(
+            !result_neg.contains(&i128_min_str),
+            "value beyond i128 range must not saturate to i128::MIN: {result_neg}"
         );
     }
 }

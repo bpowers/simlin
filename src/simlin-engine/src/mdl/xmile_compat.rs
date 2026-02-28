@@ -412,8 +412,6 @@ impl XmileFormatter {
                     let var_expr = self.format_expr_ctx(&args[0], ctx);
                     let time_expr = self.format_expr_ctx(&args[1], ctx);
                     let mode_expr = self.format_expr_ctx(&args[2], ctx);
-                    // Determine lookup variant based on mode
-                    // If mode is a constant, we can pick the right function at conversion time
                     let mode_trimmed = mode_expr.trim();
                     let lookup_fn = if mode_trimmed == "-1"
                         || mode_trimmed.eq_ignore_ascii_case("backward")
@@ -421,7 +419,18 @@ impl XmileFormatter {
                         "LOOKUP_BACKWARD"
                     } else if mode_trimmed == "1" || mode_trimmed.eq_ignore_ascii_case("forward") {
                         "LOOKUP_FORWARD"
+                    } else if mode_trimmed == "0"
+                        || mode_trimmed.eq_ignore_ascii_case("interpolate")
+                    {
+                        "LOOKUP"
                     } else {
+                        // Non-constant or unrecognized mode expression; LOOKUP
+                        // (interpolation) is the safest static approximation since
+                        // we can't resolve runtime values during conversion.
+                        eprintln!(
+                            "warning: GET DATA BETWEEN TIMES mode '{}' is not a recognized constant; defaulting to LOOKUP (interpolation)",
+                            mode_trimmed
+                        );
                         "LOOKUP"
                     };
                     return format!("{}({}, {})", lookup_fn, var_expr, time_expr);
@@ -2019,5 +2028,93 @@ mod tests {
             "should not be bare RAMP_FROM_TO: {result}"
         );
         assert!(result.contains("100") && result.contains("0"), "{result}");
+    }
+
+    #[test]
+    fn test_get_data_between_times_mode_zero() {
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("GET DATA BETWEEN TIMES"),
+            vec![],
+            vec![
+                Expr::Var(Cow::Borrowed("data var"), vec![], loc()),
+                Expr::Var(Cow::Borrowed("Time"), vec![], loc()),
+                Expr::Const(0.0, loc()),
+            ],
+            CallKind::Builtin,
+            loc(),
+        );
+        assert_eq!(
+            formatter.format_expr(&expr),
+            "LOOKUP(data_var, TIME)",
+            "mode 0 should map to LOOKUP"
+        );
+    }
+
+    #[test]
+    fn test_get_data_between_times_mode_backward() {
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("GET DATA BETWEEN TIMES"),
+            vec![],
+            vec![
+                Expr::Var(Cow::Borrowed("data var"), vec![], loc()),
+                Expr::Var(Cow::Borrowed("Time"), vec![], loc()),
+                Expr::Const(-1.0, loc()),
+            ],
+            CallKind::Builtin,
+            loc(),
+        );
+        assert_eq!(
+            formatter.format_expr(&expr),
+            "LOOKUP_BACKWARD(data_var, TIME)",
+            "mode -1 should map to LOOKUP_BACKWARD"
+        );
+    }
+
+    #[test]
+    fn test_get_data_between_times_mode_forward() {
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("GET DATA BETWEEN TIMES"),
+            vec![],
+            vec![
+                Expr::Var(Cow::Borrowed("data var"), vec![], loc()),
+                Expr::Var(Cow::Borrowed("Time"), vec![], loc()),
+                Expr::Const(1.0, loc()),
+            ],
+            CallKind::Builtin,
+            loc(),
+        );
+        assert_eq!(
+            formatter.format_expr(&expr),
+            "LOOKUP_FORWARD(data_var, TIME)",
+            "mode 1 should map to LOOKUP_FORWARD"
+        );
+    }
+
+    #[test]
+    fn test_get_data_between_times_non_constant_mode() {
+        // When mode is a non-constant expression, we can't resolve at conversion
+        // time. The output should still be valid XMILE (defaulting to LOOKUP)
+        // but must not silently drop the mode information without any indication.
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("GET DATA BETWEEN TIMES"),
+            vec![],
+            vec![
+                Expr::Var(Cow::Borrowed("data var"), vec![], loc()),
+                Expr::Var(Cow::Borrowed("Time"), vec![], loc()),
+                Expr::Var(Cow::Borrowed("mode var"), vec![], loc()),
+            ],
+            CallKind::Builtin,
+            loc(),
+        );
+        let result = formatter.format_expr(&expr);
+        // Must produce valid XMILE with LOOKUP as fallback
+        assert!(
+            result.starts_with("LOOKUP("),
+            "non-constant mode should default to LOOKUP: {result}"
+        );
     }
 }
