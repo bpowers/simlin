@@ -2067,8 +2067,54 @@ impl Vm {
                     }
                 }
 
-                Opcode::VectorSortOrder { .. } | Opcode::AllocateAvailable { .. } => {
-                    unimplemented!("vector operation opcodes not yet dispatched");
+                Opcode::VectorSortOrder { write_temp_id } => {
+                    let direction = stack.pop().round() as i32;
+
+                    let input_view = &view_stack[view_stack.len() - 1];
+
+                    let size = input_view.size();
+                    let n_dims = input_view.dims.len();
+
+                    // Collect (value, 1-based-index) pairs
+                    let mut indexed: SmallVec<[(f64, u16); 32]> = SmallVec::with_capacity(size);
+                    let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
+                    for i in 0..size {
+                        let flat_off = input_view.flat_offset(&indices);
+                        let val = Self::read_view_element(
+                            input_view,
+                            flat_off,
+                            curr,
+                            temp_storage,
+                            context,
+                        );
+                        indexed.push((val, (i + 1) as u16));
+                        for d in (0..n_dims).rev() {
+                            indices[d] += 1;
+                            if indices[d] < input_view.dims[d] {
+                                break;
+                            }
+                            indices[d] = 0;
+                        }
+                    }
+
+                    if direction == 1 {
+                        indexed.sort_by(|a, b| {
+                            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                    } else {
+                        indexed.sort_by(|a, b| {
+                            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                    }
+
+                    let temp_off = context.temp_offsets[*write_temp_id as usize];
+                    for (i, &(_, orig_idx)) in indexed.iter().enumerate() {
+                        temp_storage[temp_off + i] = orig_idx as f64;
+                    }
+                }
+
+                Opcode::AllocateAvailable { .. } => {
+                    unimplemented!("AllocateAvailable opcode not yet dispatched");
                 }
             }
 
