@@ -3327,12 +3327,19 @@ pub fn compile_var_fragment(
     let var_ident = var.ident(db).clone();
     let parsed = parse_source_variable(db, var, project);
 
-    // Check for parse errors
-    if parsed
-        .variable
-        .equation_errors()
-        .is_some_and(|e| !e.is_empty())
+    // Check for parse errors -- accumulate each one before bailing out
+    if let Some(errors) = parsed.variable.equation_errors()
+        && !errors.is_empty()
     {
+        for err in &errors {
+            CompilationDiagnostic(Diagnostic {
+                model: model.name(db).clone(),
+                variable: Some(var.ident(db).clone()),
+                error: DiagnosticError::Equation(err.clone()),
+                severity: DiagnosticSeverity::Error,
+            })
+            .accumulate(db);
+        }
         return None;
     }
 
@@ -3796,7 +3803,16 @@ pub fn compile_var_fragment(
                 Ok(ts) if !ts.is_empty() => {
                     tables.insert(var_ident_canonical.clone(), ts);
                 }
-                Err(_) => return None,
+                Err(table_err) => {
+                    CompilationDiagnostic(Diagnostic {
+                        model: model.name(db).clone(),
+                        variable: Some(var.ident(db).clone()),
+                        error: DiagnosticError::Model(table_err),
+                        severity: DiagnosticSeverity::Error,
+                    })
+                    .accumulate(db);
+                    return None;
+                }
                 _ => {}
             }
         }
