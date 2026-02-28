@@ -88,6 +88,12 @@ pub fn analyze_model(
 }
 
 /// Run the full LTM discovery pipeline.  Returns `None` on any failure.
+///
+/// Compilation and simulation use the incremental salsa path
+/// (`SimlinDb` + `compile_project_incremental`) with LTM discovery mode
+/// enabled.  Structural loop analysis (`discover_loops`) still requires
+/// the monolithic `engine::Project` for its `CausalGraph`, so a plain
+/// `Project::from` is built for that purpose only (no `with_ltm_all_links`).
 fn run_ltm_pipeline(
     project: &datamodel::Project,
     model_name: &str,
@@ -116,18 +122,33 @@ fn run_ltm_pipeline(
     // The LTM pipeline may panic on certain malformed models; catch_unwind
     // provides graceful degradation instead of crashing the server.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let compiled = crate::project::Project::from(project_clone);
+        use salsa::Setter;
 
-        let ltm_project = compiled.with_ltm_all_links().ok()?;
-        let ltm_project_rc = Rc::new(ltm_project);
+        // Use the incremental salsa path for compilation and simulation.
+        let mut db = crate::db::SimlinDb::default();
+        let source_project = {
+            let sync = crate::db::sync_from_datamodel(&db, &project_clone);
+            sync.project
+        };
 
-        let sim = crate::interpreter::Simulation::new(&ltm_project_rc, &actual_name_clone).ok()?;
-        let compiled_sim = sim.compile().ok()?;
+        // Enable LTM with discovery mode so that link score synthetic
+        // variables are generated for every causal edge (matching what
+        // `with_ltm_all_links()` used to do).
+        source_project.set_ltm_enabled(&mut db).to(true);
+        source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+        let compiled_sim =
+            crate::db::compile_project_incremental(&db, source_project, &actual_name_clone).ok()?;
         let mut vm = crate::vm::Vm::new(compiled_sim).ok()?;
         vm.run_to_end().ok()?;
         let results = vm.into_results();
 
-        let found_loops = crate::ltm_finding::discover_loops(&results, &ltm_project_rc).ok()?;
+        // discover_loops needs the monolithic engine::Project for its
+        // CausalGraph structural analysis.  A plain Project::from (without
+        // with_ltm_all_links) is sufficient since discover_loops only reads
+        // the model's variable graph, not LTM synthetic variables.
+        let structural_project = Rc::new(crate::project::Project::from(project_clone));
+        let found_loops = crate::ltm_finding::discover_loops(&results, &structural_project).ok()?;
 
         let time = build_time_array(&results);
 
@@ -141,7 +162,14 @@ fn run_ltm_pipeline(
 
         let loop_dominance: Vec<LoopSummary> = found_loops
             .iter()
-            .map(|fl| to_loop_summary(fl, &uid_to_loop_name, &actual_name_clone, &ltm_project_rc))
+            .map(|fl| {
+                to_loop_summary(
+                    fl,
+                    &uid_to_loop_name,
+                    &actual_name_clone,
+                    &structural_project.datamodel,
+                )
+            })
             .collect();
 
         Some((time, loop_dominance, dominant_loops_by_period))
@@ -225,7 +253,7 @@ fn to_loop_summary(
     fl: &crate::ltm_finding::FoundLoop,
     uid_to_loop_name: &[(Vec<i32>, String)],
     model_name: &str,
-    project: &crate::project::Project,
+    project: &datamodel::Project,
 ) -> LoopSummary {
     let polarity = match fl.loop_info.polarity {
         crate::ltm::LoopPolarity::Reinforcing => "reinforcing",
@@ -261,13 +289,13 @@ fn resolve_loop_name(
     fl: &crate::ltm_finding::FoundLoop,
     uid_to_loop_name: &[(Vec<i32>, String)],
     model_name: &str,
-    project: &crate::project::Project,
+    project: &datamodel::Project,
 ) -> Option<String> {
     if uid_to_loop_name.is_empty() {
         return None;
     }
 
-    // Collect UIDs for variables in the loop from the compiled project,
+    // Collect UIDs for variables in the loop from the datamodel,
     // restricted to the model being analyzed.
     let loop_var_idents: std::collections::HashSet<String> = fl
         .loop_info
@@ -277,7 +305,6 @@ fn resolve_loop_name(
         .collect();
 
     let mut loop_uids: Vec<i32> = project
-        .datamodel
         .models
         .iter()
         .filter(|m| {
