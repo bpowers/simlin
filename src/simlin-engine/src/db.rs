@@ -1383,6 +1383,162 @@ pub fn model_dependency_graph(
 
 // ── Diagnostic collection ──────────────────────────────────────────────
 
+/// Per-model tracked function that performs unit inference and checking,
+/// accumulating unit warnings/errors through the salsa accumulator.
+///
+/// Builds temporary ModelStage0/ModelStage1 representations from the
+/// salsa-cached parsed variables, then runs the same unit inference and
+/// checking pipeline as the old `run_default_model_checks` callback.
+/// Unit mismatches are accumulated as DiagnosticSeverity::Warning to
+/// match the old-path behavior where unit issues don't block simulation.
+///
+/// Stdlib (implicit) models are skipped because they are generic
+/// templates that only make sense when instantiated with specific inputs.
+#[salsa::tracked]
+pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject) {
+    use crate::common::{Canonical, ErrorCode, ErrorKind, Ident};
+    use crate::dimensions::DimensionsContext;
+    use crate::model::{ModelStage0, ModelStage1, ScopeStage0, VariableStage0};
+
+    // Skip stdlib models -- they are generic and unit checking doesn't
+    // apply until instantiated with concrete inputs. Stdlib model names
+    // start with the "stdlib:" prefix.
+    if model.name(db).starts_with("stdlib\u{205A}") {
+        return;
+    }
+
+    let model_name = model.name(db).clone();
+    let units_ctx = project_units_context(db, project);
+    let dm_dims = project_datamodel_dims(db, project);
+    let dim_context = DimensionsContext::from(dm_dims.as_slice());
+
+    // Helper: build a ModelStage0 from a SourceModel's parsed variables.
+    let build_model_s0 = |src_model: &SourceModel, is_stdlib: bool| -> ModelStage0 {
+        let src_vars = src_model.variables(db);
+        let mut var_list: Vec<VariableStage0> = Vec::new();
+        let mut implicit_dm: Vec<datamodel::Variable> = Vec::new();
+        for (_name, svar) in src_vars.iter() {
+            let parsed = parse_source_variable(db, *svar, project);
+            var_list.push(parsed.variable.clone());
+            implicit_dm.extend(parsed.implicit_vars.iter().cloned());
+        }
+        // Parse implicit vars (SMOOTH/DELAY expansion).
+        let mut dummy: Vec<datamodel::Variable> = Vec::new();
+        var_list.extend(implicit_dm.into_iter().map(|dm_var| {
+            crate::variable::parse_var(dm_dims, &dm_var, &mut dummy, units_ctx, |mi| {
+                Ok(Some(mi.clone()))
+            })
+        }));
+        let variables: HashMap<Ident<Canonical>, VariableStage0> = var_list
+            .into_iter()
+            .map(|v| (Ident::new(v.ident()), v))
+            .collect();
+        ModelStage0 {
+            ident: Ident::new(src_model.name(db)),
+            display_name: src_model.name(db).clone(),
+            variables,
+            errors: None,
+            implicit: is_stdlib,
+        }
+    };
+
+    // Build ModelStage0 for all project models so that cross-module unit
+    // inference constraints (module inputs/outputs) can resolve submodel
+    // variable types. Stdlib models are included in the map because user
+    // models may reference them as modules.
+    let project_models = project.models(db);
+    let mut all_s0: Vec<ModelStage0> = Vec::new();
+    for (name, src_model) in project_models.iter() {
+        let is_stdlib = name.starts_with("stdlib\u{205A}");
+        all_s0.push(build_model_s0(src_model, is_stdlib));
+    }
+
+    let models_s0: HashMap<Ident<Canonical>, &ModelStage0> =
+        all_s0.iter().map(|m| (m.ident.clone(), m)).collect();
+
+    // Lower all ModelStage0 -> ModelStage1.
+    let all_s1: Vec<ModelStage1> = all_s0
+        .iter()
+        .map(|ms0| {
+            let scope = ScopeStage0 {
+                models: &models_s0,
+                dimensions: &dim_context,
+                model_name: ms0.ident.as_str(),
+            };
+            ModelStage1::new(&scope, ms0)
+        })
+        .collect();
+
+    let models_s1: HashMap<Ident<Canonical>, &ModelStage1> =
+        all_s1.iter().map(|m| (m.name.clone(), m)).collect();
+
+    // Find the target model in the lowered map.
+    let target_ident = Ident::<Canonical>::new(&model_name);
+    let target_model = match models_s1.get(&target_ident) {
+        Some(m) => *m,
+        None => return,
+    };
+
+    // Check whether the model declares units on any variable. If not,
+    // skip surfacing inference errors (the model wasn't designed with
+    // dimensional analysis in mind).
+    let has_declared_units = target_model
+        .variables
+        .values()
+        .any(|var| var.units().is_some());
+
+    // Run unit inference.
+    let inferred_units = crate::units_infer::infer(&models_s1, units_ctx, target_model)
+        .unwrap_or_else(|err| {
+            if has_declared_units
+                && let crate::common::UnitError::InferenceError { code, .. } = &err
+                && *code == ErrorCode::UnitMismatch
+            {
+                CompilationDiagnostic(Diagnostic {
+                    model: model_name.clone(),
+                    variable: None,
+                    error: DiagnosticError::Model(crate::common::Error {
+                        kind: ErrorKind::Model,
+                        code: *code,
+                        details: Some(format!("{}", err)),
+                    }),
+                    severity: DiagnosticSeverity::Warning,
+                })
+                .accumulate(db);
+            }
+            Default::default()
+        });
+
+    // Run unit checking.
+    match crate::units_check::check(units_ctx, &inferred_units, target_model) {
+        Ok(Ok(())) => {}
+        Ok(Err(errors)) => {
+            for (ident, err) in errors.into_iter() {
+                CompilationDiagnostic(Diagnostic {
+                    model: model_name.clone(),
+                    variable: Some(ident.to_string()),
+                    error: DiagnosticError::Unit(err),
+                    severity: DiagnosticSeverity::Warning,
+                })
+                .accumulate(db);
+            }
+        }
+        Err(err) => {
+            CompilationDiagnostic(Diagnostic {
+                model: model_name.clone(),
+                variable: None,
+                error: DiagnosticError::Model(crate::common::Error {
+                    kind: ErrorKind::Model,
+                    code: ErrorCode::Generic,
+                    details: Some(format!("unit checking failed: {}", err)),
+                }),
+                severity: DiagnosticSeverity::Warning,
+            })
+            .accumulate(db);
+        }
+    }
+}
+
 /// Per-model tracked function that collects compilation diagnostics from
 /// already-cached tracked functions and pushes them to the accumulator.
 ///
@@ -1410,19 +1566,12 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
                 .accumulate(db);
             }
         }
-
-        if let Some(errors) = variable.unit_errors() {
-            for err in errors {
-                CompilationDiagnostic(Diagnostic {
-                    model: model_name.clone(),
-                    variable: Some(var_name.clone()),
-                    error: DiagnosticError::Unit(err),
-                    severity: DiagnosticSeverity::Warning,
-                })
-                .accumulate(db);
-            }
-        }
     }
+
+    // Trigger unit checking. This is a separate tracked function so
+    // that unit inference results are individually cached and
+    // invalidated only when unit-relevant inputs change.
+    check_model_units(db, model, project);
 }
 
 // ── LTM tracked functions ──────────────────────────────────────────────
