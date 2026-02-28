@@ -1988,6 +1988,14 @@ impl Simulation {
         })
     }
 
+    /// Monolithic bytecode compilation from an AST-walking `Simulation`
+    /// into a bytecode `CompiledSimulation`.
+    ///
+    /// Deprecated: production code uses `compile_project_incremental`
+    /// (in `db.rs`). This method is retained only because the incremental
+    /// path does not yet correctly propagate module input values during
+    /// VM simulation (GitHub #295). Once that is fixed, this method and
+    /// `compile_project` can be removed.
     pub fn compile(&self) -> crate::Result<CompiledSimulation> {
         let modules: crate::Result<HashMap<ModuleKey, CompiledModule>> = self
             .modules
@@ -2197,11 +2205,13 @@ impl Simulation {
     }
 }
 
-/// Build a `CompiledSimulation` directly from a project.
+/// Monolithic bytecode compilation from an `engine::Project`.
 ///
-/// This is the primary entry point for compiling a project to bytecode.
-/// The interpreter's `Simulation` struct is a reference implementation;
-/// this function provides the compile path for the bytecode VM.
+/// Deprecated: production code uses `compile_project_incremental`
+/// (in `db.rs`). This function is retained only because the incremental
+/// path does not yet correctly propagate module input values during
+/// VM simulation (GitHub #295). Once that is fixed, this function and
+/// `Simulation::compile` can be removed.
 pub fn compile_project(
     project: &Project,
     main_model_name: &str,
