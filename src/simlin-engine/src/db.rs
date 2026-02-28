@@ -3605,6 +3605,25 @@ pub fn compile_var_fragment(
         crate::model::lower_variable(&scope, &parsed.variable)
     };
 
+    // Check for errors introduced during AST lowering (e.g.,
+    // MismatchedDimensions from expr2/expr3 lowering). These are stored
+    // in the lowered variable's errors field but not in the parsed
+    // variable's errors, so we check them separately.
+    if let Some(errors) = lowered.equation_errors()
+        && !errors.is_empty()
+    {
+        for err in &errors {
+            CompilationDiagnostic(Diagnostic {
+                model: model.name(db).clone(),
+                variable: Some(var.ident(db).clone()),
+                error: DiagnosticError::Equation(err.clone()),
+                severity: DiagnosticSeverity::Error,
+            })
+            .accumulate(db);
+        }
+        return None;
+    }
+
     // Build minimal metadata: only {self} + deps
     let model_name_ident = Ident::new(model.name(db));
     let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
@@ -6001,3 +6020,7 @@ mod conversion_tests {
 #[cfg(test)]
 #[path = "db_tests.rs"]
 mod db_tests;
+
+#[cfg(test)]
+#[path = "db_diagnostic_tests.rs"]
+mod db_diagnostic_tests;
