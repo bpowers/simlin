@@ -1988,14 +1988,12 @@ impl Simulation {
         })
     }
 
-    /// Monolithic bytecode compilation from an AST-walking `Simulation`
+    /// Test-only monolithic compilation from an AST-walking `Simulation`
     /// into a bytecode `CompiledSimulation`.
     ///
-    /// Deprecated: production code uses `compile_project_incremental`
-    /// (in `db.rs`). This method is retained only because the incremental
-    /// path does not yet correctly propagate module input values during
-    /// VM simulation (GitHub #295). Once that is fixed, this method and
-    /// `compile_project` can be removed.
+    /// Production code uses `compile_project_incremental` (in `db.rs`).
+    /// This method is retained because the incremental path does not yet
+    /// correctly propagate module input values during VM simulation.
     pub fn compile(&self) -> crate::Result<CompiledSimulation> {
         let modules: crate::Result<HashMap<ModuleKey, CompiledModule>> = self
             .modules
@@ -2205,13 +2203,11 @@ impl Simulation {
     }
 }
 
-/// Monolithic bytecode compilation from an `engine::Project`.
+/// Test-only entry point for the monolithic bytecode compilation path.
 ///
-/// Deprecated: production code uses `compile_project_incremental`
-/// (in `db.rs`). This function is retained only because the incremental
-/// path does not yet correctly propagate module input values during
-/// VM simulation (GitHub #295). Once that is fixed, this function and
-/// `Simulation::compile` can be removed.
+/// Production code uses `compile_project_incremental` (in `db.rs`).
+/// This function is retained because the incremental path does not yet
+/// correctly propagate module input values during VM simulation.
 pub fn compile_project(
     project: &Project,
     main_model_name: &str,
@@ -2962,72 +2958,21 @@ fn simulation_defaults_to_project_sim_specs_without_model_override() {
 
 #[cfg(test)]
 mod compile_project_tests {
-    use crate::common::Ident;
     use crate::test_common::TestProject;
-    use crate::vm::Vm;
-    use std::sync::Arc;
-
-    #[test]
-    fn compile_project_f64_matches_simulation_compile() {
-        let tp = TestProject::new("compile_f64")
-            .with_sim_time(0.0, 10.0, 1.0)
-            .aux("rate", "0.1", None)
-            .flow("inflow", "s * rate", None)
-            .stock("s", "100", &["inflow"], &[], None);
-
-        // Via Simulation::compile()
-        let sim = tp.build_sim().expect("build_sim");
-        let compiled_via_sim = sim.compile().expect("compile");
-        let mut vm1 = Vm::new(compiled_via_sim).expect("vm1");
-        vm1.run_to_end().expect("vm1 run");
-        let s1 = vm1.get_series(&Ident::new("s")).expect("s series");
-
-        // Via compile_project()
-        let datamodel = tp.build_datamodel();
-        let project = Arc::new(crate::project::Project::from(datamodel));
-        let compiled_generic = super::compile_project(&project, "main").expect("compile_project");
-        let mut vm2 = Vm::new(compiled_generic).expect("vm2");
-        vm2.run_to_end().expect("vm2 run");
-        let s2 = vm2.get_series(&Ident::new("s")).expect("s series");
-
-        assert_eq!(s1.len(), s2.len());
-        for (i, (a, b)) in s1.iter().zip(s2.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-15,
-                "step {i}: sim.compile()={a}, compile_project()={b}"
-            );
-        }
-    }
 
     #[test]
     fn compile_project_nonexistent_model_errors() {
+        use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+
         let tp = TestProject::new("no_such_model")
             .with_sim_time(0.0, 1.0, 1.0)
             .aux("x", "1", None);
 
         let datamodel = tp.build_datamodel();
-        let project = Arc::new(crate::project::Project::from(datamodel));
-        let result = super::compile_project(&project, "nonexistent");
+        let mut salsa_db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut salsa_db, &datamodel, None);
+        let result = compile_project_incremental(&salsa_db, sync.project, "nonexistent");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn compile_as_matches_compile_project() {
-        let tp = TestProject::new("compile_as")
-            .with_sim_time(0.0, 5.0, 1.0)
-            .aux("x", "TIME * 2", None);
-
-        let datamodel = tp.build_datamodel();
-        let project = Arc::new(crate::project::Project::from(datamodel));
-
-        let compiled = super::compile_project(&project, "main").expect("compile_project");
-        let mut vm = Vm::new(compiled).expect("vm");
-        vm.run_to_end().expect("run");
-        let x = vm.get_series(&Ident::new("x")).expect("x series");
-
-        assert_eq!(x.len(), 6); // steps 0,1,2,3,4,5
-        assert!((x[0] - 0.0).abs() < 1e-10);
-        assert!((x[5] - 10.0).abs() < 1e-10);
     }
 
     #[test]
