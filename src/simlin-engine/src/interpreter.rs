@@ -2924,8 +2924,9 @@ mod compile_project_tests {
 
     #[test]
     fn sparse_arrayed_equation_defaults_missing_elements_to_zero() {
-        // EXCEPT-style sparse arrays (where omitted elements are intentionally
-        // excluded) should keep omitted elements at 0.
+        // EXCEPT-style sparse arrays where all explicit elements have the same
+        // equation as the default: omitted elements were intentionally excluded
+        // and should be 0.
         let tp = TestProject::new("sparse_arrayed")
             .with_sim_time(0.0, 1.0, 1.0)
             .named_dimension("DimA", &["A1", "A2", "A3"]);

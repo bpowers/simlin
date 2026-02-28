@@ -878,8 +878,10 @@ impl<'input> ConversionContext<'input> {
     }
 
     /// Parse GET DIRECT metadata from an expression string for compat persistence.
+    /// Resolves file aliases so that roundtripped MDL references actual filenames
+    /// rather than alias tokens (e.g. `?data`) that require settings context.
     fn extract_get_direct_data_source(&self, eq_str: &str) -> Option<crate::datamodel::DataSource> {
-        use super::external_data::{GetDirectCall, parse_get_direct};
+        use super::external_data::{GetDirectCall, parse_get_direct, resolve_file_alias};
 
         let call = parse_get_direct(eq_str)?;
         Some(match call {
@@ -890,7 +892,7 @@ impl<'input> ConversionContext<'input> {
                 data_cell,
             } => crate::datamodel::DataSource {
                 kind: crate::datamodel::DataSourceKind::Data,
-                file,
+                file: resolve_file_alias(&file, &self.file_aliases),
                 tab_or_delimiter: tab,
                 row_or_col: time_col,
                 cell: data_cell,
@@ -902,7 +904,7 @@ impl<'input> ConversionContext<'input> {
                 col,
             } => crate::datamodel::DataSource {
                 kind: crate::datamodel::DataSourceKind::Constants,
-                file,
+                file: resolve_file_alias(&file, &self.file_aliases),
                 tab_or_delimiter: tab,
                 row_or_col: row_or_cell,
                 cell: col,
@@ -914,7 +916,7 @@ impl<'input> ConversionContext<'input> {
                 y_cell,
             } => crate::datamodel::DataSource {
                 kind: crate::datamodel::DataSourceKind::Lookups,
-                file,
+                file: resolve_file_alias(&file, &self.file_aliases),
                 tab_or_delimiter: tab,
                 row_or_col: x_col,
                 cell: y_cell,
@@ -927,7 +929,7 @@ impl<'input> ConversionContext<'input> {
                 ..
             } => crate::datamodel::DataSource {
                 kind: crate::datamodel::DataSourceKind::Subscript,
-                file,
+                file: resolve_file_alias(&file, &self.file_aliases),
                 tab_or_delimiter: tab,
                 row_or_col: first_cell,
                 cell: last_cell,
@@ -1402,6 +1404,41 @@ outflow = 5
             assert_eq!(data_source.tab_or_delimiter, ",");
             assert_eq!(data_source.row_or_col, "B2");
             assert_eq!(data_source.cell, "");
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_get_direct_data_source_resolves_file_alias() {
+        let mdl = "x = GET DIRECT CONSTANTS('?data', ',', 'B2')\n\
+~ ~|\n\
+\\\\\\---/// Sketch information - do not modify anything after this line\n\
+V300\n\
+:L<%^E!@\n\
+30:?data=data/a.csv\n";
+        let provider = ConstantProvider;
+        let result = convert_mdl_with_data(mdl, Some(&provider));
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            let data_source = a
+                .compat
+                .data_source
+                .as_ref()
+                .expect("GET DIRECT metadata should be preserved in compat.data_source");
+            assert_eq!(data_source.kind, DataSourceKind::Constants);
+            assert_eq!(
+                data_source.file, "data/a.csv",
+                "file alias '?data' should be resolved to 'data/a.csv' in DataSource metadata"
+            );
         } else {
             panic!("Expected Aux variable");
         }

@@ -377,11 +377,12 @@ fn parse_equation(
             return false;
         }
 
-        // EXCEPT conversion emits at least one explicit element whose equation
-        // equals the default; sparse override-style arrays generally do not.
+        // EXCEPT conversion produces sparse arrays where ALL explicit elements
+        // have the same equation as the default (the base equation).  Override-
+        // style sparse arrays have at least one element that differs.
         !elements
             .iter()
-            .any(|(_, eqn, _, _)| eqn.trim() == default_eq.trim())
+            .all(|(_, eqn, _, _)| eqn.trim() == default_eq.trim())
     }
 
     fn parse_inner(eqn: &str) -> (Option<Expr0>, Vec<EquationError>) {
@@ -861,6 +862,36 @@ fn test_parse_equation_arrayed_preserves_default_expression() {
         "arrayed default equation should be preserved in AST lowering"
     );
     assert!(apply_default_to_missing);
+}
+
+#[test]
+fn test_parse_equation_arrayed_applies_default_when_element_matches_default() {
+    // Sparse array like {a=7, b=10, default=7}: element "a" matches the default,
+    // but missing element "c" should still get the default 7, not 0.
+    let dimensions = vec![datamodel::Dimension::named(
+        "dim".to_string(),
+        vec!["a".to_string(), "b".to_string(), "c".to_string()],
+    )];
+    let equation = datamodel::Equation::Arrayed(
+        vec!["dim".to_string()],
+        vec![
+            ("a".to_string(), "7".to_string(), None, None),
+            ("b".to_string(), "10".to_string(), None, None),
+        ],
+        Some("7".to_string()),
+    );
+
+    let (ast, errors) = parse_equation(&equation, &dimensions, false, None);
+    assert!(errors.is_empty(), "arrayed parse should not emit errors");
+
+    let Some(Ast::Arrayed(_, _, default_expr, apply_default_to_missing)) = ast else {
+        panic!("expected arrayed AST");
+    };
+    assert!(default_expr.is_some());
+    assert!(
+        apply_default_to_missing,
+        "defaults must apply to missing elements even when an explicit element matches the default"
+    );
 }
 
 #[test]

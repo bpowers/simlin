@@ -790,7 +790,10 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
 
 fn compat_get_direct_equation(compat: &datamodel::Compat) -> Option<String> {
     let ds = compat.data_source.as_ref()?;
-    let quote = |s: &str| s.replace('\'', "\\'");
+    // Vensim's GET DIRECT argument parser uses single quotes as toggle
+    // delimiters with no escape mechanism, so we pass arguments through
+    // unmodified rather than producing `\'` which would be unparsable.
+    let quote = |s: &str| s.to_string();
     let eq = match ds.kind {
         datamodel::DataSourceKind::Data => format!(
             "{{GET DIRECT DATA('{}', '{}', '{}', '{}')}}",
@@ -4417,6 +4420,29 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert!(
             buf.contains("h[A1]"),
             "explicitly present elements must still be emitted, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn compat_get_direct_equation_does_not_produce_backslash_escapes() {
+        let compat = Compat {
+            data_source: Some(crate::datamodel::DataSource {
+                kind: crate::datamodel::DataSourceKind::Constants,
+                file: "data/a.csv".to_string(),
+                tab_or_delimiter: ",".to_string(),
+                row_or_col: "B2".to_string(),
+                cell: String::new(),
+            }),
+            ..Compat::default()
+        };
+        let eq = compat_get_direct_equation(&compat).expect("should produce equation");
+        assert!(
+            !eq.contains("\\'"),
+            "writer must not emit backslash-escaped quotes (parser treats ' as toggle): {eq}"
+        );
+        assert!(
+            eq.contains("GET DIRECT CONSTANTS"),
+            "should produce GET DIRECT CONSTANTS: {eq}"
         );
     }
 }

@@ -10,8 +10,8 @@ fn data_to_string(val: &Data) -> Option<String> {
     match val {
         Data::String(s) => Some(s.clone()),
         Data::Float(f) => {
-            if *f == (*f as i64) as f64 {
-                Some(format!("{}", *f as i64))
+            if f.is_finite() && f.fract() == 0.0 {
+                Some(format!("{}", *f as i128))
             } else {
                 Some(format!("{f}"))
             }
@@ -439,5 +439,22 @@ mod tests {
         assert_eq!(data_to_string(&Data::Float(0.0)), Some("0".to_string()));
         assert_eq!(data_to_string(&Data::Float(10.0)), Some("10".to_string()));
         assert_eq!(data_to_string(&Data::Float(-5.0)), Some("-5".to_string()));
+    }
+
+    #[test]
+    fn data_to_string_large_integer_floats() {
+        use super::data_to_string;
+        use calamine::Data;
+
+        // f64 near i64::MAX where `as i64` saturates to a wrong value:
+        // 9223372036854776000.0 as i64 = i64::MAX = 9223372036854775807
+        // but the roundtrip (i64::MAX as f64) happens to equal the original,
+        // so the old code would format as "9223372036854775807" (wrong).
+        let large = 9_223_372_036_854_776_000.0_f64;
+        let result = data_to_string(&Data::Float(large)).unwrap();
+        assert!(
+            !result.contains("9223372036854775807"),
+            "large float must not be truncated to i64::MAX: {result}"
+        );
     }
 }
