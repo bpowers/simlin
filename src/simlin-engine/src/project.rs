@@ -37,11 +37,10 @@ impl Project {
     ///
     /// Deprecated: this is the monolithic (non-incremental) LTM pipeline.
     /// Prefer the salsa incremental path via `db::compile_project_incremental`
-    /// with `set_ltm_enabled(true)`. Remaining production callers:
-    /// - `layout::try_detect_ltm_loops_monolithic` (fallback when no db_state)
-    /// - `simlin-cli simulate()` (will be migrated in a follow-up)
+    /// with `set_ltm_enabled(true)`. The only remaining production caller is
+    /// `layout::try_detect_ltm_loops_monolithic` (fallback when no db_state).
     ///
-    /// Once those callers are migrated, this method and its helpers
+    /// Once that caller is migrated, this method and its helpers
     /// (`abort_if_arrayed`, `inject_ltm_vars`) can be removed.
     pub fn with_ltm(self) -> crate::common::Result<Self> {
         abort_if_arrayed(&self)?;
