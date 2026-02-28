@@ -7,7 +7,6 @@
 //! Functions for extracting feedback loops, causal links with LTM scores,
 //! and relative loop scores from a simulation.
 
-use simlin_engine::ltm::{detect_loops, LoopPolarity};
 use simlin_engine::{self as engine, canonicalize};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double};
@@ -42,12 +41,22 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
             return ptr::null_mut();
         }
     };
-    let project_locked = (*model_ref.project).project.lock().unwrap();
+    // Use salsa db for loop detection with polarity and deterministic IDs
+    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
+    let sync = match sync_state.as_ref() {
+        Some(s) => s.to_sync_result(),
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message("project not initialized"),
+            );
+            return ptr::null_mut();
+        }
+    };
 
-    let engine_model = match project_locked
-        .models
-        .get(&*canonicalize(&model_ref.model_name))
-    {
+    let canonical_model = canonicalize(&model_ref.model_name);
+    let synced_model = match sync.models.get(canonical_model.as_ref()) {
         Some(m) => m,
         None => {
             store_error(
@@ -59,28 +68,18 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
         }
     };
 
-    let all_loops = match detect_loops(engine_model, &project_locked) {
-        Ok(loops) => loops,
-        Err(err) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic)
-                    .with_message(format!("failed to detect loops: {err}")),
-            );
-            return ptr::null_mut();
-        }
-    };
-    if all_loops.is_empty() {
-        // Return empty result
+    let detected = engine::db::model_detected_loops(&*db_locked, synced_model.source, sync.project);
+
+    if detected.loops.is_empty() {
         let result = Box::new(SimlinLoops {
             loops: ptr::null_mut(),
             count: 0,
         });
         return Box::into_raw(result);
     }
-    let mut c_loops = Vec::with_capacity(all_loops.len());
-    for loop_item in all_loops {
-        let id = match CString::new(loop_item.id) {
+    let mut c_loops = Vec::with_capacity(detected.loops.len());
+    for loop_item in &detected.loops {
+        let id = match CString::new(loop_item.id.as_str()) {
             Ok(s) => s.into_raw(),
             Err(_) => {
                 drop_loops_vec(&mut c_loops);
@@ -93,46 +92,22 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
             }
         };
 
-        let mut var_names = Vec::with_capacity(loop_item.links.len() + 1);
-        let mut seen = std::collections::HashSet::new();
-        if !loop_item.links.is_empty() {
-            let first = &loop_item.links[0].from;
-            if seen.insert(first.clone()) {
-                match CString::new(first.as_str()) {
-                    Ok(s) => var_names.push(s.into_raw()),
-                    Err(_) => {
-                        drop_c_string(id);
-                        for ptr in var_names {
-                            drop_c_string(ptr);
-                        }
-                        drop_loops_vec(&mut c_loops);
-                        store_error(
-                            out_error,
-                            SimlinError::new(SimlinErrorCode::Generic)
-                                .with_message("loop variable name contains interior NUL byte"),
-                        );
-                        return ptr::null_mut();
+        let mut var_names: Vec<*mut c_char> = Vec::with_capacity(loop_item.variables.len());
+        for name in &loop_item.variables {
+            match CString::new(name.as_str()) {
+                Ok(s) => var_names.push(s.into_raw()),
+                Err(_) => {
+                    drop_c_string(id);
+                    for ptr in &var_names {
+                        drop_c_string(*ptr);
                     }
-                }
-            }
-            for link in &loop_item.links {
-                if seen.insert(link.to.clone()) {
-                    match CString::new(link.to.as_str()) {
-                        Ok(s) => var_names.push(s.into_raw()),
-                        Err(_) => {
-                            drop_c_string(id);
-                            for ptr in var_names {
-                                drop_c_string(ptr);
-                            }
-                            drop_loops_vec(&mut c_loops);
-                            store_error(
-                                out_error,
-                                SimlinError::new(SimlinErrorCode::Generic)
-                                    .with_message("loop variable name contains interior NUL byte"),
-                            );
-                            return ptr::null_mut();
-                        }
-                    }
+                    drop_loops_vec(&mut c_loops);
+                    store_error(
+                        out_error,
+                        SimlinError::new(SimlinErrorCode::Generic)
+                            .with_message("loop variable name contains interior NUL byte"),
+                    );
+                    return ptr::null_mut();
                 }
             }
         }
@@ -146,9 +121,9 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
             ptr::null_mut()
         };
         let polarity = match loop_item.polarity {
-            LoopPolarity::Reinforcing => SimlinLoopPolarity::Reinforcing,
-            LoopPolarity::Balancing => SimlinLoopPolarity::Balancing,
-            LoopPolarity::Undetermined => SimlinLoopPolarity::Undetermined,
+            engine::db::DetectedLoopPolarity::Reinforcing => SimlinLoopPolarity::Reinforcing,
+            engine::db::DetectedLoopPolarity::Balancing => SimlinLoopPolarity::Balancing,
+            engine::db::DetectedLoopPolarity::Undetermined => SimlinLoopPolarity::Undetermined,
         };
         c_loops.push(SimlinLoop {
             id,
@@ -210,12 +185,23 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
         }
     };
     let model_ref = &*sim_ref.model;
-    let project_locked = (*model_ref.project).project.lock().unwrap();
 
-    let model = match project_locked
-        .models
-        .get(&*canonicalize(&model_ref.model_name))
-    {
+    // Use salsa db for causal edge extraction
+    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
+    let sync = match sync_state.as_ref() {
+        Some(s) => s.to_sync_result(),
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message("project not initialized"),
+            );
+            return ptr::null_mut();
+        }
+    };
+
+    let canonical_model = canonicalize(&model_ref.model_name);
+    let synced_model = match sync.models.get(canonical_model.as_ref()) {
         Some(m) => m,
         None => {
             store_error(
@@ -227,69 +213,29 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
         }
     };
 
-    let graph = match engine::ltm::CausalGraph::from_model(model, &project_locked) {
-        Ok(g) => g,
-        Err(err) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic)
-                    .with_message(format!("failed to build causal graph: {err}")),
-            );
-            return ptr::null_mut();
-        }
-    };
+    let causal = engine::db::model_causal_edges(&*db_locked, synced_model.source, sync.project);
 
-    let loops = graph.find_loops();
-
+    // Build unique links from causal edges (from_var -> {to_var, ...})
     let mut unique_links = std::collections::HashMap::new();
-    for loop_item in loops {
-        for link in loop_item.links {
-            let key = (link.from.clone(), link.to.clone());
-            unique_links.entry(key).or_insert(link);
+    for (from_name, to_set) in &causal.edges {
+        for to_name in to_set {
+            let key = (from_name.clone(), to_name.clone());
+            unique_links
+                .entry(key)
+                .or_insert((from_name.clone(), to_name.clone()));
         }
     }
 
-    for (var_name, var) in &model.variables {
-        let deps = match var {
-            engine::Variable::Stock {
-                inflows, outflows, ..
-            } => inflows
-                .iter()
-                .chain(outflows.iter())
-                .map(|flow| (flow.clone(), var_name.clone()))
-                .collect(),
-            engine::Variable::Var { ast, .. } if ast.is_some() => {
-                engine::identifier_set(ast.as_ref().unwrap(), &[], None)
-                    .into_iter()
-                    .map(|dep| (dep, var_name.clone()))
-                    .collect()
-            }
-            engine::Variable::Module { inputs, .. } => inputs
-                .iter()
-                .map(|input| (input.src.clone(), var_name.clone()))
-                .collect(),
-            _ => Vec::new(),
-        };
-
-        for (from, to) in deps {
-            let key = (from.clone(), to.clone());
-            unique_links.entry(key).or_insert(engine::ltm::Link {
-                from,
-                to,
-                polarity: engine::ltm::LinkPolarity::Unknown,
-            });
-        }
-    }
+    // Drop locks before accessing sim state for LTM scores
+    drop(sync_state);
+    drop(db_locked);
 
     if unique_links.is_empty() {
-        drop(project_locked);
         return Box::into_raw(Box::new(SimlinLinks {
             links: ptr::null_mut(),
             count: 0,
         }));
     }
-
-    drop(project_locked);
 
     let has_ltm_scores = {
         let state = sim_ref.state.lock().unwrap();
@@ -297,8 +243,8 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
     };
 
     let mut c_links = Vec::with_capacity(unique_links.len());
-    for (_, link) in unique_links {
-        let from = match CString::new(link.from.as_str()) {
+    for (_, (from_name, to_name)) in unique_links {
+        let from = match CString::new(from_name.as_str()) {
             Ok(s) => s.into_raw(),
             Err(_) => {
                 drop_links_vec(&mut c_links);
@@ -310,7 +256,7 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
                 return ptr::null_mut();
             }
         };
-        let to = match CString::new(link.to.as_str()) {
+        let to = match CString::new(to_name.as_str()) {
             Ok(s) => s.into_raw(),
             Err(_) => {
                 drop_c_string(from);
@@ -323,17 +269,12 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
                 return ptr::null_mut();
             }
         };
-        let polarity = match link.polarity {
-            engine::ltm::LinkPolarity::Positive => SimlinLinkPolarity::Positive,
-            engine::ltm::LinkPolarity::Negative => SimlinLinkPolarity::Negative,
-            engine::ltm::LinkPolarity::Unknown => SimlinLinkPolarity::Unknown,
-        };
 
         let (score_ptr, score_len) = if has_ltm_scores {
             let link_score_var = format!(
                 "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
-                link.from.as_str(),
-                link.to.as_str()
+                from_name.as_str(),
+                to_name.as_str()
             );
             let var_ident = canonicalize(&link_score_var);
 
@@ -362,7 +303,7 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
         c_links.push(SimlinLink {
             from,
             to,
-            polarity,
+            polarity: SimlinLinkPolarity::Unknown,
             score: score_ptr,
             score_len,
         });

@@ -17,9 +17,8 @@ use crate::errors;
 pub use crate::ffi_error::ErrorDetail as ErrorDetailData;
 use crate::ffi_error::{FfiError, SimlinError};
 use crate::{
-    build_simlin_error, clear_out_error, compile_simulation, require_project, store_anyhow_error,
-    store_error, store_ffi_error, SimlinErrorCode, SimlinErrorKind, SimlinProject,
-    SimlinUnitErrorKind,
+    build_simlin_error, clear_out_error, require_project, store_anyhow_error, store_error,
+    store_ffi_error, SimlinErrorCode, SimlinErrorKind, SimlinProject, SimlinUnitErrorKind,
 };
 
 #[cfg(test)]
@@ -318,104 +317,51 @@ impl ErrorDetailBuilder {
 
 // ── error collection ───────────────────────────────────────────────────
 
-fn collect_project_errors(project: &engine::Project) -> Vec<ErrorDetailData> {
-    errors::collect_formatted_issues(project)
-        .errors
-        .into_iter()
-        .map(ErrorDetailBuilder::from_formatted)
-        .collect()
-}
-
-/// Collects all static analysis errors and attempts compilation to find
-/// simulation-time errors. When a synced salsa database is provided,
-/// uses incremental compilation and merges accumulator diagnostics
-/// (deduplicated by model+variable+code triple).
+/// Collect all error details from the salsa accumulator diagnostics.
+///
+/// Uses only `collect_all_diagnostics` (the tracked accumulator path).
+/// If a VM validation error is provided, it is appended to the result.
+/// The caller is responsible for running `compile_project_incremental`
+/// separately and passing the result here.
 pub(crate) fn gather_error_details_with_db(
-    project: &engine::Project,
-    db_sync: Option<(&engine::db::SimlinDb, &engine::db::SyncResult<'_>)>,
-) -> (
-    Vec<ErrorDetailData>,
-    Option<engine::Error>,
-    Option<engine::CompiledSimulation>,
-) {
-    let mut all_errors = collect_project_errors(project);
+    db: &engine::db::SimlinDb,
+    sync: &engine::db::SyncResult<'_>,
+    vm_error: Option<&engine::Error>,
+) -> Vec<ErrorDetailData> {
+    let diags = engine::db::collect_all_diagnostics(db, sync);
+    let mut all_errors: Vec<ErrorDetailData> = diags
+        .iter()
+        .map(|d| ErrorDetailBuilder::from_formatted(errors::format_diagnostic(d)))
+        .collect();
 
-    // If a synced database is available, also collect from the accumulator
-    // and merge (deduplicated by model+variable+code).
-    if let Some((db, sync)) = db_sync {
-        use std::collections::HashSet;
-
-        let mut seen_keys: HashSet<(Option<String>, Option<String>, SimlinErrorCode)> = all_errors
-            .iter()
-            .map(|e| (e.model_name.clone(), e.variable_name.clone(), e.code))
-            .collect();
-
-        let diags = engine::db::collect_all_diagnostics(db, sync);
-        for diag in &diags {
-            let formatted = errors::format_diagnostic(diag);
-            let key = (
-                formatted.model_name.clone(),
-                formatted.variable_name.clone(),
-                SimlinErrorCode::from(formatted.code),
-            );
-            if seen_keys.insert(key) {
-                all_errors.push(ErrorDetailBuilder::from_formatted(formatted));
-            }
-        }
-    }
-
-    // Use the monolithic compilation path for simulatability checks.
-    // The incremental path is used in simlin_sim_new where it matters
-    // for avoiding double-compilation; here we only need to detect errors.
-    let (compiled, sim_error) = match compile_simulation(project, "main") {
-        Ok(compiled) => match Vm::new(compiled.clone()) {
-            Ok(_vm) => (Some(compiled), None),
-            Err(err) => (Some(compiled), Some(err)),
-        },
-        Err(err) => (None, Some(err)),
-    };
-
-    if let Some(ref error) = sim_error {
+    if let Some(error) = vm_error {
         let formatted = errors::format_simulation_error("main", error);
         all_errors.push(ErrorDetailBuilder::from_formatted(formatted));
     }
 
-    (all_errors, sim_error, compiled)
+    all_errors
 }
 
 fn first_error_code(
-    project: &engine::Project,
+    diagnostics: &[engine::db::Diagnostic],
     sim_error: Option<&engine::Error>,
 ) -> Option<SimlinErrorCode> {
-    if let Some(error) = project.errors.first() {
-        return Some(SimlinErrorCode::from(error.code));
-    }
-
-    for model in project.models.values() {
-        if let Some(errors) = &model.errors {
-            if let Some(error) = errors.first() {
-                return Some(SimlinErrorCode::from(error.code));
-            }
-        }
-
-        if model
-            .get_variable_errors()
-            .values()
-            .any(|errors| !errors.is_empty())
-        {
-            return Some(SimlinErrorCode::VariablesHaveErrors);
-        }
-
-        if model
-            .get_unit_errors()
-            .values()
-            .any(|errors| !errors.is_empty())
-        {
-            return Some(SimlinErrorCode::UnitDefinitionErrors);
+    for d in diagnostics {
+        if d.severity == engine::db::DiagnosticSeverity::Error {
+            return Some(diagnostic_to_error_code(&d.error));
         }
     }
 
     sim_error.map(|error| SimlinErrorCode::from(error.code))
+}
+
+fn diagnostic_to_error_code(error: &engine::db::DiagnosticError) -> SimlinErrorCode {
+    match error {
+        engine::db::DiagnosticError::Equation(e) => SimlinErrorCode::from(e.code),
+        engine::db::DiagnosticError::Model(e) => SimlinErrorCode::from(e.code),
+        engine::db::DiagnosticError::Unit(_) => SimlinErrorCode::UnitDefinitionErrors,
+        engine::db::DiagnosticError::Assembly(_) => SimlinErrorCode::NotSimulatable,
+    }
 }
 
 /// Collects models that have unit warnings as a set of model names.
@@ -426,13 +372,21 @@ fn first_error_code(
 /// ensures that if a model already had unit warnings before a patch, further patches
 /// to that model are allowed (even if they don't fix the existing warnings).
 fn collect_models_with_unit_warnings(
-    project: &engine::Project,
+    diagnostics: &[engine::db::Diagnostic],
 ) -> std::collections::HashSet<String> {
     let mut models_with_warnings = std::collections::HashSet::new();
 
-    for (model_name, model) in &project.models {
-        if model.unit_warnings.is_some() {
-            models_with_warnings.insert(model_name.to_string());
+    for d in diagnostics {
+        if d.severity == engine::db::DiagnosticSeverity::Warning {
+            if let engine::db::DiagnosticError::Unit(_) = &d.error {
+                models_with_warnings.insert(d.model.clone());
+            }
+            // Also catch model-level UnitMismatch warnings (from unit inference)
+            if let engine::db::DiagnosticError::Model(e) = &d.error {
+                if e.code == engine::common::ErrorCode::UnitMismatch {
+                    models_with_warnings.insert(d.model.clone());
+                }
+            }
         }
     }
 
@@ -454,13 +408,22 @@ pub(crate) unsafe fn apply_project_patch_internal(
     out_collected_errors: *mut *mut SimlinError,
     out_error: *mut *mut SimlinError,
 ) {
-    // Atomically snapshot warning baseline + datamodel under a single lock
-    // acquisition, so a concurrent patch cannot change the warning set
-    // between the two reads.
+    // Snapshot the pre-patch warning baseline and datamodel atomically.
+    // The db lock is acquired to collect diagnostics for the existing state.
     let (models_with_existing_warnings, mut staged_datamodel, original_datamodel) = {
-        let project_locked = project_ref.project.lock().unwrap();
-        let warnings = collect_models_with_unit_warnings(&project_locked);
-        let dm = project_locked.datamodel.clone();
+        let datamodel_locked = project_ref.datamodel.lock().unwrap();
+        let db_locked = project_ref.db.lock().unwrap();
+        let sync_state = project_ref.sync_state.lock().unwrap();
+        let warnings = if let Some(ref state) = *sync_state {
+            let sync = state.to_sync_result();
+            let diags = engine::db::collect_all_diagnostics(&db_locked, &sync);
+            collect_models_with_unit_warnings(&diags)
+        } else {
+            std::collections::HashSet::new()
+        };
+        drop(sync_state);
+        drop(db_locked);
+        let dm = datamodel_locked.clone();
         #[cfg(test)]
         invoke_patch_test_hook(PatchHookPoint::SnapshotWhileProjectLocked, project_ref);
         (warnings, dm.clone(), dm)
@@ -490,24 +453,23 @@ pub(crate) unsafe fn apply_project_patch_internal(
     invoke_patch_test_hook(PatchHookPoint::StagedSyncWhileDbLocked, project_ref);
 
     let staged_sync = staged_sync_state.to_sync_result();
-    let staged_source_models: std::collections::HashMap<String, engine::db::SourceModel> =
-        staged_sync
-            .models
-            .iter()
-            .map(|(name, synced_model)| (name.clone(), synced_model.source))
-            .collect();
-    let staged_project = engine::Project::from_with_salsa_sync(
-        staged_datamodel,
-        &*db,
-        staged_sync.project,
-        &staged_source_models,
-    );
-    let (all_errors, sim_error, _compiled) =
-        gather_error_details_with_db(&staged_project, Some((&db, &staged_sync)));
+
+    // Collect diagnostics from the tracked accumulator path.
+    let staged_diags = engine::db::collect_all_diagnostics(&db, &staged_sync);
+
+    // Attempt compilation + VM validation to detect assembly-level errors
+    // that are not captured by per-variable diagnostics.
+    let sim_error = match engine::db::compile_project_incremental(&db, staged_sync.project, "main")
+    {
+        Ok(compiled) => Vm::new(compiled).err(),
+        Err(err) => Some(err),
+    };
+
+    let all_errors = gather_error_details_with_db(&db, &staged_sync, sim_error.as_ref());
 
     // Check for blocking errors (not including unit warnings, which are handled separately)
     let maybe_first_code = if !allow_errors {
-        first_error_code(&staged_project, sim_error.as_ref())
+        first_error_code(&staged_diags, sim_error.as_ref())
     } else {
         None
     };
@@ -515,7 +477,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // Check for NEW unit warnings in models that were previously clean.
     // If a model already had unit warnings, further changes to it are allowed.
     let new_unit_warning = if !allow_errors && maybe_first_code.is_none() {
-        let models_with_new_warnings = collect_models_with_unit_warnings(&staged_project);
+        let models_with_new_warnings = collect_models_with_unit_warnings(&staged_diags);
         // Find models that now have warnings but didn't before
         models_with_new_warnings
             .difference(&models_with_existing_warnings)
@@ -576,18 +538,15 @@ pub(crate) unsafe fn apply_project_patch_internal(
     *project_ref.sync_state.lock().unwrap() = Some(restored.clone());
     drop(db);
 
-    // Re-acquire all three locks in documented order (project -> db ->
+    // Re-acquire all three locks in documented order (datamodel -> db ->
     // sync_state) for an atomic commit. The extra sync call is cheap
     // because salsa caching makes re-applying the same inputs free.
-    let mut project_locked = project_ref.project.lock().unwrap();
+    let mut datamodel_locked = project_ref.datamodel.lock().unwrap();
     let mut db = project_ref.db.lock().unwrap();
-    let final_sync = engine::db::sync_from_datamodel_incremental(
-        &mut db,
-        &staged_project.datamodel,
-        Some(&restored),
-    );
+    let final_sync =
+        engine::db::sync_from_datamodel_incremental(&mut db, &staged_datamodel, Some(&restored));
     *project_ref.sync_state.lock().unwrap() = Some(final_sync);
-    *project_locked = staged_project;
+    *datamodel_locked = staged_datamodel;
 }
 
 // ── FFI entry point ────────────────────────────────────────────────────

@@ -39,6 +39,34 @@ pub enum Ast<Expr> {
     ),
 }
 
+impl Ast<Expr0> {
+    /// Returns the source location of the first reference to the given
+    /// canonical identifier, or None if not referenced.
+    pub(crate) fn get_var_loc(&self, canonical_ident: &str) -> Option<Loc> {
+        match self {
+            Ast::Scalar(expr) => expr.get_var_loc(canonical_ident),
+            Ast::ApplyToAll(_, expr) => expr.get_var_loc(canonical_ident),
+            Ast::Arrayed(_, subscripts) => {
+                for (_, expr) in subscripts.iter() {
+                    if let Some(loc) = expr.get_var_loc(canonical_ident) {
+                        return Some(loc);
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Render the equation as LaTeX using raw identifiers (canonicalized).
+    pub fn to_latex(&self) -> String {
+        match self {
+            Ast::Scalar(expr) => latex_eqn_expr0(expr),
+            Ast::ApplyToAll(_, _expr) => "TODO(array)".to_owned(),
+            Ast::Arrayed(_, _) => "TODO(array)".to_owned(),
+        }
+    }
+}
+
 impl Ast<Expr2> {
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
@@ -658,6 +686,90 @@ impl LatexVisitor {
 pub fn latex_eqn(expr: &Expr2) -> String {
     let mut visitor = LatexVisitor {};
     visitor.walk(expr)
+}
+
+/// Render an Expr0 (pre-lowering) AST node as LaTeX.
+///
+/// Variable names are canonicalized (lowercased with underscores) to match
+/// the Expr2-based `latex_eqn`. This avoids needing the full lowering
+/// pipeline just for LaTeX display.
+pub fn latex_eqn_expr0(expr: &Expr0) -> String {
+    match expr {
+        Expr0::Const(s, n, _) => {
+            if n.is_nan() {
+                "\\mathrm{{NaN}}".to_owned()
+            } else {
+                s.clone()
+            }
+        }
+        Expr0::Var(raw, _) => {
+            let id = canonicalize(raw.as_str());
+            let id = str::replace(&id, "_", "\\_");
+            format!("\\mathrm{{{id}}}")
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), _) => {
+            let rendered_args: Vec<String> = args.iter().map(latex_eqn_expr0).collect();
+            format!("\\operatorname{{{}}}({})", name, rendered_args.join(", "))
+        }
+        Expr0::Subscript(raw, indices, _) => {
+            let id = canonicalize(raw.as_str());
+            let rendered: Vec<String> = indices
+                .iter()
+                .map(|idx| match idx {
+                    IndexExpr0::Wildcard(_) => "*".to_string(),
+                    IndexExpr0::StarRange(id, _) => {
+                        format!("*:{}", canonicalize(id.as_str()))
+                    }
+                    IndexExpr0::Range(l, r, _) => {
+                        format!("{}:{}", latex_eqn_expr0(l), latex_eqn_expr0(r))
+                    }
+                    IndexExpr0::DimPosition(n, _) => format!("@{n}"),
+                    IndexExpr0::Expr(e) => latex_eqn_expr0(e),
+                })
+                .collect();
+            format!("{id}[{}]", rendered.join(", "))
+        }
+        Expr0::Op1(op, inner, _) => {
+            let inner = latex_eqn_expr0(inner);
+            match op {
+                UnaryOp::Positive => format!("+{inner}"),
+                UnaryOp::Negative => format!("-{inner}"),
+                UnaryOp::Not => format!("\\neg {inner}"),
+                UnaryOp::Transpose => format!("{inner}^T"),
+            }
+        }
+        Expr0::Op2(op, l, r, _) => {
+            let l = latex_eqn_expr0(l);
+            let r = latex_eqn_expr0(r);
+            match op {
+                BinaryOp::Add => format!("{l} + {r}"),
+                BinaryOp::Sub => format!("{l} - {r}"),
+                BinaryOp::Exp => format!("{l}^{{{r}}}"),
+                BinaryOp::Mul => format!("{l} \\cdot {r}"),
+                BinaryOp::Div => format!("\\frac{{{l}}}{{{r}}}"),
+                BinaryOp::Mod => format!("{l} % {r}"),
+                BinaryOp::Gt => format!("{l} > {r}"),
+                BinaryOp::Lt => format!("{l} < {r}"),
+                BinaryOp::Gte => format!("{l} >= {r}"),
+                BinaryOp::Lte => format!("{l} <= {r}"),
+                BinaryOp::Eq => format!("{l} = {r}"),
+                BinaryOp::Neq => format!("{l} != {r}"),
+                BinaryOp::And => format!("{l} && {r}"),
+                BinaryOp::Or => format!("{l} || {r}"),
+            }
+        }
+        Expr0::If(cond, t, f, _) => {
+            let cond = latex_eqn_expr0(cond);
+            let t = latex_eqn_expr0(t);
+            let f = latex_eqn_expr0(f);
+            format!(
+                "\\begin{{cases}}
+                     {t} & \\text{{if }} {cond} \\\\
+                     {f} & \\text{{else}}
+                 \\end{{cases}}"
+            )
+        }
+    }
 }
 
 #[test]

@@ -1171,9 +1171,10 @@ describe('High-Level API', () => {
       const mainErrors = allErrors.filter((e) => e.modelName === 'main');
       expect(mainIssues.length).toBe(mainErrors.length);
 
-      // Verify the error is about the unknown reference
+      // Verify the error is about the unknown dependency (bad_var references
+      // a non-existent variable called "unknown_reference")
       if (mainIssues.length > 0) {
-        expect(mainIssues[0].message).toContain('unknown_reference');
+        expect(mainIssues[0].message).toContain('unknown_dependency');
       }
 
       await project.dispose();

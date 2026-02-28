@@ -64,11 +64,11 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         }
     };
 
-    let mut project_locked = proj.project.lock().unwrap();
+    let mut datamodel_locked = proj.datamodel.lock().unwrap();
 
     // Check model existence up front so we can distinguish "not found"
     // (DoesNotExist) from internal layout failures (Generic).
-    if project_locked.datamodel.get_model(model_name_str).is_none() {
+    if datamodel_locked.get_model(model_name_str).is_none() {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::DoesNotExist)
@@ -78,8 +78,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
     }
 
     // Preserve existing zoom if the model already has a view
-    let existing_zoom = project_locked
-        .datamodel
+    let existing_zoom = datamodel_locked
         .get_model(model_name_str)
         .and_then(|m| m.views.first())
         .map(|v| match v {
@@ -87,26 +86,22 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         })
         .filter(|&z| z > 0.0);
 
-    let mut layout =
-        match engine::layout::generate_best_layout(&project_locked.datamodel, model_name_str) {
-            Ok(l) => l,
-            Err(msg) => {
-                store_error(
-                    out_error,
-                    SimlinError::new(SimlinErrorCode::Generic).with_message(msg),
-                );
-                return;
-            }
-        };
+    let mut layout = match engine::layout::generate_best_layout(&datamodel_locked, model_name_str) {
+        Ok(l) => l,
+        Err(msg) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message(msg),
+            );
+            return;
+        }
+    };
 
     if let Some(zoom) = existing_zoom {
         layout.zoom = zoom;
     }
 
     // Model existence was verified above, so this should always succeed.
-    let model = project_locked
-        .datamodel
-        .get_model_mut(model_name_str)
-        .unwrap();
+    let model = datamodel_locked.get_model_mut(model_name_str).unwrap();
     model.views = vec![engine::datamodel::View::StockFlow(layout)];
 }
