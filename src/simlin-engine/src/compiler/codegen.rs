@@ -919,22 +919,25 @@ impl<'module> Compiler<'module> {
                         self.push(Opcode::PopView {});
                         return Ok(Some(()));
                     }
-                    BuiltinFn::VectorSelect(_, _, _, _, _)
-                    | BuiltinFn::VectorElmMap(_, _)
-                    | BuiltinFn::VectorSortOrder(_, _)
-                    | BuiltinFn::AllocateAvailable(_, _, _) => {
-                        return sim_err!(
-                            TodoArrayBuiltin,
-                            "array builtins not yet supported in VM".to_owned()
-                        );
+                    BuiltinFn::VectorSelect(sel, expr, max_val, action, _err) => {
+                        self.walk_expr_as_view(sel)?;
+                        self.walk_expr_as_view(expr)?;
+                        self.walk_expr(max_val)?.unwrap();
+                        self.walk_expr(action)?.unwrap();
+                        self.push(Opcode::VectorSelect {});
+                        self.push(Opcode::PopView {});
+                        self.push(Opcode::PopView {});
+                        return Ok(Some(()));
                     }
-                    // Previous/Init are handled in a separate early-return path
-                    // added in Task 4. Until then, nothing emits these variants.
                     BuiltinFn::Previous(_) | BuiltinFn::Init(_) => {
                         unreachable!(
                             "Previous/Init builtins should be handled before reaching BuiltinId dispatch"
                         );
                     }
+                    // routed through AssignTemp by A2A hoisting
+                    BuiltinFn::VectorElmMap(_, _)
+                    | BuiltinFn::VectorSortOrder(_, _)
+                    | BuiltinFn::AllocateAvailable(_, _, _) => unreachable!(),
                 };
                 let func = match builtin {
                     BuiltinFn::Lookup(_, _, _)
@@ -970,24 +973,23 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::TimeStep
                     | BuiltinFn::StartTime
                     | BuiltinFn::FinalTime => unreachable!(),
-                    BuiltinFn::Rank(_, _)
-                    | BuiltinFn::Size(_)
-                    | BuiltinFn::Stddev(_)
-                    | BuiltinFn::Sum(_)
-                    | BuiltinFn::VectorSelect(_, _, _, _, _)
-                    | BuiltinFn::VectorElmMap(_, _)
-                    | BuiltinFn::VectorSortOrder(_, _)
-                    | BuiltinFn::AllocateAvailable(_, _, _) => {
+                    BuiltinFn::Rank(_, _) => {
                         return sim_err!(TodoArrayBuiltin, "".to_owned());
                     }
-                    // Previous/Init are handled in a separate early-return path
-                    // (Task 4 of phase 1 adds that path). Until then, nothing
-                    // emits these variants, so reaching here is a logic error.
                     BuiltinFn::Previous(_) | BuiltinFn::Init(_) => {
                         unreachable!(
                             "Previous/Init builtins should be handled before reaching BuiltinId dispatch"
                         );
                     }
+                    // handled above; we exit early
+                    BuiltinFn::Size(_)
+                    | BuiltinFn::Stddev(_)
+                    | BuiltinFn::Sum(_)
+                    | BuiltinFn::VectorSelect(_, _, _, _, _) => unreachable!(),
+                    // routed through AssignTemp by A2A hoisting
+                    BuiltinFn::VectorElmMap(_, _)
+                    | BuiltinFn::VectorSortOrder(_, _)
+                    | BuiltinFn::AllocateAvailable(_, _, _) => unreachable!(),
                 };
 
                 self.push(Opcode::Apply { func });
@@ -1083,6 +1085,43 @@ impl<'module> Compiler<'module> {
                 None
             }
             Expr::AssignTemp(id, rhs, view) => {
+                // Array-producing builtins bypass the BeginIter loop entirely
+                if let Expr::App(builtin, _) = rhs.as_ref() {
+                    match builtin {
+                        BuiltinFn::VectorElmMap(source, offset) => {
+                            self.walk_expr_as_view(source)?;
+                            self.walk_expr_as_view(offset)?;
+                            self.push(Opcode::VectorElmMap {
+                                write_temp_id: *id as TempId,
+                            });
+                            self.push(Opcode::PopView {});
+                            self.push(Opcode::PopView {});
+                            return Ok(None);
+                        }
+                        BuiltinFn::VectorSortOrder(array, direction) => {
+                            self.walk_expr_as_view(array)?;
+                            self.walk_expr(direction)?.unwrap();
+                            self.push(Opcode::VectorSortOrder {
+                                write_temp_id: *id as TempId,
+                            });
+                            self.push(Opcode::PopView {});
+                            return Ok(None);
+                        }
+                        BuiltinFn::AllocateAvailable(requests, profile, avail) => {
+                            self.walk_expr_as_view(requests)?;
+                            self.walk_expr_as_view(profile)?;
+                            self.walk_expr(avail)?.unwrap();
+                            self.push(Opcode::AllocateAvailable {
+                                write_temp_id: *id as TempId,
+                            });
+                            self.push(Opcode::PopView {});
+                            self.push(Opcode::PopView {});
+                            return Ok(None);
+                        }
+                        _ => {} // fall through to existing BeginIter logic
+                    }
+                }
+
                 // AssignTemp evaluates an array expression element-by-element and stores to temp
                 //
                 // OPTIMIZED Bytecode pattern (hoisted view pushes):
