@@ -63,6 +63,28 @@ pub enum DiagnosticError {
     Assembly(String),
 }
 
+/// Attempt to push a diagnostic into the salsa accumulator. When called
+/// inside a tracked function the diagnostic is recorded normally. When
+/// called outside any tracked context (e.g. from `compile_project_incremental`
+/// which is a plain function) the push is silently skipped, avoiding the
+/// panic that salsa raises when `accumulate` has no active query on the
+/// stack. This lets `assemble_module` / `assemble_simulation` accumulate
+/// diagnostics when invoked from tracked code while remaining safe to
+/// call from non-tracked entry points.
+fn try_accumulate_diagnostic(db: &dyn Db, diag: Diagnostic) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    // `catch_unwind` requires `UnwindSafe` for the closure's captures.
+    // We wrap the entire closure in `AssertUnwindSafe` because
+    // `accumulate` is append-only and observing partially-mutated
+    // state is not a concern.
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        CompilationDiagnostic(diag).accumulate(db);
+    }));
+    // If there was no active tracked context, the panic is caught here
+    // and silently discarded -- the diagnostic simply isn't recorded.
+    drop(result);
+}
+
 // ── Interned identifiers ───────────────────────────────────────────────
 
 #[salsa::interned(debug)]
@@ -4751,10 +4773,17 @@ pub fn assemble_module(
         model_dependency_graph_with_inputs(db, model, project, module_input_names.clone())
     };
     if dep_graph.has_cycle {
-        return Err(format!(
-            "model '{}' has circular dependencies",
-            model.name(db)
-        ));
+        let msg = format!("model '{}' has circular dependencies", model.name(db));
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: model.name(db).clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+        return Err(msg);
     }
     let layout = compute_layout(db, model, project, is_root);
     let source_vars = model.variables(db);
@@ -4976,10 +5005,20 @@ pub fn assemble_module(
     }
 
     if !missing_vars.is_empty() {
-        return Err(format!(
+        let msg = format!(
             "failed to compile fragments for variables: {}",
             missing_vars.join(", ")
-        ));
+        );
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: model_name.clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+        return Err(msg);
     }
 
     // Compute context resource base offsets for each phase so that flows
@@ -5000,8 +5039,28 @@ pub fn assemble_module(
         dim_lists: initial_counts.dim_lists + flow_counts.dim_lists,
     };
 
-    let flows_concat = concatenate_fragments(&flow_frags, &flow_base)?;
-    let stocks_concat = concatenate_fragments(&stock_frags, &stock_base)?;
+    let flows_concat = concatenate_fragments(&flow_frags, &flow_base).inspect_err(|msg| {
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: model_name.clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+    })?;
+    let stocks_concat = concatenate_fragments(&stock_frags, &stock_base).inspect_err(|msg| {
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: model_name.clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+    })?;
 
     // Build SymbolicCompiledInitial for each initial variable, renumbered
     // so context resource IDs (GFs, modules, views, temps, dim_lists) match
@@ -5029,7 +5088,18 @@ pub fn assemble_module(
                     init_dl_off,
                 )
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .inspect_err(|msg| {
+                try_accumulate_diagnostic(
+                    db,
+                    Diagnostic {
+                        model: model_name.clone(),
+                        variable: None,
+                        error: DiagnosticError::Assembly(msg.clone()),
+                        severity: DiagnosticSeverity::Error,
+                    },
+                );
+            })?;
         compiled_initials.push(SymbolicCompiledInitial {
             ident: Ident::new(name),
             bytecode: crate::compiler::symbolic::SymbolicByteCode {
@@ -5057,7 +5127,17 @@ pub fn assemble_module(
         .chain(flow_frags.iter().copied())
         .chain(stock_frags.iter().copied())
         .collect();
-    let merged = concatenate_fragments(&all_frags, &no_base)?;
+    let merged = concatenate_fragments(&all_frags, &no_base).inspect_err(|msg| {
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: model_name.clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+    })?;
 
     // Build dimension metadata from project dimensions (mirrors Compiler::populate_dimension_metadata)
     let dm_dims = source_dims_to_datamodel(project.dimensions(db));
@@ -5122,7 +5202,17 @@ pub fn assemble_module(
     };
 
     // Resolve symbolic -> concrete offsets
-    resolve_module(&sym_module, layout)
+    resolve_module(&sym_module, layout).inspect_err(|msg| {
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: model_name.clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+    })
 }
 
 /// Assemble a full CompiledSimulation from assembled modules.
@@ -5140,12 +5230,33 @@ pub fn assemble_simulation(
     let main_model_canonical = canonicalize(main_model_name);
 
     if !project_models.contains_key(main_model_canonical.as_ref()) {
-        return Err(format!("no model named '{}' to simulate", main_model_name));
+        let msg = format!("no model named '{}' to simulate", main_model_name);
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: main_model_name.to_string(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+        return Err(msg);
     }
 
     // Enumerate module instances by walking module variables recursively.
     // Each unique (model_name, input_set) pair gets its own CompiledModule.
-    let module_instances = enumerate_module_instances(db, project, main_model_name)?;
+    let module_instances =
+        enumerate_module_instances(db, project, main_model_name).inspect_err(|msg| {
+            try_accumulate_diagnostic(
+                db,
+                Diagnostic {
+                    model: main_model_name.to_string(),
+                    variable: None,
+                    error: DiagnosticError::Assembly(msg.clone()),
+                    severity: DiagnosticSeverity::Error,
+                },
+            );
+        })?;
 
     // Sort module names: main first, then all others alphabetically
     let main_ident = Ident::<Canonical>::new(main_model_name);
@@ -5170,10 +5281,20 @@ pub fn assemble_simulation(
             let model_name_str = name.as_str();
             let canonical_name = canonicalize(model_name_str);
             let source_model = project_models.get(canonical_name.as_ref()).ok_or_else(|| {
-                format!(
+                let msg = format!(
                     "model '{}' referenced as module but not found in project",
                     model_name_str,
-                )
+                );
+                try_accumulate_diagnostic(
+                    db,
+                    Diagnostic {
+                        model: main_model_name.to_string(),
+                        variable: None,
+                        error: DiagnosticError::Assembly(msg.clone()),
+                        severity: DiagnosticSeverity::Error,
+                    },
+                );
+                msg
             })?;
 
             let is_root = canonicalize(name.as_str()) == main_model_canonical;
