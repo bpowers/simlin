@@ -364,6 +364,16 @@ pub fn format_diagnostic(diag: &engine::db::Diagnostic) -> FormattedError {
             let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
             format_unit_error(&diag.model, var_name, None, err)
         }
+        DiagnosticError::Assembly(msg) => FormattedError {
+            code: ErrorCode::NotSimulatable,
+            message: Some(format!("assembly error in model '{}': {}", diag.model, msg)),
+            model_name: Some(diag.model.clone()),
+            variable_name: diag.variable.clone(),
+            start_offset: 0,
+            end_offset: 0,
+            kind: FormattedErrorKind::Simulation,
+            unit_error_kind: None,
+        },
     }
 }
 

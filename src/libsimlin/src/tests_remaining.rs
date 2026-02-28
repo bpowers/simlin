@@ -8,7 +8,7 @@
 fn test_format_diagnostic_equation_error() {
     use crate::errors::{FormattedErrorKind, format_diagnostic};
     use engine::common::{EquationError, ErrorCode};
-    use engine::db::{Diagnostic, DiagnosticError};
+    use engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let diag = Diagnostic {
         model: "test_model".to_string(),
@@ -18,6 +18,7 @@ fn test_format_diagnostic_equation_error() {
             end: 9,
             code: ErrorCode::UnknownDependency,
         }),
+        severity: DiagnosticSeverity::Error,
     };
 
     let formatted = format_diagnostic(&diag);
@@ -41,7 +42,7 @@ fn test_format_diagnostic_equation_error() {
 fn test_format_diagnostic_equation_error_no_variable() {
     use crate::errors::{FormattedErrorKind, format_diagnostic};
     use engine::common::{EquationError, ErrorCode};
-    use engine::db::{Diagnostic, DiagnosticError};
+    use engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let diag = Diagnostic {
         model: "m".to_string(),
@@ -51,6 +52,7 @@ fn test_format_diagnostic_equation_error_no_variable() {
             end: 5,
             code: ErrorCode::EmptyEquation,
         }),
+        severity: DiagnosticSeverity::Error,
     };
 
     let formatted = format_diagnostic(&diag);
@@ -67,7 +69,7 @@ fn test_format_diagnostic_equation_error_no_variable() {
 fn test_format_diagnostic_model_error_non_unit() {
     use crate::errors::{FormattedErrorKind, format_diagnostic};
     use engine::common::{Error, ErrorCode, ErrorKind};
-    use engine::db::{Diagnostic, DiagnosticError};
+    use engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let diag = Diagnostic {
         model: "broken_model".to_string(),
@@ -77,6 +79,7 @@ fn test_format_diagnostic_model_error_non_unit() {
             code: ErrorCode::CircularDependency,
             details: Some("a -> b -> a".to_string()),
         }),
+        severity: DiagnosticSeverity::Error,
     };
 
     let formatted = format_diagnostic(&diag);
@@ -92,7 +95,7 @@ fn test_format_diagnostic_model_error_non_unit() {
 fn test_format_diagnostic_model_error_unit_mismatch() {
     use crate::errors::{FormattedErrorKind, UnitErrorKind, format_diagnostic};
     use engine::common::{Error, ErrorCode, ErrorKind};
-    use engine::db::{Diagnostic, DiagnosticError};
+    use engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let diag = Diagnostic {
         model: "unit_model".to_string(),
@@ -102,6 +105,7 @@ fn test_format_diagnostic_model_error_unit_mismatch() {
             code: ErrorCode::UnitMismatch,
             details: None,
         }),
+        severity: DiagnosticSeverity::Error,
     };
 
     let formatted = format_diagnostic(&diag);
@@ -118,7 +122,7 @@ fn test_format_diagnostic_model_error_unit_mismatch() {
 fn test_format_diagnostic_unit_error() {
     use crate::errors::{FormattedErrorKind, UnitErrorKind, format_diagnostic};
     use engine::common::{ErrorCode, UnitError};
-    use engine::db::{Diagnostic, DiagnosticError};
+    use engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let diag = Diagnostic {
         model: "unit_model".to_string(),
@@ -128,6 +132,7 @@ fn test_format_diagnostic_unit_error() {
             engine::builtins::Loc::new(2, 8),
             Some("kg vs m".to_string()),
         )),
+        severity: DiagnosticSeverity::Warning,
     };
 
     let formatted = format_diagnostic(&diag);
@@ -149,7 +154,7 @@ fn test_format_diagnostic_unit_error() {
 fn test_format_diagnostic_unit_definition_error() {
     use crate::errors::{FormattedErrorKind, UnitErrorKind, format_diagnostic};
     use engine::common::{EquationError, ErrorCode, UnitError};
-    use engine::db::{Diagnostic, DiagnosticError};
+    use engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let diag = Diagnostic {
         model: "unit_def_model".to_string(),
@@ -162,6 +167,7 @@ fn test_format_diagnostic_unit_definition_error() {
             },
             Some("parse error".to_string()),
         )),
+        severity: DiagnosticSeverity::Warning,
     };
 
     let formatted = format_diagnostic(&diag);

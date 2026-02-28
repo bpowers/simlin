@@ -41,11 +41,18 @@ pub struct CompilationDiagnostic(pub Diagnostic);
 /// A single compilation diagnostic emitted by tracked functions.
 /// Carries enough context (model name, optional variable name) for
 /// downstream formatting without re-walking the model tree.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Diagnostic {
     pub model: String,
     pub variable: Option<String>,
     pub error: DiagnosticError,
+    pub severity: DiagnosticSeverity,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -53,6 +60,7 @@ pub enum DiagnosticError {
     Equation(EquationError),
     Model(Error),
     Unit(UnitError),
+    Assembly(String),
 }
 
 // ── Interned identifiers ───────────────────────────────────────────────
@@ -1206,6 +1214,7 @@ fn model_dependency_graph_impl(
                 code: crate::common::ErrorCode::CircularDependency,
                 details: None,
             }),
+            severity: DiagnosticSeverity::Error,
         })
         .accumulate(db);
         HashMap::new()
@@ -1220,6 +1229,7 @@ fn model_dependency_graph_impl(
                 code: crate::common::ErrorCode::CircularDependency,
                 details: None,
             }),
+            severity: DiagnosticSeverity::Error,
         })
         .accumulate(db);
         HashMap::new()
@@ -1373,6 +1383,7 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
                     model: model_name.clone(),
                     variable: Some(var_name.clone()),
                     error: DiagnosticError::Equation(err),
+                    severity: DiagnosticSeverity::Error,
                 })
                 .accumulate(db);
             }
@@ -1384,6 +1395,7 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
                     model: model_name.clone(),
                     variable: Some(var_name.clone()),
                     error: DiagnosticError::Unit(err),
+                    severity: DiagnosticSeverity::Warning,
                 })
                 .accumulate(db);
             }
