@@ -12,6 +12,7 @@ use float_cmp::approx_eq;
 #[cfg(feature = "file_io")]
 use simlin_engine::FilesystemDataProvider;
 use simlin_engine::common::{Canonical, Ident};
+use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::interpreter::Simulation;
 use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{Project, Results, Vm, project_io};
@@ -100,6 +101,35 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/xidz_zidz/xidz_zidz.xmile",
     "test/test-models/tests/unicode_characters/unicode_test_model.xmile",
 ];
+
+/// Check whether any model in the compiled project contains module variables
+/// (explicit or implicit from SMOOTH/DELAY/INIT/PREVIOUS builtins).
+fn project_has_modules(project: &Project) -> bool {
+    project
+        .models
+        .values()
+        .any(|m| m.variables.values().any(|v| v.is_module()))
+}
+
+/// Compile a datamodel project to a VM simulation, preferring the incremental
+/// salsa-backed path. Falls back to the monolithic Simulation::compile() path
+/// for models containing module instances (explicit or implicit via SMOOTH,
+/// DELAY, INIT, etc.) because the incremental path does not yet correctly
+/// propagate module input values during simulation.
+fn compile_vm(
+    datamodel_project: &simlin_engine::datamodel::Project,
+    has_modules: bool,
+) -> simlin_engine::CompiledSimulation {
+    if has_modules {
+        let project = Rc::new(Project::from(datamodel_project.clone()));
+        let sim = Simulation::new(&project, "main").unwrap();
+        sim.compile().unwrap()
+    } else {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, datamodel_project, None);
+        compile_project_incremental(&db, sync.project, "main").unwrap()
+    }
+}
 
 fn load_expected_results(xmile_path: &str) -> Option<Results> {
     let xmile_name = std::path::Path::new(xmile_path).file_name().unwrap();
@@ -245,7 +275,7 @@ fn simulate_path(xmile_path: &str) {
 
     // first read-in the XMILE model, convert it to our own representation,
     // and simulate it using our tree-walking interpreter
-    let (datamodel_project, sim, results1) = {
+    let (datamodel_project, has_modules, results1) = {
         let f = File::open(xmile_path).unwrap();
         let mut f = BufReader::new(f);
 
@@ -255,24 +285,18 @@ fn simulate_path(xmile_path: &str) {
         }
         let datamodel_project = datamodel_project.unwrap();
         let project = Rc::new(Project::from(datamodel_project.clone()));
+        let has_modules = project_has_modules(&project);
         let sim = Simulation::new(&project, "main").unwrap();
 
         // sim.debug_print_runlists("main");
         let results = sim.run_to_end();
         assert!(results.is_ok());
-        (datamodel_project, sim, results.unwrap())
+        (datamodel_project, has_modules, results.unwrap())
     };
 
     // next simulate the model using our bytecode VM
     let results2 = {
-        let compiled = sim.compile();
-
-        if let Err(ref e) = compiled {
-            eprintln!("Compilation error: {:?}", e);
-        }
-        assert!(compiled.is_ok(), "compile failed: {:?}", compiled);
-        let compiled_sim = compiled.unwrap();
-
+        let compiled_sim = compile_vm(&datamodel_project, has_modules);
         let mut vm = Vm::new(compiled_sim).unwrap();
         // vm.debug_print_bytecode("main");
         vm.run_to_end().unwrap();
@@ -298,10 +322,7 @@ fn simulate_path(xmile_path: &str) {
 
         let datamodel_project2 = deserialize(project_io::Project::decode(&*buf).unwrap());
         assert_eq!(datamodel_project, datamodel_project2);
-        let project = Project::from(datamodel_project2);
-        let project = Rc::new(project);
-        let sim = Simulation::new(&project, "main").unwrap();
-        let compiled_sim = sim.compile().unwrap();
+        let compiled_sim = compile_vm(&datamodel_project2, has_modules);
         let mut vm = Vm::new(compiled_sim).unwrap();
         vm.run_to_end().unwrap();
         vm.into_results()
@@ -317,12 +338,7 @@ fn simulate_path(xmile_path: &str) {
         // eprintln!("xmile:\n{}", serialized_xmile);
         let roundtripped_project = xmile::project_from_reader(&mut xmile_reader).unwrap();
 
-        let project = Project::from(roundtripped_project.clone());
-        let project = Rc::new(project);
-        let sim = Simulation::new(&project, "main").unwrap();
-        let compiled = sim.compile();
-        assert!(compiled.is_ok());
-        let compiled_sim = compiled.unwrap();
+        let compiled_sim = compile_vm(&roundtripped_project, has_modules);
         let mut vm = Vm::new(compiled_sim).unwrap();
         vm.run_to_end().unwrap();
         (roundtripped_project, vm.into_results())
@@ -1111,9 +1127,8 @@ fn simulates_wrld3_03() {
         .run_to_end()
         .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
 
-    let compiled = sim
-        .compile()
-        .unwrap_or_else(|e| panic!("compilation failed for {mdl_path}: {e}"));
+    let has_modules = project_has_modules(&project);
+    let compiled = compile_vm(&datamodel_project, has_modules);
     let mut vm =
         Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
     vm.run_to_end()
@@ -1223,8 +1238,6 @@ static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
 #[cfg(feature = "file_io")]
 #[test]
 fn incremental_compilation_covers_all_models() {
-    use simlin_engine::db;
-
     let mut failures: Vec<(String, String)> = Vec::new();
 
     for model_path in ALL_INCREMENTALLY_COMPILABLE_MODELS
@@ -1248,11 +1261,9 @@ fn incremental_compilation_covers_all_models() {
 
         let model_path_owned = model_path.to_string();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut salsa_db = db::SimlinDb::default();
-            let sync_state =
-                db::sync_from_datamodel_incremental(&mut salsa_db, &datamodel_project, None);
-            let sync = sync_state.to_sync_result();
-            db::compile_project_incremental(&salsa_db, sync.project, "main")
+            let mut salsa_db = SimlinDb::default();
+            let sync = sync_from_datamodel_incremental(&mut salsa_db, &datamodel_project, None);
+            compile_project_incremental(&salsa_db, sync.project, "main")
         }));
 
         match result {
