@@ -86,16 +86,28 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         })
         .filter(|&z| z > 0.0);
 
-    let mut layout = match engine::layout::generate_best_layout(&datamodel_locked, model_name_str) {
-        Ok(l) => l,
-        Err(msg) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic).with_message(msg),
-            );
-            return;
-        }
-    };
+    // Build db_state from the persistent sync state so the layout engine
+    // can use the incremental salsa compilation path for LTM analysis.
+    let mut db_locked = proj.db.lock().unwrap();
+    let sync_locked = proj.sync_state.lock().unwrap();
+    let db_state = sync_locked
+        .as_ref()
+        .map(|state| (&mut *db_locked, state.project));
+    // Drop sync_locked before calling generate_best_layout (we only
+    // needed the SourceProject handle, which is Copy).
+    drop(sync_locked);
+
+    let mut layout =
+        match engine::layout::generate_best_layout(&datamodel_locked, model_name_str, db_state) {
+            Ok(l) => l,
+            Err(msg) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic).with_message(msg),
+                );
+                return;
+            }
+        };
 
     if let Some(zoom) = existing_zoom {
         layout.zoom = zoom;

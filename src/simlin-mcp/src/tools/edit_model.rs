@@ -269,7 +269,7 @@ fn sync_diagram(project: &mut simlin_engine::datamodel::Project, model_name: &st
         })
         .filter(|&z| z > 0.0);
 
-    let mut layout = match simlin_engine::layout::generate_best_layout(project, model_name) {
+    let mut layout = match simlin_engine::layout::generate_best_layout(project, model_name, None) {
         Ok(l) => l,
         Err(_) => return,
     };

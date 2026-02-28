@@ -2007,14 +2007,106 @@ fn build_feedback_loops_from_metadata(
 /// detect loops, augment with synthetic LTM variables, simulate, and extract
 /// importance time series. Returns `None` if any step fails, signaling the
 /// caller to fall back to persisted loop_metadata.
+///
+/// When `db_state` is provided, uses the incremental salsa compilation path
+/// instead of the monolithic `Project::from` + `with_ltm()` pipeline.
 fn try_detect_ltm_loops(
     project: &datamodel::Project,
     model_name: &str,
+    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
+) -> Option<Vec<metadata::FeedbackLoop>> {
+    let actual_name = resolve_model_name(project, model_name).to_string();
+
+    if let Some((db, source_project)) = db_state {
+        try_detect_ltm_loops_incremental(db, source_project, &actual_name)
+    } else {
+        try_detect_ltm_loops_monolithic(project, &actual_name)
+    }
+}
+
+/// Incremental salsa path for LTM loop detection.
+fn try_detect_ltm_loops_incremental(
+    db: &mut crate::db::SimlinDb,
+    source_project: crate::db::SourceProject,
+    actual_name: &str,
+) -> Option<Vec<metadata::FeedbackLoop>> {
+    use salsa::Setter;
+
+    // Run inside catch_unwind since compilation can panic on malformed
+    // models (e.g., missing module references).
+    //
+    // catch_unwind requires the closure to be UnwindSafe, which &mut
+    // references are not. We move the db/source_project into the closure
+    // via AssertUnwindSafe, which is safe because we do not observe
+    // partially-mutated state on panic -- we simply return None.
+    let actual_name_owned = actual_name.to_string();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let source_model = *source_project.models(db).get(&actual_name_owned)?;
+
+        // Detect loops via the salsa-tracked analysis path.
+        let detected = crate::db::model_detected_loops(db, source_model, source_project);
+        if detected.loops.is_empty() {
+            return Some(Vec::new());
+        }
+
+        // Enable LTM, compile, simulate, then disable LTM.
+        source_project.set_ltm_enabled(db).to(true);
+        let compiled_sim =
+            crate::db::compile_project_incremental(db, source_project, &actual_name_owned).ok()?;
+        let mut vm = crate::vm::Vm::new(compiled_sim).ok()?;
+        vm.run_to_end().ok()?;
+        source_project.set_ltm_enabled(db).to(false);
+
+        let mut feedback_loops = Vec::new();
+        for dl in &detected.loops {
+            let polarity = match dl.polarity {
+                crate::db::DetectedLoopPolarity::Reinforcing => LoopPolarity::Reinforcing,
+                crate::db::DetectedLoopPolarity::Balancing => LoopPolarity::Balancing,
+                crate::db::DetectedLoopPolarity::Undetermined => LoopPolarity::Undetermined,
+            };
+
+            let variables: Vec<String> = {
+                let mut vars = dl.variables.clone();
+                if let Some(first) = vars.first().cloned() {
+                    vars.push(first);
+                }
+                vars
+            };
+
+            // Extract the relative loop score time series.
+            let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{}", dl.id);
+            let var_ident = Ident::new(&var_name);
+            let importance_series = vm
+                .get_series(&var_ident)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|v| if v.is_finite() { v } else { 0.0 })
+                .collect();
+
+            feedback_loops.push(metadata::FeedbackLoop {
+                name: dl.id.clone(),
+                polarity,
+                variables,
+                importance_series,
+                dominant_period: None,
+            });
+        }
+
+        Some(feedback_loops)
+    }));
+    result.ok().flatten()
+}
+
+/// Monolithic fallback path for LTM loop detection (used when no db is
+/// available).
+fn try_detect_ltm_loops_monolithic(
+    project: &datamodel::Project,
+    actual_name: &str,
 ) -> Option<Vec<metadata::FeedbackLoop>> {
     use std::rc::Rc;
 
-    let actual_name = resolve_model_name(project, model_name).to_string();
     let project_clone = project.clone();
+    let actual_name = actual_name.to_string();
 
     // Run the entire LTM pipeline inside catch_unwind since compilation
     // can panic on malformed models (e.g., missing module references).
@@ -2053,7 +2145,7 @@ fn try_detect_ltm_loops(
             };
 
             // Extract the relative loop score time series
-            let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_item.id);
+            let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{}", loop_item.id);
             let var_ident = Ident::new(&var_name);
             let importance_series = vm
                 .get_series(&var_ident)
@@ -2078,9 +2170,13 @@ fn try_detect_ltm_loops(
 }
 
 /// Compute metadata for a model from its variable definitions and dependency structure.
+///
+/// When `db_state` is provided, LTM loop detection uses the incremental salsa
+/// compilation path instead of building a monolithic `Project`.
 pub fn compute_metadata(
     project: &datamodel::Project,
     model_name: &str,
+    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Option<ComputedMetadata> {
     let model = project.get_model(model_name)?;
     let mut dep_graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -2239,7 +2335,7 @@ pub fn compute_metadata(
 
     // Try LTM-based loop detection. Falls back to persisted loop_metadata
     // if LTM detection or simulation fails.
-    let mut feedback_loops = try_detect_ltm_loops(project, model_name)
+    let mut feedback_loops = try_detect_ltm_loops(project, model_name, db_state)
         .unwrap_or_else(|| build_feedback_loops_from_metadata(model, &uid_to_ident));
     feedback_loops.sort_by(|a, b| {
         b.average_importance()
@@ -2468,11 +2564,12 @@ const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
 pub fn generate_layout(
     project: &datamodel::Project,
     model_name: &str,
+    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Result<datamodel::StockFlow, String> {
     let config = LayoutConfig::default();
     let not_found = || format!("model '{}' not found in project", model_name);
     let model = project.get_model(model_name).ok_or_else(not_found)?;
-    let metadata = compute_metadata(project, model_name).ok_or_else(not_found)?;
+    let metadata = compute_metadata(project, model_name, db_state).ok_or_else(not_found)?;
     let engine = LayoutEngine::new(config, model, metadata);
     engine.generate_layout()
 }
@@ -2482,11 +2579,12 @@ pub fn generate_layout_with_config(
     project: &datamodel::Project,
     model_name: &str,
     mut config: LayoutConfig,
+    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Result<datamodel::StockFlow, String> {
     config.validate();
     let not_found = || format!("model '{}' not found in project", model_name);
     let model = project.get_model(model_name).ok_or_else(not_found)?;
-    let metadata = compute_metadata(project, model_name).ok_or_else(not_found)?;
+    let metadata = compute_metadata(project, model_name, db_state).ok_or_else(not_found)?;
     let engine = LayoutEngine::new(config, model, metadata);
     engine.generate_layout()
 }
@@ -2496,12 +2594,13 @@ pub fn generate_layout_with_config(
 pub fn generate_best_layout(
     project: &datamodel::Project,
     model_name: &str,
+    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Result<datamodel::StockFlow, String> {
     let config = LayoutConfig::default();
     let seeds = LAYOUT_SEEDS;
     let not_found = || format!("model '{}' not found in project", model_name);
     let model = project.get_model(model_name).ok_or_else(not_found)?;
-    let metadata = compute_metadata(project, model_name).ok_or_else(not_found)?;
+    let metadata = compute_metadata(project, model_name, db_state).ok_or_else(not_found)?;
 
     let generate = |&seed: &u64| {
         let mut cfg = config.clone();
@@ -2536,8 +2635,9 @@ pub fn generate_best_layout(
 pub fn compute_layout_metadata(
     project: &datamodel::Project,
     model_name: &str,
+    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Option<ComputedMetadata> {
-    compute_metadata(project, model_name)
+    compute_metadata(project, model_name, db_state)
 }
 
 /// Pick the layout with fewest crossings; on tie, the one from the lowest seed.
@@ -2676,7 +2776,7 @@ mod tests {
             loop_metadata: Vec::new(),
             groups: Vec::new(),
         });
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
         assert!(result.elements.is_empty());
         assert_eq!(result.zoom, 1.0);
     }
@@ -2684,7 +2784,7 @@ mod tests {
     #[test]
     fn test_generate_layout_single_chain() {
         let project = test_project(simple_model());
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
 
         assert!(!result.elements.is_empty());
         assert_eq!(result.zoom, 1.0);
@@ -2715,7 +2815,7 @@ mod tests {
     fn test_generate_layout_completeness() {
         let project = test_project(simple_model());
         let model = project.get_model(TEST_MODEL).unwrap();
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
 
         // Every model variable should have a view element
         let element_names: HashSet<String> = result
@@ -2737,7 +2837,7 @@ mod tests {
     #[test]
     fn test_coordinates_positive() {
         let project = test_project(simple_model());
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
 
         for elem in &result.elements {
             match elem {
@@ -2765,7 +2865,7 @@ mod tests {
     #[test]
     fn test_no_duplicate_uids() {
         let project = test_project(simple_model());
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
 
         let mut uids: HashSet<i32> = HashSet::new();
         for elem in &result.elements {
@@ -2777,7 +2877,7 @@ mod tests {
     #[test]
     fn test_viewbox_encompasses_elements() {
         let project = test_project(simple_model());
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
 
         let vb = &result.view_box;
         assert!(vb.width > 0.0);
@@ -2815,14 +2915,14 @@ mod tests {
     #[test]
     fn test_zoom_default() {
         let project = test_project(simple_model());
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
         assert_eq!(result.zoom, 1.0);
     }
 
     #[test]
     fn test_flow_points_attached() {
         let project = test_project(simple_model());
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
 
         for elem in &result.elements {
             if let ViewElement::Flow(flow) = elem {
@@ -2845,7 +2945,7 @@ mod tests {
     #[test]
     fn test_compute_metadata_chains() {
         let project = test_project(simple_model());
-        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
 
         // Should detect one chain: population + births + deaths
         assert_eq!(metadata.chains.len(), 1);
@@ -2861,7 +2961,7 @@ mod tests {
     #[test]
     fn test_compute_metadata_dep_graph() {
         let project = test_project(simple_model());
-        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
 
         // births depends on population and birth_rate
         let births_deps = metadata.dep_graph.get("births").unwrap();
@@ -2872,7 +2972,7 @@ mod tests {
     #[test]
     fn test_compute_metadata_constants() {
         let project = test_project(simple_model());
-        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
 
         // birth_rate and death_rate are constants (scalar equations with no variable references)
         assert!(metadata.is_constant("birth_rate"));
@@ -3228,7 +3328,7 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
         assert_eq!(
             result
                 .elements
@@ -3262,7 +3362,7 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
         assert_eq!(result.elements.len(), 1);
     }
 
@@ -3306,7 +3406,7 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
         let stocks: Vec<_> = result
             .elements
             .iter()
@@ -3383,7 +3483,7 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
 
         let stock_positions: Vec<(f64, f64)> = result
             .elements
@@ -3434,7 +3534,7 @@ mod tests {
     fn test_connector_direction_dependency_to_dependent() {
         let project = test_project(simple_model());
         let model = project.get_model(TEST_MODEL).unwrap();
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
 
         let uid_to_ident: HashMap<i32, String> = model
             .variables
@@ -3530,7 +3630,7 @@ mod tests {
         };
 
         let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
 
         assert!(
             metadata
@@ -3594,7 +3694,7 @@ mod tests {
         };
 
         let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
         let flow_count = result
             .elements
             .iter()
@@ -3655,7 +3755,7 @@ mod tests {
         };
 
         let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL).unwrap();
+        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
         let element_uids: HashSet<i32> = result.elements.iter().map(|e| e.get_uid()).collect();
 
         for elem in &result.elements {
@@ -3779,7 +3879,7 @@ mod tests {
         };
 
         let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
         assert_eq!(metadata.feedback_loops.len(), 1);
         assert_eq!(metadata.feedback_loops[0].name, "R1");
         assert_eq!(
@@ -3912,7 +4012,7 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
 
         let output_deps = metadata.dep_graph.get("output").unwrap();
         assert!(output_deps.contains("rate"), "output should depend on rate");
@@ -3975,7 +4075,7 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
 
         let output_deps = metadata.dep_graph.get("output").unwrap();
         assert!(
@@ -4041,7 +4141,7 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL);
+        let result = generate_layout(&project, TEST_MODEL, None);
         assert!(
             result.is_ok(),
             "layout should succeed despite compile error, via fallback"
@@ -4093,7 +4193,7 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
 
         // Should have fallen back to persisted metadata since this minimal
         // model doesn't have sim_specs and can't simulate.
@@ -4104,7 +4204,7 @@ mod tests {
     #[test]
     fn test_compute_metadata_returns_none_for_unknown_model() {
         let project = test_project(simple_model());
-        assert!(compute_metadata(&project, "nonexistent").is_none());
+        assert!(compute_metadata(&project, "nonexistent", None).is_none());
     }
 
     #[test]
@@ -4151,7 +4251,7 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
 
         let births_deps = metadata.dep_graph.get("births").unwrap();
         assert!(
@@ -4216,7 +4316,7 @@ mod tests {
             groups: Vec::new(),
         };
         let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL).unwrap();
+        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
 
         // "phantom" is not a model variable so should not appear in the dep graph
         let all_graph_nodes: BTreeSet<&String> = metadata
@@ -4290,7 +4390,7 @@ mod tests {
         let mut model = simple_model();
         model.name = String::new();
         let project = test_project(model);
-        let metadata = compute_metadata(&project, "main");
+        let metadata = compute_metadata(&project, "main", None);
         assert!(
             metadata.is_some(),
             "compute_metadata should work with 'main' alias for unnamed models"
