@@ -161,8 +161,10 @@ fn alloc_curve(p: f64, request: f64, ptype: i32, ppriority: f64, pwidth: f64, pe
         }
         5 => {
             // Constant Elasticity of Substitution (CES)
-            if p <= 0.0 || ppriority <= 0.0 {
+            if p <= 0.0 {
                 1.0
+            } else if ppriority <= 0.0 {
+                0.0
             } else {
                 let ratio = ppriority / p;
                 let q = ratio.powf(pextra);
@@ -2342,6 +2344,33 @@ mod alloc_curve_tests {
             "CES with large exponent produced {result}"
         );
         assert!(result.abs() < 1e-10);
+    }
+
+    #[test]
+    fn ces_zero_priority_returns_zero() {
+        // When ppriority <= 0 but p > 0, the item has no priority and
+        // should receive zero allocation share.
+        let result = alloc_curve(5.0, 1.0, 5, 0.0, 0.0, 2.0);
+        assert_eq!(
+            result, 0.0,
+            "zero priority with positive price should yield 0"
+        );
+
+        let result_neg = alloc_curve(5.0, 1.0, 5, -1.0, 0.0, 2.0);
+        assert_eq!(
+            result_neg, 0.0,
+            "negative priority with positive price should yield 0"
+        );
+    }
+
+    #[test]
+    fn ces_zero_price_returns_one() {
+        // When p <= 0, price is zero/negative and everyone gets full allocation.
+        let result = alloc_curve(0.0, 1.0, 5, 10.0, 0.0, 2.0);
+        assert_eq!(result, 1.0, "zero price should yield 1");
+
+        let result_neg = alloc_curve(-1.0, 1.0, 5, 10.0, 0.0, 2.0);
+        assert_eq!(result_neg, 1.0, "negative price should yield 1");
     }
 }
 

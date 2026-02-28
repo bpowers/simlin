@@ -644,12 +644,23 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
                 // The first token was a Function (macro body variable that
                 // shadows a builtin). We can't restore and re-parse because
                 // parse_lhs expects a Symbol token. Build the LHS directly
-                // from the name we already consumed.
+                // from the name we already consumed, parsing any subscripts
+                // and EXCEPT clause that follow.
+                let subscripts = if self.peek_kind() == Some(TokenKind::LBracket) {
+                    self.parse_sub_list()?
+                } else {
+                    vec![]
+                };
+                let except = if self.peek_kind() == Some(TokenKind::Except) {
+                    Some(self.parse_except_list()?)
+                } else {
+                    None
+                };
                 let r = self.end_pos();
                 let lhs = Lhs {
                     name: sym_name,
-                    subscripts: vec![],
-                    except: None,
+                    subscripts,
+                    except,
                     interp_mode: None,
                     loc: Loc::new(sym_start, r),
                 };
@@ -2476,5 +2487,35 @@ mod tests {
             "error span should start at LHS, got {}",
             err.start
         );
+    }
+
+    #[test]
+    fn test_function_token_lhs_with_subscripts() {
+        // When a macro body variable shadows a builtin name and has subscripts,
+        // the parser must preserve subscripts in the LHS rather than dropping them.
+        let tokens = vec![
+            (0, Token::Function(Cow::Borrowed("SSHAPE")), 6),
+            (6, Token::LBracket, 7),
+            (7, Token::Symbol(Cow::Borrowed("Region")), 13),
+            (13, Token::RBracket, 14),
+            (15, Token::Eq, 16),
+            (17, Token::Number(Cow::Borrowed("42")), 19),
+            (20, Token::Tilde, 21),
+            (22, Token::Tilde, 23),
+        ];
+        let result = parse(&tokens);
+        assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
+        let (eqn, _, _) = result.unwrap();
+        match &eqn {
+            Equation::Regular(lhs, _) => {
+                assert_eq!(lhs.name.as_ref(), "SSHAPE");
+                assert_eq!(
+                    lhs.subscripts.len(),
+                    1,
+                    "Function-token LHS subscripts must be preserved"
+                );
+            }
+            other => panic!("Expected Regular equation, got {:?}", other),
+        }
     }
 }
