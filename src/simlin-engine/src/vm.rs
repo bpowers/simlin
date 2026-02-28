@@ -1939,9 +1939,75 @@ impl Vm {
                     broadcast_stack.pop();
                 }
 
-                // Vector operations -- dispatched in Phase 5
-                Opcode::VectorSelect {}
-                | Opcode::VectorElmMap { .. }
+                // =========================================================
+                // VECTOR OPERATIONS
+                // =========================================================
+                Opcode::VectorSelect {} => {
+                    let action = stack.pop().round() as i32;
+                    let max_value = stack.pop();
+
+                    let expr_view = &view_stack[view_stack.len() - 1];
+                    let sel_view = &view_stack[view_stack.len() - 2];
+
+                    let size = sel_view.size();
+                    let n_dims = sel_view.dims.len();
+
+                    let mut selected: SmallVec<[f64; 32]> = SmallVec::new();
+                    let mut sel_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
+                    let mut expr_indices: SmallVec<[u16; 4]> =
+                        smallvec::smallvec![0; expr_view.dims.len()];
+
+                    for _ in 0..size {
+                        let sel_off = sel_view.flat_offset(&sel_indices);
+                        let sel_val =
+                            Self::read_view_element(sel_view, sel_off, curr, temp_storage, context);
+
+                        if is_truthy(sel_val) {
+                            let expr_off = expr_view.flat_offset(&expr_indices);
+                            let expr_val = Self::read_view_element(
+                                expr_view,
+                                expr_off,
+                                curr,
+                                temp_storage,
+                                context,
+                            );
+                            selected.push(expr_val);
+                        }
+
+                        // Increment selection indices
+                        for d in (0..n_dims).rev() {
+                            sel_indices[d] += 1;
+                            if sel_indices[d] < sel_view.dims[d] {
+                                break;
+                            }
+                            sel_indices[d] = 0;
+                        }
+
+                        // Increment expression indices
+                        for d in (0..expr_view.dims.len()).rev() {
+                            expr_indices[d] += 1;
+                            if expr_indices[d] < expr_view.dims[d] {
+                                break;
+                            }
+                            expr_indices[d] = 0;
+                        }
+                    }
+
+                    let result = if selected.is_empty() {
+                        max_value
+                    } else {
+                        match action {
+                            1 => selected.iter().cloned().fold(f64::INFINITY, f64::min),
+                            2 => selected.iter().sum::<f64>() / selected.len() as f64,
+                            3 => selected.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                            4 => selected.iter().product(),
+                            _ => selected.iter().sum(),
+                        }
+                    };
+                    stack.push(result);
+                }
+
+                Opcode::VectorElmMap { .. }
                 | Opcode::VectorSortOrder { .. }
                 | Opcode::AllocateAvailable { .. } => {
                     unimplemented!("vector operation opcodes not yet dispatched");
@@ -2007,7 +2073,6 @@ impl Vm {
     /// NOT a sequential iteration index. For contiguous views, flat_off equals the
     /// iteration index. For non-contiguous or sparse views, the caller must compute
     /// flat_off via `view.flat_offset(&indices)` or `view.offset_for_iter_index(iter_idx)`.
-    #[allow(dead_code)] // used by vector opcode dispatch in Phase 5
     fn read_view_element(
         view: &RuntimeView,
         flat_off: usize,
