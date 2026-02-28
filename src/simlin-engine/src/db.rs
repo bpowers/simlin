@@ -1582,29 +1582,25 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     }
 }
 
-/// Per-model tracked function that collects compilation diagnostics from
-/// already-cached tracked functions and pushes them to the accumulator.
-///
-/// This runs PARALLEL to the existing error-field path: tracked functions
-/// still populate struct fields for backward compatibility, but this
-/// function also pushes the same errors into the salsa accumulator so
-/// callers can eventually read diagnostics purely from the DB.
+/// Per-model tracked function that triggers diagnostic accumulation from
+/// all compilation stages. The salsa accumulator is the sole error source
+/// for diagnostic reporting -- this function does not read struct fields.
 ///
 /// Triggers two diagnostic sources:
-/// 1. `compile_var_fragment` for each variable -- surfaces both parse-level
-///    equation errors (EmptyEquation, syntax errors) and compilation-level
-///    errors (BadTable, MismatchedDimensions, etc.)
-/// 2. `check_model_units` -- surfaces unit inference/checking warnings
+/// 1. `compile_var_fragment` for each variable -- accumulates parse-level
+///    equation errors (EmptyEquation, syntax errors), unit definition
+///    syntax errors (bad unit strings), and compilation-level errors
+///    (BadTable, MismatchedDimensions, etc.)
+/// 2. `check_model_units` -- accumulates unit inference/checking warnings
 #[salsa::tracked]
 pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
     let source_vars = model.variables(db);
-    let model_name = model.name(db).clone();
 
     // Trigger compile_var_fragment for each variable. This is a superset
-    // of parse_source_variable: it first checks for parse errors (and
-    // accumulates them via the accumulator from Task 2), then proceeds
-    // with compilation which can surface additional errors like BadTable,
-    // MismatchedDimensions, etc.
+    // of parse_source_variable: it first accumulates unit definition
+    // syntax errors from the parsed variable, then checks for equation
+    // parse errors, then proceeds with compilation which can surface
+    // additional errors like BadTable, MismatchedDimensions, etc.
     //
     // We use is_root: true and empty module_input_names for diagnostic
     // purposes. The is_root flag only affects offset layout (whether
@@ -1612,25 +1608,8 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // referencing TIME or DT don't produce false-positive missing-ref
     // errors. The module_input_names are empty because we are not in an
     // assembly context -- this is purely for error detection.
-    for (var_name, source_var) in source_vars.iter() {
+    for (_var_name, source_var) in source_vars.iter() {
         let _fragment = compile_var_fragment(db, *source_var, model, project, true, vec![]);
-
-        // Accumulate unit definition errors from the parsed variable.
-        // These are syntax errors in the unit string (e.g., "bad units
-        // here!!!") that are stored in the variable's unit_errors field
-        // during parsing but not checked by compile_var_fragment.
-        let parsed = parse_source_variable(db, *source_var, project);
-        if let Some(unit_errs) = parsed.variable.unit_errors() {
-            for err in unit_errs {
-                CompilationDiagnostic(Diagnostic {
-                    model: model_name.clone(),
-                    variable: Some(var_name.clone()),
-                    error: DiagnosticError::Unit(err),
-                    severity: DiagnosticSeverity::Error,
-                })
-                .accumulate(db);
-            }
-        }
     }
 
     // Trigger unit checking. This is a separate tracked function so
@@ -3191,6 +3170,11 @@ pub(crate) struct VarFragmentResult {
 /// Per-variable tracked compilation function. Compiles a SINGLE variable
 /// to symbolic (layout-independent) bytecodes.
 ///
+/// Accumulates all variable-level diagnostics into the salsa accumulator:
+/// - Unit definition syntax errors from the parsed variable
+/// - Equation parse errors (EmptyEquation, syntax errors)
+/// - Compilation-level errors (BadTable, MismatchedDimensions, etc.)
+///
 /// Builds a minimal context containing only the compiled variable and its
 /// direct references, then compiles through the existing Module/Compiler
 /// pipeline, and symbolizes the result.
@@ -3225,6 +3209,23 @@ pub fn compile_var_fragment(
 
     let var_ident = var.ident(db).clone();
     let parsed = parse_source_variable(db, var, project);
+
+    // Accumulate unit definition errors from the parsed variable.
+    // These are syntax errors in the unit string (e.g., "bad units
+    // here!!!") that are stored in the variable's unit_errors field
+    // during parsing but not checked during compilation.
+    if let Some(unit_errs) = parsed.variable.unit_errors() {
+        let model_name = model.name(db).clone();
+        for err in unit_errs {
+            CompilationDiagnostic(Diagnostic {
+                model: model_name.clone(),
+                variable: Some(var_ident.clone()),
+                error: DiagnosticError::Unit(err),
+                severity: DiagnosticSeverity::Error,
+            })
+            .accumulate(db);
+        }
+    }
 
     // Check for parse errors -- accumulate each one before bailing out
     if let Some(errors) = parsed.variable.equation_errors()
